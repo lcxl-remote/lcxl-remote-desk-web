@@ -2,11 +2,15 @@ use windows::Win32::{
     Foundation::GetLastError,
     UI::{
         Input::KeyboardAndMouse::{
-            INPUT, INPUT_MOUSE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
-            MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-            MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, SendInput,
+            INPUT, INPUT_MOUSE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
+            MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+            MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
+            MOUSEEVENTF_WHEEL, SendInput,
         },
-        WindowsAndMessaging::SetCursorPos,
+        WindowsAndMessaging::{
+            GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+            SM_YVIRTUALSCREEN,
+        },
     },
 };
 
@@ -32,54 +36,116 @@ impl WindowsMouseEventHandler {
         Self { geometry }
     }
 
-    /// Move the OS cursor to the normalised `(x, y)` carried by a mouse
-    /// event. Shared by `handle_mouse_move`, `handle_mouse_down` and
-    /// `handle_mouse_up` so a click always lands at its own coordinates.
+    /// Build a `SendInput` mouse-move event that lands at the normalised
+    /// `(x, y)` carried by a mouse event, expressed in absolute
+    /// virtual-desktop coordinates.
     ///
-    /// The browser ships `mousemove` on a separate, unordered data
-    /// channel (it may drop or reorder packets), while clicks travel on
-    /// the reliable channel. Repositioning here — rather than relying on
-    /// a preceding move to have already landed — guarantees a button
-    /// press / release is injected at exactly the point the user clicked,
-    /// matching the macOS backend which posts each button event with its
-    /// own coordinates. The dispatcher serialises every input event for a
-    /// connection, so the `SetCursorPos` + `SendInput` pair below is
+    /// Every pointer action — moves, presses and releases — is injected
+    /// through `SendInput` (never `SetCursorPos`) so the whole gesture
+    /// flows through a single synthetic input stream. This is what makes
+    /// "hold left button and drag to select text" work: once a button is
+    /// pressed with `SendInput`, Windows keeps that button's held state in
+    /// the injected stream, so each subsequent `MOUSEEVENTF_MOVE` is
+    /// delivered to applications as a drag (`WM_MOUSEMOVE` with
+    /// `MK_LBUTTON`) rather than a bare hover. Mixing `SetCursorPos` for
+    /// motion with `SendInput` for buttons broke that continuity and made
+    /// drag selection unreliable (notably in Windows Terminal).
+    ///
+    /// The browser ships `mousemove` on a separate, unordered data channel
+    /// (it may drop or reorder packets) while clicks travel on the
+    /// reliable channel. Prefixing every press / release with its own move
+    /// input — rather than relying on a preceding move to have landed —
+    /// guarantees the button is injected at exactly the point the user
+    /// clicked, matching the macOS backend. The dispatcher serialises every
+    /// input event for a connection, so the input batch built here is
     /// atomic with respect to other events.
-    fn position_cursor(&self, x: f64, y: f64) {
+    fn build_move_input(&self, x: f64, y: f64) -> INPUT {
         // Snapshot the geometry into locals before releasing the read
-        // lock so the unsafe `SetCursorPos` call below never runs while
-        // the lock is held — keeps the lock-hold window microscopic.
+        // lock so no Win32 call below runs while the lock is held — keeps
+        // the lock-hold window microscopic.
         let (left, top, width, height) = {
             let g = self.geometry.read().expect("monitor geometry poisoned");
             (g.left, g.top, g.width, g.height)
         };
         let (abs_x, abs_y) = compute_absolute(left, top, width, height, x, y);
-        let result = unsafe { SetCursorPos(abs_x, abs_y) };
-        if let Err(error) = result {
-            log::error!(
-                "Failed to set cursor position to ({}, {}), error: {}",
-                abs_x,
-                abs_y,
-                error
-            );
-        }
+        let (vx, vy, vw, vh) = virtual_desktop_metrics();
+        let (nx, ny) = to_absolute_normalized(abs_x, abs_y, vx, vy, vw, vh);
+
+        let mut input = INPUT::default();
+        input.r#type = INPUT_MOUSE;
+        input.Anonymous.mi.dx = nx;
+        input.Anonymous.mi.dy = ny;
+        input.Anonymous.mi.dwFlags =
+            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+        input
+    }
+}
+
+/// Read the current virtual-desktop origin and size via `GetSystemMetrics`.
+/// Returns `(x_origin, y_origin, width, height)`. The origin can be negative
+/// when a secondary monitor sits left of / above the primary. Kept as a thin
+/// wrapper so `build_move_input` stays lock-scoped and the pure normalisation
+/// math below can be unit-tested without a real desktop.
+fn virtual_desktop_metrics() -> (i32, i32, i32, i32) {
+    unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
     }
 }
 
 /// Map a normalised `(x, y)` in `[0.0, 1.0]` to absolute virtual desktop
-/// coordinates, given the captured monitor's rect. Pulled out of
-/// `handle_mouse_move` so the arithmetic can be unit-tested without a
-/// real display attached — `SetCursorPos` is unsafe Win32 and cannot be
-/// exercised on CI.
+/// pixel coordinates, given the captured monitor's rect. Pulled out so the
+/// arithmetic can be unit-tested without a real display attached.
 fn compute_absolute(left: i32, top: i32, width: i32, height: i32, x: f64, y: f64) -> (i32, i32) {
     let abs_x = left + (x * width as f64) as i32;
     let abs_y = top + (y * height as f64) as i32;
     (abs_x, abs_y)
 }
 
+/// Convert an absolute virtual-desktop pixel `(abs_x, abs_y)` into the
+/// `0..=65535` normalised range `SendInput` expects with
+/// `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK`.
+///
+/// `(vx, vy)` is the virtual-desktop origin (may be negative on multi-monitor
+/// layouts) and `(vw, vh)` its size, as returned by `GetSystemMetrics`. The
+/// origin is subtracted first so a monitor left of / above the primary maps
+/// correctly; the span uses `size - 1` because a `w`-pixel-wide desktop
+/// addresses columns `0..=w-1`, and half-span rounding gives nearest-pixel
+/// accuracy. The result is clamped to `0..=65535` so an out-of-range pixel
+/// never wraps. Pure function — unit-tested without a windowing session.
+fn to_absolute_normalized(
+    abs_x: i32,
+    abs_y: i32,
+    vx: i32,
+    vy: i32,
+    vw: i32,
+    vh: i32,
+) -> (i32, i32) {
+    let span_x = (vw - 1).max(1) as i64;
+    let span_y = (vh - 1).max(1) as i64;
+    let nx = ((abs_x - vx) as i64 * 65535 + span_x / 2) / span_x;
+    let ny = ((abs_y - vy) as i64 * 65535 + span_y / 2) / span_y;
+    (nx.clamp(0, 65535) as i32, ny.clamp(0, 65535) as i32)
+}
+
 impl MouseEventHandler for WindowsMouseEventHandler {
     fn handle_mouse_move(&mut self, event: &MouseEventData) -> Result<(), InputError> {
-        self.position_cursor(event.x, event.y);
+        // A bare absolute move. While a button is held, Windows carries
+        // that button's state in the synthetic input stream, so this is
+        // delivered as a drag rather than a hover — enabling text
+        // selection and drag gestures.
+        let inputs = [self.build_move_input(event.x, event.y)];
+        unsafe {
+            let result = SendInput(&inputs, size_of::<INPUT>() as i32);
+            if result == 0 {
+                let last_error = GetLastError();
+                log::error!("Failed to send mouse move event, error: {:?}", last_error);
+            }
+        };
         Ok(())
     }
 
@@ -94,16 +160,18 @@ impl MouseEventHandler for WindowsMouseEventHandler {
                 return Ok(());
             }
         };
-        // Land the cursor at the click point before pressing — the
-        // preceding move may have been dropped or reordered on its
-        // unreliable channel.
-        self.position_cursor(event.x, event.y);
-        let mut input = INPUT::default();
-        input.r#type = INPUT_MOUSE;
-        input.Anonymous.mi.dwFlags = mouse_event_flags;
-        let inputs = [input];
+        // Inject an absolute move immediately before the press, in the same
+        // `SendInput` batch, so the button lands at the click point even if
+        // the preceding move was dropped or reordered on its unreliable
+        // channel — and keeps the whole gesture in one synthetic stream so
+        // a following drag is recognised.
+        let move_input = self.build_move_input(event.x, event.y);
+        let mut button_input = INPUT::default();
+        button_input.r#type = INPUT_MOUSE;
+        button_input.Anonymous.mi.dwFlags = mouse_event_flags;
+        let inputs = [move_input, button_input];
         unsafe {
-            let result = SendInput(&inputs, size_of::<[INPUT; 1]>() as i32);
+            let result = SendInput(&inputs, size_of::<INPUT>() as i32);
             if result == 0 {
                 let last_error = GetLastError();
                 log::error!(
@@ -127,16 +195,16 @@ impl MouseEventHandler for WindowsMouseEventHandler {
                 return Ok(());
             }
         };
-        // Match the down path: release at the event's own coordinates so
-        // a drag whose intermediate moves were dropped still lifts at the
+        // Match the down path: absolute-move then release in one batch so a
+        // drag whose intermediate moves were dropped still lifts at the
         // correct point.
-        self.position_cursor(event.x, event.y);
-        let mut input = INPUT::default();
-        input.r#type = INPUT_MOUSE;
-        input.Anonymous.mi.dwFlags = mouse_event_flags;
-        let inputs = [input];
+        let move_input = self.build_move_input(event.x, event.y);
+        let mut button_input = INPUT::default();
+        button_input.r#type = INPUT_MOUSE;
+        button_input.Anonymous.mi.dwFlags = mouse_event_flags;
+        let inputs = [move_input, button_input];
         unsafe {
-            let result = SendInput(&inputs, size_of::<[INPUT; 1]>() as i32);
+            let result = SendInput(&inputs, size_of::<INPUT>() as i32);
             if result == 0 {
                 let last_error = GetLastError();
                 log::error!(
@@ -261,6 +329,70 @@ mod tests {
     #[test]
     fn click_top_left_corner_lands_on_monitor_origin() {
         assert_eq!(compute_absolute(1280, 0, 1500, 900, 0.0, 0.0), (1280, 0));
+    }
+
+    /// The virtual-desktop origin pixel maps to the low end of the
+    /// normalised range.
+    #[test]
+    fn to_absolute_normalized_origin_maps_to_zero() {
+        assert_eq!(to_absolute_normalized(0, 0, 0, 0, 1920, 1080), (0, 0));
+    }
+
+    /// The far-corner pixel (last addressable column/row) maps to the top
+    /// of the `0..=65535` range.
+    #[test]
+    fn to_absolute_normalized_far_corner_maps_to_max() {
+        assert_eq!(
+            to_absolute_normalized(1919, 1079, 0, 0, 1920, 1080),
+            (65535, 65535)
+        );
+    }
+
+    /// The exact center pixel of an odd-sized desktop maps to the midpoint
+    /// of the range. 1001 px spans 0..=1000, so pixel 500 → 65535/2.
+    #[test]
+    fn to_absolute_normalized_center_is_midpoint() {
+        assert_eq!(
+            to_absolute_normalized(500, 500, 0, 0, 1001, 1001),
+            (32768, 32768)
+        );
+    }
+
+    /// A negative virtual-desktop origin (secondary monitor left of / above
+    /// the primary) is subtracted before scaling, so the origin pixel still
+    /// maps to zero and the primary origin lands partway across the range.
+    #[test]
+    fn to_absolute_normalized_negative_origin() {
+        // 3840-wide virtual desktop whose origin is at -1920 (secondary
+        // monitor to the left). The leftmost pixel maps to 0...
+        assert_eq!(
+            to_absolute_normalized(-1920, 0, -1920, 0, 3840, 1080),
+            (0, 0)
+        );
+        // ...and the rightmost pixel to the max.
+        assert_eq!(
+            to_absolute_normalized(1919, 0, -1920, 0, 3840, 1080),
+            (65535, 0)
+        );
+    }
+
+    /// Pixels outside the virtual desktop are clamped, never wrapped: a
+    /// coordinate below the origin pins to 0, one past the far edge to the
+    /// max. Guards against `SendInput` receiving out-of-range values.
+    #[test]
+    fn to_absolute_normalized_clamps_out_of_range() {
+        assert_eq!(to_absolute_normalized(-100, -100, 0, 0, 1920, 1080), (0, 0));
+        assert_eq!(
+            to_absolute_normalized(999999, 999999, 0, 0, 1920, 1080),
+            (65535, 65535)
+        );
+    }
+
+    /// A degenerate 1x1 (or zero-reported) virtual desktop must not divide
+    /// by zero; the span is floored to 1 and the origin pixel maps to 0.
+    #[test]
+    fn to_absolute_normalized_single_pixel_desktop_no_div_by_zero() {
+        assert_eq!(to_absolute_normalized(0, 0, 0, 0, 1, 1), (0, 0));
     }
 
     /// Hot-update path: the handler must observe writes made through a
