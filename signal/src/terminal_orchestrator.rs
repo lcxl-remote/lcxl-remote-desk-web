@@ -328,6 +328,7 @@ mod tests {
                 cwd: Some("/srv".into()),
                 recent_output: recent.into(),
             },
+            model_id: None,
         }
     }
 
@@ -346,6 +347,7 @@ mod tests {
                 last_command: None,
                 error_text: err.map(|e| e.into()),
             },
+            model_id: None,
         }
     }
 

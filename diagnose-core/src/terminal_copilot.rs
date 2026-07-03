@@ -486,6 +486,7 @@ mod tests {
                 last_command: Some("./server".into()),
                 error_text: Some("address already in use".into()),
             },
+            model_id: None,
         }
     }
 

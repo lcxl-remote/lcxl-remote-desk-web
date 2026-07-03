@@ -51,6 +51,14 @@ pub struct DiagnoseRequestData {
     /// (trimmed, length- and charset-bounded) before use.
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// Manager-only model selection: the id of a `model` catalog row the operator
+    /// picked in the selector. The manager authorizes it against the operator's
+    /// gated catalog and pins it for the whole request. The open-source
+    /// single-model desk-server has no model catalog and **ignores** this field;
+    /// `None` (the default, sent by older control ends and every non-manager
+    /// client) leaves the server to pick its default model.
+    #[serde(default)]
+    pub model_id: Option<i32>,
 }
 
 // ===================== Remote-collect RPC (A ↔ B) =====================
@@ -482,6 +490,7 @@ mod tests {
             context_kinds: vec!["container.list".into(), "container.logs".into()],
             locale: Some("zh-CN".into()),
             conversation_id: Some("cv-abc123".into()),
+            model_id: Some(7),
         };
         let json = serde_json::to_string(&req).expect("json encode");
         let back: DiagnoseRequestData = serde_json::from_str(&json).expect("json decode");
@@ -508,6 +517,7 @@ mod tests {
                 context_kinds: vec![],
                 locale: None,
                 conversation_id: conversation_id.clone(),
+                model_id: None,
             };
             let json = serde_json::to_string(&req).expect("json encode");
             let back: DiagnoseRequestData = serde_json::from_str(&json).expect("json decode");
@@ -523,6 +533,24 @@ mod tests {
         let legacy: DiagnoseRequestData =
             serde_json::from_str(r#"{"question":"q"}"#).expect("legacy decode");
         assert_eq!(legacy.conversation_id, None);
+    }
+
+    /// The manager-only `model_id` is `#[serde(default)]`: a body that carries it
+    /// decodes to `Some`, and one that omits it (an open-source desk-server or an
+    /// older control end) decodes to `None`. This is the wire-parity guarantee —
+    /// the field can be added without breaking any client that never sets it.
+    #[test]
+    fn model_id_is_serde_default_for_wire_parity() {
+        let with_model: DiagnoseRequestData =
+            serde_json::from_str(r#"{"question":"q","model_id":42}"#).expect("decode with model");
+        assert_eq!(with_model.model_id, Some(42));
+
+        let without_model: DiagnoseRequestData =
+            serde_json::from_str(r#"{"question":"q"}"#).expect("decode without model");
+        assert_eq!(
+            without_model.model_id, None,
+            "an omitted model_id decodes to None (open-source / legacy parity)"
+        );
     }
 
     #[test]
@@ -638,6 +666,7 @@ mod tests {
                 context_kinds: vec!["system.info".into()],
                 locale: Some("zh-CN".into()),
                 conversation_id: None,
+                model_id: None,
             },
         };
         let json = serde_json::to_string(&req).expect("encode");

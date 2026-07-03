@@ -284,6 +284,7 @@ mod tests {
                 cwd: Some("/srv".into()),
                 recent_output: "$ systemctl status".into(),
             },
+            model_id: None,
         }
     }
 

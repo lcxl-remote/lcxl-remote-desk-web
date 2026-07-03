@@ -149,6 +149,7 @@ mod tests {
             context_kinds: kinds.iter().map(|s| s.to_string()).collect(),
             locale: None,
             conversation_id: None,
+            model_id: None,
         }
     }
 

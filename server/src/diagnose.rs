@@ -155,6 +155,7 @@ mod tests {
             context_kinds: vec![],
             locale: None,
             conversation_id: None,
+            model_id: None,
         }
     }
 

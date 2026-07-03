@@ -5168,6 +5168,7 @@ mod tests {
                 context_kinds: vec![],
                 locale: None,
                 conversation_id: None,
+                model_id: None,
             },
         }
     }
@@ -5266,6 +5267,7 @@ mod tests {
             context_kinds: vec![],
             locale: None,
             conversation_id: None,
+            model_id: None,
         })
         .unwrap();
         handle_diagnose_inbound(&ctx, &diagnose_model(raw))

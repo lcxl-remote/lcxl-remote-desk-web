@@ -107,6 +107,14 @@ pub struct TerminalCopilotAsk {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<CopilotHistoryTurn>,
     pub context: TerminalContext,
+    /// Manager-only model selection: the id of a `model` catalog row the operator
+    /// picked in the selector. The manager authorizes it against the operator's
+    /// gated catalog and pins it for the whole request. The open-source
+    /// single-model desk-server has no model catalog and **ignores** this field;
+    /// `None` (the default, sent by older control ends and every non-manager
+    /// client) leaves the server to pick its default model.
+    #[serde(default)]
+    pub model_id: Option<i32>,
 }
 
 /// One command the copilot proposes. `risk` / `decision` are server-computed and
@@ -329,10 +337,29 @@ mod tests {
                 last_command: Some("./server".into()),
                 error_text: Some("address already in use".into()),
             },
+            model_id: Some(9),
         };
         let bytes = wincode::config::serialize(&original, cfg).expect("wincode encode");
         let decoded: TerminalCopilotAsk =
             wincode::config::deserialize(&bytes, cfg).expect("wincode decode");
         assert_eq!(decoded, original);
+    }
+
+    /// The manager-only `model_id` is `#[serde(default)]`: a body carrying it
+    /// decodes to `Some`, and one omitting it (an open-source desk-server or an
+    /// older control end) decodes to `None`. Wire-parity guarantee for the field.
+    #[test]
+    fn model_id_is_serde_default_for_wire_parity() {
+        let base = r#""mode":"how_to","context":{"os":"linux","shell":"bash","recent_output":""}"#;
+        let with_model: TerminalCopilotAsk =
+            serde_json::from_str(&format!("{{{base},\"model_id\":7}}")).expect("decode with model");
+        assert_eq!(with_model.model_id, Some(7));
+
+        let without_model: TerminalCopilotAsk =
+            serde_json::from_str(&format!("{{{base}}}")).expect("decode without model");
+        assert_eq!(
+            without_model.model_id, None,
+            "an omitted model_id decodes to None (open-source / legacy parity)"
+        );
     }
 }

@@ -59,6 +59,15 @@ pub struct TerminalCompleteAsk {
     /// as the full command.
     pub prefix: String,
     pub context: TerminalCompletionContext,
+    /// Manager-only model selection: the id of a `model` catalog row the operator
+    /// picked in the selector. The manager authorizes it against the operator's
+    /// gated catalog and pins it for the whole request (and keys the completion
+    /// result cache on the resolved model). The open-source single-model
+    /// desk-server has no model catalog and **ignores** this field; `None` (the
+    /// default, sent by older control ends and every non-manager client) leaves the
+    /// server to pick its default model.
+    #[serde(default)]
+    pub model_id: Option<i32>,
 }
 
 /// One completion candidate. `risk` / `decision` are server-computed over the full
@@ -177,11 +186,30 @@ mod tests {
                 cwd: Some("/srv".into()),
                 recent_output: "$ systemctl status".into(),
             },
+            model_id: Some(3),
         };
         let bytes = wincode::config::serialize(&original, cfg).expect("wincode encode");
         let decoded: TerminalCompleteAsk =
             wincode::config::deserialize(&bytes, cfg).expect("wincode decode");
         assert_eq!(decoded, original);
+    }
+
+    /// The manager-only `model_id` is `#[serde(default)]`: a body carrying it
+    /// decodes to `Some`, and one omitting it (an open-source desk-server or an
+    /// older control end) decodes to `None`. Wire-parity guarantee for the field.
+    #[test]
+    fn model_id_is_serde_default_for_wire_parity() {
+        let base = r#""prefix":"sys","context":{"os":"linux","shell":"bash"}"#;
+        let with_model: TerminalCompleteAsk =
+            serde_json::from_str(&format!("{{{base},\"model_id\":5}}")).expect("decode with model");
+        assert_eq!(with_model.model_id, Some(5));
+
+        let without_model: TerminalCompleteAsk =
+            serde_json::from_str(&format!("{{{base}}}")).expect("decode without model");
+        assert_eq!(
+            without_model.model_id, None,
+            "an omitted model_id decodes to None (open-source / legacy parity)"
+        );
     }
 
     #[test]
