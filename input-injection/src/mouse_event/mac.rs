@@ -66,12 +66,59 @@ fn compute_absolute_f64(
     (abs_x, abs_y)
 }
 
+/// Which kind of motion event to synthesize for a `mousemove`, derived from
+/// the DOM `MouseEvent.buttons` bitmask carried on every move event.
+///
+/// macOS only registers a drag (text selection, drag-and-drop, …) when the
+/// motion posted between a button down and its matching up is a `*MouseDragged`
+/// event. A plain `MouseMoved` posted while a button is held is treated as a
+/// hover, so the drag never happens. We therefore inspect the held-button
+/// bitmask on each move and pick the matching dragged variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoveKind {
+    /// No button held — an ordinary hover move.
+    Move,
+    /// Left (primary) button held — drag with the left button.
+    LeftDrag,
+    /// Right (secondary) button held — drag with the right button.
+    RightDrag,
+    /// A non-left/right button held (middle, …) — drag with the center button.
+    OtherDrag,
+}
+
+/// Map the DOM `MouseEvent.buttons` bitmask (`1` = left, `2` = right,
+/// `4` = middle) to the motion kind to inject. Left takes precedence over
+/// right, right over other, matching the single-button drag the user
+/// perceives when multiple buttons happen to be reported.
+fn move_kind_for_buttons(buttons: i32) -> MoveKind {
+    const LEFT: i32 = 1;
+    const RIGHT: i32 = 2;
+    if buttons & LEFT != 0 {
+        MoveKind::LeftDrag
+    } else if buttons & RIGHT != 0 {
+        MoveKind::RightDrag
+    } else if buttons != 0 {
+        MoveKind::OtherDrag
+    } else {
+        MoveKind::Move
+    }
+}
+
 impl MouseEventHandler for MacMouseEventHandler {
     fn handle_mouse_move(&mut self, event: &MouseEventData) -> Result<(), InputError> {
         let point = self.get_point(event.x, event.y);
+        // While a button is held, macOS needs a *MouseDragged event for the
+        // motion to count as a drag; a plain MouseMoved reads as a hover and
+        // text selection / drag gestures do nothing. The button argument is
+        // only meaningful for OtherMouseDragged but is set correctly for all.
+        let (mouse_type, mouse_button) = match move_kind_for_buttons(event.buttons) {
+            MoveKind::Move => (CGEventType::MouseMoved, CGMouseButton::Left),
+            MoveKind::LeftDrag => (CGEventType::LeftMouseDragged, CGMouseButton::Left),
+            MoveKind::RightDrag => (CGEventType::RightMouseDragged, CGMouseButton::Right),
+            MoveKind::OtherDrag => (CGEventType::OtherMouseDragged, CGMouseButton::Center),
+        };
         let source = Self::create_source()?;
-        match CGEvent::new_mouse_event(source, CGEventType::MouseMoved, point, CGMouseButton::Left)
-        {
+        match CGEvent::new_mouse_event(source, mouse_type, point, mouse_button) {
             Ok(cg_event) => {
                 cg_event.post(CGEventTapLocation::HID);
                 Ok(())
@@ -162,6 +209,43 @@ impl MouseEventHandler for MacMouseEventHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No button held resolves to a plain hover move.
+    #[test]
+    fn move_kind_no_button_is_move() {
+        assert_eq!(move_kind_for_buttons(0), MoveKind::Move);
+    }
+
+    /// Left button held (DOM buttons bit 1) must become a left drag — this is
+    /// the text-selection case that was previously mis-injected as MouseMoved.
+    #[test]
+    fn move_kind_left_button_is_left_drag() {
+        assert_eq!(move_kind_for_buttons(1), MoveKind::LeftDrag);
+    }
+
+    /// Right button held (bit 2) becomes a right drag.
+    #[test]
+    fn move_kind_right_button_is_right_drag() {
+        assert_eq!(move_kind_for_buttons(2), MoveKind::RightDrag);
+    }
+
+    /// Middle button held (bit 4) becomes an other/center drag.
+    #[test]
+    fn move_kind_middle_button_is_other_drag() {
+        assert_eq!(move_kind_for_buttons(4), MoveKind::OtherDrag);
+    }
+
+    /// Left takes precedence when both left and right report as held.
+    #[test]
+    fn move_kind_left_wins_over_right() {
+        assert_eq!(move_kind_for_buttons(1 | 2), MoveKind::LeftDrag);
+    }
+
+    /// Right takes precedence over a non-left/right button.
+    #[test]
+    fn move_kind_right_wins_over_other() {
+        assert_eq!(move_kind_for_buttons(2 | 4), MoveKind::RightDrag);
+    }
 
     #[test]
     fn compute_absolute_f64_primary_monitor_center() {
