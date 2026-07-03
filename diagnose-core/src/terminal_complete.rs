@@ -285,6 +285,7 @@ mod tests {
                 recent_output: "$ systemctl status".into(),
             },
             model_id: None,
+            org_id: None,
         }
     }
 

@@ -329,6 +329,7 @@ mod tests {
                 recent_output: recent.into(),
             },
             model_id: None,
+            org_id: None,
         }
     }
 
@@ -348,6 +349,7 @@ mod tests {
                 error_text: err.map(|e| e.into()),
             },
             model_id: None,
+            org_id: None,
         }
     }
 

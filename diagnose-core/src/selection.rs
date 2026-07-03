@@ -208,6 +208,7 @@ mod tests {
             locale: None,
             conversation_id: None,
             model_id: None,
+            org_id: None,
         }
     }
 

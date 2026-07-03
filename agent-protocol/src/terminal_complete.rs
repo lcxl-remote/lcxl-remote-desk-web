@@ -68,6 +68,17 @@ pub struct TerminalCompleteAsk {
     /// server to pick its default model.
     #[serde(default)]
     pub model_id: Option<i32>,
+    /// Manager-only org context hint: the id of the organization the operator is
+    /// acting within (the org view of the model selector). NON-authoritative — the
+    /// manager validates the operator's membership in this org AND the org's
+    /// device-access grant to the target device before trusting it, and only then
+    /// resolves the model against the org catalog; a hint that fails either check
+    /// is dropped and the request falls back to the personal view. The open-source
+    /// single-instance desk-server has no org concept and **ignores** this field;
+    /// `None` (the default, sent by older control ends and every non-manager
+    /// client) is the personal view.
+    #[serde(default)]
+    pub org_id: Option<i32>,
 }
 
 /// One completion candidate. `risk` / `decision` are server-computed over the full
@@ -187,6 +198,7 @@ mod tests {
                 recent_output: "$ systemctl status".into(),
             },
             model_id: Some(3),
+            org_id: Some(6),
         };
         let bytes = wincode::config::serialize(&original, cfg).expect("wincode encode");
         let decoded: TerminalCompleteAsk =
@@ -209,6 +221,24 @@ mod tests {
         assert_eq!(
             without_model.model_id, None,
             "an omitted model_id decodes to None (open-source / legacy parity)"
+        );
+    }
+
+    /// The manager-only `org_id` context hint is `#[serde(default)]`, like
+    /// `model_id`: a body carrying it decodes to `Some`, and one omitting it decodes
+    /// to `None`. Wire-parity guarantee for the field.
+    #[test]
+    fn org_id_is_serde_default_for_wire_parity() {
+        let base = r#""prefix":"sys","context":{"os":"linux","shell":"bash"}"#;
+        let with_org: TerminalCompleteAsk =
+            serde_json::from_str(&format!("{{{base},\"org_id\":4}}")).expect("decode with org");
+        assert_eq!(with_org.org_id, Some(4));
+
+        let without_org: TerminalCompleteAsk =
+            serde_json::from_str(&format!("{{{base}}}")).expect("decode without org");
+        assert_eq!(
+            without_org.org_id, None,
+            "an omitted org_id decodes to None (open-source / legacy parity)"
         );
     }
 

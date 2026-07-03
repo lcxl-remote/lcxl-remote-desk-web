@@ -487,6 +487,7 @@ mod tests {
                 error_text: Some("address already in use".into()),
             },
             model_id: None,
+            org_id: None,
         }
     }
 
