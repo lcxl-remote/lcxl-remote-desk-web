@@ -79,7 +79,7 @@ use desk_signal::{
             update_device_code,
         },
         files::{delete_file, list_files},
-        model_provider::{get_model_provider, update_model_provider},
+        model_provider::{get_model_provider, test_model_provider, update_model_provider},
         signaling::open_signaling_handle,
         terminal::{list_terminal, open_terminal_session},
         turn_usage::get_turn_usage,
@@ -246,7 +246,8 @@ pub fn configure_api_surface(
                         utoipa_actix_web::scope("/model")
                             .service(get_model_usage)
                             .service(get_model_provider)
-                            .service(update_model_provider),
+                            .service(update_model_provider)
+                            .service(test_model_provider),
                     );
                 }
             }),

@@ -28,6 +28,11 @@ pub struct ModelRequest {
     pub tools: Vec<ToolSpec>,
     pub tool_choice: ToolChoice,
     pub response_format: ResponseFormatSpec,
+    /// Optional upper bound on the model's output tokens. `None` leaves the seam's
+    /// own default in effect. Currently honored only by the signal seam's body
+    /// builders (`web/signal/src/model_dial.rs`), used by the provider connectivity
+    /// probe to keep the test reply tiny; other seams may ignore it.
+    pub max_output_tokens: Option<u32>,
 }
 
 impl ModelRequest {
@@ -39,6 +44,7 @@ impl ModelRequest {
             tools: Vec::new(),
             tool_choice: ToolChoice::Auto,
             response_format,
+            max_output_tokens: None,
         }
     }
 }

@@ -181,6 +181,7 @@ async fn run_inner(
             tools: specs,
             tool_choice: crate::chat::ToolChoice::Auto,
             response_format: deps.response_format.clone(),
+            max_output_tokens: None,
         };
 
         let turn = deps.model.call(request, sink).await?;

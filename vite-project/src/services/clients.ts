@@ -4,7 +4,7 @@
 */
 
 import fetch from "@/lib/kubb-client";
-import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, GetCurrentUserQueryResponse, GetCurrentUser401, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, ListFilesQueryResponse, ListFilesQueryParams, QueryMacosAutologinQueryResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandlePathParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics417, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
+import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, GetCurrentUserQueryResponse, GetCurrentUser401, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, ListFilesQueryResponse, ListFilesQueryParams, QueryMacosAutologinQueryResponse, RetryManagerLinkMutationResponse, QueryManagerLinkStatusQueryResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandlePathParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, TestModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics417, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 
 function getGetCurrentUserUrl() {
@@ -220,6 +220,42 @@ export async function queryMacosAutologin(config: Partial<RequestConfig> & { cli
 
 
   const res = await request<QueryMacosAutologinQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getQueryMacosAutologinUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getRetryManagerLinkUrl() {
+  const res = { method: 'POST', url: `/api/desk/manager-link/retry` as const }
+  return res
+}
+
+/**
+ * @summary Manually retry the host→manager registration
+ * {@link /api/desk/manager-link/retry}
+ */
+export async function retryManagerLink(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<RetryManagerLinkMutationResponse, ResponseErrorConfig<Error>, unknown>({ method : "POST", url : getRetryManagerLinkUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getQueryManagerLinkStatusUrl() {
+  const res = { method: 'GET', url: `/api/desk/manager-link/status` as const }
+  return res
+}
+
+/**
+ * @summary Query host→manager link status
+ * {@link /api/desk/manager-link/status}
+ */
+export async function queryManagerLinkStatus(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<QueryManagerLinkStatusQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getQueryManagerLinkStatusUrl().url.toString(), ... requestConfig })
   return res.data
 }
 
@@ -803,6 +839,24 @@ export async function updateModelProvider(data: UpdateModelProviderMutationReque
   const requestData = data
 
   const res = await request<UpdateModelProviderMutationResponse, ResponseErrorConfig<Error>, UpdateModelProviderMutationRequest>({ method : "POST", url : getUpdateModelProviderUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getTestModelProviderUrl() {
+  const res = { method: 'POST', url: `/api/model/provider/test` as const }
+  return res
+}
+
+/**
+ * @summary Test the model-provider AI call chain
+ * {@link /api/model/provider/test}
+ */
+export async function testModelProvider(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<TestModelProviderMutationResponse, ResponseErrorConfig<Error>, unknown>({ method : "POST", url : getTestModelProviderUrl().url.toString(), ... requestConfig })
   return res.data
 }
 

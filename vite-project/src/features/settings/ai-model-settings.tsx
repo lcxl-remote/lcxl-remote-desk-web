@@ -3,10 +3,11 @@ import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import { useTranslation } from "react-i18next"
-import { Loader2, Save } from "lucide-react"
+import { Loader2, Save, PlugZap } from "lucide-react"
 
 import { useGetModelProvider } from "@/services/hooks/modelProviderController/useGetModelProvider"
 import { useUpdateModelProvider } from "@/services/hooks/modelProviderController/useUpdateModelProvider"
+import { useTestModelProvider } from "@/services/hooks/modelProviderController/useTestModelProvider"
 import { useQueryAiPolicySettings } from "@/services/hooks/aiModelController/useQueryAiPolicySettings"
 import { useUpdateAiPolicySettings } from "@/services/hooks/aiModelController/useUpdateAiPolicySettings"
 import { useQueryCollectionPolicySettings } from "@/services/hooks/aiModelController/useQueryCollectionPolicySettings"
@@ -85,6 +86,7 @@ export function AiModelSettings() {
     // signaling server is embedded in this process, so the same origin serves it.
     const { data: providerResponse, isLoading } = useGetModelProvider()
     const { mutateAsync: updateProvider, isPending: isProviderUpdating } = useUpdateModelProvider()
+    const { mutateAsync: testProvider, isPending: isTesting } = useTestModelProvider()
 
     // Whether a key is already stored (the value itself is never returned).
     const [apiKeySet, setApiKeySet] = useState(false)
@@ -168,6 +170,38 @@ export function AiModelSettings() {
             toast({
                 variant: "destructive",
                 title: t("pages.system.settings.error"),
+                description: t("pages.aiModel.settings.updateFailedMessage"),
+            })
+        }
+    }
+
+    // Probe the stored provider (base_url / key / model / dialect) end-to-end with a
+    // tiny chat call. Tests the saved config, not the unsaved form — save first to
+    // test edits. A reachable-but-broken chain comes back as `success === false`
+    // with the real reason, so it is a toast, not a thrown error.
+    const onTestConnection = async () => {
+        try {
+            const res = await testProvider()
+            if (res?.success === false) {
+                toast({
+                    variant: "destructive",
+                    title: t("pages.aiModel.settings.testFailed"),
+                    description: res.message ?? t("pages.aiModel.settings.testFailed"),
+                })
+                return
+            }
+            const latency = res?.data?.latency_ms
+            const sample = res?.data?.sample
+            toast({
+                title: t("pages.aiModel.settings.testSucceed"),
+                description: sample
+                    ? t("pages.aiModel.settings.testResult", { latency, sample })
+                    : t("pages.aiModel.settings.testResultNoSample", { latency }),
+            })
+        } catch {
+            toast({
+                variant: "destructive",
+                title: t("pages.aiModel.settings.testFailed"),
                 description: t("pages.aiModel.settings.updateFailedMessage"),
             })
         }
@@ -478,7 +512,11 @@ export function AiModelSettings() {
                                 )}
                             />
 
-                            <div className="flex justify-end">
+                            <div className="flex justify-end gap-2">
+                                <Button type="button" variant="outline" onClick={onTestConnection} disabled={isTesting || isProviderUpdating}>
+                                    {isTesting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PlugZap className="mr-2 h-4 w-4" />}
+                                    {t("pages.aiModel.settings.testConnection")}
+                                </Button>
                                 <Button type="submit" disabled={isProviderUpdating}>
                                     {isProviderUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t("pages.system.settings.save")}

@@ -39,6 +39,8 @@ A headless `desk-server` is a pure thin edge: it has **no embedded signaling ser
 
 The **model provider** (provider, base URL, model, API key, output format, and the granted execution mode) is configured on the **central signaling server**. **API keys are strictly server-side secrets** — they are never returned to the browser, never written to logs, and never included in any public settings DTO.
 
+A **Test connection** button next to Save probes the **saved** provider config end-to-end: it sends a tiny chat request (a one-word reply) through the configured base URL / API key / model and reports the latency and a reply snippet, or the real upstream reason on failure. It runs against the stored config, so save your edits before testing. The API key stays server-side throughout.
+
 Each device additionally keeps two **local** controls in its own settings: an **execution ceiling** (the highest mode the AI may use on that device, which caps any central grant) and an **evidence collection policy** (`allow_logs` / `allow_screen`, the device's final say over what evidence may leave it).
 
 ## Security

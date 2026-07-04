@@ -426,6 +426,9 @@ fn build_openai_body(model: &str, request: &ModelRequest) -> Value {
         "stream": true,
         "stream_options": { "include_usage": true },
     });
+    if let Some(max) = request.max_output_tokens {
+        body["max_tokens"] = json!(max);
+    }
     match &request.response_format {
         ResponseFormatSpec::None => {}
         ResponseFormatSpec::JsonObject => {
@@ -568,7 +571,7 @@ fn build_anthropic_body(model: &str, request: &ModelRequest) -> Value {
     }
     let mut body = json!({
         "model": model,
-        "max_tokens": ANTHROPIC_MAX_TOKENS,
+        "max_tokens": request.max_output_tokens.unwrap_or(ANTHROPIC_MAX_TOKENS),
         "messages": messages,
         "stream": true,
     });
@@ -798,6 +801,21 @@ mod tests {
         assert_eq!(body["system"], "you are a diagnostician");
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
         assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn max_output_tokens_caps_both_dialects_when_set() {
+        let mut req = text_request(ResponseFormatSpec::None);
+        req.max_output_tokens = Some(16);
+        // OpenAI: no cap by default, present when requested.
+        assert!(
+            build_openai_body("gpt-test", &text_request(ResponseFormatSpec::None))
+                .get("max_tokens")
+                .is_none()
+        );
+        assert_eq!(build_openai_body("gpt-test", &req)["max_tokens"], 16);
+        // Anthropic: the override replaces the default ceiling.
+        assert_eq!(build_anthropic_body("claude-x", &req)["max_tokens"], 16);
     }
 
     /// Drive an OpenAI stream: deltas concatenate in order, a `finish_reason`

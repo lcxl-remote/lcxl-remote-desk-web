@@ -337,7 +337,7 @@ export type ConnectionModel = {
     */
     connection_id: string;
     /**
-     * @description Device primary key for multi-instance addressing. Filled by the manager\n(whose presence registry is keyed by device id); `None` on the OSS\nsingle-instance signal server, which has no device registry. Dual-target\nfield, not a backward-compat field: control ends address a manager device\nby this id and an OSS connection by `connection_id`.
+     * @description External device handle (a non-enumerable UUID) for multi-instance\naddressing. Filled by the manager (whose presence registry maps it to the\ninternal device id); `None` on the OSS single-instance signal server, which\nhas no device registry. Dual-target field, not a backward-compat field:\ncontrol ends address a manager device by this handle and an OSS connection\nby `connection_id`.
      * @type string,null
     */
     device_id?: string | null;
@@ -525,7 +525,7 @@ export type DeleteFileRequest = {
     */
     delete_permanently?: boolean | null;
     /**
-     * @description Target device primary key (manager multi-instance addressing). See\n[`FileListParams::device_id`] for the dual-target rationale.
+     * @description Target device handle (UUID; manager multi-instance addressing). See\n[`FileListParams::device_id`] for the dual-target rationale.
      * @type string,null
     */
     device_id?: string | null;
@@ -1583,6 +1583,24 @@ export type MacosPermissions = {
     screen_recording: boolean;
 };
 
+export type ManagerLinkStatus = {
+    /**
+     * @description True when registration is fatally blocked and auto-reconnect is paused.
+     * @type boolean
+    */
+    blocked: boolean;
+    /**
+     * @description `DeskErrorCode` of the rejection (`46` quota exceeded, `47` missing client\nid), when blocked.
+     * @type integer,null, int32
+    */
+    error_code?: number | null;
+    /**
+     * @description Human-readable reason, when blocked.
+     * @type string,null
+    */
+    message?: string | null;
+};
+
 export const responseFormatModeEnum = {
     none: "none",
     json_object: "json_object",
@@ -1787,6 +1805,23 @@ export type PasswordParams = {
      * @type string
     */
     username: string;
+};
+
+/**
+ * @description Result of a successful provider connectivity test. The `api_key` stays\nserver-side; only latency and a bounded reply snippet are returned.
+*/
+export type ProviderTestDto = {
+    /**
+     * @description Round-trip latency of the probe call, in milliseconds.
+     * @minLength 0
+     * @type integer, int64
+    */
+    latency_ms: number;
+    /**
+     * @description A short snippet of the model\'s reply (bounded), when it returned text.
+     * @type string,null
+    */
+    sample?: string | null;
 };
 
 /**
@@ -2075,6 +2110,41 @@ export type RestResponseMacosAutologin = {
     success: boolean;
 };
 
+export type RestResponseManagerLinkStatus = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description True when registration is fatally blocked and auto-reconnect is paused.
+         * @type boolean
+        */
+        blocked: boolean;
+        /**
+         * @description `DeskErrorCode` of the rejection (`46` quota exceeded, `47` missing client\nid), when blocked.
+         * @type integer,null, int32
+        */
+        error_code?: number | null;
+        /**
+         * @description Human-readable reason, when blocked.
+         * @type string,null
+        */
+        message?: string | null;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseModelProviderPublic = {
     /**
      * @type integer, int32
@@ -2140,6 +2210,38 @@ export type RestResponseModelUsageResult = {
          * @type array
         */
         items: ModelUsageItem[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseProviderTestDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Result of a successful provider connectivity test. The `api_key` stays\nserver-side; only latency and a bounded reply snippet are returned.
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description Round-trip latency of the probe call, in milliseconds.
+         * @minLength 0
+         * @type integer, int64
+        */
+        latency_ms: number;
+        /**
+         * @description A short snippet of the model\'s reply (bounded), when it returned text.
+         * @type string,null
+        */
+        sample?: string | null;
     };
     /**
      * @type string,null
@@ -2795,6 +2897,25 @@ export type RestResponseVirtualDisplaySettings = {
         */
         prompt_ms?: number;
     };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseBool = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type boolean | undefined
+    */
+    data?: boolean;
     /**
      * @type string,null
     */
@@ -3817,7 +3938,7 @@ export type ListFilesQueryParams = {
     */
     connection_id?: string | null;
     /**
-     * @description Target device primary key (manager multi-instance addressing). The manager\nroutes by this; the OSS single-instance signal leaves it `None` and routes\nby `connection_id` (dual-target wire model).
+     * @description Target device handle (UUID; manager multi-instance addressing). The manager\nroutes by this; the OSS single-instance signal leaves it `None` and routes\nby `connection_id` (dual-target wire model).
      * @type string,null
     */
     device_id?: string | null;
@@ -3845,6 +3966,30 @@ export type QueryMacosAutologinQueryResponse = QueryMacosAutologin200;
 
 export type QueryMacosAutologinQuery = {
     Response: QueryMacosAutologin200;
+    Errors: any;
+};
+
+/**
+ * @description Retry requested
+*/
+export type RetryManagerLink200 = RestResponseBool;
+
+export type RetryManagerLinkMutationResponse = RetryManagerLink200;
+
+export type RetryManagerLinkMutation = {
+    Response: RetryManagerLink200;
+    Errors: any;
+};
+
+/**
+ * @description Manager link status
+*/
+export type QueryManagerLinkStatus200 = RestResponseManagerLinkStatus;
+
+export type QueryManagerLinkStatusQueryResponse = QueryManagerLinkStatus200;
+
+export type QueryManagerLinkStatusQuery = {
+    Response: QueryManagerLinkStatus200;
     Errors: any;
 };
 
@@ -4226,7 +4371,7 @@ export type OpenTerminalSessionQueryParams = {
     */
     command: string;
     /**
-     * @description Target device primary key (manager multi-instance addressing). The manager\nroutes by this; the OSS single-instance signal leaves it `None` and routes\nby the path `connection_id` (dual-target wire model).
+     * @description Target device handle (UUID; manager multi-instance addressing). The manager\nroutes by this; the OSS single-instance signal leaves it `None` and routes\nby the path `connection_id` (dual-target wire model).
      * @type string,null
     */
     device_id?: string | null;
@@ -4256,7 +4401,7 @@ export type ListTerminalPathParams = {
 
 export type ListTerminalQueryParams = {
     /**
-     * @description Target device primary key (manager multi-instance addressing); `None` on\nthe OSS single-instance signal.
+     * @description Target device handle (UUID; manager multi-instance addressing); `None` on\nthe OSS single-instance signal.
      * @type string,null
     */
     device_id?: string | null;
@@ -4403,6 +4548,18 @@ export type UpdateModelProviderMutationResponse = UpdateModelProvider200;
 export type UpdateModelProviderMutation = {
     Response: UpdateModelProvider200;
     Request: UpdateModelProviderMutationRequest;
+    Errors: any;
+};
+
+/**
+ * @description Connectivity test result
+*/
+export type TestModelProvider200 = RestResponseProviderTestDto;
+
+export type TestModelProviderMutationResponse = TestModelProvider200;
+
+export type TestModelProviderMutation = {
+    Response: TestModelProvider200;
     Errors: any;
 };
 

@@ -1,12 +1,33 @@
+use std::time::Instant;
+
 use actix_web::{HttpResponse, get, post, web};
+use desk_diagnose_core::chat::{ChatMessage, ChatRole};
+use desk_diagnose_core::prompt::ResponseFormatSpec;
+use desk_diagnose_core::seam::{ModelRequest, ModelSeam, NullTurnSink};
 use desk_utils::error::DeskErrorCode;
 use desk_utils::rest::RestResponse;
+use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::error::DeskSignalError;
-use crate::model_dial::configured_ssrf_mode;
+use crate::model_dial::{SignalModelSeam, configured_ssrf_mode};
 use crate::model_provider::{self, ModelProviderPublic, ModelProviderUpdate};
 
 pub const TAG: &str = "ModelProvider";
+
+/// Small output cap for the connectivity probe. The reply is a single word, so a
+/// tiny ceiling keeps a misconfigured model from streaming a wall of text.
+const PROBE_MAX_OUTPUT_TOKENS: u32 = 16;
+
+/// Result of a successful provider connectivity test. The `api_key` stays
+/// server-side; only latency and a bounded reply snippet are returned.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProviderTestDto {
+    /// Round-trip latency of the probe call, in milliseconds.
+    pub latency_ms: u64,
+    /// A short snippet of the model's reply (bounded), when it returned text.
+    pub sample: Option<String>,
+}
 
 #[utoipa::path(
     tag = TAG,
@@ -53,4 +74,128 @@ pub async fn update_model_provider(
     }
     model_provider::save(db, config.clone()).await?;
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(config.public_view())))
+}
+
+/// Run a minimal chat probe against `seam` and shape the outcome. Kept separate
+/// from the handler so tests can inject a stub [`ModelSeam`] and exercise the
+/// success / error mapping without a real upstream call.
+async fn run_probe(seam: &dyn ModelSeam) -> Result<ProviderTestDto, DeskSignalError> {
+    let mut request = ModelRequest::text_only(
+        vec![ChatMessage::text(
+            "probe",
+            ChatRole::User,
+            "Reply with the single word: pong",
+        )],
+        ResponseFormatSpec::None,
+    );
+    // A one-word reply — cap output so a misconfigured model cannot stream forever.
+    request.max_output_tokens = Some(PROBE_MAX_OUTPUT_TOKENS);
+
+    let started = Instant::now();
+    let mut sink = NullTurnSink;
+    let turn = seam.call(request, &mut sink).await.map_err(|e| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::SYSTEM_ERROR,
+            &format!("Test failed: {}", e.message),
+        )
+    })?;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    // Bound the snippet; do not match the text exactly (a small cap may truncate a
+    // healthy reply), just prove the chain returned something.
+    let trimmed = turn.text.trim();
+    let sample = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.chars().take(200).collect())
+    };
+    Ok(ProviderTestDto { latency_ms, sample })
+}
+
+#[utoipa::path(
+    tag = TAG,
+    summary = "Test the model-provider AI call chain",
+    responses(
+        (status = 200, description = "Connectivity test result", body = RestResponse<ProviderTestDto>),
+    ),
+)]
+#[post("/provider/test")]
+pub async fn test_model_provider() -> Result<HttpResponse, DeskSignalError> {
+    let db = crate::db::get_db();
+    let config = model_provider::load(db).await?;
+    // Fail closed with a precondition error when the provider is not fully
+    // configured (missing model / base_url / api_key).
+    let seam = SignalModelSeam::from_config(&config).map_err(|e| {
+        DeskSignalError::new_custom_error(DeskErrorCode::PRECONDITION_FAILED, &e.message)
+    })?;
+    // A reachable-but-broken chain (bad key, wrong model, unreachable host) is a
+    // business outcome surfaced as the failure body with the real reason.
+    let dto = run_probe(&seam).await?;
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(dto)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use desk_agent_protocol::{AgentError, AgentErrorKind};
+    use desk_diagnose_core::chat::ModelTurn;
+    use desk_diagnose_core::seam::TurnSink;
+
+    /// A seam that returns a fixed reply and asserts the probe capped its output.
+    struct OkSeam;
+
+    #[async_trait::async_trait(?Send)]
+    impl ModelSeam for OkSeam {
+        async fn call(
+            &self,
+            request: ModelRequest,
+            _sink: &mut dyn TurnSink,
+        ) -> Result<ModelTurn, AgentError> {
+            assert_eq!(
+                request.max_output_tokens,
+                Some(PROBE_MAX_OUTPUT_TOKENS),
+                "probe must cap the output tokens"
+            );
+            Ok(ModelTurn {
+                text: "  pong  ".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    /// A seam that always fails, standing in for an unreachable / misconfigured
+    /// upstream.
+    struct ErrSeam;
+
+    #[async_trait::async_trait(?Send)]
+    impl ModelSeam for ErrSeam {
+        async fn call(
+            &self,
+            _request: ModelRequest,
+            _sink: &mut dyn TurnSink,
+        ) -> Result<ModelTurn, AgentError> {
+            Err(AgentError {
+                kind: AgentErrorKind::Internal,
+                message: "boom".into(),
+                retryable: false,
+                safe_for_model: true,
+                error_code: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_success_trims_reply_into_sample() {
+        let dto = run_probe(&OkSeam).await.expect("probe ok");
+        assert_eq!(dto.sample.as_deref(), Some("pong"));
+    }
+
+    #[tokio::test]
+    async fn probe_error_surfaces_upstream_reason_as_business_failure() {
+        let err = run_probe(&ErrSeam).await.expect_err("probe should fail");
+        assert!(matches!(err, DeskSignalError::CustomError(_)));
+        assert!(
+            err.to_string().contains("boom"),
+            "the upstream reason should pass through: {err}"
+        );
+    }
 }

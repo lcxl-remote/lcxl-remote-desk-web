@@ -1,0 +1,1 @@
+{"type":"object","required":["success","code"],"properties":{"code":{"type":"integer","format":"int32"},"data":{"type":"boolean"},"message":{"type":["string","null"]},"success":{"type":"boolean"}},"x-readme-ref-name":"RestResponse_bool"}
