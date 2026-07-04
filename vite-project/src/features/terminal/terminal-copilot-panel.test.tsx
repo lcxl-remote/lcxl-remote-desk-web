@@ -197,6 +197,18 @@ describe("TerminalCopilotPanel exec promotion", () => {
         expect(screen.getByText(/execution ceiling/i)).toBeInTheDocument();
     });
 
+    it("lays the composer out below the conversation log (bottom-pinned input)", () => {
+        renderPanel([suggestion()]);
+        const question = screen.getByText("check nginx");
+        const composer = screen.getByPlaceholderText("Describe what you want to do…");
+        // A chat layout: the conversation sits above the input, so the question
+        // must precede the composer in document order.
+        expect(
+            question.compareDocumentPosition(composer) &
+                Node.DOCUMENT_POSITION_FOLLOWING,
+        ).toBeTruthy();
+    });
+
     it("does not guide on a hard-blocked preview", () => {
         const exec = stubExec({
             0: {

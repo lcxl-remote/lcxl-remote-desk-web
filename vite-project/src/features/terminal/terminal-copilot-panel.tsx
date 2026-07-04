@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
     Sparkles,
@@ -214,6 +214,14 @@ export function TerminalCopilotPanel({
 
     const running = state.phase === 'running';
 
+    // The conversation scrolls above a bottom-pinned composer; keep the newest
+    // turn (and streaming text) in view as it grows, mirroring a chat log.
+    const logRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        const log = logRef.current;
+        if (log) log.scrollTop = log.scrollHeight;
+    }, [state.turns, state.partialText, state.phase]);
+
     const submit = () => {
         if (running) return;
         if (mode === 'how_to' && !question.trim()) return;
@@ -232,66 +240,7 @@ export function TerminalCopilotPanel({
                 </Button>
             </div>
 
-            <div className="border-b border-border p-3">
-                <div className="mb-2 flex gap-1">
-                    <Button
-                        size="sm"
-                        variant={mode === 'how_to' ? 'default' : 'outline'}
-                        onClick={() => setMode('how_to')}
-                    >
-                        {t('pages.deskTerminal.copilot.modeHowTo')}
-                    </Button>
-                    <Button
-                        size="sm"
-                        variant={mode === 'explain_error' ? 'default' : 'outline'}
-                        onClick={() => setMode('explain_error')}
-                    >
-                        {t('pages.deskTerminal.copilot.modeExplain')}
-                    </Button>
-                </div>
-                {mode === 'how_to' ? (
-                    <textarea
-                        className="min-h-16 w-full resize-none rounded-md border border-input bg-background px-2 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        placeholder={t(
-                            'pages.deskTerminal.copilot.askPlaceholder',
-                        )}
-                        value={question}
-                        onChange={(e) => setQuestion(e.target.value)}
-                        onKeyDown={(e) => {
-                            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit();
-                        }}
-                    />
-                ) : (
-                    <p className="text-xs text-muted-foreground">
-                        {t(
-                            'pages.deskTerminal.copilot.explainHint',
-                        )}
-                    </p>
-                )}
-                {/* Manager-only agent-model picker; renders nothing against an
-                    open-source signal server, leaving the flow unchanged. */}
-                <div className="mt-2">
-                    <ModelSelector
-                        role="agent"
-                        orgId={orgId}
-                        onChange={setModelId}
-                        className="border-input bg-background text-foreground"
-                    />
-                </div>
-                <div className="mt-2 flex gap-2">
-                    <Button size="sm" onClick={submit} disabled={running}>
-                        {running && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
-                        {t('pages.deskTerminal.copilot.ask')}
-                    </Button>
-                    {(state.phase === 'done' || state.phase === 'error' || running) && (
-                        <Button size="sm" variant="ghost" onClick={onReset}>
-                            {t('pages.deskTerminal.copilot.reset')}
-                        </Button>
-                    )}
-                </div>
-            </div>
-
-            <div className="flex-1 space-y-4 overflow-y-auto p-3">
+            <div ref={logRef} className="flex-1 space-y-4 overflow-y-auto p-3">
                 {state.turns.map((turn, turnIndex) => {
                     const isLast = turnIndex === state.turns.length - 1;
                     return (
@@ -379,6 +328,65 @@ export function TerminalCopilotPanel({
                         </div>
                     );
                 })}
+            </div>
+
+            <div className="border-t border-border p-3">
+                <div className="mb-2 flex gap-1">
+                    <Button
+                        size="sm"
+                        variant={mode === 'how_to' ? 'default' : 'outline'}
+                        onClick={() => setMode('how_to')}
+                    >
+                        {t('pages.deskTerminal.copilot.modeHowTo')}
+                    </Button>
+                    <Button
+                        size="sm"
+                        variant={mode === 'explain_error' ? 'default' : 'outline'}
+                        onClick={() => setMode('explain_error')}
+                    >
+                        {t('pages.deskTerminal.copilot.modeExplain')}
+                    </Button>
+                </div>
+                {mode === 'how_to' ? (
+                    <textarea
+                        className="min-h-16 w-full resize-none rounded-md border border-input bg-background px-2 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        placeholder={t(
+                            'pages.deskTerminal.copilot.askPlaceholder',
+                        )}
+                        value={question}
+                        onChange={(e) => setQuestion(e.target.value)}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit();
+                        }}
+                    />
+                ) : (
+                    <p className="text-xs text-muted-foreground">
+                        {t(
+                            'pages.deskTerminal.copilot.explainHint',
+                        )}
+                    </p>
+                )}
+                {/* Manager-only agent-model picker; renders nothing against an
+                    open-source signal server, leaving the flow unchanged. */}
+                <div className="mt-2">
+                    <ModelSelector
+                        role="agent"
+                        orgId={orgId}
+                        onChange={setModelId}
+                        className="border-input bg-background text-foreground"
+                    />
+                </div>
+                <div className="mt-2 flex gap-2">
+                    <Button size="sm" onClick={submit} disabled={running}>
+                        {running && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+                        {t('pages.deskTerminal.copilot.ask')}
+                    </Button>
+                    {(state.phase === 'done' || state.phase === 'error' || running) && (
+                        <Button size="sm" variant="ghost" onClick={onReset}>
+                            {t('pages.deskTerminal.copilot.reset')}
+                        </Button>
+                    )}
+                </div>
             </div>
         </div>
     );
