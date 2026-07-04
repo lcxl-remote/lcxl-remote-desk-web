@@ -163,6 +163,23 @@ describe("DiagnosePanel", () => {
         });
     });
 
+    it("running: the live turn's own question renders immediately, not a turn late", () => {
+        renderPanel({ phase: "running", status: "modeling", question: "why is the disk full?" })
+        expect(screen.getByText("why is the disk full?")).toBeInTheDocument()
+    })
+
+    it("done: the answered question stays visible above its result", () => {
+        renderPanel({ phase: "done", question: "and the disk?", answer: "plenty free" })
+        expect(screen.getByText("and the disk?")).toBeInTheDocument()
+        expect(screen.getByText("plenty free")).toBeInTheDocument()
+    })
+
+    it("error: the failed question stays visible above the error", () => {
+        renderPanel({ phase: "error", question: "why crash?", error: "boom" })
+        expect(screen.getByText("why crash?")).toBeInTheDocument()
+        expect(screen.getByText("boom")).toBeInTheDocument()
+    })
+
     it("transcript: prior settled turns render above the live turn", () => {
         renderPanel({
             phase: "running",

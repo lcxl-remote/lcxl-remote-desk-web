@@ -241,6 +241,19 @@ function AgenticExecApproval({
 }
 
 /**
+ * A right-aligned chat bubble carrying the user's question for a turn. Shared by
+ * the settled transcript and the live turn so the current question is visible as
+ * soon as it is asked, not only after the next turn snapshots it into history.
+ */
+function QuestionBubble({ question }: { question: string }) {
+    return (
+        <div className="max-w-[85%] self-end rounded-lg rounded-br-sm bg-blue-500/20 px-2.5 py-1.5 text-xs text-white/90">
+            {question}
+        </div>
+    )
+}
+
+/**
  * The settled turns of the current conversation, rendered as a compact chat
  * transcript (question bubble + the turn's answer / summary / error) above the
  * live turn. Empty for the first turn, so it renders nothing.
@@ -256,9 +269,7 @@ function ConversationHistory({ turns }: { turns: DiagnoseHistoryTurn[] }) {
                     : turn.answer ?? turn.result?.summary ?? turn.summary
                 return (
                     <div key={turn.requestId} className="flex flex-col gap-1.5">
-                        <div className="max-w-[85%] self-end rounded-lg rounded-br-sm bg-blue-500/20 px-2.5 py-1.5 text-xs text-white/90">
-                            {turn.question}
-                        </div>
+                        <QuestionBubble question={turn.question} />
                         <div
                             className={`max-w-[90%] self-start whitespace-pre-wrap rounded-lg rounded-bl-sm px-2.5 py-1.5 text-xs ${
                                 turn.phase === "error"
@@ -392,8 +403,11 @@ export function DiagnosePanel({
                 {(state.phase === "running" ||
                     state.phase === "done" ||
                     state.phase === "error") && (
-                    <div className="mb-3">
+                    <div className="mb-3 flex flex-col gap-3">
                         <ConversationHistory turns={state.history} />
+                        {/* The live turn's own question, shown immediately rather
+                            than only once the next turn freezes it into history. */}
+                        {state.question && <QuestionBubble question={state.question} />}
                     </div>
                 )}
 
