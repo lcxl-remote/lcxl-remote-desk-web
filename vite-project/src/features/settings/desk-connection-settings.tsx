@@ -8,6 +8,7 @@ import { Loader2, Save } from "lucide-react"
 import { useQuerySettings } from "@/services/hooks/settingsController/useQuerySettings"
 import { useUpdateSettings } from "@/services/hooks/settingsController/useUpdateSettings"
 import { mergeSystemSettings } from "@/features/settings/settings-payload"
+import { ManagerLinkBanner } from "@/features/settings/manager-link-banner"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -96,6 +97,8 @@ export function DeskConnectionSettings() {
                     {t('pages.deskConnection.description')}
                 </p>
             </div>
+
+            <ManagerLinkBanner />
 
             <Card>
                 <CardHeader>

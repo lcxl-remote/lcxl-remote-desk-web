@@ -12,6 +12,9 @@ Server settings are managed via `conf/config.toml`. The config file path can be 
 - `signaling_token` — node access token for the remote signaling server (passed as `?token=` on the signaling WebSocket).
 - `manager_url` — URL of an enterprise manager's signaling endpoint to connect out to.
 - `manager_api_token` — access token for the manager (passed as `?token=` on the manager signaling WebSocket).
+
+> When the manager fatally rejects this host's registration (its device limit is reached, or the host has no device identity), the desk-server pauses auto-reconnect and the **Desk Connection** settings page shows a banner explaining why, with a **Retry registration** button. Free a device slot from a control end, then retry.
+
 - `local_signaling_token` — auto-generated, persisted token used by the local desk server (and other hosts) to authenticate with the co-located signaling server. Do not set by hand; it is a credential and is masked in logs.
 
 ## Log `[log]`

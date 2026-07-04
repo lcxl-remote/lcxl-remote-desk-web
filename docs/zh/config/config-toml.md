@@ -12,6 +12,8 @@
 - `signaling_token`——远程信令服务器的节点接入令牌（以 `?token=` 附在信令 WebSocket 上）。
 - `manager_url`——要连接的企业版 manager 信令地址。
 - `manager_api_token`——manager 的接入令牌（以 `?token=` 附在 manager 信令 WebSocket 上）。
+
+> 当 manager 致命拒绝本机注册（设备数量已达上限，或本机缺少设备身份）时，desk-server 会暂停自动重连，**出站连接**设置页会显示横幅说明原因，并提供**重试注册**按钮。请先从任一控制端清理出一个设备名额，再重试。
 - `local_signaling_token`——自动生成并持久化的令牌，供本地 desk server（及其他被控端）与同机信令服务器鉴权。请勿手动设置；它是凭据，日志中已脱敏。
 
 ## 日志 `[log]`
