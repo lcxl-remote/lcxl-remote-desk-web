@@ -75,7 +75,14 @@ export function shouldOpenConfigDialog(args: {
     return !hasAttemptedConnect || rtcFailed
 }
 
-export default function DeskSession() {
+/** Container props. `orgId` is injected only by the manager console's org view
+ *  (via a static wrapper); the open-source standalone app renders `<DeskSession/>`
+ *  with no props, keeping the AI model selection personal-scoped. */
+type DeskSessionProps = {
+    orgId?: number
+}
+
+export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     const { id: deskId } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const { t } = useTranslation()
@@ -1225,6 +1232,7 @@ export default function DeskSession() {
                                 exec={exec}
                                 onApproveExec={diagnose.approveExec}
                                 onRejectExec={diagnose.rejectExec}
+                                orgId={orgId}
                             />
                         )}
 

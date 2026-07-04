@@ -17,6 +17,7 @@ import { v4 } from "uuid"
 import { useDeskSignaling } from "../desk/use-desk-signaling"
 import { useTerminalCopilot, type TerminalCopilotMode, type TerminalContext } from "./use-terminal-copilot"
 import { TerminalCopilotPanel } from "./terminal-copilot-panel"
+import { ModelSelector } from "../desk/model-selector"
 import { useConfirmExec } from "../exec/use-confirm-exec"
 import {
     useTerminalComplete,
@@ -39,7 +40,7 @@ const SIGNALING_TYPE_CODE_TERMINAL_CLOSED = 10014
 const SIGNALING_TYPE_CODE_HEARTBEAT = 1
 const TERMINAL_HEARTBEAT_INTERVAL_MS = 30_000
 
-function TerminalView({ connectionId, deviceId, command, onClose }: { connectionId: string; deviceId?: string; command: string; onClose: () => void }) {
+function TerminalView({ connectionId, deviceId, command, onClose, orgId }: { connectionId: string; deviceId?: string; command: string; onClose: () => void; orgId?: number }) {
     const { t } = useTranslation()
     const terminalRef = useRef<HTMLDivElement>(null)
     const [isConnected, setIsConnected] = useState(false)
@@ -60,7 +61,16 @@ function TerminalView({ connectionId, deviceId, command, onClose }: { connection
     // host re-classifies the command and gates it on the device execution ceiling;
     // the browser only relays and renders.
     const exec = useConfirmExec({ deskId: connectionId, subscribe, sendMessage })
-    const complete = useTerminalComplete({ connectionId, subscribe, sendMessage })
+    // The manager-selected completion model, or null when the selector is hidden
+    // (open-source signal) — then no `model_id` rides the completion ask.
+    const [completionModelId, setCompletionModelId] = useState<number | null>(null)
+    const complete = useTerminalComplete({
+        connectionId,
+        subscribe,
+        sendMessage,
+        modelId: completionModelId,
+        orgId,
+    })
     const [showCopilot, setShowCopilot] = useState(false)
     const recentOutputRef = useRef<string>("")
     const lastCommandRef = useRef<string>("")
@@ -111,8 +121,8 @@ function TerminalView({ connectionId, deviceId, command, onClose }: { connection
     }, [command])
 
     const askCopilot = useCallback((mode: TerminalCopilotMode, question: string, modelId: number | null) => {
-        copilot.ask({ mode, question: question || undefined, context: buildContext(mode), modelId })
-    }, [copilot, buildContext])
+        copilot.ask({ mode, question: question || undefined, context: buildContext(mode), modelId, orgId })
+    }, [copilot, buildContext, orgId])
 
     // The (non-authoritative) environment hint for a completion ask.
     const completeContext = useCallback((): TerminalCompletionContext => {
@@ -471,6 +481,21 @@ function TerminalView({ connectionId, deviceId, command, onClose }: { connection
                         Switch Shell
                     </Button>
                 </div>
+                {/* Manager-only completion-model picker; renders nothing against an
+                    open-source signal server (or when no completion model exists),
+                    leaving the completion flow unchanged. Shown only while the
+                    completion assist is on, sitting under the top control bar. */}
+                {completionEnabled && (
+                    <div className="absolute top-12 right-4 z-10 w-56">
+                        <ModelSelector
+                            role="completion"
+                            orgId={orgId}
+                            onChange={setCompletionModelId}
+                            label={t('pages.desk.modelSelector.completionLabel')}
+                            className="border-input bg-[#2a2a2a] text-gray-200"
+                        />
+                    </div>
+                )}
                 <div className="flex-1 w-full p-2 overflow-hidden relative">
                     <div className="absolute inset-2 overflow-hidden" ref={terminalRef} />
                 </div>
@@ -504,13 +529,21 @@ function TerminalView({ connectionId, deviceId, command, onClose }: { connection
                     onClose={() => setShowCopilot(false)}
                     onFill={fillCommand}
                     exec={exec}
+                    orgId={orgId}
                 />
             )}
         </div>
     )
 }
 
-export default function TerminalSession() {
+/** Container props. `orgId` is injected only by the manager console's org view
+ *  (via a static wrapper); the open-source standalone app renders
+ *  `<TerminalSession/>` with no props, keeping AI model selection personal-scoped. */
+type TerminalSessionProps = {
+    orgId?: number
+}
+
+export default function TerminalSession({ orgId }: TerminalSessionProps = {}) {
     const { id: connectionId } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const { t } = useTranslation()
@@ -539,6 +572,7 @@ export default function TerminalSession() {
             deviceId={deviceId}
             command={selectedCommand}
             onClose={handleTerminalClose}
+            orgId={orgId}
         />
     }
 

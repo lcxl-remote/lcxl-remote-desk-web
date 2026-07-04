@@ -420,6 +420,7 @@ export default {
   // Shared AI-model selector (diagnose panel + terminal copilot). Only shown when
   // connected to a manager; hidden against the open-source signal server.
   'pages.desk.modelSelector.label': 'AI 模型',
+  'pages.desk.modelSelector.completionLabel': '补全模型',
   'pages.desk.modelSelector.priceHint': '入 {{input}} / 出 {{output}} 点',
   'pages.desk.modelSelector.free': '免费',
   'pages.desk.modelSelector.balance': '余额:{{points}} 点',

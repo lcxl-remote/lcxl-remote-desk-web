@@ -3,14 +3,18 @@ import { useTranslation } from "react-i18next"
 import { cn } from "@/lib/utils"
 import { useToast } from "@/hooks/use-toast"
 
-// Manager-only wire types. The model-selection endpoints (`GET /api/my/ai/models`,
-// `PUT /api/my/ai/model-preference`) and the wallet endpoint exist only on the
-// manager, not on the open-source signaling server, so they are absent from the
-// shared generated OpenAPI client. This component reaches them with a raw `fetch`
-// (same-origin, session-cookie auth) and feature-detects their availability: when
-// they are missing (the control end is connected to an open-source signal server)
-// the selector renders nothing and the AI flow proceeds exactly as before, with no
-// `model_id` attached — that is the API-parity guarantee.
+// Manager-only wire types. The model-selection endpoints (personal
+// `GET /api/my/ai/models` / `PUT /api/my/ai/model-preference`, or their org
+// counterparts `GET|PUT /api/org/{id}/ai/model{s,-preference}`) and the wallet
+// endpoint exist only on the manager, not on the open-source signaling server, so
+// they are absent from the shared generated OpenAPI client. This component reaches
+// them with a raw `fetch` (same-origin, session-cookie auth) and feature-detects
+// their availability: when they are missing (the control end is connected to an
+// open-source signal server) the selector renders nothing and the AI flow proceeds
+// exactly as before, with no `model_id` attached — that is the API-parity
+// guarantee. Which face (personal vs. org) is queried is decided by the optional
+// `orgId` prop: absent → personal endpoints (and no `org_id` on the wire); set →
+// the org endpoints for that organization.
 
 /** One selectable AI model, mirroring the manager's `AiModelDto`. */
 export type AiModelDto = {
@@ -57,6 +61,19 @@ type ModelSelectorProps = {
     /** Extra classes for the `<select>`, so each host (the dark diagnose overlay vs.
      *  the themed terminal card) can blend it in. */
     className?: string
+    /**
+     * The active organization id, threaded down from the manager console's org
+     * view. When set, the selector queries the org face of the model endpoints
+     * (`/api/org/{orgId}/ai/...`) so the catalog, preference, and any `model_id`
+     * the parent forwards are all scoped to that org. Left `undefined` by the
+     * open-source standalone control end and by the personal view, in which case
+     * the personal endpoints are used and nothing org-scoped is sent — preserving
+     * the exact behavior of a manager with no org context.
+     */
+    orgId?: number
+    /** Overrides the picker label (defaults to the shared "AI model" string), so a
+     *  second selector (e.g. the terminal completion slot) can name its own role. */
+    label?: string
 }
 
 const MICRO_PER_POINT = 1_000_000
@@ -75,9 +92,14 @@ function pointsFromMicro(micro: number): string {
  * parent for the next request. Renders nothing when the manager endpoints are
  * unavailable (open-source signal) or when no model exists for `role`.
  */
-export function ModelSelector({ role, onChange, className }: ModelSelectorProps) {
+export function ModelSelector({ role, onChange, className, orgId, label }: ModelSelectorProps) {
     const { t } = useTranslation()
     const { toast } = useToast()
+    // The manager endpoints to query: the org face when an org is active, else the
+    // personal face. `orgId` is a plain number, so it can be interpolated directly.
+    const modelsUrl = orgId != null ? `/api/org/${orgId}/ai/models` : "/api/my/ai/models"
+    const preferenceUrl =
+        orgId != null ? `/api/org/${orgId}/ai/model-preference` : "/api/my/ai/model-preference"
     const [models, setModels] = useState<AiModelDto[] | null>(null)
     const [hidden, setHidden] = useState(false)
     const [selectedId, setSelectedId] = useState<number | null>(null)
@@ -112,7 +134,7 @@ export function ModelSelector({ role, onChange, className }: ModelSelectorProps)
 
         const loadModels = async () => {
             try {
-                const res = await fetch("/api/my/ai/models", {
+                const res = await fetch(modelsUrl, {
                     credentials: "include",
                     headers: { Accept: "application/json" },
                 })
@@ -151,13 +173,14 @@ export function ModelSelector({ role, onChange, className }: ModelSelectorProps)
         return () => {
             cancelled = true
         }
-    }, [role])
+        // Re-run when the queried face changes (role, or personal↔org via `modelsUrl`).
+    }, [role, modelsUrl])
 
     if (hidden || !models || selectedId === null) return null
 
     const persist = async (id: number) => {
         try {
-            const res = await fetch("/api/my/ai/model-preference", {
+            const res = await fetch(preferenceUrl, {
                 method: "PUT",
                 credentials: "include",
                 headers: { "Content-Type": "application/json" },
@@ -199,7 +222,7 @@ export function ModelSelector({ role, onChange, className }: ModelSelectorProps)
         <div className="flex flex-col gap-1">
             <div className="flex items-center justify-between gap-2">
                 <label className="text-xs text-inherit opacity-70">
-                    {t("pages.desk.modelSelector.label")}
+                    {label ?? t("pages.desk.modelSelector.label")}
                 </label>
                 {balance && (
                     <span className="text-[10px] text-inherit opacity-60">

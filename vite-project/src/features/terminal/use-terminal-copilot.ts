@@ -156,6 +156,10 @@ export type AskInput = {
      *  model selector is hidden (open-source signal); the server then resolves the
      *  default, so the flow is identical across both signaling targets. */
     modelId?: number | null;
+    /** Manager-only active-organization hint. Set only in the console's org view;
+     *  omitted by the personal view and the open-source control end, so no `org_id`
+     *  rides the wire and the ask resolves personal-scoped exactly as before. */
+    orgId?: number;
 };
 
 /**
@@ -218,6 +222,9 @@ export function useTerminalCopilot({
                 // Absent (undefined) unless the manager model selector supplied a
                 // choice; the open-source server ignores the field anyway.
                 model_id: input.modelId ?? undefined,
+                // Absent (undefined) unless the console's org view supplied it; a
+                // non-authoritative hint the manager validates, ignored open-source.
+                org_id: input.orgId ?? undefined,
             };
             const requestId = sendMessage(
                 SIGNALING_TYPE_CODE_TERMINAL_COPILOT_ASK,

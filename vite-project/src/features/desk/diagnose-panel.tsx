@@ -42,6 +42,10 @@ type DiagnosePanelProps = {
     onApproveExec?: () => void
     /** Reject the command the agentic loop is parked on (agentic path). */
     onRejectExec?: () => void
+    /** Manager-only active-organization id, threaded to the model selector and the
+     *  diagnose request. Undefined for the personal view / open-source control end,
+     *  which keeps everything personal-scoped. */
+    orgId?: number
 }
 
 /** Map the backend confidence to a badge colour. */
@@ -319,6 +323,7 @@ export function DiagnosePanel({
     exec,
     onApproveExec,
     onRejectExec,
+    orgId,
 }: DiagnosePanelProps) {
     const { t, i18n } = useTranslation()
     const [question, setQuestion] = useState("")
@@ -337,13 +342,13 @@ export function DiagnosePanel({
         const trimmed = q.trim()
         if (!trimmed) return
         // Pass the current UI language so the AI answers in it.
-        onStart(trimmed, { includeScreen, locale: i18n.language, modelId })
+        onStart(trimmed, { includeScreen, locale: i18n.language, modelId, orgId })
     }
 
     // A follow-up keeps the same conversation; the hook reuses the conversation
     // id so the model sees the prior turns.
     const askFollowUp = (q: string) =>
-        onStart(q, { includeScreen, locale: i18n.language, modelId })
+        onStart(q, { includeScreen, locale: i18n.language, modelId, orgId })
 
     // The lifecycle status name is a backend-provided phase string; map the
     // known ones to localized labels, falling back to the raw value.
@@ -439,6 +444,7 @@ export function DiagnosePanel({
                             an open-source signal server, leaving the flow unchanged. */}
                         <ModelSelector
                             role="agent"
+                            orgId={orgId}
                             onChange={setModelId}
                             className="border-white/20 bg-white/10 text-white"
                         />

@@ -106,6 +106,15 @@ type UseTerminalCompleteProps = {
     ) => string;
     /** Debounce before an L2 AI ask fires, coalescing rapid keystrokes. */
     debounceMs?: number;
+    /** Manager-only user-selected completion model. Omitted (null/undefined) when
+     *  the completion model selector is hidden (open-source signal); the server then
+     *  resolves the default, keeping the flow identical across both signaling
+     *  targets. */
+    modelId?: number | null;
+    /** Manager-only active-organization hint. Set only in the console's org view;
+     *  omitted by the personal view and the open-source control end, so no `org_id`
+     *  rides the wire and the ask resolves personal-scoped exactly as before. */
+    orgId?: number;
 };
 
 /**
@@ -123,6 +132,8 @@ export function useTerminalComplete({
     subscribe,
     sendMessage,
     debounceMs = 180,
+    modelId,
+    orgId,
 }: UseTerminalCompleteProps) {
     const [completions, setCompletions] = useState<CommandCompletion[]>([]);
     // The prefix the current `completions` were computed for; the component
@@ -131,6 +142,13 @@ export function useTerminalComplete({
     const activeRequestRef = useRef<string | null>(null);
     const sentPrefixRef = useRef<string>('');
     const timerRef = useRef<number | undefined>(undefined);
+    // The manager-only model / org hints, held in refs so the debounced ask reads
+    // the latest values without re-creating `requestCompletion` on every change
+    // (completion asks fire on keystrokes, not on selector changes).
+    const modelIdRef = useRef<number | null | undefined>(modelId);
+    modelIdRef.current = modelId;
+    const orgIdRef = useRef<number | undefined>(orgId);
+    orgIdRef.current = orgId;
 
     const clear = useCallback(() => {
         if (timerRef.current !== undefined) window.clearTimeout(timerRef.current);
@@ -153,7 +171,16 @@ export function useTerminalComplete({
             timerRef.current = window.setTimeout(() => {
                 const requestId = sendMessage(
                     SIGNALING_TYPE_CODE_TERMINAL_COMPLETE_ASK,
-                    { prefix, context },
+                    {
+                        prefix,
+                        context,
+                        // Absent (undefined) unless the manager completion selector
+                        // supplied a choice; the open-source server ignores it.
+                        model_id: modelIdRef.current ?? undefined,
+                        // Absent (undefined) unless the console's org view supplied
+                        // it; a validated hint, ignored open-source.
+                        org_id: orgIdRef.current ?? undefined,
+                    },
                     connectionId,
                 );
                 activeRequestRef.current = requestId;

@@ -107,6 +107,12 @@ export type DiagnoseStartOptions = {
      *  model selector is hidden (open-source signal); the server then resolves the
      *  default, keeping the flow identical across both signaling targets. */
     modelId?: number | null;
+    /** Manager-only active-organization hint. Set only in the console's org view;
+     *  omitted (undefined) by the personal view and the open-source control end, so
+     *  no `org_id` rides the wire and the request resolves against the personal
+     *  subject exactly as before. The manager validates it and silently degrades to
+     *  personal if it fails, so forwarding it is always safe. */
+    orgId?: number;
 };
 
 /**
@@ -350,6 +356,9 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                 // Absent (undefined) unless the manager model selector supplied a
                 // choice; the open-source server ignores the field anyway.
                 model_id: options?.modelId ?? undefined,
+                // Absent (undefined) unless the console's org view supplied it; a
+                // non-authoritative hint the manager validates, ignored open-source.
+                org_id: options?.orgId ?? undefined,
             };
             const requestId = sendMessage(SIGNALING_TYPE_CODE_DIAGNOSE, data, deskId);
             activeRequestRef.current = requestId;

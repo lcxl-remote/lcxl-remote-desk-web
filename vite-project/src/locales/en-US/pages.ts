@@ -422,6 +422,7 @@ export default {
   // Shared AI-model selector (diagnose panel + terminal copilot). Only shown when
   // connected to a manager; hidden against the open-source signal server.
   'pages.desk.modelSelector.label': 'AI model',
+  'pages.desk.modelSelector.completionLabel': 'Completion model',
   'pages.desk.modelSelector.priceHint': 'in {{input}} / out {{output}} pts',
   'pages.desk.modelSelector.free': 'Free',
   'pages.desk.modelSelector.balance': 'Balance: {{points}} pts',

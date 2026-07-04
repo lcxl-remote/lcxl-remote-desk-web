@@ -52,6 +52,10 @@ describe("DiagnosePanel", () => {
         expect(onStart).toHaveBeenCalledWith("why slow?", {
             includeScreen: false,
             locale: "en-US",
+            // The model selector is hidden in tests (no manager endpoints), so no
+            // model is chosen; with no org context the org hint is omitted too.
+            modelId: null,
+            orgId: undefined,
         });
     });
 
@@ -137,6 +141,10 @@ describe("DiagnosePanel", () => {
         expect(onStart).toHaveBeenCalledWith("and the disk?", {
             includeScreen: false,
             locale: "en-US",
+            // The model selector is hidden in tests (no manager endpoints), so no
+            // model is chosen; with no org context the org hint is omitted too.
+            modelId: null,
+            orgId: undefined,
         });
     });
 
@@ -148,6 +156,10 @@ describe("DiagnosePanel", () => {
         expect(onStart).toHaveBeenCalledWith("retry differently", {
             includeScreen: false,
             locale: "en-US",
+            // The model selector is hidden in tests (no manager endpoints), so no
+            // model is chosen; with no org context the org hint is omitted too.
+            modelId: null,
+            orgId: undefined,
         });
     });
 

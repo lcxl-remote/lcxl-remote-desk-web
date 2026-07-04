@@ -97,6 +97,40 @@ describe('useTerminalComplete', () => {
         expect((data as { prefix: string }).prefix).toBe('systemctl ');
     });
 
+    it('omits model_id / org_id when not supplied (open-source / personal parity)', () => {
+        const { result } = renderComplete();
+        act(() => result.current.requestCompletion('systemctl ', ctx));
+        act(() => vi.advanceTimersByTime(100));
+        const data = sendMessage.mock.calls[0][1] as {
+            model_id?: number;
+            org_id?: number;
+        };
+        expect(data.model_id).toBeUndefined();
+        expect(data.org_id).toBeUndefined();
+    });
+
+    it('carries the manager model_id and org_id hints when supplied', () => {
+        const subscribe = () => () => {};
+        const { result } = renderHook(() =>
+            useTerminalComplete({
+                connectionId: 'conn-1',
+                subscribe,
+                sendMessage,
+                debounceMs: 100,
+                modelId: 7,
+                orgId: 4,
+            }),
+        );
+        act(() => result.current.requestCompletion('systemctl ', ctx));
+        act(() => vi.advanceTimersByTime(100));
+        const data = sendMessage.mock.calls[0][1] as {
+            model_id?: number;
+            org_id?: number;
+        };
+        expect(data.model_id).toBe(7);
+        expect(data.org_id).toBe(4);
+    });
+
     it('coalesces rapid keystrokes into a single ask for the latest prefix', () => {
         const { result } = renderComplete();
         act(() => result.current.requestCompletion('sy', ctx));

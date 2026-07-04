@@ -185,6 +185,10 @@ export type TerminalCopilotPanelProps = {
     onFill: (command: string) => void;
     /** Confirmed-execution controls; omitted in suggest-only contexts. */
     exec?: CopilotExecControls;
+    /** Manager-only active-organization id, threaded to the model selector so the
+     *  copilot catalog and preference are org-scoped. Undefined for the personal
+     *  view / open-source control end. */
+    orgId?: number;
 };
 
 /**
@@ -200,6 +204,7 @@ export function TerminalCopilotPanel({
     onClose,
     onFill,
     exec,
+    orgId,
 }: TerminalCopilotPanelProps) {
     const { t } = useTranslation();
     const [mode, setMode] = useState<TerminalCopilotMode>('how_to');
@@ -268,6 +273,7 @@ export function TerminalCopilotPanel({
                 <div className="mt-2">
                     <ModelSelector
                         role="agent"
+                        orgId={orgId}
                         onChange={setModelId}
                         className="border-input bg-background text-foreground"
                     />
