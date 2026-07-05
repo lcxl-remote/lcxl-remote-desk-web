@@ -251,6 +251,11 @@ impl DeskErrorCode {
     /// `free`, or add a replacement price. Carried in `RestResponse.code`, never
     /// an HTTP status.
     pub const PLAN_PRICE_REQUIRED: DeskErrorCode = DeskErrorCode(53);
+    /// A billing account cannot be switched to `prepaid` settlement because it still
+    /// carries outstanding payable `point_debt`. Prepaid accounts are never billed by
+    /// settlement, so the residual debt would strand forever; the admin must settle or
+    /// absorb it before switching. Carried in `RestResponse.code`, never an HTTP status.
+    pub const SETTLEMENT_DEBT_OUTSTANDING: DeskErrorCode = DeskErrorCode(55);
 
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
