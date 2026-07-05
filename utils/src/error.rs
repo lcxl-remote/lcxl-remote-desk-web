@@ -257,6 +257,10 @@ impl DeskErrorCode {
     /// absorb it before switching. Carried in `RestResponse.code`, never an HTTP status.
     pub const SETTLEMENT_DEBT_OUTSTANDING: DeskErrorCode = DeskErrorCode(55);
 
+    /// No billing account exists for the referenced subject. Carried in
+    /// `RestResponse.code`, never an HTTP status.
+    pub const BILLING_ACCOUNT_NOT_FOUND: DeskErrorCode = DeskErrorCode(56);
+
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
     pub const REMOTE_DESK_OFFLINE: DeskErrorCode = DeskErrorCode(10003);
