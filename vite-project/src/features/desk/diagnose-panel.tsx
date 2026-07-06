@@ -399,6 +399,10 @@ export function DiagnosePanel({
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-sm">
+                {/* Standing reminder that AI output is fallible and should be verified. */}
+                <p className="mb-3 rounded-md bg-muted/50 px-2 py-1 text-xs text-muted-foreground">
+                    {t("pages.desk.diagnose.aiDisclaimer")}
+                </p>
                 {/* Conversation transcript (prior settled turns) */}
                 {(state.phase === "running" ||
                     state.phase === "done" ||

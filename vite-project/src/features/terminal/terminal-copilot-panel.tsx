@@ -331,6 +331,10 @@ export function TerminalCopilotPanel({
             </div>
 
             <div className="border-t border-border p-3">
+                {/* Standing reminder that AI output is fallible and should be verified. */}
+                <p className="mb-2 text-xs text-muted-foreground">
+                    {t('pages.deskTerminal.copilot.aiDisclaimer')}
+                </p>
                 <div className="mb-2 flex gap-1">
                     <Button
                         size="sm"
