@@ -22,10 +22,13 @@ use crate::read_tools::read_tool_registry;
 use crate::registry::RegisteredTool;
 use crate::seam::TurnSink;
 
-/// Per-turn step budget for the copilot's read-only evidence gathering. Tighter
-/// than diagnose ([`crate::MAX_STEPS_PER_TURN`]) because the terminal is
-/// interactive and latency-sensitive.
-pub const COPILOT_MAX_STEPS_PER_TURN: u32 = 2;
+/// Default per-turn step budget for the copilot's read-only evidence gathering.
+/// The manager treats this as the fallback when its platform-configured limit
+/// (`ai.terminal_copilot.max_steps_per_turn`) is absent or unparseable; deployments
+/// can raise it there without a rebuild. Kept below diagnose
+/// ([`crate::MAX_STEPS_PER_TURN`]) because the terminal is interactive and
+/// latency-sensitive.
+pub const COPILOT_MAX_STEPS_PER_TURN: u32 = 5;
 
 /// Max bytes of recent terminal output forwarded to the model (after the runtime
 /// has redacted it). Caps prompt size / latency; the runtime redacts first.

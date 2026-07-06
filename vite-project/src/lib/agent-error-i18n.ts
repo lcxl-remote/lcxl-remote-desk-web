@@ -15,12 +15,22 @@ import type { TFunction } from 'i18next';
 export const AGENT_ERROR_CODE = {
     TERMINAL_COPILOT_DISABLED: 50,
     AI_MODEL_NOT_CONFIGURED: 51,
+    COPILOT_STEP_LIMIT_EXCEEDED: 57,
+    COPILOT_RESPONSE_TRUNCATED: 58,
+    COPILOT_PROTOCOL_VIOLATION: 59,
+    COPILOT_TURN_BUSY: 60,
+    COPILOT_SUBJECT_MISMATCH: 61,
 } as const;
 
 /** Codes with a dedicated localized message. */
 const CODE_TO_KEY: Record<number, string> = {
     [AGENT_ERROR_CODE.TERMINAL_COPILOT_DISABLED]: 'pages.agentError.terminalCopilotDisabled',
     [AGENT_ERROR_CODE.AI_MODEL_NOT_CONFIGURED]: 'pages.agentError.aiModelNotConfigured',
+    [AGENT_ERROR_CODE.COPILOT_STEP_LIMIT_EXCEEDED]: 'pages.agentError.copilotStepLimit',
+    [AGENT_ERROR_CODE.COPILOT_RESPONSE_TRUNCATED]: 'pages.agentError.copilotTruncated',
+    [AGENT_ERROR_CODE.COPILOT_PROTOCOL_VIOLATION]: 'pages.agentError.copilotProtocolViolation',
+    [AGENT_ERROR_CODE.COPILOT_TURN_BUSY]: 'pages.agentError.copilotTurnBusy',
+    [AGENT_ERROR_CODE.COPILOT_SUBJECT_MISMATCH]: 'pages.agentError.copilotSubjectMismatch',
 };
 
 /**

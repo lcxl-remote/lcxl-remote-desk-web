@@ -580,6 +580,13 @@ export default {
   'pages.agentError.terminalCopilotDisabled': '本部署未启用终端 Copilot，请联系管理员开启。',
   'pages.agentError.aiModelNotConfigured':
     '服务器尚未配置 AI 模型，请联系管理员在「AI 模型设置」中填写供应商、模型、Base URL 与 API Key。',
+  'pages.agentError.copilotStepLimit':
+    'Copilot 在给出答案前用尽了推理步数。请尝试更简单的问题，或联系管理员调高步数上限。',
+  'pages.agentError.copilotTruncated': 'Copilot 的回复在完成前被截断，请重试。',
+  'pages.agentError.copilotProtocolViolation':
+    'AI 模型返回了格式错误的响应。请重试；若持续出现请联系管理员。',
+  'pages.agentError.copilotTurnBusy': '当前会话已有一个 Copilot 请求正在进行，请等待其完成后再试。',
+  'pages.agentError.copilotSubjectMismatch': '该 Copilot 会话属于另一个会话，请重新发起提问。',
   'pages.deskTerminal.completion.title': 'AI 补全',
   'pages.deskTerminal.completion.toggleHint': 'AI 命令补全 —— 按 Tab 采纳灰字提示',
   'pages.deskTerminal.completion.acceptHint': 'Tab',

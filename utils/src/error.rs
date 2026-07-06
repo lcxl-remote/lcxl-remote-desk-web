@@ -261,6 +261,28 @@ impl DeskErrorCode {
     /// `RestResponse.code`, never an HTTP status.
     pub const BILLING_ACCOUNT_NOT_FOUND: DeskErrorCode = DeskErrorCode(56);
 
+    /// The agentic terminal copilot exhausted its per-turn step budget before
+    /// producing an answer (the loop's step circuit-breaker tripped). The control
+    /// end maps this code to a localized "ran out of steps" message. Rides the
+    /// agent-error wire, not an HTTP status.
+    pub const COPILOT_STEP_LIMIT_EXCEEDED: DeskErrorCode = DeskErrorCode(57);
+    /// The terminal copilot's response was truncated before it completed. The
+    /// control end maps this code to a localized message. Rides the agent-error
+    /// wire, not an HTTP status.
+    pub const COPILOT_RESPONSE_TRUNCATED: DeskErrorCode = DeskErrorCode(58);
+    /// The model violated the copilot response contract (unparseable / malformed
+    /// tool or answer envelope). The control end maps this code to a localized
+    /// message. Rides the agent-error wire, not an HTTP status.
+    pub const COPILOT_PROTOCOL_VIOLATION: DeskErrorCode = DeskErrorCode(59);
+    /// Another copilot turn is already in progress for this conversation, so the
+    /// new ask is refused. The control end maps this code to a localized message.
+    /// Rides the agent-error wire, not an HTTP status.
+    pub const COPILOT_TURN_BUSY: DeskErrorCode = DeskErrorCode(60);
+    /// The copilot conversation belongs to a different session subject than the
+    /// caller (a stale or cross-session continuation). The control end maps this
+    /// code to a localized message. Rides the agent-error wire, not an HTTP status.
+    pub const COPILOT_SUBJECT_MISMATCH: DeskErrorCode = DeskErrorCode(61);
+
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
     pub const REMOTE_DESK_OFFLINE: DeskErrorCode = DeskErrorCode(10003);
@@ -501,6 +523,11 @@ mod tests {
         assert_eq!(DeskErrorCode::PLAN_NO_PRICE.code(), 52);
         assert_eq!(DeskErrorCode::PLAN_PRICE_REQUIRED.code(), 53);
         assert_eq!(DeskErrorCode::AI_MODEL_NOT_AUTHORIZED.code(), 54);
+        assert_eq!(DeskErrorCode::COPILOT_STEP_LIMIT_EXCEEDED.code(), 57);
+        assert_eq!(DeskErrorCode::COPILOT_RESPONSE_TRUNCATED.code(), 58);
+        assert_eq!(DeskErrorCode::COPILOT_PROTOCOL_VIOLATION.code(), 59);
+        assert_eq!(DeskErrorCode::COPILOT_TURN_BUSY.code(), 60);
+        assert_eq!(DeskErrorCode::COPILOT_SUBJECT_MISMATCH.code(), 61);
         let codes = [
             DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(),
             DeskErrorCode::DEVICE_CLIENT_ID_REQUIRED.code(),
