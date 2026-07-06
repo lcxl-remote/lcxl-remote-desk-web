@@ -36,7 +36,7 @@ use desk_agent_protocol::exec::{
     ConfirmExecData, ExecDecision, ExecEffect, ExecPlan, ExecPreview, ExecResultPayload,
     ResolveExecData,
 };
-use desk_agent_protocol::exec_policy::{ExecLimits, blocked_argv, build_exact_argv_draft};
+use desk_agent_protocol::exec_policy::{ExecLimits, build_exact_argv_draft};
 
 use crate::diagnose::terminal_copilot::copilot_signaling_sink;
 use desk_agent_protocol::{
@@ -210,6 +210,10 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // classifier reads it); never forwarded to the worker.
         SignalingType::CommandTemplateSync => RouteOwnership::Daemon,
 
+        // Command-blocklist sync is applied to the daemon's own cache (the exec
+        // classifier's Step 0 reads it); never forwarded to the worker.
+        SignalingType::CommandBlocklistSync => RouteOwnership::Daemon,
+
         // Remote-collect request: manager → daemon. In the thin-edge model the
         // daemon runs its read-only collectors on behalf of the central
         // orchestrator and streams a chunked CollectResponse back; handled inline
@@ -377,6 +381,13 @@ pub struct RouterContext {
     /// single-machine / remote-signaling links. Replaced wholesale on each
     /// `CommandTemplateSync` from the manager.
     pub command_templates: Arc<crate::daemon::command_templates::CommandTemplateCache>,
+    /// Effective command blocklist synced from the manager. The exec classifier's
+    /// Step 0 matches against this instead of the compiled-in floor, so an
+    /// admin-disabled built-in rule is genuinely absent and custom rules apply.
+    /// Seeded with the built-in floor, so it is never empty (fail-open) even
+    /// before the first manager sync. Replaced (revision-gated) on each
+    /// `CommandBlocklistSync`.
+    pub command_blocklist: Arc<crate::daemon::command_blocklist::CommandBlocklistCache>,
     /// Audit sink for the confirmed-execution lifecycle. Single-machine uses a
     /// structured log sink; a DB-backed sink can be substituted without touching
     /// the emission sites.
@@ -690,6 +701,10 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // (`handle_inbound_signaling_text`) has already dropped any non-Manager
         // origin before reaching here; this only applies the validated set.
         SignalingType::CommandTemplateSync => handle_command_template_sync_inbound(ctx, model),
+        // Command-blocklist sync from the manager. The source gate
+        // (`handle_inbound_signaling_text`) has already dropped any non-central
+        // origin before reaching here; this only applies the validated set.
+        SignalingType::CommandBlocklistSync => handle_command_blocklist_sync_inbound(ctx, model),
         // Remote-collect request from the manager: run the daemon-side read-only
         // collectors and stream a chunked CollectResponse back. The source gate
         // (`handle_inbound_signaling_text`) has already dropped any non-Manager
@@ -962,6 +977,55 @@ fn handle_command_template_sync_inbound(
     log::info!(
         "[router] applied operator command-template sync: {accepted} template(s) (revision {revision:?})"
     );
+    Ok(())
+}
+
+/// Apply an inbound `CommandBlocklistSync` from the manager: parse the payload,
+/// reject an unknown wire version, and replace the effective-blocklist cache
+/// (revision-gated, fail-closed inside `replace`). A frame with no revision is
+/// dropped — the manager always stamps one, and for the blocklist a revision is
+/// required to enforce monotonic ordering. The exec classifier's Step 0 picks up
+/// the new set on the next classification.
+fn handle_command_blocklist_sync_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    use desk_agent_protocol::command_blocklist::{
+        COMMAND_BLOCKLIST_SYNC_VERSION, CommandBlocklistSyncPayload,
+        MIN_COMMAND_BLOCKLIST_SYNC_VERSION,
+    };
+    let payload = match model.get_data::<CommandBlocklistSyncPayload>() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("[router] bad CommandBlocklistSync payload: {e}");
+            return Ok(());
+        }
+    };
+    if !(MIN_COMMAND_BLOCKLIST_SYNC_VERSION..=COMMAND_BLOCKLIST_SYNC_VERSION)
+        .contains(&payload.version)
+    {
+        log::warn!(
+            "[router] ignoring CommandBlocklistSync with unsupported version {}",
+            payload.version
+        );
+        return Ok(());
+    }
+    // The blocklist requires a revision to enforce monotonic ordering (a stale
+    // frame must never roll back a newer set, re-opening a denied command). A
+    // frame without one is malformed for this type — drop it and keep the
+    // current cache (which is at worst the built-in floor).
+    let Some(revision) = payload.command_blocklist_revision else {
+        log::warn!("[router] dropping CommandBlocklistSync without a revision");
+        return Ok(());
+    };
+    match ctx.command_blocklist.replace(payload.rules, revision) {
+        Some(count) => log::info!(
+            "[router] applied command-blocklist sync: {count} effective rule(s) (revision {revision})"
+        ),
+        None => {
+            log::warn!("[router] command-blocklist sync at revision {revision} rejected as stale")
+        }
+    }
     Ok(())
 }
 
@@ -2288,9 +2352,16 @@ async fn handle_confirm_exec_inbound(
     };
 
     // Classify against the built-in baseline unioned with the operator
-    // templates synced from the manager (empty on single-machine links).
+    // templates synced from the manager (empty on single-machine links), using
+    // the effective blocklist (built-in floor on single-machine / unsynced links,
+    // the manager's built-in-minus-disabled ∪ custom set on a fleet link).
     let operator_templates = ctx.command_templates.snapshot();
-    let outcome = crate::exec::classify_command_with(&exec_input, &operator_templates);
+    let effective_blocklist = ctx.command_blocklist.snapshot();
+    let outcome = crate::exec::classify_command_with_all(
+        &exec_input,
+        &operator_templates,
+        &effective_blocklist,
+    );
     let classification = outcome.classification;
 
     // Fleet PDP risk ceiling (manager link): refuse a command whose classified
@@ -2810,12 +2881,17 @@ fn pep_validate_edge_exec_plan(
     plan: &ExecPlan,
     max_risk: desk_agent_protocol::RiskLevel,
     templates: &[desk_agent_protocol::command_template::SyncedCommandTemplate],
+    blocklist: &[desk_agent_protocol::command_blocklist::BlocklistRule],
 ) -> Option<String> {
-    // The blocklist operates over the full argv (program is `argv[0]`).
+    // The blocklist operates over the full argv (program is `argv[0]`), matched
+    // against the effective set (built-in floor on an unsynced link, the manager's
+    // built-in-minus-disabled ∪ custom set on a fleet link) — never a second
+    // compiled-in pass, so an admin-disabled rule is genuinely gone here too.
     let full_argv: Vec<String> = std::iter::once(plan.program.clone())
         .chain(plan.argv.iter().cloned())
         .collect();
-    if let Some(rule) = blocked_argv(&full_argv) {
+    let lc = full_argv.join(" ").to_ascii_lowercase();
+    if let Some(rule) = desk_agent_protocol::command_blocklist::blocklist_match(blocklist, &lc) {
         return Some(format!("pep_rejected:blocklist:{rule}"));
     }
 
@@ -2902,7 +2978,10 @@ async fn handle_edge_exec_request_inbound(
     }
 
     let templates = ctx.command_templates.snapshot();
-    if let Some(reason) = pep_validate_edge_exec_plan(&plan, authz.max_risk, &templates) {
+    let effective_blocklist = ctx.command_blocklist.snapshot();
+    if let Some(reason) =
+        pep_validate_edge_exec_plan(&plan, authz.max_risk, &templates, &effective_blocklist)
+    {
         log::warn!("[fleet-exec] PEP rejected plan for request {request_id}: {reason}");
         send_edge_exec_result(
             &ctx.outbound_tx,
@@ -3235,6 +3314,9 @@ mod tests {
             ),
             command_templates: Arc::new(
                 crate::daemon::command_templates::CommandTemplateCache::new(),
+            ),
+            command_blocklist: Arc::new(
+                crate::daemon::command_blocklist::CommandBlocklistCache::new(),
             ),
             audit: Arc::new(crate::worker::agent::audit_sink::LogAuditSink),
             diagnose_tasks: Default::default(),
@@ -5637,6 +5719,92 @@ mod tests {
         assert!(preview.requires_confirmation);
     }
 
+    fn command_blocklist_sync_model(
+        rules: Vec<desk_agent_protocol::command_blocklist::BlocklistRule>,
+        revision: Option<i64>,
+    ) -> SignalingModel {
+        use desk_agent_protocol::command_blocklist::{
+            COMMAND_BLOCKLIST_SYNC_VERSION, CommandBlocklistSyncPayload,
+        };
+        let payload = CommandBlocklistSyncPayload {
+            version: COMMAND_BLOCKLIST_SYNC_VERSION,
+            rules,
+            command_blocklist_revision: revision,
+        };
+        SignalingModel::new(
+            "rb",
+            SignalingType::CommandBlocklistSync,
+            None,
+            None,
+            Some(serde_json::to_value(payload).unwrap()),
+            None,
+        )
+    }
+
+    fn custom_blocklist_rule(
+        rule_id: &str,
+        pattern: &str,
+    ) -> desk_agent_protocol::command_blocklist::BlocklistRule {
+        desk_agent_protocol::command_blocklist::BlocklistRule {
+            rule_id: rule_id.to_string(),
+            category: "operator policy".to_string(),
+            matcher: desk_agent_protocol::command_blocklist::BlocklistMatcher::Substring {
+                patterns: vec![pattern.to_string()],
+            },
+        }
+    }
+
+    /// A manager-synced custom blocklist rule denies a command that the built-in
+    /// whitelist would otherwise allow — Step 0 outranks the whitelist, and the
+    /// classifier reads the synced effective set on the next `ConfirmExec`.
+    #[tokio::test]
+    async fn synced_custom_blocklist_rule_blocks_a_whitelisted_command() {
+        let (ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+
+        // Before sync: a built-in whitelist command is executable.
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "Get-Service -Name Spooler"))
+            .await
+            .unwrap();
+        assert!(read_preview(&mut rx).executable);
+
+        route(
+            &command_blocklist_sync_model(
+                vec![custom_blocklist_rule("custom.spooler", "get-service")],
+                Some(1),
+            ),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ctx.command_blocklist.revision(), Some(1));
+
+        // After sync: the same command is now blocked (not executable).
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r2", "Get-Service -Name Spooler"))
+            .await
+            .unwrap();
+        let preview = read_preview(&mut rx);
+        assert!(!preview.executable);
+        assert_eq!(preview.risk, desk_agent_protocol::RiskLevel::Blocked);
+    }
+
+    /// A `CommandBlocklistSync` without a revision is dropped (the blocklist needs
+    /// a revision for monotonic ordering); the cache keeps its built-in floor.
+    #[tokio::test]
+    async fn blocklist_sync_without_revision_is_dropped() {
+        let (ctx, _rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        route(
+            &command_blocklist_sync_model(
+                vec![custom_blocklist_rule("custom.x", "get-service")],
+                None,
+            ),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        // Still unsynced: revision None, cache holds the built-in floor.
+        assert_eq!(ctx.command_blocklist.revision(), None);
+    }
+
     /// An operator template is still bound by the policy `max_risk` ceiling: a
     /// mutating (High) operator template is refused when the policy caps risk at
     /// Low — operator templates cannot escalate past the policy matrix.
@@ -5792,7 +5960,8 @@ mod tests {
             pep_validate_edge_exec_plan(
                 &plan,
                 desk_agent_protocol::RiskLevel::High,
-                std::slice::from_ref(&template)
+                std::slice::from_ref(&template),
+                desk_agent_protocol::exec_policy::builtin_blocklist(),
             ),
             None
         );
@@ -5802,8 +5971,13 @@ mod tests {
     fn pep_rejects_template_not_in_allowlist() {
         let template = fleet_template();
         let plan = fleet_plan(&template, "a1");
-        let reason = pep_validate_edge_exec_plan(&plan, desk_agent_protocol::RiskLevel::High, &[])
-            .expect("empty allowlist must reject");
+        let reason = pep_validate_edge_exec_plan(
+            &plan,
+            desk_agent_protocol::RiskLevel::High,
+            &[],
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
+        )
+        .expect("empty allowlist must reject");
         assert!(reason.contains("template_not_in_allowlist"), "{reason}");
     }
 
@@ -5818,6 +5992,7 @@ mod tests {
             &plan,
             desk_agent_protocol::RiskLevel::High,
             std::slice::from_ref(&template),
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
         )
         .expect("tampered argv must reject");
         assert!(reason.contains("template_drift"), "{reason}");
@@ -5832,6 +6007,7 @@ mod tests {
             &plan,
             desk_agent_protocol::RiskLevel::High,
             std::slice::from_ref(&template),
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
         )
         .expect("tampered fingerprint must reject");
         assert!(reason.contains("template_drift"), "{reason}");
@@ -5846,6 +6022,7 @@ mod tests {
             &plan,
             desk_agent_protocol::RiskLevel::Medium,
             std::slice::from_ref(&template),
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
         )
         .expect("risk above max_risk must reject");
         assert!(reason.contains("risk_exceeds_max"), "{reason}");
@@ -5865,9 +6042,39 @@ mod tests {
             &plan,
             desk_agent_protocol::RiskLevel::Critical,
             std::slice::from_ref(&template),
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
         )
         .expect("blocklisted argv must reject");
         assert!(reason.contains("blocklist"), "{reason}");
+    }
+
+    #[test]
+    fn pep_honors_a_disabled_builtin_in_the_effective_set() {
+        // Same wevtutil plan, but the effective blocklist has the audit/log rule
+        // disabled (removed). The PEP must not re-block it from a compiled-in pass —
+        // it passes the blocklist step (and is accepted since it is in the allowlist).
+        let template = SyncedCommandTemplate {
+            template_id: "danger".into(),
+            argv: vec!["wevtutil".into(), "cl".into(), "System".into()],
+            effect: desk_agent_protocol::exec::ExecEffect::Mutating,
+        };
+        let plan = fleet_plan(&template, "a1");
+        let effective: Vec<desk_agent_protocol::command_blocklist::BlocklistRule> =
+            desk_agent_protocol::exec_policy::builtin_blocklist()
+                .iter()
+                .filter(|r| r.rule_id != "builtin.audit_log_tampering")
+                .cloned()
+                .collect();
+        let reason = pep_validate_edge_exec_plan(
+            &plan,
+            desk_agent_protocol::RiskLevel::Critical,
+            std::slice::from_ref(&template),
+            &effective,
+        );
+        assert_eq!(
+            reason, None,
+            "disabled builtin must not re-block via the PEP"
+        );
     }
 
     #[tokio::test]

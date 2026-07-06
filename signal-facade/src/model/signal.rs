@@ -319,6 +319,17 @@ pub enum SignalingType {
     #[wincode(tag = 621)]
     TerminalCompleteResult = 621,
 
+    /// Command-blocklist sync (manager → desk-server daemon only). Carries
+    /// `desk_agent_protocol::command_blocklist::CommandBlocklistSyncPayload`: the
+    /// full effective blocklist set (the built-in floor minus admin-disabled rules,
+    /// plus enabled custom rules). The manager pushes it on link establishment and
+    /// on any blocklist change; the daemon replaces its cache (gated on a monotonic
+    /// revision) and matches against it before tokenization at classify time.
+    /// Accepted only from the trusted manager link (the inbound source gate drops
+    /// it from any other source). Notification-style (`response_state = None`).
+    #[wincode(tag = 622)]
+    CommandBlocklistSync = 622,
+
     /// Error
     #[wincode(tag = -1)]
     Error = -1,
@@ -955,7 +966,7 @@ mod wincode_tests {
     /// the enum, this table must be extended — leaving it incomplete
     /// is precisely the regression `signaling_type_wire_tag_matches_…`
     /// is built to catch.
-    fn all_variants_with_tag() -> [(SignalingType, i32); 53] {
+    fn all_variants_with_tag() -> [(SignalingType, i32); 59] {
         [
             (SignalingType::Heartbeat, 1),
             (SignalingType::FetchConnections, 21),
@@ -994,6 +1005,12 @@ mod wincode_tests {
             (SignalingType::EdgeExecResult, 614),
             (SignalingType::RemoteToolRequest, 615),
             (SignalingType::RemoteToolResponse, 616),
+            (SignalingType::TerminalCopilotAsk, 617),
+            (SignalingType::TerminalCopilotEvent, 618),
+            (SignalingType::TerminalCopilotCancel, 619),
+            (SignalingType::TerminalCompleteAsk, 620),
+            (SignalingType::TerminalCompleteResult, 621),
+            (SignalingType::CommandBlocklistSync, 622),
             (SignalingType::ManagerSystemInfo, 10003),
             (SignalingType::ManagerSystemStatue, 10004),
             (SignalingType::ManagerFileList, 10005),

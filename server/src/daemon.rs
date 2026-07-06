@@ -1,6 +1,7 @@
 pub mod agentic_exec;
 pub mod bitrate_controller;
 pub mod codec_negotiation;
+pub mod command_blocklist;
 pub mod command_templates;
 pub mod exec_approval;
 pub mod local_api;

@@ -1151,6 +1151,16 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     self.connection_state.model.connection_id
                 );
             }
+            SignalingType::CommandBlocklistSync => {
+                // Manager → daemon only, originated server-side and written
+                // directly to the desk-server's session. A client sending it
+                // inbound to the signaling server is a protocol error; swallow
+                // it so a control end cannot forge a blocklist sync.
+                log::warn!(
+                    "Received command-blocklist sync from client {}, ignoring",
+                    self.connection_state.model.connection_id
+                );
+            }
             SignalingType::CollectRequest => {
                 // Manager → daemon only, originated server-side and written
                 // directly to the desk-server's session. A client sending it

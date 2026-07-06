@@ -51,6 +51,8 @@ pub async fn run_signaling_proxy(
     // classify + approval/result waits), the router (ResolveExec routing), and the
     // worker-message loop (ExecResult delivery), so all reference the same state.
     let command_templates = Arc::new(crate::daemon::command_templates::CommandTemplateCache::new());
+    let command_blocklist =
+        Arc::new(crate::daemon::command_blocklist::CommandBlocklistCache::new());
     let agentic_exec = Arc::new(crate::daemon::agentic_exec::AgenticExecCoordinator::new());
 
     // The diagnose orchestrator runs daemon-side wherever an in-process worker
@@ -132,6 +134,7 @@ pub async fn run_signaling_proxy(
         agentic_exec: agentic_exec.clone(),
         session_approvals: Arc::new(crate::daemon::session_approval::SessionApprovalStore::new()),
         command_templates: command_templates.clone(),
+        command_blocklist: command_blocklist.clone(),
         // Audit sink: in fleet mode (a manager is configured) report events to
         // the manager for DB persistence; otherwise keep the local log sink.
         audit: audit_sink.clone(),
@@ -1485,14 +1488,18 @@ async fn handle_inbound_signaling_text(
         };
     }
 
-    // Source gate: `CommandTemplateSync`, `CollectRequest`, `EdgeExecRequest`,
-    // and `RemoteToolRequest` are trusted central→daemon plumbing. Accept them
-    // only from the trusted-central link; a Local / remote-signaling origin (no
-    // trusted PDP) must never inject operator templates, drive an evidence
-    // collection, dispatch a sealed execution plan, or drive a remote read.
+    // Source gate: `CommandTemplateSync`, `CommandBlocklistSync`,
+    // `CollectRequest`, `EdgeExecRequest`, and `RemoteToolRequest` are trusted
+    // central→daemon plumbing. Accept them only from the trusted-central link; a
+    // Local / remote-signaling origin (no trusted PDP) must never inject operator
+    // templates, weaken the command blocklist, drive an evidence collection,
+    // dispatch a sealed execution plan, or drive a remote read. For the blocklist
+    // this is critical: a forged sync with a higher revision and a thinned rule
+    // set would otherwise wipe the daemon's floor and fail-open.
     if matches!(
         parsed.signaling_type,
         SignalingType::CommandTemplateSync
+            | SignalingType::CommandBlocklistSync
             | SignalingType::CollectRequest
             | SignalingType::EdgeExecRequest
             | SignalingType::RemoteToolRequest
@@ -1657,6 +1664,9 @@ mod tests {
             ),
             command_templates: Arc::new(
                 crate::daemon::command_templates::CommandTemplateCache::new(),
+            ),
+            command_blocklist: Arc::new(
+                crate::daemon::command_blocklist::CommandBlocklistCache::new(),
             ),
             audit: Arc::new(LogAuditSink),
             diagnose_tasks: Default::default(),
