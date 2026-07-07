@@ -19,6 +19,18 @@ The signaling server decides each connection's `remote_desk_type` itself — a c
 
 The same contract holds on both the open-source signaling server and the enterprise manager.
 
+## Support upstream (temporary support)
+
+A host can open a second, dedicated upstream in the **`Support`** role so a no-account third party can be helped by a supporter (a TeamViewer-QuickSupport-style flow). This upstream reuses the host's existing `manager_api_token`; it registers nothing (no device presence) and only carries the support session.
+
+Because a temporary supporter is only semi-trusted, every inbound connection that arrives on the Support upstream is **born restricted** and enforced **fail-closed by the host**, not by the signaling server:
+
+- **Signaling is allow-listed.** Only session-establishment and control-plane frames are accepted on a restricted connection; any privileged frame (settings queries and anything that could leak the `signaling_token` / `manager_api_token`) is dropped at a single `route()` choke point.
+- **Data-channel actions are allow-listed too.** Clipboard, file transfer and whiteboard are denied; mouse/keyboard input stays gated behind the same local control-approval prompt as any remote control.
+- **The session is time-boxed.** It tears down when the code expires or the local user ends support, and closing it cleans up only that connection.
+
+Issuing the one-time code that a supporter redeems is a **central-brain (manager) capability** — the open-source signaling server routes the `Support` role but does **not** originate support codes. On a plain signaling server the host's Support upstream therefore carries no code issuer; the restricted-session enforcement above is part of the open-source baseline regardless.
+
 ## Obtaining a host token (`POST /api/tokens`)
 
 A logged-in client that wants to connect as a host (`remote_desk_type=server`) obtains the token it must present via `POST /api/tokens` (called on the session cookie). The endpoint exists with the same request/response shape on both backends, so a client needs no server-type probe:
