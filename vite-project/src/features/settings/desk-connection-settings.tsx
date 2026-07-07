@@ -9,6 +9,7 @@ import { useQuerySettings } from "@/services/hooks/settingsController/useQuerySe
 import { useUpdateSettings } from "@/services/hooks/settingsController/useUpdateSettings"
 import { mergeSystemSettings } from "@/features/settings/settings-payload"
 import { ManagerLinkBanner } from "@/features/settings/manager-link-banner"
+import { SupportCodeCard } from "@/features/settings/support-code-card"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -99,6 +100,8 @@ export function DeskConnectionSettings() {
             </div>
 
             <ManagerLinkBanner />
+
+            <SupportCodeCard />
 
             <Card>
                 <CardHeader>

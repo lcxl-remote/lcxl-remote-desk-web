@@ -261,7 +261,8 @@ export const remoteDeskTypeEnumEnum = {
     browser: "browser",
     server: "server",
     signal: "signal",
-    manager: "manager"
+    manager: "manager",
+    support: "support"
 } as const;
 
 export type RemoteDeskTypeEnumEnumKey = (typeof remoteDeskTypeEnumEnum)[keyof typeof remoteDeskTypeEnumEnum];
@@ -2373,6 +2374,41 @@ export type RestResponseServerInfo = {
     success: boolean;
 };
 
+export type RestResponseSupportSessionStatus = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description True while a support session is live (upstream requested / open and not yet\nstopped or expired).
+         * @type boolean
+        */
+        active: boolean;
+        /**
+         * @description The manager-issued code, once it has arrived on the support upstream.
+         * @type string,null
+        */
+        code?: string | null;
+        /**
+         * @description Unix seconds at which the code / session expires, when a code is present.
+         * @type integer,null, int64
+        */
+        expires_at?: number | null;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export const startupModeEnum = {
     default: "default",
     signaling: "signaling",
@@ -3121,6 +3157,24 @@ export type SignalingModel = {
      * @type string,null
     */
     to_connection_id?: string | null;
+};
+
+export type SupportSessionStatus = {
+    /**
+     * @description True while a support session is live (upstream requested / open and not yet\nstopped or expired).
+     * @type boolean
+    */
+    active: boolean;
+    /**
+     * @description The manager-issued code, once it has arrived on the support upstream.
+     * @type string,null
+    */
+    code?: string | null;
+    /**
+     * @description Unix seconds at which the code / session expires, when a code is present.
+     * @type integer,null, int64
+    */
+    expires_at?: number | null;
 };
 
 /**
@@ -4314,6 +4368,42 @@ export type OpenSignalingHandleQueryResponse = OpenSignalingHandle200;
 export type OpenSignalingHandleQuery = {
     Response: OpenSignalingHandle200;
     PathParams: OpenSignalingHandlePathParams;
+    Errors: any;
+};
+
+/**
+ * @description Current support session status
+*/
+export type StartSupport200 = RestResponseSupportSessionStatus;
+
+export type StartSupportMutationResponse = StartSupport200;
+
+export type StartSupportMutation = {
+    Response: StartSupport200;
+    Errors: any;
+};
+
+/**
+ * @description Current support session status
+*/
+export type SupportStatus200 = RestResponseSupportSessionStatus;
+
+export type SupportStatusQueryResponse = SupportStatus200;
+
+export type SupportStatusQuery = {
+    Response: SupportStatus200;
+    Errors: any;
+};
+
+/**
+ * @description Stop requested
+*/
+export type StopSupport200 = RestResponseBool;
+
+export type StopSupportMutationResponse = StopSupport200;
+
+export type StopSupportMutation = {
+    Response: StopSupport200;
     Errors: any;
 };
 

@@ -1,1 +1,1 @@
-{"type":"string","description":"Remote Desk Type Enum","enum":["browser","server","signal","manager"],"x-readme-ref-name":"RemoteDeskTypeEnum"}
+{"type":"string","description":"Remote Desk Type Enum","enum":["browser","server","signal","manager","support"],"x-readme-ref-name":"RemoteDeskTypeEnum"}
