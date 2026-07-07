@@ -535,6 +535,16 @@ pub struct PcRegistry {
     /// point back at these so the node never relays through itself. Shared via
     /// `Arc` so registry clones stay cheap and consistent.
     own_turn_endpoints: Arc<HashSet<String>>,
+    /// Connection ids currently held as restricted temporary-support sessions
+    /// (see `RemoteDeskTypeEnum::Support`). Populated by
+    /// [`Self::mark_restricted_connection`] when a `RequestRemote` arrives on the
+    /// support upstream, cleared by [`cleanup_pc`] on teardown. Consumed by the
+    /// signaling proxy's outbound Support-isolation filter (which forwards a
+    /// support-destined frame only on the support upstream and every other frame
+    /// only off it) — kept as a lightweight projection so that filter never has to
+    /// lock each `PeerConnectionContext` per outbound frame. Shared via `Arc` so
+    /// registry clones stay consistent.
+    restricted_connections: Arc<RwLock<HashSet<String>>>,
     /// Test-only phantom PC counter added to `len()`. See
     /// [`Self::set_test_len_extra`] — it lets the signaling router unit
     /// tests simulate multi-PC topologies without building real
@@ -610,6 +620,31 @@ impl PcRegistry {
 
     pub async fn remove(&self, connection_id: &str) -> Option<Arc<RwLock<PeerConnectionContext>>> {
         self.inner.write().await.remove(connection_id)
+    }
+
+    /// Mark a connection as a restricted temporary-support session. Adds it to the
+    /// projection consumed by the outbound Support-isolation filter;
+    /// [`handle_request_remote`] also flips the connection's
+    /// `SignalingState::restricted`. Idempotent.
+    pub async fn mark_restricted_connection(&self, connection_id: &str) {
+        self.restricted_connections
+            .write()
+            .await
+            .insert(connection_id.to_string());
+    }
+
+    /// Drop a connection from the restricted-session projection. Called by
+    /// [`cleanup_pc`] on every teardown path; a no-op for unrestricted
+    /// connections.
+    async fn unmark_restricted_connection(&self, connection_id: &str) {
+        self.restricted_connections.write().await.remove(connection_id);
+    }
+
+    /// Shared handle to the restricted-session projection, for the signaling
+    /// proxy's outbound Support-isolation filter. Cloning the `Arc` keeps the
+    /// filter reading the same set the registry mutates.
+    pub fn restricted_connections_handle(&self) -> Arc<RwLock<HashSet<String>>> {
+        Arc::clone(&self.restricted_connections)
     }
 
     /// Whether any registered `PeerConnectionContext` currently has
@@ -1075,6 +1110,26 @@ fn route_to_service_msg(
 /// per connection (the same per-DC permission cache the worker maintains).
 async fn route_is_permitted(route: DcRoute, state: &Arc<RwLock<SignalingState>>) -> bool {
     let s = state.read().await;
+    if s.restricted {
+        // Second fail-closed door: a restricted temporary-support session (see
+        // `RemoteDeskTypeEnum::Support`). Only pointer/keyboard input is allowed,
+        // and it stays gated by `accept_control` (a view-only support grant never
+        // sets it). Clipboard, file transfer, whiteboard — and any future
+        // DataChannel route — are denied outright so a semi-trusted supporter
+        // cannot exfiltrate the clipboard / files or draw on the host. This gate
+        // is independent of the signaling `route()` allowlist because file
+        // transfer never flows as a signaling frame; it rides its own DataChannel,
+        // which the unrestricted arm below lets through unconditionally.
+        // `CursorSync` (read-only cursor-shape write-back the browser never pushes
+        // to) is stashed before this gate in `register_data_channel_router`, so it
+        // is implicitly allowed even for restricted sessions and never reaches
+        // here.
+        return match route {
+            DcRoute::Mouse | DcRoute::MouseMove | DcRoute::Keyboard => s.accept_control,
+            DcRoute::Clipboard | DcRoute::FileTransfer | DcRoute::Whiteboard => false,
+            DcRoute::CursorSync => unreachable!("CursorSync DC has no message route"),
+        };
+    }
     match route {
         DcRoute::Mouse | DcRoute::MouseMove | DcRoute::Keyboard => s.accept_control,
         DcRoute::Clipboard => s.accept_clipboard_sync,
@@ -1131,6 +1186,12 @@ pub fn register_data_channel_router(
                 }
             };
             if route == DcRoute::CursorSync {
+                // Read-only cursor-shape write-back: the browser never pushes to
+                // this channel (we install no on_message forwarder — hence the
+                // early return before `route_is_permitted`). It carries no input
+                // injection or exfiltration, so it is intentionally allowed even
+                // for restricted temporary-support sessions; the restriction gate
+                // in `route_is_permitted` deliberately never sees it.
                 let mut slot = cursor_data_channel.write().await;
                 *slot = Some(Arc::clone(&dc));
                 log::info!(
@@ -1499,6 +1560,13 @@ pub async fn handle_request_remote(
     worker_mgr: Option<&WorkerManager>,
     virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
     model: &SignalingModel,
+    // True when this `RequestRemote` arrived on the restricted support upstream
+    // (see `RemoteDeskTypeEnum::Support`). The freshly-created PC is marked
+    // restricted before any ICE / DataChannel handler is installed or any Init
+    // reply egresses, so both the daemon-side data-channel gate
+    // (`route_is_permitted`) and the outbound Support-isolation filter observe it
+    // from the connection's very first frame.
+    restricted: bool,
 ) -> Result<(), DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
     let request_remote = model.get_data::<RequestRemoteModel>()?;
@@ -1506,6 +1574,15 @@ pub async fn handle_request_remote(
     let ctx = registry
         .create_for_request_remote(from_connection_id, &request_remote, settings)
         .await?;
+
+    if restricted {
+        // Flip the per-connection restriction flag (read by `route_is_permitted`)
+        // and register the connection in the outbound-filter projection, both
+        // before the ICE / DataChannel handlers below and before the Init reply,
+        // so there is no unrestricted window.
+        ctx.read().await.signaling_state.write().await.restricted = true;
+        registry.mark_restricted_connection(from_connection_id).await;
+    }
 
     // Forward locally-gathered ICE candidates back to the browser. Must
     // happen before the Offer arrives (and definitely before
@@ -2615,6 +2692,10 @@ async fn cleanup_pc(
     reason: &str,
 ) {
     let removed = registry.remove(connection_id).await;
+    // Drop the connection from the restricted-session projection on every teardown
+    // path (idempotent for unrestricted connections) so the outbound
+    // Support-isolation filter can never route a frame to a stale support id.
+    registry.unmark_restricted_connection(connection_id).await;
     if let Some(ctx) = &removed {
         let ctx = ctx.read().await;
         if let Err(e) = ctx.pc.close().await {
@@ -4200,6 +4281,7 @@ mod tests {
             None,
             None,
             &model,
+            false,
         )
         .await
         .expect("handle ok");
@@ -4253,6 +4335,7 @@ mod tests {
             None,
             None,
             &model,
+            false,
         )
         .await
         .expect("handle ok");
@@ -4319,6 +4402,7 @@ mod tests {
             None,
             None,
             &model,
+            false,
         )
         .await
         .expect("handle ok");
@@ -4448,6 +4532,7 @@ mod tests {
             None,
             None,
             &model,
+            false,
         )
         .await
         .expect("handle ok");
@@ -5225,6 +5310,64 @@ mod tests {
         assert!(route_is_permitted(DcRoute::Clipboard, &state).await);
         assert!(route_is_permitted(DcRoute::FileTransfer, &state).await);
         assert!(route_is_permitted(DcRoute::Whiteboard, &state).await);
+    }
+
+    /// Restricted temporary-support session (second fail-closed door): file
+    /// transfer / clipboard / whiteboard are denied outright even with both
+    /// accept flags open. This closes the exfiltration path a normal session
+    /// leaves open (`FileTransfer` passes unconditionally there); pointer /
+    /// keyboard input stays allowed but remains gated by `accept_control`.
+    #[tokio::test]
+    async fn route_is_permitted_restricted_denies_file_clipboard_whiteboard() {
+        let state = Arc::new(RwLock::new(SignalingState {
+            accept_control: true,
+            accept_clipboard_sync: true,
+            restricted: true,
+            ..SignalingState::default()
+        }));
+        assert!(!route_is_permitted(DcRoute::FileTransfer, &state).await);
+        assert!(!route_is_permitted(DcRoute::Clipboard, &state).await);
+        assert!(!route_is_permitted(DcRoute::Whiteboard, &state).await);
+        assert!(route_is_permitted(DcRoute::Mouse, &state).await);
+        assert!(route_is_permitted(DcRoute::MouseMove, &state).await);
+        assert!(route_is_permitted(DcRoute::Keyboard, &state).await);
+    }
+
+    /// Restricted view-only support session: `accept_control` never set, so even
+    /// the allowed pointer / keyboard routes are gated off, and file transfer
+    /// stays denied. A view-only supporter can drive nothing.
+    #[tokio::test]
+    async fn route_is_permitted_restricted_view_only_denies_all_input() {
+        let state = Arc::new(RwLock::new(SignalingState {
+            accept_control: false,
+            restricted: true,
+            ..SignalingState::default()
+        }));
+        assert!(!route_is_permitted(DcRoute::Mouse, &state).await);
+        assert!(!route_is_permitted(DcRoute::MouseMove, &state).await);
+        assert!(!route_is_permitted(DcRoute::Keyboard, &state).await);
+        assert!(!route_is_permitted(DcRoute::FileTransfer, &state).await);
+    }
+
+    /// The restricted-connections projection is populated by
+    /// `mark_restricted_connection` and cleared by `cleanup_pc` on every teardown
+    /// path — including for a connection that was never registered — so the
+    /// outbound Support-isolation filter can never route to a stale support id.
+    #[tokio::test]
+    async fn restricted_connections_projection_marks_and_clears_on_cleanup() {
+        let registry = PcRegistry::new();
+        let handle = registry.restricted_connections_handle();
+        assert!(handle.read().await.is_empty());
+
+        registry.mark_restricted_connection("conn-support").await;
+        assert!(handle.read().await.contains("conn-support"));
+
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+        cleanup_pc(&registry, &worker_mgr, None, "conn-support", "test").await;
+        assert!(!handle.read().await.contains("conn-support"));
     }
 
     /// `register_data_channel_router` is async-callable on a

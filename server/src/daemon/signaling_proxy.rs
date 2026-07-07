@@ -142,6 +142,9 @@ pub async fn run_signaling_proxy(
         // Per-call trusted-central authorization is injected by the inbound
         // dispatcher; the shared base context carries none.
         inbound_authz: None,
+        // Per-call restriction flag: set by the inbound dispatcher when the frame
+        // arrived on the support upstream. The shared base context is unrestricted.
+        inbound_restricted: false,
         // Fleet exec correlation set, shared with the worker-message loop below so
         // a worker `ExecResult` for an in-flight fleet attempt is relayed to the
         // manager as a `EdgeExecResult`.
@@ -1003,6 +1006,43 @@ fn fatal_registration_reject(model: &SignalingModel) -> Option<(i32, String)> {
     }
 }
 
+/// Outbound Support-isolation filter for one upstream's egress.
+///
+/// A frame destined to a restricted support-origin connection may leave ONLY on
+/// the dedicated support upstream; every other frame — including all
+/// `to_connection_id = None` daemon→central frames (`AiAuditEvent`,
+/// `CollectResponse`, `RemoteToolResponse`, `EdgeExecResult`, `Manager*Response`,
+/// …) — may leave only on the trusted/relay upstreams and must never reach the
+/// support link. This is the core secrecy boundary: the support upstream carries
+/// a connection handle to a semi-trusted supporter, so leaking a manager response
+/// or an exec result onto it would expose privileged state.
+///
+/// Only `to_connection_id` is parsed (a lightweight projection); a malformed
+/// frame or one without a target is treated as non-support, which is fail-closed
+/// for the support link (it never receives such a frame).
+async fn egress_permitted(
+    msg: &str,
+    is_support_upstream: bool,
+    restricted_connections: &tokio::sync::RwLock<std::collections::HashSet<String>>,
+) -> bool {
+    #[derive(serde::Deserialize)]
+    struct EgressRoute {
+        to_connection_id: Option<String>,
+    }
+    let to = serde_json::from_str::<EgressRoute>(msg)
+        .ok()
+        .and_then(|r| r.to_connection_id);
+    let is_support_dest = match to.as_deref() {
+        Some(c) => restricted_connections.read().await.contains(c),
+        None => false,
+    };
+    if is_support_upstream {
+        is_support_dest
+    } else {
+        !is_support_dest
+    }
+}
+
 async fn maintain_proxy_connection(
     settings: web::Data<SharedSettings>,
     router_ctx: &RouterContext,
@@ -1028,11 +1068,21 @@ async fn maintain_proxy_connection(
         s.system.get_client_id().map_err(|e| format!("{e}"))?
     };
 
+    // The three trusted/relay links register as a normal `Server` connection;
+    // the dedicated support upstream registers as `Support` so the central brain
+    // resolves it to a restricted, temp-code session (no device / presence
+    // registration) rather than the host's main connection.
+    let remote_desk_type = if source.is_restricted() {
+        RemoteDeskTypeEnum::Support
+    } else {
+        RemoteDeskTypeEnum::Server
+    };
+
     let mut version_info = VersionInfo::new(
         desk_server_version::SERVER_API_VERSION,
         crate::version::SERVER_BUILD_NUMBER,
         crate::version::SERVER_COMMIT_HASH.to_string(),
-        RemoteDeskTypeEnum::Server,
+        remote_desk_type,
         display_name,
         Some(client_id),
     );
@@ -1084,6 +1134,17 @@ async fn maintain_proxy_connection(
     }
 
     let (mut sink, mut stream) = framed.split();
+
+    // Outbound Support-isolation state. `is_support_upstream` is true only for the
+    // dedicated support link; `restricted_connections` is the shared registry
+    // projection of which browser connections are restricted support sessions.
+    // The single `outbound_tx` broadcast still fans every frame to all upstreams;
+    // `egress_permitted` then keeps a support-destined frame on the support link
+    // only and every other frame (including all `to_connection_id = None`
+    // daemon→central frames) off it. When no support upstream is live the set stays
+    // empty, so the trusted links forward everything exactly as before.
+    let is_support_upstream = source.is_restricted();
+    let restricted_connections = router_ctx.pc_registry.restricted_connections_handle();
 
     loop {
         tokio::select! {
@@ -1148,6 +1209,13 @@ async fn maintain_proxy_connection(
             outbound = outbound_rx.recv() => {
                 match outbound {
                     Ok(msg) => {
+                        if !egress_permitted(&msg, is_support_upstream, &restricted_connections).await {
+                            // Dropped by the Support-isolation filter: either a
+                            // support-destined frame on a trusted upstream, or a
+                            // non-support frame (including every None-target
+                            // daemon→central frame) on the support upstream.
+                            continue;
+                        }
                         if let Err(e) = sink.send(awc::ws::Message::Text(msg.into())).await {
                             error!("[Proxy] WS send error: {e}");
                             break;
@@ -1191,6 +1259,27 @@ pub enum InboundSignalingSource {
     /// from the connection's authentication result (the central credential
     /// slot), never from a bare relay.
     TrustedCentral,
+    /// A dedicated temporary-support upstream (see [`RemoteDeskTypeEnum::Support`]).
+    /// The host opens it on demand to serve one semi-trusted supporter and holds
+    /// every session that arrives on it fail-closed: inbound frames are restricted
+    /// to the establishment / control-plane allowlist, and outbound frames destined
+    /// to a support-origin connection egress ONLY here (never any privileged
+    /// daemon→central frame). It is never a policy-decision upstream — it cannot
+    /// inject authorization and is treated like a bare relay for every trust check.
+    Support,
+}
+
+impl InboundSignalingSource {
+    /// Whether frames arriving on this link belong to a restricted
+    /// temporary-support session. Only the dedicated [`Support`] upstream is
+    /// restricted; the loopback / relay / trusted-central links are not. Drives
+    /// both the router's inbound fail-closed allowlist and the outbound
+    /// Support-isolation filter.
+    ///
+    /// [`Support`]: InboundSignalingSource::Support
+    pub fn is_restricted(self) -> bool {
+        matches!(self, InboundSignalingSource::Support)
+    }
 }
 
 /// Classify the daemon's local loopback signaling link by startup mode.
@@ -1590,19 +1679,24 @@ async fn handle_inbound_signaling_text(
         }
     };
 
-    // A validated central authorization rides into the handlers via a per-call
-    // clone of the router context (cheap: the context is Arc-backed). This keeps
-    // `route()` and the AI handler signatures untouched.
+    // A validated central authorization — and/or the support-session restriction
+    // flag — rides into the handlers via a per-call clone of the router context
+    // (cheap: the context is Arc-backed). This keeps `route()` and the AI handler
+    // signatures untouched. A support upstream can only ever reach this general
+    // path (its frames are dropped by the trusted-central source gate above before
+    // the AI / plumbing / fleet-exec branches), so tagging restriction here covers
+    // every frame a restricted session can deliver.
+    let restricted = source.is_restricted();
     let effective_ctx;
-    let ctx_ref = match authz {
-        Some(block) => {
-            effective_ctx = RouterContext {
-                inbound_authz: Some(block),
-                ..router_ctx.clone()
-            };
-            &effective_ctx
-        }
-        None => router_ctx,
+    let ctx_ref = if authz.is_some() || restricted {
+        effective_ctx = RouterContext {
+            inbound_authz: authz,
+            inbound_restricted: restricted,
+            ..router_ctx.clone()
+        };
+        &effective_ctx
+    } else {
+        router_ctx
     };
 
     if let Err(e) = signaling_router::route(&parsed, ctx_ref).await {
@@ -1641,6 +1735,96 @@ mod tests {
         );
     }
 
+    #[test]
+    fn only_the_support_upstream_is_restricted() {
+        assert!(InboundSignalingSource::Support.is_restricted());
+        assert!(!InboundSignalingSource::Local.is_restricted());
+        assert!(!InboundSignalingSource::RemoteSignaling.is_restricted());
+        assert!(!InboundSignalingSource::TrustedCentral.is_restricted());
+    }
+
+    fn frame_to(to: Option<&str>) -> String {
+        let model = SignalingModel::new(
+            "req-1",
+            SignalingType::Init,
+            None,
+            to.map(|s| s.to_string()),
+            None,
+            None,
+        );
+        serde_json::to_string(&model).expect("serialize frame")
+    }
+
+    /// The outbound Support-isolation filter keeps a support-destined frame on the
+    /// support upstream only, and every other frame (normal target, unknown
+    /// target, or no target) off it and on the trusted upstreams. This is the
+    /// secrecy boundary that a fourth support upstream depends on.
+    #[tokio::test]
+    async fn egress_isolates_support_destined_frames() {
+        use std::collections::HashSet;
+        let restricted = tokio::sync::RwLock::new(HashSet::from(["conn-support".to_string()]));
+
+        let to_support = frame_to(Some("conn-support"));
+        let to_normal = frame_to(Some("conn-owner"));
+        let to_unknown = frame_to(Some("conn-ghost"));
+        let to_none = frame_to(None);
+
+        // Support upstream: ONLY frames destined to a support-origin connection.
+        assert!(egress_permitted(&to_support, true, &restricted).await);
+        assert!(!egress_permitted(&to_normal, true, &restricted).await);
+        assert!(!egress_permitted(&to_unknown, true, &restricted).await);
+        assert!(!egress_permitted(&to_none, true, &restricted).await);
+
+        // Trusted upstream: everything EXCEPT support-destined frames.
+        assert!(!egress_permitted(&to_support, false, &restricted).await);
+        assert!(egress_permitted(&to_normal, false, &restricted).await);
+        assert!(egress_permitted(&to_unknown, false, &restricted).await);
+        assert!(egress_permitted(&to_none, false, &restricted).await);
+    }
+
+    /// Daemon→central frames carry `to_connection_id = None`. Table-driven guard
+    /// that none of them ever egress on the support upstream (they would leak
+    /// privileged manager responses / exec results / audit to a semi-trusted
+    /// supporter) and all of them still egress on a trusted upstream.
+    #[tokio::test]
+    async fn egress_keeps_none_target_daemon_frames_off_support_upstream() {
+        use std::collections::HashSet;
+        let restricted = tokio::sync::RwLock::new(HashSet::from(["conn-support".to_string()]));
+        for st in [
+            SignalingType::AiAuditEvent,
+            SignalingType::CollectResponse,
+            SignalingType::RemoteToolResponse,
+            SignalingType::EdgeExecResult,
+            SignalingType::ManagerSystemInfo,
+            SignalingType::ManagerQuerySettings,
+        ] {
+            let frame = serde_json::to_string(&SignalingModel::new(
+                "req-1", st, None, None, None, None,
+            ))
+            .expect("serialize frame");
+            assert!(
+                !egress_permitted(&frame, true, &restricted).await,
+                "{st:?} must not egress on the support upstream"
+            );
+            assert!(
+                egress_permitted(&frame, false, &restricted).await,
+                "{st:?} must egress on a trusted upstream"
+            );
+        }
+    }
+
+    /// A malformed outbound frame is treated as non-support: dropped on the
+    /// support upstream (fail-closed — it never receives an unparseable frame)
+    /// and forwarded on the trusted upstreams (parity with the prior flood).
+    #[tokio::test]
+    async fn egress_treats_malformed_frame_as_non_support() {
+        use std::collections::HashSet;
+        let restricted = tokio::sync::RwLock::new(HashSet::from(["conn-support".to_string()]));
+        let junk = "not json";
+        assert!(!egress_permitted(junk, true, &restricted).await);
+        assert!(egress_permitted(junk, false, &restricted).await);
+    }
+
     fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
         let (outbound_tx, _) = broadcast::channel::<String>(16);
         let shared = SharedSettings::from(Settings::default());
@@ -1671,6 +1855,7 @@ mod tests {
             audit: Arc::new(LogAuditSink),
             diagnose_tasks: Default::default(),
             inbound_authz: None,
+            inbound_restricted: false,
             edge_exec_pending: Default::default(),
         };
         (ctx, outbound_tx)

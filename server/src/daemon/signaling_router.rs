@@ -412,6 +412,14 @@ pub struct RouterContext {
     /// through the context (rather than the handler signatures) so the existing
     /// `route()` / handler call sites stay untouched.
     pub inbound_authz: Option<desk_agent_protocol::authz::AuthorizationBlock>,
+    /// True when the current inbound frame arrived on the restricted support
+    /// upstream (see `RemoteDeskTypeEnum::Support`), set per call by the proxy.
+    /// `route()` gates on it with a fail-closed allowlist so a semi-trusted
+    /// supporter cannot drive the privileged manager-plane frames a normal owner
+    /// connection can. `false` on every trusted/relay link. Threaded through the
+    /// context (like `inbound_authz`) so the `route()` / handler signatures stay
+    /// untouched.
+    pub inbound_restricted: bool,
     /// Per-attempt `request_id`s of fleet executions currently dispatched to the
     /// worker. When the worker replies with `WorkerToService::ExecResult` whose
     /// `request_id` is in this set, the proxy emits a `EdgeExecResult(614)`
@@ -423,6 +431,29 @@ pub struct RouterContext {
 /// Fresh audit event id.
 fn new_audit_event_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+/// Signaling types a restricted temporary-support session is allowed to use
+/// (the first fail-closed door in `route()`). The allowlist is deliberately
+/// minimal — session establishment (`RequestRemote` / `Offer` / `Answer` /
+/// `Canid`), the control plane (`RequireControl` / `CloseControl`), teardown
+/// (`ConnectionRemoved`), and `Heartbeat`. Everything else — every
+/// `Manager*`, settings, system-info, file, terminal, display, and AI frame,
+/// plus any signaling type added in the future — is denied by default. Keeping
+/// it an explicit allowlist (rather than a denylist) means a new privileged
+/// frame cannot silently become reachable by a supporter.
+fn support_session_permits(t: SignalingType) -> bool {
+    matches!(
+        t,
+        SignalingType::RequestRemote
+            | SignalingType::Offer
+            | SignalingType::Answer
+            | SignalingType::Canid
+            | SignalingType::RequireControl
+            | SignalingType::CloseControl
+            | SignalingType::ConnectionRemoved
+            | SignalingType::Heartbeat
+    )
 }
 
 /// RFC3339 timestamp for an audit event.
@@ -466,6 +497,21 @@ fn risk_str(risk: desk_agent_protocol::RiskLevel) -> &'static str {
 /// path — batch 4 of the typed-IPC migration removed the
 /// `SignalingMessage` bridge.
 pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), RouterError> {
+    // First fail-closed door: restricted temporary-support sessions (see
+    // `RemoteDeskTypeEnum::Support`). The support upstream hands the host a
+    // connection handle to a semi-trusted supporter, so the host must never honour
+    // the privileged manager-plane frames (settings / system info / file list /
+    // terminal / display / AI) a normal owner connection can. Only the minimal
+    // session-establishment + control-plane set is permitted; every other frame —
+    // including any future signaling type — is dropped here. The data-channel path
+    // is gated independently by `route_is_permitted` (the second door).
+    if ctx.inbound_restricted && !support_session_permits(model.signaling_type) {
+        log::warn!(
+            "[router] restricted support session: rejecting {:?} frame",
+            model.signaling_type
+        );
+        return Ok(());
+    }
     match model.signaling_type {
         SignalingType::RequestRemote => {
             // v5 lazy lifecycle: hold a pending guard for the lifetime
@@ -518,6 +564,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                 Some(&ctx.worker_mgr),
                 ctx.virtual_display.as_ref(),
                 model,
+                ctx.inbound_restricted,
             )
             .await;
 
@@ -3358,8 +3405,83 @@ mod tests {
             audit: Arc::new(crate::worker::agent::audit_sink::LogAuditSink),
             diagnose_tasks: Default::default(),
             inbound_authz: None,
+            inbound_restricted: false,
             edge_exec_pending: Default::default(),
         }
+    }
+
+    /// The restricted-support allowlist covers exactly session establishment, the
+    /// control plane, teardown, and heartbeat; every privileged manager-plane /
+    /// settings / file / terminal / display / AI frame is denied. Fail-closed:
+    /// anything not explicitly listed (including a future signaling type) is
+    /// denied for a support session.
+    #[test]
+    fn support_session_permits_only_establishment_and_control() {
+        for t in [
+            SignalingType::RequestRemote,
+            SignalingType::Offer,
+            SignalingType::Answer,
+            SignalingType::Canid,
+            SignalingType::RequireControl,
+            SignalingType::CloseControl,
+            SignalingType::ConnectionRemoved,
+            SignalingType::Heartbeat,
+        ] {
+            assert!(support_session_permits(t), "{t:?} should be permitted");
+        }
+        for t in [
+            SignalingType::ManagerQuerySettings,
+            SignalingType::ManagerUpdateSettings,
+            SignalingType::ManagerSystemInfo,
+            SignalingType::ManagerFileList,
+            SignalingType::ManagerFileDelete,
+            SignalingType::UpdateDeskSettings,
+            SignalingType::EnablePrivateScreen,
+            SignalingType::ChangeDisplaySettings,
+            SignalingType::ListTerminal,
+            SignalingType::StartTerminal,
+            SignalingType::AgentRequest,
+            SignalingType::Diagnose,
+        ] {
+            assert!(!support_session_permits(t), "{t:?} should be denied");
+        }
+    }
+
+    /// First fail-closed door end-to-end: on a restricted session a privileged
+    /// frame is dropped before its handler runs, so no response frame is emitted
+    /// and `route()` still returns Ok. Guards against the handler leaking
+    /// `signaling_token` / `manager_api_token` to a semi-trusted supporter.
+    #[tokio::test]
+    async fn route_rejects_privileged_frame_on_restricted_session() {
+        let mut ctx = make_ctx();
+        ctx.inbound_restricted = true;
+        let mut rx = ctx.outbound_tx.subscribe();
+
+        let model = SignalingModel::new(
+            "req-1",
+            SignalingType::ManagerQuerySettings,
+            Some("conn-support".to_string()),
+            None,
+            None,
+            None,
+        );
+        route(&model, &ctx).await.expect("gate returns Ok");
+        assert!(
+            rx.try_recv().is_err(),
+            "a rejected privileged frame must emit no outbound response"
+        );
+    }
+
+    /// The restriction gate must not turn an allowlisted frame into an anomalous
+    /// drop: a `Heartbeat` on a restricted session routes exactly as it would on
+    /// a normal one (swallowed, Ok, no error).
+    #[tokio::test]
+    async fn route_allows_control_plane_frame_on_restricted_session() {
+        let mut ctx = make_ctx();
+        ctx.inbound_restricted = true;
+        let model =
+            SignalingModel::new("req-1", SignalingType::Heartbeat, None, None, None, None);
+        route(&model, &ctx).await.expect("allowlisted frame routes Ok");
     }
 
     /// `make_ctx` variant that installs an `Attached`-state supervisor
