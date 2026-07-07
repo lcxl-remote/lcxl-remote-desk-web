@@ -2,8 +2,9 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react"
 import type { MouseEvent as ReactMouseEvent } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle, AlertTriangle, Sparkles } from "lucide-react"
+import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle, AlertTriangle, Sparkles, SignalHigh, SignalMedium, SignalLow } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { connectionQuality } from "./connection-quality"
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -80,6 +81,31 @@ export function shouldOpenConfigDialog(args: {
  *  with no props, keeping the AI model selection personal-scoped. */
 type DeskSessionProps = {
     orgId?: number
+}
+
+/**
+ * A compact live connection-quality badge (good / fair / poor) derived from the
+ * WebRTC stats. Backend-agnostic — identical against the open-source signal and
+ * the manager — so it needs no signal-server capability detection.
+ */
+function ConnectionQualityBadge({ packetLoss, rtt }: { packetLoss: number; rtt: number }) {
+    const { t } = useTranslation()
+    const quality = connectionQuality(packetLoss, rtt)
+    const config = {
+        good: { Icon: SignalHigh, cls: "text-green-500", label: t("pages.desk.quality.good") },
+        fair: { Icon: SignalMedium, cls: "text-amber-500", label: t("pages.desk.quality.fair") },
+        poor: { Icon: SignalLow, cls: "text-red-500", label: t("pages.desk.quality.poor") },
+    }[quality]
+    const Icon = config.Icon
+    return (
+        <span
+            className={`flex items-center gap-1 text-sm ${config.cls}`}
+            title={t("pages.desk.quality.detail", { rtt: Math.round(rtt), loss: packetLoss })}
+        >
+            <Icon className="h-4 w-4" />
+            <span className="hidden sm:inline">{config.label}</span>
+        </span>
+    )
 }
 
 export default function DeskSession({ orgId }: DeskSessionProps = {}) {
@@ -867,6 +893,9 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                 <div className="flex items-center gap-4">
                     {hasControl && (
                         <div className="text-sm font-medium text-blue-500">Controlling</div>
+                    )}
+                    {isConnected && (
+                        <ConnectionQualityBadge packetLoss={rtcStats.packetLoss} rtt={rtcStats.rtt} />
                     )}
                     <div className="flex items-center gap-2">
                         <div className={`h-2 w-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
