@@ -111,6 +111,14 @@ pub enum SignalingType {
     #[wincode(tag = 208)]
     AudioPlaybackError = 208,
 
+    /// Manager → host (desk server) over its dedicated Support upstream: the
+    /// temporary support code the manager issued for this connection, with its
+    /// expiry (see [`SupportCodeIssuedData`]). The host displays it to the local
+    /// user, who passes it out-of-band to a supporter. Server-originated only — a
+    /// client that sends this inbound is misbehaving and the signal drops it.
+    #[wincode(tag = 210)]
+    SupportCodeIssued = 210,
+
     #[wincode(tag = 301)]
     UpdateDeskSettings = 301,
 
@@ -893,6 +901,14 @@ pub enum RemoteDeskTypeEnum {
     /// this enum used by another project, not this project
     /// so keep this enum but do not use it
     Manager,
+    /// Temporary-support type: a desk server's dedicated, short-lived upstream
+    /// connection opened solely to obtain and serve a temporary support session
+    /// (a supporter the owner does not otherwise share the device with). Distinct
+    /// from its main `Server` connection so it registers no device / presence and
+    /// the host can hold it as a restricted, fail-closed session. Only a central
+    /// brain (the manager) attaches temp-code semantics to this role; a plain
+    /// signal treats it as routing-only.
+    Support,
 }
 
 /// Request remote access model.

@@ -214,6 +214,12 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // classifier's Step 0 reads it); never forwarded to the worker.
         SignalingType::CommandBlocklistSync => RouteOwnership::Daemon,
 
+        // Temporary-support code: manager → daemon, pushed over the host's
+        // dedicated Support upstream after the manager issues a code for that
+        // connection. The daemon consumes it locally (surfaces the code to the
+        // local user); never forwarded to the worker.
+        SignalingType::SupportCodeIssued => RouteOwnership::Daemon,
+
         // Remote-collect request: manager → daemon. In the thin-edge model the
         // daemon runs its read-only collectors on behalf of the central
         // orchestrator and streams a chunked CollectResponse back; handled inline
@@ -705,6 +711,11 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // (`handle_inbound_signaling_text`) has already dropped any non-central
         // origin before reaching here; this only applies the validated set.
         SignalingType::CommandBlocklistSync => handle_command_blocklist_sync_inbound(ctx, model),
+        // Temporary-support code issued by the manager over this host's dedicated
+        // Support upstream. The daemon surfaces it to the local user, who reads it
+        // out to a supporter. The source gate (`handle_inbound_signaling_text`) has
+        // already dropped any non-central origin before reaching here.
+        SignalingType::SupportCodeIssued => handle_support_code_issued_inbound(ctx, model),
         // Remote-collect request from the manager: run the daemon-side read-only
         // collectors and stream a chunked CollectResponse back. The source gate
         // (`handle_inbound_signaling_text`) has already dropped any non-Manager
@@ -986,6 +997,30 @@ fn handle_command_template_sync_inbound(
 /// dropped — the manager always stamps one, and for the blocklist a revision is
 /// required to enforce monotonic ordering. The exec classifier's Step 0 picks up
 /// the new set on the next classification.
+/// Surface a manager-issued temporary support code to the local user.
+///
+/// The code arrives over the host's dedicated Support upstream (the source gate
+/// has already dropped any non-central origin). The daemon logs receipt so the
+/// local operator has a record of the issued code and its expiry.
+fn handle_support_code_issued_inbound(
+    _ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    use desk_signal_facade::model::support::SupportCodeIssuedData;
+    let payload = match model.get_data::<SupportCodeIssuedData>() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("[support] bad SupportCodeIssued payload: {e}");
+            return Ok(());
+        }
+    };
+    log::info!(
+        "[support] manager issued temporary support code (expires_at={})",
+        payload.expires_at
+    );
+    Ok(())
+}
+
 fn handle_command_blocklist_sync_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
@@ -3248,6 +3283,8 @@ mod tests {
             // daemon-emitted toward the manager.
             SignalingType::EdgeExecRequest,
             SignalingType::EdgeExecResult,
+            // Temporary-support code: manager → daemon, consumed locally.
+            SignalingType::SupportCodeIssued,
         ] {
             assert_eq!(
                 classify(t),

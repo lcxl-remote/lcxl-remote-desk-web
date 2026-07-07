@@ -8,6 +8,7 @@ pub mod os;
 pub mod private_screen;
 pub mod security_settings;
 pub mod signal;
+pub mod support;
 pub mod system_info;
 pub mod system_settings;
 pub mod terminal;

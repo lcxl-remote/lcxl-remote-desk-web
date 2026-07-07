@@ -1237,6 +1237,15 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     signaling_model.signaling_type
                 );
             }
+            SignalingType::SupportCodeIssued => {
+                // Manager → host only (the issued support code, pushed over the
+                // host's dedicated Support upstream). It is server-originated, so a
+                // connection sending it inbound is misbehaving; drop it.
+                log::warn!(
+                    "Received SupportCodeIssued from a client; it is server-originated and must \
+                     not be sent inbound — dropping"
+                );
+            }
         }
         Ok(())
     }

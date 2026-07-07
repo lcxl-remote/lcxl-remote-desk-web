@@ -258,6 +258,17 @@ mod tests {
     }
 
     #[test]
+    fn valid_token_admits_reported_support_role() {
+        // A desk-server's dedicated temporary-support upstream presents a valid
+        // token and reports Support: it is admitted as a Support node (routing-only
+        // on a plain signal), not rejected and not coerced to Browser.
+        assert_eq!(
+            adjudicate_role(TokenOutcome::Valid, RemoteDeskTypeEnum::Support),
+            RoleDecision::Node(RemoteDeskTypeEnum::Support)
+        );
+    }
+
+    #[test]
     fn invalid_token_is_rejected_and_never_falls_back_to_cookie() {
         // Regression guard for the contract: a non-empty but invalid token must
         // surface as 401 (Reject), NOT be silently downgraded to a cookie/Browser
