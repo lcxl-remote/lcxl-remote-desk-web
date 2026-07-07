@@ -426,6 +426,11 @@ pub struct RouterContext {
     /// toward the manager instead of an `ExecResult(609)` toward a browser.
     /// Always present (in-memory state); only populated on the fleet exec path.
     pub edge_exec_pending: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// On-demand temporary-support lifecycle. `handle_support_code_issued_inbound`
+    /// records the manager-issued code here for the local UI and arms a teardown
+    /// at its expiry; the signaling proxy's support loop drives the upstream from
+    /// the same handle. Node-local runtime state (one desk-server process).
+    pub support_link_state: Arc<crate::daemon::support_link_state::SupportLinkState>,
 }
 
 /// Fresh audit event id.
@@ -453,6 +458,10 @@ fn support_session_permits(t: SignalingType) -> bool {
             | SignalingType::CloseControl
             | SignalingType::ConnectionRemoved
             | SignalingType::Heartbeat
+            // The manager pushes the temporary code back on the support upstream
+            // itself; it is a host-inbound notification (display + arm TTL) that
+            // triggers no privileged host action, so it is on the allowlist.
+            | SignalingType::SupportCodeIssued
     )
 }
 
@@ -1044,13 +1053,17 @@ fn handle_command_template_sync_inbound(
 /// dropped — the manager always stamps one, and for the blocklist a revision is
 /// required to enforce monotonic ordering. The exec classifier's Step 0 picks up
 /// the new set on the next classification.
-/// Surface a manager-issued temporary support code to the local user.
+/// Surface a manager-issued temporary support code to the local user and arm the
+/// session's expiry teardown.
 ///
 /// The code arrives over the host's dedicated Support upstream (the source gate
-/// has already dropped any non-central origin). The daemon logs receipt so the
-/// local operator has a record of the issued code and its expiry.
+/// has already dropped any non-central origin). The daemon records it in the
+/// support link state for the local UI and spawns a timer that ends the session
+/// at the code's expiry — guarded by the session epoch so a stale timer from an
+/// earlier session cannot tear down a newer one. The signaling proxy's support
+/// loop performs the actual upstream / PC teardown when the state flips inactive.
 fn handle_support_code_issued_inbound(
-    _ctx: &RouterContext,
+    ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
     use desk_signal_facade::model::support::SupportCodeIssuedData;
@@ -1065,6 +1078,22 @@ fn handle_support_code_issued_inbound(
         "[support] manager issued temporary support code (expires_at={})",
         payload.expires_at
     );
+    let state = ctx.support_link_state.clone();
+    let expires_at = payload.expires_at;
+    let code = payload.code;
+    let armed_epoch = state.epoch();
+    actix_web::rt::spawn(async move {
+        state.set_snapshot(code, expires_at).await;
+        let now = chrono::Utc::now().timestamp();
+        let remaining = expires_at.saturating_sub(now).max(0) as u64;
+        tokio::time::sleep(std::time::Duration::from_secs(remaining)).await;
+        // Only tear down if this is still the same session — a manual stop or a
+        // fresh start (which bumps the epoch) supersedes this timer.
+        if state.epoch() == armed_epoch && state.is_active() {
+            log::info!("[support] temporary support code expired; ending session");
+            state.request_stop();
+        }
+    });
     Ok(())
 }
 
@@ -3407,6 +3436,9 @@ mod tests {
             inbound_authz: None,
             inbound_restricted: false,
             edge_exec_pending: Default::default(),
+            support_link_state: Arc::new(
+                crate::daemon::support_link_state::SupportLinkState::new(),
+            ),
         }
     }
 
@@ -3426,6 +3458,7 @@ mod tests {
             SignalingType::CloseControl,
             SignalingType::ConnectionRemoved,
             SignalingType::Heartbeat,
+            SignalingType::SupportCodeIssued,
         ] {
             assert!(support_session_permits(t), "{t:?} should be permitted");
         }

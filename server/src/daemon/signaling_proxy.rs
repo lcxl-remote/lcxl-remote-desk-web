@@ -1,4 +1,5 @@
 use super::manager_link_state::ManagerLinkState;
+use super::support_link_state::SupportLinkState;
 use super::pc_manager::PcRegistry;
 use super::signaling_router::{self, RouterContext};
 use super::virtual_display::VirtualDisplaySupervisor;
@@ -41,6 +42,11 @@ pub async fn run_signaling_proxy(
     // carries the manual-retry signal. The same handle is exposed to the host REST
     // API so the UI can show the rejection and trigger a reconnect.
     manager_link_state: Arc<ManagerLinkState>,
+    // On-demand temporary-support lifecycle: the host REST API flips it active to
+    // request a support session; the support loop below drives a dedicated Support
+    // upstream from it. The same handle rides into the router context so the
+    // inbound `SupportCodeIssued` handler can record the code + arm its TTL.
+    support_link_state: Arc<SupportLinkState>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Signaling proxy starting");
 
@@ -149,6 +155,8 @@ pub async fn run_signaling_proxy(
         // a worker `ExecResult` for an in-flight fleet attempt is relayed to the
         // manager as a `EdgeExecResult`.
         edge_exec_pending: Default::default(),
+        // On-demand temporary-support lifecycle, shared with the support loop.
+        support_link_state: support_link_state.clone(),
     };
 
     let local_handle = {
@@ -298,6 +306,68 @@ pub async fn run_signaling_proxy(
                 }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        })
+    };
+
+    // On-demand temporary-support upstream. Unlike the three always-on upstreams
+    // this one parks until a local user requests a support code (the host REST API
+    // flips `support_link_state` active), then opens a single dedicated `Support`
+    // link to the manager. It serves exactly one session — until the upstream
+    // closes, the local user ends support, or the code's TTL expires — then
+    // force-tears any restricted PCs the supporter established and parks again.
+    let support_handle = {
+        let settings = settings.clone();
+        let outbound_tx = outbound_tx.clone();
+        let router_ctx = router_ctx.clone();
+        let support_link_state = support_link_state.clone();
+        actix_web::rt::spawn(async move {
+            loop {
+                support_link_state.wait_for_start().await;
+
+                let (manager_url, manager_api_token) = {
+                    let s = settings.read().await;
+                    (
+                        s.system.manager_url.clone(),
+                        s.system.manager_api_token.clone(),
+                    )
+                };
+
+                if let (Some(url), Some(token)) = (manager_url, manager_api_token)
+                    && !url.is_empty()
+                    && !token.is_empty()
+                {
+                    let rx = outbound_tx.subscribe();
+                    // Serve one support session: whichever finishes first wins —
+                    // the upstream connection ending, or a stop (manual "end
+                    // support" / TTL expiry) flipping the state inactive.
+                    tokio::select! {
+                        _ = maintain_proxy_connection(
+                            settings.clone(),
+                            &router_ctx,
+                            url,
+                            token,
+                            rx,
+                            InboundSignalingSource::Support,
+                            false,
+                            None,
+                        ) => {}
+                        _ = support_link_state.wait_for_stop() => {}
+                    }
+                    // End the supporter's session physically, not just at the
+                    // signaling layer, by closing every restricted PC.
+                    crate::daemon::pc_manager::cleanup_restricted_connections(
+                        &router_ctx.pc_registry,
+                        &router_ctx.worker_mgr,
+                        router_ctx.virtual_display.as_ref(),
+                        "support_session_ended",
+                    )
+                    .await;
+                } else {
+                    warn!("[support] start requested but the manager link is not configured");
+                }
+                // Reset for the next session (idempotent if already stopped).
+                support_link_state.finish().await;
             }
         })
     };
@@ -795,6 +865,7 @@ pub async fn run_signaling_proxy(
     local_handle.abort();
     remote_sig_handle.abort();
     remote_mgr_handle.abort();
+    support_handle.abort();
 
     info!("Signaling proxy stopped");
     Ok(())
@@ -1857,6 +1928,9 @@ mod tests {
             inbound_authz: None,
             inbound_restricted: false,
             edge_exec_pending: Default::default(),
+            support_link_state: Arc::new(
+                crate::daemon::support_link_state::SupportLinkState::new(),
+            ),
         };
         (ctx, outbound_tx)
     }

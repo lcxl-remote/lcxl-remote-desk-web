@@ -13,6 +13,7 @@ pub mod session_approval;
 pub mod session_monitor;
 pub mod signaling_proxy;
 pub mod signaling_router;
+pub mod support_link_state;
 pub mod tauri_ipc;
 pub mod virtual_display;
 pub mod windows_service;
@@ -111,6 +112,10 @@ pub async fn run_service_daemon_inner(
     // it + triggers reconnect).
     let manager_link_state = Arc::new(manager_link_state::ManagerLinkState::new());
 
+    // On-demand temporary-support lifecycle, shared between the signaling proxy
+    // (drives the support upstream) and the local API (start / stop / status).
+    let support_link_state = Arc::new(support_link_state::SupportLinkState::new());
+
     // The bridge is now a tiny holder for `tauri_is_admin` + `tauri_login_token`.
     // The host control endpoint owns `/ws/tauri_ipc` and `/ws/host_upstream` and
     // refreshes `tauri_login_token` on every Tauri ws connect.
@@ -124,10 +129,17 @@ pub async fn run_service_daemon_inner(
         let bridge = Arc::clone(&tauri_bridge);
         let hub = Arc::clone(&host_control_hub);
         let link_state = Arc::clone(&manager_link_state);
+        let support_state = Arc::clone(&support_link_state);
         tokio::spawn(async move {
-            if let Err(e) =
-                local_api::run_local_api(settings, bridge, hub, link_state, Some(api_ready_tx))
-                    .await
+            if let Err(e) = local_api::run_local_api(
+                settings,
+                bridge,
+                hub,
+                link_state,
+                support_state,
+                Some(api_ready_tx),
+            )
+            .await
             {
                 error!("Local API error: {e}");
             }
@@ -225,6 +237,7 @@ pub async fn run_service_daemon_inner(
         let pc_registry = pc_registry.clone();
         let virtual_display = virtual_display_supervisor.clone();
         let manager_link_state = Arc::clone(&manager_link_state);
+        let support_link_state = Arc::clone(&support_link_state);
         actix_web::rt::spawn(async move {
             if let Err(e) = signaling_proxy::run_signaling_proxy(
                 settings,
@@ -234,6 +247,7 @@ pub async fn run_service_daemon_inner(
                 pc_registry,
                 virtual_display,
                 manager_link_state,
+                support_link_state,
             )
             .await
             {
@@ -317,6 +331,7 @@ pub async fn start_inprocess_daemon(
     host_control_hub: Arc<crate::host_control::HostControlHub>,
     own_turn_endpoints: Arc<std::collections::HashSet<String>>,
     manager_link_state: Arc<crate::daemon::manager_link_state::ManagerLinkState>,
+    support_link_state: Arc<crate::daemon::support_link_state::SupportLinkState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Starting in-process daemon (portable mode)");
 
@@ -365,6 +380,7 @@ pub async fn start_inprocess_daemon(
             proxy_registry,
             None,
             manager_link_state,
+            support_link_state,
         )
         .await
         {

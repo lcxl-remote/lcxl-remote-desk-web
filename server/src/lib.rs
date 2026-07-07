@@ -43,6 +43,7 @@ use crate::{
             update_log_settings, update_security_settings, update_settings,
             update_telemetry_consent, update_turn_client_settings, update_turn_settings,
         },
+        support::{start_support, stop_support, support_status},
         turn::{
             delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
             get_turn_session_statistics,
@@ -207,6 +208,9 @@ pub fn configure_api_surface(
                     .service(update_telemetry_consent)
                     .service(query_manager_link_status)
                     .service(retry_manager_link)
+                    .service(start_support)
+                    .service(stop_support)
+                    .service(support_status)
                     .service(list_connections)
                     .service(list_terminal)
                     .service(open_terminal_session)
@@ -564,6 +568,11 @@ pub async fn run_with_hub(
     let manager_link_state = Arc::new(daemon::manager_link_state::ManagerLinkState::new());
     let manager_link_state_data = web::Data::new(manager_link_state.clone());
 
+    // On-demand temporary-support lifecycle: shared between the signaling proxy
+    // (drives the support upstream) and the REST API (start / stop / status).
+    let support_link_state = Arc::new(daemon::support_link_state::SupportLinkState::new());
+    let support_link_state_data = web::Data::new(support_link_state.clone());
+
     // If this instance runs signaling, ensure local_signaling_token is generated and persisted
     if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
         let mut s = shared_settings_data.write().await;
@@ -601,6 +610,7 @@ pub async fn run_with_hub(
             let session_hub = host_control_hub_arc.clone();
             let args_clone = settings.args.clone();
             let proxy_link_state = manager_link_state.clone();
+            let proxy_support_state = support_link_state.clone();
             // Freeze this node's own bundled-TURN endpoints from the running
             // `TurnApiState` (same snapshot the local signaling injects from;
             // `None` -> empty when no embedded TURN started) so the daemon's PC
@@ -615,6 +625,7 @@ pub async fn run_with_hub(
                     session_hub,
                     own_turn_endpoints,
                     proxy_link_state,
+                    proxy_support_state,
                 )
                 .await
                 {
@@ -635,6 +646,7 @@ pub async fn run_with_hub(
         let host_control_hub_data = host_control_hub_data.clone();
         let validator_data = validator_data.clone();
         let manager_link_state_data = manager_link_state_data.clone();
+        let support_link_state_data = support_link_state_data.clone();
         let host_control_endpoint_state = host_control_endpoint_state.clone();
         let surface_opts = ApiSurfaceOpts {
             include_signaling: matches!(
@@ -692,6 +704,7 @@ pub async fn run_with_hub(
             .app_data(host_control_hub_data.clone())
             .app_data(validator_data.clone())
             .app_data(manager_link_state_data.clone())
+            .app_data(support_link_state_data.clone())
             .configure(|cfg| {
                 if let Some(turn_api_state) = &turn_api_state {
                     cfg.app_data(turn_api_state.clone());

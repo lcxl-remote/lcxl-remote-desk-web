@@ -2760,6 +2760,30 @@ async fn cleanup_pc(
     }
 }
 
+/// Tear down every restricted temporary-support connection (see
+/// `RemoteDeskTypeEnum::Support`). Called when the support session ends — a
+/// manual "end support", the code's TTL expiry, or the support upstream closing
+/// — so the supporter's WebRTC session ends physically, not just at the signaling
+/// layer. Snapshots the restricted-connections projection first (each `cleanup_pc`
+/// mutates it), then closes each PC. A no-op when no support session is live.
+pub async fn cleanup_restricted_connections(
+    registry: &PcRegistry,
+    worker_mgr: &WorkerManager,
+    virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
+    reason: &str,
+) {
+    let ids: Vec<String> = registry
+        .restricted_connections_handle()
+        .read()
+        .await
+        .iter()
+        .cloned()
+        .collect();
+    for id in ids {
+        cleanup_pc(registry, worker_mgr, virtual_display, &id, reason).await;
+    }
+}
+
 /// Wire the daemon-side cleanup path onto `pc.on_peer_connection_state_change`
 /// so a browser disconnect / network drop / explicit close releases the
 /// worker's encoder + capture resources promptly.
@@ -5368,6 +5392,43 @@ mod tests {
         let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
         cleanup_pc(&registry, &worker_mgr, None, "conn-support", "test").await;
         assert!(!handle.read().await.contains("conn-support"));
+    }
+
+    /// Ending a support session tears down every restricted PC but leaves
+    /// unrestricted (owner) PCs untouched — the supporter's session ends while a
+    /// concurrent owner session keeps running.
+    #[tokio::test]
+    async fn cleanup_restricted_connections_closes_only_restricted_pcs() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-owner", &request_remote, &s)
+            .await
+            .expect("owner pc");
+        registry
+            .create_for_request_remote("conn-support", &request_remote, &s)
+            .await
+            .expect("support pc");
+        registry.mark_restricted_connection("conn-support").await;
+        assert_eq!(registry.len().await, 2);
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+        cleanup_restricted_connections(&registry, &worker_mgr, None, "test").await;
+
+        assert!(registry.get("conn-owner").await.is_some());
+        assert!(registry.get("conn-support").await.is_none());
+        assert!(
+            registry
+                .restricted_connections_handle()
+                .read()
+                .await
+                .is_empty()
+        );
     }
 
     /// `register_data_channel_router` is async-callable on a

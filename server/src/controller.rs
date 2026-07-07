@@ -5,6 +5,7 @@ pub mod login;
 pub mod manager_link;
 pub mod service_mgmt;
 pub mod settings;
+pub mod support;
 pub mod turn;
 pub mod user;
 pub mod virtual_display;
