@@ -57,7 +57,7 @@ export default {
   'pages.legal.consent.required.description': 'Please read and accept the Terms of Service and Privacy Policy before continuing.',
   'pages.legal.dialog.close': 'Close',
   'pages.legal.dialog.lastUpdated': 'Last updated: July 8, 2026',
-  'pages.legal.dialog.operatorNotice': 'Service operator: [operator name to be filled in]; Contact email: [to be filled in]. For private-cloud / organization deployments, the operator and contact details are those published by the relevant administrator.',
+  'pages.legal.dialog.operatorNotice': 'Service operator: lcxbox.app; Contact email: support@lcxbox.app. For private-cloud / organization deployments, the operator and contact details are those published by the relevant administrator.',
   'pages.legal.terms.title': 'Terms of Service',
   'pages.legal.terms.intro': 'Welcome to lcxl-remote-desk (the "Service"). Please read and fully understand these terms before registering or initializing the Service. By checking the consent box you accept all of these terms.',
   'pages.legal.terms.s1.heading': '1. Service Description',

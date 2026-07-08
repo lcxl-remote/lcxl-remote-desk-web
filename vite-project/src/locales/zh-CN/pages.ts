@@ -58,7 +58,7 @@ export default {
   'pages.legal.consent.required.description': '请先阅读并勾选同意《用户协议》和《隐私政策》后再继续。',
   'pages.legal.dialog.close': '关闭',
   'pages.legal.dialog.lastUpdated': '最后更新：2026 年 7 月 8 日',
-  'pages.legal.dialog.operatorNotice': '本服务运营方：[待填写主体名称]；联系邮箱：[待填写]。在私有云 / 组织部署下，具体运营方与联系方式以对应管理员公示为准。',
+  'pages.legal.dialog.operatorNotice': '本服务运营方：lcxbox.app；联系邮箱：support@lcxbox.app。在私有云 / 组织部署下，具体运营方与联系方式以对应管理员公示为准。',
   'pages.legal.terms.title': '用户协议',
   'pages.legal.terms.intro': '欢迎使用 lcxl-remote-desk（以下简称“本服务”）。在注册或初始化本服务前，请您仔细阅读并充分理解本协议各条款；勾选同意即表示您接受本协议的全部内容。',
   'pages.legal.terms.s1.heading': '1. 服务说明',
