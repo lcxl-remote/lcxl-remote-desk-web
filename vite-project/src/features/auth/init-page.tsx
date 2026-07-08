@@ -25,6 +25,7 @@ import { useInitSystem } from "@/services/hooks/systemController/useInitSystem"
 import { ModeToggle } from "@/components/mode-toggle"
 import { LanguageToggle } from "@/components/language-toggle"
 import { TelemetryDisclosure } from "@/components/telemetry-disclosure"
+import { AgreementConsent } from "@/components/legal-agreement"
 
 export default function InitPage() {
     const { t } = useTranslation()
@@ -43,6 +44,9 @@ export default function InitPage() {
             message: t("pages.init.confirmPassword.required"),
         }),
         telemetryConsent: z.boolean().default(true),
+        agreementAccepted: z.boolean().refine((value) => value === true, {
+            message: t("pages.legal.consent.required.description"),
+        }),
     }).refine((data) => data.password === data.confirmPassword, {
         message: t("pages.init.confirmPassword.match"),
         path: ["confirmPassword"],
@@ -59,6 +63,7 @@ export default function InitPage() {
             password: "",
             confirmPassword: "",
             telemetryConsent: true,
+            agreementAccepted: false,
         },
     })
 
@@ -199,6 +204,20 @@ export default function InitPage() {
                                                     <TelemetryDisclosure />
                                                 </div>
                                             </div>
+                                        </FormItem>
+                                    )}
+                                />
+
+                                <FormField
+                                    control={form.control}
+                                    name="agreementAccepted"
+                                    render={({ field }) => (
+                                        <FormItem className="space-y-1">
+                                            <AgreementConsent
+                                                checked={field.value}
+                                                onCheckedChange={field.onChange}
+                                            />
+                                            <FormMessage className="text-xs" />
                                         </FormItem>
                                     )}
                                 />
