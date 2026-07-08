@@ -157,6 +157,8 @@ export default {
   'pages.managerLink.retrying': '正在重试…',
   'pages.managerLink.retrySucceed': '已请求重新注册',
   'pages.managerLink.retryFailed': '重试请求失败',
+  'pages.support.pageTitle': '远程支援',
+  'pages.support.pageDescription': '当你需要他人远程协助操作这台电脑时，在这里获取一个临时支援码，并把它报给帮助你的人。',
   'pages.support.title': '临时支援',
   'pages.support.description': '获取一次性支援码，让他人连入协助你。支援码过期或你结束支援时，会话即终止。',
   'pages.support.getCode': '获取支援码',

@@ -11,6 +11,7 @@ import {
     ChevronDown,
     Key,
     BarChart3,
+    LifeBuoy,
 } from "lucide-react"
 import { useLocation, Link, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
@@ -87,6 +88,17 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                     title: "menu.desk",
                     url: "/desk/list",
                     icon: Monitor,
+                });
+            }
+
+            // Host-side "ask for remote help": a primary entry so non-technical
+            // users can reach it directly. Available whenever this node can act
+            // as a host (any mode except pure signaling).
+            if (serverInfo.startup_mode !== "signaling") {
+                dynamicItems.push({
+                    title: "menu.support",
+                    url: "/support",
+                    icon: LifeBuoy,
                 });
             }
 

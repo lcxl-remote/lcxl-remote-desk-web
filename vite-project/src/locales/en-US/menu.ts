@@ -61,6 +61,7 @@ export default {
   'menu.settings.aiModel': 'AI Settings',
   'menu.settings.signalToken': 'Signal Access Token',
   'menu.settings.deskConnection': 'Outbound Connection',
+  'menu.support': 'Remote Support',
   'menu.usage': 'Usage',
   'menu.usage.turn': 'TURN Usage',
   'menu.usage.model': 'AI Token Usage',

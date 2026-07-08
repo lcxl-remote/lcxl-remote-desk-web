@@ -159,6 +159,8 @@ export default {
   'pages.managerLink.retrying': 'Retrying…',
   'pages.managerLink.retrySucceed': 'Re-registration requested',
   'pages.managerLink.retryFailed': 'Retry request failed',
+  'pages.support.pageTitle': 'Remote support',
+  'pages.support.pageDescription': 'When you need someone to help operate this computer remotely, get a temporary support code here and read it out to the person helping you.',
   'pages.support.title': 'Temporary support',
   'pages.support.description': 'Get a one-time code to let someone connect and help you. The session ends when the code expires or you end support.',
   'pages.support.getCode': 'Get a support code',

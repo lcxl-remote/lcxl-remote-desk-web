@@ -29,6 +29,7 @@ import { VirtualDisplaySettings } from '@/features/settings/virtual-display-sett
 import { AiModelSettings } from '@/features/settings/ai-model-settings';
 import { DeskConnectionSettings } from '@/features/settings/desk-connection-settings';
 import { SignalTokenSettings } from '@/features/settings/signal-token-settings';
+import { SupportPage } from '@/features/support/support-page';
 
 export const router = createBrowserRouter([
     {
@@ -86,6 +87,10 @@ export const router = createBrowserRouter([
             {
                 path: 'desk/:id/terminal',
                 element: <TerminalSession />,
+            },
+            {
+                path: 'support',
+                element: <SupportPage />,
             },
             {
                 path: 'system',

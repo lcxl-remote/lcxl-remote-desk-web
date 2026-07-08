@@ -61,6 +61,7 @@ export default {
   'menu.settings.aiModel': 'AI 设置',
   'menu.settings.signalToken': 'Signal 接入令牌',
   'menu.settings.deskConnection': '出站连接',
+  'menu.support': '远程支援',
   'menu.usage': '用量统计',
   'menu.usage.turn': 'TURN 流量统计',
   'menu.usage.model': 'AI Token 用量',
