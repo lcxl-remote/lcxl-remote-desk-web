@@ -65,6 +65,7 @@ export default {
   'menu.usage': '用量统计',
   'menu.usage.turn': 'TURN 流量统计',
   'menu.usage.model': 'AI Token 用量',
+  'menu.usage.retention': '数据保留',
   'menu.desk': '桌面',
   'menu.desk.file-list': '文件列表',
   'menu.desk.desk': "桌面",

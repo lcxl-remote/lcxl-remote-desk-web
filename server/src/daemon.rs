@@ -83,10 +83,15 @@ pub async fn run_service_daemon_inner(
         .unwrap_or(Path::new("."))
         .to_string_lossy()
         .to_string();
-    desk_signal::db::init_db(&signal_db_dir)
+    let signal_db = desk_signal::db::init_db(&signal_db_dir)
         .await
         .map_err(|e| format!("Failed to init signal DB: {e}"))?;
     info!("Signal database initialized at {signal_db_dir}");
+    // Age-based retention cleanup for the local usage rollups (collect-only
+    // telemetry, no billing coupling). One task per process; the delete is idempotent.
+    tokio::spawn(desk_signal::usage_retention::run_retention_cleanup_loop(
+        signal_db.clone(),
+    ));
 
     // Ensure local_signaling_token exists so the signaling proxy can authenticate
     // as a desk node with the local HTTP server on SERVICE_API_PORT.

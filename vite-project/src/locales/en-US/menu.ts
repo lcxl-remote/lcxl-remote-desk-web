@@ -65,6 +65,7 @@ export default {
   'menu.usage': 'Usage',
   'menu.usage.turn': 'TURN Usage',
   'menu.usage.model': 'AI Token Usage',
+  'menu.usage.retention': 'Data Retention',
   'menu.desk': 'Desk',
   'menu.desk.file-list': 'File List',
   'menu.desk.desk': "Desktop",

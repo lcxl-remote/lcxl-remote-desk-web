@@ -1716,11 +1716,34 @@ export type ModelUsageItem = {
     requestCount: number;
 };
 
+/**
+ * @description The effective range returned to the console alongside the usage rows.
+*/
+export type UsageRangeDto = {
+    /**
+     * @type string
+    */
+    from: string;
+    /**
+     * @type string
+    */
+    granularity: string;
+    /**
+     * @type string
+    */
+    to: string;
+};
+
 export type ModelUsageResult = {
     /**
      * @type array
     */
     items: ModelUsageItem[];
+    /**
+     * @description The effective range returned to the console alongside the usage rows.
+     * @type object
+    */
+    range: UsageRangeDto;
 };
 
 /**
@@ -2211,6 +2234,11 @@ export type RestResponseModelUsageResult = {
          * @type array
         */
         items: ModelUsageItem[];
+        /**
+         * @description The effective range returned to the console alongside the usage rows.
+         * @type object
+        */
+        range: UsageRangeDto;
     };
     /**
      * @type string,null
@@ -2830,6 +2858,44 @@ export type RestResponseTurnUsageResult = {
          * @type array
         */
         items: TurnUsageItem[];
+        /**
+         * @description The effective range returned to the console alongside the usage rows.
+         * @type object
+        */
+        range: UsageRangeDto;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseUsageRetentionConfig = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Usage-retention windows, one per rollup family, in whole days.
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description Retention window for AI token rollups (`ai_usage_hourly`), in days.
+         * @minLength 0
+         * @type integer, int32
+        */
+        ai_days: number;
+        /**
+         * @description Retention window for TURN traffic rollups (`turn_usage_hourly`), in days.
+         * @minLength 0
+         * @type integer, int32
+        */
+        turn_days: number;
     };
     /**
      * @type string,null
@@ -3567,6 +3633,29 @@ export type TurnUsageResult = {
      * @type array
     */
     items: TurnUsageItem[];
+    /**
+     * @description The effective range returned to the console alongside the usage rows.
+     * @type object
+    */
+    range: UsageRangeDto;
+};
+
+/**
+ * @description Usage-retention windows, one per rollup family, in whole days.
+*/
+export type UsageRetentionConfig = {
+    /**
+     * @description Retention window for AI token rollups (`ai_usage_hourly`), in days.
+     * @minLength 0
+     * @type integer, int32
+    */
+    ai_days: number;
+    /**
+     * @description Retention window for TURN traffic rollups (`turn_usage_hourly`), in days.
+     * @minLength 0
+     * @type integer, int32
+    */
+    turn_days: number;
 };
 
 export type UserResponeCurrentUser = {
@@ -4662,6 +4751,11 @@ export type GetModelUsageQueryParams = {
      * @type string,null
     */
     to?: string | null;
+    /**
+     * @description Time-bucket granularity (`hour` / `day`). Omitted defaults to `hour`; a\nrange wider than the day threshold forces `day` regardless.
+     * @type string,null
+    */
+    granularity?: string | null;
 };
 
 /**
@@ -4861,6 +4955,11 @@ export type GetTurnUsageQueryParams = {
      * @type string,null
     */
     to?: string | null;
+    /**
+     * @description Time-bucket granularity (`hour` / `day`). Omitted defaults to `hour`; a\nrange wider than the day threshold forces `day` regardless.
+     * @type string,null
+    */
+    granularity?: string | null;
 };
 
 /**
@@ -4873,6 +4972,33 @@ export type GetTurnUsageQueryResponse = GetTurnUsage200;
 export type GetTurnUsageQuery = {
     Response: GetTurnUsage200;
     QueryParams: GetTurnUsageQueryParams;
+    Errors: any;
+};
+
+/**
+ * @description Current retention windows (days)
+*/
+export type GetUsageRetention200 = RestResponseUsageRetentionConfig;
+
+export type GetUsageRetentionQueryResponse = GetUsageRetention200;
+
+export type GetUsageRetentionQuery = {
+    Response: GetUsageRetention200;
+    Errors: any;
+};
+
+/**
+ * @description Updated windows, or a business error code
+*/
+export type UpdateUsageRetention200 = RestResponseUsageRetentionConfig;
+
+export type UpdateUsageRetentionMutationRequest = UsageRetentionConfig;
+
+export type UpdateUsageRetentionMutationResponse = UpdateUsageRetention200;
+
+export type UpdateUsageRetentionMutation = {
+    Response: UpdateUsageRetention200;
+    Request: UpdateUsageRetentionMutationRequest;
     Errors: any;
 };
 

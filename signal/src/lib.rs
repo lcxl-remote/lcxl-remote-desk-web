@@ -13,4 +13,6 @@ pub mod model_provider;
 pub mod service;
 pub mod terminal_orchestrator;
 pub mod turn_usage;
+pub mod usage_query;
+pub mod usage_retention;
 pub mod version;

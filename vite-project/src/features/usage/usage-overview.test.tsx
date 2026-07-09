@@ -29,6 +29,11 @@ describe("UsageOverview", () => {
         expect(c.querySelector('a[href="/usage/model"]')).not.toBeNull()
     })
 
+    it("links the retention config card to /usage/retention", () => {
+        const c = renderOverview()
+        expect(c.querySelector('a[href="/usage/retention"]')).not.toBeNull()
+    })
+
     it("does not reuse the old settings-scoped routes", () => {
         const c = renderOverview()
         expect(c.querySelector('a[href="/system/turn-usage"]')).toBeNull()

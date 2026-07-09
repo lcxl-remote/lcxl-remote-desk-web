@@ -1,9 +1,15 @@
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Network } from 'lucide-react';
 
 import { useGetTurnUsage } from '@/services/hooks/turnUsageController/useGetTurnUsage';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { TurnUsageChart, type TurnUsageRow } from '@/features/usage/turn-usage-chart';
+import {
+    UsageRangePicker,
+    presetRange,
+    type UsageRangeParams,
+} from '@/features/usage/usage-range-picker';
 
 /**
  * Local per-device TURN usage view for the portable/signal server. Collect-only
@@ -12,8 +18,10 @@ import { TurnUsageChart, type TurnUsageRow } from '@/features/usage/turn-usage-c
  */
 export function TurnUsagePage() {
     const { t } = useTranslation();
-    const { data, isLoading, error } = useGetTurnUsage();
+    const [range, setRange] = useState<UsageRangeParams>(() => presetRange('24h', new Date()));
+    const { data, isLoading, error } = useGetTurnUsage({ from: range.from, to: range.to });
 
+    const effective = data?.data?.range;
     const items = data?.data?.items ?? [];
     const rows: TurnUsageRow[] = items.map((item) => ({
         dimension: item.deviceCode,
@@ -34,7 +42,8 @@ export function TurnUsagePage() {
                     </div>
                     <CardDescription>{t('pages.turnUsage.description')}</CardDescription>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="flex flex-col gap-4">
+                    <UsageRangePicker value={range} onChange={setRange} effective={effective} />
                     {isLoading && (
                         <div className="text-muted-foreground text-sm py-8 text-center">
                             {t('pages.turnUsage.loading')}

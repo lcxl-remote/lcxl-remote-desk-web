@@ -1,0 +1,1 @@
+{"type":"object","description":"The effective range returned to the console alongside the usage rows.","required":["from","to","granularity"],"properties":{"from":{"type":"string"},"granularity":{"type":"string"},"to":{"type":"string"}},"x-readme-ref-name":"UsageRangeDto"}

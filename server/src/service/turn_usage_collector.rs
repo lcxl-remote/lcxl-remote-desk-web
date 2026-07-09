@@ -204,6 +204,7 @@ mod tests {
             &db,
             now() - chrono::Duration::hours(1),
             now() + chrono::Duration::hours(1),
+            desk_signal::usage_query::Granularity::Hour,
         )
         .await
         .unwrap();
@@ -218,6 +219,7 @@ mod tests {
             &db,
             now() - chrono::Duration::hours(1),
             now() + chrono::Duration::hours(1),
+            desk_signal::usage_query::Granularity::Hour,
         )
         .await
         .unwrap();
@@ -243,6 +245,7 @@ mod tests {
             &db,
             now() - chrono::Duration::hours(1),
             now() + chrono::Duration::hours(1),
+            desk_signal::usage_query::Granularity::Hour,
         )
         .await
         .unwrap();

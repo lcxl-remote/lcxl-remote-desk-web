@@ -37,6 +37,7 @@ const enSidebar = [
       { text: 'Terminal, Files & Clipboard', link: '/features/terminal-files-clipboard' },
       { text: 'Virtual Display', link: '/features/virtual-display' },
       { text: 'Privacy Screen & Whiteboard', link: '/features/privacy-whiteboard' },
+      { text: 'Usage Statistics & Retention', link: '/features/usage-statistics' },
     ],
   },
   {
@@ -94,6 +95,7 @@ const zhSidebar = [
       { text: '终端 / 文件 / 剪贴板', link: '/zh/features/terminal-files-clipboard' },
       { text: '虚拟显示器', link: '/zh/features/virtual-display' },
       { text: '防窥屏与白板', link: '/zh/features/privacy-whiteboard' },
+      { text: '用量统计与数据保留', link: '/zh/features/usage-statistics' },
     ],
   },
   {

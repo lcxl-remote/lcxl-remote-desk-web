@@ -7,13 +7,14 @@
 //! cache read, cache write) but without the subject/tier/node dimensions a
 //! single-process portable server does not have.
 
-use chrono::Timelike;
+use chrono::{NaiveDateTime, Timelike};
 use sea_orm::prelude::DateTimeUtc;
 use sea_orm::prelude::Expr;
 use sea_orm::sea_query::{ExprTrait, OnConflict};
-use sea_orm::{ActiveValue::Set, DatabaseConnection, DbErr, EntityTrait};
+use sea_orm::{ActiveValue::Set, DatabaseConnection, DbErr, EntityTrait, FromQueryResult};
 
 use crate::entity::ai_usage;
+use crate::usage_query::{Granularity, time_bucket_expr};
 
 /// A signed increment to apply to one `(model_name, hour_bucket)` rollup row.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -87,20 +88,72 @@ pub async fn upsert_ai_usage(
     Ok(())
 }
 
-/// Query per-model hourly rollups whose `hour_bucket` falls in `[from, to)`,
-/// ordered by hour then model.
+/// One aggregated per-model usage bucket. The time bucket decodes to a tz-less
+/// `NaiveDateTime` (UTC), summed over the hours it spans for a `day` query.
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+pub struct AiUsageBucket {
+    pub model_name: String,
+    pub hour_bucket: NaiveDateTime,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub request_count: i64,
+}
+
+/// Query per-model rollups whose `hour_bucket` falls in `[from, to)`, aggregated to
+/// the requested granularity (hour is identity; day folds hours into the UTC day),
+/// ordered by bucket then model.
 pub async fn query_ai_usage(
     db: &DatabaseConnection,
     from: DateTimeUtc,
     to: DateTimeUtc,
-) -> Result<Vec<ai_usage::Model>, DbErr> {
-    use sea_orm::{ColumnTrait, QueryFilter, QueryOrder};
+    granularity: Granularity,
+) -> Result<Vec<AiUsageBucket>, DbErr> {
+    use sea_orm::{ColumnTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 
+    let bucket = time_bucket_expr(granularity);
     ai_usage::Entity::find()
+        .select_only()
+        .column(ai_usage::Column::ModelName)
+        .column_as(bucket.clone(), "hour_bucket")
+        .column_as(
+            Expr::col(ai_usage::Column::InputTokens)
+                .sum()
+                .cast_as("BIGINT"),
+            "input_tokens",
+        )
+        .column_as(
+            Expr::col(ai_usage::Column::OutputTokens)
+                .sum()
+                .cast_as("BIGINT"),
+            "output_tokens",
+        )
+        .column_as(
+            Expr::col(ai_usage::Column::CacheReadTokens)
+                .sum()
+                .cast_as("BIGINT"),
+            "cache_read_tokens",
+        )
+        .column_as(
+            Expr::col(ai_usage::Column::CacheWriteTokens)
+                .sum()
+                .cast_as("BIGINT"),
+            "cache_write_tokens",
+        )
+        .column_as(
+            Expr::col(ai_usage::Column::RequestCount)
+                .sum()
+                .cast_as("BIGINT"),
+            "request_count",
+        )
         .filter(ai_usage::Column::HourBucket.gte(from))
         .filter(ai_usage::Column::HourBucket.lt(to))
-        .order_by_asc(ai_usage::Column::HourBucket)
+        .group_by(ai_usage::Column::ModelName)
+        .group_by(bucket.clone())
+        .order_by(bucket, Order::Asc)
         .order_by_asc(ai_usage::Column::ModelName)
+        .into_model::<AiUsageBucket>()
         .all(db)
         .await
 }
@@ -137,7 +190,9 @@ mod tests {
     #[test]
     fn truncate_drops_sub_hour_components() {
         use chrono::TimeZone;
-        let ts = chrono::Utc.with_ymd_and_hms(2026, 6, 24, 9, 37, 42).unwrap();
+        let ts = chrono::Utc
+            .with_ymd_and_hms(2026, 6, 24, 9, 37, 42)
+            .unwrap();
         assert_eq!(truncate_to_hour(ts), hour(9));
     }
 
@@ -151,7 +206,9 @@ mod tests {
             .await
             .unwrap();
 
-        let rows = query_ai_usage(&db, hour(0), hour(23)).await.unwrap();
+        let rows = query_ai_usage(&db, hour(0), hour(23), Granularity::Hour)
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].input_tokens, 200);
         assert_eq!(rows[0].output_tokens, 10);
@@ -174,8 +231,29 @@ mod tests {
             .unwrap();
 
         // Range [9,10) keeps only the two hour-9 rows.
-        let rows = query_ai_usage(&db, hour(9), hour(10)).await.unwrap();
+        let rows = query_ai_usage(&db, hour(9), hour(10), Granularity::Hour)
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| r.hour_bucket == hour(9)));
+        assert!(rows.iter().all(|r| r.hour_bucket == hour(9).naive_utc()));
+    }
+
+    #[tokio::test]
+    async fn day_granularity_folds_hours_and_decodes() {
+        let db = memory_db().await;
+        // Two hours on the same UTC day for one model collapse into one day bucket.
+        upsert_ai_usage(&db, hour(9), &delta("gpt-x", 10))
+            .await
+            .unwrap();
+        upsert_ai_usage(&db, hour(20), &delta("gpt-x", 5))
+            .await
+            .unwrap();
+        let rows = query_ai_usage(&db, hour(0), hour(23), Granularity::Day)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "both hours fold into one UTC day");
+        assert_eq!(rows[0].input_tokens, 15);
+        // The day bucket decodes to the UTC midnight timestamp (never a bare date).
+        assert_eq!(rows[0].hour_bucket, hour(0).naive_utc());
     }
 }

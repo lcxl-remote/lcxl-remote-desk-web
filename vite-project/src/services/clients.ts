@@ -4,7 +4,7 @@
 */
 
 import fetch from "@/lib/kubb-client";
-import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, GetCurrentUserQueryResponse, GetCurrentUser401, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, ListFilesQueryResponse, ListFilesQueryParams, QueryMacosAutologinQueryResponse, RetryManagerLinkMutationResponse, QueryManagerLinkStatusQueryResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandlePathParams, StartSupportMutationResponse, SupportStatusQueryResponse, StopSupportMutationResponse, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, TestModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics417, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
+import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, GetCurrentUserQueryResponse, GetCurrentUser401, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, ListFilesQueryResponse, ListFilesQueryParams, QueryMacosAutologinQueryResponse, RetryManagerLinkMutationResponse, QueryManagerLinkStatusQueryResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandlePathParams, StartSupportMutationResponse, SupportStatusQueryResponse, StopSupportMutationResponse, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, TestModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics417, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, GetUsageRetentionQueryResponse, UpdateUsageRetentionMutationRequest, UpdateUsageRetentionMutationResponse, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 
 function getGetCurrentUserUrl() {
@@ -1115,6 +1115,42 @@ export async function getTurnUsage(params?: GetTurnUsageQueryParams, config: Par
 
 
   const res = await request<GetTurnUsageQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetTurnUsageUrl().url.toString(), params, ... requestConfig })
+  return res.data
+}
+
+function getGetUsageRetentionUrl() {
+  const res = { method: 'GET', url: `/api/usage/usage-retention` as const }
+  return res
+}
+
+/**
+ * @summary Query the usage-rollup retention windows
+ * {@link /api/usage/usage-retention}
+ */
+export async function getUsageRetention(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<GetUsageRetentionQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetUsageRetentionUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getUpdateUsageRetentionUrl() {
+  const res = { method: 'PUT', url: `/api/usage/usage-retention` as const }
+  return res
+}
+
+/**
+ * @summary Update the usage-rollup retention windows
+ * {@link /api/usage/usage-retention}
+ */
+export async function updateUsageRetention(data: UpdateUsageRetentionMutationRequest, config: Partial<RequestConfig<UpdateUsageRetentionMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<UpdateUsageRetentionMutationResponse, ResponseErrorConfig<Error>, UpdateUsageRetentionMutationRequest>({ method : "PUT", url : getUpdateUsageRetentionUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 

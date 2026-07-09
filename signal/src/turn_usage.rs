@@ -6,14 +6,15 @@
 
 use std::collections::HashMap;
 
-use chrono::Timelike;
+use chrono::{NaiveDateTime, Timelike};
 use sea_orm::prelude::DateTimeUtc;
 use sea_orm::prelude::Expr;
 use sea_orm::sea_query::{ExprTrait, OnConflict};
-use sea_orm::{ActiveValue::Set, DatabaseConnection, DbErr, EntityTrait};
+use sea_orm::{ActiveValue::Set, DatabaseConnection, DbErr, EntityTrait, FromQueryResult};
 use tokio::sync::RwLock;
 
 use crate::entity::turn_usage;
+use crate::usage_query::{Granularity, time_bucket_expr};
 
 /// In-process map from signaling `connection_id` to its resolved `device_code`,
 /// populated while a connection is live. The portable server is a single
@@ -99,20 +100,65 @@ pub async fn upsert_turn_usage(
     Ok(())
 }
 
-/// Query per-device hourly rollups whose `hour_bucket` falls in `[from, to)`,
-/// ordered by hour then device.
+/// One aggregated per-device usage bucket. The time bucket decodes to a tz-less
+/// `NaiveDateTime` (UTC), summed over the hours it spans for a `day` query.
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+pub struct TurnUsageBucket {
+    pub device_code: String,
+    pub hour_bucket: NaiveDateTime,
+    pub received_bytes: i64,
+    pub sent_bytes: i64,
+    pub received_pkts: i64,
+    pub sent_pkts: i64,
+}
+
+/// Query per-device rollups whose `hour_bucket` falls in `[from, to)`, aggregated to
+/// the requested granularity (hour is identity; day folds hours into the UTC day),
+/// ordered by bucket then device.
 pub async fn query_turn_usage(
     db: &DatabaseConnection,
     from: DateTimeUtc,
     to: DateTimeUtc,
-) -> Result<Vec<turn_usage::Model>, DbErr> {
-    use sea_orm::{ColumnTrait, QueryFilter, QueryOrder};
+    granularity: Granularity,
+) -> Result<Vec<TurnUsageBucket>, DbErr> {
+    use sea_orm::{ColumnTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 
+    let bucket = time_bucket_expr(granularity);
     turn_usage::Entity::find()
+        .select_only()
+        .column(turn_usage::Column::DeviceCode)
+        .column_as(bucket.clone(), "hour_bucket")
+        .column_as(
+            Expr::col(turn_usage::Column::ReceivedBytes)
+                .sum()
+                .cast_as("BIGINT"),
+            "received_bytes",
+        )
+        .column_as(
+            Expr::col(turn_usage::Column::SentBytes)
+                .sum()
+                .cast_as("BIGINT"),
+            "sent_bytes",
+        )
+        .column_as(
+            Expr::col(turn_usage::Column::ReceivedPkts)
+                .sum()
+                .cast_as("BIGINT"),
+            "received_pkts",
+        )
+        .column_as(
+            Expr::col(turn_usage::Column::SentPkts)
+                .sum()
+                .cast_as("BIGINT"),
+            "sent_pkts",
+        )
         .filter(turn_usage::Column::HourBucket.gte(from))
         .filter(turn_usage::Column::HourBucket.lt(to))
-        .order_by_asc(turn_usage::Column::HourBucket)
+        .group_by(turn_usage::Column::DeviceCode)
+        .group_by(bucket.clone())
+        .order_by(bucket, Order::Asc)
         .order_by_asc(turn_usage::Column::DeviceCode)
+        .into_model::<TurnUsageBucket>()
         .all(db)
         .await
 }
@@ -160,7 +206,9 @@ mod tests {
             .await
             .unwrap();
 
-        let rows = query_turn_usage(&db, hour(0), hour(23)).await.unwrap();
+        let rows = query_turn_usage(&db, hour(0), hour(23), Granularity::Hour)
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].received_bytes, 200);
         assert_eq!(rows[0].sent_bytes, 80);
@@ -180,8 +228,28 @@ mod tests {
         upsert_turn_usage(&db, "dev-1", hour(10), &d).await.unwrap();
 
         // Range [9,10) keeps only the two hour-9 rows.
-        let rows = query_turn_usage(&db, hour(9), hour(10)).await.unwrap();
+        let rows = query_turn_usage(&db, hour(9), hour(10), Granularity::Hour)
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| r.hour_bucket == hour(9)));
+        assert!(rows.iter().all(|r| r.hour_bucket == hour(9).naive_utc()));
+    }
+
+    #[tokio::test]
+    async fn day_granularity_folds_hours_and_decodes() {
+        let db = memory_db().await;
+        let d = TurnUsageDelta {
+            received_bytes: 10,
+            ..Default::default()
+        };
+        // Two hours on the same UTC day for one device collapse into one day bucket.
+        upsert_turn_usage(&db, "dev-1", hour(9), &d).await.unwrap();
+        upsert_turn_usage(&db, "dev-1", hour(20), &d).await.unwrap();
+        let rows = query_turn_usage(&db, hour(0), hour(23), Granularity::Day)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "both hours fold into one UTC day");
+        assert_eq!(rows[0].received_bytes, 20);
+        assert_eq!(rows[0].hour_bucket, hour(0).naive_utc());
     }
 }

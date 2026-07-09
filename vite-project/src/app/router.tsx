@@ -16,6 +16,7 @@ import { SystemSettings } from '@/features/settings/system-settings';
 import { TurnSettings } from '@/features/settings/turn-settings';
 import { TurnUsagePage } from '@/features/usage/turn-usage';
 import { ModelUsagePage } from '@/features/usage/model-usage';
+import { UsageRetentionPage } from '@/features/usage/usage-retention';
 import { UsageLayout } from '@/features/usage/usage-layout';
 import { UsageOverview } from '@/features/usage/usage-overview';
 import { TurnClientSettingsPage } from '@/features/settings/turn-client-settings';
@@ -157,6 +158,10 @@ export const router = createBrowserRouter([
                     {
                         path: 'model',
                         element: <ModelUsagePage />,
+                    },
+                    {
+                        path: 'retention',
+                        element: <UsageRetentionPage />,
                     },
                 ]
             },

@@ -84,6 +84,7 @@ use desk_signal::{
         signaling::open_signaling_handle,
         terminal::{list_terminal, open_terminal_session},
         turn_usage::get_turn_usage,
+        usage_retention::{get_usage_retention, update_usage_retention},
     },
     model::SharedConnectionMap,
 };
@@ -252,6 +253,14 @@ pub fn configure_api_surface(
                             .service(get_model_provider)
                             .service(update_model_provider)
                             .service(test_model_provider),
+                    )
+                    // Usage-retention windows govern both rollup tables; the row
+                    // lives in the same local signal DB, present whenever the
+                    // usage view is.
+                    .service(
+                        utoipa_actix_web::scope("/usage")
+                            .service(get_usage_retention)
+                            .service(update_usage_retention),
                     );
                 }
             }),
@@ -456,7 +465,13 @@ pub async fn run_with_hub(
             .to_string_lossy()
             .to_string();
 
-        desk_signal::db::init_db(&settings_dir).await?;
+        let signal_db = desk_signal::db::init_db(&settings_dir).await?;
+        // Age-based retention cleanup for the local usage rollups (collect-only
+        // telemetry, no billing coupling). One task per process; the delete is
+        // idempotent.
+        tokio::spawn(desk_signal::usage_retention::run_retention_cleanup_loop(
+            signal_db.clone(),
+        ));
     }
 
     info!("Server settings: {:?}", settings);

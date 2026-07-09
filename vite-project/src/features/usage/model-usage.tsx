@@ -1,9 +1,15 @@
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Bot } from 'lucide-react';
 
 import { useGetModelUsage } from '@/services/hooks/modelUsageController/useGetModelUsage';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ModelUsageChart, type ModelUsageRow } from '@/features/usage/model-usage-chart';
+import {
+    UsageRangePicker,
+    presetRange,
+    type UsageRangeParams,
+} from '@/features/usage/usage-range-picker';
 
 /**
  * Local per-model AI gateway token-usage view for the portable/signal server.
@@ -12,8 +18,10 @@ import { ModelUsageChart, type ModelUsageRow } from '@/features/usage/model-usag
  */
 export function ModelUsagePage() {
     const { t } = useTranslation();
-    const { data, isLoading, error } = useGetModelUsage();
+    const [range, setRange] = useState<UsageRangeParams>(() => presetRange('24h', new Date()));
+    const { data, isLoading, error } = useGetModelUsage({ from: range.from, to: range.to });
 
+    const effective = data?.data?.range;
     const items = data?.data?.items ?? [];
     const rows: ModelUsageRow[] = items.map((item) => ({
         dimension: item.modelName,
@@ -35,7 +43,8 @@ export function ModelUsagePage() {
                     </div>
                     <CardDescription>{t('pages.modelUsage.description')}</CardDescription>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="flex flex-col gap-4">
+                    <UsageRangePicker value={range} onChange={setRange} effective={effective} />
                     {isLoading && (
                         <div className="text-muted-foreground text-sm py-8 text-center">
                             {t('pages.modelUsage.loading')}
