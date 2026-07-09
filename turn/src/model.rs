@@ -57,24 +57,36 @@ impl Statistics {
         self.addr_to_conn.get(addr).map(String::as_str)
     }
 
-    /// Fold a received-direction sample into `by_connection` when `addr` has a
-    /// known binding. The per-address / global counters are updated by the
-    /// caller; this only handles the connection dimension.
-    pub fn record_recv(&mut self, addr: std::net::SocketAddr, bytes: usize) {
+    /// Fold a received-direction sample of class `class` into `by_connection`
+    /// when `addr` has a known binding. The per-address / global counters are
+    /// updated by the caller; this only handles the connection dimension.
+    pub fn record_recv(
+        &mut self,
+        addr: std::net::SocketAddr,
+        bytes: usize,
+        class: TurnTrafficClass,
+    ) {
         if let Some(conn_id) = self.addr_to_conn.get(&addr) {
-            let entry = self.by_connection.entry(conn_id.clone()).or_default();
-            entry.received_bytes += bytes;
-            entry.received_pkts += 1;
+            self.by_connection
+                .entry(conn_id.clone())
+                .or_default()
+                .add_recv(bytes, class);
         }
     }
 
-    /// Fold a sent-direction sample into `by_connection` when `target` has a
-    /// known binding.
-    pub fn record_send(&mut self, target: std::net::SocketAddr, bytes: usize) {
+    /// Fold a sent-direction sample of class `class` into `by_connection` when
+    /// `target` has a known binding.
+    pub fn record_send(
+        &mut self,
+        target: std::net::SocketAddr,
+        bytes: usize,
+        class: TurnTrafficClass,
+    ) {
         if let Some(conn_id) = self.addr_to_conn.get(&target) {
-            let entry = self.by_connection.entry(conn_id.clone()).or_default();
-            entry.send_bytes += bytes;
-            entry.send_pkts += 1;
+            self.by_connection
+                .entry(conn_id.clone())
+                .or_default()
+                .add_send(bytes, class);
         }
     }
 }
@@ -136,13 +148,58 @@ pub struct TurnSession {
     pub expires: u64,
 }
 
-#[derive(Serialize, ToSchema, Default, Debug, Clone)]
-pub struct TurnSessionStatistics {
+/// Traffic class of a single TURN client-facing datagram. `Relay` carries
+/// relayed application data (ChannelData / Send / Data indication) and is the
+/// billable dimension; `Control` covers STUN Binding and TURN control messages
+/// (Allocate / Refresh / CreatePermission / ChannelBind) plus anything malformed,
+/// and is retained for observability only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnTrafficClass {
+    Relay,
+    Control,
+}
+
+/// Byte/packet counters for one traffic class in both directions.
+#[derive(Serialize, ToSchema, Default, Debug, Clone, Copy)]
+pub struct TurnDirectionalCounters {
     pub received_bytes: usize,
     pub send_bytes: usize,
     pub received_pkts: usize,
     pub send_pkts: usize,
+}
+
+#[derive(Serialize, ToSchema, Default, Debug, Clone)]
+pub struct TurnSessionStatistics {
+    /// Relayed application data (ChannelData + Send/Data indications). Billable.
+    pub relay: TurnDirectionalCounters,
+    /// STUN Binding + TURN control (Allocate/Refresh/CreatePermission/ChannelBind)
+    /// and any malformed datagram. Observability only, never billed.
+    pub control: TurnDirectionalCounters,
     pub error_pkts: usize,
+}
+
+impl TurnSessionStatistics {
+    /// Mutable counters for the given traffic class.
+    fn counters_mut(&mut self, class: TurnTrafficClass) -> &mut TurnDirectionalCounters {
+        match class {
+            TurnTrafficClass::Relay => &mut self.relay,
+            TurnTrafficClass::Control => &mut self.control,
+        }
+    }
+
+    /// Fold one received-direction sample into the counters of `class`.
+    pub fn add_recv(&mut self, bytes: usize, class: TurnTrafficClass) {
+        let counters = self.counters_mut(class);
+        counters.received_bytes += bytes;
+        counters.received_pkts += 1;
+    }
+
+    /// Fold one sent-direction sample into the counters of `class`.
+    pub fn add_send(&mut self, bytes: usize, class: TurnTrafficClass) {
+        let counters = self.counters_mut(class);
+        counters.send_bytes += bytes;
+        counters.send_pkts += 1;
+    }
 }
 
 /// Turn Server Settings
@@ -231,25 +288,31 @@ mod statistics_tests {
     }
 
     #[test]
-    fn bound_addr_folds_into_by_connection() {
+    fn bound_addr_folds_relay_and_control_separately() {
         let mut stats = Statistics::default();
         stats.record_binding(addr(1000), "conn-a");
 
-        stats.record_recv(addr(1000), 100);
-        stats.record_send(addr(1000), 40);
+        stats.record_recv(addr(1000), 100, TurnTrafficClass::Relay);
+        stats.record_send(addr(1000), 40, TurnTrafficClass::Relay);
+        stats.record_recv(addr(1000), 7, TurnTrafficClass::Control);
+        stats.record_send(addr(1000), 3, TurnTrafficClass::Control);
 
         let conn = stats.by_connection.get("conn-a").expect("connection entry");
-        assert_eq!(conn.received_bytes, 100);
-        assert_eq!(conn.received_pkts, 1);
-        assert_eq!(conn.send_bytes, 40);
-        assert_eq!(conn.send_pkts, 1);
+        assert_eq!(conn.relay.received_bytes, 100);
+        assert_eq!(conn.relay.received_pkts, 1);
+        assert_eq!(conn.relay.send_bytes, 40);
+        assert_eq!(conn.relay.send_pkts, 1);
+        assert_eq!(conn.control.received_bytes, 7);
+        assert_eq!(conn.control.send_bytes, 3);
+        assert_eq!(conn.control.received_pkts, 1);
+        assert_eq!(conn.control.send_pkts, 1);
     }
 
     #[test]
     fn unbound_addr_does_not_touch_by_connection() {
         let mut stats = Statistics::default();
-        stats.record_recv(addr(2000), 100);
-        stats.record_send(addr(2000), 40);
+        stats.record_recv(addr(2000), 100, TurnTrafficClass::Relay);
+        stats.record_send(addr(2000), 40, TurnTrafficClass::Control);
         assert!(stats.by_connection.is_empty());
     }
 
@@ -257,17 +320,27 @@ mod statistics_tests {
     fn addr_reuse_is_last_writer_wins() {
         let mut stats = Statistics::default();
         stats.record_binding(addr(3000), "conn-old");
-        stats.record_recv(addr(3000), 10);
+        stats.record_recv(addr(3000), 10, TurnTrafficClass::Relay);
         // Same address rebinds to a new connection (NAT reuse).
         stats.record_binding(addr(3000), "conn-new");
-        stats.record_recv(addr(3000), 50);
+        stats.record_recv(addr(3000), 50, TurnTrafficClass::Relay);
 
         assert_eq!(
-            stats.by_connection.get("conn-old").unwrap().received_bytes,
+            stats
+                .by_connection
+                .get("conn-old")
+                .unwrap()
+                .relay
+                .received_bytes,
             10
         );
         assert_eq!(
-            stats.by_connection.get("conn-new").unwrap().received_bytes,
+            stats
+                .by_connection
+                .get("conn-new")
+                .unwrap()
+                .relay
+                .received_bytes,
             50
         );
     }
@@ -276,15 +349,20 @@ mod statistics_tests {
     fn snapshot_is_independent_clone() {
         let mut stats = Statistics::default();
         stats.record_binding(addr(4000), "conn-x");
-        stats.record_recv(addr(4000), 25);
+        stats.record_recv(addr(4000), 25, TurnTrafficClass::Relay);
 
         let snap = stats.snapshot_by_connection();
         // Mutating the live stats must not change the snapshot.
-        stats.record_recv(addr(4000), 75);
+        stats.record_recv(addr(4000), 75, TurnTrafficClass::Relay);
 
-        assert_eq!(snap.get("conn-x").unwrap().received_bytes, 25);
+        assert_eq!(snap.get("conn-x").unwrap().relay.received_bytes, 25);
         assert_eq!(
-            stats.by_connection.get("conn-x").unwrap().received_bytes,
+            stats
+                .by_connection
+                .get("conn-x")
+                .unwrap()
+                .relay
+                .received_bytes,
             100
         );
     }

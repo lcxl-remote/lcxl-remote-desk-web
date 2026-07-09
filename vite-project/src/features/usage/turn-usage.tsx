@@ -26,10 +26,14 @@ export function TurnUsagePage() {
     const rows: TurnUsageRow[] = items.map((item) => ({
         dimension: item.deviceCode,
         hourBucket: item.hourBucket,
-        receivedBytes: item.receivedBytes,
-        sentBytes: item.sentBytes,
-        receivedPkts: item.receivedPkts,
-        sentPkts: item.sentPkts,
+        relayReceivedBytes: item.relayReceivedBytes,
+        relaySentBytes: item.relaySentBytes,
+        relayReceivedPkts: item.relayReceivedPkts,
+        relaySentPkts: item.relaySentPkts,
+        controlReceivedBytes: item.controlReceivedBytes,
+        controlSentBytes: item.controlSentBytes,
+        controlReceivedPkts: item.controlReceivedPkts,
+        controlSentPkts: item.controlSentPkts,
     }));
 
     return (

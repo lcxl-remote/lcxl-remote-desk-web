@@ -21,16 +21,22 @@ pub struct TurnUsageQuery {
     pub granularity: Option<String>,
 }
 
-/// One per-device hourly usage row, projected for the frontend chart.
+/// One per-device hourly usage row, projected for the frontend chart. Traffic is
+/// split into billable `relay_*` (ChannelData + Send/Data indications) and
+/// observation-only `control_*` (STUN + TURN control).
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnUsageItem {
     pub device_code: String,
     pub hour_bucket: String,
-    pub received_bytes: i64,
-    pub sent_bytes: i64,
-    pub received_pkts: i64,
-    pub sent_pkts: i64,
+    pub relay_received_bytes: i64,
+    pub relay_sent_bytes: i64,
+    pub relay_received_pkts: i64,
+    pub relay_sent_pkts: i64,
+    pub control_received_bytes: i64,
+    pub control_sent_bytes: i64,
+    pub control_received_pkts: i64,
+    pub control_sent_pkts: i64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -82,10 +88,14 @@ pub async fn get_turn_usage(
                     chrono::Utc,
                 )
                 .to_rfc3339(),
-                received_bytes: row.received_bytes,
-                sent_bytes: row.sent_bytes,
-                received_pkts: row.received_pkts,
-                sent_pkts: row.sent_pkts,
+                relay_received_bytes: row.relay_received_bytes,
+                relay_sent_bytes: row.relay_sent_bytes,
+                relay_received_pkts: row.relay_received_pkts,
+                relay_sent_pkts: row.relay_sent_pkts,
+                control_received_bytes: row.control_received_bytes,
+                control_sent_bytes: row.control_sent_bytes,
+                control_received_pkts: row.control_received_pkts,
+                control_sent_pkts: row.control_sent_pkts,
             })
             .collect()
     };

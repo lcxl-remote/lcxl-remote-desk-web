@@ -16,10 +16,16 @@ import {
 export interface TurnUsageRow {
     dimension: string;
     hourBucket: string;
-    receivedBytes: number;
-    sentBytes: number;
-    receivedPkts: number;
-    sentPkts: number;
+    /** Relayed application data (ChannelData + Send/Data indications). Billable. */
+    relayReceivedBytes: number;
+    relaySentBytes: number;
+    relayReceivedPkts: number;
+    relaySentPkts: number;
+    /** STUN + TURN control traffic. Observability only, never billed. */
+    controlReceivedBytes: number;
+    controlSentBytes: number;
+    controlReceivedPkts: number;
+    controlSentPkts: number;
 }
 
 export interface TurnUsageChartProps {
@@ -41,10 +47,10 @@ function formatBytes(bytes: number): string {
 
 interface DimensionTotals {
     dimension: string;
-    receivedBytes: number;
-    sentBytes: number;
-    receivedPkts: number;
-    sentPkts: number;
+    relayReceivedBytes: number;
+    relaySentBytes: number;
+    relayPkts: number;
+    controlBytes: number;
 }
 
 /**
@@ -60,25 +66,24 @@ export function TurnUsageChart({ dimensionLabel, rows }: TurnUsageChartProps) {
     for (const row of rows) {
         const entry = byDimension.get(row.dimension) ?? {
             dimension: row.dimension,
-            receivedBytes: 0,
-            sentBytes: 0,
-            receivedPkts: 0,
-            sentPkts: 0,
+            relayReceivedBytes: 0,
+            relaySentBytes: 0,
+            relayPkts: 0,
+            controlBytes: 0,
         };
-        entry.receivedBytes += row.receivedBytes;
-        entry.sentBytes += row.sentBytes;
-        entry.receivedPkts += row.receivedPkts;
-        entry.sentPkts += row.sentPkts;
+        entry.relayReceivedBytes += row.relayReceivedBytes;
+        entry.relaySentBytes += row.relaySentBytes;
+        entry.relayPkts += row.relayReceivedPkts + row.relaySentPkts;
+        entry.controlBytes += row.controlReceivedBytes + row.controlSentBytes;
         byDimension.set(row.dimension, entry);
     }
 
+    // Sort and scale the magnitude bar by billable (relay) traffic.
+    const relayTotal = (d: DimensionTotals) => d.relayReceivedBytes + d.relaySentBytes;
     const totals = Array.from(byDimension.values()).sort(
-        (a, b) => b.receivedBytes + b.sentBytes - (a.receivedBytes + a.sentBytes),
+        (a, b) => relayTotal(b) - relayTotal(a),
     );
-    const maxTotal = totals.reduce(
-        (max, d) => Math.max(max, d.receivedBytes + d.sentBytes),
-        0,
-    );
+    const maxTotal = totals.reduce((max, d) => Math.max(max, relayTotal(d)), 0);
 
     if (totals.length === 0) {
         return (
@@ -102,15 +107,18 @@ export function TurnUsageChart({ dimensionLabel, rows }: TurnUsageChartProps) {
                             {t('pages.turnUsage.column.sent')}
                         </TableHead>
                         <TableHead className="text-right">
+                            {t('pages.turnUsage.column.control')}
+                        </TableHead>
+                        <TableHead className="text-right">
                             {t('pages.turnUsage.column.packets')}
                         </TableHead>
                     </TableRow>
                 </TableHeader>
                 <TableBody>
                     {totals.map((d) => {
-                        const total = d.receivedBytes + d.sentBytes;
+                        const total = d.relayReceivedBytes + d.relaySentBytes;
                         const pct = maxTotal > 0 ? (total / maxTotal) * 100 : 0;
-                        const rxPct = total > 0 ? (d.receivedBytes / total) * 100 : 0;
+                        const rxPct = total > 0 ? (d.relayReceivedBytes / total) * 100 : 0;
                         return (
                             <TableRow key={d.dimension}>
                                 <TableCell className="font-mono">{d.dimension}</TableCell>
@@ -124,19 +132,25 @@ export function TurnUsageChart({ dimensionLabel, rows }: TurnUsageChartProps) {
                                     </div>
                                 </TableCell>
                                 <TableCell className="text-right">
-                                    {formatBytes(d.receivedBytes)}
+                                    {formatBytes(d.relayReceivedBytes)}
                                 </TableCell>
                                 <TableCell className="text-right">
-                                    {formatBytes(d.sentBytes)}
+                                    {formatBytes(d.relaySentBytes)}
+                                </TableCell>
+                                <TableCell className="text-right text-muted-foreground">
+                                    {formatBytes(d.controlBytes)}
                                 </TableCell>
                                 <TableCell className="text-right">
-                                    {(d.receivedPkts + d.sentPkts).toLocaleString()}
+                                    {d.relayPkts.toLocaleString()}
                                 </TableCell>
                             </TableRow>
                         );
                     })}
                 </TableBody>
             </Table>
+            <p className="text-muted-foreground text-xs">
+                {t('pages.turnUsage.billableNote')}
+            </p>
         </div>
     );
 }

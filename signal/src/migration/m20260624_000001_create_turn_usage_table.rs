@@ -22,25 +22,49 @@ impl MigrationTrait for Migration {
                             .not_null(),
                     )
                     .col(
-                        ColumnDef::new(TurnUsageHourly::ReceivedBytes)
+                        ColumnDef::new(TurnUsageHourly::RelayReceivedBytes)
                             .big_integer()
                             .not_null()
                             .default(0),
                     )
                     .col(
-                        ColumnDef::new(TurnUsageHourly::SentBytes)
+                        ColumnDef::new(TurnUsageHourly::RelaySentBytes)
                             .big_integer()
                             .not_null()
                             .default(0),
                     )
                     .col(
-                        ColumnDef::new(TurnUsageHourly::ReceivedPkts)
+                        ColumnDef::new(TurnUsageHourly::RelayReceivedPkts)
                             .big_integer()
                             .not_null()
                             .default(0),
                     )
                     .col(
-                        ColumnDef::new(TurnUsageHourly::SentPkts)
+                        ColumnDef::new(TurnUsageHourly::RelaySentPkts)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(TurnUsageHourly::ControlReceivedBytes)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(TurnUsageHourly::ControlSentBytes)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(TurnUsageHourly::ControlReceivedPkts)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(TurnUsageHourly::ControlSentPkts)
                             .big_integer()
                             .not_null()
                             .default(0),
@@ -73,9 +97,13 @@ pub enum TurnUsageHourly {
     Table,
     DeviceCode,
     HourBucket,
-    ReceivedBytes,
-    SentBytes,
-    ReceivedPkts,
-    SentPkts,
+    RelayReceivedBytes,
+    RelaySentBytes,
+    RelayReceivedPkts,
+    RelaySentPkts,
+    ControlReceivedBytes,
+    ControlSentBytes,
+    ControlReceivedPkts,
+    ControlSentPkts,
     UpdatedAt,
 }

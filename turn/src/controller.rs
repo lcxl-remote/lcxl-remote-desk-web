@@ -66,22 +66,27 @@ pub async fn get_turn_metrics(
     let mut metrics = String::new();
 
     if let Ok(stats) = api_state.statistics.read() {
-        metrics.push_str(&format!(
-            "turn_server_received_bytes_total {}\n",
-            stats.global.received_bytes
-        ));
-        metrics.push_str(&format!(
-            "turn_server_sent_bytes_total {}\n",
-            stats.global.send_bytes
-        ));
-        metrics.push_str(&format!(
-            "turn_server_received_pkts_total {}\n",
-            stats.global.received_pkts
-        ));
-        metrics.push_str(&format!(
-            "turn_server_sent_pkts_total {}\n",
-            stats.global.send_pkts
-        ));
+        for (class, c) in [
+            ("relay", &stats.global.relay),
+            ("control", &stats.global.control),
+        ] {
+            metrics.push_str(&format!(
+                "turn_server_received_bytes_total{{class=\"{class}\"}} {}\n",
+                c.received_bytes
+            ));
+            metrics.push_str(&format!(
+                "turn_server_sent_bytes_total{{class=\"{class}\"}} {}\n",
+                c.send_bytes
+            ));
+            metrics.push_str(&format!(
+                "turn_server_received_pkts_total{{class=\"{class}\"}} {}\n",
+                c.received_pkts
+            ));
+            metrics.push_str(&format!(
+                "turn_server_sent_pkts_total{{class=\"{class}\"}} {}\n",
+                c.send_pkts
+            ));
+        }
     }
 
     Ok(HttpResponse::Ok()

@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use desk_signal::turn_usage::{
     ConnectionDeviceMap, TurnUsageDelta, truncate_to_hour, upsert_turn_usage,
 };
-use desk_turn::model::{Statistics, TurnSessionStatistics};
+use desk_turn::model::{Statistics, TurnDirectionalCounters, TurnSessionStatistics};
 use sea_orm::DatabaseConnection;
 
 /// Hour-aligned UTC timestamp, matching the rollup's `hour_bucket` column type.
@@ -86,10 +86,14 @@ impl TurnUsageCollector {
             let entry = per_device
                 .entry(device_code)
                 .or_insert_with(|| (TurnUsageDelta::default(), Vec::new()));
-            entry.0.received_bytes += delta.received_bytes;
-            entry.0.sent_bytes += delta.sent_bytes;
-            entry.0.received_pkts += delta.received_pkts;
-            entry.0.sent_pkts += delta.sent_pkts;
+            entry.0.relay_received_bytes += delta.relay_received_bytes;
+            entry.0.relay_sent_bytes += delta.relay_sent_bytes;
+            entry.0.relay_received_pkts += delta.relay_received_pkts;
+            entry.0.relay_sent_pkts += delta.relay_sent_pkts;
+            entry.0.control_received_bytes += delta.control_received_bytes;
+            entry.0.control_sent_bytes += delta.control_sent_bytes;
+            entry.0.control_received_pkts += delta.control_received_pkts;
+            entry.0.control_sent_pkts += delta.control_sent_pkts;
             entry.1.push(conn_id.clone());
         }
 
@@ -125,21 +129,42 @@ impl TurnUsageCollector {
     }
 }
 
-/// Signed difference of a current cumulative sample from its baseline. Saturates
-/// at zero per field to tolerate a counter reset (e.g. runtime restart).
+/// Signed difference of a current cumulative sample from its baseline, per
+/// traffic class. Saturates at zero per field to tolerate a counter reset (e.g.
+/// runtime restart).
 fn delta_since(
     base: Option<&TurnSessionStatistics>,
     cur: &TurnSessionStatistics,
 ) -> TurnUsageDelta {
-    let (br, bs, brp, bsp) = match base {
-        Some(b) => (b.received_bytes, b.send_bytes, b.received_pkts, b.send_pkts),
-        None => (0, 0, 0, 0),
+    let default = TurnDirectionalCounters::default();
+    let (base_relay, base_control) = match base {
+        Some(b) => (&b.relay, &b.control),
+        None => (&default, &default),
     };
     TurnUsageDelta {
-        received_bytes: cur.received_bytes.saturating_sub(br) as i64,
-        sent_bytes: cur.send_bytes.saturating_sub(bs) as i64,
-        received_pkts: cur.received_pkts.saturating_sub(brp) as i64,
-        sent_pkts: cur.send_pkts.saturating_sub(bsp) as i64,
+        relay_received_bytes: cur
+            .relay
+            .received_bytes
+            .saturating_sub(base_relay.received_bytes) as i64,
+        relay_sent_bytes: cur.relay.send_bytes.saturating_sub(base_relay.send_bytes) as i64,
+        relay_received_pkts: cur
+            .relay
+            .received_pkts
+            .saturating_sub(base_relay.received_pkts) as i64,
+        relay_sent_pkts: cur.relay.send_pkts.saturating_sub(base_relay.send_pkts) as i64,
+        control_received_bytes: cur
+            .control
+            .received_bytes
+            .saturating_sub(base_control.received_bytes) as i64,
+        control_sent_bytes: cur
+            .control
+            .send_bytes
+            .saturating_sub(base_control.send_bytes) as i64,
+        control_received_pkts: cur
+            .control
+            .received_pkts
+            .saturating_sub(base_control.received_pkts) as i64,
+        control_sent_pkts: cur.control.send_pkts.saturating_sub(base_control.send_pkts) as i64,
     }
 }
 
@@ -148,6 +173,7 @@ mod tests {
     use super::*;
     use desk_signal::entity::turn_usage;
     use desk_signal::turn_usage::query_turn_usage;
+    use desk_turn::model::TurnTrafficClass;
     use sea_orm::{ConnectionTrait, Database, Schema};
 
     async fn memory_db() -> DatabaseConnection {
@@ -158,12 +184,22 @@ mod tests {
         db
     }
 
+    /// A cumulative sample with `rx`/`tx` relay bytes (and a fixed small amount of
+    /// control traffic to exercise both dimensions).
     fn sample(rx: usize, tx: usize) -> TurnSessionStatistics {
         TurnSessionStatistics {
-            received_bytes: rx,
-            send_bytes: tx,
-            received_pkts: 1,
-            send_pkts: 1,
+            relay: TurnDirectionalCounters {
+                received_bytes: rx,
+                send_bytes: tx,
+                received_pkts: 1,
+                send_pkts: 1,
+            },
+            control: TurnDirectionalCounters {
+                received_bytes: 5,
+                send_bytes: 5,
+                received_pkts: 1,
+                send_pkts: 1,
+            },
             error_pkts: 0,
         }
     }
@@ -178,8 +214,8 @@ mod tests {
         let base = sample(500, 500);
         let cur = sample(100, 100); // lower than baseline (reset)
         let d = delta_since(Some(&base), &cur);
-        assert_eq!(d.received_bytes, 0);
-        assert_eq!(d.sent_bytes, 0);
+        assert_eq!(d.relay_received_bytes, 0);
+        assert_eq!(d.relay_sent_bytes, 0);
     }
 
     #[tokio::test]
@@ -189,12 +225,14 @@ mod tests {
         let map: Arc<ConnectionDeviceMap> = Arc::new(ConnectionDeviceMap::default());
         map.write().await.insert("conn-1".into(), "dev-1".into());
 
-        // Bind an address and fold some bytes for conn-1.
+        // Bind an address and fold relay + control bytes for conn-1.
         {
             let mut s = stats.write().unwrap();
-            s.record_binding("127.0.0.1:5000".parse().unwrap(), "conn-1");
-            s.record_recv("127.0.0.1:5000".parse().unwrap(), 100);
-            s.record_send("127.0.0.1:5000".parse().unwrap(), 40);
+            let addr = "127.0.0.1:5000".parse().unwrap();
+            s.record_binding(addr, "conn-1");
+            s.record_recv(addr, 100, TurnTrafficClass::Relay);
+            s.record_send(addr, 40, TurnTrafficClass::Relay);
+            s.record_recv(addr, 9, TurnTrafficClass::Control);
         }
 
         let mut collector = TurnUsageCollector::new(stats.clone(), map.clone());
@@ -210,8 +248,9 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].device_code, "dev-1");
-        assert_eq!(rows[0].received_bytes, 100);
-        assert_eq!(rows[0].sent_bytes, 40);
+        assert_eq!(rows[0].relay_received_bytes, 100);
+        assert_eq!(rows[0].relay_sent_bytes, 40);
+        assert_eq!(rows[0].control_received_bytes, 9);
 
         // Second flush with no new traffic must be a no-op (baseline advanced).
         collector.flush_once(&db, now()).await.unwrap();
@@ -223,7 +262,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(rows[0].received_bytes, 100, "no double-counting");
+        assert_eq!(rows[0].relay_received_bytes, 100, "no double-counting");
     }
 
     #[tokio::test]
@@ -234,8 +273,9 @@ mod tests {
 
         {
             let mut s = stats.write().unwrap();
-            s.record_binding("127.0.0.1:6000".parse().unwrap(), "conn-x");
-            s.record_recv("127.0.0.1:6000".parse().unwrap(), 70);
+            let addr = "127.0.0.1:6000".parse().unwrap();
+            s.record_binding(addr, "conn-x");
+            s.record_recv(addr, 70, TurnTrafficClass::Relay);
         }
 
         let mut collector = TurnUsageCollector::new(stats.clone(), map.clone());
@@ -251,6 +291,6 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].device_code, "conn-x", "falls back to connection_id");
-        assert_eq!(rows[0].received_bytes, 70);
+        assert_eq!(rows[0].relay_received_bytes, 70);
     }
 }

@@ -320,10 +320,14 @@ mod tests {
         turn_usage::ActiveModel {
             device_code: Set(device.into()),
             hour_bucket: Set(hour),
-            received_bytes: Set(10),
-            sent_bytes: Set(20),
-            received_pkts: Set(1),
-            sent_pkts: Set(2),
+            relay_received_bytes: Set(10),
+            relay_sent_bytes: Set(20),
+            relay_received_pkts: Set(1),
+            relay_sent_pkts: Set(2),
+            control_received_bytes: Set(3),
+            control_sent_bytes: Set(4),
+            control_received_pkts: Set(1),
+            control_sent_pkts: Set(1),
             updated_at: Set(hour),
         }
         .insert(db)

@@ -2816,9 +2816,25 @@ export type RestResponseTurnSettings = {
 };
 
 /**
- * @description One per-device hourly usage row, projected for the frontend chart.
+ * @description One per-device hourly usage row, projected for the frontend chart. Traffic is\nsplit into billable `relay_*` (ChannelData + Send/Data indications) and\nobservation-only `control_*` (STUN + TURN control).
 */
 export type TurnUsageItem = {
+    /**
+     * @type integer, int64
+    */
+    controlReceivedBytes: number;
+    /**
+     * @type integer, int64
+    */
+    controlReceivedPkts: number;
+    /**
+     * @type integer, int64
+    */
+    controlSentBytes: number;
+    /**
+     * @type integer, int64
+    */
+    controlSentPkts: number;
     /**
      * @type string
     */
@@ -2830,19 +2846,19 @@ export type TurnUsageItem = {
     /**
      * @type integer, int64
     */
-    receivedBytes: number;
+    relayReceivedBytes: number;
     /**
      * @type integer, int64
     */
-    receivedPkts: number;
+    relayReceivedPkts: number;
     /**
      * @type integer, int64
     */
-    sentBytes: number;
+    relaySentBytes: number;
     /**
      * @type integer, int64
     */
-    sentPkts: number;
+    relaySentPkts: number;
 };
 
 export type RestResponseTurnUsageResult = {
@@ -3493,6 +3509,32 @@ export type TurnClientSettings = {
     traversal_mode: TraversalMode;
 };
 
+/**
+ * @description Byte/packet counters for one traffic class in both directions.
+*/
+export type TurnDirectionalCounters = {
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    received_bytes: number;
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    received_pkts: number;
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    send_bytes: number;
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    send_pkts: number;
+};
+
 export type TurnInfo = {
     /**
      * @type array
@@ -3546,30 +3588,20 @@ export type TurnSession = {
 
 export type TurnSessionStatistics = {
     /**
+     * @description Byte/packet counters for one traffic class in both directions.
+     * @type object
+    */
+    control: TurnDirectionalCounters;
+    /**
      * @minLength 0
      * @type integer
     */
     error_pkts: number;
     /**
-     * @minLength 0
-     * @type integer
+     * @description Byte/packet counters for one traffic class in both directions.
+     * @type object
     */
-    received_bytes: number;
-    /**
-     * @minLength 0
-     * @type integer
-    */
-    received_pkts: number;
-    /**
-     * @minLength 0
-     * @type integer
-    */
-    send_bytes: number;
-    /**
-     * @minLength 0
-     * @type integer
-    */
-    send_pkts: number;
+    relay: TurnDirectionalCounters;
 };
 
 /**

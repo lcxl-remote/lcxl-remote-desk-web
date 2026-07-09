@@ -22,21 +22,31 @@ use crate::usage_query::{Granularity, time_bucket_expr};
 pub type ConnectionDeviceMap = RwLock<HashMap<String, String>>;
 
 /// A signed increment to apply to one `(device_code, hour_bucket)` rollup row.
+/// Traffic is split into the billable `relay_*` dimension (ChannelData + Send/Data
+/// indications) and the observation-only `control_*` dimension (STUN + TURN control).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TurnUsageDelta {
-    pub received_bytes: i64,
-    pub sent_bytes: i64,
-    pub received_pkts: i64,
-    pub sent_pkts: i64,
+    pub relay_received_bytes: i64,
+    pub relay_sent_bytes: i64,
+    pub relay_received_pkts: i64,
+    pub relay_sent_pkts: i64,
+    pub control_received_bytes: i64,
+    pub control_sent_bytes: i64,
+    pub control_received_pkts: i64,
+    pub control_sent_pkts: i64,
 }
 
 impl TurnUsageDelta {
     /// Whether this delta carries any traffic (used to skip no-op upserts).
     pub fn is_zero(&self) -> bool {
-        self.received_bytes == 0
-            && self.sent_bytes == 0
-            && self.received_pkts == 0
-            && self.sent_pkts == 0
+        self.relay_received_bytes == 0
+            && self.relay_sent_bytes == 0
+            && self.relay_received_pkts == 0
+            && self.relay_sent_pkts == 0
+            && self.control_received_bytes == 0
+            && self.control_sent_bytes == 0
+            && self.control_received_pkts == 0
+            && self.control_sent_pkts == 0
     }
 }
 
@@ -61,10 +71,14 @@ pub async fn upsert_turn_usage(
     let model = turn_usage::ActiveModel {
         device_code: Set(device_code.to_string()),
         hour_bucket: Set(hour_bucket),
-        received_bytes: Set(delta.received_bytes),
-        sent_bytes: Set(delta.sent_bytes),
-        received_pkts: Set(delta.received_pkts),
-        sent_pkts: Set(delta.sent_pkts),
+        relay_received_bytes: Set(delta.relay_received_bytes),
+        relay_sent_bytes: Set(delta.relay_sent_bytes),
+        relay_received_pkts: Set(delta.relay_received_pkts),
+        relay_sent_pkts: Set(delta.relay_sent_pkts),
+        control_received_bytes: Set(delta.control_received_bytes),
+        control_sent_bytes: Set(delta.control_sent_bytes),
+        control_received_pkts: Set(delta.control_received_pkts),
+        control_sent_pkts: Set(delta.control_sent_pkts),
         updated_at: Set(now),
     };
 
@@ -77,20 +91,37 @@ pub async fn upsert_turn_usage(
             // Unqualified columns in DO UPDATE reference the existing row, so
             // these expressions accumulate the delta into the stored counters.
             .value(
-                turn_usage::Column::ReceivedBytes,
-                Expr::col(turn_usage::Column::ReceivedBytes).add(delta.received_bytes),
+                turn_usage::Column::RelayReceivedBytes,
+                Expr::col(turn_usage::Column::RelayReceivedBytes).add(delta.relay_received_bytes),
             )
             .value(
-                turn_usage::Column::SentBytes,
-                Expr::col(turn_usage::Column::SentBytes).add(delta.sent_bytes),
+                turn_usage::Column::RelaySentBytes,
+                Expr::col(turn_usage::Column::RelaySentBytes).add(delta.relay_sent_bytes),
             )
             .value(
-                turn_usage::Column::ReceivedPkts,
-                Expr::col(turn_usage::Column::ReceivedPkts).add(delta.received_pkts),
+                turn_usage::Column::RelayReceivedPkts,
+                Expr::col(turn_usage::Column::RelayReceivedPkts).add(delta.relay_received_pkts),
             )
             .value(
-                turn_usage::Column::SentPkts,
-                Expr::col(turn_usage::Column::SentPkts).add(delta.sent_pkts),
+                turn_usage::Column::RelaySentPkts,
+                Expr::col(turn_usage::Column::RelaySentPkts).add(delta.relay_sent_pkts),
+            )
+            .value(
+                turn_usage::Column::ControlReceivedBytes,
+                Expr::col(turn_usage::Column::ControlReceivedBytes)
+                    .add(delta.control_received_bytes),
+            )
+            .value(
+                turn_usage::Column::ControlSentBytes,
+                Expr::col(turn_usage::Column::ControlSentBytes).add(delta.control_sent_bytes),
+            )
+            .value(
+                turn_usage::Column::ControlReceivedPkts,
+                Expr::col(turn_usage::Column::ControlReceivedPkts).add(delta.control_received_pkts),
+            )
+            .value(
+                turn_usage::Column::ControlSentPkts,
+                Expr::col(turn_usage::Column::ControlSentPkts).add(delta.control_sent_pkts),
             )
             .value(turn_usage::Column::UpdatedAt, now)
             .to_owned(),
@@ -106,10 +137,14 @@ pub async fn upsert_turn_usage(
 pub struct TurnUsageBucket {
     pub device_code: String,
     pub hour_bucket: NaiveDateTime,
-    pub received_bytes: i64,
-    pub sent_bytes: i64,
-    pub received_pkts: i64,
-    pub sent_pkts: i64,
+    pub relay_received_bytes: i64,
+    pub relay_sent_bytes: i64,
+    pub relay_received_pkts: i64,
+    pub relay_sent_pkts: i64,
+    pub control_received_bytes: i64,
+    pub control_sent_bytes: i64,
+    pub control_received_pkts: i64,
+    pub control_sent_pkts: i64,
 }
 
 /// Query per-device rollups whose `hour_bucket` falls in `[from, to)`, aggregated to
@@ -129,28 +164,52 @@ pub async fn query_turn_usage(
         .column(turn_usage::Column::DeviceCode)
         .column_as(bucket.clone(), "hour_bucket")
         .column_as(
-            Expr::col(turn_usage::Column::ReceivedBytes)
+            Expr::col(turn_usage::Column::RelayReceivedBytes)
                 .sum()
                 .cast_as("BIGINT"),
-            "received_bytes",
+            "relay_received_bytes",
         )
         .column_as(
-            Expr::col(turn_usage::Column::SentBytes)
+            Expr::col(turn_usage::Column::RelaySentBytes)
                 .sum()
                 .cast_as("BIGINT"),
-            "sent_bytes",
+            "relay_sent_bytes",
         )
         .column_as(
-            Expr::col(turn_usage::Column::ReceivedPkts)
+            Expr::col(turn_usage::Column::RelayReceivedPkts)
                 .sum()
                 .cast_as("BIGINT"),
-            "received_pkts",
+            "relay_received_pkts",
         )
         .column_as(
-            Expr::col(turn_usage::Column::SentPkts)
+            Expr::col(turn_usage::Column::RelaySentPkts)
                 .sum()
                 .cast_as("BIGINT"),
-            "sent_pkts",
+            "relay_sent_pkts",
+        )
+        .column_as(
+            Expr::col(turn_usage::Column::ControlReceivedBytes)
+                .sum()
+                .cast_as("BIGINT"),
+            "control_received_bytes",
+        )
+        .column_as(
+            Expr::col(turn_usage::Column::ControlSentBytes)
+                .sum()
+                .cast_as("BIGINT"),
+            "control_sent_bytes",
+        )
+        .column_as(
+            Expr::col(turn_usage::Column::ControlReceivedPkts)
+                .sum()
+                .cast_as("BIGINT"),
+            "control_received_pkts",
+        )
+        .column_as(
+            Expr::col(turn_usage::Column::ControlSentPkts)
+                .sum()
+                .cast_as("BIGINT"),
+            "control_sent_pkts",
         )
         .filter(turn_usage::Column::HourBucket.gte(from))
         .filter(turn_usage::Column::HourBucket.lt(to))
@@ -194,10 +253,14 @@ mod tests {
     async fn upsert_accumulates_on_conflict() {
         let db = memory_db().await;
         let delta = TurnUsageDelta {
-            received_bytes: 100,
-            sent_bytes: 40,
-            received_pkts: 2,
-            sent_pkts: 1,
+            relay_received_bytes: 100,
+            relay_sent_bytes: 40,
+            relay_received_pkts: 2,
+            relay_sent_pkts: 1,
+            control_received_bytes: 7,
+            control_sent_bytes: 3,
+            control_received_pkts: 1,
+            control_sent_pkts: 1,
         };
         upsert_turn_usage(&db, "dev-1", hour(9), &delta)
             .await
@@ -210,17 +273,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].received_bytes, 200);
-        assert_eq!(rows[0].sent_bytes, 80);
-        assert_eq!(rows[0].received_pkts, 4);
-        assert_eq!(rows[0].sent_pkts, 2);
+        assert_eq!(rows[0].relay_received_bytes, 200);
+        assert_eq!(rows[0].relay_sent_bytes, 80);
+        assert_eq!(rows[0].relay_received_pkts, 4);
+        assert_eq!(rows[0].relay_sent_pkts, 2);
+        assert_eq!(rows[0].control_received_bytes, 14);
+        assert_eq!(rows[0].control_sent_bytes, 6);
     }
 
     #[tokio::test]
     async fn distinct_keys_and_range_filter() {
         let db = memory_db().await;
         let d = TurnUsageDelta {
-            received_bytes: 10,
+            relay_received_bytes: 10,
             ..Default::default()
         };
         upsert_turn_usage(&db, "dev-1", hour(9), &d).await.unwrap();
@@ -239,7 +304,7 @@ mod tests {
     async fn day_granularity_folds_hours_and_decodes() {
         let db = memory_db().await;
         let d = TurnUsageDelta {
-            received_bytes: 10,
+            relay_received_bytes: 10,
             ..Default::default()
         };
         // Two hours on the same UTC day for one device collapse into one day bucket.
@@ -249,7 +314,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows.len(), 1, "both hours fold into one UTC day");
-        assert_eq!(rows[0].received_bytes, 20);
+        assert_eq!(rows[0].relay_received_bytes, 20);
         assert_eq!(rows[0].hour_bucket, hour(0).naive_utc());
     }
 }
