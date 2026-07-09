@@ -282,6 +282,15 @@ impl DeskErrorCode {
     /// caller (a stale or cross-session continuation). The control end maps this
     /// code to a localized message. Rides the agent-error wire, not an HTTP status.
     pub const COPILOT_SUBJECT_MISMATCH: DeskErrorCode = DeskErrorCode(61);
+    /// The account is in a self-deletion state (`email_pending` / `grace` /
+    /// `deleting` / `deleted`) and the requested mutating action is refused while
+    /// the deletion is pending. The user must cancel the deletion first. Carried
+    /// in `RestResponse.code` (business error, HTTP stays 200).
+    pub const ACCOUNT_PENDING_DELETION: DeskErrorCode = DeskErrorCode(62);
+    /// The account cannot be deleted because it still owns one or more
+    /// organizations; ownership must be transferred or the organizations disbanded
+    /// first. Carried in `RestResponse.code` (business error, HTTP stays 200).
+    pub const ACCOUNT_STILL_ORG_OWNER: DeskErrorCode = DeskErrorCode(63);
 
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
