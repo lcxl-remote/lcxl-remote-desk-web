@@ -75,7 +75,7 @@ export default {
   'pages.legal.terms.s7.heading': '7. Billing',
   'pages.legal.terms.s7.body': 'Only the platform’s own AI models are billed by usage; personal / organization models using your own key are not billed. Specific billing rules follow the billing notes in the console.',
   'pages.legal.terms.s8.heading': '8. Availability & Disclaimer',
-  'pages.legal.terms.s8.body': 'The Service is built on an open-source baseline (Apache-2.0) and is provided on an "as is" and "as available" basis, without warranty of uninterrupted, error-free, or fit-for-a-particular-purpose operation. To the maximum extent permitted by law, the operator is not liable for indirect, incidental, or consequential damages arising from use of or inability to use the Service.',
+  'pages.legal.terms.s8.body': 'The open-source baseline components of the Service (lcxl-remote-desk-web) are licensed under Apache-2.0. The Service is provided on an "as is" and "as available" basis, without warranty of uninterrupted, error-free, or fit-for-a-particular-purpose operation. To the maximum extent permitted by law, the operator is not liable for indirect, incidental, or consequential damages arising from use of or inability to use the Service.',
   'pages.legal.terms.s9.heading': '9. Changes & Termination',
   'pages.legal.terms.s9.body': 'The operator may update these terms, with updates published on this page; continued use constitutes acceptance of the updated terms. You may stop using the Service and delete your account at any time.',
   'pages.legal.privacy.title': 'Privacy Policy',

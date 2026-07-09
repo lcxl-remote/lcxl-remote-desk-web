@@ -76,7 +76,7 @@ export default {
   'pages.legal.terms.s7.heading': '7. 计费',
   'pages.legal.terms.s7.body': '仅平台自有 AI 模型按用量计费；使用您自带密钥的个人 / 组织模型不计费。具体计费规则以控制台内的计费说明为准。',
   'pages.legal.terms.s8.heading': '8. 服务可用性与免责',
-  'pages.legal.terms.s8.body': '本服务基于开源基线（Apache-2.0）构建，按“现状”与“可用”提供，不对服务不间断、无错误或适用于特定用途作出保证。在法律允许的最大范围内，运营方不对因使用或无法使用本服务而导致的间接、偶发或后果性损失承担责任。',
+  'pages.legal.terms.s8.body': '本服务的开源基线组件（lcxl-remote-desk-web）以 Apache-2.0 许可开放；本服务按“现状”与“可用”提供，不对服务不间断、无错误或适用于特定用途作出保证。在法律允许的最大范围内，运营方不对因使用或无法使用本服务而导致的间接、偶发或后果性损失承担责任。',
   'pages.legal.terms.s9.heading': '9. 协议变更与终止',
   'pages.legal.terms.s9.body': '运营方可对本协议进行更新，更新后将在本页面公示；您继续使用即视为接受更新后的条款。您可随时停止使用并注销账号。',
   'pages.legal.privacy.title': '隐私政策',
