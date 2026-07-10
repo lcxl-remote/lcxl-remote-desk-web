@@ -25,6 +25,7 @@ rust-i18n = { workspace = true }
 tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
 
 actix-rt = { workspace = true }
 awc = { workspace = true }

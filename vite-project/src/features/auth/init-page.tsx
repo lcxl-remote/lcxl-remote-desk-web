@@ -5,6 +5,7 @@ import { CheckCircle2, ChevronRight, Loader2, Lock, Settings2, User, XCircle } f
 import { useQueryClient } from "@tanstack/react-query"
 import { queryServerInfoQueryKey } from "@/services/hooks/systemController/useQueryServerInfo"
 
+import { openExternalUrl } from "@/lib/open-external"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -179,7 +180,7 @@ export default function InitPage() {
         const host = domain.trim() || DEFAULT_MANAGER_DOMAIN
         // Strip any port for the console origin.
         const hostOnly = host.split(":")[0]
-        window.open(`https://${hostOnly}`, "_blank", "noopener")
+        openExternalUrl(`https://${hostOnly}`)
     }
 
     // Step 2 "next" for the configure-manager branch: re-verify with the token

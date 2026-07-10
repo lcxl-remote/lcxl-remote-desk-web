@@ -1,4 +1,5 @@
 mod error;
+mod external_link;
 mod ipc_client;
 #[cfg(target_os = "macos")]
 mod macos_relocate;
@@ -157,6 +158,7 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -238,11 +240,16 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                             if handle_inner.get_webview_window(MAIN_WINDOW_LABEL).is_some() {
                                 return;
                             }
+                            let frontend_origin = window_url.parse().unwrap();
                             match WebviewWindowBuilder::new(
                                 &handle_inner,
                                 MAIN_WINDOW_LABEL,
                                 WebviewUrl::External(window_url.parse().unwrap()),
                             )
+                            .on_navigation(external_link::external_link_navigation_handler(
+                                handle_inner.clone(),
+                                frontend_origin,
+                            ))
                             .title("LCXL Remote Desktop")
                             .inner_size(1200.0, 800.0)
                             .center()
@@ -558,6 +565,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -869,11 +877,16 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                         return;
                     }
 
+                    let frontend_origin = window_url.parse().unwrap();
                     match WebviewWindowBuilder::new(
                         &handle,
                         MAIN_WINDOW_LABEL,
                         WebviewUrl::External(window_url.parse().unwrap()),
                     )
+                    .on_navigation(external_link::external_link_navigation_handler(
+                        handle.clone(),
+                        frontend_origin,
+                    ))
                     .title("LCXL Remote Desktop")
                     .inner_size(1200.0, 800.0)
                     .center()
