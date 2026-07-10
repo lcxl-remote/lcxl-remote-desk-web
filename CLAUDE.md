@@ -15,6 +15,8 @@ cargo run -p lcxl-remote-desk-server -- --help         # 查看所有启动标�
 cargo build --workspace --release
 cargo test --workspace
 
+# 工具链已由 rust-toolchain.toml 钉死(1.90.0)、rustfmt.toml 设 edition 2024，全仓已 fmt-clean；
+# 提交前直接 `cargo fmt --all`(不会有版本漂移)，裸 `rustfmt <file>` 也无需再带 --edition。
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 
@@ -105,7 +107,7 @@ sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev \
 ## 代码规范与规则
 
 1. **工作语言规则：所有回复、思考过程及任务清单，均须使用中文。**
-2. **Rust:** 使用 `rustfmt` 格式化，函数/模块名使用 `snake_case`，类型名使用 `PascalCase`，常量使用 `SCREAMING_SNAKE_CASE`。
+2. **Rust:** 使用 `rustfmt` 格式化（工具链由 `rust-toolchain.toml` 钉死 1.90.0、`rustfmt.toml` 设 `edition = "2024"`，全仓已建立基线且 `cargo fmt --all --check` 全绿；提交前 `cargo fmt --all` 即可，无版本漂移，裸 `rustfmt <file>` 也无需 `--edition`）。函数/模块名使用 `snake_case`，类型名使用 `PascalCase`，常量使用 `SCREAMING_SNAKE_CASE`。
 3. **TypeScript/React:** 4 个空格缩进，组件名使用 `PascalCase`，钩子名使用 `useXxx`，`src/components/ui` 中的文件名使用 `kebab-case`。
 4. **代码注释**必须使用**英文 (English)**。
 5. **注释只描述当前代码 (CRITICAL)**：注释只能说明代码**当前**的行为、意图与约束，**禁止保留开发阶段标记**——例如 `PR-A` / `PR 6` / `cut 4` / `Cut 5` / `phase-1` / `Arch III` / `Arch IV` / `batch 2` 这类指代某次 PR、某个开发阶段或某代架构的字样。这些标记对读代码的人毫无意义、只会造成困惑。改写时把"曾经如何、某阶段会做什么"重述为对现状的客观描述（如需保留历史背景，用 "previously" / "legacy" / "an earlier design" 等中性措辞，不要带阶段代号）。**例外**：描述算法/状态机当前运行步骤的 "Phase 1/2/3"、"Step N" 属于对当前逻辑的说明，可保留。
