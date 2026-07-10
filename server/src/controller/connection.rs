@@ -433,24 +433,24 @@ pub async fn verify_connection(
 ) -> Result<HttpResponse, AWError> {
     let params = request_json.into_inner();
 
-    // Self-authentication + SSRF posture. Before the system is initialized the
-    // wizard runs with no account, so the endpoint is open but restricted to
-    // public targets (`Strict`). Once initialized it requires a logged-in session
-    // and, being an authenticated operator configuring an outbound address, may
-    // reach private / LAN addresses (`Relaxed`) — the metadata floor stays blocked
-    // in both.
+    // Self-authentication + SSRF posture. This endpoint dials the host's own
+    // signaling server / manager, which is legitimately reached over a private /
+    // LAN address in self-hosted and private-cloud deployments (e.g. a manager on
+    // `192.168.x.x`). So it uses `Relaxed` — private / LAN targets are allowed
+    // while the cloud-metadata hard floor (169.254.169.254 etc.) stays blocked —
+    // regardless of init state. This differs from the model-provider guard, whose
+    // `Strict` public posture does not fit host↔manager wiring. Access control is
+    // orthogonal: before the system is initialized the onboarding wizard runs with
+    // no account so the endpoint is open; once initialized it requires a logged-in
+    // session.
     let initialized = {
         let s = settings.read().await;
         !s.user.login_password.is_empty()
     };
-    let mode = if initialized {
-        if session.get_current_user::<CurrentUser>()?.is_none() {
-            return Err(actix_web::error::ErrorUnauthorized("Unauthorized"));
-        }
-        ProviderSsrfMode::Relaxed
-    } else {
-        ProviderSsrfMode::Strict
-    };
+    if initialized && session.get_current_user::<CurrentUser>()?.is_none() {
+        return Err(actix_web::error::ErrorUnauthorized("Unauthorized"));
+    }
+    let mode = ProviderSsrfMode::Relaxed;
 
     let input = params.input.trim().to_string();
     if input.is_empty() {
@@ -662,25 +662,28 @@ mod tests {
     #[actix_web::test]
     async fn ssrf_resolver_enforces_mode_per_resolved_ip() {
         use actix_tls::connect::Resolve;
-        // Loopback: blocked under Strict (anonymous), allowed under Relaxed
-        // (authenticated / LAN self-host). No external DNS: literals resolve
-        // locally.
-        assert!(
-            (SsrfResolver {
-                mode: ProviderSsrfMode::Strict
-            })
-            .lookup("127.0.0.1", 443)
-            .await
-            .is_err()
-        );
-        assert!(
-            (SsrfResolver {
-                mode: ProviderSsrfMode::Relaxed
-            })
-            .lookup("127.0.0.1", 443)
-            .await
-            .is_ok()
-        );
+        // Private / loopback / LAN: blocked under Strict, allowed under Relaxed.
+        // The verify endpoint uses Relaxed so a self-hosted signaling server /
+        // manager on a LAN address (e.g. `192.168.x.x`) is reachable. No external
+        // DNS: IP literals resolve locally.
+        for host in ["127.0.0.1", "192.168.50.50", "10.0.0.5"] {
+            assert!(
+                (SsrfResolver {
+                    mode: ProviderSsrfMode::Strict
+                })
+                .lookup(host, 443)
+                .await
+                .is_err()
+            );
+            assert!(
+                (SsrfResolver {
+                    mode: ProviderSsrfMode::Relaxed
+                })
+                .lookup(host, 443)
+                .await
+                .is_ok()
+            );
+        }
         // Cloud metadata: blocked under BOTH modes (the hard floor).
         for mode in [ProviderSsrfMode::Strict, ProviderSsrfMode::Relaxed] {
             assert!(
@@ -756,8 +759,9 @@ mod tests {
                 .service(verify_connection),
         )
         .await;
-        // Uninitialized: the endpoint is open (no 401), but Strict mode blocks the
-        // cloud-metadata address at connect time, so it is never reached.
+        // Uninitialized: the endpoint is open (no 401). Even under Relaxed the
+        // cloud-metadata hard floor still blocks this address at connect time, so
+        // it is never reached.
         let params = ConnectionVerifyParams {
             target: "signaling".to_string(),
             input: "169.254.169.254".to_string(),
@@ -773,5 +777,45 @@ mod tests {
         let result = body.data.expect("result");
         assert!(!result.reached, "metadata address must never be reached");
         assert!(!result.ok);
+    }
+
+    #[actix_web::test]
+    async fn verify_uninitialized_allows_private_target() {
+        use actix_session::{SessionMiddleware, storage::CookieSessionStore};
+        use actix_web::{App, cookie::Key, test};
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let app = test::init_service(
+            App::new()
+                .app_data(settings_for_verify(false))
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                ))
+                .service(verify_connection),
+        )
+        .await;
+        // Uninitialized onboarding wizard pointing at a private / LAN manager (the
+        // self-hosted case). A full `ws://` URL on loopback avoids any TLS
+        // handshake and hits a port with no listener, so the probe fails with
+        // "unreachable" — crucially NOT "blocked": the private address is allowed
+        // past the SSRF guard (Relaxed), which is the regression this guards.
+        let params = ConnectionVerifyParams {
+            target: "manager".to_string(),
+            input: "ws://127.0.0.1:9/api/desk/signaling".to_string(),
+            token: None,
+        };
+        let req = test::TestRequest::post()
+            .uri("/api/connection/verify")
+            .set_json(&params)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        let body: RestResponse<ConnectionVerifyResult> = test::read_body_json(resp).await;
+        let result = body.data.expect("result");
+        assert_ne!(
+            result.error_code,
+            DeskErrorCode::CONNECTION_TARGET_BLOCKED.code(),
+            "a private LAN target must not be blocked by the SSRF guard in the wizard"
+        );
     }
 }
