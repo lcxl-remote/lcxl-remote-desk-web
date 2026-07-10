@@ -2,10 +2,10 @@ use std::{sync::LazyLock, time::Instant};
 
 use desk_signal_facade::model::desk_settings::H264EncoderSettings;
 use openh264::{
-    encoder::{BitRate, IntraFramePeriod},
     OpenH264API,
+    encoder::{BitRate, IntraFramePeriod},
 };
-use prometheus::{register_histogram_vec, HistogramVec};
+use prometheus::{HistogramVec, register_histogram_vec};
 use yuv::YuvPlanarImageMut;
 
 use crate::{

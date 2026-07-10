@@ -637,7 +637,10 @@ impl PcRegistry {
     /// [`cleanup_pc`] on every teardown path; a no-op for unrestricted
     /// connections.
     async fn unmark_restricted_connection(&self, connection_id: &str) {
-        self.restricted_connections.write().await.remove(connection_id);
+        self.restricted_connections
+            .write()
+            .await
+            .remove(connection_id);
     }
 
     /// Shared handle to the restricted-session projection, for the signaling
@@ -1581,7 +1584,9 @@ pub async fn handle_request_remote(
         // before the ICE / DataChannel handlers below and before the Init reply,
         // so there is no unrestricted window.
         ctx.read().await.signaling_state.write().await.restricted = true;
-        registry.mark_restricted_connection(from_connection_id).await;
+        registry
+            .mark_restricted_connection(from_connection_id)
+            .await;
     }
 
     // Forward locally-gathered ICE candidates back to the browser. Must

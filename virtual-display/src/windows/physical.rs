@@ -52,7 +52,9 @@ use super::cds::{apply_cds_with_flags, commit_pending_changes};
 /// canonical pattern documented by MS and used by NirCmd, Chromium,
 /// and MultiMonitorTool.
 const SET_PRIMARY_BATCH_FLAGS: windows::Win32::Graphics::Gdi::CDS_TYPE =
-    windows::Win32::Graphics::Gdi::CDS_TYPE(CDS_NORESET.0 | CDS_SET_PRIMARY.0 | CDS_UPDATEREGISTRY.0);
+    windows::Win32::Graphics::Gdi::CDS_TYPE(
+        CDS_NORESET.0 | CDS_SET_PRIMARY.0 | CDS_UPDATEREGISTRY.0,
+    );
 
 /// Flag combination required for any **non-primary** call inside a
 /// multi-monitor batch update — detach (`dmPelsWidth = 0`) and
@@ -133,9 +135,7 @@ pub struct ExclusiveLayout {
 /// virtual display does not show up in the enumeration — typical of a
 /// pre-attach state or an Iddcx attach that has not yet propagated to
 /// the user session.
-pub fn snapshot_layout(
-    virtual_display_name: &str,
-) -> Result<ExclusiveLayout, VirtualDisplayError> {
+pub fn snapshot_layout(virtual_display_name: &str) -> Result<ExclusiveLayout, VirtualDisplayError> {
     let active = enumerate_active_displays()?;
     let mut virtual_snapshot: Option<PhysicalDisplaySnapshot> = None;
     let mut physical_snapshots: Vec<PhysicalDisplaySnapshot> = Vec::new();
@@ -207,9 +207,7 @@ pub fn log_active_displays_for_diagnostics(context: &str) {
             );
         }
         Err(e) => {
-            log::warn!(
-                "[virtual-display] display-layout({context}): enumeration failed: {e}"
-            );
+            log::warn!("[virtual-display] display-layout({context}): enumeration failed: {e}");
         }
     }
 }
@@ -237,8 +235,7 @@ fn enumerate_active_displays() -> Result<Vec<PhysicalDisplaySnapshot>, VirtualDi
         if (device.StateFlags.0 & DISPLAY_DEVICE_ACTIVE.0) == 0 {
             continue;
         }
-        let is_primary =
-            (device.StateFlags.0 & DISPLAY_DEVICE_PRIMARY_DEVICE.0) != 0;
+        let is_primary = (device.StateFlags.0 & DISPLAY_DEVICE_PRIMARY_DEVICE.0) != 0;
         let devmode = read_current_devmode(&device.DeviceName)?;
         out.push(PhysicalDisplaySnapshot {
             device_name,
@@ -335,9 +332,7 @@ pub fn enter_exclusive(layout: &ExclusiveLayout) -> Result<(), VirtualDisplayErr
         // Only the virtual display is active — exclusive mode is a
         // no-op. The worker would normally not request this, but a
         // crash-restart path may; treat it as success.
-        log::info!(
-            "[virtual-display] enter_exclusive: no physical displays attached, no-op"
-        );
+        log::info!("[virtual-display] enter_exclusive: no physical displays attached, no-op");
         return Ok(());
     }
 
@@ -369,9 +364,7 @@ pub fn enter_exclusive(layout: &ExclusiveLayout) -> Result<(), VirtualDisplayErr
         SET_PRIMARY_BATCH_FLAGS,
         &format!("set primary on {virtual_name}"),
     ) {
-        log::error!(
-            "[virtual-display] enter_exclusive: set-primary on {virtual_name} failed: {e}"
-        );
+        log::error!("[virtual-display] enter_exclusive: set-primary on {virtual_name} failed: {e}");
         return Err(e);
     }
 
@@ -397,7 +390,12 @@ pub fn enter_exclusive(layout: &ExclusiveLayout) -> Result<(), VirtualDisplayErr
             );
             // Roll back: restore each already-detached physical display
             // and the virtual display to its snapshotted devmode.
-            rollback_enter(&virtual_name, &layout.virtual_snapshot, &layout.physical_snapshots, &succeeded);
+            rollback_enter(
+                &virtual_name,
+                &layout.virtual_snapshot,
+                &layout.physical_snapshots,
+                &succeeded,
+            );
             return Err(e);
         }
         succeeded.push(&snap.device_name);
@@ -405,10 +403,13 @@ pub fn enter_exclusive(layout: &ExclusiveLayout) -> Result<(), VirtualDisplayErr
 
     // Step C: commit the batch.
     if let Err(e) = commit_pending_changes() {
-        log::error!(
-            "[virtual-display] enter_exclusive: commit batch failed: {e}; rolling back"
+        log::error!("[virtual-display] enter_exclusive: commit batch failed: {e}; rolling back");
+        rollback_enter(
+            &virtual_name,
+            &layout.virtual_snapshot,
+            &layout.physical_snapshots,
+            &succeeded,
         );
-        rollback_enter(&virtual_name, &layout.virtual_snapshot, &layout.physical_snapshots, &succeeded);
         return Err(e);
     }
     log::info!(
@@ -628,8 +629,7 @@ mod tests {
         assert_eq!(primary.dmPelsHeight, 1440);
         assert_eq!(primary.dmDisplayFrequency, 120);
         // All four CDS-honoured fields are advertised in dmFields.
-        let expected =
-            DM_POSITION.0 | DM_PELSWIDTH.0 | DM_PELSHEIGHT.0 | DM_DISPLAYFREQUENCY.0;
+        let expected = DM_POSITION.0 | DM_PELSWIDTH.0 | DM_PELSHEIGHT.0 | DM_DISPLAYFREQUENCY.0;
         assert_eq!(primary.dmFields.0, expected);
     }
 

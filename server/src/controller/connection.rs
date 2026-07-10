@@ -137,7 +137,10 @@ fn probe_http_url(url: &str) -> Option<String> {
     let trimmed = url.trim();
     let lower = trimmed.to_ascii_lowercase();
     if let Some(rest) = lower.strip_prefix("wss://") {
-        Some(format!("https://{}", &trimmed[trimmed.len() - rest.len()..]))
+        Some(format!(
+            "https://{}",
+            &trimmed[trimmed.len() - rest.len()..]
+        ))
     } else if let Some(rest) = lower.strip_prefix("ws://") {
         Some(format!("http://{}", &trimmed[trimmed.len() - rest.len()..]))
     } else if lower.starts_with("https://") || lower.starts_with("http://") {
@@ -214,10 +217,11 @@ fn build_probe_client(mode: ProviderSsrfMode) -> awc::Client {
         .with_root_certificates(Arc::new(root_store))
         .with_no_client_auth();
 
-    let tcp = actix_tls::connect::Connector::new(actix_tls::connect::Resolver::custom(
-        SsrfResolver { mode },
-    ))
-    .service();
+    let tcp =
+        actix_tls::connect::Connector::new(actix_tls::connect::Resolver::custom(SsrfResolver {
+            mode,
+        }))
+        .service();
 
     awc::Client::builder()
         .connector(
@@ -314,11 +318,23 @@ impl ConsoleProbe {
 /// plaintext `http` so a self-hosted manager without TLS is still reachable.
 async fn probe_console(client: &awc::Client, host: &str) -> ConsoleProbe {
     let https = format!("https://{host}");
-    if client.get(&https).timeout(PROBE_TIMEOUT).send().await.is_ok() {
+    if client
+        .get(&https)
+        .timeout(PROBE_TIMEOUT)
+        .send()
+        .await
+        .is_ok()
+    {
         return ConsoleProbe::Https;
     }
     let http = format!("http://{host}");
-    if client.get(&http).timeout(PROBE_TIMEOUT).send().await.is_ok() {
+    if client
+        .get(&http)
+        .timeout(PROBE_TIMEOUT)
+        .send()
+        .await
+        .is_ok()
+    {
         return ConsoleProbe::Http;
     }
     ConsoleProbe::Unreachable
@@ -438,13 +454,13 @@ pub async fn verify_connection(
 
     let input = params.input.trim().to_string();
     if input.is_empty() {
-        return Ok(
-            HttpResponse::Ok().json(RestResponse::<ConnectionVerifyResult>::failed_with_data(
+        return Ok(HttpResponse::Ok().json(
+            RestResponse::<ConnectionVerifyResult>::failed_with_data(
                 DeskErrorCode::INVALID_PARAMS,
                 Some("input is empty".to_string()),
                 None,
-            )),
-        );
+            ),
+        ));
     }
     let token = params.token.as_deref().filter(|t| !t.is_empty());
     let is_manager = params.target.eq_ignore_ascii_case("manager");
@@ -453,9 +469,7 @@ pub async fn verify_connection(
 
     // Resolve scheme / URL and run the primary signaling probe.
     let (outcome, scheme, resolved_url) = if looks_like_full_url(&input) {
-        let scheme = url::Url::parse(&input)
-            .ok()
-            .map(|u| u.scheme().to_string());
+        let scheme = url::Url::parse(&input).ok().map(|u| u.scheme().to_string());
         let outcome = probe_signaling(&client, &input, token).await;
         (outcome, scheme, Some(input.clone()))
     } else {
@@ -527,7 +541,10 @@ mod tests {
 
     #[test]
     fn extracts_host_from_url_and_bare_input() {
-        assert_eq!(host_of("wss://a.example:8443/x").as_deref(), Some("a.example"));
+        assert_eq!(
+            host_of("wss://a.example:8443/x").as_deref(),
+            Some("a.example")
+        );
         assert_eq!(host_of("a.example:8443").as_deref(), Some("a.example"));
         assert_eq!(host_of("a.example").as_deref(), Some("a.example"));
     }
@@ -565,11 +582,23 @@ mod tests {
     #[test]
     fn manager_overall_requires_console_ok() {
         // Auth ok but console down -> overall not ok.
-        let r = build_result(&ProbeOutcome::AuthOk, None, Some("wss".into()), Some(false), false);
+        let r = build_result(
+            &ProbeOutcome::AuthOk,
+            None,
+            Some("wss".into()),
+            Some(false),
+            false,
+        );
         assert!(r.auth_ok);
         assert!(!r.ok, "manager overall must require console_ok");
         // Auth ok and console up -> ok.
-        let r = build_result(&ProbeOutcome::AuthOk, None, Some("wss".into()), Some(true), true);
+        let r = build_result(
+            &ProbeOutcome::AuthOk,
+            None,
+            Some("wss".into()),
+            Some(true),
+            true,
+        );
         assert!(r.ok);
     }
 
@@ -579,7 +608,13 @@ mod tests {
         assert!(!ProbeOutcome::Blocked.reached());
         assert!(!ProbeOutcome::Timeout.reached());
         assert!(ProbeOutcome::ReachedNoAuth.reached());
-        let r = build_result(&ProbeOutcome::ReachedNoAuth, None, Some("wss".into()), None, true);
+        let r = build_result(
+            &ProbeOutcome::ReachedNoAuth,
+            None,
+            Some("wss".into()),
+            None,
+            true,
+        );
         assert!(r.reached && !r.auth_ok);
         assert_eq!(r.error_code, DeskErrorCode::CONNECTION_AUTH_FAILED.code());
     }
@@ -604,11 +639,23 @@ mod tests {
     fn plaintext_manager_is_reachable_but_not_secure() {
         // A manager answering only over ws + http: overall ok (not blocked) but
         // flagged insecure so the frontend can warn.
-        let r = build_result(&ProbeOutcome::AuthOk, None, Some("ws".into()), Some(true), false);
+        let r = build_result(
+            &ProbeOutcome::AuthOk,
+            None,
+            Some("ws".into()),
+            Some(true),
+            false,
+        );
         assert!(r.ok, "plaintext manager must not be hard-blocked");
         assert!(!r.secure, "plaintext manager must be flagged insecure");
         // A fully TLS manager (wss + https): ok and secure.
-        let r = build_result(&ProbeOutcome::AuthOk, None, Some("wss".into()), Some(true), true);
+        let r = build_result(
+            &ProbeOutcome::AuthOk,
+            None,
+            Some("wss".into()),
+            Some(true),
+            true,
+        );
         assert!(r.ok && r.secure);
     }
 

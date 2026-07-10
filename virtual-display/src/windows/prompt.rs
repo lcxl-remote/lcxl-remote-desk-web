@@ -61,10 +61,7 @@ mod imp {
 
     /// Run the prompt on its own thread. Returns once every window has
     /// been destroyed (either the countdown elapsed or cancel fired).
-    pub(super) fn run_prompt(
-        duration: Duration,
-        shared: Arc<PromptShared>,
-    ) {
+    pub(super) fn run_prompt(duration: Duration, shared: Arc<PromptShared>) {
         // Best-effort: a registration failure is logged and we exit
         // gracefully — the caller still gets a finished signal.
         let class_atom = match register_class() {
@@ -76,9 +73,7 @@ mod imp {
         };
         let monitors = enumerate_monitors();
         if monitors.is_empty() {
-            log::warn!(
-                "[virtual-display::prompt] no monitors enumerated; skipping prompt"
-            );
+            log::warn!("[virtual-display::prompt] no monitors enumerated; skipping prompt");
             // SAFETY: class_atom was registered above; we own its
             // lifetime for the duration of this thread.
             let _ = unsafe { unregister_class(class_atom) };
@@ -134,8 +129,7 @@ mod imp {
             // Check if our own deadline has elapsed or the controller
             // asked us to cancel.
             let elapsed = start.elapsed();
-            let should_quit =
-                shared.cancel_flag.load(Ordering::SeqCst) || elapsed >= duration;
+            let should_quit = shared.cancel_flag.load(Ordering::SeqCst) || elapsed >= duration;
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -382,8 +376,7 @@ impl PromptController {
             // destroyed the window the call simply fails — we treat
             // that as success since the loop is already on its way
             // out.
-            let _ =
-                unsafe { PostMessageW(Some(wrapper.0), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+            let _ = unsafe { PostMessageW(Some(wrapper.0), WM_CLOSE, WPARAM(0), LPARAM(0)) };
         }
     }
 }

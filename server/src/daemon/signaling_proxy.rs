@@ -1,8 +1,8 @@
 use super::manager_link_gate::ManagerLinkGate;
 use super::manager_link_state::ManagerLinkState;
-use super::support_link_state::SupportLinkState;
 use super::pc_manager::PcRegistry;
 use super::signaling_router::{self, RouterContext};
+use super::support_link_state::SupportLinkState;
 use super::virtual_display::VirtualDisplaySupervisor;
 use super::worker_manager::{WorkerManager, WorkerMessageReceiver};
 use crate::diagnose::DiagnoseOrchestrator;
@@ -1882,8 +1882,16 @@ mod tests {
         // Missing / empty url or token -> never connect regardless of the toggle.
         assert!(!manager_link_should_connect(&None, &token, None));
         assert!(!manager_link_should_connect(&url, &None, None));
-        assert!(!manager_link_should_connect(&Some(String::new()), &token, None));
-        assert!(!manager_link_should_connect(&url, &Some(String::new()), None));
+        assert!(!manager_link_should_connect(
+            &Some(String::new()),
+            &token,
+            None
+        ));
+        assert!(!manager_link_should_connect(
+            &url,
+            &Some(String::new()),
+            None
+        ));
     }
 
     #[test]
@@ -1967,10 +1975,9 @@ mod tests {
             SignalingType::ManagerSystemInfo,
             SignalingType::ManagerQuerySettings,
         ] {
-            let frame = serde_json::to_string(&SignalingModel::new(
-                "req-1", st, None, None, None, None,
-            ))
-            .expect("serialize frame");
+            let frame =
+                serde_json::to_string(&SignalingModel::new("req-1", st, None, None, None, None))
+                    .expect("serialize frame");
             assert!(
                 !egress_permitted(&frame, true, &restricted).await,
                 "{st:?} must not egress on the support upstream"
@@ -2026,9 +2033,7 @@ mod tests {
             inbound_authz: None,
             inbound_restricted: false,
             edge_exec_pending: Default::default(),
-            support_link_state: Arc::new(
-                crate::daemon::support_link_state::SupportLinkState::new(),
-            ),
+            support_link_state: Arc::new(crate::daemon::support_link_state::SupportLinkState::new()),
         };
         (ctx, outbound_tx)
     }

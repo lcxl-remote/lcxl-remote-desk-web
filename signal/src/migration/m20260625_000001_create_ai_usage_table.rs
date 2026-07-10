@@ -11,11 +11,7 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(AiUsageHourly::Table)
                     .if_not_exists()
-                    .col(
-                        ColumnDef::new(AiUsageHourly::ModelName)
-                            .string()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(AiUsageHourly::ModelName).string().not_null())
                     .col(
                         ColumnDef::new(AiUsageHourly::HourBucket)
                             .timestamp()

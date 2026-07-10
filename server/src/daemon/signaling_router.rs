@@ -3436,9 +3436,7 @@ mod tests {
             inbound_authz: None,
             inbound_restricted: false,
             edge_exec_pending: Default::default(),
-            support_link_state: Arc::new(
-                crate::daemon::support_link_state::SupportLinkState::new(),
-            ),
+            support_link_state: Arc::new(crate::daemon::support_link_state::SupportLinkState::new()),
         }
     }
 
@@ -3512,9 +3510,10 @@ mod tests {
     async fn route_allows_control_plane_frame_on_restricted_session() {
         let mut ctx = make_ctx();
         ctx.inbound_restricted = true;
-        let model =
-            SignalingModel::new("req-1", SignalingType::Heartbeat, None, None, None, None);
-        route(&model, &ctx).await.expect("allowlisted frame routes Ok");
+        let model = SignalingModel::new("req-1", SignalingType::Heartbeat, None, None, None, None);
+        route(&model, &ctx)
+            .await
+            .expect("allowlisted frame routes Ok");
     }
 
     /// `make_ctx` variant that installs an `Attached`-state supervisor

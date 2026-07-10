@@ -68,7 +68,10 @@ mod tests {
         let exp: u64 = username.split(':').next().unwrap().parse().unwrap();
         // Key for an unexpired credential matches the manual recomputation.
         let key = validate_rest_credential(SECRET, &username, REALM, exp - 1).unwrap();
-        assert_eq!(key, turn::auth::generate_auth_key(&username, REALM, &password));
+        assert_eq!(
+            key,
+            turn::auth::generate_auth_key(&username, REALM, &password)
+        );
     }
 
     #[test]

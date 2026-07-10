@@ -83,8 +83,14 @@ impl SupportLinkState {
     /// Request the current support session to stop (manual "end support" or TTL
     /// expiry). A no-op if no session is active.
     pub fn request_stop(&self) {
-        self.active_tx
-            .send_if_modified(|active| if *active { *active = false; true } else { false });
+        self.active_tx.send_if_modified(|active| {
+            if *active {
+                *active = false;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     /// Whether a support session is currently active.

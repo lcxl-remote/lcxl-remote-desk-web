@@ -49,7 +49,9 @@ pub struct ExclusiveLayout {
     pub virtual_snapshot: PhysicalDisplaySnapshot,
 }
 
-pub fn snapshot_layout(_virtual_display_name: &str) -> Result<ExclusiveLayout, VirtualDisplayError> {
+pub fn snapshot_layout(
+    _virtual_display_name: &str,
+) -> Result<ExclusiveLayout, VirtualDisplayError> {
     Err(VirtualDisplayError::NotSupported)
 }
 

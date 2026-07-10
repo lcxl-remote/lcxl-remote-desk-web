@@ -1,10 +1,10 @@
 use std::{sync::LazyLock, time::Instant};
 
 use desk_signal_facade::model::{
-    desk_settings::{default_video_bps, X264EncoderSettings},
+    desk_settings::{X264EncoderSettings, default_video_bps},
     image_capture::DisplayInfo,
 };
-use prometheus::{register_histogram_vec, HistogramVec};
+use prometheus::{HistogramVec, register_histogram_vec};
 use x264::{Colorspace, Encoder, Image, Plane, Preset, Setup, Tune};
 
 use crate::{

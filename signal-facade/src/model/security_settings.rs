@@ -90,7 +90,10 @@ mod tests {
             ..SecuritySettings::default()
         };
         settings.normalize();
-        assert_eq!(settings.approval_timeout, Some(DEFAULT_APPROVAL_TIMEOUT_SECS));
+        assert_eq!(
+            settings.approval_timeout,
+            Some(DEFAULT_APPROVAL_TIMEOUT_SECS)
+        );
     }
 
     #[test]

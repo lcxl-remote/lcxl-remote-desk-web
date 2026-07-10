@@ -14,6 +14,12 @@ pub mod unsupported;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+#[cfg(not(target_os = "windows"))]
+pub use unsupported::{
+    ExclusiveLayout, PhysicalDisplaySnapshot, PromptController, PromptWaiter, enter_exclusive,
+    enumerate_active_displays_for_diagnostics, leave_exclusive,
+    log_active_displays_for_diagnostics, show_pre_detach_prompt, snapshot_layout,
+};
 /// Exclusive-mode helpers re-exported so the worker `ExclusiveCoordinator`
 /// can import them via a single path on Windows. Other platforms get
 /// permanent stubs from [`unsupported`].
@@ -25,12 +31,6 @@ pub use windows::physical::{
 };
 #[cfg(target_os = "windows")]
 pub use windows::prompt::{PromptController, PromptWaiter, show_pre_detach_prompt};
-#[cfg(not(target_os = "windows"))]
-pub use unsupported::{
-    ExclusiveLayout, PhysicalDisplaySnapshot, PromptController, PromptWaiter, enter_exclusive,
-    enumerate_active_displays_for_diagnostics, leave_exclusive,
-    log_active_displays_for_diagnostics, show_pre_detach_prompt, snapshot_layout,
-};
 
 /// Lifecycle owner: held by the LocalSystem daemon. Creating a handle
 /// allocates the OS-level virtual monitor resource; dropping the handle

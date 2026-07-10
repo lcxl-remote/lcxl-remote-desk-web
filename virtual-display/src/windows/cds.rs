@@ -41,8 +41,16 @@ fn build_devmode(mode: VirtualDisplayMode) -> DEVMODEW {
 /// persistent across logoff/login.
 pub fn apply_cds(device_name: &str, mode: VirtualDisplayMode) -> Result<(), VirtualDisplayError> {
     let devmode = build_devmode(mode);
-    let context = format!("{device_name} @ {}x{}@{}", mode.width, mode.height, mode.refresh_hz);
-    apply_cds_with_flags(Some(device_name), Some(&devmode), CDS_UPDATEREGISTRY, &context)
+    let context = format!(
+        "{device_name} @ {}x{}@{}",
+        mode.width, mode.height, mode.refresh_hz
+    );
+    apply_cds_with_flags(
+        Some(device_name),
+        Some(&devmode),
+        CDS_UPDATEREGISTRY,
+        &context,
+    )
 }
 
 /// Lower-level CDS commit. `device_name = None` + `devmode = None`

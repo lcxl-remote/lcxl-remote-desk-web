@@ -1,7 +1,7 @@
 use std::{sync::LazyLock, time::Instant};
 
 use desk_signal_facade::model::{desk_settings::VpxEncoderSettings, image_capture::DisplayInfo};
-use prometheus::{register_histogram_vec, HistogramVec};
+use prometheus::{HistogramVec, register_histogram_vec};
 use vpx_encode::VideoCodecId;
 
 use crate::{

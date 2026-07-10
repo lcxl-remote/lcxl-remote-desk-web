@@ -143,8 +143,13 @@ mod wincode_tests {
         // The manager routes by device_id; the OSS signal leaves it absent. The
         // query must parse with it present and serialize without it when None so
         // an OSS request carries no stray field (dual-target wire model).
-        let with_device: ListTerminalQuery = serde_json::from_str(r#"{"device_id":"11111111-1111-4111-8111-111111111111"}"#).unwrap();
-        assert_eq!(with_device.device_id.as_deref(), Some("11111111-1111-4111-8111-111111111111"));
+        let with_device: ListTerminalQuery =
+            serde_json::from_str(r#"{"device_id":"11111111-1111-4111-8111-111111111111"}"#)
+                .unwrap();
+        assert_eq!(
+            with_device.device_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
 
         let empty: ListTerminalQuery = serde_json::from_str("{}").unwrap();
         assert!(empty.device_id.is_none());
