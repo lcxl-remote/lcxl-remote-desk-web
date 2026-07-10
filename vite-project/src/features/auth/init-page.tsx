@@ -173,8 +173,9 @@ export default function InitPage() {
             const decision = managerNextDecision(result)
             if (decision === "advance") {
                 if (isInsecureConnection(result)) {
+                    // Verified, but unencrypted (http/ws): a warning, not an error.
                     toast({
-                        variant: "destructive",
+                        variant: "warning",
                         title: t("pages.init.manager.verifyOk"),
                         description: t("pages.init.manager.insecureWarning"),
                     })
@@ -232,8 +233,9 @@ export default function InitPage() {
             const decision = managerNextDecision(result)
             if (decision === "advance") {
                 if (isInsecureConnection(result)) {
+                    // Advancing over an unencrypted link is allowed — warn, don't block.
                     toast({
-                        variant: "destructive",
+                        variant: "warning",
                         title: t("pages.init.manager.insecureWarningTitle"),
                         description: t("pages.init.manager.insecureWarning"),
                     })
