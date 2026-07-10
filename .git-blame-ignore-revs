@@ -1,0 +1,7 @@
+# Revisions listed here are skipped by `git blame` (bulk reformatting, no
+# functional change). Enable locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub applies this file automatically.
+
+# style: format workspace with rustfmt 1.90.0 (edition 2024)
+c0547138bc5329552f44eeddab727ff88764ad9b
