@@ -292,6 +292,21 @@ impl DeskErrorCode {
     /// first. Carried in `RestResponse.code` (business error, HTTP stays 200).
     pub const ACCOUNT_STILL_ORG_OWNER: DeskErrorCode = DeskErrorCode(63);
 
+    /// A connection-verify probe could not reach the target at all (DNS failure,
+    /// connection refused, TLS handshake failure). Carried inside the
+    /// `ConnectionVerifyResult` for display.
+    pub const CONNECTION_UNREACHABLE: DeskErrorCode = DeskErrorCode(64);
+    /// A connection-verify probe reached an endpoint but it did not identify
+    /// itself as a desk signaling endpoint (missing probe marker header), so it is
+    /// not usable as a signaling / manager target.
+    pub const CONNECTION_NOT_SIGNALING: DeskErrorCode = DeskErrorCode(65);
+    /// A connection-verify probe reached the signaling endpoint but the API token
+    /// was rejected (or absent).
+    pub const CONNECTION_AUTH_FAILED: DeskErrorCode = DeskErrorCode(66);
+    /// A connection-verify target was refused before dialing: an unsupported URL
+    /// scheme, or an address blocked by the SSRF guard.
+    pub const CONNECTION_TARGET_BLOCKED: DeskErrorCode = DeskErrorCode(67);
+
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
     pub const REMOTE_DESK_OFFLINE: DeskErrorCode = DeskErrorCode(10003);

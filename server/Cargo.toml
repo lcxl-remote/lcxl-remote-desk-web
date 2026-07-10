@@ -30,6 +30,7 @@ actix-files = { workspace = true }
 actix-server = { workspace = true }
 actix-http = { workspace = true }
 actix-service = { workspace = true }
+actix-tls = { workspace = true }
 awc = { workspace = true }
 
 rustls = { workspace = true }

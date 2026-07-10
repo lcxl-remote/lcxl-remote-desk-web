@@ -30,6 +30,7 @@ use std::{
 use crate::{
     controller::{
         api_token::create_token,
+        connection::verify_connection,
         info::{query_backend_info, query_macos_autologin, query_server_info, query_sysinfo},
         init::init_system,
         login::{change_password, get_captcha, login_account, login_tauri, logout_account},
@@ -161,7 +162,11 @@ pub fn configure_api_surface(
         .service(query_server_info)
         .service(install_service)
         .service(uninstall_service)
-        .service(init_system);
+        .service(init_system)
+        // Connection-verify performs its own self-authentication (open before the
+        // system is initialized, session-gated after), so it is registered outside
+        // the `/api` scope to bypass `reject_anonymous_users`, like signaling.
+        .service(verify_connection);
 
     // Signaling WS is registered at the top level (outside the `/api` scope) so
     // it bypasses `reject_anonymous_users` — the handler performs its own
@@ -588,6 +593,23 @@ pub async fn run_with_hub(
     let support_link_state = Arc::new(daemon::support_link_state::SupportLinkState::new());
     let support_link_state_data = web::Data::new(support_link_state.clone());
 
+    // Shared "should the manager link be connected" gate: driven by the settings
+    // controllers (host toggling the manager connection) and observed by the
+    // signaling proxy (tears the current manager / support upstream down on
+    // disable) and the fleet audit sink (stays purely local when disabled). Its
+    // initial value is derived from the persisted settings.
+    let manager_link_gate = {
+        let s = shared_settings_data.read().await;
+        Arc::new(daemon::manager_link_gate::ManagerLinkGate::new(
+            daemon::signaling_proxy::manager_link_should_connect(
+                &s.system.manager_url,
+                &s.system.manager_api_token,
+                s.system.manager_enabled,
+            ),
+        ))
+    };
+    let manager_link_gate_data = web::Data::new(manager_link_gate.clone());
+
     // If this instance runs signaling, ensure local_signaling_token is generated and persisted
     if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
         let mut s = shared_settings_data.write().await;
@@ -626,6 +648,7 @@ pub async fn run_with_hub(
             let args_clone = settings.args.clone();
             let proxy_link_state = manager_link_state.clone();
             let proxy_support_state = support_link_state.clone();
+            let proxy_link_gate = manager_link_gate.clone();
             // Freeze this node's own bundled-TURN endpoints from the running
             // `TurnApiState` (same snapshot the local signaling injects from;
             // `None` -> empty when no embedded TURN started) so the daemon's PC
@@ -641,6 +664,7 @@ pub async fn run_with_hub(
                     own_turn_endpoints,
                     proxy_link_state,
                     proxy_support_state,
+                    proxy_link_gate,
                 )
                 .await
                 {
@@ -662,6 +686,7 @@ pub async fn run_with_hub(
         let validator_data = validator_data.clone();
         let manager_link_state_data = manager_link_state_data.clone();
         let support_link_state_data = support_link_state_data.clone();
+        let manager_link_gate_data = manager_link_gate_data.clone();
         let host_control_endpoint_state = host_control_endpoint_state.clone();
         let surface_opts = ApiSurfaceOpts {
             include_signaling: matches!(
@@ -720,6 +745,7 @@ pub async fn run_with_hub(
             .app_data(validator_data.clone())
             .app_data(manager_link_state_data.clone())
             .app_data(support_link_state_data.clone())
+            .app_data(manager_link_gate_data.clone())
             .configure(|cfg| {
                 if let Some(turn_api_state) = &turn_api_state {
                     cfg.app_data(turn_api_state.clone());

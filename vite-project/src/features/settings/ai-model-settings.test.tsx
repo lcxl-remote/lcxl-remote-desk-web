@@ -38,6 +38,9 @@ vi.mock("@/services/hooks/aiModelController/useQueryCollectionPolicySettings", (
 vi.mock("@/services/hooks/aiModelController/useUpdateCollectionPolicySettings", () => ({
     useUpdateCollectionPolicySettings: () => ({ mutateAsync: h.collectionMutateAsync, isPending: false }),
 }))
+vi.mock("@/services/hooks/modelProviderController/useTestModelProvider", () => ({
+    useTestModelProvider: () => ({ mutateAsync: vi.fn(), isPending: false }),
+}))
 
 import { AiModelSettings } from "./ai-model-settings"
 

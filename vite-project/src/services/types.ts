@@ -377,6 +377,67 @@ export type ConnectionList = {
     current_connection_id: string;
 };
 
+export type ConnectionVerifyParams = {
+    /**
+     * @description Either a bare `host[:port]` (the wizard\'s domain field — the backend then\nresolves `wss`→`ws`) or a full `ws(s)://host[:port]/path` URL (advanced /\ndesk-connection settings — probed as-is with no fallback).
+     * @type string
+    */
+    input: string;
+    /**
+     * @description Which link is being verified: `\"signaling\"` (a bare remote signaling\nserver) or `\"manager\"` (also checks the console origin is reachable).
+     * @type string
+    */
+    target: string;
+    /**
+     * @description API token to authenticate the probe. Omitted during pure scheme resolution\n(domain-field blur), supplied when checking whether the token is accepted.
+     * @type string,null
+    */
+    token?: string | null;
+};
+
+export type ConnectionVerifyResult = {
+    /**
+     * @description Whether the signaling endpoint confirmed the token: probe marker header\npresent **and** status 200. This is what the wizard\'s \"next\" gate requires.
+     * @type boolean
+    */
+    auth_ok: boolean;
+    /**
+     * @description Manager target only: whether the console origin (`https://<host>`) answered.
+     * @type boolean,null
+    */
+    console_ok?: boolean | null;
+    /**
+     * @description Machine-readable outcome ([`DeskErrorCode`]); `0` on success.
+     * @type integer, int32
+    */
+    error_code: number;
+    /**
+     * @description Human-readable outcome message.
+     * @type string
+    */
+    message: string;
+    /**
+     * @description Overall verdict. Signaling target: equals `auth_ok`. Manager target:\n`auth_ok && console_ok` (a missing console check counts as ok).
+     * @type boolean
+    */
+    ok: boolean;
+    /**
+     * @description Whether any HTTP response came back (DNS + TLS + connect all succeeded).\nThis is what the wizard uses to pick the `wss`/`ws` scheme.
+     * @type boolean
+    */
+    reached: boolean;
+    /**
+     * @description The full `ws(s)://.../path` URL the probe settled on (for the bare-host\ncase, the scheme that succeeded); echoed back so the wizard can persist it.
+     * @type string,null
+    */
+    resolved_url?: string | null;
+    /**
+     * @description The scheme that succeeded (`\"wss\"` or `\"ws\"`).
+     * @type string,null
+    */
+    scheme?: string | null;
+};
+
 /**
  * @description CPU information
 */
@@ -1222,11 +1283,70 @@ export type FileTransferMessage = ((DownloadRequest & {
     type: FileTransferMessageTypeEnum7Key;
 }));
 
+/**
+ * @description Security settings for controlling remote access permissions.\n\nEach capability field uses `Option<bool>`:\n  - `None`  — not configured (GUI: prompt user; headless: deny)\n  - `Some(true)`  — always allow\n  - `Some(false)` — always deny\n\n`approval_timeout` is different: a missing value on the wire is normalized to\n[`DEFAULT_APPROVAL_TIMEOUT_SECS`] (see [`SecuritySettings::normalize`]), and\nthe explicit \"never\" choice is persisted as the present value `Some(0)` — not\n`None` — so it survives a save/reload round-trip (TOML omits `None`, and the\n`serde(default)` reload would otherwise resurrect the 30s default).
+*/
+export type SecuritySettings = {
+    /**
+     * @description Allow clipboard synchronization
+     * @type boolean,null
+    */
+    allow_clipboard_sync?: boolean | null;
+    /**
+     * @description Allow file browsing (list/delete files via signaling)
+     * @type boolean,null
+    */
+    allow_file_browse?: boolean | null;
+    /**
+     * @description Allow file transfer (upload/download via DataChannel)
+     * @type boolean,null
+    */
+    allow_file_transfer?: boolean | null;
+    /**
+     * @description Allow enabling private screen mode
+     * @type boolean,null
+    */
+    allow_private_screen?: boolean | null;
+    /**
+     * @description Allow remote desktop control (mouse/keyboard input)
+     * @type boolean,null
+    */
+    allow_remote_control?: boolean | null;
+    /**
+     * @description Allow remote terminal access
+     * @type boolean,null
+    */
+    allow_terminal?: boolean | null;
+    /**
+     * @description Allow whiteboard overlay
+     * @type boolean,null
+    */
+    allow_whiteboard?: boolean | null;
+    /**
+     * @description Timeout for security approval requests in seconds.\n`Some(0)` means \"never time out\"; `None` on the wire is normalized to the\n30s default rather than treated as \"never\".
+     * @minLength 0
+     * @default 30
+     * @type integer,null, int32
+    */
+    approval_timeout?: number | null;
+};
+
 export type InitParams = {
+    /**
+     * @description Optional manager API token paired with `manager_url`.
+     * @type string,null
+    */
+    manager_api_token?: string | null;
+    /**
+     * @description Optional manager signaling URL to connect on first run (the wizard\'s\nresolved `ws(s)://.../signaling` URL). Skipping the manager step leaves it\n`None`.
+     * @type string,null
+    */
+    manager_url?: string | null;
     /**
      * @type string
     */
     password: string;
+    security?: (null | SecuritySettings);
     /**
      * @type boolean
     */
@@ -1988,6 +2108,66 @@ export type RestResponseCollectionPolicySettings = {
     success: boolean;
 };
 
+export type RestResponseConnectionVerifyResult = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description Whether the signaling endpoint confirmed the token: probe marker header\npresent **and** status 200. This is what the wizard\'s \"next\" gate requires.
+         * @type boolean
+        */
+        auth_ok: boolean;
+        /**
+         * @description Manager target only: whether the console origin (`https://<host>`) answered.
+         * @type boolean,null
+        */
+        console_ok?: boolean | null;
+        /**
+         * @description Machine-readable outcome ([`DeskErrorCode`]); `0` on success.
+         * @type integer, int32
+        */
+        error_code: number;
+        /**
+         * @description Human-readable outcome message.
+         * @type string
+        */
+        message: string;
+        /**
+         * @description Overall verdict. Signaling target: equals `auth_ok`. Manager target:\n`auth_ok && console_ok` (a missing console check counts as ok).
+         * @type boolean
+        */
+        ok: boolean;
+        /**
+         * @description Whether any HTTP response came back (DNS + TLS + connect all succeeded).\nThis is what the wizard uses to pick the `wss`/`ws` scheme.
+         * @type boolean
+        */
+        reached: boolean;
+        /**
+         * @description The full `ws(s)://.../path` URL the probe settled on (for the bare-host\ncase, the scheme that succeeded); echoed back so the wizard can persist it.
+         * @type string,null
+        */
+        resolved_url?: string | null;
+        /**
+         * @description The scheme that succeeded (`\"wss\"` or `\"ws\"`).
+         * @type string,null
+        */
+        scheme?: string | null;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseCreateApiTokenResult = {
     /**
      * @type integer, int32
@@ -2288,7 +2468,7 @@ export type RestResponseSecuritySettings = {
     */
     code: number;
     /**
-     * @description Security settings for controlling remote access permissions.\n\nEach field uses `Option<bool>`:\n  - `None`  — not configured (GUI: prompt user; headless: deny)\n  - `Some(true)`  — always allow\n  - `Some(false)` — always deny
+     * @description Security settings for controlling remote access permissions.\n\nEach capability field uses `Option<bool>`:\n  - `None`  — not configured (GUI: prompt user; headless: deny)\n  - `Some(true)`  — always allow\n  - `Some(false)` — always deny\n\n`approval_timeout` is different: a missing value on the wire is normalized to\n[`DEFAULT_APPROVAL_TIMEOUT_SECS`] (see [`SecuritySettings::normalize`]), and\nthe explicit \"never\" choice is persisted as the present value `Some(0)` — not\n`None` — so it survives a save/reload round-trip (TOML omits `None`, and the\n`serde(default)` reload would otherwise resurrect the 30s default).
      * @type object | undefined
     */
     data?: {
@@ -2328,8 +2508,9 @@ export type RestResponseSecuritySettings = {
         */
         allow_whiteboard?: boolean | null;
         /**
-         * @description Timeout for security approval requests in seconds
+         * @description Timeout for security approval requests in seconds.\n`Some(0)` means \"never time out\"; `None` on the wire is normalized to the\n30s default rather than treated as \"never\".
          * @minLength 0
+         * @default 30
          * @type integer,null, int32
         */
         approval_timeout?: number | null;
@@ -2583,6 +2764,11 @@ export type RestResponseSystemSettings = {
          * @type string,null
         */
         manager_api_token?: string | null;
+        /**
+         * @description Whether the host should keep the manager link connected. This is a\nhost-local UI toggle that lets a user disable the manager connection\nwithout clearing `manager_url` / `manager_api_token`, so the address is\nretained for a later re-enable. `None` / `Some(true)` = enabled;\n`Some(false)` = explicitly disabled. Not part of the shared\n`RemoteSystemSettings` — the manager cannot flip its own link off.
+         * @type boolean,null
+        */
+        manager_enabled?: boolean | null;
         /**
          * @description Remote manager server url for connecting to an enterprise manager
          * @type string,null
@@ -3082,53 +3268,6 @@ export type SecurityApprovalSubmitParams = {
 };
 
 /**
- * @description Security settings for controlling remote access permissions.\n\nEach field uses `Option<bool>`:\n  - `None`  — not configured (GUI: prompt user; headless: deny)\n  - `Some(true)`  — always allow\n  - `Some(false)` — always deny
-*/
-export type SecuritySettings = {
-    /**
-     * @description Allow clipboard synchronization
-     * @type boolean,null
-    */
-    allow_clipboard_sync?: boolean | null;
-    /**
-     * @description Allow file browsing (list/delete files via signaling)
-     * @type boolean,null
-    */
-    allow_file_browse?: boolean | null;
-    /**
-     * @description Allow file transfer (upload/download via DataChannel)
-     * @type boolean,null
-    */
-    allow_file_transfer?: boolean | null;
-    /**
-     * @description Allow enabling private screen mode
-     * @type boolean,null
-    */
-    allow_private_screen?: boolean | null;
-    /**
-     * @description Allow remote desktop control (mouse/keyboard input)
-     * @type boolean,null
-    */
-    allow_remote_control?: boolean | null;
-    /**
-     * @description Allow remote terminal access
-     * @type boolean,null
-    */
-    allow_terminal?: boolean | null;
-    /**
-     * @description Allow whiteboard overlay
-     * @type boolean,null
-    */
-    allow_whiteboard?: boolean | null;
-    /**
-     * @description Timeout for security approval requests in seconds
-     * @minLength 0
-     * @type integer,null, int32
-    */
-    approval_timeout?: number | null;
-};
-
-/**
  * @description Server information
 */
 export type ServerInfo = {
@@ -3371,6 +3510,11 @@ export type SystemSettings = {
      * @type string,null
     */
     manager_api_token?: string | null;
+    /**
+     * @description Whether the host should keep the manager link connected. This is a\nhost-local UI toggle that lets a user disable the manager connection\nwithout clearing `manager_url` / `manager_api_token`, so the address is\nretained for a later re-enable. `None` / `Some(true)` = enabled;\n`Some(false)` = explicitly disabled. Not part of the shared\n`RemoteSystemSettings` — the manager cannot flip its own link off.
+     * @type boolean,null
+    */
+    manager_enabled?: boolean | null;
     /**
      * @description Remote manager server url for connecting to an enterprise manager
      * @type string,null
@@ -3867,6 +4011,21 @@ export type VirtualDisplaySettings = {
      * @type integer | undefined, int32
     */
     prompt_ms?: number;
+};
+
+/**
+ * @description Verification result
+*/
+export type VerifyConnection200 = RestResponseConnectionVerifyResult;
+
+export type VerifyConnectionMutationRequest = ConnectionVerifyParams;
+
+export type VerifyConnectionMutationResponse = VerifyConnection200;
+
+export type VerifyConnectionMutation = {
+    Response: VerifyConnection200;
+    Request: VerifyConnectionMutationRequest;
+    Errors: any;
 };
 
 /**

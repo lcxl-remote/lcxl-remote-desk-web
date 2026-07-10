@@ -1,19 +1,23 @@
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import { useTranslation } from "react-i18next"
-import { Loader2, Save } from "lucide-react"
+import { CheckCircle2, Loader2, Save, ShieldCheck, XCircle } from "lucide-react"
 
 import { useQuerySettings } from "@/services/hooks/settingsController/useQuerySettings"
 import { useUpdateSettings } from "@/services/hooks/settingsController/useUpdateSettings"
+import { useVerifyConnection } from "@/services/hooks/connectionController/useVerifyConnection"
+import type { ConnectionVerifyResult } from "@/services/types"
 import { mergeSystemSettings } from "@/features/settings/settings-payload"
 import { ManagerLinkBanner } from "@/features/settings/manager-link-banner"
 
 import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
+import { Switch } from "@/components/ui/switch"
 import { useToast } from "@/hooks/use-toast"
 
 // Outbound connection settings let a desk-server reach a standalone signaling
@@ -25,9 +29,20 @@ const deskConnectionSchema = z.object({
     signaling_token: z.string().nullable(),
     manager_url: z.string().nullable(),
     manager_api_token: z.string().nullable(),
+    // Host-local toggle: disable the manager connection without clearing the
+    // address so it can be re-enabled later.
+    manager_enabled: z.boolean(),
 })
 
 type DeskConnectionFormValues = z.infer<typeof deskConnectionSchema>
+
+// Per-target verification state for the status badges.
+type VerifyState =
+    | { kind: "idle" }
+    | { kind: "unconfigured" }
+    | { kind: "disabled" }
+    | { kind: "checking" }
+    | { kind: "result"; result: ConnectionVerifyResult }
 
 export function DeskConnectionSettings() {
     const { t } = useTranslation()
@@ -35,6 +50,12 @@ export function DeskConnectionSettings() {
 
     const { data: settingsResponse, isLoading, refetch: refetchSettings } = useQuerySettings()
     const { mutateAsync: updateSettings, isPending: isUpdating } = useUpdateSettings()
+    const { mutateAsync: verifyConnection } = useVerifyConnection()
+
+    const [signalingState, setSignalingState] = useState<VerifyState>({ kind: "idle" })
+    const [managerState, setManagerState] = useState<VerifyState>({ kind: "idle" })
+    const [checkingSignaling, setCheckingSignaling] = useState(false)
+    const [checkingManager, setCheckingManager] = useState(false)
 
     const form = useForm<DeskConnectionFormValues>({
         resolver: zodResolver(deskConnectionSchema),
@@ -43,6 +64,7 @@ export function DeskConnectionSettings() {
             signaling_token: null,
             manager_url: null,
             manager_api_token: null,
+            manager_enabled: true,
         },
     })
 
@@ -54,9 +76,107 @@ export function DeskConnectionSettings() {
                 signaling_token: data.signaling_token || null,
                 manager_url: data.manager_url || null,
                 manager_api_token: data.manager_api_token || null,
+                // Unset / true both mean enabled; only an explicit false disables.
+                manager_enabled: data.manager_enabled !== false,
             })
         }
     }, [settingsResponse?.data, isLoading, form])
+
+    // Run one verify probe; returns the result or null on transport failure.
+    const runVerify = async (
+        target: "signaling" | "manager",
+        input: string,
+        token: string | null,
+    ): Promise<ConnectionVerifyResult | null> => {
+        try {
+            const res = await verifyConnection({
+                data: { target, input, token: token || undefined },
+            })
+            return res.data ?? null
+        } catch {
+            return null
+        }
+    }
+
+    const verifySignaling = async () => {
+        const url = form.getValues("signaling_url")
+        if (!url) {
+            setSignalingState({ kind: "unconfigured" })
+            return
+        }
+        setCheckingSignaling(true)
+        setSignalingState({ kind: "checking" })
+        const result = await runVerify("signaling", url, form.getValues("signaling_token"))
+        setCheckingSignaling(false)
+        setSignalingState(
+            result
+                ? { kind: "result", result }
+                : {
+                      kind: "result",
+                      result: {
+                          ok: false,
+                          reached: false,
+                          auth_ok: false,
+                          error_code: -1,
+                          message: t("pages.deskConnection.verify.transportError"),
+                      },
+                  },
+        )
+    }
+
+    const verifyManager = async () => {
+        const url = form.getValues("manager_url")
+        if (!url) {
+            setManagerState({ kind: "unconfigured" })
+            return
+        }
+        if (!form.getValues("manager_enabled")) {
+            setManagerState({ kind: "disabled" })
+            return
+        }
+        setCheckingManager(true)
+        setManagerState({ kind: "checking" })
+        const result = await runVerify("manager", url, form.getValues("manager_api_token"))
+        setCheckingManager(false)
+        setManagerState(
+            result
+                ? { kind: "result", result }
+                : {
+                      kind: "result",
+                      result: {
+                          ok: false,
+                          reached: false,
+                          auth_ok: false,
+                          error_code: -1,
+                          message: t("pages.deskConnection.verify.transportError"),
+                      },
+                  },
+        )
+    }
+
+    // Auto-run a status check once settings load, for any configured + enabled
+    // target. Runs only on the initial load (guarded by the idle state).
+    useEffect(() => {
+        if (isLoading || !settingsResponse?.data) return
+        const data = settingsResponse.data
+        if (signalingState.kind === "idle") {
+            if (data.signaling_url) {
+                void verifySignaling()
+            } else {
+                setSignalingState({ kind: "unconfigured" })
+            }
+        }
+        if (managerState.kind === "idle") {
+            if (!data.manager_url) {
+                setManagerState({ kind: "unconfigured" })
+            } else if (data.manager_enabled === false) {
+                setManagerState({ kind: "disabled" })
+            } else {
+                void verifyManager()
+            }
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isLoading, settingsResponse?.data])
 
     const onSubmit = async (values: DeskConnectionFormValues) => {
         try {
@@ -100,6 +220,27 @@ export function DeskConnectionSettings() {
 
             <ManagerLinkBanner />
 
+            <Card className="mb-6">
+                <CardHeader>
+                    <CardTitle>{t("pages.deskConnection.status.title")}</CardTitle>
+                    <CardDescription>{t("pages.deskConnection.status.description")}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                    <ConnectionStatusRow
+                        label={t("pages.deskConnection.status.signaling")}
+                        state={signalingState}
+                        checking={checkingSignaling}
+                        onVerify={verifySignaling}
+                    />
+                    <ConnectionStatusRow
+                        label={t("pages.deskConnection.status.manager")}
+                        state={managerState}
+                        checking={checkingManager}
+                        onVerify={verifyManager}
+                    />
+                </CardContent>
+            </Card>
+
             <Card>
                 <CardHeader>
                     <CardTitle>{t("pages.deskConnection.configuration")}</CardTitle>
@@ -133,6 +274,21 @@ export function DeskConnectionSettings() {
                                                 <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="Node access token for remote signaling..." />
                                             </FormControl>
                                             <FormMessage />
+                                        </FormItem>
+                                    )}
+                                />
+                                <FormField
+                                    control={form.control}
+                                    name="manager_enabled"
+                                    render={({ field }) => (
+                                        <FormItem className="flex flex-row items-center justify-between rounded-lg border p-4">
+                                            <div className="space-y-0.5">
+                                                <FormLabel className="text-base">{t("pages.deskConnection.managerEnabled")}</FormLabel>
+                                                <FormDescription>{t("pages.deskConnection.managerEnabled.description")}</FormDescription>
+                                            </div>
+                                            <FormControl>
+                                                <Switch checked={field.value} onCheckedChange={field.onChange} />
+                                            </FormControl>
                                         </FormItem>
                                     )}
                                 />
@@ -175,6 +331,81 @@ export function DeskConnectionSettings() {
                     </Form>
                 </CardContent>
             </Card>
+        </div>
+    )
+}
+
+// One status row: a label, a state badge, an optional failure reason, and a
+// manual re-verify button.
+function ConnectionStatusRow({
+    label,
+    state,
+    checking,
+    onVerify,
+}: {
+    label: string
+    state: VerifyState
+    checking: boolean
+    onVerify: () => void
+}) {
+    const { t } = useTranslation()
+
+    let badge: React.ReactNode
+    let reason: string | null = null
+    switch (state.kind) {
+        case "checking":
+            badge = (
+                <Badge variant="secondary">
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                    {t("pages.deskConnection.status.checking")}
+                </Badge>
+            )
+            break
+        case "unconfigured":
+            badge = <Badge variant="outline">{t("pages.deskConnection.status.unconfigured")}</Badge>
+            break
+        case "disabled":
+            badge = <Badge variant="outline">{t("pages.deskConnection.status.disabled")}</Badge>
+            break
+        case "result":
+            if (state.result.ok) {
+                badge = (
+                    <Badge variant="default" className="bg-green-600 hover:bg-green-600">
+                        <CheckCircle2 className="mr-1 h-3 w-3" />
+                        {t("pages.deskConnection.status.ok")}
+                    </Badge>
+                )
+            } else {
+                badge = (
+                    <Badge variant="destructive">
+                        <XCircle className="mr-1 h-3 w-3" />
+                        {t("pages.deskConnection.status.error")}
+                    </Badge>
+                )
+                reason = state.result.message
+            }
+            break
+        default:
+            badge = <Badge variant="outline">{t("pages.deskConnection.status.idle")}</Badge>
+    }
+
+    return (
+        <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+                <span className="text-sm font-medium">{label}</span>
+                {badge}
+            </div>
+            <div className="flex items-center gap-3">
+                {reason && <span className="text-xs text-muted-foreground">{reason}</span>}
+                <Button type="button" variant="outline" size="sm" disabled={checking} onClick={onVerify}>
+                    {checking ? (
+                        <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                    ) : (
+                        <ShieldCheck className="mr-1 h-3 w-3" />
+                    )}
+                    {t("pages.deskConnection.verify.button")}
+                </Button>
+            </div>
         </div>
     )
 }

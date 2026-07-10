@@ -1,3 +1,4 @@
+use super::manager_link_gate::ManagerLinkGate;
 use super::manager_link_state::ManagerLinkState;
 use super::support_link_state::SupportLinkState;
 use super::pc_manager::PcRegistry;
@@ -29,8 +30,29 @@ use log::{debug, error, info, warn};
 use rustls::{ClientConfig, RootCertStore};
 use rustls_native_certs::load_native_certs;
 use std::{sync::Arc, time::Duration};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
+/// Whether the host should keep the manager link connected right now: the
+/// manager URL and API token are both configured (non-empty) **and** the
+/// host-local `manager_enabled` toggle is not turned off (`Some(false)`).
+///
+/// The single predicate behind the always-on manager upstream guard, the
+/// on-demand support upstream guard, and the shared [`ManagerLinkGate`] value, so
+/// none of them can drift from the others.
+pub fn manager_link_should_connect(
+    manager_url: &Option<String>,
+    manager_api_token: &Option<String>,
+    manager_enabled: Option<bool>,
+) -> bool {
+    let url_ok = manager_url.as_ref().map(|u| !u.is_empty()).unwrap_or(false);
+    let token_ok = manager_api_token
+        .as_ref()
+        .map(|t| !t.is_empty())
+        .unwrap_or(false);
+    url_ok && token_ok && manager_enabled != Some(false)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run_signaling_proxy(
     settings: web::Data<SharedSettings>,
     worker_mgr: WorkerManager,
@@ -47,6 +69,10 @@ pub async fn run_signaling_proxy(
     // upstream from it. The same handle rides into the router context so the
     // inbound `SupportCodeIssued` handler can record the code + arm its TTL.
     support_link_state: Arc<SupportLinkState>,
+    // Shared "should the manager link be connected" gate. Flipping it to `false`
+    // (host UI disabling the manager connection) tears the current manager /
+    // support upstream down and puts the fleet audit sink back to purely-local.
+    manager_link_gate: Arc<ManagerLinkGate>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Signaling proxy starting");
 
@@ -97,22 +123,17 @@ pub async fn run_signaling_proxy(
         }
     };
 
-    // Choose the audit sink once: report to the manager (DB persistence) when a
-    // manager is configured, otherwise log locally. `RemoteAuditSink` still logs
-    // too, so a fleet host keeps a local trail.
-    let manager_configured = {
-        let s = settings.read().await;
-        s.system
-            .manager_url
-            .as_ref()
-            .map(|u| !u.is_empty())
-            .unwrap_or(false)
-    };
-    let audit_sink: Arc<dyn AuditSink> = if manager_configured {
-        Arc::new(RemoteAuditSink::new(outbound_tx.clone()))
-    } else {
-        Arc::new(LogAuditSink)
-    };
+    // The audit sink always logs locally and best-effort reports each event to
+    // the manager (DB persistence) over the outbound lane. Whether the manager
+    // report is emitted is decided dynamically at record time from the shared
+    // [`ManagerLinkGate`]: when the manager link should not be connected (unset /
+    // disabled at runtime) the sink stays purely local, so the choice is never a
+    // stale startup decision. When no manager upstream is live the frame is
+    // dropped by the broadcast anyway, so a momentary disconnect loses nothing.
+    let audit_sink: Arc<dyn AuditSink> = Arc::new(RemoteAuditSink::new(
+        outbound_tx.clone(),
+        manager_link_gate.clone(),
+    ));
 
     // The daemon constructs `pc_registry` once in `daemon::mod` and shares
     // it with both `WorkerManager` (for the media-pipe receiver) and the
@@ -212,6 +233,7 @@ pub async fn run_signaling_proxy(
                     local_loopback_source(&startup_mode),
                     false,
                     None,
+                    None,
                 )
                 .await;
 
@@ -250,6 +272,7 @@ pub async fn run_signaling_proxy(
                         InboundSignalingSource::RemoteSignaling,
                         false,
                         None,
+                        None,
                     )
                     .await;
                 }
@@ -264,24 +287,27 @@ pub async fn run_signaling_proxy(
         let outbound_tx = outbound_tx.clone();
         let router_ctx = router_ctx.clone();
         let manager_link_state = manager_link_state.clone();
+        let manager_link_gate = manager_link_gate.clone();
         actix_web::rt::spawn(async move {
             loop {
-                let (manager_url, manager_api_token) = {
+                let (manager_url, manager_api_token, manager_enabled) = {
                     let s = settings.read().await;
                     (
                         s.system.manager_url.clone(),
                         s.system.manager_api_token.clone(),
+                        s.system.manager_enabled,
                     )
                 };
 
-                if let (Some(url), Some(token)) = (manager_url, manager_api_token)
-                    && !url.is_empty()
-                    && !token.is_empty()
+                if manager_link_should_connect(&manager_url, &manager_api_token, manager_enabled)
+                    && let (Some(url), Some(token)) = (manager_url, manager_api_token)
                 {
                     let rx = outbound_tx.subscribe();
                     // The manager link is the only one that enforces fatal
                     // device-quota rejection (`remote_mgr_handle` is the sole manager
-                    // injection point).
+                    // injection point). It is also gated by the shared
+                    // `ManagerLinkGate`, so disabling the manager connection at
+                    // runtime tears the current WebSocket down.
                     let outcome = maintain_proxy_connection(
                         settings.clone(),
                         &router_ctx,
@@ -291,6 +317,7 @@ pub async fn run_signaling_proxy(
                         InboundSignalingSource::TrustedCentral,
                         true,
                         Some(manager_link_state.clone()),
+                        Some(manager_link_gate.subscribe()),
                     )
                     .await;
 
@@ -321,21 +348,25 @@ pub async fn run_signaling_proxy(
         let outbound_tx = outbound_tx.clone();
         let router_ctx = router_ctx.clone();
         let support_link_state = support_link_state.clone();
+        let manager_link_gate = manager_link_gate.clone();
         actix_web::rt::spawn(async move {
             loop {
                 support_link_state.wait_for_start().await;
 
-                let (manager_url, manager_api_token) = {
+                let (manager_url, manager_api_token, manager_enabled) = {
                     let s = settings.read().await;
                     (
                         s.system.manager_url.clone(),
                         s.system.manager_api_token.clone(),
+                        s.system.manager_enabled,
                     )
                 };
 
-                if let (Some(url), Some(token)) = (manager_url, manager_api_token)
-                    && !url.is_empty()
-                    && !token.is_empty()
+                // The support upstream rides the manager credentials, so it is
+                // gated by the same predicate: disabling the manager connection
+                // also means no support upstream.
+                if manager_link_should_connect(&manager_url, &manager_api_token, manager_enabled)
+                    && let (Some(url), Some(token)) = (manager_url, manager_api_token)
                 {
                     let rx = outbound_tx.subscribe();
                     // Serve one support session: whichever finishes first wins —
@@ -351,6 +382,7 @@ pub async fn run_signaling_proxy(
                             InboundSignalingSource::Support,
                             false,
                             None,
+                            Some(manager_link_gate.subscribe()),
                         ) => {}
                         _ = support_link_state.wait_for_stop() => {}
                     }
@@ -364,7 +396,9 @@ pub async fn run_signaling_proxy(
                     )
                     .await;
                 } else {
-                    warn!("[support] start requested but the manager link is not configured");
+                    warn!(
+                        "[support] start requested but the manager link is not configured or is disabled"
+                    );
                 }
                 // Reset for the next session (idempotent if already stopped).
                 support_link_state.finish().await;
@@ -1114,6 +1148,7 @@ async fn egress_permitted(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn maintain_proxy_connection(
     settings: web::Data<SharedSettings>,
     router_ctx: &RouterContext,
@@ -1127,6 +1162,12 @@ async fn maintain_proxy_connection(
     fatal_quota_reject_enabled: bool,
     // Records the fatal rejection for the host UI when the link is the manager link.
     manager_link_state: Option<Arc<ManagerLinkState>>,
+    // Set only for the manager and support upstreams. When present, the current
+    // connection is torn down the moment the shared `ManagerLinkGate` flips to
+    // `false` (the host disabling the manager connection at runtime). `None` for
+    // the local loopback and bare remote-signaling relays, which the manager
+    // toggle does not govern.
+    mut manager_link_enabled_rx: Option<watch::Receiver<bool>>,
 ) -> Result<ProxyConnectionOutcome, Box<dyn std::error::Error>> {
     let display_name = {
         let s = settings.read().await;
@@ -1217,6 +1258,17 @@ async fn maintain_proxy_connection(
     let is_support_upstream = source.is_restricted();
     let restricted_connections = router_ctx.pc_registry.restricted_connections_handle();
 
+    // Close a race where the manager link is disabled after `connect()` but
+    // before this read loop parks on the gate: read the current value first and
+    // bail out immediately if the link should no longer be up.
+    if let Some(rx) = manager_link_enabled_rx.as_ref()
+        && !*rx.borrow()
+    {
+        info!("[Proxy] Manager link disabled; closing {signaling_url}");
+        let _ = sink.send(awc::ws::Message::Close(None)).await;
+        return Ok(ProxyConnectionOutcome::Closed);
+    }
+
     loop {
         tokio::select! {
             ws_msg = stream.next() => {
@@ -1301,11 +1353,34 @@ async fn maintain_proxy_connection(
                     }
                 }
             }
+
+            // Manager / support upstreams only: tear the connection down when the
+            // host disables the manager link at runtime. `None` links resolve a
+            // never-completing future, so this branch is inert for them.
+            _ = wait_manager_link_disabled(&mut manager_link_enabled_rx) => {
+                info!("[Proxy] Manager link disabled; closing {signaling_url}");
+                let _ = sink.send(awc::ws::Message::Close(None)).await;
+                break;
+            }
         }
     }
 
     info!("[Proxy] Connection to {signaling_url} ended");
     Ok(ProxyConnectionOutcome::Closed)
+}
+
+/// Resolve when the shared manager-link gate flips to disabled. For links the
+/// manager toggle does not govern (`None` receiver) this never resolves, so the
+/// `select!` branch that awaits it stays inert.
+async fn wait_manager_link_disabled(rx: &mut Option<watch::Receiver<bool>>) {
+    match rx {
+        Some(rx) => {
+            // `wait_for` re-checks the current value, so a disable that already
+            // happened is observed rather than missed.
+            let _ = rx.wait_for(|enabled| !*enabled).await;
+        }
+        None => std::future::pending::<()>().await,
+    }
 }
 
 /// Which upstream link an inbound signaling frame arrived on. This is the
@@ -1787,6 +1862,29 @@ mod tests {
     use crate::host_control::HostControlHub;
     use crate::model::settings::{Settings, SharedSettings};
     use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
+
+    #[test]
+    fn manager_link_should_connect_requires_config_and_not_disabled() {
+        let url = Some("wss://manager.example/api/desk/signaling".to_string());
+        let token = Some("tok".to_string());
+
+        // Configured + enabled (None or Some(true)) -> connect. This gate is shared
+        // by the always-on manager upstream, the support upstream, and the audit
+        // sink, so all three agree.
+        assert!(manager_link_should_connect(&url, &token, None));
+        assert!(manager_link_should_connect(&url, &token, Some(true)));
+
+        // Explicitly disabled -> never connect, even with full config (cold-start
+        // with manager_enabled=false keeps both the manager and support upstreams
+        // parked).
+        assert!(!manager_link_should_connect(&url, &token, Some(false)));
+
+        // Missing / empty url or token -> never connect regardless of the toggle.
+        assert!(!manager_link_should_connect(&None, &token, None));
+        assert!(!manager_link_should_connect(&url, &None, None));
+        assert!(!manager_link_should_connect(&Some(String::new()), &token, None));
+        assert!(!manager_link_should_connect(&url, &Some(String::new()), None));
+    }
 
     #[test]
     fn local_loopback_is_trusted_central_only_in_portable_default() {

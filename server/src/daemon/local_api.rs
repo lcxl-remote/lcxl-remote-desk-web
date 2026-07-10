@@ -33,6 +33,7 @@ pub async fn run_local_api(
     host_control_hub: Arc<host_control::HostControlHub>,
     manager_link_state: Arc<super::manager_link_state::ManagerLinkState>,
     support_link_state: Arc<super::support_link_state::SupportLinkState>,
+    manager_link_gate: Arc<super::manager_link_gate::ManagerLinkGate>,
     ready_tx: Option<oneshot::Sender<()>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("ServiceDaemon HTTP server starting on 0.0.0.0:{SERVICE_API_PORT}");
@@ -72,6 +73,7 @@ pub async fn run_local_api(
     let validator_data = web::Data::new(validator);
     let manager_link_state_data = web::Data::new(manager_link_state);
     let support_link_state_data = web::Data::new(support_link_state);
+    let manager_link_gate_data = web::Data::new(manager_link_gate);
 
     // Share the bridge's TauriLoginToken clone with the HTTP server so that
     // refresh() calls from the WS handler are visible to the login controller.
@@ -117,6 +119,7 @@ pub async fn run_local_api(
             .app_data(validator_data.clone())
             .app_data(manager_link_state_data.clone())
             .app_data(support_link_state_data.clone())
+            .app_data(manager_link_gate_data.clone())
             .app_data(api_json_config())
             .configure(move |cfg| {
                 if let Some(admin) = tauri_is_admin {

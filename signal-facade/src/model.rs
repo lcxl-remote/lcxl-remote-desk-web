@@ -6,6 +6,7 @@ pub mod files;
 pub mod image_capture;
 pub mod os;
 pub mod private_screen;
+pub mod probe;
 pub mod security_settings;
 pub mod signal;
 pub mod support;

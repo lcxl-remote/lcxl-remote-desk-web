@@ -48,3 +48,5 @@ actix-tls = { version = "3.5", default-features = false, features = ["connect"] 
 # raised `max_frame_size` is regression-tested against the diagnose chunk size.
 actix-http = { workspace = true }
 tokio-util = { workspace = true }
+# Build a realistic VersionInfo query string for the signaling probe test.
+serde_urlencoded = { workspace = true }

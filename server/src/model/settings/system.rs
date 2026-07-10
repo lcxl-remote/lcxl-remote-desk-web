@@ -99,6 +99,13 @@ pub struct SystemSettings {
     pub signaling_token: Option<String>,
     /// Remote manager server url for connecting to an enterprise manager
     pub manager_url: Option<String>,
+    /// Whether the host should keep the manager link connected. This is a
+    /// host-local UI toggle that lets a user disable the manager connection
+    /// without clearing `manager_url` / `manager_api_token`, so the address is
+    /// retained for a later re-enable. `None` / `Some(true)` = enabled;
+    /// `Some(false)` = explicitly disabled. Not part of the shared
+    /// `RemoteSystemSettings` — the manager cannot flip its own link off.
+    pub manager_enabled: Option<bool>,
     /// Client ID for telemetry
     client_id: Option<String>,
     /// Telemetry consent status
@@ -184,6 +191,7 @@ impl std::fmt::Debug for SystemSettings {
                 &format_args!("{}", redacted(&self.signaling_token)),
             )
             .field("manager_url", &self.manager_url)
+            .field("manager_enabled", &self.manager_enabled)
             .field("client_id", &self.client_id)
             .field("telemetry_consent", &self.telemetry_consent)
             .field("auto_start", &self.auto_start)
@@ -286,6 +294,7 @@ impl Default for SystemSettings {
             signaling_url: None,
             signaling_token: None,
             manager_url: None,
+            manager_enabled: None,
             client_id: None,
             telemetry_consent: None,
             auto_start: None,
@@ -388,5 +397,25 @@ mod tests {
         let rendered = format!("{:?}", settings);
         assert!(rendered.contains("local_signaling_token: None"));
         assert!(rendered.contains("manager_api_token: None"));
+    }
+
+    #[test]
+    fn manager_enabled_defaults_to_none_and_is_not_a_secret() {
+        let settings = SystemSettings::default();
+        assert_eq!(settings.manager_enabled, None);
+        // `manager_enabled` is not a credential, so Debug shows the real value.
+        let rendered = format!("{:?}", settings);
+        assert!(rendered.contains("manager_enabled: None"));
+    }
+
+    #[test]
+    fn manager_enabled_disabled_survives_toml_round_trip() {
+        let settings = SystemSettings {
+            manager_enabled: Some(false),
+            ..SystemSettings::default()
+        };
+        let serialized = toml::to_string(&settings).expect("serialize");
+        let reloaded: SystemSettings = toml::from_str(&serialized).expect("deserialize");
+        assert_eq!(reloaded.manager_enabled, Some(false));
     }
 }

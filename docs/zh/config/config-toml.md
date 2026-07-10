@@ -12,6 +12,7 @@
 - `signaling_token`——远程信令服务器的节点接入令牌（以 `?token=` 附在信令 WebSocket 上）。
 - `manager_url`——要连接的企业版 manager 信令地址。
 - `manager_api_token`——manager 的接入令牌（以 `?token=` 附在 manager 信令 WebSocket 上）。
+- `manager_enabled`——是否保持 manager 连接。留空（或 `true`）表示连接；设为 `false` 可在**不清空** `manager_url` / `manager_api_token` 的前提下断开 manager 链接，从而保留地址以便日后重新启用。可在**出站连接**设置页切换；这是被控端本机开关（manager 无法关闭自身链接）。
 
 > 当 manager 致命拒绝本机注册（设备数量已达上限，或本机缺少设备身份）时，desk-server 会暂停自动重连，**出站连接**设置页会显示横幅说明原因，并提供**重试注册**按钮。请先从任一控制端清理出一个设备名额，再重试。
 - `local_signaling_token`——自动生成并持久化的令牌，供本地 desk server（及其他被控端）与同机信令服务器鉴权。请勿手动设置；它是凭据，日志中已脱敏。
@@ -53,6 +54,19 @@
 
 - `enabled`——是否启用虚拟显示器（需已安装 IddCx 驱动；仅在特定模式下生效）。
 - `exclusive` / `prompt_ms` / `adaptive_*`——独占模式与自适应分辨率参数。
+
+## 安全 `[security]`
+
+对入站远程会话的按能力访问控制。每项能力为三态：未设置表示“每次询问本地用户”（默认），`true` 表示“始终允许”，`false` 表示“始终拒绝”。
+
+- `allow_remote_control`——鼠标 / 键盘输入。
+- `allow_clipboard_sync`——剪贴板同步。
+- `allow_private_screen`——防窥（隐私）屏模式。
+- `allow_whiteboard`——白板叠加。
+- `allow_terminal`——远程终端访问。
+- `allow_file_browse`——文件浏览。
+- `allow_file_transfer`——文件上传 / 下载。
+- `approval_timeout`——授权提示框的等待时长（秒）。**默认 `30`**——无人值守的被控端会自动取消请求，而不是让它永久挂起。设为 `0` 表示永不超时（提示框无限等待）。“从不”以数值 `0` 存储，因此重启后仍然保持。
 
 ## AI 设置
 

@@ -10,7 +10,7 @@ Start the service using Docker Compose:
 docker-compose up -d
 ```
 
-Access `http://localhost:8081` and set up the admin account on your first visit.
+Access `http://localhost:8081`. On your first visit a short setup wizard walks you through three steps: (1) create the admin account and accept the agreements, (2) optionally point the host at a manager (enter its domain — the wizard resolves `wss`/`ws` and verifies the API token — or skip it), and (3) choose the inbound security switches and the telemetry option, then finish.
 
 ## Option 2: Tauri Desktop Client
 

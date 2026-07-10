@@ -12,6 +12,7 @@ export type { LoginTauriMutationKey } from "./authController/useLoginTauri.ts";
 export type { LogoutAccountMutationKey } from "./authController/useLogoutAccount.ts";
 export type { ListConnectionsQueryKey } from "./connectionController/useListConnections.ts";
 export type { ListConnectionsSuspenseQueryKey } from "./connectionController/useListConnectionsSuspense.ts";
+export type { VerifyConnectionMutationKey } from "./connectionController/useVerifyConnection.ts";
 export type { BatchDeleteDeviceCodesMutationKey } from "./deviceCodeController/useBatchDeleteDeviceCodes.ts";
 export type { CreateDeviceCodeMutationKey } from "./deviceCodeController/useCreateDeviceCode.ts";
 export type { DeleteDeviceCodeMutationKey } from "./deviceCodeController/useDeleteDeviceCode.ts";
@@ -137,6 +138,9 @@ export { useListConnections } from "./connectionController/useListConnections.ts
 export { listConnectionsSuspenseQueryKey } from "./connectionController/useListConnectionsSuspense.ts";
 export { listConnectionsSuspenseQueryOptions } from "./connectionController/useListConnectionsSuspense.ts";
 export { useListConnectionsSuspense } from "./connectionController/useListConnectionsSuspense.ts";
+export { useVerifyConnection } from "./connectionController/useVerifyConnection.ts";
+export { verifyConnectionMutationKey } from "./connectionController/useVerifyConnection.ts";
+export { verifyConnectionMutationOptions } from "./connectionController/useVerifyConnection.ts";
 export { batchDeleteDeviceCodesMutationKey } from "./deviceCodeController/useBatchDeleteDeviceCodes.ts";
 export { batchDeleteDeviceCodesMutationOptions } from "./deviceCodeController/useBatchDeleteDeviceCodes.ts";
 export { useBatchDeleteDeviceCodes } from "./deviceCodeController/useBatchDeleteDeviceCodes.ts";

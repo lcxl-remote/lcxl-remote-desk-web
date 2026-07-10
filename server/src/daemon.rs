@@ -5,6 +5,7 @@ pub mod command_blocklist;
 pub mod command_templates;
 pub mod exec_approval;
 pub mod local_api;
+pub mod manager_link_gate;
 pub mod manager_link_state;
 pub mod pc_manager;
 #[cfg(target_os = "windows")]
@@ -121,6 +122,21 @@ pub async fn run_service_daemon_inner(
     // (drives the support upstream) and the local API (start / stop / status).
     let support_link_state = Arc::new(support_link_state::SupportLinkState::new());
 
+    // Shared "should the manager link be connected" gate, shared between the
+    // signaling proxy (tears the manager / support upstream down on disable) and
+    // the local API (settings controllers flip it when the host toggles the
+    // manager connection). Initial value derived from the persisted settings.
+    let manager_link_gate = {
+        let s = shared_settings.read().await;
+        Arc::new(manager_link_gate::ManagerLinkGate::new(
+            signaling_proxy::manager_link_should_connect(
+                &s.system.manager_url,
+                &s.system.manager_api_token,
+                s.system.manager_enabled,
+            ),
+        ))
+    };
+
     // The bridge is now a tiny holder for `tauri_is_admin` + `tauri_login_token`.
     // The host control endpoint owns `/ws/tauri_ipc` and `/ws/host_upstream` and
     // refreshes `tauri_login_token` on every Tauri ws connect.
@@ -135,6 +151,7 @@ pub async fn run_service_daemon_inner(
         let hub = Arc::clone(&host_control_hub);
         let link_state = Arc::clone(&manager_link_state);
         let support_state = Arc::clone(&support_link_state);
+        let link_gate = Arc::clone(&manager_link_gate);
         tokio::spawn(async move {
             if let Err(e) = local_api::run_local_api(
                 settings,
@@ -142,6 +159,7 @@ pub async fn run_service_daemon_inner(
                 hub,
                 link_state,
                 support_state,
+                link_gate,
                 Some(api_ready_tx),
             )
             .await
@@ -243,6 +261,7 @@ pub async fn run_service_daemon_inner(
         let virtual_display = virtual_display_supervisor.clone();
         let manager_link_state = Arc::clone(&manager_link_state);
         let support_link_state = Arc::clone(&support_link_state);
+        let manager_link_gate = Arc::clone(&manager_link_gate);
         actix_web::rt::spawn(async move {
             if let Err(e) = signaling_proxy::run_signaling_proxy(
                 settings,
@@ -253,6 +272,7 @@ pub async fn run_service_daemon_inner(
                 virtual_display,
                 manager_link_state,
                 support_link_state,
+                manager_link_gate,
             )
             .await
             {
@@ -337,6 +357,7 @@ pub async fn start_inprocess_daemon(
     own_turn_endpoints: Arc<std::collections::HashSet<String>>,
     manager_link_state: Arc<crate::daemon::manager_link_state::ManagerLinkState>,
     support_link_state: Arc<crate::daemon::support_link_state::SupportLinkState>,
+    manager_link_gate: Arc<crate::daemon::manager_link_gate::ManagerLinkGate>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Starting in-process daemon (portable mode)");
 
@@ -386,6 +407,7 @@ pub async fn start_inprocess_daemon(
             None,
             manager_link_state,
             support_link_state,
+            manager_link_gate,
         )
         .await
         {

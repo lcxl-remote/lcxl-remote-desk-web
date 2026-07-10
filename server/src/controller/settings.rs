@@ -13,6 +13,8 @@ use crate::model::settings::{
     CollectionPolicySettingsUpdate, LogSettings, SharedSettings, SystemSettings,
     TurnClientSettings,
 };
+use crate::daemon::manager_link_gate::ManagerLinkGate;
+use crate::daemon::signaling_proxy::manager_link_should_connect;
 use crate::service::auto_start::update_auto_start_status;
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_turn::model::TurnSettings;
@@ -66,6 +68,7 @@ pub async fn query_settings(settings: web::Data<SharedSettings>) -> Result<HttpR
 pub async fn update_settings(
     requst_json: web::Json<SystemSettings>,
     settings: web::Data<SharedSettings>,
+    manager_link_gate: web::Data<Arc<ManagerLinkGate>>,
 ) -> Result<HttpResponse, AWError> {
     let mut params = requst_json.into_inner();
     let mut settings = settings.write().await;
@@ -95,6 +98,16 @@ pub async fn update_settings(
     settings.system = params;
     // save new settings to file
     settings.save()?;
+    // Re-sync the shared manager-link gate to the freshly persisted config while
+    // still holding the settings write lock, so the proxy's reconnect loop cannot
+    // observe the new settings before the gate value catches up. Disabling the
+    // manager connection here tears down the current upstream; re-enabling lets
+    // the reconnect loop bring it back.
+    manager_link_gate.set(manager_link_should_connect(
+        &settings.system.manager_url,
+        &settings.system.manager_api_token,
+        settings.system.manager_enabled,
+    ));
     info!("Update system settings successfully, {:?}", settings.system);
     Ok(HttpResponse::Ok().finish())
 }
@@ -357,7 +370,11 @@ pub async fn update_security_settings(
     request_json: web::Json<SecuritySettings>,
     settings: web::Data<SharedSettings>,
 ) -> Result<HttpResponse, AWError> {
-    let params = request_json.into_inner();
+    let mut params = request_json.into_inner();
+    // Collapse an omitted (`None`) approval timeout to the finite default so an
+    // unattended host never keeps inbound control requests hanging; "never" is
+    // carried explicitly as the present value `Some(0)`.
+    params.normalize();
     let mut settings = settings.write().await;
     settings.security = params;
     settings.save()?;
@@ -637,7 +654,14 @@ mod tests {
         // must fail the app-dir guard, return a business error (HTTP 200 + a
         // non-success body code), and must NOT fall through to persisting.
         let shared = web::Data::new(SharedSettings::from(Settings::default()));
-        let app = test::init_service(App::new().app_data(shared).service(update_settings)).await;
+        let gate = web::Data::new(Arc::new(ManagerLinkGate::new(false)));
+        let app = test::init_service(
+            App::new()
+                .app_data(shared)
+                .app_data(gate)
+                .service(update_settings),
+        )
+        .await;
 
         let mut payload = SystemSettings::default();
         payload.auto_start = Some(true);
@@ -651,5 +675,58 @@ mod tests {
         let body: RestResponse<()> = test::read_body_json(resp).await;
         assert!(!body.success);
         assert_eq!(body.code, DeskErrorCode::AUTO_START_ERROR.code());
+    }
+
+    fn settings_with_temp_path() -> SharedSettings {
+        let mut settings = Settings::default();
+        let mut temp_path = std::env::temp_dir();
+        temp_path.push(format!("desk_settings_test_{}.toml", uuid::Uuid::new_v4()));
+        settings.args = crate::model::settings::Args {
+            config_file_path: temp_path.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        SharedSettings::from(settings)
+    }
+
+    #[actix_web::test]
+    #[allow(clippy::field_reassign_with_default)]
+    async fn update_settings_syncs_manager_link_gate() {
+        let shared = web::Data::new(settings_with_temp_path());
+        // Gate starts enabled; the update must drive it from the persisted config.
+        let gate = Arc::new(ManagerLinkGate::new(true));
+        let gate_data = web::Data::new(gate.clone());
+        let app = test::init_service(
+            App::new()
+                .app_data(shared)
+                .app_data(gate_data)
+                .service(update_settings),
+        )
+        .await;
+
+        // Configured manager but explicitly disabled -> gate should go false.
+        let mut payload = SystemSettings::default();
+        payload.manager_url = Some("wss://manager.example/api/desk/signaling".to_string());
+        payload.manager_api_token = Some("tok".to_string());
+        payload.manager_enabled = Some(false);
+        let req = test::TestRequest::post()
+            .uri("/settings")
+            .set_json(&payload)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        assert!(!gate.should_connect(), "disabled manager -> gate false");
+
+        // Re-enable (manager_enabled None) with config present -> gate true.
+        let mut payload = SystemSettings::default();
+        payload.manager_url = Some("wss://manager.example/api/desk/signaling".to_string());
+        payload.manager_api_token = Some("tok".to_string());
+        payload.manager_enabled = None;
+        let req = test::TestRequest::post()
+            .uri("/settings")
+            .set_json(&payload)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        assert!(gate.should_connect(), "enabled + configured -> gate true");
     }
 }

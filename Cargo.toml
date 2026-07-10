@@ -90,6 +90,7 @@ actix-http = "3.11"
 actix-rt = "2"
 awc = { version = "3.5", features = ["rustls-0_23"] }
 actix-service = "2.0"
+actix-tls = { version = "3.5", default-features = false, features = ["connect"] }
 
 # `ring` feature enabled so the model HTTP clients can pin it explicitly: the
 # default `aws_lc_rs` provider fast-fails (STATUS_STACK_BUFFER_OVERRUN) on the

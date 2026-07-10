@@ -9,27 +9,43 @@
 //! Only content-free fields are logged (the builders already guarantee
 //! summaries carry counts / sizes, never raw data).
 
+use std::sync::Arc;
+
 use desk_agent_protocol::audit::{AiAuditEventPayload, AuditEvent, AuditSink};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use tokio::sync::broadcast;
+
+use crate::daemon::manager_link_gate::ManagerLinkGate;
 
 /// Logs each audit event at info level. The fixed field set keeps the line
 /// greppable; the raw artifact never appears (see module docs).
 pub struct LogAuditSink;
 
-/// Fleet-mode audit sink: logs locally **and** reports each event to the
-/// manager as an `AiAuditEvent(608)` signaling frame over the outbound lane,
-/// where the manager observer persists it into `ai_audit_event`. The manager is
-/// the only consumer — the signal server drops the frame and the daemon swallows
-/// any echo, so it never re-enters a browser-facing lane (security model §6 /
-/// D6). Used when a manager is configured; single-machine keeps [`LogAuditSink`].
+/// Fleet-mode audit sink: logs locally **and**, when the manager link should be
+/// connected, reports each event to the manager as an `AiAuditEvent(608)`
+/// signaling frame over the outbound lane, where the manager observer persists it
+/// into `ai_audit_event`. The manager is the only consumer — the signal server
+/// drops the frame and the daemon swallows any echo, so it never re-enters a
+/// browser-facing lane (security model §6 / D6).
+///
+/// The manager report is gated dynamically at record time by the shared
+/// [`ManagerLinkGate`]: when the manager link is unset or has been disabled at
+/// runtime, the sink stays purely local (equivalent to [`LogAuditSink`]) and
+/// emits no frame onto the outbound lane.
 pub struct RemoteAuditSink {
     outbound_tx: broadcast::Sender<String>,
+    manager_link_gate: Arc<ManagerLinkGate>,
 }
 
 impl RemoteAuditSink {
-    pub fn new(outbound_tx: broadcast::Sender<String>) -> Self {
-        Self { outbound_tx }
+    pub fn new(
+        outbound_tx: broadcast::Sender<String>,
+        manager_link_gate: Arc<ManagerLinkGate>,
+    ) -> Self {
+        Self {
+            outbound_tx,
+            manager_link_gate,
+        }
     }
 }
 
@@ -39,6 +55,11 @@ impl AuditSink for RemoteAuditSink {
         // Keep the local greppable line too, so a fleet host's log still shows
         // its audit trail even if the manager link is momentarily down.
         log::info!("{}", format_audit_line(&event));
+        // Stay purely local when the manager link should not be connected, so a
+        // host with the manager connection disabled emits no audit frames.
+        if !self.manager_link_gate.should_connect() {
+            return;
+        }
         let payload = AiAuditEventPayload { event };
         match SignalingModel::new_request(SignalingType::AiAuditEvent, None, Some(&payload)) {
             Ok(model) => match serde_json::to_string(&model) {
@@ -91,6 +112,48 @@ impl AuditSink for LogAuditSink {
 mod tests {
     use super::*;
     use desk_agent_protocol::{CallerRef, CallerType};
+
+    fn sample_event() -> AuditEvent {
+        let caller = CallerRef {
+            caller_type: CallerType::AiModel,
+            model_provider: Some("anthropic".to_string()),
+            model_name: Some("claude-x".to_string()),
+            adapter: Some("lcxl-anthropic".to_string()),
+        };
+        AuditEvent::model_responded(
+            "evt-gate".to_string(),
+            "2026-07-09T00:00:00Z".to_string(),
+            "req-gate",
+            &caller,
+            "diagnosis: 0 findings".to_string(),
+            Some(1),
+            Some(1),
+            10,
+        )
+    }
+
+    #[tokio::test]
+    async fn remote_sink_emits_when_manager_link_should_connect() {
+        let (tx, mut rx) = broadcast::channel::<String>(4);
+        let gate = Arc::new(ManagerLinkGate::new(true));
+        let sink = RemoteAuditSink::new(tx, gate);
+        sink.record(sample_event()).await;
+        // A frame reaches the outbound lane for the manager observer.
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn remote_sink_stays_local_when_manager_link_disabled() {
+        let (tx, mut rx) = broadcast::channel::<String>(4);
+        let gate = Arc::new(ManagerLinkGate::new(false));
+        let sink = RemoteAuditSink::new(tx, gate);
+        sink.record(sample_event()).await;
+        // No frame is emitted onto the outbound lane when the link is disabled.
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
 
     /// A model-responded line carries the provider / adapter / token accounting
     /// so the audit trail attributes the call to a concrete wire adapter.

@@ -12,6 +12,7 @@ Server settings are managed via `conf/config.toml`. The config file path can be 
 - `signaling_token` — node access token for the remote signaling server (passed as `?token=` on the signaling WebSocket).
 - `manager_url` — URL of an enterprise manager's signaling endpoint to connect out to.
 - `manager_api_token` — access token for the manager (passed as `?token=` on the manager signaling WebSocket).
+- `manager_enabled` — whether to keep the manager connection active. Leave unset (or `true`) to connect; set to `false` to disable the manager link **without clearing** `manager_url` / `manager_api_token`, so the address is retained for a later re-enable. Toggled from the **Desk Connection** settings page; this is a host-local switch (the manager cannot turn its own link off).
 
 > When the manager fatally rejects this host's registration (its device limit is reached, or the host has no device identity), the desk-server pauses auto-reconnect and the **Desk Connection** settings page shows a banner explaining why, with a **Retry registration** button. Free a device slot from a control end, then retry.
 
@@ -54,6 +55,21 @@ Server settings are managed via `conf/config.toml`. The config file path can be 
 
 - `enabled` — whether to enable the virtual display (requires an installed IddCx driver; effective only in specific modes).
 - `exclusive` / `prompt_ms` / `adaptive_*` — exclusive-mode and adaptive-resolution parameters.
+
+## Security `[security]`
+
+Per-capability access control for inbound remote sessions. Each capability is
+tri-state: unset means "ask the local user each time" (the default), `true`
+means "always allow", `false` means "always deny".
+
+- `allow_remote_control` — mouse / keyboard input.
+- `allow_clipboard_sync` — clipboard synchronization.
+- `allow_private_screen` — private (privacy) screen mode.
+- `allow_whiteboard` — whiteboard overlay.
+- `allow_terminal` — remote terminal access.
+- `allow_file_browse` — file browsing.
+- `allow_file_transfer` — file upload / download.
+- `approval_timeout` — how long an approval prompt waits, in seconds. **Default `30`** — an unattended host auto-cancels the request rather than leaving it pending forever. Set to `0` to never time out (the prompt waits indefinitely). "Never" is stored as the value `0`, so it survives a restart.
 
 ## AI Settings
 

@@ -15,6 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useToast } from "@/hooks/use-toast"
 import { useQueryClient } from "@tanstack/react-query"
 import { querySecuritySettingsQueryKey } from "@/services/hooks/securityController/useQuerySecuritySettings"
+import { mapTimeoutFromSelectValue, mapTimeoutToSelectValue } from "./security-timeout"
 
 const securitySettingsSchema = z.object({
     allow_remote_control: z.boolean().nullable(),
@@ -41,15 +42,6 @@ const mapFromSelectValue = (val: string): boolean | null => {
     return null
 }
 
-const mapTimeoutToSelectValue = (val: number | null) => {
-    return (val ?? 0).toString()
-}
-
-const mapTimeoutFromSelectValue = (val: string): number | null => {
-    if (!val || val === "") return null
-    const num = parseInt(val, 10)
-    return num > 0 ? num : null
-}
 
 export function SecuritySettings() {
     const { t } = useTranslation()

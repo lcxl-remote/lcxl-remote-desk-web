@@ -135,6 +135,10 @@ pub async fn check_security_permission(
                         settings_write.security.allow_file_transfer = Some(response.approved);
                     }
                 }
+                // Any path that persists security settings normalizes an unset
+                // approval timeout to the finite default, so a save never drops
+                // it to a value that reloads as the 30s default by omission.
+                settings_write.security.normalize();
                 if let Err(e) = settings_write.save() {
                     log::error!("Failed to save security settings: {}", e);
                 }

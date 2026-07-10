@@ -4,7 +4,11 @@ use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 use desk_signal_facade::{
-    model::{signal::RemoteDeskTypeEnum, version::VersionInfo},
+    model::{
+        probe::{SIGNALING_PROBE_HEADER, SIGNALING_PROBE_HEADER_VALUE, is_probe_query},
+        signal::RemoteDeskTypeEnum,
+        version::VersionInfo,
+    },
     service::NodeTokenValidator,
 };
 use desk_turn::model::TurnApiState;
@@ -106,6 +110,24 @@ pub async fn open_signaling_handle(
         }
     };
 
+    // Zero-side-effect connection-verify probe: a `?probe=1` request is answered
+    // here, after the token has been authenticated but before any side effect —
+    // no WebSocket upgrade, no `handle_signaling` spawn, no device registration,
+    // no presence / quota. The marker header proves the response came from a
+    // genuine desk signaling endpoint; a valid token yields 200, anything else
+    // 401. Cookies are never consulted (the wizard runs before login).
+    if is_probe_query(req.query_string()) {
+        let status = match token_outcome {
+            TokenOutcome::Valid => actix_web::http::StatusCode::OK,
+            TokenOutcome::Invalid | TokenOutcome::Absent => {
+                actix_web::http::StatusCode::UNAUTHORIZED
+            }
+        };
+        return Ok(HttpResponse::build(status)
+            .insert_header((SIGNALING_PROBE_HEADER, SIGNALING_PROBE_HEADER_VALUE))
+            .finish());
+    }
+
     let reported_type = version_info_opt
         .as_ref()
         .map(|vi| vi.remote_desk_type)
@@ -198,6 +220,97 @@ pub async fn open_signaling_handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use actix_web::App;
+    // NOTE: do not `use actix_web::test` — it also imports the `test` attribute
+    // macro, which shadows the built-in `#[test]` used by the pure-function tests
+    // below. Qualify `actix_web::test::*` at call sites instead.
+
+    /// Test double: accepts exactly one known-good token.
+    struct MockValidator {
+        good: String,
+    }
+
+    impl NodeTokenValidator for MockValidator {
+        fn validate_node_token<'a>(
+            &'a self,
+            token: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            let ok = token == self.good;
+            Box::pin(async move { ok })
+        }
+    }
+
+    fn probe_uri(token: Option<&str>) -> String {
+        let mut version_info = VersionInfo::new(
+            desk_server_version::SERVER_API_VERSION,
+            0,
+            "test".to_string(),
+            RemoteDeskTypeEnum::Server,
+            Some("probe-host".to_string()),
+            Some("client-1".to_string()),
+        );
+        version_info.token = token.map(|t| t.to_string());
+        let query = serde_urlencoded::to_string(&version_info).expect("encode version info");
+        format!("/api/desk/signaling?{query}&probe=1")
+    }
+
+    async fn call_probe(
+        connection_map: web::Data<SharedConnectionMap>,
+        token: Option<&str>,
+    ) -> actix_web::dev::ServiceResponse {
+        let validator: Arc<dyn NodeTokenValidator> = Arc::new(MockValidator {
+            good: "goodtoken".to_string(),
+        });
+        let app = actix_web::test::init_service(
+            App::new()
+                .app_data(connection_map)
+                .app_data(web::Data::new(validator))
+                .service(open_signaling_handle),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri(&probe_uri(token))
+            .to_request();
+        actix_web::test::call_service(&app, req).await
+    }
+
+    #[actix_web::test]
+    async fn probe_valid_token_returns_200_marker_and_no_side_effects() {
+        let connection_map = web::Data::new(SharedConnectionMap::new());
+        let resp = call_probe(connection_map.clone(), Some("goodtoken")).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(SIGNALING_PROBE_HEADER).unwrap(),
+            SIGNALING_PROBE_HEADER_VALUE
+        );
+        // Zero side effects: the probe short-circuits before the WS upgrade /
+        // `handle_signaling` spawn, so no connection (and thus no device_code /
+        // presence entry) is ever registered.
+        assert!(connection_map.read().await.is_empty());
+    }
+
+    #[actix_web::test]
+    async fn probe_invalid_token_returns_401_marker() {
+        let connection_map = web::Data::new(SharedConnectionMap::new());
+        let resp = call_probe(connection_map.clone(), Some("wrongtoken")).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers().get(SIGNALING_PROBE_HEADER).unwrap(),
+            SIGNALING_PROBE_HEADER_VALUE
+        );
+        assert!(connection_map.read().await.is_empty());
+    }
+
+    #[actix_web::test]
+    async fn probe_absent_token_returns_401_marker() {
+        let connection_map = web::Data::new(SharedConnectionMap::new());
+        let resp = call_probe(connection_map.clone(), None).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers().get(SIGNALING_PROBE_HEADER).unwrap(),
+            SIGNALING_PROBE_HEADER_VALUE
+        );
+    }
 
     /// A chunked diagnose `CollectResponse` rides the signaling socket as a
     /// single (unfragmented) WS text frame up to `COLLECT_CHUNK_PAYLOAD_LIMIT`.
