@@ -38,7 +38,7 @@ export default {
   'pages.init.manager.domain': 'Manager domain',
   'pages.init.manager.domainInvalid': 'Enter a valid domain (optional port), without a scheme or path',
   'pages.init.manager.resolving': 'Probing the connection…',
-  'pages.init.manager.resolvedScheme': 'Reachable ({scheme})',
+  'pages.init.manager.resolvedScheme': 'Reachable ({{scheme}})',
   'pages.init.manager.reachable': 'Reachable',
   'pages.init.manager.unreachable': 'Could not reach this address',
   'pages.init.manager.advanced': 'Advanced',

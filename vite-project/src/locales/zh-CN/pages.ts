@@ -39,7 +39,7 @@ export default {
   'pages.init.manager.domain': 'Manager 域名',
   'pages.init.manager.domainInvalid': '请输入合法的域名（可含端口号），不要包含协议或路径',
   'pages.init.manager.resolving': '正在探测连接方式…',
-  'pages.init.manager.resolvedScheme': '连接可用（{scheme}）',
+  'pages.init.manager.resolvedScheme': '连接可用（{{scheme}}）',
   'pages.init.manager.reachable': '连接可用',
   'pages.init.manager.unreachable': '无法连接到该地址',
   'pages.init.manager.advanced': '高级配置',
