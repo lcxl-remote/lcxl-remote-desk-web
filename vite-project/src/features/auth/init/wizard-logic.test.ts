@@ -3,6 +3,7 @@ import type { ConnectionVerifyResult } from "@/services/types"
 import {
     SECURITY_CAPABILITIES,
     buildSecurityPayload,
+    isInsecureConnection,
     isManagerConfigured,
     managerNextDecision,
     type SecurityToggles,
@@ -23,6 +24,7 @@ function result(partial: Partial<ConnectionVerifyResult>): ConnectionVerifyResul
         ok: false,
         reached: false,
         auth_ok: false,
+        secure: false,
         error_code: 0,
         message: "",
         ...partial,
@@ -57,6 +59,22 @@ describe("managerNextDecision", () => {
         expect(managerNextDecision(result({ reached: false }))).toBe("unreachable")
         expect(managerNextDecision(null)).toBe("unreachable")
         expect(managerNextDecision(undefined)).toBe("unreachable")
+    })
+})
+
+describe("isInsecureConnection", () => {
+    it("flags a reached target that answered only over plaintext", () => {
+        expect(isInsecureConnection(result({ reached: true, secure: false }))).toBe(true)
+    })
+
+    it("is not insecure when the connection is TLS-encrypted", () => {
+        expect(isInsecureConnection(result({ reached: true, secure: true }))).toBe(false)
+    })
+
+    it("is not insecure when the target was never reached", () => {
+        expect(isInsecureConnection(result({ reached: false, secure: false }))).toBe(false)
+        expect(isInsecureConnection(null)).toBe(false)
+        expect(isInsecureConnection(undefined)).toBe(false)
     })
 })
 

@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { CheckCircle2, ChevronRight, Loader2, Lock, Settings2, User, XCircle } from "lucide-react"
+import { AlertTriangle, CheckCircle2, ChevronRight, Loader2, Lock, Settings2, User, XCircle } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
 import { queryServerInfoQueryKey } from "@/services/hooks/systemController/useQueryServerInfo"
 
@@ -24,6 +24,7 @@ import {
     SECURITY_CAPABILITIES,
     type SecurityToggles,
     buildSecurityPayload,
+    isInsecureConnection,
     isManagerConfigured,
     managerNextDecision,
 } from "@/features/auth/init/wizard-logic"
@@ -38,7 +39,7 @@ const DOMAIN_RE = /^[a-zA-Z0-9.-]+(:\d{1,5})?$/
 type SchemeStatus =
     | { kind: "idle" }
     | { kind: "checking" }
-    | { kind: "ok"; scheme: string }
+    | { kind: "ok"; scheme: string; insecure: boolean }
     | { kind: "error"; message: string }
 
 export default function InitPage() {
@@ -109,7 +110,11 @@ export default function InitPage() {
             const result = res.data
             if (result?.reached && result.resolved_url) {
                 setManagerUrl(result.resolved_url)
-                setSchemeStatus({ kind: "ok", scheme: result.scheme || "wss" })
+                setSchemeStatus({
+                    kind: "ok",
+                    scheme: result.scheme || "wss",
+                    insecure: isInsecureConnection(result),
+                })
             } else {
                 setSchemeStatus({
                     kind: "error",
@@ -136,7 +141,11 @@ export default function InitPage() {
             const res = await verifyConnection({ data: { target: "manager", input: value } })
             const result = res.data
             if (result?.reached) {
-                setSchemeStatus({ kind: "ok", scheme: result.scheme || "" })
+                setSchemeStatus({
+                    kind: "ok",
+                    scheme: result.scheme || "",
+                    insecure: isInsecureConnection(result),
+                })
             } else {
                 setSchemeStatus({
                     kind: "error",
@@ -163,7 +172,15 @@ export default function InitPage() {
             const result = res.data
             const decision = managerNextDecision(result)
             if (decision === "advance") {
-                toast({ title: t("pages.init.manager.verifyOk") })
+                if (isInsecureConnection(result)) {
+                    toast({
+                        variant: "destructive",
+                        title: t("pages.init.manager.verifyOk"),
+                        description: t("pages.init.manager.insecureWarning"),
+                    })
+                } else {
+                    toast({ title: t("pages.init.manager.verifyOk") })
+                }
             } else if (decision === "token") {
                 setManagerNextError(t("pages.init.manager.tokenRejected"))
             } else {
@@ -196,6 +213,13 @@ export default function InitPage() {
             const result = res.data
             const decision = managerNextDecision(result)
             if (decision === "advance") {
+                if (isInsecureConnection(result)) {
+                    toast({
+                        variant: "destructive",
+                        title: t("pages.init.manager.insecureWarningTitle"),
+                        description: t("pages.init.manager.insecureWarning"),
+                    })
+                }
                 setStep(3)
             } else if (decision === "token") {
                 setManagerNextError(t("pages.init.manager.tokenRejected"))
@@ -460,10 +484,18 @@ function SchemeStatusHint({ status }: { status: SchemeStatus }) {
     }
     if (status.kind === "ok") {
         return (
-            <p className="flex items-center gap-1 text-xs text-green-600">
-                <CheckCircle2 className="h-3 w-3" />
-                {status.scheme ? t('pages.init.manager.resolvedScheme', { scheme: status.scheme }) : t('pages.init.manager.reachable')}
-            </p>
+            <div className="space-y-1">
+                <p className="flex items-center gap-1 text-xs text-green-600">
+                    <CheckCircle2 className="h-3 w-3" />
+                    {status.scheme ? t('pages.init.manager.resolvedScheme', { scheme: status.scheme }) : t('pages.init.manager.reachable')}
+                </p>
+                {status.insecure && (
+                    <p className="flex items-start gap-1 text-xs text-amber-600">
+                        <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                        {t('pages.init.manager.insecureWarning')}
+                    </p>
+                )}
+            </div>
         )
     }
     return (

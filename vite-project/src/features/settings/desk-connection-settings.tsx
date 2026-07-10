@@ -3,7 +3,7 @@ import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import { useTranslation } from "react-i18next"
-import { CheckCircle2, Loader2, Save, ShieldCheck, XCircle } from "lucide-react"
+import { AlertTriangle, CheckCircle2, Loader2, Save, ShieldCheck, XCircle } from "lucide-react"
 
 import { useQuerySettings } from "@/services/hooks/settingsController/useQuerySettings"
 import { useUpdateSettings } from "@/services/hooks/settingsController/useUpdateSettings"
@@ -117,6 +117,7 @@ export function DeskConnectionSettings() {
                           ok: false,
                           reached: false,
                           auth_ok: false,
+                          secure: false,
                           error_code: -1,
                           message: t("pages.deskConnection.verify.transportError"),
                       },
@@ -147,6 +148,7 @@ export function DeskConnectionSettings() {
                           ok: false,
                           reached: false,
                           auth_ok: false,
+                          secure: false,
                           error_code: -1,
                           message: t("pages.deskConnection.verify.transportError"),
                       },
@@ -352,6 +354,9 @@ function ConnectionStatusRow({
 
     let badge: React.ReactNode
     let reason: string | null = null
+    // A reachable but plaintext (`ws`/`http`) target is working yet unencrypted:
+    // surfaced as a warning alongside the OK badge rather than as a failure.
+    const insecure = state.kind === "result" && state.result.ok && state.result.secure === false
     switch (state.kind) {
         case "checking":
             badge = (
@@ -394,9 +399,18 @@ function ConnectionStatusRow({
             <div className="flex items-center gap-3">
                 <span className="text-sm font-medium">{label}</span>
                 {badge}
+                {insecure && (
+                    <Badge variant="outline" className="border-amber-500 text-amber-600">
+                        <AlertTriangle className="mr-1 h-3 w-3" />
+                        {t("pages.deskConnection.status.insecure")}
+                    </Badge>
+                )}
             </div>
             <div className="flex items-center gap-3">
                 {reason && <span className="text-xs text-muted-foreground">{reason}</span>}
+                {insecure && (
+                    <span className="text-xs text-amber-600">{t("pages.deskConnection.status.insecureHint")}</span>
+                )}
                 <Button type="button" variant="outline" size="sm" disabled={checking} onClick={onVerify}>
                     {checking ? (
                         <Loader2 className="mr-1 h-3 w-3 animate-spin" />

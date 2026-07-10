@@ -36,6 +36,18 @@ export function managerNextDecision(
 }
 
 /**
+ * Whether a reachable target answered only over plaintext (`ws`/`http`). The
+ * connection is not blocked in this case — a self-hosted server without TLS still
+ * works — but the wizard surfaces it as a security warning. Not insecure when the
+ * target was never reached (that is a plain failure, not a downgrade).
+ */
+export function isInsecureConnection(
+    result: ConnectionVerifyResult | null | undefined,
+): boolean {
+    return !!result?.reached && result.secure === false
+}
+
+/**
  * Build the `SecuritySettings` payload from the per-capability toggles: ON =
  * auto-allow (`true`), OFF = prompt each time (`null`). `approval_timeout` is left
  * `null`; the backend normalizes an unset timeout to its 30s default.

@@ -402,7 +402,7 @@ export type ConnectionVerifyResult = {
     */
     auth_ok: boolean;
     /**
-     * @description Manager target only: whether the console origin (`https://<host>`) answered.
+     * @description Manager target only: whether the console origin answered (over `https`\nor, as a fallback, plaintext `http`).
      * @type boolean,null
     */
     console_ok?: boolean | null;
@@ -436,6 +436,11 @@ export type ConnectionVerifyResult = {
      * @type string,null
     */
     scheme?: string | null;
+    /**
+     * @description Whether the resolved connection is TLS-encrypted end to end: the signaling\nscheme is `wss` and (for a manager target) the console answered over\n`https`. `false` means the target answered only over plaintext (`ws` /\n`http`) — a self-hosted server without TLS still works, but the frontend\nsurfaces this as a security warning rather than a hard failure.
+     * @type boolean
+    */
+    secure: boolean;
 };
 
 /**
@@ -2123,7 +2128,7 @@ export type RestResponseConnectionVerifyResult = {
         */
         auth_ok: boolean;
         /**
-         * @description Manager target only: whether the console origin (`https://<host>`) answered.
+         * @description Manager target only: whether the console origin answered (over `https`\nor, as a fallback, plaintext `http`).
          * @type boolean,null
         */
         console_ok?: boolean | null;
@@ -2157,6 +2162,11 @@ export type RestResponseConnectionVerifyResult = {
          * @type string,null
         */
         scheme?: string | null;
+        /**
+         * @description Whether the resolved connection is TLS-encrypted end to end: the signaling\nscheme is `wss` and (for a manager target) the console answered over\n`https`. `false` means the target answered only over plaintext (`ws` /\n`http`) — a self-hosted server without TLS still works, but the frontend\nsurfaces this as a security warning rather than a hard failure.
+         * @type boolean
+        */
+        secure: boolean;
     };
     /**
      * @type string,null

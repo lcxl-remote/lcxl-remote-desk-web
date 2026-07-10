@@ -73,8 +73,15 @@ pub struct ConnectionVerifyResult {
     pub resolved_url: Option<String>,
     /// The scheme that succeeded (`"wss"` or `"ws"`).
     pub scheme: Option<String>,
-    /// Manager target only: whether the console origin (`https://<host>`) answered.
+    /// Manager target only: whether the console origin answered (over `https`
+    /// or, as a fallback, plaintext `http`).
     pub console_ok: Option<bool>,
+    /// Whether the resolved connection is TLS-encrypted end to end: the signaling
+    /// scheme is `wss` and (for a manager target) the console answered over
+    /// `https`. `false` means the target answered only over plaintext (`ws` /
+    /// `http`) — a self-hosted server without TLS still works, but the frontend
+    /// surfaces this as a security warning rather than a hard failure.
+    pub secure: bool,
     /// Machine-readable outcome ([`DeskErrorCode`]); `0` on success.
     pub error_code: i32,
     /// Human-readable outcome message.
@@ -141,7 +148,7 @@ fn probe_http_url(url: &str) -> Option<String> {
 }
 
 /// Extract the host (without port) from a full URL or bare `host[:port]`, for the
-/// manager console check (`https://<host>`).
+/// manager console check (`https://<host>`, falling back to `http://<host>`).
 fn host_of(input: &str) -> Option<String> {
     if looks_like_full_url(input) {
         url::Url::parse(input.trim())
@@ -284,14 +291,42 @@ fn classify_send_error(err: &str) -> ProbeOutcome {
     }
 }
 
-/// Whether the manager console origin answers an HTTP GET (any status counts as
-/// "the frontend server is up").
-async fn probe_console(client: &awc::Client, host: &str) -> bool {
-    let url = format!("https://{host}");
-    matches!(
-        client.get(&url).timeout(PROBE_TIMEOUT).send().await,
-        Ok(_resp)
-    )
+/// Outcome of probing the manager console origin: whether it answered and, if so,
+/// over which scheme (any HTTP status counts as "the frontend server is up").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsoleProbe {
+    /// Answered over `https` (encrypted).
+    Https,
+    /// Answered only over plaintext `http` (the `https` attempt failed first).
+    Http,
+    /// Did not answer on either scheme.
+    Unreachable,
+}
+
+impl ConsoleProbe {
+    /// Whether the console answered at all (either scheme).
+    fn reached(self) -> bool {
+        !matches!(self, ConsoleProbe::Unreachable)
+    }
+}
+
+/// Probe the manager console origin, preferring `https` and falling back to
+/// plaintext `http` so a self-hosted manager without TLS is still reachable.
+async fn probe_console(client: &awc::Client, host: &str) -> ConsoleProbe {
+    let https = format!("https://{host}");
+    if client.get(&https).timeout(PROBE_TIMEOUT).send().await.is_ok() {
+        return ConsoleProbe::Https;
+    }
+    let http = format!("http://{host}");
+    if client.get(&http).timeout(PROBE_TIMEOUT).send().await.is_ok() {
+        return ConsoleProbe::Http;
+    }
+    ConsoleProbe::Unreachable
+}
+
+/// Whether a resolved signaling scheme is TLS-encrypted.
+fn scheme_is_secure(scheme: Option<&str>) -> bool {
+    matches!(scheme, Some("wss") | Some("https"))
 }
 
 /// Turn a chosen probe outcome (plus resolved scheme/url and optional console
@@ -301,6 +336,7 @@ fn build_result(
     resolved_url: Option<String>,
     scheme: Option<String>,
     console_ok: Option<bool>,
+    secure: bool,
 ) -> ConnectionVerifyResult {
     let reached = outcome.reached();
     let auth_ok = matches!(outcome, ProbeOutcome::AuthOk);
@@ -336,6 +372,7 @@ fn build_result(
         resolved_url,
         scheme,
         console_ok,
+        secure,
         error_code,
         message,
     }
@@ -426,17 +463,29 @@ pub async fn verify_connection(
         (outcome, Some(scheme), Some(url))
     };
 
-    // Manager target: also check the console origin is reachable.
-    let console_ok = if is_manager {
+    // Manager target: also check the console origin is reachable, recording
+    // whether it answered over TLS.
+    let console = if is_manager {
         match host_of(&input) {
             Some(host) => Some(probe_console(&client, &host).await),
-            None => Some(false),
+            None => Some(ConsoleProbe::Unreachable),
         }
     } else {
         None
     };
+    let console_ok = console.map(ConsoleProbe::reached);
 
-    let result = build_result(&outcome, resolved_url, scheme, console_ok);
+    // End-to-end encryption verdict: the signaling scheme must be TLS and, for a
+    // manager, the console must also have answered over `https`. A reachable but
+    // plaintext target is still allowed (not a hard failure) so a self-hosted
+    // manager without TLS works; the frontend surfaces the downgrade as a warning.
+    let signaling_secure = scheme_is_secure(scheme.as_deref());
+    let secure = match console {
+        Some(c) => signaling_secure && matches!(c, ConsoleProbe::Https),
+        None => signaling_secure,
+    };
+
+    let result = build_result(&outcome, resolved_url, scheme, console_ok, secure);
     debug!(
         "connection verify: target={} reached={} auth_ok={} console_ok={:?} code={}",
         params.target, result.reached, result.auth_ok, result.console_ok, result.error_code
@@ -503,9 +552,9 @@ mod tests {
     fn auth_ok_only_on_marker_plus_200() {
         // AuthOk is the only outcome that sets auth_ok; a plain 200 without the
         // marker (ReachedNotSignaling) must NOT be treated as authenticated.
-        let ok = build_result(&ProbeOutcome::AuthOk, None, Some("wss".into()), None);
+        let ok = build_result(&ProbeOutcome::AuthOk, None, Some("wss".into()), None, true);
         assert!(ok.auth_ok && ok.ok && ok.reached);
-        let not_sig = build_result(&ProbeOutcome::ReachedNotSignaling, None, None, None);
+        let not_sig = build_result(&ProbeOutcome::ReachedNotSignaling, None, None, None, false);
         assert!(!not_sig.auth_ok && !not_sig.ok && not_sig.reached);
         assert_eq!(
             not_sig.error_code,
@@ -516,11 +565,11 @@ mod tests {
     #[test]
     fn manager_overall_requires_console_ok() {
         // Auth ok but console down -> overall not ok.
-        let r = build_result(&ProbeOutcome::AuthOk, None, Some("wss".into()), Some(false));
+        let r = build_result(&ProbeOutcome::AuthOk, None, Some("wss".into()), Some(false), false);
         assert!(r.auth_ok);
         assert!(!r.ok, "manager overall must require console_ok");
         // Auth ok and console up -> ok.
-        let r = build_result(&ProbeOutcome::AuthOk, None, Some("wss".into()), Some(true));
+        let r = build_result(&ProbeOutcome::AuthOk, None, Some("wss".into()), Some(true), true);
         assert!(r.ok);
     }
 
@@ -530,9 +579,37 @@ mod tests {
         assert!(!ProbeOutcome::Blocked.reached());
         assert!(!ProbeOutcome::Timeout.reached());
         assert!(ProbeOutcome::ReachedNoAuth.reached());
-        let r = build_result(&ProbeOutcome::ReachedNoAuth, None, Some("wss".into()), None);
+        let r = build_result(&ProbeOutcome::ReachedNoAuth, None, Some("wss".into()), None, true);
         assert!(r.reached && !r.auth_ok);
         assert_eq!(r.error_code, DeskErrorCode::CONNECTION_AUTH_FAILED.code());
+    }
+
+    #[test]
+    fn scheme_security_is_tls_only() {
+        assert!(scheme_is_secure(Some("wss")));
+        assert!(scheme_is_secure(Some("https")));
+        assert!(!scheme_is_secure(Some("ws")));
+        assert!(!scheme_is_secure(Some("http")));
+        assert!(!scheme_is_secure(None));
+    }
+
+    #[test]
+    fn console_probe_reached_covers_both_schemes() {
+        assert!(ConsoleProbe::Https.reached());
+        assert!(ConsoleProbe::Http.reached());
+        assert!(!ConsoleProbe::Unreachable.reached());
+    }
+
+    #[test]
+    fn plaintext_manager_is_reachable_but_not_secure() {
+        // A manager answering only over ws + http: overall ok (not blocked) but
+        // flagged insecure so the frontend can warn.
+        let r = build_result(&ProbeOutcome::AuthOk, None, Some("ws".into()), Some(true), false);
+        assert!(r.ok, "plaintext manager must not be hard-blocked");
+        assert!(!r.secure, "plaintext manager must be flagged insecure");
+        // A fully TLS manager (wss + https): ok and secure.
+        let r = build_result(&ProbeOutcome::AuthOk, None, Some("wss".into()), Some(true), true);
+        assert!(r.ok && r.secure);
     }
 
     #[actix_web::test]
