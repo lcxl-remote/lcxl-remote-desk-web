@@ -1,49 +1,73 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { openExternalUrl } from "./open-external"
+import { isTauriShell, openExternalUrl } from "./open-external"
 
 // jsdom's `window.location.assign` is not directly spyable, so each test swaps
-// in a stub location object and restores the original afterwards.
+// in a stub location object (with a controllable `search`) and restores the
+// original afterwards.
 const originalLocation = window.location
 
-function stubLocationAssign(): ReturnType<typeof vi.fn> {
+function stubLocation(search: string): ReturnType<typeof vi.fn> {
     const assign = vi.fn()
     Object.defineProperty(window, "location", {
         configurable: true,
-        value: { ...originalLocation, assign },
+        value: { ...originalLocation, search, assign },
     })
     return assign
 }
 
+afterEach(() => {
+    vi.restoreAllMocks()
+    Object.defineProperty(window, "location", {
+        configurable: true,
+        value: originalLocation,
+    })
+})
+
+describe("isTauriShell", () => {
+    it("is true only when the tauri=1 query is present", () => {
+        stubLocation("?tauri=1")
+        expect(isTauriShell()).toBe(true)
+        stubLocation("?foo=bar")
+        expect(isTauriShell()).toBe(false)
+        stubLocation("")
+        expect(isTauriShell()).toBe(false)
+    })
+})
+
 describe("openExternalUrl", () => {
-    afterEach(() => {
-        vi.restoreAllMocks()
-        Object.defineProperty(window, "location", {
-            configurable: true,
-            value: originalLocation,
-        })
+    it("in the Tauri shell, navigates top-level (no popup) so on_navigation routes to the OS browser", () => {
+        const assignSpy = stubLocation("?tauri=1")
+        const openSpy = vi.spyOn(window, "open").mockReturnValue(null)
+
+        openExternalUrl("http://192.168.50.50/console/")
+
+        // The window.open popup is exactly what showed the http interstitial, so
+        // it must not be used inside the shell.
+        expect(openSpy).not.toHaveBeenCalled()
+        expect(assignSpy).toHaveBeenCalledWith("http://192.168.50.50/console/")
     })
 
-    it("opens a new tab and does not navigate when window.open succeeds", () => {
+    it("in a normal browser, opens a new tab and does not navigate away", () => {
+        const assignSpy = stubLocation("")
         const openSpy = vi.spyOn(window, "open").mockReturnValue({} as Window)
-        const assignSpy = stubLocationAssign()
 
-        openExternalUrl("https://example.com")
+        openExternalUrl("https://lcxbox.app/console/")
 
         expect(openSpy).toHaveBeenCalledWith(
-            "https://example.com",
+            "https://lcxbox.app/console/",
             "_blank",
             "noopener",
         )
         expect(assignSpy).not.toHaveBeenCalled()
     })
 
-    it("falls back to a top-level navigation when window.open is swallowed (Tauri)", () => {
+    it("in a normal browser, falls back to a top-level navigation when the popup is blocked", () => {
+        const assignSpy = stubLocation("")
         vi.spyOn(window, "open").mockReturnValue(null)
-        const assignSpy = stubLocationAssign()
 
-        openExternalUrl("https://example.com")
+        openExternalUrl("https://lcxbox.app/console/")
 
-        expect(assignSpy).toHaveBeenCalledWith("https://example.com")
+        expect(assignSpy).toHaveBeenCalledWith("https://lcxbox.app/console/")
     })
 })
