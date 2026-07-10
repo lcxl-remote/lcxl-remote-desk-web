@@ -194,10 +194,28 @@ export default function InitPage() {
     }
 
     const openManagerConsole = () => {
-        const host = domain.trim() || DEFAULT_MANAGER_DOMAIN
-        // Strip any port for the console origin.
-        const hostOnly = host.split(":")[0]
-        openExternalUrl(`https://${hostOnly}`)
+        // The console is served under /console on the same origin as the manager,
+        // over http(s) matching the resolved ws(s) scheme. Prefer the probe's
+        // resolved URL (it carries scheme + host + port); fall back to the domain
+        // field with https (the default for the public manager) before a probe has
+        // run. Keep the port — a self-hosted manager may not use the default one.
+        let origin: string | null = null
+        const resolved = managerUrl.trim()
+        if (resolved) {
+            try {
+                const u = new URL(resolved)
+                const httpProtocol =
+                    u.protocol === "ws:" ? "http:" : u.protocol === "wss:" ? "https:" : u.protocol
+                origin = `${httpProtocol}//${u.host}`
+            } catch {
+                origin = null
+            }
+        }
+        if (!origin) {
+            const host = domain.trim() || DEFAULT_MANAGER_DOMAIN
+            origin = `https://${host}`
+        }
+        openExternalUrl(`${origin}/console/`)
     }
 
     // Step 2 "next" for the configure-manager branch: re-verify with the token
