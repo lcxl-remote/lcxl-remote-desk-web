@@ -23,14 +23,16 @@
 //! ## Permission gating
 //!
 //! The daemon's DC router gates browser→worker forwarding on
-//! `accept_control` (`pc_manager::route_is_permitted`). The legacy
-//! single-process path additionally cached
-//! `check_security_permission(allow_whiteboard)` per-DC; that
-//! finer-grained gate is not yet plumbed across the daemon/worker
-//! boundary. Like file_transfer the worker trusts the daemon's gate
-//! and does not re-check.
+//! `accept_control` (`pc_manager::route_is_permitted`). On top of that coarse
+//! gate the dispatcher runs a per-connection
+//! `check_security_permission(meet(ceiling.whiteboard, global.allow_whiteboard))`
+//! — the single active `allow_whiteboard` enforcement point (the daemon router
+//! only checks `accept_control`, not the whiteboard capability). The decision is
+//! cached per connection; the approval prompt (when the effective value is
+//! `None`) is awaited **without holding the `inner` mutex** so a slow prompt
+//! cannot block the IPC loop or deadlock other commands.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use desk_input_injection::model::host_control::WhiteboardCommand;
@@ -40,42 +42,104 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::host_control::HostControlHub;
 use crate::host_control::bridge::bridge_whiteboard_to_hub;
+use crate::model::security_approval::{
+    SecurityPermissionType, check_security_permission, effective_permission,
+};
+use crate::model::settings::SharedSettings;
+use crate::worker::connection_ceiling::ConnectionCeilingStore;
 
 struct DispatcherInner {
     sender: std::sync::mpsc::Sender<WhiteboardCommand>,
     active_connections: HashSet<String>,
+    /// Per-connection cached `allow_whiteboard` decision (mirrors
+    /// `FileTransferDispatcher`'s cache) so the approval prompt fires at most
+    /// once per connection.
+    permission_cache: HashMap<String, bool>,
 }
 
 /// Worker-side whiteboard dispatcher. Cheap to clone (`Arc` inside).
 #[derive(Clone)]
 pub struct WhiteboardDispatcher {
     inner: Arc<TokioMutex<DispatcherInner>>,
+    /// Shared settings read by the permission gate for `allow_whiteboard`.
+    settings: Arc<SharedSettings>,
+    /// Host-control hub used by `check_security_permission` for the approval
+    /// prompt.
+    hub: Arc<HostControlHub>,
+    /// Per-connection capability ceilings for redeemed-grant sessions. The gate
+    /// meets the connection's ceiling with the global; owner connections carry
+    /// none.
+    connection_ceilings: ConnectionCeilingStore,
 }
 
 impl WhiteboardDispatcher {
     /// Construct a dispatcher whose draw / show / hide commands fan
     /// into the supplied `host_control_hub`. Spawns the bridge thread
     /// once (same shape as the legacy `DeskSession::new`).
-    pub fn new(host_control_hub: Arc<HostControlHub>) -> Self {
-        let sender = bridge_whiteboard_to_hub(host_control_hub);
+    pub fn new(
+        host_control_hub: Arc<HostControlHub>,
+        settings: Arc<SharedSettings>,
+        connection_ceilings: ConnectionCeilingStore,
+    ) -> Self {
+        let sender = bridge_whiteboard_to_hub(Arc::clone(&host_control_hub));
         Self {
             inner: Arc::new(TokioMutex::new(DispatcherInner {
                 sender,
                 active_connections: HashSet::new(),
+                permission_cache: HashMap::new(),
             })),
+            settings,
+            hub: host_control_hub,
+            connection_ceilings,
         }
     }
 
-    /// For tests: construct with a pre-built sender so a mock can
+    /// For tests: construct with a pre-built sender + settings so a mock can
     /// observe the emitted commands without spinning up the hub.
     #[cfg(test)]
-    fn from_sender(sender: std::sync::mpsc::Sender<WhiteboardCommand>) -> Self {
+    fn from_sender(
+        sender: std::sync::mpsc::Sender<WhiteboardCommand>,
+        settings: Arc<SharedSettings>,
+    ) -> Self {
         Self {
             inner: Arc::new(TokioMutex::new(DispatcherInner {
                 sender,
                 active_connections: HashSet::new(),
+                permission_cache: HashMap::new(),
             })),
+            settings,
+            hub: Arc::new(HostControlHub::new_local()),
+            connection_ceilings: ConnectionCeilingStore::new(),
         }
+    }
+
+    /// Resolve the `allow_whiteboard` decision for a connection, meeting its grant
+    /// ceiling with the host global. Cached per connection. The approval await
+    /// does not hold the `inner` mutex.
+    async fn permission_for(&self, connection_id: &str) -> bool {
+        {
+            let inner = self.inner.lock().await;
+            if let Some(&v) = inner.permission_cache.get(connection_id) {
+                return v;
+            }
+        }
+        let global_whiteboard = self.settings.read().await.security.allow_whiteboard;
+        let ceiling = self.connection_ceilings.get(connection_id).await;
+        let allow_whiteboard =
+            effective_permission(ceiling.as_ref(), global_whiteboard, |c| c.allow_whiteboard);
+        let approved = check_security_permission(
+            &self.settings,
+            &self.hub,
+            allow_whiteboard,
+            SecurityPermissionType::Whiteboard,
+            Some(connection_id.to_string()),
+        )
+        .await;
+        let mut inner = self.inner.lock().await;
+        inner
+            .permission_cache
+            .insert(connection_id.to_string(), approved);
+        approved
     }
 
     /// Add a connection to the active set so subsequent IPC
@@ -135,14 +199,29 @@ impl WhiteboardDispatcher {
     /// JSON draw payload that the Tauri whiteboard manager parses;
     /// the dispatcher only validates UTF-8 and forwards through.
     pub async fn handle_command(&self, payload: OpaqueConnectionPayload) {
-        let inner = self.inner.lock().await;
-        if !inner.active_connections.contains(&payload.connection_id) {
+        // Active-connection check. Drop the lock before the permission await so a
+        // slow approval prompt cannot block the IPC loop / deadlock.
+        {
+            let inner = self.inner.lock().await;
+            if !inner.active_connections.contains(&payload.connection_id) {
+                debug!(
+                    "[WhiteboardDispatcher] {}: command for inactive connection — dropping",
+                    payload.connection_id
+                );
+                return;
+            }
+        }
+
+        // Whiteboard capability gate: meet(ceiling.whiteboard, global). This is the
+        // single active `allow_whiteboard` enforcement point.
+        if !self.permission_for(&payload.connection_id).await {
             debug!(
-                "[WhiteboardDispatcher] {}: command for inactive connection — dropping",
+                "[WhiteboardDispatcher] {}: whiteboard denied by security policy — dropping",
                 payload.connection_id
             );
             return;
         }
+
         let s = match std::str::from_utf8(&payload.data) {
             Ok(s) => s.to_string(),
             Err(e) => {
@@ -153,6 +232,12 @@ impl WhiteboardDispatcher {
                 return;
             }
         };
+        let inner = self.inner.lock().await;
+        // Re-check active: the connection could have torn down during the approval
+        // await above.
+        if !inner.active_connections.contains(&payload.connection_id) {
+            return;
+        }
         // Send Show on every message so the overlay
         // is guaranteed to be visible even if the user dismissed it
         // mid-session. The Tauri manager dedupes.
@@ -179,12 +264,26 @@ impl WhiteboardDispatcher {
 mod tests {
     use super::*;
     use desk_ipc_protocol::message::MediaCodec;
+    use desk_signal_facade::model::security_settings::SecuritySettings;
     use std::sync::mpsc as std_mpsc;
     use std::time::Duration;
 
+    /// A dispatcher whose host global allows whiteboard (so the new capability
+    /// gate passes) and whose connection has no grant ceiling (owner). Tests that
+    /// exercise the gate itself override the settings / ceiling explicitly.
     fn dispatcher() -> (WhiteboardDispatcher, std_mpsc::Receiver<WhiteboardCommand>) {
+        dispatcher_with_whiteboard(Some(true))
+    }
+
+    fn dispatcher_with_whiteboard(
+        allow_whiteboard: Option<bool>,
+    ) -> (WhiteboardDispatcher, std_mpsc::Receiver<WhiteboardCommand>) {
+        use crate::model::settings::Settings;
         let (tx, rx) = std_mpsc::channel::<WhiteboardCommand>();
-        (WhiteboardDispatcher::from_sender(tx), rx)
+        let mut settings = Settings::default();
+        settings.security.allow_whiteboard = allow_whiteboard;
+        let shared = Arc::new(SharedSettings::from(settings));
+        (WhiteboardDispatcher::from_sender(tx, shared), rx)
     }
 
     fn start_payload(connection_id: &str) -> StartMediaPayload {
@@ -241,6 +340,55 @@ mod tests {
             }
             other => panic!("expected DrawMessage, got {other:?}"),
         }
+    }
+
+    /// Capability gate: an active connection whose host global denies whiteboard
+    /// (`allow_whiteboard = Some(false)`) emits nothing — the draw is dropped at
+    /// the new `check_security_permission(meet(...))` gate. Regression guard: this
+    /// is the sole active `allow_whiteboard` enforcement point.
+    #[tokio::test]
+    async fn handle_command_denied_when_global_whiteboard_false() {
+        let (d, rx) = dispatcher_with_whiteboard(Some(false));
+        d.start_connection(&start_payload("c1")).await;
+        d.handle_command(OpaqueConnectionPayload {
+            connection_id: "c1".into(),
+            data: br#"{"action":"begin"}"#.to_vec(),
+        })
+        .await;
+        let cmds = drain_with_timeout(&rx, Duration::from_millis(50));
+        assert!(
+            cmds.is_empty(),
+            "whiteboard denied globally must emit nothing, got {cmds:?}"
+        );
+    }
+
+    /// Capability gate: a redeemed-grant connection whose ceiling denies
+    /// whiteboard is dropped even when the host global allows it — the ceiling
+    /// meets the global and can only tighten.
+    #[tokio::test]
+    async fn handle_command_denied_when_ceiling_whiteboard_false() {
+        let (d, rx) = dispatcher_with_whiteboard(Some(true));
+        // Register a grant ceiling that denies whiteboard for this connection.
+        d.connection_ceilings
+            .set(
+                "c1",
+                Some(SecuritySettings {
+                    allow_whiteboard: Some(false),
+                    ..Default::default()
+                }),
+            )
+            .await;
+        d.start_connection(&start_payload("c1")).await;
+        d.handle_command(OpaqueConnectionPayload {
+            connection_id: "c1".into(),
+            data: br#"{"action":"begin"}"#.to_vec(),
+        })
+        .await;
+        let cmds = drain_with_timeout(&rx, Duration::from_millis(50));
+        assert!(
+            cmds.is_empty(),
+            "ceiling denial must override an allowing global, got {cmds:?}"
+        );
     }
 
     /// Inactive connection: command is dropped without emitting any

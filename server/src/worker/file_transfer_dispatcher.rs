@@ -83,6 +83,7 @@ use crate::host_control::HostControlHub;
 use crate::model::file_transfer::*;
 use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
 use crate::model::settings::SharedSettings;
+use crate::worker::connection_ceiling::ConnectionCeilingStore;
 
 /// Per-chunk DC payload size for downloads (host → browser).
 ///
@@ -362,6 +363,10 @@ pub struct FileTransferDispatcher {
     /// mode it's the worker's Forwarder hub that bridges back to the
     /// daemon's aggregator over ws.
     hub: Arc<HostControlHub>,
+    /// Per-connection capability ceilings for redeemed-grant sessions. The
+    /// permission gate meets the connection's ceiling with the global so a grant
+    /// can only tighten file-transfer; owner connections carry no ceiling.
+    connection_ceilings: ConnectionCeilingStore,
 }
 
 impl FileTransferDispatcher {
@@ -369,12 +374,14 @@ impl FileTransferDispatcher {
         file_sender: Arc<dyn EventSender<FileTransferPayload>>,
         settings: Arc<SharedSettings>,
         hub: Arc<HostControlHub>,
+        connection_ceilings: ConnectionCeilingStore,
     ) -> Self {
         Self {
             inner: Arc::new(TokioMutex::new(DispatcherInner::new())),
             file_sender,
             settings,
             hub,
+            connection_ceilings,
         }
     }
 
@@ -398,7 +405,15 @@ impl FileTransferDispatcher {
                 return v;
             }
         }
-        let allow_transfer = self.settings.read().await.security.allow_file_transfer;
+        let global_transfer = self.settings.read().await.security.allow_file_transfer;
+        // Meet the connection's grant ceiling with the global so a redeemed-grant
+        // session is capped; owner connections carry no ceiling.
+        let ceiling = self.connection_ceilings.get(connection_id).await;
+        let allow_transfer = crate::model::security_approval::effective_permission(
+            ceiling.as_ref(),
+            global_transfer,
+            |c| c.allow_file_transfer,
+        );
         let approved = check_security_permission(
             &self.settings,
             &self.hub,
@@ -1325,7 +1340,10 @@ mod tests {
         let hub = Arc::new(HostControlHub::new_local());
         let (file_tx, file_rx) =
             inprocess::make_event_inprocess_with_cap::<FileTransferPayload>(file_cap);
-        (FileTransferDispatcher::new(file_tx, shared, hub), file_rx)
+        (
+            FileTransferDispatcher::new(file_tx, shared, hub, ConnectionCeilingStore::new()),
+            file_rx,
+        )
     }
 
     /// Helper: assert the file lane has no pending payload within a
@@ -1425,6 +1443,37 @@ mod tests {
         tokio::task::yield_now().await;
         assert_no_message(&mut rx).await;
         // Cache is populated so subsequent commands short-circuit.
+        let g = d.inner.lock().await;
+        assert_eq!(g.permission_cache.get("c1").copied(), Some(false));
+    }
+
+    /// Capability gate: a redeemed-grant connection whose ceiling denies
+    /// file transfer is dropped even when the host global allows it — the ceiling
+    /// meets the global and can only tighten. Closes the file-transfer
+    /// second-connection escape for a capped grant.
+    #[tokio::test]
+    async fn handle_command_drops_when_ceiling_denies_file_transfer() {
+        use desk_signal_facade::model::security_settings::SecuritySettings;
+        let (d, mut rx) = dispatcher_with_setting(Some(true));
+        d.connection_ceilings
+            .set(
+                "c1",
+                Some(SecuritySettings {
+                    allow_file_transfer: Some(false),
+                    ..Default::default()
+                }),
+            )
+            .await;
+        d.start_connection(&start_payload("c1")).await;
+        let payload = FileTransferPayload {
+            connection_id: "c1".into(),
+            data: br#"{"type":"download_request","transfer_id":"t","file_path":"x"}"#.to_vec(),
+            is_text: true,
+            transfer_id: None,
+        };
+        d.handle_command(payload).await;
+        tokio::task::yield_now().await;
+        assert_no_message(&mut rx).await;
         let g = d.inner.lock().await;
         assert_eq!(g.permission_cache.get("c1").copied(), Some(false));
     }

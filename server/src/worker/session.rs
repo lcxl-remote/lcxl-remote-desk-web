@@ -836,22 +836,27 @@ impl WorkerSession {
         // `file_sender`; daemon-bound traffic never goes through the
         // event lane (`writer_tx`) anymore — that path was retired
         // when fix-2026-05-05 demonstrated the head-of-line risk.
+        // Per-connection capability ceilings, registered by the daemon via
+        // `SetConnectionCeiling` for redeemed-grant sessions and consumed by the
+        // worker-side `meet(ceiling, global)` permission gates (the dispatchers and
+        // DeskSession below each take a clone). Owner / unrestricted connections
+        // are never registered (missing entry = global-only gating).
+        let connection_ceilings = crate::worker::connection_ceiling::ConnectionCeilingStore::new();
         let file_transfer_dispatcher = FileTransferDispatcher::new(
             file_sender,
             shared_settings.clone(),
             Arc::clone(&host_control_hub),
+            connection_ceilings.clone(),
         );
         // Whiteboard dispatcher. Spawns a bridge thread to
         // the host_control_hub on construction; reuses the same hub
         // the DeskSession (legacy / portable path) uses so messages
         // flow through a single Tauri overlay manager.
-        let whiteboard_dispatcher = WhiteboardDispatcher::new(Arc::clone(&host_control_hub));
-        // Per-connection capability ceilings, registered by the daemon via
-        // `SetConnectionCeiling` for redeemed-grant sessions and consumed by the
-        // worker-side `meet(ceiling, global)` permission gates. Owner /
-        // unrestricted connections are never registered (missing entry =
-        // global-only gating).
-        let connection_ceilings = crate::worker::connection_ceiling::ConnectionCeilingStore::new();
+        let whiteboard_dispatcher = WhiteboardDispatcher::new(
+            Arc::clone(&host_control_hub),
+            shared_settings.clone(),
+            connection_ceilings.clone(),
+        );
         if writer_tx
             .send(WorkerToService::Capabilities(capabilities))
             .is_err()
