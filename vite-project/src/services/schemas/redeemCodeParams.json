@@ -1,0 +1,1 @@
+{"type":"object","required":["code"],"properties":{"code":{"type":"string","description":"The access-grant code (device code or support code) to redeem."}},"x-readme-ref-name":"RedeemCodeParams"}

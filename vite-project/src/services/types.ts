@@ -883,7 +883,56 @@ export type DeviceCodeBatchDeleteParams = {
     ids: number[];
 };
 
+/**
+ * @description Security settings for controlling remote access permissions.\n\nEach capability field uses `Option<bool>`:\n  - `None`  — not configured (GUI: prompt user; headless: deny)\n  - `Some(true)`  — always allow\n  - `Some(false)` — always deny\n\n`approval_timeout` is different: a missing value on the wire is normalized to\n[`DEFAULT_APPROVAL_TIMEOUT_SECS`] (see [`SecuritySettings::normalize`]), and\nthe explicit \"never\" choice is persisted as the present value `Some(0)` — not\n`None` — so it survives a save/reload round-trip (TOML omits `None`, and the\n`serde(default)` reload would otherwise resurrect the 30s default).
+*/
+export type SecuritySettings = {
+    /**
+     * @description Allow clipboard synchronization
+     * @type boolean,null
+    */
+    allow_clipboard_sync?: boolean | null;
+    /**
+     * @description Allow file browsing (list/delete files via signaling)
+     * @type boolean,null
+    */
+    allow_file_browse?: boolean | null;
+    /**
+     * @description Allow file transfer (upload/download via DataChannel)
+     * @type boolean,null
+    */
+    allow_file_transfer?: boolean | null;
+    /**
+     * @description Allow enabling private screen mode
+     * @type boolean,null
+    */
+    allow_private_screen?: boolean | null;
+    /**
+     * @description Allow remote desktop control (mouse/keyboard input)
+     * @type boolean,null
+    */
+    allow_remote_control?: boolean | null;
+    /**
+     * @description Allow remote terminal access
+     * @type boolean,null
+    */
+    allow_terminal?: boolean | null;
+    /**
+     * @description Allow whiteboard overlay
+     * @type boolean,null
+    */
+    allow_whiteboard?: boolean | null;
+    /**
+     * @description Timeout for security approval requests in seconds.\n`Some(0)` means \"never time out\"; `None` on the wire is normalized to the\n30s default rather than treated as \"never\".
+     * @minLength 0
+     * @default 30
+     * @type integer,null, int32
+    */
+    approval_timeout?: number | null;
+};
+
 export type DeviceCodeCreateParams = {
+    capabilities?: (null | SecuritySettings);
     /**
      * @type string
     */
@@ -895,6 +944,7 @@ export type DeviceCodeCreateParams = {
 };
 
 export type DeviceCodeItem = {
+    capabilities?: (null | SecuritySettings);
     /**
      * @type string
     */
@@ -934,6 +984,7 @@ export type DeviceCodeListResult = {
 };
 
 export type DeviceCodeUpdateParams = {
+    capabilities?: (null | SecuritySettings);
     /**
      * @type string
     */
@@ -1287,54 +1338,6 @@ export type FileTransferMessage = ((DownloadRequest & {
     */
     type: FileTransferMessageTypeEnum7Key;
 }));
-
-/**
- * @description Security settings for controlling remote access permissions.\n\nEach capability field uses `Option<bool>`:\n  - `None`  — not configured (GUI: prompt user; headless: deny)\n  - `Some(true)`  — always allow\n  - `Some(false)` — always deny\n\n`approval_timeout` is different: a missing value on the wire is normalized to\n[`DEFAULT_APPROVAL_TIMEOUT_SECS`] (see [`SecuritySettings::normalize`]), and\nthe explicit \"never\" choice is persisted as the present value `Some(0)` — not\n`None` — so it survives a save/reload round-trip (TOML omits `None`, and the\n`serde(default)` reload would otherwise resurrect the 30s default).
-*/
-export type SecuritySettings = {
-    /**
-     * @description Allow clipboard synchronization
-     * @type boolean,null
-    */
-    allow_clipboard_sync?: boolean | null;
-    /**
-     * @description Allow file browsing (list/delete files via signaling)
-     * @type boolean,null
-    */
-    allow_file_browse?: boolean | null;
-    /**
-     * @description Allow file transfer (upload/download via DataChannel)
-     * @type boolean,null
-    */
-    allow_file_transfer?: boolean | null;
-    /**
-     * @description Allow enabling private screen mode
-     * @type boolean,null
-    */
-    allow_private_screen?: boolean | null;
-    /**
-     * @description Allow remote desktop control (mouse/keyboard input)
-     * @type boolean,null
-    */
-    allow_remote_control?: boolean | null;
-    /**
-     * @description Allow remote terminal access
-     * @type boolean,null
-    */
-    allow_terminal?: boolean | null;
-    /**
-     * @description Allow whiteboard overlay
-     * @type boolean,null
-    */
-    allow_whiteboard?: boolean | null;
-    /**
-     * @description Timeout for security approval requests in seconds.\n`Some(0)` means \"never time out\"; `None` on the wire is normalized to the\n30s default rather than treated as \"never\".
-     * @minLength 0
-     * @default 30
-     * @type integer,null, int32
-    */
-    approval_timeout?: number | null;
-};
 
 export type InitParams = {
     /**
@@ -1973,10 +1976,36 @@ export type ProviderTestDto = {
     sample?: string | null;
 };
 
+export type RedeemCodeParams = {
+    /**
+     * @description The access-grant code (device code or support code) to redeem.
+     * @type string
+    */
+    code: string;
+};
+
+export type RedeemCodeResult = {
+    /**
+     * @description The reusable grant-session token the control end must attach to each\nRequestRemote (main + file-transfer connections) for this target.
+     * @type string
+    */
+    grant_session_id: string;
+    /**
+     * @description The resolved target device connection to control.
+     * @type string
+    */
+    target_connection_id: string;
+};
+
 /**
  * @description RequestRemoteModel is used to request remote access.\nweb browser -> signaling server -> desk server
 */
 export type RequestRemoteModel = {
+    /**
+     * @description Browser-writable, **untrusted** selector naming which grant session this\nrequest redeems (set after redeeming a device / support code). It only\n*selects* a grant; the authorization fact — whether it is honored and what\ncapability ceiling it carries — is decided server-side by looking the grant\nup and checking the caller\'s server-resolved principal, and is stamped into\nthe trusted [`super::request_remote_authz::RequestRemoteAuthz`]. A browser\npresenting someone else\'s `grant_session_id` is rejected at that principal\ncheck. `None` on a normal owner/org request.
+     * @type string,null
+    */
+    grant_session_id?: string | null;
     /**
      * @description ICE servers, the value comes from signaling server
      * @type array | undefined
@@ -2461,6 +2490,36 @@ export type RestResponseProviderTestDto = {
          * @type string,null
         */
         sample?: string | null;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseRedeemCodeResult = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description The reusable grant-session token the control end must attach to each\nRequestRemote (main + file-transfer connections) for this target.
+         * @type string
+        */
+        grant_session_id: string;
+        /**
+         * @description The resolved target device connection to control.
+         * @type string
+        */
+        target_connection_id: string;
     };
     /**
      * @type string,null
@@ -4334,6 +4393,21 @@ export type QueryManagerLinkStatusQueryResponse = QueryManagerLinkStatus200;
 
 export type QueryManagerLinkStatusQuery = {
     Response: QueryManagerLinkStatus200;
+    Errors: any;
+};
+
+/**
+ * @description Redeem result
+*/
+export type RedeemCode200 = RestResponseRedeemCodeResult;
+
+export type RedeemCodeMutationRequest = RedeemCodeParams;
+
+export type RedeemCodeMutationResponse = RedeemCode200;
+
+export type RedeemCodeMutation = {
+    Response: RedeemCode200;
+    Request: RedeemCodeMutationRequest;
     Errors: any;
 };
 

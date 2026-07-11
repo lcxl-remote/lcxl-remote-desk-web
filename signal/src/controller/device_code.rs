@@ -6,9 +6,25 @@ use sea_orm::*;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use desk_signal_facade::model::security_settings::SecuritySettings;
+
 use crate::{entity::device_code, error::DeskSignalError, model::SharedConnectionMap};
 
 pub const TAG: &str = "DeviceCode";
+
+/// Serialize a per-code capability ceiling for storage in the `capabilities`
+/// column, mirroring what redeem reads back with [`SecuritySettings::parse_code_ceiling`].
+/// `None` clears the column (the code falls back to the all-prompt ceiling).
+fn encode_capabilities(capabilities: Option<&SecuritySettings>) -> Option<String> {
+    capabilities.map(|c| serde_json::to_string(c).unwrap_or_default())
+}
+
+/// Decode the stored `capabilities` column for display. Unconfigured or malformed
+/// JSON surfaces as `None` (the owner sees "not configured") rather than silently
+/// substituting the all-prompt fallback that redeem applies at grant time.
+fn decode_capabilities(stored: Option<&str>) -> Option<SecuritySettings> {
+    stored.and_then(|s| serde_json::from_str(s).ok())
+}
 
 #[derive(Serialize, Deserialize, ToSchema, Debug)]
 pub struct DeviceCodeListParams {
@@ -20,11 +36,19 @@ pub struct DeviceCodeListParams {
 pub struct DeviceCodeCreateParams {
     pub client_id: String,
     pub device_code: Option<String>,
+    /// Per-code capability ceiling. `None` leaves the code at the all-prompt
+    /// default (every dimension prompts on redeem).
+    #[serde(default)]
+    pub capabilities: Option<SecuritySettings>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Debug)]
 pub struct DeviceCodeUpdateParams {
     pub device_code: String,
+    /// Replacement capability ceiling. The edit form always sends the full
+    /// object, so `None` clears any prior config back to the all-prompt default.
+    #[serde(default)]
+    pub capabilities: Option<SecuritySettings>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Debug)]
@@ -42,6 +66,8 @@ pub struct DeviceCodeItem {
     pub created_at: String,
     pub updated_at: String,
     pub is_online: bool,
+    /// The code's configured capability ceiling, or `None` when unconfigured.
+    pub capabilities: Option<SecuritySettings>,
 }
 
 impl DeviceCodeItem {
@@ -53,6 +79,7 @@ impl DeviceCodeItem {
             created_at: model.created_at.to_rfc3339(),
             updated_at: model.updated_at.to_rfc3339(),
             is_online,
+            capabilities: decode_capabilities(model.capabilities.as_deref()),
         }
     }
 }
@@ -135,6 +162,7 @@ pub async fn create_device_code(
     let new_model = device_code::ActiveModel {
         client_id: Set(params.client_id),
         device_code: Set(new_code),
+        capabilities: Set(encode_capabilities(params.capabilities.as_ref())),
         created_at: Set(chrono::Utc::now()),
         updated_at: Set(chrono::Utc::now()),
         ..Default::default()
@@ -166,7 +194,9 @@ pub async fn update_device_code(
     let id = path.into_inner();
     let params = body.into_inner();
 
-    let Some(result) = apply_device_code_update(db, id, &params.device_code).await? else {
+    let Some(result) =
+        apply_device_code_update(db, id, &params.device_code, params.capabilities.as_ref()).await?
+    else {
         return Err(DeskSignalError::new_custom_error(
             DeskErrorCode::SYSTEM_ERROR,
             "Device code not found",
@@ -187,18 +217,19 @@ pub async fn update_device_code(
     )
 }
 
-/// Apply a device-code edit: rotate the stored code and, when the code actually
-/// changes, bump `generation` so every access grant minted at the old generation is
-/// refused at redeem / stamp time (the `authorize` generation check). This is the
-/// single-instance signal's equivalent of the manager's dial-code regeneration
-/// (rule 22): no cross-instance directed teardown, since the generation bump alone
-/// supersedes the old code. A same-code edit only refreshes `updated_at`, leaving
-/// the generation untouched. Returns the updated model, or `None` if no code with
-/// that id exists.
+/// Apply a device-code edit: rotate the stored code, replace the capability
+/// ceiling, and, when the code actually changes, bump `generation` so every access
+/// grant minted at the old generation is refused at redeem / stamp time (the
+/// `authorize` generation check). This is the single-instance signal's equivalent
+/// of the manager's dial-code regeneration (rule 22): no cross-instance directed
+/// teardown, since the generation bump alone supersedes the old code. A same-code
+/// edit only refreshes `updated_at` and the capabilities, leaving the generation
+/// untouched. Returns the updated model, or `None` if no code with that id exists.
 pub async fn apply_device_code_update<C: ConnectionTrait>(
     db: &C,
     id: i32,
     new_code: &str,
+    capabilities: Option<&SecuritySettings>,
 ) -> Result<Option<device_code::Model>, DbErr> {
     let Some(model) = device_code::Entity::find_by_id(id).one(db).await? else {
         return Ok(None);
@@ -207,6 +238,7 @@ pub async fn apply_device_code_update<C: ConnectionTrait>(
     let previous_generation = model.generation;
     let mut active: device_code::ActiveModel = model.into();
     active.device_code = Set(new_code.to_string());
+    active.capabilities = Set(encode_capabilities(capabilities));
     active.updated_at = Set(chrono::Utc::now());
     if code_changed {
         active.generation = Set(previous_generation + 1);
@@ -336,7 +368,7 @@ mod tests {
         let seeded = seed(&db, "client-a", "OLD123").await;
         assert_eq!(seeded.generation, 0);
 
-        let updated = apply_device_code_update(&db, seeded.id, "NEW456")
+        let updated = apply_device_code_update(&db, seeded.id, "NEW456", None)
             .await
             .unwrap()
             .expect("code exists");
@@ -350,7 +382,7 @@ mod tests {
         let db = setup().await;
         let seeded = seed(&db, "client-a", "SAME00").await;
 
-        let updated = apply_device_code_update(&db, seeded.id, "SAME00")
+        let updated = apply_device_code_update(&db, seeded.id, "SAME00", None)
             .await
             .unwrap()
             .expect("code exists");
@@ -362,10 +394,63 @@ mod tests {
     async fn unknown_id_is_none() {
         let db = setup().await;
         assert!(
-            apply_device_code_update(&db, 999, "X")
+            apply_device_code_update(&db, 999, "X", None)
                 .await
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn update_stores_and_clears_capabilities() {
+        let db = setup().await;
+        let seeded = seed(&db, "client-a", "CAP000").await;
+        assert!(seeded.capabilities.is_none());
+
+        // Configuring a ceiling persists as JSON and decodes back on read.
+        let ceiling = SecuritySettings {
+            allow_terminal: Some(true),
+            ..SecuritySettings::all_prompt()
+        };
+        let updated = apply_device_code_update(&db, seeded.id, "CAP000", Some(&ceiling))
+            .await
+            .unwrap()
+            .expect("code exists");
+        assert_eq!(
+            decode_capabilities(updated.capabilities.as_deref()),
+            Some(ceiling.clone())
+        );
+        // Redeem's parser round-trips the same stored value.
+        assert_eq!(
+            SecuritySettings::parse_code_ceiling(updated.capabilities.as_deref()),
+            ceiling
+        );
+
+        // A subsequent edit that omits capabilities clears the column back to null.
+        let cleared = apply_device_code_update(&db, seeded.id, "CAP000", None)
+            .await
+            .unwrap()
+            .expect("code exists");
+        assert!(cleared.capabilities.is_none());
+    }
+
+    #[tokio::test]
+    async fn item_surfaces_configured_ceiling() {
+        let db = setup().await;
+        let seeded = seed(&db, "client-a", "ITEM00").await;
+        let ceiling = SecuritySettings {
+            allow_file_transfer: Some(false),
+            ..SecuritySettings::all_prompt()
+        };
+        apply_device_code_update(&db, seeded.id, "ITEM00", Some(&ceiling))
+            .await
+            .unwrap();
+        let refreshed = device_code::Entity::find_by_id(seeded.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let item = DeviceCodeItem::from_model(refreshed, false);
+        assert_eq!(item.capabilities, Some(ceiling));
     }
 }
