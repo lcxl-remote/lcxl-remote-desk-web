@@ -1,9 +1,52 @@
+use desk_signal_facade::model::security_settings::SecuritySettings;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utoipa::ToSchema;
 
 use crate::host_control::{ApprovalRequest, HostControlHub};
 use crate::model::settings::SharedSettings;
+
+/// The three-state capability ordering `Some(false) < None < Some(true)` used to
+/// combine a per-connection capability ceiling with the host global. `meet` picks
+/// the **more restrictive** (smaller) of the two — `Some(false)` (deny) dominates,
+/// then `None` (prompt), then `Some(true)` (allow).
+fn tri_state_rank(v: Option<bool>) -> u8 {
+    match v {
+        Some(false) => 0,
+        None => 1,
+        Some(true) => 2,
+    }
+}
+
+/// The more restrictive of two tri-state permissions under
+/// `Some(false) < None < Some(true)` (i.e. the min). Feeding the result into
+/// [`check_security_permission`] means a redeemed-grant session can only ever be
+/// *tightened* relative to the host global, never widened: `meet(Some(false), _)`
+/// hard-denies, `meet(None, _)` downgrades an allow to a prompt, and
+/// `meet(Some(true), g) == g` leaves the global untouched.
+pub fn meet_permission(ceiling: Option<bool>, global: Option<bool>) -> Option<bool> {
+    if tri_state_rank(ceiling) <= tri_state_rank(global) {
+        ceiling
+    } else {
+        global
+    }
+}
+
+/// The effective permission for one capability dimension given the connection's
+/// optional ceiling and the host global. An owner / unrestricted connection
+/// (`ceiling == None`, no `SecuritySettings` at all) uses the global verbatim; a
+/// redeemed-grant connection meets its per-dimension ceiling with the global via
+/// [`meet_permission`]. `dim` selects the capability field from both.
+pub fn effective_permission(
+    ceiling: Option<&SecuritySettings>,
+    global: Option<bool>,
+    dim: impl Fn(&SecuritySettings) -> Option<bool>,
+) -> Option<bool> {
+    match ceiling {
+        None => global,
+        Some(c) => meet_permission(dim(c), global),
+    }
+}
 
 /// Type of security permission being requested
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -154,6 +197,70 @@ mod tests {
     use crate::host_control::{ApprovalResponse, HostControlHub, HostControlMessage};
     use crate::model::settings::Settings;
     use std::time::Duration;
+
+    /// Full 9-cell truth table of `meet_permission` under
+    /// `Some(false) < None < Some(true)` — the result is always the more
+    /// restrictive (smaller) of the two operands.
+    #[test]
+    fn meet_permission_picks_the_more_restrictive() {
+        use std::option::Option::None as N;
+        let f = Some(false);
+        let t = Some(true);
+        // ceiling \ global:      false   None    true
+        assert_eq!(meet_permission(f, f), f);
+        assert_eq!(meet_permission(f, N), f);
+        assert_eq!(meet_permission(f, t), f);
+        assert_eq!(meet_permission(N, f), f);
+        assert_eq!(meet_permission(N, N), N);
+        assert_eq!(meet_permission(N, t), N);
+        assert_eq!(meet_permission(t, f), f);
+        assert_eq!(meet_permission(t, N), N);
+        assert_eq!(meet_permission(t, t), t);
+    }
+
+    /// `effective_permission`: an owner connection (no ceiling) uses the global
+    /// verbatim; a grant connection meets its per-dimension ceiling with the
+    /// global. A grant can only tighten, never widen.
+    #[test]
+    fn effective_permission_owner_uses_global_grant_meets() {
+        // Owner (no ceiling) → global verbatim, even for a "prompt" global.
+        assert_eq!(
+            effective_permission(None, Some(true), |c| c.allow_file_transfer),
+            Some(true)
+        );
+        assert_eq!(
+            effective_permission(None, None, |c| c.allow_file_transfer),
+            None
+        );
+
+        // Grant with a deny ceiling hard-denies even when the global allows.
+        let deny_ft = SecuritySettings {
+            allow_file_transfer: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_permission(Some(&deny_ft), Some(true), |c| c.allow_file_transfer),
+            Some(false)
+        );
+
+        // Grant with an unset (None) ceiling dimension downgrades an allow to a
+        // prompt (cannot silently widen).
+        let unset = SecuritySettings::default();
+        assert_eq!(
+            effective_permission(Some(&unset), Some(true), |c| c.allow_terminal),
+            None
+        );
+
+        // Grant that allows a dimension defers to the global (min == global).
+        let allow_term = SecuritySettings {
+            allow_terminal: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_permission(Some(&allow_term), Some(false), |c| c.allow_terminal),
+            Some(false)
+        );
+    }
 
     fn shared_settings_for_test() -> SharedSettings {
         let mut s = Settings::default();
