@@ -15,14 +15,18 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
 import { Skeleton } from "@/components/ui/skeleton"
+import { clearSessionGrant } from "@/features/desk/session-grant"
 
 export default function DeskList() {
     const { t } = useTranslation()
     const navigate = useNavigate()
     const { data: connections, isLoading, refetch } = useListConnections()
 
-    // Helper to handle navigation to desk
+    // Helper to handle navigation to desk. Connecting from the owner's own list is a
+    // full-control session, so drop any stale restricted grant for this target first
+    // (a residual redeem token must never downgrade an owner session).
     const handleConnect = (id: string) => {
+        clearSessionGrant(id)
         navigate(`/desk/${id}`)
     }
 

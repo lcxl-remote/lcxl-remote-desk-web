@@ -76,4 +76,25 @@ describe('deriveRestrictedSession', () => {
         expect(r.ownerPlaneVisible).toBe(false);
         expect(r.capabilityVisible('allow_terminal')).toBe(true);
     });
+
+    it('anti-downgrade: clearing the grant before an owner connect restores full control', () => {
+        // Redeem a restricted code for a target in this tab...
+        saveSessionGrant('desk-1', {
+            grantSessionId: 'gs-1',
+            accessCeiling: { allow_terminal: false, allow_file_browse: false },
+            source: 'device-code',
+        });
+        expect(deriveRestrictedSession('desk-1').isRestricted).toBe(true);
+
+        // ...then connect to the SAME target from the owner device list, which clears
+        // the stale grant first. The owner session must derive as unrestricted, so no
+        // grant token is sent and the residual code cannot downgrade it.
+        clearSessionGrant('desk-1');
+        const owner = deriveRestrictedSession('desk-1');
+        expect(owner.isRestricted).toBe(false);
+        expect(owner.grantSessionId).toBeNull();
+        expect(owner.ownerPlaneVisible).toBe(true);
+        expect(owner.capabilityVisible('allow_terminal')).toBe(true);
+        expect(owner.capabilityVisible('allow_file_browse')).toBe(true);
+    });
 });
