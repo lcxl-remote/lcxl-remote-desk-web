@@ -880,15 +880,6 @@ pub struct SignalingState {
     pub accept_control: bool,
     /// accept clipboard sync from remote peer
     pub accept_clipboard_sync: bool,
-    /// True when this connection is a restricted temporary-support session
-    /// (see [`RemoteDeskTypeEnum::Support`]). The host holds such a connection
-    /// fail-closed: the daemon's data-channel gate denies every route except
-    /// pointer/keyboard input (still governed by `accept_control`), and the
-    /// signaling router denies every frame outside the session-establishment /
-    /// control-plane allowlist. Default `false` — a normal owner connection is
-    /// unrestricted. This is host-local runtime state, never carried on the wire;
-    /// a plain signal leaves it at its default.
-    pub restricted: bool,
     /// The validated capability ceiling for this connection, unwrapped from the
     /// `RequestRemoteAuthz` stamp by the host gate. `None` for a central-verified
     /// owner/full session (no ceiling) or a plain unrestricted connection;

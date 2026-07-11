@@ -448,6 +448,29 @@ fn new_audit_event_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// The capability ceiling applied to a legacy temporary-support session (one that
+/// arrived on the physical support upstream without a central grant stamp). The
+/// AccessGrant unification treats such a session as a grant with a fixed
+/// restrictive ceiling: pointer/keyboard control defers to the host global (met
+/// with it, so an approval prompt / global deny still applies), and every other
+/// capability — clipboard, private screen, whiteboard, terminal, file browse,
+/// file transfer — is hard-denied. The worker- and daemon-side `meet` gates
+/// enforce it (replacing the retired `SignalingState.restricted` hard-deny door).
+/// A per-code configured ceiling supersedes this once support codes migrate to
+/// the grant store.
+fn legacy_support_ceiling() -> desk_signal_facade::model::security_settings::SecuritySettings {
+    desk_signal_facade::model::security_settings::SecuritySettings {
+        allow_remote_control: Some(true),
+        allow_clipboard_sync: Some(false),
+        allow_private_screen: Some(false),
+        allow_whiteboard: Some(false),
+        allow_terminal: Some(false),
+        allow_file_browse: Some(false),
+        allow_file_transfer: Some(false),
+        ..Default::default()
+    }
+}
+
 /// Signaling types a restricted temporary-support session is allowed to use
 /// (the first fail-closed door in `route()`). The allowlist is deliberately
 /// minimal — session establishment (`RequestRemote` / `Offer` / `Answer` /
@@ -573,19 +596,24 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             let user_name = "worker_node".to_string();
             let has_tauri = ctx.host_control_hub.has_tauri_ui();
             let capabilities = ctx.worker_mgr.worker_capabilities();
-            // Unwrap the validated ceiling stamp (owner stamp → `access_ceiling ==
-            // None`; redeemed-grant stamp → `Some(ceiling)`; no stamp → both None).
+            // Resolve the connection's capability ceiling. A redeemed-grant stamp
+            // carries one directly (an owner stamp carries `None` = no ceiling); a
+            // legacy support upstream (no stamp, `inbound_restricted`) gets the
+            // fixed restrictive support ceiling so the `meet` gates enforce its
+            // isolation without the retired `restricted` hard-deny door.
             let (access_ceiling, grant_session_id) = match ctx
                 .inbound_request_remote_authz
                 .as_ref()
             {
                 Some(a) => (a.access_ceiling.clone(), a.grant_session_id.clone()),
+                None if ctx.inbound_restricted => (Some(legacy_support_ceiling()), None),
                 None => (None, None),
             };
-            // A session is restricted when it arrived on the restricted support
-            // upstream OR carries a redeemed-grant ceiling stamp (an owner stamp
-            // has `access_ceiling == None`, which is not a restriction).
-            let restricted = ctx.inbound_restricted || access_ceiling.is_some();
+            // Whether the connection rides the physical support upstream — drives
+            // only the Support-isolation egress projection, independent of the
+            // capability ceiling (a central grant is capability-restricted but is
+            // not a support-upstream connection).
+            let is_support_upstream = ctx.inbound_restricted;
             let result = pc_manager::handle_request_remote(
                 &ctx.pc_registry,
                 &ctx.outbound_tx,
@@ -596,7 +624,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                 Some(&ctx.worker_mgr),
                 ctx.virtual_display.as_ref(),
                 model,
-                restricted,
+                is_support_upstream,
                 access_ceiling,
                 grant_session_id,
             )
@@ -3345,6 +3373,23 @@ async fn handle_agent_request_inbound(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The legacy support ceiling defers pointer/keyboard control to the host
+    /// global (so an approval prompt / global deny still applies) and hard-denies
+    /// every exfiltration / privileged capability. This is the fixed ceiling a
+    /// support-upstream session runs under until support codes carry a configured
+    /// per-code ceiling.
+    #[test]
+    fn legacy_support_ceiling_denies_everything_but_control() {
+        let c = legacy_support_ceiling();
+        assert_eq!(c.allow_remote_control, Some(true));
+        assert_eq!(c.allow_clipboard_sync, Some(false));
+        assert_eq!(c.allow_private_screen, Some(false));
+        assert_eq!(c.allow_whiteboard, Some(false));
+        assert_eq!(c.allow_terminal, Some(false));
+        assert_eq!(c.allow_file_browse, Some(false));
+        assert_eq!(c.allow_file_transfer, Some(false));
+    }
 
     /// Daemon-owned: WebRTC SDP/ICE/PC lifecycle + daemon-emitted
     /// notifications + connection bookkeeping + WS heartbeat.

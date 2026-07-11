@@ -1163,26 +1163,13 @@ fn route_to_service_msg(
 /// per connection (the same per-DC permission cache the worker maintains).
 async fn route_is_permitted(route: DcRoute, state: &Arc<RwLock<SignalingState>>) -> bool {
     let s = state.read().await;
-    if s.restricted {
-        // Second fail-closed door: a restricted temporary-support session (see
-        // `RemoteDeskTypeEnum::Support`). Only pointer/keyboard input is allowed,
-        // and it stays gated by `accept_control` (a view-only support grant never
-        // sets it). Clipboard, file transfer, whiteboard — and any future
-        // DataChannel route — are denied outright so a semi-trusted supporter
-        // cannot exfiltrate the clipboard / files or draw on the host. This gate
-        // is independent of the signaling `route()` allowlist because file
-        // transfer never flows as a signaling frame; it rides its own DataChannel,
-        // which the unrestricted arm below lets through unconditionally.
-        // `CursorSync` (read-only cursor-shape write-back the browser never pushes
-        // to) is stashed before this gate in `register_data_channel_router`, so it
-        // is implicitly allowed even for restricted sessions and never reaches
-        // here.
-        return match route {
-            DcRoute::Mouse | DcRoute::MouseMove | DcRoute::Keyboard => s.accept_control,
-            DcRoute::Clipboard | DcRoute::FileTransfer | DcRoute::Whiteboard => false,
-            DcRoute::CursorSync => unreachable!("CursorSync DC has no message route"),
-        };
-    }
+    // Capability restriction for redeemed-grant and legacy-support sessions is no
+    // longer a coarse daemon-side hard-deny door here; it is enforced per
+    // capability by the worker- and daemon-side `meet(ceiling, global)` gates
+    // (clipboard via the control-grant meet that sets `accept_clipboard_sync`,
+    // file transfer / whiteboard via their worker dispatcher gates). This gate now
+    // only routes on the runtime grant bits (`accept_control` /
+    // `accept_clipboard_sync`), which the ceiling already tightened.
     match route {
         DcRoute::Mouse | DcRoute::MouseMove | DcRoute::Keyboard => s.accept_control,
         DcRoute::Clipboard => s.accept_clipboard_sync,
@@ -1613,18 +1600,18 @@ pub async fn handle_request_remote(
     worker_mgr: Option<&WorkerManager>,
     virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
     model: &SignalingModel,
-    // True when this `RequestRemote` is held fail-closed: either it arrived on the
-    // restricted support upstream (see `RemoteDeskTypeEnum::Support`) or it carries
-    // a redeemed-grant capability ceiling. The freshly-created PC is marked
-    // restricted before any ICE / DataChannel handler is installed or any Init
-    // reply egresses, so both the daemon-side data-channel gate
-    // (`route_is_permitted`) and the outbound Support-isolation filter observe it
-    // from the connection's very first frame.
-    restricted: bool,
-    // The validated capability ceiling unwrapped from the `RequestRemoteAuthz`
-    // stamp (`None` for owner / unrestricted / legacy-support). Stored on the
-    // connection's `SignalingState` so the worker-side permission gates can later
-    // enforce `meet(ceiling, global)`.
+    // True when this `RequestRemote` arrived on the physical support upstream (see
+    // `RemoteDeskTypeEnum::Support`). Drives only the outbound Support-isolation
+    // egress projection (`mark_restricted_connection`), independent of the
+    // capability ceiling — a central grant is capability-restricted but is not a
+    // support-upstream connection. Set before any frame egresses so the isolation
+    // filter observes it from the connection's very first frame.
+    is_support_upstream: bool,
+    // The validated capability ceiling: unwrapped from the `RequestRemoteAuthz`
+    // stamp for a redeemed grant, the fixed restrictive ceiling for a legacy
+    // support session, or `None` for an owner / unrestricted connection. Stored on
+    // the connection's `SignalingState` and registered with the worker so the
+    // `meet(ceiling, global)` gates enforce it.
     access_ceiling: Option<SecuritySettings>,
     // The grant logical-session id this connection belongs to (`None` when there
     // is no grant). Indexes the connection for grant-directed teardown.
@@ -1674,15 +1661,13 @@ pub async fn handle_request_remote(
         .create_for_request_remote(from_connection_id, &request_remote, settings)
         .await?;
 
-    // Stamp the fail-closed state onto the connection before the ICE / DataChannel
-    // handlers below and before the Init reply, so there is no unrestricted window.
-    // `restricted` gates `route_is_permitted`; `access_ceiling` feeds the
-    // worker-side `meet(ceiling, global)` gates; `grant_session_id` indexes the
-    // connection for grant-directed teardown.
-    if restricted || access_ceiling.is_some() || grant_session_id.is_some() {
+    // Stamp the capability ceiling and grant id onto the connection before the ICE
+    // / DataChannel handlers below and before the Init reply, so the worker-side
+    // `meet(ceiling, global)` gates and grant-directed teardown observe them from
+    // the connection's very first frame.
+    if access_ceiling.is_some() || grant_session_id.is_some() {
         let ctx_guard = ctx.read().await;
         let mut st = ctx_guard.signaling_state.write().await;
-        st.restricted = restricted;
         st.access_ceiling = access_ceiling;
         st.grant_session_id = grant_session_id.clone();
     }
@@ -1693,7 +1678,7 @@ pub async fn handle_request_remote(
             .index_grant_connection(gsid, from_connection_id)
             .await;
     }
-    if restricted {
+    if is_support_upstream {
         // Register the connection in the outbound-filter projection so the
         // Support-isolation filter observes it from the connection's first frame.
         registry
@@ -4608,7 +4593,7 @@ mod tests {
             Some(&worker_mgr),
             None,
             &model,
-            true,
+            false, // a central grant is not a support-upstream connection
             Some(ceiling.clone()),
             Some("GS-1".to_string()),
         )
@@ -4634,7 +4619,6 @@ mod tests {
 
         let ctx = registry.get("conn-grant-1").await.expect("pc registered");
         let st = ctx.read().await.signaling_state.read().await.clone();
-        assert!(st.restricted, "grant session must be marked restricted");
         assert_eq!(
             st.access_ceiling,
             Some(ceiling),
@@ -4646,16 +4630,16 @@ mod tests {
             "grant-session id must index the connection"
         );
 
-        // The coarse restricted-set projection is also populated for the
-        // outbound Support-isolation filter.
+        // A central grant is NOT a support-upstream connection, so it must not be
+        // added to the Support-isolation egress projection.
         assert!(
-            registry
+            !registry
                 .restricted_connections_handle()
                 .read()
                 .await
                 .contains("conn-grant-1"),
         );
-        // ...and the connection is indexed under its grant for directed teardown.
+        // ...but it is indexed under its grant for directed teardown.
         assert_eq!(
             registry.connections_for_grant("GS-1").await,
             ["conn-grant-1"]
@@ -4700,7 +4684,7 @@ mod tests {
             None,
             None,
             &model,
-            true,
+            false, // a central grant is not a support-upstream connection
             Some(ceiling),
             Some("GS-2".to_string()),
         )
@@ -5694,41 +5678,34 @@ mod tests {
         assert!(route_is_permitted(DcRoute::Whiteboard, &state).await);
     }
 
-    /// Restricted temporary-support session (second fail-closed door): file
-    /// transfer / clipboard / whiteboard are denied outright even with both
-    /// accept flags open. This closes the exfiltration path a normal session
-    /// leaves open (`FileTransfer` passes unconditionally there); pointer /
-    /// keyboard input stays allowed but remains gated by `accept_control`.
+    /// `route_is_permitted` no longer hard-denies a capability-restricted session
+    /// at the daemon door: with the retired `restricted` hard-deny branch gone, a
+    /// grant / support connection routes purely on its runtime accept bits, exactly
+    /// like an owner connection. The ceiling restriction is now enforced per
+    /// capability by the `meet(ceiling, global)` gates — clipboard via the
+    /// control-grant meet that sets `accept_clipboard_sync` (a capped session lands
+    /// with it false), file transfer / whiteboard via their worker dispatcher gates
+    /// (covered by those dispatchers' ceiling-deny tests). Here a session whose
+    /// control grant was approved but whose clipboard was capped off routes input
+    /// and lets file transfer through to the worker gate, while clipboard stays
+    /// denied by its own accept bit.
     #[tokio::test]
-    async fn route_is_permitted_restricted_denies_file_clipboard_whiteboard() {
+    async fn route_is_permitted_routes_on_accept_bits_not_a_restricted_flag() {
         let state = Arc::new(RwLock::new(SignalingState {
             accept_control: true,
-            accept_clipboard_sync: true,
-            restricted: true,
+            accept_clipboard_sync: false,
             ..SignalingState::default()
         }));
-        assert!(!route_is_permitted(DcRoute::FileTransfer, &state).await);
-        assert!(!route_is_permitted(DcRoute::Clipboard, &state).await);
-        assert!(!route_is_permitted(DcRoute::Whiteboard, &state).await);
+        // Pointer / keyboard follow the control grant.
         assert!(route_is_permitted(DcRoute::Mouse, &state).await);
         assert!(route_is_permitted(DcRoute::MouseMove, &state).await);
         assert!(route_is_permitted(DcRoute::Keyboard, &state).await);
-    }
-
-    /// Restricted view-only support session: `accept_control` never set, so even
-    /// the allowed pointer / keyboard routes are gated off, and file transfer
-    /// stays denied. A view-only supporter can drive nothing.
-    #[tokio::test]
-    async fn route_is_permitted_restricted_view_only_denies_all_input() {
-        let state = Arc::new(RwLock::new(SignalingState {
-            accept_control: false,
-            restricted: true,
-            ..SignalingState::default()
-        }));
-        assert!(!route_is_permitted(DcRoute::Mouse, &state).await);
-        assert!(!route_is_permitted(DcRoute::MouseMove, &state).await);
-        assert!(!route_is_permitted(DcRoute::Keyboard, &state).await);
-        assert!(!route_is_permitted(DcRoute::FileTransfer, &state).await);
+        // Clipboard denied by its own capped accept bit.
+        assert!(!route_is_permitted(DcRoute::Clipboard, &state).await);
+        // File transfer / whiteboard pass the daemon door; their worker meet gates
+        // are the enforcement point now.
+        assert!(route_is_permitted(DcRoute::FileTransfer, &state).await);
+        assert!(route_is_permitted(DcRoute::Whiteboard, &state).await);
     }
 
     /// The restricted-connections projection is populated by
@@ -6708,7 +6685,6 @@ mod tests {
                 ..Default::default()
             });
             st.grant_session_id = Some("GS-cap".to_string());
-            st.restricted = true;
         }
 
         let model = require_control_model("conn-cap", true, true);
