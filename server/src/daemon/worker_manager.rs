@@ -1695,6 +1695,7 @@ mod tests {
         let pc_registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let mut s = crate::model::settings::Settings::default();
         s.args.startup_mode = crate::model::settings::StartupMode::ServiceDaemon;

@@ -3690,6 +3690,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
 
@@ -3742,6 +3743,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
 
@@ -3769,6 +3771,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
 
@@ -3814,6 +3817,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         let ctx = registry
@@ -3851,6 +3855,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         let ctx = registry
@@ -3933,6 +3938,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -3962,6 +3968,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         for id in ["alpha", "beta", "gamma"] {
@@ -3998,6 +4005,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -4034,6 +4042,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -4101,6 +4110,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -4152,6 +4162,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -4184,6 +4195,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -4218,6 +4230,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -4248,6 +4261,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -4294,6 +4308,7 @@ mod tests {
             Some(
                 serde_json::to_value(RequestRemoteModel {
                     ice_servers: vec![],
+                    grant_session_id: None,
                 })
                 .unwrap(),
             ),
@@ -4348,6 +4363,7 @@ mod tests {
             Some(
                 serde_json::to_value(RequestRemoteModel {
                     ice_servers: vec![],
+                    grant_session_id: None,
                 })
                 .unwrap(),
             ),
@@ -4415,6 +4431,7 @@ mod tests {
             Some(
                 serde_json::to_value(RequestRemoteModel {
                     ice_servers: vec![],
+                    grant_session_id: None,
                 })
                 .unwrap(),
             ),
@@ -4545,6 +4562,7 @@ mod tests {
             Some(
                 serde_json::to_value(RequestRemoteModel {
                     ice_servers: vec![],
+                    grant_session_id: None,
                 })
                 .unwrap(),
             ),
@@ -4622,6 +4640,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         let ctx = registry
@@ -4694,6 +4713,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -4720,6 +4740,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -4787,6 +4808,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -4828,6 +4850,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         for id in ["conn-a", "conn-b"] {
@@ -4872,6 +4895,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -4919,6 +4943,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -4978,6 +5003,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         let ctx_a = registry
@@ -5067,6 +5093,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -5116,6 +5143,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -5407,6 +5435,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -5491,6 +5520,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -5516,6 +5546,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -5555,6 +5586,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -5578,6 +5610,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         let ctx = registry
@@ -5606,6 +5639,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         let ctx = registry
@@ -5663,6 +5697,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -5692,6 +5727,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -5726,6 +5762,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -5768,6 +5805,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -5851,6 +5889,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
         registry
@@ -6178,6 +6217,7 @@ mod tests {
 
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         registry
             .create_for_request_remote("conn-rc", &request_remote, &*settings.read().await)
@@ -6218,6 +6258,7 @@ mod tests {
 
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         registry
             .create_for_request_remote("conn-deny", &request_remote, &*settings.read().await)
@@ -6261,6 +6302,7 @@ mod tests {
 
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let ctx = registry
             .create_for_request_remote("conn-release", &request_remote, &*settings.read().await)
@@ -6313,6 +6355,7 @@ mod tests {
 
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let ctx = registry
             .create_for_request_remote("conn-ask-release", &request_remote, &*settings.read().await)
@@ -6370,6 +6413,7 @@ mod tests {
 
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let ctx = registry
             .create_for_request_remote("conn-regrant", &request_remote, &*settings.read().await)
@@ -6423,6 +6467,7 @@ mod tests {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let s = settings_with_startup(StartupMode::ServiceDaemon);
 

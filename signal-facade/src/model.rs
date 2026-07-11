@@ -7,6 +7,7 @@ pub mod image_capture;
 pub mod os;
 pub mod private_screen;
 pub mod probe;
+pub mod request_remote_authz;
 pub mod security_settings;
 pub mod signal;
 pub mod support;

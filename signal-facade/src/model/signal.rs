@@ -718,6 +718,16 @@ pub struct RequestRemoteModel {
     /// ICE servers, the value comes from signaling server
     #[serde(default)]
     pub ice_servers: Vec<LcxlRTCIceServer>,
+    /// Browser-writable, **untrusted** selector naming which grant session this
+    /// request redeems (set after redeeming a device / support code). It only
+    /// *selects* a grant; the authorization fact — whether it is honored and what
+    /// capability ceiling it carries — is decided server-side by looking the grant
+    /// up and checking the caller's server-resolved principal, and is stamped into
+    /// the trusted [`super::request_remote_authz::RequestRemoteAuthz`]. A browser
+    /// presenting someone else's `grant_session_id` is rejected at that principal
+    /// check. `None` on a normal owner/org request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_session_id: Option<String>,
 }
 
 /// Browser-facing knobs that drive the adaptive-resolution hook. Server

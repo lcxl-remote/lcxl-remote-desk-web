@@ -3961,6 +3961,7 @@ mod tests {
         let ctx = make_ctx();
         let request_remote = desk_signal_facade::model::signal::RequestRemoteModel {
             ice_servers: vec![],
+            grant_session_id: None,
         };
         let local_settings = crate::model::settings::Settings::default();
         let ctx_a = ctx
@@ -4338,6 +4339,7 @@ mod tests {
             Some(
                 serde_json::to_value(RequestRemoteModel {
                     ice_servers: vec![],
+                    grant_session_id: None,
                 })
                 .unwrap(),
             ),

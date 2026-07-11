@@ -197,6 +197,40 @@ pub trait ControlFrameAuthorizer: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ControlFrameOutcome> + Send + 'a>>;
 }
 
+// ====== AccessGrantAuthorizer (RequestRemote capability-ceiling stamp) ======
+
+/// Outcome of authorizing a `RequestRemote` before it is relayed to the host.
+pub enum RequestRemoteOutcome {
+    /// Relay this model to the peer. The manager / signal server returns the frame
+    /// wrapped in an `AuthorizedRequestRemote` (a trusted capability-ceiling
+    /// stamp); with no authorizer the plain frame is relayed unchanged.
+    Forward(SignalingModel),
+    /// Reject the request (default-deny: neither an owner/org authorization nor a
+    /// valid grant for the target). An error response is returned to the sender.
+    Reject {
+        code: DeskErrorCode,
+        message: String,
+    },
+}
+
+/// Stamps a trusted capability ceiling onto every `RequestRemote` before it is
+/// relayed to the host — the enforcement seam that lets the host drop any bare
+/// `RequestRemote` on its trusted-central upstream (defense against a grant
+/// session stripping its stamp to masquerade as an owner). The manager and the
+/// signal server each implement it (rule 22, same shape): an owner / org
+/// authorization stamps `access_ceiling: None` (full), a valid redeemed grant
+/// stamps `Some(ceiling)`, and neither is a default-deny reject. The signal
+/// server injects its own single-account/grant implementation; a handler with no
+/// authorizer relays plainly (used where the host applies no central trust).
+pub trait RequestRemoteAuthorizer: Send + Sync {
+    fn authorize<'a>(
+        &'a self,
+        actor: &'a ConnectionState,
+        connection_map: &'a SharedConnectionMap,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RequestRemoteOutcome> + Send + 'a>>;
+}
+
 // ====== AuditObserver trait ======
 
 /// Consumes inbound `AiAuditEvent` frames for persistence. The manager
@@ -529,6 +563,12 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// the manager (which wraps the frames with an authorization decision);
     /// `None` in the signal server, where the frames relay unwrapped.
     pub control_authorizer: Option<Arc<dyn ControlFrameAuthorizer>>,
+    /// Capability-ceiling stamp seam for `RequestRemote` frames. `Some` in both
+    /// the manager and the signal server (each stamps owner sessions with no
+    /// ceiling and redeemed grants with their per-code ceiling, default-denying
+    /// otherwise); `None` only where the host applies no central trust, in which
+    /// case requests relay unstamped.
+    pub request_remote_authorizer: Option<Arc<dyn RequestRemoteAuthorizer>>,
     /// Audit persistence observer for inbound `AiAuditEvent` frames. `Some` only
     /// in the manager (which persists them); `None` elsewhere, where they are
     /// ignored.
@@ -719,6 +759,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             user,
             turn,
             control_authorizer: None,
+            request_remote_authorizer: None,
             audit_observer: None,
             collect_observer: None,
             edge_exec_observer: None,
@@ -732,6 +773,17 @@ impl<U: SignalingUser> SignalingHandler<U> {
     /// server never calls this, leaving AI frames relayed unwrapped.
     pub fn with_control_authorizer(mut self, authorizer: Arc<dyn ControlFrameAuthorizer>) -> Self {
         self.control_authorizer = Some(authorizer);
+        self
+    }
+
+    /// Attach the `RequestRemote` capability-ceiling stamp seam. The manager and
+    /// the signal server both call this so every relayed `RequestRemote` carries a
+    /// trusted stamp; a handler left without one relays requests unstamped.
+    pub fn with_request_remote_authorizer(
+        mut self,
+        authorizer: Arc<dyn RequestRemoteAuthorizer>,
+    ) -> Self {
+        self.request_remote_authorizer = Some(authorizer);
         self
     }
 
@@ -1009,7 +1061,23 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     data,
                     signaling_model.response_state,
                 );
-                self.forward_to_peer(&new_signaling_model, false).await?;
+                // Stamp the trusted capability ceiling (owner → none / grant →
+                // ceiling / neither → default-deny) before relaying. With no
+                // authorizer the frame relays unstamped.
+                let to_forward = if let Some(authorizer) = self.request_remote_authorizer.clone() {
+                    match authorizer
+                        .authorize(&self.connection_state, &self.connection_map, &new_signaling_model)
+                        .await
+                    {
+                        RequestRemoteOutcome::Forward(m) => m,
+                        RequestRemoteOutcome::Reject { code, message } => {
+                            return DeskSignalFacadeError::custom_error(code, &message);
+                        }
+                    }
+                } else {
+                    new_signaling_model
+                };
+                self.forward_to_peer(&to_forward, false).await?;
             }
 
             SignalingType::Init => {
