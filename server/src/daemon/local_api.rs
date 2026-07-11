@@ -153,6 +153,10 @@ pub async fn run_local_api(
             .wrap(
                 SessionMiddleware::builder(CookieSessionStore::default(), secret_key.clone())
                     .cookie_secure(false)
+                    // Encrypt (not just sign) the session cookie and keep it out of
+                    // page JavaScript, matching the portable / daemon HTTP apps.
+                    .cookie_content_security(actix_session::config::CookieContentSecurity::Private)
+                    .cookie_http_only(true)
                     .build(),
             )
             .service(
