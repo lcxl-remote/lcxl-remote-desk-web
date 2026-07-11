@@ -18,7 +18,7 @@ pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u32 = 30;
 /// the explicit "never" choice is persisted as the present value `Some(0)` — not
 /// `None` — so it survives a save/reload round-trip (TOML omits `None`, and the
 /// `serde(default)` reload would otherwise resurrect the 30s default).
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, ToSchema)]
 #[serde(default)]
 pub struct SecuritySettings {
     /// Allow remote desktop control (mouse/keyboard input)
