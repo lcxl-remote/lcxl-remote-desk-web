@@ -502,6 +502,18 @@ impl PeerConnectionContext {
     }
 }
 
+/// How a signaling connection was admitted, recorded when its `RequestRemote`
+/// is authorized and consulted by the router's first door. Independent of the
+/// PC's lifecycle so it survives a `CloseControl` PC teardown (see
+/// [`PcRegistry::admissions`]).
+#[derive(Debug, Clone)]
+pub enum Admission {
+    /// An owner / full session — no capability ceiling.
+    OwnerFull,
+    /// A redeemed-grant or legacy-support session, capped by this ceiling.
+    Capped(SecuritySettings),
+}
+
 /// Daemon-wide registry of active per-browser
 /// `PeerConnectionContext`s, indexed by `connection_id`. Equivalent
 /// to the `DeskSession::rtc_peer_connection_map` the worker process
@@ -559,6 +571,19 @@ pub struct PcRegistry {
     /// every [`cleanup_pc`] teardown. Shared via `Arc` so registry clones stay
     /// consistent.
     grant_sessions: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    /// Signaling-connection admission classes, keyed by the server-authoritative
+    /// `from_connection_id`. Recorded when a connection's `RequestRemote` is
+    /// authorized (owner → [`Admission::OwnerFull`]; redeemed grant / legacy
+    /// support → [`Admission::Capped`] with the ceiling) and — crucially — kept for
+    /// the whole **signaling** connection, i.e. **not** cleared when the PC is torn
+    /// down by `CloseControl` / [`cleanup_pc`], only by
+    /// [`Self::clear_admission`] on the real `ConnectionRemoved` (or a grant
+    /// revoke). This outlives the PC so the router's first door still classifies a
+    /// capped connection as capped after it drops its PC — closing the
+    /// post-teardown escalation where a capped client sends `CloseControl` then
+    /// reuses the same connection id for owner-plane frames. Shared via `Arc` so
+    /// registry clones stay consistent.
+    admissions: Arc<RwLock<HashMap<String, Admission>>>,
     /// Test-only phantom PC counter added to `len()`. See
     /// [`Self::set_test_len_extra`] — it lets the signaling router unit
     /// tests simulate multi-PC topologies without building real
@@ -698,6 +723,33 @@ impl PcRegistry {
             .get(grant_session_id)
             .map(|conns| conns.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Record how `connection_id` was admitted (owner vs. capped). Called from
+    /// [`handle_request_remote`] when the connection's `RequestRemote` is
+    /// authorized. Kept for the whole signaling connection — see
+    /// [`Self::admissions`].
+    pub async fn record_admission(&self, connection_id: &str, admission: Admission) {
+        self.admissions
+            .write()
+            .await
+            .insert(connection_id.to_string(), admission);
+    }
+
+    /// The admission class of `connection_id`, if its `RequestRemote` was
+    /// authorized on this instance. `None` for a connection that never did an
+    /// authorized `RequestRemote` (e.g. a central/owner management-only connection
+    /// whose privileged frames are gated by their own source/authz gates).
+    pub async fn admission(&self, connection_id: &str) -> Option<Admission> {
+        self.admissions.read().await.get(connection_id).cloned()
+    }
+
+    /// Drop `connection_id`'s admission record. Called only when the signaling
+    /// connection truly ends (`ConnectionRemoved`) or its grant is revoked — never
+    /// on a `CloseControl` PC teardown, so a capped connection stays classified as
+    /// capped for the life of its signaling connection.
+    pub async fn clear_admission(&self, connection_id: &str) {
+        self.admissions.write().await.remove(connection_id);
     }
 
     /// Whether any registered `PeerConnectionContext` currently has
@@ -1660,6 +1712,20 @@ pub async fn handle_request_remote(
     let ctx = registry
         .create_for_request_remote(from_connection_id, &request_remote, settings)
         .await?;
+
+    // Record the admission class for the router's first door, keyed by the
+    // server-authoritative connection id. Kept for the whole signaling connection
+    // (survives a later `CloseControl` PC teardown) so a capped connection can
+    // never be reclassified as an unadmitted owner-plane sender.
+    registry
+        .record_admission(
+            from_connection_id,
+            match access_ceiling.as_ref() {
+                Some(c) => Admission::Capped(c.clone()),
+                None => Admission::OwnerFull,
+            },
+        )
+        .await;
 
     // Stamp the capability ceiling and grant id onto the connection before the ICE
     // / DataChannel handlers below and before the Init reply, so the worker-side
@@ -3013,6 +3079,10 @@ pub async fn handle_connection_removed(
         "peer_signaling_closed",
     )
     .await;
+    // The signaling connection is truly ending (not just a `CloseControl` PC
+    // teardown), so drop its admission record. `cleanup_pc` above — shared with the
+    // `CloseControl` path — deliberately leaves the admission intact.
+    registry.clear_admission(from_connection_id).await;
     Ok(())
 }
 
@@ -5831,6 +5901,61 @@ mod tests {
         cleanup_pc(&registry, &worker_mgr, None, "conn-g", "test").await;
 
         assert!(registry.connections_for_grant("GS-9").await.is_empty());
+    }
+
+    /// A capped connection's admission record survives a `CloseControl` PC teardown
+    /// (via `cleanup_pc`) and is only dropped when the signaling connection truly
+    /// ends (`ConnectionRemoved` → `handle_connection_removed`). This closes the
+    /// post-teardown escalation where a capped client sends `CloseControl` to drop
+    /// its PC and then reuses the same connection id for owner-plane frames: the
+    /// first door still classifies it as capped.
+    #[tokio::test]
+    async fn admission_survives_close_control_but_cleared_on_connection_removed() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+            grant_session_id: None,
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-cap", &request_remote, &s)
+            .await
+            .expect("pc");
+        registry
+            .record_admission("conn-cap", Admission::Capped(SecuritySettings::default()))
+            .await;
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+
+        // CloseControl-style teardown drops the PC but must NOT clear the admission.
+        cleanup_pc(&registry, &worker_mgr, None, "conn-cap", "close_control").await;
+        assert!(registry.get("conn-cap").await.is_none(), "PC torn down");
+        assert!(
+            matches!(
+                registry.admission("conn-cap").await,
+                Some(Admission::Capped(_))
+            ),
+            "admission must survive a CloseControl PC teardown"
+        );
+
+        // ConnectionRemoved ends the signaling connection → admission cleared.
+        let model = SignalingModel::new(
+            "req",
+            SignalingType::ConnectionRemoved,
+            Some("conn-cap".to_string()),
+            None,
+            None,
+            None,
+        );
+        handle_connection_removed(&registry, &worker_mgr, None, &model)
+            .await
+            .expect("connection removed ok");
+        assert!(
+            registry.admission("conn-cap").await.is_none(),
+            "ConnectionRemoved must clear the admission"
+        );
     }
 
     /// `register_data_channel_router` is async-callable on a

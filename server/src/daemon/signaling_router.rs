@@ -54,6 +54,7 @@ use desk_ipc_protocol::message::{
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams};
 use desk_signal_facade::model::private_screen::EnablePrivateScreenData;
+use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use desk_signal_facade::model::system_settings::RemoteSystemSettings;
 use desk_signal_facade::model::terminal::{
@@ -458,8 +459,8 @@ fn new_audit_event_id() -> String {
 /// enforce it (replacing the retired `SignalingState.restricted` hard-deny door).
 /// A per-code configured ceiling supersedes this once support codes migrate to
 /// the grant store.
-fn legacy_support_ceiling() -> desk_signal_facade::model::security_settings::SecuritySettings {
-    desk_signal_facade::model::security_settings::SecuritySettings {
+fn legacy_support_ceiling() -> SecuritySettings {
+    SecuritySettings {
         allow_remote_control: Some(true),
         allow_clipboard_sync: Some(false),
         allow_private_screen: Some(false),
@@ -471,16 +472,13 @@ fn legacy_support_ceiling() -> desk_signal_facade::model::security_settings::Sec
     }
 }
 
-/// Signaling types a restricted temporary-support session is allowed to use
-/// (the first fail-closed door in `route()`). The allowlist is deliberately
-/// minimal — session establishment (`RequestRemote` / `Offer` / `Answer` /
-/// `Canid`), the control plane (`RequireControl` / `CloseControl`), teardown
-/// (`ConnectionRemoved`), and `Heartbeat`. Everything else — every
-/// `Manager*`, settings, system-info, file, terminal, display, and AI frame,
-/// plus any signaling type added in the future — is denied by default. Keeping
-/// it an explicit allowlist (rather than a denylist) means a new privileged
-/// frame cannot silently become reachable by a supporter.
-fn support_session_permits(t: SignalingType) -> bool {
+/// Baseline session-establishment / control-plane frames that every session —
+/// even a fully capped grant / support session — may use. Deliberately minimal:
+/// session establishment (`RequestRemote` / `Offer` / `Answer` / `Canid`), the
+/// control plane (`RequireControl` / `CloseControl`), teardown
+/// (`ConnectionRemoved`), `Heartbeat`, and the manager's `SupportCodeIssued`
+/// host-inbound notification (display + arm TTL; triggers no privileged action).
+fn is_baseline_signaling_type(t: SignalingType) -> bool {
     matches!(
         t,
         SignalingType::RequestRemote
@@ -491,11 +489,90 @@ fn support_session_permits(t: SignalingType) -> bool {
             | SignalingType::CloseControl
             | SignalingType::ConnectionRemoved
             | SignalingType::Heartbeat
-            // The manager pushes the temporary code back on the support upstream
-            // itself; it is a host-inbound notification (display + arm TTL) that
-            // triggers no privileged host action, so it is on the allowlist.
             | SignalingType::SupportCodeIssued
     )
+}
+
+/// The first fail-closed door for a capability-capped session (a redeemed grant
+/// or a legacy support session, both carrying an `access_ceiling`). Permits the
+/// baseline frames unconditionally, plus the connection-scoped capability
+/// families whose ceiling dimension is not an explicit `Some(false)` — so the
+/// frame can reach its worker-side `meet(ceiling, global)` gate. Everything else
+/// is denied: owner-plane frames (`Manager*` settings / system-info, display,
+/// AI / exec / remote-tool) have **no** worker-side meet gate, so door1 is their
+/// only enforcement point against a capped session; and any unknown / future
+/// signaling type falls through the `_ => false` arm (deliberate fail-closed —
+/// this is not the `handle_message` exhaustiveness rule).
+fn capped_session_permits(t: SignalingType, ceiling: &SecuritySettings) -> bool {
+    use SignalingType::*;
+    if is_baseline_signaling_type(t) {
+        return true;
+    }
+    match t {
+        // Terminal family — the whole terminal UI including enumeration.
+        StartTerminal | SendDataToTerminal | ResizeTerminal | CloseTerminal | ListTerminal => {
+            ceiling.allow_terminal != Some(false)
+        }
+        // File-browse family (list / delete share the capability).
+        ManagerFileList | ManagerFileDelete => ceiling.allow_file_browse != Some(false),
+        EnablePrivateScreen => ceiling.allow_private_screen != Some(false),
+        _ => false,
+    }
+}
+
+/// Classification of a `from_connection_id` for the door1 gate, derived from its
+/// **admission record** (kept for the whole signaling connection, independent of
+/// the PC lifecycle) rather than the PC's live state — so a capped connection
+/// that dropped its PC via `CloseControl` is still classified as capped.
+enum ConnectionGate {
+    /// Admitted as a full owner session — no capability ceiling.
+    KnownOwnerFull,
+    /// Admitted as a redeemed-grant / legacy-support session, capped by a ceiling.
+    KnownCapped(SecuritySettings),
+    /// No admission record for this `from_connection_id`: it never did an
+    /// authorized `RequestRemote` on this instance (a central / owner
+    /// management-only connection whose privileged frames are gated by their own
+    /// source / authz gates), or the id is absent / spoofed. Never a capped
+    /// session — a capped session's admission is recorded before its first
+    /// non-baseline frame and outlives its PC.
+    UnknownConnection,
+}
+
+/// Classify a `from_connection_id` for the door1 gate from the registry's
+/// admission map. The server stamps `from_connection_id` authoritatively
+/// (`ConnectionState::send_to_peer`), so this cannot be spoofed by the client.
+async fn classify_connection(registry: &PcRegistry, connection_id: Option<&str>) -> ConnectionGate {
+    let Some(cid) = connection_id else {
+        return ConnectionGate::UnknownConnection;
+    };
+    match registry.admission(cid).await {
+        Some(pc_manager::Admission::OwnerFull) => ConnectionGate::KnownOwnerFull,
+        Some(pc_manager::Admission::Capped(c)) => ConnectionGate::KnownCapped(c),
+        None => ConnectionGate::UnknownConnection,
+    }
+}
+
+/// The door1 decision for an inbound frame. A session admitted as owner passes
+/// everything (route() drops non-inbound types anyway); a capped session runs the
+/// capability matrix (still capped after a `CloseControl` PC teardown, since the
+/// admission outlives the PC). An un-admitted connection is either a support-source
+/// frame whose PC/admission does not exist yet — fall back to the fixed
+/// [`legacy_support_ceiling`] — or a central / owner management frame that never
+/// did a `RequestRemote`; the latter is allowed here and gated by its own
+/// source/authz gate (this door only enforces the capability ceiling of admitted
+/// PC sessions, exactly as before it only enforced restricted support sessions).
+fn door1_permits(gate: &ConnectionGate, t: SignalingType, inbound_restricted: bool) -> bool {
+    match gate {
+        ConnectionGate::KnownOwnerFull => true,
+        ConnectionGate::KnownCapped(ceiling) => capped_session_permits(t, ceiling),
+        ConnectionGate::UnknownConnection => {
+            if inbound_restricted {
+                capped_session_permits(t, &legacy_support_ceiling())
+            } else {
+                true
+            }
+        }
+    }
 }
 
 /// RFC3339 timestamp for an audit event.
@@ -539,17 +616,22 @@ fn risk_str(risk: desk_agent_protocol::RiskLevel) -> &'static str {
 /// path — batch 4 of the typed-IPC migration removed the
 /// `SignalingMessage` bridge.
 pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), RouterError> {
-    // First fail-closed door: restricted temporary-support sessions (see
-    // `RemoteDeskTypeEnum::Support`). The support upstream hands the host a
-    // connection handle to a semi-trusted supporter, so the host must never honour
-    // the privileged manager-plane frames (settings / system info / file list /
-    // terminal / display / AI) a normal owner connection can. Only the minimal
-    // session-establishment + control-plane set is permitted; every other frame —
-    // including any future signaling type — is dropped here. The data-channel path
-    // is gated independently by `route_is_permitted` (the second door).
-    if ctx.inbound_restricted && !support_session_permits(model.signaling_type) {
+    // First fail-closed door: capability-capped sessions (a redeemed grant or a
+    // legacy support session — both carry an `access_ceiling`) may only use the
+    // baseline session/control frames plus the connection-scoped capability frames
+    // their ceiling permits. The owner-plane frames (`Manager*` settings / system
+    // info, display, AI / exec / remote-tool) — which have **no** worker-side meet
+    // gate — plus any unknown / future signaling type are denied here; this is the
+    // only enforcement point protecting them from a capped session. A full owner
+    // session (registered PC, no ceiling) passes unchanged. An unknown / spoofed /
+    // not-yet-registered connection id is never treated as owner (fail-closed); a
+    // support-upstream frame with no PC yet falls back to the fixed support
+    // ceiling. The data-channel path is gated independently by `route_is_permitted`
+    // (the second door) and the worker-side `meet` gates.
+    let gate = classify_connection(&ctx.pc_registry, model.from_connection_id.as_deref()).await;
+    if !door1_permits(&gate, model.signaling_type, ctx.inbound_restricted) {
         log::warn!(
-            "[router] restricted support session: rejecting {:?} frame",
+            "[router] capability-restricted session: rejecting {:?} frame",
             model.signaling_type
         );
         return Ok(());
@@ -3511,42 +3593,203 @@ mod tests {
         }
     }
 
-    /// The restricted-support allowlist covers exactly session establishment, the
-    /// control plane, teardown, and heartbeat; every privileged manager-plane /
-    /// settings / file / terminal / display / AI frame is denied. Fail-closed:
-    /// anything not explicitly listed (including a future signaling type) is
-    /// denied for a support session.
+    /// Exhaustive door1 capability matrix over **every** `SignalingType`
+    /// (enumerated via `EnumIter`, so a newly-added variant is automatically
+    /// checked). A capped session may use only the baseline frames plus the three
+    /// connection-scoped capability families whose ceiling dimension is not an
+    /// explicit `Some(false)`. Everything else — owner-plane `Manager*` /
+    /// display / AI-exec, plus any unknown / future type — is fail-closed denied.
     #[test]
-    fn support_session_permits_only_establishment_and_control() {
-        for t in [
-            SignalingType::RequestRemote,
-            SignalingType::Offer,
-            SignalingType::Answer,
-            SignalingType::Canid,
-            SignalingType::RequireControl,
-            SignalingType::CloseControl,
-            SignalingType::ConnectionRemoved,
-            SignalingType::Heartbeat,
-            SignalingType::SupportCodeIssued,
-        ] {
-            assert!(support_session_permits(t), "{t:?} should be permitted");
+    fn capped_session_permits_matrix_over_all_signaling_types() {
+        use SignalingType::*;
+        use strum::IntoEnumIterator;
+
+        // Support default: every capability hard-denied → only baseline passes.
+        let deny_all = SecuritySettings {
+            allow_remote_control: Some(false),
+            allow_clipboard_sync: Some(false),
+            allow_private_screen: Some(false),
+            allow_whiteboard: Some(false),
+            allow_terminal: Some(false),
+            allow_file_browse: Some(false),
+            allow_file_transfer: Some(false),
+            ..Default::default()
+        };
+        // Permissive: the three door1 families reach their service-layer gate.
+        let allow_families = SecuritySettings {
+            allow_terminal: Some(true),
+            allow_file_browse: Some(true),
+            allow_private_screen: Some(true),
+            ..Default::default()
+        };
+
+        let terminal_family = [
+            StartTerminal,
+            SendDataToTerminal,
+            ResizeTerminal,
+            CloseTerminal,
+            ListTerminal,
+        ];
+        let file_family = [ManagerFileList, ManagerFileDelete];
+
+        for t in SignalingType::iter() {
+            let baseline = is_baseline_signaling_type(t);
+            let is_family = terminal_family.contains(&t)
+                || file_family.contains(&t)
+                || t == EnablePrivateScreen;
+
+            // A baseline type must never also be a capability family (no overlap).
+            assert!(
+                !(baseline && is_family),
+                "{t:?} is both baseline and a family"
+            );
+
+            // Deny-all ceiling: only baseline passes.
+            assert_eq!(
+                capped_session_permits(t, &deny_all),
+                baseline,
+                "deny-all ceiling: {t:?}"
+            );
+            // Permissive ceiling: baseline + the three families pass; owner-plane /
+            // unknown stays denied (the `_ => false` fail-closed arm).
+            assert_eq!(
+                capped_session_permits(t, &allow_families),
+                baseline || is_family,
+                "permissive ceiling: {t:?}"
+            );
         }
+
+        // Spot-check the owner-plane frames codex flagged: no worker-side meet gate
+        // protects them, so door1 must deny them for a capped session even under a
+        // permissive ceiling.
         for t in [
-            SignalingType::ManagerQuerySettings,
-            SignalingType::ManagerUpdateSettings,
-            SignalingType::ManagerSystemInfo,
-            SignalingType::ManagerFileList,
-            SignalingType::ManagerFileDelete,
-            SignalingType::UpdateDeskSettings,
-            SignalingType::EnablePrivateScreen,
-            SignalingType::ChangeDisplaySettings,
-            SignalingType::ListTerminal,
-            SignalingType::StartTerminal,
-            SignalingType::AgentRequest,
-            SignalingType::Diagnose,
+            ManagerQuerySettings,
+            ManagerUpdateSettings,
+            ManagerSystemInfo,
+            ChangeDisplaySettings,
+            AgentRequest,
+            ConfirmExec,
+            ResolveExec,
+            TerminalCopilotAsk,
+            CollectRequest,
+            EdgeExecRequest,
+            RemoteToolRequest,
+            Diagnose,
         ] {
-            assert!(!support_session_permits(t), "{t:?} should be denied");
+            assert!(
+                !capped_session_permits(t, &allow_families),
+                "owner-plane {t:?} must be denied for a capped session"
+            );
         }
+    }
+
+    /// door1's per-family `Some(false)` early-reject vs. `None` pass-through: an
+    /// explicit deny short-circuits at the router, while an unset dimension passes
+    /// to the service-layer `meet` gate (which handles the prompt/deny).
+    #[test]
+    fn capped_session_permits_early_rejects_only_explicit_deny() {
+        use SignalingType::*;
+        let ceiling = SecuritySettings {
+            allow_terminal: Some(true),
+            allow_file_browse: Some(false), // explicit deny → early reject
+            // allow_private_screen left None → passes to the service meet gate
+            ..Default::default()
+        };
+        assert!(capped_session_permits(StartTerminal, &ceiling));
+        assert!(!capped_session_permits(ManagerFileList, &ceiling));
+        assert!(capped_session_permits(EnablePrivateScreen, &ceiling));
+    }
+
+    /// The admission-based door1 gate (codex Blocking 1, 2nd round): a session
+    /// admitted as owner passes everything; a capped session runs the matrix; an
+    /// un-admitted connection is allowed when not support-tagged (its own
+    /// source/authz gate applies — this door never guarded such frames) and falls
+    /// back to the fixed support ceiling when support-tagged.
+    #[test]
+    fn door1_permits_gates_capped_sessions_and_passes_unadmitted() {
+        use SignalingType::*;
+        let capped = SecuritySettings {
+            allow_terminal: Some(true),
+            ..Default::default()
+        };
+
+        // Admitted owner: everything passes.
+        assert!(door1_permits(
+            &ConnectionGate::KnownOwnerFull,
+            ManagerUpdateSettings,
+            false
+        ));
+        // Admitted capped: owner-plane denied, permitted family allowed.
+        assert!(!door1_permits(
+            &ConnectionGate::KnownCapped(capped.clone()),
+            ManagerUpdateSettings,
+            false
+        ));
+        assert!(door1_permits(
+            &ConnectionGate::KnownCapped(capped),
+            StartTerminal,
+            false
+        ));
+        // Un-admitted, not support-tagged: a central / owner management frame that
+        // never did a RequestRemote — passed here, gated by its own authz gate.
+        assert!(door1_permits(
+            &ConnectionGate::UnknownConnection,
+            ManagerUpdateSettings,
+            false
+        ));
+        assert!(door1_permits(
+            &ConnectionGate::UnknownConnection,
+            StartTerminal,
+            false
+        ));
+        // Un-admitted but support-tagged (no PC/admission yet): fixed support
+        // ceiling — baseline passes, capability frames denied.
+        assert!(door1_permits(
+            &ConnectionGate::UnknownConnection,
+            RequireControl,
+            true
+        ));
+        assert!(!door1_permits(
+            &ConnectionGate::UnknownConnection,
+            StartTerminal,
+            true
+        ));
+    }
+
+    /// `classify_connection` reads the registry admission map — an id with no
+    /// admission record is `UnknownConnection`, never silently owner.
+    #[tokio::test]
+    async fn classify_connection_reads_admission_map() {
+        let registry = PcRegistry::new();
+
+        // No admission → unknown (also for a missing connection id).
+        assert!(matches!(
+            classify_connection(&registry, None).await,
+            ConnectionGate::UnknownConnection
+        ));
+        assert!(matches!(
+            classify_connection(&registry, Some("ghost")).await,
+            ConnectionGate::UnknownConnection
+        ));
+
+        registry
+            .record_admission("conn-owner", pc_manager::Admission::OwnerFull)
+            .await;
+        assert!(matches!(
+            classify_connection(&registry, Some("conn-owner")).await,
+            ConnectionGate::KnownOwnerFull
+        ));
+
+        registry
+            .record_admission(
+                "conn-cap",
+                pc_manager::Admission::Capped(SecuritySettings::default()),
+            )
+            .await;
+        assert!(matches!(
+            classify_connection(&registry, Some("conn-cap")).await,
+            ConnectionGate::KnownCapped(_)
+        ));
     }
 
     /// First fail-closed door end-to-end: on a restricted session a privileged
@@ -3615,7 +3858,10 @@ mod tests {
         ctx.virtual_display = Some(std::sync::Arc::new(supervisor));
         // Default to a single-client topology so auto requests reach the
         // throttle / IPC stage. The multi-client tests override this via
-        // `set_test_len_extra` directly.
+        // `set_test_len_extra` directly. The ChangeDisplaySettings test frames come
+        // from a connection with no admission record → door1 treats it as an
+        // un-admitted management frame and passes it (its own gates apply),
+        // matching the pre-door1 behaviour.
         ctx.pc_registry.set_test_len_extra(1);
         // Wire a mock IPC sink so send_to_worker has somewhere to go.
         let (ipc_tx, ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();

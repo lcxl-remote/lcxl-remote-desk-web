@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, time::Duration};
 use desk_utils::error::{CustomDeskError, DeskErrorCode};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use strum_macros::{Display, FromRepr};
+use strum_macros::{Display, EnumIter, FromRepr};
 use utoipa::{IntoParams, ToSchema};
 use utoipa_repr::ToSchema_repr;
 use uuid::Uuid;
@@ -35,6 +35,7 @@ use crate::{
     PartialEq,
     Eq,
     FromRepr,
+    EnumIter,
     ToSchema_repr,
     Serialize_repr,
     Deserialize_repr,
