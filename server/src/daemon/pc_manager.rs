@@ -23,6 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_signal_facade::model::signal::{
     LcxlRTCIceServer, OfferModel, RequestRemoteModel, SignalingModel, SignalingState,
     SignalingType, TurnTransport,
@@ -1563,13 +1564,22 @@ pub async fn handle_request_remote(
     worker_mgr: Option<&WorkerManager>,
     virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
     model: &SignalingModel,
-    // True when this `RequestRemote` arrived on the restricted support upstream
-    // (see `RemoteDeskTypeEnum::Support`). The freshly-created PC is marked
+    // True when this `RequestRemote` is held fail-closed: either it arrived on the
+    // restricted support upstream (see `RemoteDeskTypeEnum::Support`) or it carries
+    // a redeemed-grant capability ceiling. The freshly-created PC is marked
     // restricted before any ICE / DataChannel handler is installed or any Init
     // reply egresses, so both the daemon-side data-channel gate
     // (`route_is_permitted`) and the outbound Support-isolation filter observe it
     // from the connection's very first frame.
     restricted: bool,
+    // The validated capability ceiling unwrapped from the `RequestRemoteAuthz`
+    // stamp (`None` for owner / unrestricted / legacy-support). Stored on the
+    // connection's `SignalingState` so the worker-side permission gates can later
+    // enforce `meet(ceiling, global)`.
+    access_ceiling: Option<SecuritySettings>,
+    // The grant logical-session id this connection belongs to (`None` when there
+    // is no grant). Indexes the connection for grant-directed teardown.
+    grant_session_id: Option<String>,
 ) -> Result<(), DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
     let request_remote = model.get_data::<RequestRemoteModel>()?;
@@ -1578,12 +1588,21 @@ pub async fn handle_request_remote(
         .create_for_request_remote(from_connection_id, &request_remote, settings)
         .await?;
 
+    // Stamp the fail-closed state onto the connection before the ICE / DataChannel
+    // handlers below and before the Init reply, so there is no unrestricted window.
+    // `restricted` gates `route_is_permitted`; `access_ceiling` feeds the
+    // worker-side `meet(ceiling, global)` gates; `grant_session_id` indexes the
+    // connection for grant-directed teardown.
+    if restricted || access_ceiling.is_some() || grant_session_id.is_some() {
+        let ctx_guard = ctx.read().await;
+        let mut st = ctx_guard.signaling_state.write().await;
+        st.restricted = restricted;
+        st.access_ceiling = access_ceiling;
+        st.grant_session_id = grant_session_id;
+    }
     if restricted {
-        // Flip the per-connection restriction flag (read by `route_is_permitted`)
-        // and register the connection in the outbound-filter projection, both
-        // before the ICE / DataChannel handlers below and before the Init reply,
-        // so there is no unrestricted window.
-        ctx.read().await.signaling_state.write().await.restricted = true;
+        // Register the connection in the outbound-filter projection so the
+        // Support-isolation filter observes it from the connection's first frame.
         registry
             .mark_restricted_connection(from_connection_id)
             .await;
@@ -4326,6 +4345,8 @@ mod tests {
             None,
             &model,
             false,
+            None,
+            None,
         )
         .await
         .expect("handle ok");
@@ -4381,6 +4402,8 @@ mod tests {
             None,
             &model,
             false,
+            None,
+            None,
         )
         .await
         .expect("handle ok");
@@ -4394,6 +4417,82 @@ mod tests {
         // an exact platform-dependent list.
         assert!(!init.video_encoder_list.is_empty());
         assert!(!init.audio_encoder_list.is_empty());
+    }
+
+    /// A redeemed-grant `RequestRemote` carries a validated capability ceiling and
+    /// a grant-session id; `handle_request_remote` must stamp all three
+    /// (`restricted` / `access_ceiling` / `grant_session_id`) onto the created
+    /// connection's `SignalingState` before any frame egresses, so the worker-side
+    /// `meet(ceiling, global)` gates and grant-directed teardown observe them from
+    /// the connection's first frame.
+    #[tokio::test]
+    async fn handle_request_remote_stamps_ceiling_and_grant_onto_signaling_state() {
+        let registry = PcRegistry::new();
+        let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let model = SignalingModel::new(
+            "req-grant-1",
+            SignalingType::RequestRemote,
+            Some("conn-grant-1".to_string()),
+            None,
+            Some(
+                serde_json::to_value(RequestRemoteModel {
+                    ice_servers: vec![],
+                    grant_session_id: Some("GS-1".to_string()),
+                })
+                .unwrap(),
+            ),
+            None,
+        );
+
+        let ceiling = SecuritySettings {
+            allow_file_transfer: Some(false),
+            ..Default::default()
+        };
+
+        handle_request_remote(
+            &registry,
+            &outbound_tx,
+            &s,
+            "user-x",
+            false,
+            None,
+            None,
+            None,
+            &model,
+            true,
+            Some(ceiling.clone()),
+            Some("GS-1".to_string()),
+        )
+        .await
+        .expect("handle ok");
+
+        // Drain the Init reply so the broadcast channel does not lag.
+        let _ = outbound_rx.recv().await.expect("init reply");
+
+        let ctx = registry.get("conn-grant-1").await.expect("pc registered");
+        let st = ctx.read().await.signaling_state.read().await.clone();
+        assert!(st.restricted, "grant session must be marked restricted");
+        assert_eq!(
+            st.access_ceiling,
+            Some(ceiling),
+            "validated ceiling must be stored for the worker-side meet gates"
+        );
+        assert_eq!(
+            st.grant_session_id.as_deref(),
+            Some("GS-1"),
+            "grant-session id must index the connection"
+        );
+
+        // The coarse restricted-set projection is also populated for the
+        // outbound Support-isolation filter.
+        assert!(
+            registry
+                .restricted_connections_handle()
+                .read()
+                .await
+                .contains("conn-grant-1"),
+        );
     }
 
     /// Regression: when the worker reports `X264` and `H264` as two
@@ -4449,6 +4548,8 @@ mod tests {
             None,
             &model,
             false,
+            None,
+            None,
         )
         .await
         .expect("handle ok");
@@ -4580,6 +4681,8 @@ mod tests {
             None,
             &model,
             false,
+            None,
+            None,
         )
         .await
         .expect("handle ok");

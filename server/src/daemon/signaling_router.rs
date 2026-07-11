@@ -573,14 +573,19 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             let user_name = "worker_node".to_string();
             let has_tauri = ctx.host_control_hub.has_tauri_ui();
             let capabilities = ctx.worker_mgr.worker_capabilities();
+            // Unwrap the validated ceiling stamp (owner stamp → `access_ceiling ==
+            // None`; redeemed-grant stamp → `Some(ceiling)`; no stamp → both None).
+            let (access_ceiling, grant_session_id) = match ctx
+                .inbound_request_remote_authz
+                .as_ref()
+            {
+                Some(a) => (a.access_ceiling.clone(), a.grant_session_id.clone()),
+                None => (None, None),
+            };
             // A session is restricted when it arrived on the restricted support
             // upstream OR carries a redeemed-grant ceiling stamp (an owner stamp
             // has `access_ceiling == None`, which is not a restriction).
-            let restricted = ctx.inbound_restricted
-                || ctx
-                    .inbound_request_remote_authz
-                    .as_ref()
-                    .is_some_and(|a| a.access_ceiling.is_some());
+            let restricted = ctx.inbound_restricted || access_ceiling.is_some();
             let result = pc_manager::handle_request_remote(
                 &ctx.pc_registry,
                 &ctx.outbound_tx,
@@ -592,6 +597,8 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                 ctx.virtual_display.as_ref(),
                 model,
                 restricted,
+                access_ceiling,
+                grant_session_id,
             )
             .await;
 

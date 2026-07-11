@@ -22,6 +22,7 @@ use crate::{
         desk_settings::DeskSettings,
         image_capture::DisplayInfo,
         os::OperationSystemEnum,
+        security_settings::SecuritySettings,
         virtual_display::{DEFAULT_ADAPTIVE_DEBOUNCE_MS, DEFAULT_ADAPTIVE_MIN_DELTA_PX},
     },
 };
@@ -888,6 +889,18 @@ pub struct SignalingState {
     /// unrestricted. This is host-local runtime state, never carried on the wire;
     /// a plain signal leaves it at its default.
     pub restricted: bool,
+    /// The validated capability ceiling for this connection, unwrapped from the
+    /// `RequestRemoteAuthz` stamp by the host gate. `None` for a central-verified
+    /// owner/full session (no ceiling) or a plain unrestricted connection;
+    /// `Some(_)` for a redeemed-grant session whose effective capabilities are
+    /// `meet(ceiling, global)` at each worker-side permission gate. Host-local
+    /// runtime state, never carried on the wire; a plain signal leaves it `None`.
+    pub access_ceiling: Option<SecuritySettings>,
+    /// The grant logical-session id this connection belongs to, copied from the
+    /// stamp so the daemon can index connections by grant (directed teardown /
+    /// revocation) instead of by the coarse restricted-set. `None` for owner /
+    /// unrestricted / legacy-support connections. Host-local runtime state.
+    pub grant_session_id: Option<String>,
     /// current display info
     pub display_info: DisplayInfo,
     /// wayland control mode: portal/uinput/auto/none
