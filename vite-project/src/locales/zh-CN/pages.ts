@@ -53,7 +53,7 @@ export default {
   'pages.init.manager.tokenRejected': '可以连接，但 API 令牌被拒绝，请检查令牌是否正确',
   'pages.init.manager.insecureWarning': 'Manager 未启用加密（HTTP/WS），连接内容可能被窃听或篡改，请仅在受信任的内网中使用；生产环境强烈建议配置 HTTPS/WSS。',
   'pages.init.manager.insecureWarningTitle': '连接未加密',
-  'pages.init.security.hint': '开启表示自动允许该功能；关闭表示每次请求时询问。默认全部关闭。',
+  'pages.init.security.hint': '开启表示自动允许该功能（默认对本人开启，方便连接自己的无人值守设备）；关闭表示每次请求时询问。「拒绝」可稍后在安全设置页设置。分享的设备码不受此处影响，各自携带能力上限。',
   'pages.init.security.allow_remote_control': '远程控制（鼠标 / 键盘）',
   'pages.init.security.allow_clipboard_sync': '剪贴板同步',
   'pages.init.security.allow_private_screen': '隐私屏模式',

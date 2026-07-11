@@ -52,7 +52,7 @@ export default {
   'pages.init.manager.tokenRejected': 'Reachable, but the API token was rejected — check the token',
   'pages.init.manager.insecureWarning': 'The manager is not using encryption (HTTP/WS); traffic can be eavesdropped or tampered with. Use only on a trusted private network — configuring HTTPS/WSS is strongly recommended for production.',
   'pages.init.manager.insecureWarningTitle': 'Connection not encrypted',
-  'pages.init.security.hint': 'On = auto-allow this capability; off = prompt on each request. All off by default.',
+  'pages.init.security.hint': 'On = auto-allow this capability (on by default, so you can reach your own unattended device); off = prompt on each request. "Deny" can be set later on the security settings page. Shared device codes are unaffected — each carries its own capability ceiling.',
   'pages.init.security.allow_remote_control': 'Remote control (mouse / keyboard)',
   'pages.init.security.allow_clipboard_sync': 'Clipboard sync',
   'pages.init.security.allow_private_screen': 'Private screen mode',

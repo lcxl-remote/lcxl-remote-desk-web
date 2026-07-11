@@ -70,15 +70,19 @@ export default function InitPage() {
     const [verifyingToken, setVerifyingToken] = useState(false)
     const [advancingManager, setAdvancingManager] = useState(false)
 
-    // Step 3: security + telemetry
+    // Step 3: security + telemetry. Capabilities default ON (auto-allow) so the owner
+    // can reach their own unattended device without a local prompt no one is there to
+    // answer; each toggle can be turned OFF to prompt every time, and "deny" is set
+    // later on the security settings page. Shared access-grant codes are unaffected —
+    // a code carries its own ceiling and never inherits this owner default.
     const [security, setSecurity] = useState<SecurityToggles>({
-        allow_remote_control: false,
-        allow_clipboard_sync: false,
-        allow_private_screen: false,
-        allow_whiteboard: false,
-        allow_terminal: false,
-        allow_file_browse: false,
-        allow_file_transfer: false,
+        allow_remote_control: true,
+        allow_clipboard_sync: true,
+        allow_private_screen: true,
+        allow_whiteboard: true,
+        allow_terminal: true,
+        allow_file_browse: true,
+        allow_file_transfer: true,
     })
     const [telemetryConsent, setTelemetryConsent] = useState(true)
     const [submitting, setSubmitting] = useState(false)
