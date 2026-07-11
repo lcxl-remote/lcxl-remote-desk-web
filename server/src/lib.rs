@@ -50,7 +50,7 @@ use crate::{
             delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
             get_turn_session_statistics,
         },
-        user::{get_current_user, reject_anonymous_users},
+        user::{enforce_device_scope, get_current_user},
         virtual_display::{
             install_driver as install_virtual_display_driver,
             query_driver_status as query_virtual_display_driver_status,
@@ -127,7 +127,7 @@ pub struct ApiRouteConfig {
 /// `App`), so it stays a clean single source of truth for the HTTP surface.
 #[derive(Clone, Copy, Debug)]
 pub struct ApiSurfaceOpts {
-    /// Register the signaling WS handle (top level, bypasses `reject_anonymous_users`).
+    /// Register the signaling WS handle (top level, bypasses `enforce_device_scope`).
     pub include_signaling: bool,
     /// Register file management + device-code admin under `/api/desk`.
     pub include_file_device_code: bool,
@@ -166,11 +166,11 @@ pub fn configure_api_surface(
         .service(init_system)
         // Connection-verify performs its own self-authentication (open before the
         // system is initialized, session-gated after), so it is registered outside
-        // the `/api` scope to bypass `reject_anonymous_users`, like signaling.
+        // the `/api` scope to bypass `enforce_device_scope`, like signaling.
         .service(verify_connection);
 
     // Signaling WS is registered at the top level (outside the `/api` scope) so
-    // it bypasses `reject_anonymous_users` — the handler performs its own
+    // it bypasses `enforce_device_scope` — the handler performs its own
     // token/session auth. It MUST be registered before the `/api` scope below.
     //
     // Code redemption is likewise a top-level public route: the redeemer is
@@ -185,7 +185,7 @@ pub fn configure_api_surface(
 
     cfg.service(
         utoipa_actix_web::scope("/api")
-            .wrap(from_fn(reject_anonymous_users))
+            .wrap(from_fn(enforce_device_scope))
             .service(query_virtual_display_driver_status)
             .service(install_virtual_display_driver)
             .service(uninstall_virtual_display_driver)
@@ -1149,7 +1149,7 @@ mod tests {
     }
 
     /// Auth-order guard: signaling is registered at the top level, *before* the
-    /// `/api` scope's `reject_anonymous_users`. With a valid node token (and no
+    /// `/api` scope's `enforce_device_scope`. With a valid node token (and no
     /// session) the handler must pass its own auth and reach the WebSocket
     /// handshake — so the response is neither a `404` (route absent) nor a `401`
     /// (which would mean the anonymous-rejection middleware ran first because
@@ -1226,12 +1226,12 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         // 400 = the handler ran, passed token auth, and reached the WebSocket
         // handshake which fails on the missing upgrade headers. A 401 would mean
-        // `reject_anonymous_users` ran first (signaling wrongly nested under
+        // `enforce_device_scope` ran first (signaling wrongly nested under
         // `/api`); a 404 would mean the route is absent.
         assert_eq!(
             resp.status(),
             actix_web::http::StatusCode::BAD_REQUEST,
-            "signaling should bypass reject_anonymous and reach the WS handshake (got {})",
+            "signaling should bypass enforce_device_scope and reach the WS handshake (got {})",
             resp.status(),
         );
     }
