@@ -19,17 +19,18 @@ The signaling server decides each connection's `remote_desk_type` itself — a c
 
 The same contract holds on both the open-source signaling server and the enterprise manager.
 
-## Support upstream (temporary support)
+## Access-grant sessions (device & support codes)
 
-A host can open a second, dedicated upstream in the **`Support`** role so a no-account third party can be helped by a supporter (a TeamViewer-QuickSupport-style flow). This upstream reuses the host's existing `manager_api_token`; it registers nothing (no device presence) and only carries the support session.
+A controller reaches an online host by redeeming an **access code** in the connect box (`POST /api/desk/redeem-code`) — either a permanent **device code** or a **support code** (a device code with a bounded TTL, minted for a one-time assist). A redeemed session connects to the host's **regular live connection**; there is no separate "support" upstream.
 
-Because a temporary supporter is only semi-trusted, every inbound connection that arrives on the Support upstream is **born restricted** and enforced **fail-closed by the host**, not by the signaling server:
+Because a redeemed session is not the owner, it is **capability-scoped** and enforced **fail-closed by the host**, not by the signaling server:
 
-- **Signaling is allow-listed.** Only session-establishment and control-plane frames are accepted on a restricted connection; any privileged frame (settings queries and anything that could leak the `signaling_token` / `manager_api_token`) is dropped at a single `route()` choke point.
-- **Data-channel actions are allow-listed too.** Clipboard, file transfer and whiteboard are denied; mouse/keyboard input stays gated behind the same local control-approval prompt as any remote control.
-- **The session is time-boxed.** It tears down when the code expires or the local user ends support, and closing it cleans up only that connection.
+- **A per-code capability ceiling travels with the session.** The owner configures, per code, a three-state ceiling (allow / ask / deny) over remote control, clipboard, private screen, whiteboard, terminal, file browse and file transfer. An unconfigured code defaults to all-ask, never to full control. See [Access Codes](/guide/access-codes).
+- **The effective permission is a three-way meet.** For each action the host takes the stricter of the code's ceiling and its own global `[security]` settings, then — if that result is still "ask" — prompts the local user for live approval. `Deny` anywhere hard-denies; an unset dimension always prompts. (This replaces an earlier fixed rule that denied clipboard, file transfer and whiteboard outright.)
+- **Privileged signaling is allow-listed.** Only session-establishment and control-plane frames pass on a scoped session; any frame that could leak host credentials (the `signaling_token` / `manager_api_token`) is denied at the host's signaling gate.
+- **The session is time-boxed.** A support code carries a TTL; the host's local user can also end it at any time, and closing it cleans up only that connection.
 
-Issuing the one-time code that a supporter redeems is a **central-brain (manager) capability** — the open-source signaling server routes the `Support` role but does **not** originate support codes. On a plain signaling server the host's Support upstream therefore carries no code issuer; the restricted-session enforcement above is part of the open-source baseline regardless.
+Minting a support code is a **central-brain (manager) capability** — the open-source signaling server routes connections but does **not** originate support codes. On a plain signaling server the `Support` role is ordinary routing-only (equivalent to a `Browser`: no device presence, no special privileges); device-code redemption and the capability-scoped enforcement above are part of the open-source baseline regardless.
 
 ## Obtaining a host token (`POST /api/tokens`)
 

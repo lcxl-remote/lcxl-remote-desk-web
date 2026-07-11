@@ -23,6 +23,7 @@ const enSidebar = [
     items: [
       { text: 'Introduction', link: '/guide/introduction' },
       { text: 'Quick Start', link: '/guide/quick-start' },
+      { text: 'Access Codes', link: '/guide/access-codes' },
       { text: 'Core Concepts', link: '/guide/concepts' },
       { text: 'Startup Modes', link: '/guide/startup-modes' },
       { text: 'Deployment', link: '/guide/deployment' },
@@ -81,6 +82,7 @@ const zhSidebar = [
     items: [
       { text: '介绍', link: '/zh/guide/introduction' },
       { text: '快速开始', link: '/zh/guide/quick-start' },
+      { text: '访问码', link: '/zh/guide/access-codes' },
       { text: '核心概念', link: '/zh/guide/concepts' },
       { text: '启动模式', link: '/zh/guide/startup-modes' },
       { text: '部署', link: '/zh/guide/deployment' },

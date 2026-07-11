@@ -2,6 +2,10 @@
 
 In addition to manual control, LCXL Remote Desk lets AI models **read and analyze** the device's status to help troubleshoot — in plain language.
 
+::: info Under a shared access code
+When you connect by an [access code](/guide/access-codes) rather than as the owner, the session is capability-scoped: read-only diagnosis is available, while any command a diagnosis suggests still runs only under the device's execution ceiling and explicit on-site confirmation.
+:::
+
 ## How It Works
 
 AI is orchestrated by the **central signaling server** (the "central brain"); the device is a **thin edge** that only provides read-only evidence on request. When a user asks a question during a session (e.g. *"Why is this system slow?"*), the central server drives a strict pipeline:

@@ -2,6 +2,10 @@
 
 These two features render locally on the controlled machine and therefore require the **Tauri desktop client** (`tauri-app`).
 
+::: info Under a shared access code
+Private screen and whiteboard are subject to the redeemed [access code](/guide/access-codes)'s capability ceiling, the host's global access settings, and live approval when you connect by a device or support code rather than as the owner.
+:::
+
 ## Privacy Screen
 
 Lock the local display and input to ensure privacy during remote operations — bystanders at the remote machine cannot see the screen or interfere with input while you work.
