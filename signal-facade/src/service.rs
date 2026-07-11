@@ -127,9 +127,28 @@ mod request_remote_ice_tests {
     }
 }
 
+/// Owner-plane host-management signaling frames that only the host owner may
+/// direct at a host: reading or writing host system settings (which carry the
+/// host's signaling / manager credentials), host system info / status, and
+/// display-mode changes. They have **no** worker-side `meet` gate, so the central
+/// forward path is their authorization point — a capability-scoped code-session
+/// (routed as `device_user`) can never originate one (see
+/// [`ConnectionState::forward_to_peer`]). Session-scoped media tuning
+/// (`UpdateDeskSettings`) is deliberately excluded — it is not host config.
+pub(crate) fn is_owner_plane_management_frame(t: SignalingType) -> bool {
+    matches!(
+        t,
+        SignalingType::ManagerUpdateSettings
+            | SignalingType::ManagerQuerySettings
+            | SignalingType::ManagerSystemInfo
+            | SignalingType::ManagerSystemStatue
+            | SignalingType::ChangeDisplaySettings
+    )
+}
+
 // ====== DeviceCodeService trait ======
 
-/// Trait for device code operations.  
+/// Trait for device code operations.
 /// Signal implements this with SQLite DB.
 /// Manager can return None (no device codes in manager).
 pub trait DeviceCodeService: Send + Sync {
@@ -896,6 +915,26 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     ),
                 );
             }
+            // A capability-scoped code-session (a redeemed device / support code,
+            // routed as `device_user`) is never the host owner. Refuse to forward
+            // owner-plane host-management frames to it: reading / writing host
+            // system settings (which carry the host's signaling / manager
+            // credentials), host system info / status, and display-mode changes
+            // have **no** worker-side `meet` gate, so the central is their sole
+            // authorization point. door1 denies them for an *admitted* capped
+            // session; blocking here also closes the pre-`RequestRemote` window,
+            // where the host has no admission record yet and would otherwise pass
+            // them (F1). Session media tuning (`UpdateDeskSettings`) is
+            // session-scoped, not host config, so it is intentionally not listed.
+            if is_owner_plane_management_frame(signaling_model.signaling_type) {
+                return DeskSignalFacadeError::custom_error(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    &format!(
+                        "Permission denied: a capability-scoped session cannot send {:?}",
+                        signaling_model.signaling_type
+                    ),
+                );
+            }
         }
 
         if let Some(tx) = self
@@ -1446,6 +1485,44 @@ impl<U: SignalingUser> SignalingHandler<U> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F1: the owner-plane host-management frames the central refuses to forward
+    /// from a capability-scoped code-session (`device_user`). Session-scoped media
+    /// tuning (`UpdateDeskSettings`) and the session/capability frames must NOT be
+    /// classified owner-plane, or a legitimate support session would break.
+    #[test]
+    fn owner_plane_frames_are_classified_for_code_session_denial() {
+        use SignalingType::*;
+        for t in [
+            ManagerUpdateSettings,
+            ManagerQuerySettings,
+            ManagerSystemInfo,
+            ManagerSystemStatue,
+            ChangeDisplaySettings,
+        ] {
+            assert!(
+                is_owner_plane_management_frame(t),
+                "{t:?} must be owner-plane (denied for a code-session)"
+            );
+        }
+        for t in [
+            RequestRemote,
+            Offer,
+            Answer,
+            RequireControl,
+            CloseControl,
+            StartTerminal,
+            ListTerminal,
+            ManagerFileList,
+            EnablePrivateScreen,
+            UpdateDeskSettings,
+        ] {
+            assert!(
+                !is_owner_plane_management_frame(t),
+                "{t:?} must NOT be owner-plane (a code-session legitimately uses it)"
+            );
+        }
+    }
 
     /// `ConnectionRemoved` is the wire-level marker the daemon's
     /// signaling router keys off to release per-`connection_id`

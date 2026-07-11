@@ -472,6 +472,29 @@ fn is_baseline_signaling_type(t: SignalingType) -> bool {
     )
 }
 
+/// Connection-scoped capability frames whose enforcement is a per-dimension
+/// `access_ceiling` gate: the terminal family, the file-browse family, and
+/// private-screen enable. These are only ever legitimate **after** an authorized
+/// `RequestRemote` has recorded the connection's admission (owner → `OwnerFull`,
+/// redeemed grant → `Capped`) and provisioned its worker-side ceiling. An
+/// un-admitted connection sending one is anomalous: no ceiling has reached the
+/// worker yet, so the worker-side `meet` gate would fall back to the host global
+/// (fail-open). door1 therefore denies these for an un-admitted connection.
+fn is_connection_scoped_capability_frame(t: SignalingType) -> bool {
+    use SignalingType::*;
+    matches!(
+        t,
+        StartTerminal
+            | SendDataToTerminal
+            | ResizeTerminal
+            | CloseTerminal
+            | ListTerminal
+            | ManagerFileList
+            | ManagerFileDelete
+            | EnablePrivateScreen
+    )
+}
+
 /// The first fail-closed door for a capability-capped session (a redeemed grant
 /// or a legacy support session, both carrying an `access_ceiling`). Permits the
 /// baseline frames unconditionally, plus the connection-scoped capability
@@ -508,13 +531,21 @@ enum ConnectionGate {
     KnownOwnerFull,
     /// Admitted as a redeemed-grant / legacy-support session, capped by a ceiling.
     KnownCapped(SecuritySettings),
-    /// No admission record for this `from_connection_id`: it never did an
-    /// authorized `RequestRemote` on this instance (a central / owner
-    /// management-only connection whose privileged frames are gated by their own
-    /// source / authz gates), or the id is absent / spoofed. Never a capped
-    /// session — a capped session's admission is recorded before its first
-    /// non-baseline frame and outlives its PC.
-    UnknownConnection,
+    /// A server-internal frame with no originating WS connection id
+    /// (`from_connection_id == None`): a REST-initiated `ManagerFileList` /
+    /// `ListTerminal` emitted by `signal-facade`'s file/terminal controllers,
+    /// already authorized by the REST `enforce_device_scope` layer before it was
+    /// emitted. A WS client cannot produce this — the server stamps a real id on
+    /// every client frame — so it is trusted and passes door1 unchanged.
+    ServerInternal,
+    /// A WS connection carrying a real stamped id but no admission record: it
+    /// never did an authorized `RequestRemote` on this instance (a management-only
+    /// connection, or a session before its `RequestRemote`), or the id is spoofed.
+    /// door1 is fail-closed for connection-scoped capability frames here (see
+    /// [`door1_permits`]) — a capped session that has not yet been admitted must
+    /// not slip a capability frame through the pre-admission window where the
+    /// worker has no ceiling and would fall back to the host global (F1 / N1).
+    UnadmittedConnection,
 }
 
 /// Classify a `from_connection_id` for the door1 gate from the registry's
@@ -522,12 +553,12 @@ enum ConnectionGate {
 /// (`ConnectionState::send_to_peer`), so this cannot be spoofed by the client.
 async fn classify_connection(registry: &PcRegistry, connection_id: Option<&str>) -> ConnectionGate {
     let Some(cid) = connection_id else {
-        return ConnectionGate::UnknownConnection;
+        return ConnectionGate::ServerInternal;
     };
     match registry.admission(cid).await {
         Some(pc_manager::Admission::OwnerFull) => ConnectionGate::KnownOwnerFull,
         Some(pc_manager::Admission::Capped(c)) => ConnectionGate::KnownCapped(c),
-        None => ConnectionGate::UnknownConnection,
+        None => ConnectionGate::UnadmittedConnection,
     }
 }
 
@@ -535,15 +566,25 @@ async fn classify_connection(registry: &PcRegistry, connection_id: Option<&str>)
 /// everything (route() drops non-inbound types anyway); a capped session (a
 /// redeemed grant carrying an `access_ceiling`, including a temporary-support
 /// session) runs the capability matrix (still capped after a `CloseControl` PC
-/// teardown, since the admission outlives the PC). An un-admitted connection is a
-/// central / owner management frame that never did a `RequestRemote`; it is allowed
-/// here and gated by its own source/authz gate (this door only enforces the
-/// capability ceiling of admitted PC sessions).
+/// teardown, since the admission outlives the PC).
+///
+/// A server-internal (REST-initiated) frame passes — it was already authorized by
+/// the REST `enforce_device_scope` layer. An un-admitted WS connection (a real
+/// stamped id with no `RequestRemote` recorded) is fail-closed for connection-
+/// scoped capability frames: those are only legitimate after an admission has
+/// provisioned the worker ceiling, so one arriving here would otherwise fall
+/// through to the worker with no ceiling and be evaluated against the host global
+/// (fail-open — the pre-`RequestRemote` window of F1/N1). Owner-plane management
+/// frames (`Manager*` settings / system-info, display) are authorized at the
+/// central — a capability-scoped code-session cannot originate them — so they pass
+/// here; frames carrying their own authz gate (AI / exec via the control
+/// authorizer) pass and are gated there.
 fn door1_permits(gate: &ConnectionGate, t: SignalingType) -> bool {
     match gate {
         ConnectionGate::KnownOwnerFull => true,
         ConnectionGate::KnownCapped(ceiling) => capped_session_permits(t, ceiling),
-        ConnectionGate::UnknownConnection => true,
+        ConnectionGate::ServerInternal => true,
+        ConnectionGate::UnadmittedConnection => !is_connection_scoped_capability_frame(t),
     }
 }
 
@@ -3696,11 +3737,12 @@ mod tests {
 
     /// The admission-based door1 gate: a session admitted as owner passes
     /// everything; a capped session (a redeemed grant, including a temporary-support
-    /// session) runs the capability matrix; an un-admitted connection is allowed
-    /// here (its own source/authz gate applies — this door never guarded such
-    /// frames, only the capability ceiling of admitted PC sessions).
+    /// session) runs the capability matrix; an un-admitted connection is fail-closed
+    /// for connection-scoped capability frames (the pre-`RequestRemote` window
+    /// where the worker has no ceiling — F1/N1), while owner-plane frames pass here
+    /// and are authorized at the central.
     #[test]
-    fn door1_permits_gates_capped_sessions_and_passes_unadmitted() {
+    fn door1_permits_gates_capped_sessions_and_fails_closed_unadmitted_capability() {
         use SignalingType::*;
         let capped = SecuritySettings {
             allow_terminal: Some(true),
@@ -3721,16 +3763,43 @@ mod tests {
             &ConnectionGate::KnownCapped(capped),
             StartTerminal
         ));
-        // Un-admitted: a central / owner management frame that never did a
-        // RequestRemote — passed here, gated by its own authz gate.
+        // Un-admitted WS connection: a connection-scoped capability frame is
+        // denied — it would otherwise reach the worker before any ceiling was
+        // provisioned and be evaluated against the host global (F1/N1
+        // pre-RequestRemote window).
+        for t in [
+            StartTerminal,
+            SendDataToTerminal,
+            ResizeTerminal,
+            CloseTerminal,
+            ListTerminal,
+            ManagerFileList,
+            ManagerFileDelete,
+            EnablePrivateScreen,
+        ] {
+            assert!(
+                !door1_permits(&ConnectionGate::UnadmittedConnection, t),
+                "un-admitted capability frame {t:?} must be denied at door1"
+            );
+        }
+        // Un-admitted owner-plane / baseline frames still pass here (owner-plane is
+        // authorized at the central; a code-session cannot originate them).
         assert!(door1_permits(
-            &ConnectionGate::UnknownConnection,
+            &ConnectionGate::UnadmittedConnection,
             ManagerUpdateSettings
         ));
         assert!(door1_permits(
-            &ConnectionGate::UnknownConnection,
-            StartTerminal
+            &ConnectionGate::UnadmittedConnection,
+            RequestRemote
         ));
+        // Server-internal (REST-initiated, `from_connection_id == None`) frames —
+        // already authorized at the REST layer — pass, including the capability
+        // frames a REST file/terminal listing legitimately emits.
+        assert!(door1_permits(
+            &ConnectionGate::ServerInternal,
+            ManagerFileList
+        ));
+        assert!(door1_permits(&ConnectionGate::ServerInternal, ListTerminal));
     }
 
     /// `classify_connection` reads the registry admission map — an id with no
@@ -3739,14 +3808,16 @@ mod tests {
     async fn classify_connection_reads_admission_map() {
         let registry = PcRegistry::new();
 
-        // No admission → unknown (also for a missing connection id).
+        // A missing connection id is a server-internal (REST-initiated) frame.
         assert!(matches!(
             classify_connection(&registry, None).await,
-            ConnectionGate::UnknownConnection
+            ConnectionGate::ServerInternal
         ));
+        // A real stamped id with no admission is an un-admitted WS connection,
+        // never silently owner.
         assert!(matches!(
             classify_connection(&registry, Some("ghost")).await,
-            ConnectionGate::UnknownConnection
+            ConnectionGate::UnadmittedConnection
         ));
 
         registry
@@ -3908,6 +3979,12 @@ mod tests {
     #[tokio::test]
     async fn route_terminal_requests_handled_inline_not_bridged() {
         let ctx = make_ctx();
+        // Terminal frames are connection-scoped capability frames: door1 only
+        // admits them once the connection has an admission (here an owner one),
+        // matching production where they follow the session's `RequestRemote`.
+        ctx.pc_registry
+            .record_admission("conn-term", pc_manager::Admission::OwnerFull)
+            .await;
         let cases = [
             (
                 SignalingType::StartTerminal,
@@ -3977,6 +4054,11 @@ mod tests {
     #[tokio::test]
     async fn route_start_terminal_with_invalid_payload_is_dropped() {
         let ctx = make_ctx();
+        // Admit the connection so the frame reaches the payload-parse path rather
+        // than being stopped at door1's un-admitted capability guard.
+        ctx.pc_registry
+            .record_admission("conn-term", pc_manager::Admission::OwnerFull)
+            .await;
         let model = SignalingModel::new(
             "req-start-bad",
             SignalingType::StartTerminal,
@@ -4133,6 +4215,11 @@ mod tests {
     #[tokio::test]
     async fn route_manager_file_list_with_invalid_payload_is_dropped() {
         let ctx = make_ctx();
+        // Admit the connection so the frame reaches the payload-parse path rather
+        // than being stopped at door1's un-admitted capability guard.
+        ctx.pc_registry
+            .record_admission("conn-fl", pc_manager::Admission::OwnerFull)
+            .await;
         let model = SignalingModel::new(
             "req-fl-bad",
             SignalingType::ManagerFileList,
@@ -4151,6 +4238,11 @@ mod tests {
     #[tokio::test]
     async fn route_enable_private_screen_handled_inline_not_bridged() {
         let ctx = make_ctx();
+        // EnablePrivateScreen is a connection-scoped capability frame — admit the
+        // connection so door1 passes it to the inline handler.
+        ctx.pc_registry
+            .record_admission("conn-priv", pc_manager::Admission::OwnerFull)
+            .await;
         let data =
             desk_signal_facade::model::private_screen::EnablePrivateScreenData { enable: true };
         let model = SignalingModel::new(
