@@ -1,13 +1,14 @@
 //! Host-side control of the on-demand temporary-support session.
 //!
-//! A local user (at the machine) asks for a support code; the host opens a
-//! dedicated `Support` upstream to the manager, which mints a short-lived code and
-//! pushes it back. The host displays the code so the user can read it out to a
-//! supporter. These endpoints are the local UI's control surface: start a session,
-//! stop it ("end support"), and read the current code + expiry to render the code
-//! card and countdown. The code itself arrives asynchronously over the support
-//! upstream, so `start` only triggers; the UI then polls `status` (or listens for
-//! the pushed event) for the issued code.
+//! A local user (at the machine) asks for a support code; the host requests one
+//! over its regular `Server` upstream (`RequestSupportCode`) and the manager mints
+//! a short-lived code and pushes it back. The host displays the code so the user
+//! can read it out to a supporter, who redeems it into a capability-scoped grant
+//! session. These endpoints are the local UI's control surface: start a session,
+//! stop it ("end support" — which asks the manager to revoke the current code),
+//! and read the current code + expiry to render the code card and countdown. The
+//! code itself arrives asynchronously, so `start` only triggers; the UI then polls
+//! `status` for the issued code.
 
 use actix_web::{Error as AWError, HttpResponse, get, post, web};
 use desk_utils::rest::RestResponse;

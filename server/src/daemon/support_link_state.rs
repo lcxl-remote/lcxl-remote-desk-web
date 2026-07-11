@@ -1,14 +1,13 @@
 //! Shared, in-memory lifecycle state for the host's on-demand temporary-support
-//! upstream.
+//! session.
 //!
 //! A local user clicks "get a support code"; the host REST layer flips this state
-//! to active, which wakes the signaling proxy's support loop. That loop opens a
-//! dedicated `Support` upstream to the manager (see [`RemoteDeskTypeEnum::Support`]),
-//! which mints a temporary code and pushes it back as `SupportCodeIssued`. The
-//! host records the code snapshot here for its local UI and arms a teardown at the
-//! code's expiry. Stopping — a manual "end support", the code's TTL, or the
-//! upstream closing — flips the state back to inactive, and the proxy tears the
-//! session down.
+//! to active, which wakes the signaling proxy's support loop. That loop requests a
+//! code over the regular `Server` upstream (`RequestSupportCode`); the manager
+//! mints one and pushes it back as `SupportCodeIssued`. The host records the code
+//! snapshot here for its local UI and arms a teardown at the code's expiry.
+//! Stopping — a manual "end support" or the code's TTL — flips the state back to
+//! inactive; the loop then asks the manager to revoke the current code.
 //!
 //! Like [`super::manager_link_state::ManagerLinkState`] this is genuinely
 //! node-local runtime state (one desk-server process, at most one live support

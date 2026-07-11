@@ -299,17 +299,25 @@ pub trait RemoteToolObserver: Send + Sync {
 
 // ====== SupportCodeMinter trait ======
 
-/// Mints a temporary support code for an inbound `RequestSupportCode` frame and
-/// pushes it back to the requesting host as `SupportCodeIssued`.
+/// Central-brain lifecycle for temporary support codes: mint on an inbound
+/// `RequestSupportCode`, revoke on an inbound `RevokeSupportCode`.
 ///
-/// Only a central brain (the manager) mints: it resolves `source`'s owner-bound
-/// device, stores a short-lived code in shared state and writes the issued code
-/// onto `source`'s own session. A plain signal server leaves this unset, so the
-/// frame is ignored there (support codes are a manager feature). `source` is the
+/// Only a central brain (the manager) implements this. On mint it resolves
+/// `source`'s owner-bound device, stores a short-lived code in shared state and
+/// writes the issued code onto `source`'s own session as `SupportCodeIssued`. On
+/// revoke it verifies `source` owns the code's device, then drops the code so it
+/// can no longer be redeemed. A plain signal server leaves this unset, so both
+/// frames are ignored there (support codes are a manager feature). `source` is the
 /// requesting connection — a token-authenticated desk server whose regular
-/// `Server` upstream carries the request (there is no dedicated support upstream).
+/// `Server` upstream carries the frame (there is no dedicated support upstream).
 pub trait SupportCodeMinter: Send + Sync {
     fn on_request_support_code<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+
+    fn on_revoke_support_code<'a>(
         &'a self,
         source: &'a ConnectionState,
         model: &'a SignalingModel,
@@ -1344,6 +1352,16 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 if let Some(minter) = self.support_code_minter.clone() {
                     minter
                         .on_request_support_code(&self.connection_state, &signaling_model)
+                        .await;
+                }
+            }
+            SignalingType::RevokeSupportCode => {
+                // Host (desk server) → central brain: the local user ended support;
+                // revoke the code so it can no longer be redeemed. Consumed by the
+                // manager (which verifies ownership first); ignored elsewhere.
+                if let Some(minter) = self.support_code_minter.clone() {
+                    minter
+                        .on_revoke_support_code(&self.connection_state, &signaling_model)
                         .await;
                 }
             }

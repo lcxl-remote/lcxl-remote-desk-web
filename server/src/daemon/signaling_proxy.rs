@@ -392,6 +392,32 @@ pub async fn run_signaling_proxy(
                 // There is no dedicated upstream to tear down; an in-flight
                 // supporter session ends on its own grant TTL.
                 support_link_state.wait_for_stop().await;
+
+                // Ask the manager to revoke the code so it can no longer be
+                // redeemed the moment support ends, instead of only ageing out on
+                // its TTL. Best-effort: if the code never arrived there is nothing
+                // to revoke, and an already-expired code revokes to a no-op.
+                if let Some(snapshot) = support_link_state.snapshot().await {
+                    let payload = desk_signal_facade::model::support::RevokeSupportCodeData {
+                        code: snapshot.code,
+                    };
+                    match SignalingModel::new_request(
+                        SignalingType::RevokeSupportCode,
+                        None,
+                        Some(&payload),
+                    ) {
+                        Ok(model) => match serde_json::to_string(&model) {
+                            Ok(text) => {
+                                let _ = outbound_tx.send(text);
+                            }
+                            Err(e) => {
+                                warn!("[support] failed to serialise RevokeSupportCode: {e}")
+                            }
+                        },
+                        Err(e) => warn!("[support] failed to build RevokeSupportCode: {e}"),
+                    }
+                }
+
                 support_link_state.finish().await;
             }
         })
@@ -1693,6 +1719,23 @@ fn gate_fleet_exec_frame(
 /// Inbound-text dispatcher pulled out of `maintain_proxy_connection`
 /// so the parse / route sequence is reusable for tests and the
 /// per-frame logic stays out of the WS select loop.
+/// Signaling types that are server-originated central→daemon plumbing: they are
+/// accepted only from the trusted-central link. A Local / remote-signaling origin
+/// (no trusted PDP) must never inject operator templates, weaken the command
+/// blocklist, drive an evidence collection, dispatch a sealed execution plan,
+/// drive a remote read, or surface a forged support code to the local user.
+fn is_trusted_central_only(t: SignalingType) -> bool {
+    matches!(
+        t,
+        SignalingType::CommandTemplateSync
+            | SignalingType::CommandBlocklistSync
+            | SignalingType::CollectRequest
+            | SignalingType::EdgeExecRequest
+            | SignalingType::RemoteToolRequest
+            | SignalingType::SupportCodeIssued
+    )
+}
+
 ///
 /// Parses the inbound text once, applies source-gated authorization wrapper
 /// handling ([`gate_authz_frame`]), and hands the model to
@@ -1727,22 +1770,12 @@ async fn handle_inbound_signaling_text(
         };
     }
 
-    // Source gate: `CommandTemplateSync`, `CommandBlocklistSync`,
-    // `CollectRequest`, `EdgeExecRequest`, and `RemoteToolRequest` are trusted
-    // central→daemon plumbing. Accept them only from the trusted-central link; a
-    // Local / remote-signaling origin (no trusted PDP) must never inject operator
-    // templates, weaken the command blocklist, drive an evidence collection,
-    // dispatch a sealed execution plan, or drive a remote read. For the blocklist
-    // this is critical: a forged sync with a higher revision and a thinned rule
-    // set would otherwise wipe the daemon's floor and fail-open.
-    if matches!(
-        parsed.signaling_type,
-        SignalingType::CommandTemplateSync
-            | SignalingType::CommandBlocklistSync
-            | SignalingType::CollectRequest
-            | SignalingType::EdgeExecRequest
-            | SignalingType::RemoteToolRequest
-    ) && source != InboundSignalingSource::TrustedCentral
+    // Source gate: server-originated central→daemon plumbing (see
+    // [`is_trusted_central_only`]) is accepted only from the trusted-central link.
+    // For the blocklist this is critical: a forged sync with a higher revision and
+    // a thinned rule set would otherwise wipe the daemon's floor and fail-open.
+    if is_trusted_central_only(parsed.signaling_type)
+        && source != InboundSignalingSource::TrustedCentral
     {
         warn!(
             "[Proxy] Dropping {:?} from non-central source {source:?}",
@@ -1932,6 +1965,23 @@ mod tests {
             audience: RR_AUDIENCE.to_string(),
             expires_at: Some("2999-01-01T00:00:00Z".to_string()),
         }
+    }
+
+    #[test]
+    fn support_code_issued_is_trusted_central_only() {
+        // A `SupportCodeIssued` is server-originated (the manager mints it), so the
+        // source gate must confine it to the trusted-central link — otherwise a
+        // bare relay could push a forged code to the host UI.
+        assert!(is_trusted_central_only(SignalingType::SupportCodeIssued));
+        // Alongside the other central→daemon plumbing.
+        assert!(is_trusted_central_only(SignalingType::CommandBlocklistSync));
+        assert!(is_trusted_central_only(SignalingType::CollectRequest));
+        // The host→manager support frames are NOT gated here (they egress, never
+        // arrive inbound), nor are ordinary session frames.
+        assert!(!is_trusted_central_only(SignalingType::RequestSupportCode));
+        assert!(!is_trusted_central_only(SignalingType::RevokeSupportCode));
+        assert!(!is_trusted_central_only(SignalingType::RequestRemote));
+        assert!(!is_trusted_central_only(SignalingType::Offer));
     }
 
     #[test]

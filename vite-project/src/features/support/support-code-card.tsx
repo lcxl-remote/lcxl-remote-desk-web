@@ -23,10 +23,10 @@ function formatRemaining(seconds: number): string {
 }
 
 // Shown on the Desk Connection page: lets the local user open a temporary
-// support session on demand. Starting it opens a dedicated, host-restricted
-// upstream; the manager mints a short-lived code shown here to read out to a
-// supporter. The session ends on "end support", the code's expiry, or the
-// upstream dropping.
+// support session on demand. Starting it requests a short-lived code from the
+// manager (over the host's regular link), shown here to read out to a supporter
+// who redeems it into a capability-scoped grant session. The session ends on
+// "end support" (which revokes the code) or the code's expiry.
 export function SupportCodeCard() {
     const { t } = useTranslation()
     const { toast } = useToast()

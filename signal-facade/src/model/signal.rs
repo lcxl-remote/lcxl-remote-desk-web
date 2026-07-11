@@ -130,6 +130,14 @@ pub enum SignalingType {
     #[wincode(tag = 210)]
     SupportCodeIssued = 210,
 
+    /// Host (desk server) → central brain (manager): revoke the temporary support
+    /// code this host currently holds (the local user ended support), so it can no
+    /// longer be redeemed. Carries the code to revoke (see [`RevokeSupportCodeData`]);
+    /// the manager verifies the requesting connection owns the code's device before
+    /// revoking. A plain signal never mints, so it ignores this.
+    #[wincode(tag = 211)]
+    RevokeSupportCode = 211,
+
     #[wincode(tag = 301)]
     UpdateDeskSettings = 301,
 
