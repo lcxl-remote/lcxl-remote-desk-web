@@ -160,13 +160,24 @@ pub async fn handle_manager_file_list(
 ) -> Result<(), DeskError> {
     // ManagerFileList is a request from the http api, so it may not have a from_connection_id
     let from_connection_id = signaling_model.from_connection_id.clone();
-    let allow_file_browse = {
+    let global_file_browse = {
         desk_session
             .settings
             .read()
             .await
             .security
             .allow_file_browse
+    };
+    // Meet the connection's grant ceiling with the global so a redeemed-grant
+    // session is capped; connection-less (HTTP-API / owner) requests use the
+    // global verbatim.
+    let allow_file_browse = match from_connection_id.as_deref() {
+        Some(cid) => {
+            desk_session
+                .effective_permission(cid, global_file_browse, |c| c.allow_file_browse)
+                .await
+        }
+        None => global_file_browse,
     };
     let approved = check_security_permission(
         &desk_session.settings,
@@ -226,13 +237,24 @@ pub async fn handle_manager_file_delete(
 ) -> Result<(), DeskError> {
     // ManagerFileList is a request from the http api, so it may not have a from_connection_id
     let from_connection_id = signaling_model.from_connection_id.clone();
-    let allow_file_browse = {
+    let global_file_browse = {
         desk_session
             .settings
             .read()
             .await
             .security
             .allow_file_browse
+    };
+    // Meet the connection's grant ceiling with the global so a redeemed-grant
+    // session is capped; connection-less (HTTP-API / owner) requests use the
+    // global verbatim.
+    let allow_file_browse = match from_connection_id.as_deref() {
+        Some(cid) => {
+            desk_session
+                .effective_permission(cid, global_file_browse, |c| c.allow_file_browse)
+                .await
+        }
+        None => global_file_browse,
     };
     let approved = check_security_permission(
         &desk_session.settings,

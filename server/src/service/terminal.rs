@@ -126,7 +126,10 @@ pub async fn handle_manager_terminal_start(
 ) -> Result<(), DeskError> {
     let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
 
-    let allow_terminal = { desk_session.settings.read().await.security.allow_terminal };
+    let global_terminal = { desk_session.settings.read().await.security.allow_terminal };
+    let allow_terminal = desk_session
+        .effective_permission(from_connection_id, global_terminal, |c| c.allow_terminal)
+        .await;
     let approved = check_security_permission(
         &desk_session.settings,
         &desk_session.host_control_hub,
@@ -391,6 +394,42 @@ pub async fn handle_list_terminals(
     signaling_model: &SignalingModel,
 ) -> Result<(), DeskError> {
     let from_connection_id = signaling_model.from_connection_id.clone();
+
+    // Terminal listing is part of the terminal capability: a redeemed-grant
+    // session whose ceiling denies (or does not grant) `terminal` must not be able
+    // to enumerate open terminals. Gate on meet(ceiling.terminal, global);
+    // connection-less (HTTP-API / owner) requests use the global verbatim.
+    let global_terminal = { desk_session.settings.read().await.security.allow_terminal };
+    let allow_terminal = match from_connection_id.as_deref() {
+        Some(cid) => {
+            desk_session
+                .effective_permission(cid, global_terminal, |c| c.allow_terminal)
+                .await
+        }
+        None => global_terminal,
+    };
+    let approved = check_security_permission(
+        &desk_session.settings,
+        &desk_session.host_control_hub,
+        allow_terminal,
+        SecurityPermissionType::Terminal,
+        from_connection_id.clone(),
+    )
+    .await;
+    if !approved {
+        desk_session
+            .session
+            .send_error(
+                &signaling_model.request_id,
+                signaling_model.signaling_type,
+                from_connection_id,
+                DeskErrorCode::PERMISSION_ERROR,
+                "Terminal access denied by security settings or user",
+            )
+            .await?;
+        return Ok(());
+    }
+
     let terminals = fetch_terminal_list(desk_session.settings.clone()).await?;
     desk_session
         .session

@@ -21,7 +21,10 @@ use desk_signal_facade::error::DeskSignalFacadeError;
 use desk_signal_facade::model::private_screen::{
     EnablePrivateScreenData, PrivateScreenStateChangedData,
 };
+use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_signal_facade::model::signal::{PeerSignalingSender, SignalingModel, SignalingType};
+
+use crate::worker::connection_ceiling::ConnectionCeilingStore;
 use desk_utils::error::{CustomDeskError, DeskErrorCode};
 
 use log::{error, info};
@@ -228,6 +231,12 @@ pub struct DeskSession {
     /// All approval flow + private-screen / whiteboard / service-op traffic
     /// routes through here.
     pub host_control_hub: Arc<HostControlHub>,
+    /// Per-connection capability ceilings registered by the daemon for
+    /// redeemed-grant sessions. The worker-side permission gates meet a
+    /// connection's ceiling with the host global so a grant can only be tightened;
+    /// owner sessions carry no ceiling and use the global verbatim. Shared (Arc)
+    /// with the worker session loop that populates it on `SetConnectionCeiling`.
+    pub connection_ceilings: ConnectionCeilingStore,
 }
 
 impl DeskSession {
@@ -236,6 +245,7 @@ impl DeskSession {
         session: DeskSessionSender,
         user: CurrentUser,
         host_control_hub: Arc<HostControlHub>,
+        connection_ceilings: ConnectionCeilingStore,
     ) -> Result<Self, DeskError> {
         let desk_settings = settings.read().await.clone().desk;
 
@@ -298,7 +308,23 @@ impl DeskSession {
             host_control_helper: helper,
             whiteboard_cmd_sender,
             host_control_hub,
+            connection_ceilings,
         })
+    }
+
+    /// The effective permission for `connection_id` on one capability dimension:
+    /// the connection's grant ceiling met with the host `global` (an owner session
+    /// carries no ceiling and uses the global verbatim). Worker-side gates call
+    /// this instead of reading the global directly, so a redeemed-grant session is
+    /// capped by its ceiling.
+    pub async fn effective_permission(
+        &self,
+        connection_id: &str,
+        global: Option<bool>,
+        dim: impl Fn(&SecuritySettings) -> Option<bool>,
+    ) -> Option<bool> {
+        let ceiling = self.connection_ceilings.get(connection_id).await;
+        crate::model::security_approval::effective_permission(ceiling.as_ref(), global, dim)
     }
 
     /// Shutdown the session. Only terminals are owned by the
@@ -348,8 +374,13 @@ impl DeskSession {
                     signaling_model.get_data_with_type::<EnablePrivateScreenData>()?
                 {
                     if data.enable {
-                        let allow_private_screen =
+                        let global_private_screen =
                             { self.settings.read().await.security.allow_private_screen };
+                        let allow_private_screen = self
+                            .effective_permission(from_connection_id, global_private_screen, |c| {
+                                c.allow_private_screen
+                            })
+                            .await;
                         let approved = check_security_permission(
                             &self.settings,
                             &self.host_control_hub,

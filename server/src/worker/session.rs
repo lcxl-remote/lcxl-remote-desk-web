@@ -865,6 +865,7 @@ impl WorkerSession {
             session_sender,
             CurrentUser::new_admin("worker_node"),
             host_control_hub,
+            connection_ceilings.clone(),
         )
         .await
         .map_err(|e| format!("Failed to create DeskSession: {}", e))?;
