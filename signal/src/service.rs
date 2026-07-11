@@ -177,8 +177,20 @@ pub async fn handle_signaling(
     let collect_observer = std::sync::Arc::new(
         crate::diagnose_orchestrator::SignalCollectObserver::new(connection_map.clone()),
     );
-    let request_remote_authorizer =
-        std::sync::Arc::new(crate::request_remote_authorizer::SignalRequestRemoteAuthorizer::new());
+    // The single-account owner is stamped with full control; a code-session
+    // (anonymous redeemer) is stamped with the redeemed code's ceiling via the
+    // shared grant store. Both share the process-global store so a grant minted at
+    // redeem time is visible here.
+    let request_remote_authorizer = std::sync::Arc::new(
+        crate::request_remote_authorizer::SignalRequestRemoteAuthorizer::new(
+            crate::access_grant::global_access_grant_store(),
+            std::sync::Arc::new(
+                crate::request_remote_authorizer::DbDeviceGenerationLookup::new(
+                    crate::db::get_db().clone(),
+                ),
+            ),
+        ),
+    );
 
     let mut handler = SignalingHandler::init(
         connection_id,

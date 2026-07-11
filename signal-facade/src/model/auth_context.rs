@@ -7,6 +7,7 @@
 //! authorization (the fleet policy decision point) and audit attribution read
 //! it instead of trusting anything the control end reports.
 
+use crate::grant::GrantPrincipal;
 use crate::model::signal::RemoteDeskTypeEnum;
 
 /// How a connection authenticated.
@@ -19,6 +20,13 @@ pub enum AuthKind {
     TokenAuth,
     /// Authenticated by a session cookie (browser / operator connections).
     CookieAuth,
+    /// A capability-scoped anonymous redeemer on the open-source single-account
+    /// signal: it presented a valid access-grant code and holds a server-minted
+    /// `code_session_id` (in a private cookie), **not** the owner account. Its
+    /// authority comes solely from the grant it redeemed, so it is never the
+    /// single-account owner and every RequestRemote it makes is stamped with the
+    /// code's capability ceiling — never full control.
+    CodeSession,
 }
 
 /// Server-resolved identity bound to a single signaling connection.
@@ -37,6 +45,11 @@ pub struct AuthContext {
     pub token_id: Option<i32>,
     pub remote_desk_type: RemoteDeskTypeEnum,
     pub bound_device_id: Option<i32>,
+    /// The server-minted `code_session_id` when `auth_kind == CodeSession`. It is
+    /// the grant principal source (`code:{id}`) the RequestRemote authorizer uses
+    /// to look up and authorize the redeemed grant. Resolved from a private
+    /// (encrypted) cookie, never self-reported.
+    pub code_session_id: Option<String>,
 }
 
 impl AuthContext {
@@ -48,6 +61,7 @@ impl AuthContext {
             token_id: None,
             remote_desk_type,
             bound_device_id: None,
+            code_session_id: None,
         }
     }
 
@@ -60,6 +74,7 @@ impl AuthContext {
             token_id: Some(token_id),
             remote_desk_type,
             bound_device_id: None,
+            code_session_id: None,
         }
     }
 
@@ -72,6 +87,32 @@ impl AuthContext {
             token_id: None,
             remote_desk_type,
             bound_device_id: None,
+            code_session_id: None,
+        }
+    }
+
+    /// A capability-scoped code-session context (open-source anonymous redeemer).
+    /// It carries no `user_id` — so it can never be mistaken for the single-account
+    /// owner — only the server-minted `code_session_id` that identifies its grant
+    /// principal. Always a control end (`Browser`), never a device.
+    pub fn code_session(code_session_id: impl Into<String>) -> Self {
+        Self {
+            auth_kind: AuthKind::CodeSession,
+            user_id: None,
+            token_id: None,
+            remote_desk_type: RemoteDeskTypeEnum::Browser,
+            bound_device_id: None,
+            code_session_id: Some(code_session_id.into()),
+        }
+    }
+
+    /// The grant principal this connection authorizes as, when it is a
+    /// code-session. Owner / node / anonymous connections have no code-session
+    /// principal (they authorize by other means), so this returns `None`.
+    pub fn grant_principal(&self) -> Option<GrantPrincipal> {
+        match (self.auth_kind, &self.code_session_id) {
+            (AuthKind::CodeSession, Some(id)) => Some(GrantPrincipal::from_code_session(id)),
+            _ => None,
         }
     }
 
@@ -119,6 +160,34 @@ mod tests {
         assert_eq!(ctx.user_id, None);
         assert_eq!(ctx.token_id, None);
         assert_eq!(ctx.bound_device_id, None);
+        assert_eq!(ctx.code_session_id, None);
+        assert_eq!(ctx.grant_principal(), None);
+    }
+
+    /// A code-session carries its grant principal but never a `user_id`, so it can
+    /// never alias the single-account owner (`user_id == 1`) on the open-source
+    /// signal, and it is only ever a control-end `Browser`.
+    #[test]
+    fn code_session_has_principal_but_no_owner_user_id() {
+        let ctx = AuthContext::code_session("sess-xyz");
+        assert_eq!(ctx.auth_kind, AuthKind::CodeSession);
+        assert_eq!(ctx.user_id, None);
+        assert_eq!(ctx.token_id, None);
+        assert_eq!(ctx.bound_device_id, None);
+        assert_eq!(ctx.remote_desk_type, RemoteDeskTypeEnum::Browser);
+        assert_eq!(
+            ctx.grant_principal(),
+            Some(GrantPrincipal::from_code_session("sess-xyz"))
+        );
+        // Owner / node / anonymous contexts never expose a code-session principal.
+        assert_eq!(
+            AuthContext::cookie(1, RemoteDeskTypeEnum::Browser).grant_principal(),
+            None
+        );
+        assert_eq!(
+            AuthContext::token_auth(1, 1, RemoteDeskTypeEnum::Server).grant_principal(),
+            None
+        );
     }
 
     /// A cookie control end never gains a device binding even if asked, because

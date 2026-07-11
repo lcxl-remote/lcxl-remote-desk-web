@@ -19,14 +19,55 @@
 //! **receiving** token-authenticated `Server` connection, so a control end can
 //! neither be addressed as a device nor claim to be one.
 
+use async_trait::async_trait;
+use desk_signal_facade::grant::{AccessGrantStore, GrantPrincipal};
 use desk_signal_facade::model::auth_context::{AuthContext, AuthKind};
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::request_remote_authz::{
     AuthorizedRequestRemote, REQUEST_REMOTE_AUTHZ_VERSION, RequestRemoteAuthz,
 };
-use desk_signal_facade::model::signal::{RemoteDeskTypeEnum, SignalingModel};
+use desk_signal_facade::model::security_settings::SecuritySettings;
+use desk_signal_facade::model::signal::{RemoteDeskTypeEnum, RequestRemoteModel, SignalingModel};
 use desk_signal_facade::service::{RequestRemoteAuthorizer, RequestRemoteOutcome};
 use desk_utils::error::DeskErrorCode;
+use std::sync::Arc;
+
+/// Resolves the live generation of an open-source device code by the target's
+/// `client_id`, so a superseded (regenerated) code — and any grant minted from an
+/// earlier generation — is refused at stamp time. Abstracted behind a trait so the
+/// authorizer's decision logic is unit-testable without a live database.
+#[async_trait]
+pub trait DeviceGenerationLookup: Send + Sync {
+    /// The live code generation for the device registered under `client_id`, or
+    /// `None` if no such device code exists (target is not a registered device).
+    async fn current_generation(&self, client_id: &str) -> Option<i64>;
+}
+
+/// Production [`DeviceGenerationLookup`] backed by the signal's SQLite device-code
+/// table.
+pub struct DbDeviceGenerationLookup {
+    db: sea_orm::DatabaseConnection,
+}
+
+impl DbDeviceGenerationLookup {
+    pub fn new(db: sea_orm::DatabaseConnection) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl DeviceGenerationLookup for DbDeviceGenerationLookup {
+    async fn current_generation(&self, client_id: &str) -> Option<i64> {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        crate::entity::device_code::Entity::find()
+            .filter(crate::entity::device_code::Column::ClientId.eq(client_id))
+            .one(&self.db)
+            .await
+            .ok()
+            .flatten()
+            .map(|row| row.generation as i64)
+    }
+}
 
 /// Validity window of an injected stamp (seconds); matches the AI authorizer's
 /// `AUTHZ_TTL_SECS` and doubles as the edge-enforced replay window.
@@ -108,12 +149,54 @@ fn build_stamped_outcome(
 }
 
 /// Signal single-account `RequestRemote` capability-ceiling stamp.
-#[derive(Default)]
-pub struct SignalRequestRemoteAuthorizer;
+///
+/// The authenticated single account is the owner of every device it reaches, so
+/// its request is stamped with `access_ceiling: None` (full control). A
+/// capability-scoped code-session (an anonymous redeemer) instead authorizes
+/// solely through the grant it redeemed: its request is stamped with the code's
+/// ceiling (`Some(ceiling)`) after a server-side lookup keyed by its resolved
+/// principal, or default-denied.
+pub struct SignalRequestRemoteAuthorizer {
+    grant_store: Arc<dyn AccessGrantStore>,
+    generation_lookup: Arc<dyn DeviceGenerationLookup>,
+}
 
 impl SignalRequestRemoteAuthorizer {
-    pub fn new() -> Self {
-        Self
+    pub fn new(
+        grant_store: Arc<dyn AccessGrantStore>,
+        generation_lookup: Arc<dyn DeviceGenerationLookup>,
+    ) -> Self {
+        Self {
+            grant_store,
+            generation_lookup,
+        }
+    }
+
+    /// Resolve the capability ceiling to stamp for a code-session actor against
+    /// the resolved target `audience` (the target's `client_id`), or `None` to
+    /// reject. The grant-session selector on the frame is browser-writable and
+    /// therefore untrusted; the authorization fact is the server-side lookup keyed
+    /// by the actor's resolved principal, the target audience, and the code's live
+    /// generation. Returns `(ceiling, Some(grant_session_id))` on success.
+    async fn resolve_code_ceiling(
+        &self,
+        principal: &GrantPrincipal,
+        audience: &str,
+        model: &SignalingModel,
+    ) -> Option<(Option<SecuritySettings>, Option<String>)> {
+        let grant_session_id = model
+            .get_data::<RequestRemoteModel>()
+            .ok()
+            .and_then(|m| m.grant_session_id)?;
+        let record = self
+            .grant_store
+            .lookup(&grant_session_id)
+            .await
+            .ok()
+            .flatten()?;
+        let current_generation = self.generation_lookup.current_generation(audience).await?;
+        let ceiling = record.authorize(principal, audience, current_generation)?;
+        Some((ceiling, Some(grant_session_id)))
     }
 }
 
@@ -126,18 +209,9 @@ impl RequestRemoteAuthorizer for SignalRequestRemoteAuthorizer {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RequestRemoteOutcome> + Send + 'a>>
     {
         Box::pin(async move {
-            // Actor must be the cookie-authenticated single account (the owner);
-            // the server resolves this, the control end cannot fake it. Anonymous
-            // requests are default-denied.
-            if owner_actor_user_id(&actor.auth_context).is_none() {
-                return RequestRemoteOutcome::Reject {
-                    code: DeskErrorCode::PERMISSION_ERROR,
-                    message: "remote control requires an authenticated operator".to_string(),
-                };
-            }
-
             // Target device: resolved from the receiving connection's validated
-            // state, never from a control-end self-report.
+            // state, never from a control-end self-report. Both an owner and a
+            // code-session must address a real registered device.
             let Some(to_id) = model.to_connection_id.clone() else {
                 return RequestRemoteOutcome::Reject {
                     code: DeskErrorCode::INVALID_PARAMS,
@@ -166,8 +240,41 @@ impl RequestRemoteAuthorizer for SignalRequestRemoteAuthorizer {
                 + chrono::Duration::seconds(REQUEST_REMOTE_AUTHZ_TTL_SECS))
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
-            // Single account = owner of every device it reaches → no ceiling.
-            build_stamped_outcome(model, None, None, audience, expires_at)
+            // The cookie-authenticated single account owns every device it reaches
+            // → no ceiling (full control). The server resolves this from the
+            // session, so a control end cannot fake it.
+            if owner_actor_user_id(&actor.auth_context).is_some() {
+                return build_stamped_outcome(model, None, None, audience, expires_at);
+            }
+
+            // A code-session authorizes solely through the grant it redeemed: stamp
+            // the code's ceiling after a server-side lookup keyed by its resolved
+            // principal. It can never be mistaken for the owner (it carries no
+            // `user_id`), so it is never stamped with full control.
+            if let Some(principal) = actor.auth_context.grant_principal() {
+                return match self
+                    .resolve_code_ceiling(&principal, &audience, model)
+                    .await
+                {
+                    Some((ceiling, grant_session_id)) => build_stamped_outcome(
+                        model,
+                        ceiling,
+                        grant_session_id,
+                        audience,
+                        expires_at,
+                    ),
+                    None => RequestRemoteOutcome::Reject {
+                        code: DeskErrorCode::PERMISSION_ERROR,
+                        message: "no valid access grant for this target".to_string(),
+                    },
+                };
+            }
+
+            // Anything else (node token / anonymous) is default-denied.
+            RequestRemoteOutcome::Reject {
+                code: DeskErrorCode::PERMISSION_ERROR,
+                message: "remote control requires an authenticated operator".to_string(),
+            }
         })
     }
 }
@@ -176,6 +283,9 @@ impl RequestRemoteAuthorizer for SignalRequestRemoteAuthorizer {
 mod tests {
     use super::*;
     use desk_signal_facade::model::signal::SignalingType;
+
+    use desk_signal_facade::grant::{GrantSessionRecord, InProcessAccessGrantStore};
+    use desk_signal_facade::model::security_settings::SecuritySettings;
 
     fn request_remote(request_id: &str, to: Option<&str>) -> SignalingModel {
         let data =
@@ -189,6 +299,169 @@ mod tests {
             Some(data),
             None,
         )
+    }
+
+    /// A `RequestRemote` model carrying the browser-supplied (untrusted) grant
+    /// selector.
+    fn request_remote_with_grant(grant_session_id: Option<&str>) -> SignalingModel {
+        let inner = RequestRemoteModel {
+            grant_session_id: grant_session_id.map(str::to_string),
+            ..Default::default()
+        };
+        SignalingModel::new(
+            "req-1",
+            SignalingType::RequestRemote,
+            Some("browser-1".to_string()),
+            Some("edge-1".to_string()),
+            Some(serde_json::to_value(inner).unwrap()),
+            None,
+        )
+    }
+
+    /// A code that permits terminal but leaves the rest unset (prompt).
+    fn code_ceiling() -> SecuritySettings {
+        SecuritySettings {
+            allow_terminal: Some(true),
+            allow_remote_control: None,
+            allow_clipboard_sync: None,
+            allow_private_screen: None,
+            allow_whiteboard: None,
+            allow_file_browse: None,
+            allow_file_transfer: None,
+            approval_timeout: None,
+        }
+    }
+
+    struct FixedGeneration(Option<i64>);
+
+    #[async_trait]
+    impl DeviceGenerationLookup for FixedGeneration {
+        async fn current_generation(&self, _client_id: &str) -> Option<i64> {
+            self.0
+        }
+    }
+
+    /// Build an authorizer over an in-process store with one minted grant. Returns
+    /// the authorizer and the minted `grant_session_id`.
+    async fn authorizer_with_grant(
+        record: GrantSessionRecord,
+        live_generation: Option<i64>,
+    ) -> (SignalRequestRemoteAuthorizer, String) {
+        let store = Arc::new(InProcessAccessGrantStore::new());
+        let minted = store.mint(&record, 300).await.unwrap();
+        let authz =
+            SignalRequestRemoteAuthorizer::new(store, Arc::new(FixedGeneration(live_generation)));
+        (authz, minted.grant_session_id)
+    }
+
+    fn code_record(session: &str, target: &str, generation: i64) -> GrantSessionRecord {
+        GrantSessionRecord {
+            principal: GrantPrincipal::from_code_session(session),
+            target_device: target.to_string(),
+            access_ceiling: Some(code_ceiling()),
+            generation,
+        }
+    }
+
+    #[tokio::test]
+    async fn code_session_with_valid_grant_stamps_the_code_ceiling() {
+        let (authz, gsid) =
+            authorizer_with_grant(code_record("sess-1", "client-x", 0), Some(0)).await;
+        let model = request_remote_with_grant(Some(&gsid));
+        let resolved = authz
+            .resolve_code_ceiling(
+                &GrantPrincipal::from_code_session("sess-1"),
+                "client-x",
+                &model,
+            )
+            .await;
+        // Stamps the code's ceiling (not full control) and echoes the grant id.
+        assert_eq!(resolved, Some((Some(code_ceiling()), Some(gsid))));
+    }
+
+    #[tokio::test]
+    async fn code_session_wrong_principal_is_rejected() {
+        let (authz, gsid) =
+            authorizer_with_grant(code_record("sess-1", "client-x", 0), Some(0)).await;
+        let model = request_remote_with_grant(Some(&gsid));
+        // A different code-session presenting someone else's grant id is refused.
+        let resolved = authz
+            .resolve_code_ceiling(
+                &GrantPrincipal::from_code_session("sess-2"),
+                "client-x",
+                &model,
+            )
+            .await;
+        assert_eq!(resolved, None);
+    }
+
+    #[tokio::test]
+    async fn code_session_wrong_target_is_rejected() {
+        let (authz, gsid) =
+            authorizer_with_grant(code_record("sess-1", "client-x", 0), Some(0)).await;
+        let model = request_remote_with_grant(Some(&gsid));
+        let resolved = authz
+            .resolve_code_ceiling(
+                &GrantPrincipal::from_code_session("sess-1"),
+                "client-other",
+                &model,
+            )
+            .await;
+        assert_eq!(resolved, None);
+    }
+
+    #[tokio::test]
+    async fn code_session_superseded_generation_is_rejected() {
+        // Grant minted at generation 0; the live code has been regenerated to 1.
+        let (authz, gsid) =
+            authorizer_with_grant(code_record("sess-1", "client-x", 0), Some(1)).await;
+        let model = request_remote_with_grant(Some(&gsid));
+        let resolved = authz
+            .resolve_code_ceiling(
+                &GrantPrincipal::from_code_session("sess-1"),
+                "client-x",
+                &model,
+            )
+            .await;
+        assert_eq!(resolved, None);
+    }
+
+    #[tokio::test]
+    async fn code_session_missing_or_unknown_grant_is_rejected() {
+        let (authz, _gsid) =
+            authorizer_with_grant(code_record("sess-1", "client-x", 0), Some(0)).await;
+        let principal = GrantPrincipal::from_code_session("sess-1");
+        // No selector on the frame → reject.
+        let no_selector = request_remote_with_grant(None);
+        assert_eq!(
+            authz
+                .resolve_code_ceiling(&principal, "client-x", &no_selector)
+                .await,
+            None
+        );
+        // Selector points to no known grant → reject.
+        let unknown = request_remote_with_grant(Some("nonexistent-grant"));
+        assert_eq!(
+            authz
+                .resolve_code_ceiling(&principal, "client-x", &unknown)
+                .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn code_session_missing_live_device_is_rejected() {
+        // The target has no device-code row (generation lookup returns None).
+        let (authz, gsid) = authorizer_with_grant(code_record("sess-1", "client-x", 0), None).await;
+        let model = request_remote_with_grant(Some(&gsid));
+        let resolved = authz
+            .resolve_code_ceiling(
+                &GrantPrincipal::from_code_session("sess-1"),
+                "client-x",
+                &model,
+            )
+            .await;
+        assert_eq!(resolved, None);
     }
 
     #[test]

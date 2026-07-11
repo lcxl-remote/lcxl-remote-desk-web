@@ -1,3 +1,4 @@
+pub mod access_grant;
 pub mod ai_usage;
 pub mod collect_pending;
 pub mod control_authorizer;
