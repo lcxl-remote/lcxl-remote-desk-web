@@ -417,14 +417,6 @@ pub struct RouterContext {
     /// through the context (rather than the handler signatures) so the existing
     /// `route()` / handler call sites stay untouched.
     pub inbound_authz: Option<desk_agent_protocol::authz::AuthorizationBlock>,
-    /// True when the current inbound frame arrived on the restricted support
-    /// upstream (see `RemoteDeskTypeEnum::Support`), set per call by the proxy.
-    /// `route()` gates on it with a fail-closed allowlist so a semi-trusted
-    /// supporter cannot drive the privileged manager-plane frames a normal owner
-    /// connection can. `false` on every trusted/relay link. Threaded through the
-    /// context (like `inbound_authz`) so the `route()` / handler signatures stay
-    /// untouched.
-    pub inbound_restricted: bool,
     /// The validated capability-ceiling stamp for the current inbound
     /// `RequestRemote`, set per call by the proxy after `gate_request_remote_frame`
     /// accepts a wrapped frame on the trusted-central link. `None` for a bare
@@ -451,29 +443,6 @@ pub struct RouterContext {
 /// Fresh audit event id.
 fn new_audit_event_id() -> String {
     uuid::Uuid::new_v4().to_string()
-}
-
-/// The capability ceiling applied to a legacy temporary-support session (one that
-/// arrived on the physical support upstream without a central grant stamp). The
-/// AccessGrant unification treats such a session as a grant with a fixed
-/// restrictive ceiling: pointer/keyboard control defers to the host global (met
-/// with it, so an approval prompt / global deny still applies), and every other
-/// capability — clipboard, private screen, whiteboard, terminal, file browse,
-/// file transfer — is hard-denied. The worker- and daemon-side `meet` gates
-/// enforce it (replacing the retired `SignalingState.restricted` hard-deny door).
-/// A per-code configured ceiling supersedes this once support codes migrate to
-/// the grant store.
-fn legacy_support_ceiling() -> SecuritySettings {
-    SecuritySettings {
-        allow_remote_control: Some(true),
-        allow_clipboard_sync: Some(false),
-        allow_private_screen: Some(false),
-        allow_whiteboard: Some(false),
-        allow_terminal: Some(false),
-        allow_file_browse: Some(false),
-        allow_file_transfer: Some(false),
-        ..Default::default()
-    }
 }
 
 /// Baseline session-establishment / control-plane frames that every session —
@@ -557,25 +526,18 @@ async fn classify_connection(registry: &PcRegistry, connection_id: Option<&str>)
 }
 
 /// The door1 decision for an inbound frame. A session admitted as owner passes
-/// everything (route() drops non-inbound types anyway); a capped session runs the
-/// capability matrix (still capped after a `CloseControl` PC teardown, since the
-/// admission outlives the PC). An un-admitted connection is either a support-source
-/// frame whose PC/admission does not exist yet — fall back to the fixed
-/// [`legacy_support_ceiling`] — or a central / owner management frame that never
-/// did a `RequestRemote`; the latter is allowed here and gated by its own
-/// source/authz gate (this door only enforces the capability ceiling of admitted
-/// PC sessions, exactly as before it only enforced restricted support sessions).
-fn door1_permits(gate: &ConnectionGate, t: SignalingType, inbound_restricted: bool) -> bool {
+/// everything (route() drops non-inbound types anyway); a capped session (a
+/// redeemed grant carrying an `access_ceiling`, including a temporary-support
+/// session) runs the capability matrix (still capped after a `CloseControl` PC
+/// teardown, since the admission outlives the PC). An un-admitted connection is a
+/// central / owner management frame that never did a `RequestRemote`; it is allowed
+/// here and gated by its own source/authz gate (this door only enforces the
+/// capability ceiling of admitted PC sessions).
+fn door1_permits(gate: &ConnectionGate, t: SignalingType) -> bool {
     match gate {
         ConnectionGate::KnownOwnerFull => true,
         ConnectionGate::KnownCapped(ceiling) => capped_session_permits(t, ceiling),
-        ConnectionGate::UnknownConnection => {
-            if inbound_restricted {
-                capped_session_permits(t, &legacy_support_ceiling())
-            } else {
-                true
-            }
-        }
+        ConnectionGate::UnknownConnection => true,
     }
 }
 
@@ -633,7 +595,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
     // ceiling. The data-channel path is gated independently by `route_is_permitted`
     // (the second door) and the worker-side `meet` gates.
     let gate = classify_connection(&ctx.pc_registry, model.from_connection_id.as_deref()).await;
-    if !door1_permits(&gate, model.signaling_type, ctx.inbound_restricted) {
+    if !door1_permits(&gate, model.signaling_type) {
         log::warn!(
             "[router] capability-restricted session: rejecting {:?} frame",
             model.signaling_type
@@ -684,22 +646,14 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             let capabilities = ctx.worker_mgr.worker_capabilities();
             // Resolve the connection's capability ceiling. A redeemed-grant stamp
             // carries one directly (an owner stamp carries `None` = no ceiling); a
-            // legacy support upstream (no stamp, `inbound_restricted`) gets the
-            // fixed restrictive support ceiling so the `meet` gates enforce its
-            // isolation without the retired `restricted` hard-deny door.
-            let (access_ceiling, grant_session_id) = match ctx
-                .inbound_request_remote_authz
-                .as_ref()
-            {
-                Some(a) => (a.access_ceiling.clone(), a.grant_session_id.clone()),
-                None if ctx.inbound_restricted => (Some(legacy_support_ceiling()), None),
-                None => (None, None),
-            };
-            // Whether the connection rides the physical support upstream — drives
-            // only the Support-isolation egress projection, independent of the
-            // capability ceiling (a central grant is capability-restricted but is
-            // not a support-upstream connection).
-            let is_support_upstream = ctx.inbound_restricted;
+            // bare (non-central) request carries none. A temporary-support session
+            // now arrives as an ordinary redeemed grant (its ceiling comes from the
+            // device's per-code capabilities), so there is no separate support path.
+            let (access_ceiling, grant_session_id) =
+                match ctx.inbound_request_remote_authz.as_ref() {
+                    Some(a) => (a.access_ceiling.clone(), a.grant_session_id.clone()),
+                    None => (None, None),
+                };
             let result = pc_manager::handle_request_remote(
                 &ctx.pc_registry,
                 &ctx.outbound_tx,
@@ -710,7 +664,6 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                 Some(&ctx.worker_mgr),
                 ctx.virtual_display.as_ref(),
                 model,
-                is_support_upstream,
                 access_ceiling,
                 grant_session_id,
             )
@@ -3464,23 +3417,6 @@ async fn handle_agent_request_inbound(
 mod tests {
     use super::*;
 
-    /// The legacy support ceiling defers pointer/keyboard control to the host
-    /// global (so an approval prompt / global deny still applies) and hard-denies
-    /// every exfiltration / privileged capability. This is the fixed ceiling a
-    /// support-upstream session runs under until support codes carry a configured
-    /// per-code ceiling.
-    #[test]
-    fn legacy_support_ceiling_denies_everything_but_control() {
-        let c = legacy_support_ceiling();
-        assert_eq!(c.allow_remote_control, Some(true));
-        assert_eq!(c.allow_clipboard_sync, Some(false));
-        assert_eq!(c.allow_private_screen, Some(false));
-        assert_eq!(c.allow_whiteboard, Some(false));
-        assert_eq!(c.allow_terminal, Some(false));
-        assert_eq!(c.allow_file_browse, Some(false));
-        assert_eq!(c.allow_file_transfer, Some(false));
-    }
-
     /// Daemon-owned: WebRTC SDP/ICE/PC lifecycle + daemon-emitted
     /// notifications + connection bookkeeping + WS heartbeat.
     /// Pinning these prevents accidental classification flips: the
@@ -3594,7 +3530,6 @@ mod tests {
             audit: Arc::new(crate::worker::agent::audit_sink::LogAuditSink),
             diagnose_tasks: Default::default(),
             inbound_authz: None,
-            inbound_restricted: false,
             inbound_request_remote_authz: None,
             edge_exec_pending: Default::default(),
             support_link_state: Arc::new(crate::daemon::support_link_state::SupportLinkState::new()),
@@ -3708,11 +3643,11 @@ mod tests {
         assert!(capped_session_permits(EnablePrivateScreen, &ceiling));
     }
 
-    /// The admission-based door1 gate (codex Blocking 1, 2nd round): a session
-    /// admitted as owner passes everything; a capped session runs the matrix; an
-    /// un-admitted connection is allowed when not support-tagged (its own
-    /// source/authz gate applies — this door never guarded such frames) and falls
-    /// back to the fixed support ceiling when support-tagged.
+    /// The admission-based door1 gate: a session admitted as owner passes
+    /// everything; a capped session (a redeemed grant, including a temporary-support
+    /// session) runs the capability matrix; an un-admitted connection is allowed
+    /// here (its own source/authz gate applies — this door never guarded such
+    /// frames, only the capability ceiling of admitted PC sessions).
     #[test]
     fn door1_permits_gates_capped_sessions_and_passes_unadmitted() {
         use SignalingType::*;
@@ -3724,43 +3659,26 @@ mod tests {
         // Admitted owner: everything passes.
         assert!(door1_permits(
             &ConnectionGate::KnownOwnerFull,
-            ManagerUpdateSettings,
-            false
+            ManagerUpdateSettings
         ));
         // Admitted capped: owner-plane denied, permitted family allowed.
         assert!(!door1_permits(
             &ConnectionGate::KnownCapped(capped.clone()),
-            ManagerUpdateSettings,
-            false
+            ManagerUpdateSettings
         ));
         assert!(door1_permits(
             &ConnectionGate::KnownCapped(capped),
-            StartTerminal,
-            false
+            StartTerminal
         ));
-        // Un-admitted, not support-tagged: a central / owner management frame that
-        // never did a RequestRemote — passed here, gated by its own authz gate.
+        // Un-admitted: a central / owner management frame that never did a
+        // RequestRemote — passed here, gated by its own authz gate.
         assert!(door1_permits(
             &ConnectionGate::UnknownConnection,
-            ManagerUpdateSettings,
-            false
+            ManagerUpdateSettings
         ));
         assert!(door1_permits(
             &ConnectionGate::UnknownConnection,
-            StartTerminal,
-            false
-        ));
-        // Un-admitted but support-tagged (no PC/admission yet): fixed support
-        // ceiling — baseline passes, capability frames denied.
-        assert!(door1_permits(
-            &ConnectionGate::UnknownConnection,
-            RequireControl,
-            true
-        ));
-        assert!(!door1_permits(
-            &ConnectionGate::UnknownConnection,
-            StartTerminal,
-            true
+            StartTerminal
         ));
     }
 
@@ -3798,44 +3716,6 @@ mod tests {
             classify_connection(&registry, Some("conn-cap")).await,
             ConnectionGate::KnownCapped(_)
         ));
-    }
-
-    /// First fail-closed door end-to-end: on a restricted session a privileged
-    /// frame is dropped before its handler runs, so no response frame is emitted
-    /// and `route()` still returns Ok. Guards against the handler leaking
-    /// `signaling_token` / `manager_api_token` to a semi-trusted supporter.
-    #[tokio::test]
-    async fn route_rejects_privileged_frame_on_restricted_session() {
-        let mut ctx = make_ctx();
-        ctx.inbound_restricted = true;
-        let mut rx = ctx.outbound_tx.subscribe();
-
-        let model = SignalingModel::new(
-            "req-1",
-            SignalingType::ManagerQuerySettings,
-            Some("conn-support".to_string()),
-            None,
-            None,
-            None,
-        );
-        route(&model, &ctx).await.expect("gate returns Ok");
-        assert!(
-            rx.try_recv().is_err(),
-            "a rejected privileged frame must emit no outbound response"
-        );
-    }
-
-    /// The restriction gate must not turn an allowlisted frame into an anomalous
-    /// drop: a `Heartbeat` on a restricted session routes exactly as it would on
-    /// a normal one (swallowed, Ok, no error).
-    #[tokio::test]
-    async fn route_allows_control_plane_frame_on_restricted_session() {
-        let mut ctx = make_ctx();
-        ctx.inbound_restricted = true;
-        let model = SignalingModel::new("req-1", SignalingType::Heartbeat, None, None, None, None);
-        route(&model, &ctx)
-            .await
-            .expect("allowlisted frame routes Ok");
     }
 
     /// `make_ctx` variant that installs an `Attached`-state supervisor

@@ -550,16 +550,6 @@ pub struct PcRegistry {
     /// point back at these so the node never relays through itself. Shared via
     /// `Arc` so registry clones stay cheap and consistent.
     own_turn_endpoints: Arc<HashSet<String>>,
-    /// Connection ids currently held as restricted temporary-support sessions
-    /// (see `RemoteDeskTypeEnum::Support`). Populated by
-    /// [`Self::mark_restricted_connection`] when a `RequestRemote` arrives on the
-    /// support upstream, cleared by [`cleanup_pc`] on teardown. Consumed by the
-    /// signaling proxy's outbound Support-isolation filter (which forwards a
-    /// support-destined frame only on the support upstream and every other frame
-    /// only off it) — kept as a lightweight projection so that filter never has to
-    /// lock each `PeerConnectionContext` per outbound frame. Shared via `Arc` so
-    /// registry clones stay consistent.
-    restricted_connections: Arc<RwLock<HashSet<String>>>,
     /// Reverse index `grant_session_id -> connection_ids` for every connection
     /// admitted under a redeemed grant (its `RequestRemoteAuthz` stamp carried a
     /// `grant_session_id`). Lets the daemon target a whole logical grant session
@@ -659,34 +649,6 @@ impl PcRegistry {
 
     pub async fn remove(&self, connection_id: &str) -> Option<Arc<RwLock<PeerConnectionContext>>> {
         self.inner.write().await.remove(connection_id)
-    }
-
-    /// Mark a connection as a restricted temporary-support session. Adds it to the
-    /// projection consumed by the outbound Support-isolation filter;
-    /// [`handle_request_remote`] also flips the connection's
-    /// `SignalingState::restricted`. Idempotent.
-    pub async fn mark_restricted_connection(&self, connection_id: &str) {
-        self.restricted_connections
-            .write()
-            .await
-            .insert(connection_id.to_string());
-    }
-
-    /// Drop a connection from the restricted-session projection. Called by
-    /// [`cleanup_pc`] on every teardown path; a no-op for unrestricted
-    /// connections.
-    async fn unmark_restricted_connection(&self, connection_id: &str) {
-        self.restricted_connections
-            .write()
-            .await
-            .remove(connection_id);
-    }
-
-    /// Shared handle to the restricted-session projection, for the signaling
-    /// proxy's outbound Support-isolation filter. Cloning the `Arc` keeps the
-    /// filter reading the same set the registry mutates.
-    pub fn restricted_connections_handle(&self) -> Arc<RwLock<HashSet<String>>> {
-        Arc::clone(&self.restricted_connections)
     }
 
     /// Record that `connection_id` was admitted under grant `grant_session_id`.
@@ -1652,18 +1614,11 @@ pub async fn handle_request_remote(
     worker_mgr: Option<&WorkerManager>,
     virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
     model: &SignalingModel,
-    // True when this `RequestRemote` arrived on the physical support upstream (see
-    // `RemoteDeskTypeEnum::Support`). Drives only the outbound Support-isolation
-    // egress projection (`mark_restricted_connection`), independent of the
-    // capability ceiling — a central grant is capability-restricted but is not a
-    // support-upstream connection. Set before any frame egresses so the isolation
-    // filter observes it from the connection's very first frame.
-    is_support_upstream: bool,
     // The validated capability ceiling: unwrapped from the `RequestRemoteAuthz`
-    // stamp for a redeemed grant, the fixed restrictive ceiling for a legacy
-    // support session, or `None` for an owner / unrestricted connection. Stored on
-    // the connection's `SignalingState` and registered with the worker so the
-    // `meet(ceiling, global)` gates enforce it.
+    // stamp for a redeemed grant (a temporary-support session is one such grant),
+    // or `None` for an owner / unrestricted connection. Stored on the connection's
+    // `SignalingState` and registered with the worker so the `meet(ceiling,
+    // global)` gates enforce it.
     access_ceiling: Option<SecuritySettings>,
     // The grant logical-session id this connection belongs to (`None` when there
     // is no grant). Indexes the connection for grant-directed teardown.
@@ -1742,13 +1697,6 @@ pub async fn handle_request_remote(
         // can reach every connection that shares the grant in one sweep.
         registry
             .index_grant_connection(gsid, from_connection_id)
-            .await;
-    }
-    if is_support_upstream {
-        // Register the connection in the outbound-filter projection so the
-        // Support-isolation filter observes it from the connection's first frame.
-        registry
-            .mark_restricted_connection(from_connection_id)
             .await;
     }
 
@@ -2860,12 +2808,9 @@ async fn cleanup_pc(
     reason: &str,
 ) {
     let removed = registry.remove(connection_id).await;
-    // Drop the connection from the restricted-session projection on every teardown
-    // path (idempotent for unrestricted connections) so the outbound
-    // Support-isolation filter can never route a frame to a stale support id.
-    registry.unmark_restricted_connection(connection_id).await;
-    // Prune the grant reverse-index too (idempotent for connections that carry no
-    // grant) so a directed teardown can never reach a stale connection id.
+    // Prune the grant reverse-index on every teardown path (idempotent for
+    // connections that carry no grant) so a directed teardown can never reach a
+    // stale connection id.
     registry.unindex_grant_connection(connection_id).await;
     if let Some(ctx) = &removed {
         let ctx = ctx.read().await;
@@ -2928,30 +2873,6 @@ async fn cleanup_pc(
         if let Err(e) = supervisor.apply(false).await {
             log::warn!("[pc_manager] N->0 virtual display detach failed: {e}");
         }
-    }
-}
-
-/// Tear down every restricted temporary-support connection (see
-/// `RemoteDeskTypeEnum::Support`). Called when the support session ends — a
-/// manual "end support", the code's TTL expiry, or the support upstream closing
-/// — so the supporter's WebRTC session ends physically, not just at the signaling
-/// layer. Snapshots the restricted-connections projection first (each `cleanup_pc`
-/// mutates it), then closes each PC. A no-op when no support session is live.
-pub async fn cleanup_restricted_connections(
-    registry: &PcRegistry,
-    worker_mgr: &WorkerManager,
-    virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
-    reason: &str,
-) {
-    let ids: Vec<String> = registry
-        .restricted_connections_handle()
-        .read()
-        .await
-        .iter()
-        .cloned()
-        .collect();
-    for id in ids {
-        cleanup_pc(registry, worker_mgr, virtual_display, &id, reason).await;
     }
 }
 
@@ -4535,7 +4456,6 @@ mod tests {
             None,
             None,
             &model,
-            false,
             None,
             None,
         )
@@ -4592,7 +4512,6 @@ mod tests {
             None,
             None,
             &model,
-            false,
             None,
             None,
         )
@@ -4663,7 +4582,6 @@ mod tests {
             Some(&worker_mgr),
             None,
             &model,
-            false, // a central grant is not a support-upstream connection
             Some(ceiling.clone()),
             Some("GS-1".to_string()),
         )
@@ -4700,16 +4618,7 @@ mod tests {
             "grant-session id must index the connection"
         );
 
-        // A central grant is NOT a support-upstream connection, so it must not be
-        // added to the Support-isolation egress projection.
-        assert!(
-            !registry
-                .restricted_connections_handle()
-                .read()
-                .await
-                .contains("conn-grant-1"),
-        );
-        // ...but it is indexed under its grant for directed teardown.
+        // The grant connection is indexed under its grant for directed teardown.
         assert_eq!(
             registry.connections_for_grant("GS-1").await,
             ["conn-grant-1"]
@@ -4754,7 +4663,6 @@ mod tests {
             None,
             None,
             &model,
-            false, // a central grant is not a support-upstream connection
             Some(ceiling),
             Some("GS-2".to_string()),
         )
@@ -4823,7 +4731,6 @@ mod tests {
             None,
             None,
             &model,
-            false,
             None,
             None,
         )
@@ -4956,7 +4863,6 @@ mod tests {
             None,
             None,
             &model,
-            false,
             None,
             None,
         )
@@ -5776,65 +5682,6 @@ mod tests {
         // are the enforcement point now.
         assert!(route_is_permitted(DcRoute::FileTransfer, &state).await);
         assert!(route_is_permitted(DcRoute::Whiteboard, &state).await);
-    }
-
-    /// The restricted-connections projection is populated by
-    /// `mark_restricted_connection` and cleared by `cleanup_pc` on every teardown
-    /// path — including for a connection that was never registered — so the
-    /// outbound Support-isolation filter can never route to a stale support id.
-    #[tokio::test]
-    async fn restricted_connections_projection_marks_and_clears_on_cleanup() {
-        let registry = PcRegistry::new();
-        let handle = registry.restricted_connections_handle();
-        assert!(handle.read().await.is_empty());
-
-        registry.mark_restricted_connection("conn-support").await;
-        assert!(handle.read().await.contains("conn-support"));
-
-        let s = settings_with_startup(StartupMode::ServiceDaemon);
-        let shared = SharedSettings::from(s);
-        let settings = actix_web::web::Data::new(shared);
-        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
-        cleanup_pc(&registry, &worker_mgr, None, "conn-support", "test").await;
-        assert!(!handle.read().await.contains("conn-support"));
-    }
-
-    /// Ending a support session tears down every restricted PC but leaves
-    /// unrestricted (owner) PCs untouched — the supporter's session ends while a
-    /// concurrent owner session keeps running.
-    #[tokio::test]
-    async fn cleanup_restricted_connections_closes_only_restricted_pcs() {
-        let registry = PcRegistry::new();
-        let request_remote = RequestRemoteModel {
-            ice_servers: vec![],
-            grant_session_id: None,
-        };
-        let s = settings_with_startup(StartupMode::ServiceDaemon);
-        registry
-            .create_for_request_remote("conn-owner", &request_remote, &s)
-            .await
-            .expect("owner pc");
-        registry
-            .create_for_request_remote("conn-support", &request_remote, &s)
-            .await
-            .expect("support pc");
-        registry.mark_restricted_connection("conn-support").await;
-        assert_eq!(registry.len().await, 2);
-
-        let shared = SharedSettings::from(s);
-        let settings = actix_web::web::Data::new(shared);
-        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
-        cleanup_restricted_connections(&registry, &worker_mgr, None, "test").await;
-
-        assert!(registry.get("conn-owner").await.is_some());
-        assert!(registry.get("conn-support").await.is_none());
-        assert!(
-            registry
-                .restricted_connections_handle()
-                .read()
-                .await
-                .is_empty()
-        );
     }
 
     /// A grant-directed teardown closes every connection that shares the grant in
