@@ -60,7 +60,9 @@ use crate::daemon::worker_manager::WorkerManager;
 use crate::error::DeskError;
 use crate::host_control::HostControlHub;
 use crate::model::data_channel::SignalRequestControlData;
-use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
+use crate::model::security_approval::{
+    SecurityPermissionType, check_security_permission, effective_permission,
+};
 use crate::model::settings::{Settings, SharedSettings, SystemSettings, TraversalMode};
 use crate::service::signaling::{should_short_circuit_clipboard, should_short_circuit_control};
 use desk_capture_engine::audio_encoder::audio_encoder_factory::list_audio_encoder;
@@ -3107,9 +3109,29 @@ pub async fn handle_require_control(
         });
     }
 
-    // From here on the browser is requesting a grant (accept = true).
-    let allow_control = settings.read().await.security.allow_remote_control;
-    let allow_clipboard = settings.read().await.security.allow_clipboard_sync;
+    // From here on the browser is requesting a grant (accept = true). The
+    // effective permission is the connection's capability ceiling met with the
+    // host global, so a redeemed-grant session can only be tightened relative to
+    // the owner's global; an owner session carries no ceiling and uses the global
+    // verbatim.
+    let access_ceiling = ctx
+        .read()
+        .await
+        .signaling_state
+        .read()
+        .await
+        .access_ceiling
+        .clone();
+    let allow_control = effective_permission(
+        access_ceiling.as_ref(),
+        settings.read().await.security.allow_remote_control,
+        |c| c.allow_remote_control,
+    );
+    let allow_clipboard = effective_permission(
+        access_ceiling.as_ref(),
+        settings.read().await.security.allow_clipboard_sync,
+        |c| c.allow_clipboard_sync,
+    );
 
     let control_approved =
         if should_short_circuit_control(control_data.accept, currently_has_control) {
@@ -6654,6 +6676,56 @@ mod tests {
             !s.accept_clipboard_sync,
             "accept_clipboard_sync must stay false"
         );
+    }
+
+    /// A redeemed-grant session whose ceiling denies remote control is denied even
+    /// when the host global allows it: the daemon control gate meets the
+    /// connection ceiling with the global, so the grant can only tighten. Clipboard
+    /// is likewise capped by the ceiling meet.
+    #[tokio::test]
+    async fn handle_require_control_meets_ceiling_and_denies_when_ceiling_denies() {
+        let registry = PcRegistry::new();
+        let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
+        // Host global would allow both control and clipboard...
+        let settings = settings_with_security(Some(true), Some(true));
+        let hub = Arc::new(HostControlHub::new_local());
+
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+            grant_session_id: None,
+        };
+        let ctx = registry
+            .create_for_request_remote("conn-cap", &request_remote, &*settings.read().await)
+            .await
+            .expect("seed pc");
+        // ...but the grant ceiling denies remote control (and leaves clipboard
+        // unset → prompt, which a headless host denies).
+        {
+            let guard = ctx.read().await;
+            let mut st = guard.signaling_state.write().await;
+            st.access_ceiling = Some(SecuritySettings {
+                allow_remote_control: Some(false),
+                ..Default::default()
+            });
+            st.grant_session_id = Some("GS-cap".to_string());
+            st.restricted = true;
+        }
+
+        let model = require_control_model("conn-cap", true, true);
+        handle_require_control(&registry, &outbound_tx, &settings, &hub, &model)
+            .await
+            .expect("handle ok");
+
+        let text = outbound_rx.recv().await.expect("reply");
+        let reply: SignalingModel = serde_json::from_str(&text).expect("decode");
+        assert_eq!(
+            reply.signaling_type,
+            SignalingType::DenyControl,
+            "ceiling denial must override an allowing global"
+        );
+        let s = ctx.read().await.signaling_state.read().await.clone();
+        assert!(!s.accept_control, "accept_control must stay false");
+        assert!(!s.accept_clipboard_sync, "clipboard must stay false");
     }
 
     /// Release path: browser sends RequireControl{accept=false} to
