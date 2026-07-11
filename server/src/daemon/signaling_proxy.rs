@@ -339,18 +339,20 @@ pub async fn run_signaling_proxy(
         })
     };
 
-    // On-demand temporary-support upstream. Unlike the three always-on upstreams
-    // this one parks until a local user requests a support code (the host REST API
-    // flips `support_link_state` active), then opens a single dedicated `Support`
-    // link to the manager. It serves exactly one session — until the upstream
-    // closes, the local user ends support, or the code's TTL expires — then
-    // force-tears any restricted PCs the supporter established and parks again.
+    // On-demand temporary-support request. This parks until a local user requests
+    // a support code (the host REST API flips `support_link_state` active), then
+    // asks the manager to mint one by broadcasting a `RequestSupportCode` frame
+    // over the regular upstreams (only the central brain mints; a plain signal
+    // ignores it). The manager pushes the issued code back as `SupportCodeIssued`,
+    // which the daemon consumes locally to display it and arm the TTL-expiry timer.
+    // There is no dedicated support upstream: a supporter redeems the code into a
+    // capability-scoped grant and connects over the host's regular connection, so
+    // the restriction is enforced per session (grant ceiling) rather than by
+    // isolating a physical link.
     let support_handle = {
         let settings = settings.clone();
         let outbound_tx = outbound_tx.clone();
-        let router_ctx = router_ctx.clone();
         let support_link_state = support_link_state.clone();
-        let manager_link_gate = manager_link_gate.clone();
         actix_web::rt::spawn(async move {
             loop {
                 support_link_state.wait_for_start().await;
@@ -364,45 +366,35 @@ pub async fn run_signaling_proxy(
                     )
                 };
 
-                // The support upstream rides the manager credentials, so it is
-                // gated by the same predicate: disabling the manager connection
-                // also means no support upstream.
-                if manager_link_should_connect(&manager_url, &manager_api_token, manager_enabled)
-                    && let (Some(url), Some(token)) = (manager_url, manager_api_token)
-                {
-                    let rx = outbound_tx.subscribe();
-                    // Serve one support session: whichever finishes first wins —
-                    // the upstream connection ending, or a stop (manual "end
-                    // support" / TTL expiry) flipping the state inactive.
-                    tokio::select! {
-                        _ = maintain_proxy_connection(
-                            settings.clone(),
-                            &router_ctx,
-                            url,
-                            token,
-                            rx,
-                            InboundSignalingSource::Support,
-                            false,
-                            None,
-                            Some(manager_link_gate.subscribe()),
-                        ) => {}
-                        _ = support_link_state.wait_for_stop() => {}
+                // Support codes are minted only by a central brain (the manager),
+                // so a request is meaningful only when the manager link is on.
+                if manager_link_should_connect(&manager_url, &manager_api_token, manager_enabled) {
+                    match SignalingModel::new_request(
+                        SignalingType::RequestSupportCode,
+                        None,
+                        None::<&()>,
+                    ) {
+                        Ok(model) => match serde_json::to_string(&model) {
+                            Ok(text) => {
+                                let _ = outbound_tx.send(text);
+                            }
+                            Err(e) => {
+                                warn!("[support] failed to serialise RequestSupportCode: {e}")
+                            }
+                        },
+                        Err(e) => warn!("[support] failed to build RequestSupportCode: {e}"),
                     }
-                    // End the supporter's session physically, not just at the
-                    // signaling layer, by closing every restricted PC.
-                    crate::daemon::pc_manager::cleanup_restricted_connections(
-                        &router_ctx.pc_registry,
-                        &router_ctx.worker_mgr,
-                        router_ctx.virtual_display.as_ref(),
-                        "support_session_ended",
-                    )
-                    .await;
                 } else {
                     warn!(
                         "[support] start requested but the manager link is not configured or is disabled"
                     );
                 }
-                // Reset for the next session (idempotent if already stopped).
+
+                // Park until the local user ends support (or the inbound
+                // `SupportCodeIssued` TTL-expiry timer flips the state inactive).
+                // There is no dedicated upstream to tear down; an in-flight
+                // supporter session ends on its own grant TTL.
+                support_link_state.wait_for_stop().await;
                 support_link_state.finish().await;
             }
         })

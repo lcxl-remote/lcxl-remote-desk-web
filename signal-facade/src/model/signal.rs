@@ -113,7 +113,16 @@ pub enum SignalingType {
     #[wincode(tag = 208)]
     AudioPlaybackError = 208,
 
-    /// Manager → host (desk server) over its dedicated Support upstream: the
+    /// Host (desk server) → central brain (manager) over its regular `Server`
+    /// upstream: a request to mint a temporary support code for this connection's
+    /// device. The manager resolves the connection's owner-bound device, mints a
+    /// short-lived code and pushes it back as [`SupportCodeIssued`]. A plain signal
+    /// (no central brain) never mints, so it ignores this. It replaces the former
+    /// dedicated `Support` upstream whose registration itself triggered the mint.
+    #[wincode(tag = 209)]
+    RequestSupportCode = 209,
+
+    /// Manager → host (desk server) over its regular `Server` upstream: the
     /// temporary support code the manager issued for this connection, with its
     /// expiry (see [`SupportCodeIssuedData`]). The host displays it to the local
     /// user, who passes it out-of-band to a supporter. Server-originated only — a

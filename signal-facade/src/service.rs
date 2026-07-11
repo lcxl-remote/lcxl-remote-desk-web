@@ -297,6 +297,25 @@ pub trait RemoteToolObserver: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 }
 
+// ====== SupportCodeMinter trait ======
+
+/// Mints a temporary support code for an inbound `RequestSupportCode` frame and
+/// pushes it back to the requesting host as `SupportCodeIssued`.
+///
+/// Only a central brain (the manager) mints: it resolves `source`'s owner-bound
+/// device, stores a short-lived code in shared state and writes the issued code
+/// onto `source`'s own session. A plain signal server leaves this unset, so the
+/// frame is ignored there (support codes are a manager feature). `source` is the
+/// requesting connection — a token-authenticated desk server whose regular
+/// `Server` upstream carries the request (there is no dedicated support upstream).
+pub trait SupportCodeMinter: Send + Sync {
+    fn on_request_support_code<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
 // ====== FetchConnectionsResolver trait ======
 
 /// Resolves a `FetchConnections` request into the connection list to return.
@@ -585,6 +604,10 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// `Some` only in the manager (which feeds them into its remote-tool pending
     /// store); `None` elsewhere, where they are ignored.
     pub remote_tool_observer: Option<Arc<dyn RemoteToolObserver>>,
+    /// Support-code minter for inbound `RequestSupportCode` frames. `Some` only in
+    /// the manager (which mints a code for the requesting host's device and pushes
+    /// it back); `None` elsewhere, where the frame is ignored.
+    pub support_code_minter: Option<Arc<dyn SupportCodeMinter>>,
     /// Resolver for `FetchConnections` requests. `Some` only in the manager
     /// (which returns a cluster-wide, scope-authorized list from presence);
     /// `None` in the signal server, where the handler falls back to the local
@@ -764,6 +787,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             collect_observer: None,
             edge_exec_observer: None,
             remote_tool_observer: None,
+            support_code_minter: None,
             fetch_connections_resolver: None,
             peer_relay: None,
         })
@@ -815,6 +839,13 @@ impl<U: SignalingUser> SignalingHandler<U> {
     /// frames are ignored there.
     pub fn with_remote_tool_observer(mut self, observer: Arc<dyn RemoteToolObserver>) -> Self {
         self.remote_tool_observer = Some(observer);
+        self
+    }
+
+    /// Attach a support-code minter (the manager). The signal server never calls
+    /// this, so inbound `RequestSupportCode` frames are ignored there.
+    pub fn with_support_code_minter(mut self, minter: Arc<dyn SupportCodeMinter>) -> Self {
+        self.support_code_minter = Some(minter);
         self
     }
 
@@ -1305,9 +1336,20 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     signaling_model.signaling_type
                 );
             }
+            SignalingType::RequestSupportCode => {
+                // Host (desk server) → central brain: mint a support code for the
+                // requesting connection's device and push it back. Consumed by the
+                // manager's minter; ignored where none is attached (a plain signal
+                // never mints support codes).
+                if let Some(minter) = self.support_code_minter.clone() {
+                    minter
+                        .on_request_support_code(&self.connection_state, &signaling_model)
+                        .await;
+                }
+            }
             SignalingType::SupportCodeIssued => {
                 // Manager → host only (the issued support code, pushed over the
-                // host's dedicated Support upstream). It is server-originated, so a
+                // host's regular `Server` upstream). It is server-originated, so a
                 // connection sending it inbound is misbehaving; drop it.
                 log::warn!(
                     "Received SupportCodeIssued from a client; it is server-originated and must \

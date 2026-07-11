@@ -215,11 +215,15 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // classifier's Step 0 reads it); never forwarded to the worker.
         SignalingType::CommandBlocklistSync => RouteOwnership::Daemon,
 
-        // Temporary-support code: manager → daemon, pushed over the host's
-        // dedicated Support upstream after the manager issues a code for that
-        // connection. The daemon consumes it locally (surfaces the code to the
-        // local user); never forwarded to the worker.
-        SignalingType::SupportCodeIssued => RouteOwnership::Daemon,
+        // Temporary-support code: manager → daemon, pushed over the host's regular
+        // `Server` upstream after the manager issues a code for that connection.
+        // The daemon consumes it locally (surfaces the code to the local user);
+        // never forwarded to the worker. `RequestSupportCode` is the reverse
+        // direction (daemon → manager, asking for a code) and is never received
+        // inbound here, so a stray inbound copy is swallowed daemon-side.
+        SignalingType::SupportCodeIssued | SignalingType::RequestSupportCode => {
+            RouteOwnership::Daemon
+        }
 
         // Remote-collect request: manager → daemon. In the thin-edge model the
         // daemon runs its read-only collectors on behalf of the central
@@ -907,6 +911,10 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // out to a supporter. The source gate (`handle_inbound_signaling_text`) has
         // already dropped any non-central origin before reaching here.
         SignalingType::SupportCodeIssued => handle_support_code_issued_inbound(ctx, model),
+        // RequestSupportCode is emitted by this daemon toward the manager (asking
+        // for a code); a stray inbound copy is swallowed (the daemon never consumes
+        // its own request).
+        SignalingType::RequestSupportCode => Ok(()),
         // Remote-collect request from the manager: run the daemon-side read-only
         // collectors and stream a chunked CollectResponse back. The source gate
         // (`handle_inbound_signaling_text`) has already dropped any non-Manager
