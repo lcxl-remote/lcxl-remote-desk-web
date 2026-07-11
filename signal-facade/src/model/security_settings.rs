@@ -45,6 +45,13 @@ pub struct SecuritySettings {
 }
 
 impl Default for SecuritySettings {
+    // The neutral "unset" default: every capability prompts (`None`) and the timeout
+    // is the standard 30s. This is deliberately NOT the owner's "auto-allow" posture —
+    // the onboarding wizard supplies that by submitting an explicit all-`true` payload,
+    // so a wizard-installed device gets owner-open defaults while a bare `/api/init`
+    // (or any `..Default::default()` spread, e.g. ceiling construction) keeps the
+    // restrictive all-prompt baseline. Flipping this impl to all-allow would silently
+    // widen those spread-in ceilings, so owner-open lives at the wizard layer only.
     fn default() -> Self {
         Self {
             allow_remote_control: None,
