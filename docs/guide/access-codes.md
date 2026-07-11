@@ -7,7 +7,7 @@ An **access code** lets a controller reach an online host by typing a short code
 
 ## Redeeming a code
 
-Enter the code in the connect box and submit (`POST /api/desk/redeem-code`). The server resolves it to the target host's live connection and returns a **capability-scoped session**. On the open-source signaling server a redeemed session is **always capability-scoped** — full, unrestricted control belongs only to the single-account owner signed in directly to the console (session cookie), not to any redeemed code.
+Enter the code in the connect box and submit (`POST /api/desk/redeem-code`). The server resolves it to the target host's live connection and returns a **capability-scoped session**. On the open-source signaling server a redeemed session is **always capability-scoped** — full, unrestricted control belongs only to the single-account owner signed in directly with the account credentials (session cookie), not to any redeemed code.
 
 Each redemption carries an **access ceiling** — the capability limit the owner configured for that code (see below). The ceiling travels with every control request the controller makes during the session.
 

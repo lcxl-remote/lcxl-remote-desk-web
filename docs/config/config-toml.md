@@ -59,8 +59,14 @@ Server settings are managed via `conf/config.toml`. The config file path can be 
 ## Security `[security]`
 
 Per-capability access control for inbound remote sessions. Each capability is
-tri-state: unset means "ask the local user each time" (the default), `true`
+tri-state: unset means "ask the local user each time" (the file default), `true`
 means "always allow", `false` means "always deny".
+
+The onboarding wizard writes an explicit posture at install time (opening
+capabilities for the owner), so a wizard-installed host does not start from the
+all-ask file default. For a non-owner session redeemed via an
+[access code](/guide/access-codes), these global settings are additionally met
+with that code's capability ceiling and live approval.
 
 - `allow_remote_control` — mouse / keyboard input.
 - `allow_clipboard_sync` — clipboard synchronization.
