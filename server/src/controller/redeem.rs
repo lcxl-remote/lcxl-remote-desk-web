@@ -143,7 +143,7 @@ pub async fn redeem_code(
     let record = GrantSessionRecord {
         principal: GrantPrincipal::from_code_session(&code_session_id),
         target_device: target_client_id,
-        access_ceiling: Some(ceiling.clone()),
+        access_ceiling: Some(ceiling),
         generation,
     };
     let store = desk_signal::access_grant::global_access_grant_store();
@@ -166,8 +166,8 @@ pub async fn redeem_code(
 
     let cookie = CodeSessionCookie {
         code_session_id,
+        grant_session_id: minted.grant_session_id.clone(),
         target_connection_id: target_connection_id.clone(),
-        access_ceiling: ceiling,
     };
     if let Err(e) = session.insert(CODE_SESSION_KEY, &cookie) {
         log::error!("Failed to persist code-session cookie: {e}");
@@ -306,6 +306,9 @@ async fn redeem_rate_limited(req: &HttpRequest) -> bool {
         .unwrap_or_else(|| "unknown".to_string());
     let now = Instant::now();
     let mut limit = REDEEM_RATE_LIMIT.write().await;
+    // Drop entries whose window has elapsed so the map cannot grow without bound
+    // on a long-lived public server (each distinct IP would otherwise leak a slot).
+    limit.retain(|_, (_, last_time)| now.duration_since(*last_time).as_secs() < 60);
     match limit.get_mut(&ip) {
         Some((count, last_time)) if now.duration_since(*last_time).as_secs() < 60 => {
             if *count >= REDEEM_ATTEMPTS_PER_MINUTE {

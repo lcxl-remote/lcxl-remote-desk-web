@@ -787,6 +787,11 @@ pub async fn run_with_hub(
             .wrap(
                 SessionMiddleware::builder(CookieSessionStore::default(), secret_key.clone())
                     .cookie_secure(cookie_secure_from_env())
+                    // Encrypt (not just sign) the session cookie: the code-session
+                    // principal it carries must be neither readable nor forgeable by
+                    // the client. HttpOnly keeps it out of page JavaScript.
+                    .cookie_content_security(actix_session::config::CookieContentSecurity::Private)
+                    .cookie_http_only(true)
                     .build(),
             )
             .service(
@@ -1016,6 +1021,14 @@ mod tests {
                 .wrap(
                     SessionMiddleware::builder(CookieSessionStore::default(), secret_key)
                         .cookie_secure(cookie_secure_from_env())
+                        // Encrypt (not just sign) the session cookie: the
+                        // code-session principal it carries must be neither readable
+                        // nor forgeable by the client. HttpOnly keeps it out of page
+                        // JavaScript.
+                        .cookie_content_security(
+                            actix_session::config::CookieContentSecurity::Private,
+                        )
+                        .cookie_http_only(true)
                         .build(),
                 ),
         )
@@ -1203,6 +1216,14 @@ mod tests {
                 .wrap(
                     SessionMiddleware::builder(CookieSessionStore::default(), secret_key)
                         .cookie_secure(cookie_secure_from_env())
+                        // Encrypt (not just sign) the session cookie: the
+                        // code-session principal it carries must be neither readable
+                        // nor forgeable by the client. HttpOnly keeps it out of page
+                        // JavaScript.
+                        .cookie_content_security(
+                            actix_session::config::CookieContentSecurity::Private,
+                        )
+                        .cookie_http_only(true)
                         .build(),
                 ),
         )
