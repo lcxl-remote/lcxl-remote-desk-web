@@ -73,6 +73,11 @@ pub struct RequestRemoteAuthz {
     /// in-flight session minted at a superseded generation (`generation ≤ revoked`).
     /// Meaningful only for grant sessions (`grant_session_id.is_some()`); an owner
     /// session is never indexed or revoked, so its value is a `0` placeholder.
+    ///
+    /// `#[serde(default)]` so a stamp serialized before this field existed decodes to
+    /// `0` (a during-rollout host reading an older central's stamp treats it as an
+    /// un-revocable generation) rather than failing to deserialize the whole wrapper.
+    #[serde(default)]
     pub generation: i64,
     /// The `request_id` of the frame this stamp authorizes; must match, so a
     /// stamp cannot be lifted onto a different frame.
@@ -191,6 +196,23 @@ mod tests {
             a.validate("req-1", "host-client-abc", "2026-01-01T00:00:00Z"),
             Ok(())
         );
+    }
+
+    #[test]
+    fn stamp_without_generation_decodes_to_zero() {
+        // A stamp serialized before `generation` existed (an older central during a
+        // rolling deploy) must still decode — to a `0` placeholder — rather than
+        // failing the whole wrapper.
+        let json = r#"{
+            "version": 1,
+            "access_ceiling": null,
+            "grant_session_id": null,
+            "request_id": "req-1",
+            "audience": "host-client-abc",
+            "expires_at": null
+        }"#;
+        let decoded: RequestRemoteAuthz = serde_json::from_str(json).expect("decode");
+        assert_eq!(decoded.generation, 0);
     }
 
     #[test]

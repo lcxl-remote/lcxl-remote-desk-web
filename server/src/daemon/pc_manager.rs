@@ -2936,6 +2936,13 @@ pub async fn close_grant_session(
 /// [`close_grant_session`], so all of its connections end together). Owner sessions
 /// carry no grant and are never indexed, so they are untouched. A no-op when no
 /// held grant is at or below the revoked generation.
+///
+/// Matches on generation alone, not device: this daemon serves a single device (one
+/// desk-server = one `client_id`), so every grant it holds targets that one device
+/// and the `RevokeAccessGrant` frame is delivered only to this host. If a daemon ever
+/// hosted grants for more than one target device, this would need the frame's
+/// `target_device` as a second filter dimension (stored per grant) to avoid closing
+/// an unrelated device's grant that happens to share a generation number.
 pub async fn close_grants_up_to_generation(
     registry: &PcRegistry,
     worker_mgr: &WorkerManager,
