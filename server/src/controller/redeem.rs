@@ -55,6 +55,13 @@ pub struct RedeemCodeResult {
     /// The reusable grant-session token the control end must attach to each
     /// RequestRemote (main + file-transfer connections) for this target.
     pub grant_session_id: String,
+    /// The redeemed code's capability ceiling, so the control end can hide the
+    /// entries a dimension explicitly denies. This is a UX hint only — the host
+    /// still enforces `meet(ceiling, global)` plus live approval, so a control end
+    /// that ignores it gains nothing. Always present here (the open-source portable
+    /// redeem is always capability-scoped); `Option` for wire parity with the
+    /// manager, whose owner redeem returns `None` (unrestricted full control).
+    pub access_ceiling: Option<SecuritySettings>,
 }
 
 #[utoipa::path(
@@ -143,7 +150,7 @@ pub async fn redeem_code(
     let record = GrantSessionRecord {
         principal: GrantPrincipal::from_code_session(&code_session_id),
         target_device: target_client_id,
-        access_ceiling: Some(ceiling),
+        access_ceiling: Some(ceiling.clone()),
         generation,
     };
     let store = desk_signal::access_grant::global_access_grant_store();
@@ -182,6 +189,7 @@ pub async fn redeem_code(
         HttpResponse::Ok().json(RestResponse::succeed_with_data(RedeemCodeResult {
             target_connection_id,
             grant_session_id: minted.grant_session_id,
+            access_ceiling: Some(ceiling),
         })),
     )
 }
@@ -293,6 +301,31 @@ mod tests {
         .await;
         assert_eq!(body["success"], false);
         assert_eq!(body["code"], DeskErrorCode::DEVICE_NOT_FOUND.code());
+    }
+
+    /// The success result carries the code's ceiling under `access_ceiling`, the
+    /// wire field the control end reads to hide capability-denied entries. Guards the
+    /// field name / presence the frontend contract depends on (a full mint path needs
+    /// a live connection + global DB, out of reach for a unit test).
+    #[test]
+    fn result_serializes_access_ceiling() {
+        let ceiling = SecuritySettings {
+            allow_terminal: Some(true),
+            allow_file_transfer: Some(false),
+            ..SecuritySettings::all_prompt()
+        };
+        let result = RedeemCodeResult {
+            target_connection_id: "conn-1".to_string(),
+            grant_session_id: "gs-1".to_string(),
+            access_ceiling: Some(ceiling),
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["access_ceiling"]["allow_terminal"], true);
+        assert_eq!(json["access_ceiling"]["allow_file_transfer"], false);
+        assert_eq!(
+            json["access_ceiling"]["allow_clipboard_sync"],
+            serde_json::Value::Null
+        );
     }
 }
 

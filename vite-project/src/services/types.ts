@@ -1985,6 +1985,7 @@ export type RedeemCodeParams = {
 };
 
 export type RedeemCodeResult = {
+    access_ceiling?: (null | SecuritySettings);
     /**
      * @description The reusable grant-session token the control end must attach to each\nRequestRemote (main + file-transfer connections) for this target.
      * @type string
@@ -2510,6 +2511,7 @@ export type RestResponseRedeemCodeResult = {
      * @type object | undefined
     */
     data?: {
+        access_ceiling?: (null | SecuritySettings);
         /**
          * @description The reusable grant-session token the control end must attach to each\nRequestRemote (main + file-transfer connections) for this target.
          * @type string
