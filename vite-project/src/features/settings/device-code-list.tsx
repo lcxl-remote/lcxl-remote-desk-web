@@ -22,10 +22,21 @@ import { useCreateDeviceCode } from "@/services/hooks/deviceCodeController/useCr
 import { useUpdateDeviceCode } from "@/services/hooks/deviceCodeController/useUpdateDeviceCode"
 import { useDeleteDeviceCode } from "@/services/hooks/deviceCodeController/useDeleteDeviceCode"
 import { useBatchDeleteDeviceCodes } from "@/services/hooks/deviceCodeController/useBatchDeleteDeviceCodes"
-import type { DeviceCodeItem } from "@/services/types"
+import type { DeviceCodeItem, SecuritySettings } from "@/services/types"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import { v4 as uuidv4 } from "uuid"
+import { CapabilityCeilingEditor } from "@/features/settings/capability-ceiling-editor"
+
+// Generate a fresh 6-character device code from an unambiguous charset.
+const generateDeviceCode = () => {
+    const charset = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+    let code = ""
+    for (let i = 0; i < 6; i++) {
+        code += charset.charAt(Math.floor(Math.random() * charset.length))
+    }
+    return code
+}
 
 export function DeviceCodeList() {
     const { t } = useTranslation()
@@ -48,19 +59,13 @@ export function DeviceCodeList() {
     const [selectedIds, setSelectedIds] = useState<number[]>([])
 
     const [isCreateOpen, setIsCreateOpen] = useState(false)
-    const [createForm, setCreateForm] = useState({ clientId: '', deviceCode: '' })
+    const [createForm, setCreateForm] = useState<{ clientId: string; deviceCode: string; capabilities: SecuritySettings | null }>({ clientId: '', deviceCode: '', capabilities: null })
 
     const [editItem, setEditItem] = useState<DeviceCodeItem | null>(null)
-    const [editForm, setEditForm] = useState({ deviceCode: '' })
+    const [editForm, setEditForm] = useState<{ deviceCode: string; capabilities: SecuritySettings | null }>({ deviceCode: '', capabilities: null })
 
     const handleOpenCreate = () => {
-        const client_id = uuidv4()
-        const charset = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
-        let device_code = ""
-        for (let i = 0; i < 6; i++) {
-            device_code += charset.charAt(Math.floor(Math.random() * charset.length))
-        }
-        setCreateForm({ clientId: client_id, deviceCode: device_code })
+        setCreateForm({ clientId: uuidv4(), deviceCode: generateDeviceCode(), capabilities: null })
         setIsCreateOpen(true)
     }
 
@@ -70,7 +75,8 @@ export function DeviceCodeList() {
             await createDeviceCode({
                 data: {
                     client_id: createForm.clientId,
-                    device_code: createForm.deviceCode
+                    device_code: createForm.deviceCode,
+                    capabilities: createForm.capabilities
                 }
             })
             toast({
@@ -108,21 +114,19 @@ export function DeviceCodeList() {
 
     const handleOpenEdit = (item: DeviceCodeItem) => {
         setEditItem(item)
-        setEditForm({ deviceCode: item.deviceCode })
+        setEditForm({ deviceCode: item.deviceCode, capabilities: item.capabilities ?? null })
     }
 
     const submitEdit = async () => {
         if (!editItem || !editForm.deviceCode) return;
-        if (editForm.deviceCode === editItem.deviceCode) {
-            setEditItem(null)
-            return
-        }
-
+        // Always send the update: the code and/or the ceiling may have changed, and the
+        // backend only bumps the generation when the code itself rotates.
         try {
             await updateDeviceCode({
                 id: editItem.id,
                 data: {
-                    device_code: editForm.deviceCode
+                    device_code: editForm.deviceCode,
+                    capabilities: editForm.capabilities
                 }
             })
             toast({
@@ -134,6 +138,30 @@ export function DeviceCodeList() {
             toast({
                 variant: 'destructive',
                 title: t('pages.deviceCodeList.updateFailed'),
+                description: (error as Error).message
+            })
+        }
+    }
+
+    // Regenerate a code's dial code in place: rotate to a fresh code (which bumps the
+    // server-side generation and thereby invalidates every grant minted from the old
+    // code) while preserving the configured capability ceiling.
+    const handleRegenerate = async (item: DeviceCodeItem) => {
+        if (!confirm(t('pages.deviceCodeList.regenerateConfirm'))) return
+        try {
+            await updateDeviceCode({
+                id: item.id,
+                data: {
+                    device_code: generateDeviceCode(),
+                    capabilities: item.capabilities ?? null
+                }
+            })
+            toast({ title: t('pages.deviceCodeList.regenerateSuccess') })
+            refetch()
+        } catch (error) {
+            toast({
+                variant: 'destructive',
+                title: t('pages.deviceCodeList.regenerateFailed'),
                 description: (error as Error).message
             })
         }
@@ -260,10 +288,13 @@ export function DeviceCodeList() {
                                                 <TableCell>{new Date(item.createdAt).toLocaleString()}</TableCell>
                                                 <TableCell>{new Date(item.updatedAt).toLocaleString()}</TableCell>
                                                 <TableCell className="text-right">
-                                                    <Button variant="ghost" size="icon" onClick={() => handleOpenEdit(item)}>
+                                                    <Button variant="ghost" size="icon" onClick={() => handleOpenEdit(item)} title={t('pages.deviceCodeList.action.edit')}>
                                                         <Edit2 className="h-4 w-4" />
                                                     </Button>
-                                                    <Button variant="destructive" size="icon" className="ml-2" disabled={item.isOnline} onClick={() => handleDelete(item.id)}>
+                                                    <Button variant="ghost" size="icon" className="ml-2" onClick={() => handleRegenerate(item)} title={t('pages.deviceCodeList.regenerate')}>
+                                                        <RefreshCw className="h-4 w-4" />
+                                                    </Button>
+                                                    <Button variant="destructive" size="icon" className="ml-2" disabled={item.isOnline} onClick={() => handleDelete(item.id)} title={t('pages.deviceCodeList.action.delete')}>
                                                         <Trash2 className="h-4 w-4" />
                                                     </Button>
                                                 </TableCell>
@@ -308,6 +339,13 @@ export function DeviceCodeList() {
                                 className="col-span-3"
                             />
                         </div>
+                        <div className="space-y-2">
+                            <Label>{t('pages.deviceCodeList.capabilitiesLabel')}</Label>
+                            <CapabilityCeilingEditor
+                                value={createForm.capabilities}
+                                onChange={(capabilities) => setCreateForm({ ...createForm, capabilities })}
+                            />
+                        </div>
                     </div>
                     <DialogFooter>
                         <Button variant="outline" onClick={() => setIsCreateOpen(false)}>{t('common.cancel')}</Button>
@@ -348,6 +386,13 @@ export function DeviceCodeList() {
                                 value={editForm.deviceCode}
                                 onChange={(e) => setEditForm({ ...editForm, deviceCode: e.target.value })}
                                 className="col-span-3"
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <Label>{t('pages.deviceCodeList.capabilitiesLabel')}</Label>
+                            <CapabilityCeilingEditor
+                                value={editForm.capabilities}
+                                onChange={(capabilities) => setEditForm({ ...editForm, capabilities })}
                             />
                         </div>
                     </div>
