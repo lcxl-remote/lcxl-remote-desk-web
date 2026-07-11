@@ -846,6 +846,12 @@ impl WorkerSession {
         // the DeskSession (legacy / portable path) uses so messages
         // flow through a single Tauri overlay manager.
         let whiteboard_dispatcher = WhiteboardDispatcher::new(Arc::clone(&host_control_hub));
+        // Per-connection capability ceilings, registered by the daemon via
+        // `SetConnectionCeiling` for redeemed-grant sessions and consumed by the
+        // worker-side `meet(ceiling, global)` permission gates. Owner /
+        // unrestricted connections are never registered (missing entry =
+        // global-only gating).
+        let connection_ceilings = crate::worker::connection_ceiling::ConnectionCeilingStore::new();
         if writer_tx
             .send(WorkerToService::Capabilities(capabilities))
             .is_err()
@@ -1075,6 +1081,11 @@ impl WorkerSession {
                                         );
                                     }
                                 }
+                                ServiceToWorker::SetConnectionCeiling(payload) => {
+                                    connection_ceilings
+                                        .set(&payload.connection_id, payload.ceiling)
+                                        .await;
+                                }
                                 ServiceToWorker::StopMedia(payload) => {
                                     vd_state.record_stop(&payload.connection_id);
                                     if let Some(producer) = media_producer.as_ref() {
@@ -1086,6 +1097,7 @@ impl WorkerSession {
                                     }
                                     file_transfer_dispatcher.stop_connection(&payload).await;
                                     whiteboard_dispatcher.stop_connection(&payload).await;
+                                    connection_ceilings.clear(&payload.connection_id).await;
                                 }
                                 ServiceToWorker::ForceKeyframe(payload) => {
                                     if let Some(producer) = media_producer.as_ref() {

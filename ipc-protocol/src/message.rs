@@ -43,6 +43,17 @@ pub enum ServiceToWorker {
     /// has stopped.
     StopMedia(StopMediaPayload),
 
+    /// Daemon → worker: register the validated capability ceiling for a
+    /// connection admitted under a redeemed grant. Sent from
+    /// `handle_request_remote` the moment the daemon stamps the connection's
+    /// `SignalingState`, before any worker-bound frame for that connection, so the
+    /// worker's per-connection ceiling map is populated ahead of the first
+    /// file-list / terminal / media request. `ceiling = None` marks an
+    /// owner/unrestricted connection (no cap). The map entry is cleared when the
+    /// connection tears down via [`Self::StopMedia`]. Routed on the never-drop
+    /// event pipe so it is FIFO-ordered ahead of the connection's other frames.
+    SetConnectionCeiling(SetConnectionCeilingPayload),
+
     /// Update encoder parameters mid-stream (bitrate / fps / quality).
     UpdateMediaSettings(UpdateMediaSettingsPayload),
 
@@ -644,6 +655,15 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct StopMediaPayload {
     pub connection_id: String,
+}
+
+/// Registers a connection's validated capability ceiling with the worker (see
+/// [`ServiceToWorker::SetConnectionCeiling`]). `ceiling = None` means the
+/// connection is an owner/unrestricted session with no cap.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct SetConnectionCeilingPayload {
+    pub connection_id: String,
+    pub ceiling: Option<desk_signal_facade::model::security_settings::SecuritySettings>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]

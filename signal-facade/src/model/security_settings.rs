@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use wincode::{SchemaRead, SchemaWrite};
 
 /// Default approval timeout in seconds applied when a security settings payload
 /// leaves `approval_timeout` unset. A finite default (rather than "never") means
@@ -18,7 +19,9 @@ pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u32 = 30;
 /// the explicit "never" choice is persisted as the present value `Some(0)` — not
 /// `None` — so it survives a save/reload round-trip (TOML omits `None`, and the
 /// `serde(default)` reload would otherwise resurrect the 30s default).
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, ToSchema)]
+#[derive(
+    Clone, Debug, Deserialize, Serialize, PartialEq, Eq, ToSchema, SchemaWrite, SchemaRead,
+)]
 #[serde(default)]
 pub struct SecuritySettings {
     /// Allow remote desktop control (mouse/keyboard input)

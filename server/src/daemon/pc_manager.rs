@@ -1631,6 +1631,43 @@ pub async fn handle_request_remote(
     let from_connection_id = model.check_and_get_from_connection_id()?;
     let request_remote = model.get_data::<RequestRemoteModel>()?;
 
+    // Register the validated ceiling with the worker's per-connection ceiling map
+    // ahead of any worker-bound frame for this connection, so the worker-side
+    // `meet(ceiling, global)` gates enforce it from the first file-list / terminal
+    // / media request (the never-drop event pipe keeps this FIFO-ordered before
+    // them). Only grant-restricted connections carry a ceiling. Fail-closed: if the
+    // registration cannot be delivered we abort the whole `RequestRemote` — done
+    // *before* creating the PC so a rejected grant leaves no registered connection
+    // — rather than let a capped grant session run with no worker-side cap (a
+    // delivered media/terminal frame with no ceiling would fall back to global-only
+    // gating and over-permit). Owner/unrestricted connections (`ceiling == None`)
+    // skip this and leave the worker map empty.
+    if let Some(ceiling) = access_ceiling.as_ref() {
+        let mgr = worker_mgr.ok_or_else(|| {
+            DeskError::CustomError(CustomDeskError::new(
+                DeskErrorCode::SYSTEM_ERROR,
+                &format!(
+                    "cannot admit grant session {from_connection_id}: no worker to receive its capability ceiling"
+                ),
+            ))
+        })?;
+        mgr.send_to_worker(ServiceToWorker::SetConnectionCeiling(
+            desk_ipc_protocol::message::SetConnectionCeilingPayload {
+                connection_id: from_connection_id.to_string(),
+                ceiling: Some(ceiling.clone()),
+            },
+        ))
+        .await
+        .map_err(|e| {
+            DeskError::CustomError(CustomDeskError::new(
+                DeskErrorCode::SYSTEM_ERROR,
+                &format!(
+                    "cannot admit grant session {from_connection_id}: ceiling registration failed to reach worker: {e}"
+                ),
+            ))
+        })?;
+    }
+
     let ctx = registry
         .create_for_request_remote(from_connection_id, &request_remote, settings)
         .await?;
@@ -4497,16 +4534,28 @@ mod tests {
     }
 
     /// A redeemed-grant `RequestRemote` carries a validated capability ceiling and
-    /// a grant-session id; `handle_request_remote` must stamp all three
-    /// (`restricted` / `access_ceiling` / `grant_session_id`) onto the created
-    /// connection's `SignalingState` before any frame egresses, so the worker-side
-    /// `meet(ceiling, global)` gates and grant-directed teardown observe them from
-    /// the connection's first frame.
+    /// a grant-session id; `handle_request_remote` must (a) register the ceiling
+    /// with the worker's per-connection map ahead of any worker-bound frame and
+    /// (b) stamp all three (`restricted` / `access_ceiling` / `grant_session_id`)
+    /// onto the created connection's `SignalingState` before any frame egresses, so
+    /// the worker-side `meet(ceiling, global)` gates and grant-directed teardown
+    /// observe them from the connection's first frame.
     #[tokio::test]
     async fn handle_request_remote_stamps_ceiling_and_grant_onto_signaling_state() {
+        use desk_ipc_protocol::message::ServiceToWorker;
+
         let registry = PcRegistry::new();
         let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
         let s = settings_with_startup(StartupMode::ServiceDaemon);
+        // Stand up a worker manager with a fake active worker so the daemon has a
+        // destination for the ceiling registration (grants are fail-closed without
+        // one — see the dedicated fail-closed test).
+        let shared = SharedSettings::from(s.clone());
+        let settings_data = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings_data, registry.clone());
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+
         let model = SignalingModel::new(
             "req-grant-1",
             SignalingType::RequestRemote,
@@ -4534,7 +4583,7 @@ mod tests {
             "user-x",
             false,
             None,
-            None,
+            Some(&worker_mgr),
             None,
             &model,
             true,
@@ -4546,6 +4595,20 @@ mod tests {
 
         // Drain the Init reply so the broadcast channel does not lag.
         let _ = outbound_rx.recv().await.expect("init reply");
+
+        // The worker received the ceiling registration for this connection.
+        let mut saw_ceiling = false;
+        while let Ok(msg) = ipc_rx.try_recv() {
+            if let ServiceToWorker::SetConnectionCeiling(p) = msg {
+                assert_eq!(p.connection_id, "conn-grant-1");
+                assert_eq!(p.ceiling, Some(ceiling.clone()));
+                saw_ceiling = true;
+            }
+        }
+        assert!(
+            saw_ceiling,
+            "daemon must register the grant ceiling with the worker"
+        );
 
         let ctx = registry.get("conn-grant-1").await.expect("pc registered");
         let st = ctx.read().await.signaling_state.read().await.clone();
@@ -4574,6 +4637,61 @@ mod tests {
         assert_eq!(
             registry.connections_for_grant("GS-1").await,
             ["conn-grant-1"]
+        );
+    }
+
+    /// A grant `RequestRemote` (ceiling `Some`) is fail-closed when the daemon has
+    /// no worker to receive the ceiling registration: `handle_request_remote`
+    /// returns an error and registers no connection, so a capped session can never
+    /// run without its worker-side cap in place.
+    #[tokio::test]
+    async fn handle_request_remote_grant_fails_closed_without_worker() {
+        let registry = PcRegistry::new();
+        let (outbound_tx, _outbound_rx) = broadcast::channel::<String>(8);
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let model = SignalingModel::new(
+            "req-grant-2",
+            SignalingType::RequestRemote,
+            Some("conn-grant-2".to_string()),
+            None,
+            Some(
+                serde_json::to_value(RequestRemoteModel {
+                    ice_servers: vec![],
+                    grant_session_id: Some("GS-2".to_string()),
+                })
+                .unwrap(),
+            ),
+            None,
+        );
+        let ceiling = SecuritySettings {
+            allow_file_transfer: Some(false),
+            ..Default::default()
+        };
+
+        let result = handle_request_remote(
+            &registry,
+            &outbound_tx,
+            &s,
+            "user-x",
+            false,
+            None,
+            None,
+            None,
+            &model,
+            true,
+            Some(ceiling),
+            Some("GS-2".to_string()),
+        )
+        .await;
+
+        assert!(result.is_err(), "grant without a worker must be rejected");
+        assert!(
+            registry.get("conn-grant-2").await.is_none(),
+            "a rejected grant must leave no registered connection"
+        );
+        assert!(
+            registry.connections_for_grant("GS-2").await.is_empty(),
+            "a rejected grant must not index anything"
         );
     }
 

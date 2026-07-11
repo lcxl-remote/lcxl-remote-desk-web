@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod clipboard_dispatcher;
+pub mod connection_ceiling;
 pub mod desktop_monitor;
 pub mod exec;
 pub mod file_transfer_dispatcher;
