@@ -546,6 +546,17 @@ pub struct PcRegistry {
     /// lock each `PeerConnectionContext` per outbound frame. Shared via `Arc` so
     /// registry clones stay consistent.
     restricted_connections: Arc<RwLock<HashSet<String>>>,
+    /// Reverse index `grant_session_id -> connection_ids` for every connection
+    /// admitted under a redeemed grant (its `RequestRemoteAuthz` stamp carried a
+    /// `grant_session_id`). Lets the daemon target a whole logical grant session
+    /// for directed teardown / revocation — closing every connection that shares
+    /// one grant in a single sweep — instead of the coarse restricted-set. Owner /
+    /// unrestricted / legacy-support connections carry no grant and never appear
+    /// here. Populated by [`Self::index_grant_connection`] in
+    /// [`handle_request_remote`], pruned by [`Self::unindex_grant_connection`] on
+    /// every [`cleanup_pc`] teardown. Shared via `Arc` so registry clones stay
+    /// consistent.
+    grant_sessions: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     /// Test-only phantom PC counter added to `len()`. See
     /// [`Self::set_test_len_extra`] — it lets the signaling router unit
     /// tests simulate multi-PC topologies without building real
@@ -649,6 +660,42 @@ impl PcRegistry {
     /// filter reading the same set the registry mutates.
     pub fn restricted_connections_handle(&self) -> Arc<RwLock<HashSet<String>>> {
         Arc::clone(&self.restricted_connections)
+    }
+
+    /// Record that `connection_id` was admitted under grant `grant_session_id`.
+    /// Idempotent; multiple connections (main / file-transfer / reconnect) of one
+    /// grant accumulate under the same key so a directed teardown reaches them all.
+    async fn index_grant_connection(&self, grant_session_id: &str, connection_id: &str) {
+        self.grant_sessions
+            .write()
+            .await
+            .entry(grant_session_id.to_string())
+            .or_default()
+            .insert(connection_id.to_string());
+    }
+
+    /// Drop `connection_id` from whatever grant session held it, removing the
+    /// grant key entirely once its last connection departs. Called by
+    /// [`cleanup_pc`] on every teardown path; a no-op for connections that carry
+    /// no grant.
+    async fn unindex_grant_connection(&self, connection_id: &str) {
+        let mut map = self.grant_sessions.write().await;
+        map.retain(|_, conns| {
+            conns.remove(connection_id);
+            !conns.is_empty()
+        });
+    }
+
+    /// Snapshot the connection ids currently indexed under `grant_session_id`
+    /// (empty when the grant is unknown). Used by [`close_grant_session`] to sweep
+    /// every connection of a revoked grant.
+    pub async fn connections_for_grant(&self, grant_session_id: &str) -> Vec<String> {
+        self.grant_sessions
+            .read()
+            .await
+            .get(grant_session_id)
+            .map(|conns| conns.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Whether any registered `PeerConnectionContext` currently has
@@ -1598,7 +1645,14 @@ pub async fn handle_request_remote(
         let mut st = ctx_guard.signaling_state.write().await;
         st.restricted = restricted;
         st.access_ceiling = access_ceiling;
-        st.grant_session_id = grant_session_id;
+        st.grant_session_id = grant_session_id.clone();
+    }
+    if let Some(gsid) = grant_session_id.as_deref() {
+        // Index the connection under its grant so a directed revocation / teardown
+        // can reach every connection that shares the grant in one sweep.
+        registry
+            .index_grant_connection(gsid, from_connection_id)
+            .await;
     }
     if restricted {
         // Register the connection in the outbound-filter projection so the
@@ -2720,6 +2774,9 @@ async fn cleanup_pc(
     // path (idempotent for unrestricted connections) so the outbound
     // Support-isolation filter can never route a frame to a stale support id.
     registry.unmark_restricted_connection(connection_id).await;
+    // Prune the grant reverse-index too (idempotent for connections that carry no
+    // grant) so a directed teardown can never reach a stale connection id.
+    registry.unindex_grant_connection(connection_id).await;
     if let Some(ctx) = &removed {
         let ctx = ctx.read().await;
         if let Err(e) = ctx.pc.close().await {
@@ -2803,6 +2860,26 @@ pub async fn cleanup_restricted_connections(
         .iter()
         .cloned()
         .collect();
+    for id in ids {
+        cleanup_pc(registry, worker_mgr, virtual_display, &id, reason).await;
+    }
+}
+
+/// Tear down every connection admitted under grant `grant_session_id` — a
+/// grant-directed revocation. Called when a grant is revoked or its logical
+/// session ends (e.g. the manager broadcasts a directed teardown after a device
+/// dial-code regeneration), so every connection sharing the grant ends
+/// physically, not just at the signaling layer. Snapshots the grant's connection
+/// ids first (each `cleanup_pc` prunes the reverse-index), then closes each PC. A
+/// no-op when the grant has no live connection.
+pub async fn close_grant_session(
+    registry: &PcRegistry,
+    worker_mgr: &WorkerManager,
+    virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
+    grant_session_id: &str,
+    reason: &str,
+) {
+    let ids = registry.connections_for_grant(grant_session_id).await;
     for id in ids {
         cleanup_pc(registry, worker_mgr, virtual_display, &id, reason).await;
     }
@@ -4493,6 +4570,11 @@ mod tests {
                 .await
                 .contains("conn-grant-1"),
         );
+        // ...and the connection is indexed under its grant for directed teardown.
+        assert_eq!(
+            registry.connections_for_grant("GS-1").await,
+            ["conn-grant-1"]
+        );
     }
 
     /// Regression: when the worker reports `X264` and `H264` as two
@@ -5566,6 +5648,72 @@ mod tests {
                 .await
                 .is_empty()
         );
+    }
+
+    /// A grant-directed teardown closes every connection that shares the grant in
+    /// one sweep (main + a second file-transfer connection of the same logical
+    /// session) while leaving connections of an unrelated grant / owner untouched,
+    /// and prunes the grant key once emptied.
+    #[tokio::test]
+    async fn close_grant_session_tears_down_all_grant_connections() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+            grant_session_id: None,
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        for id in ["conn-g1-main", "conn-g1-file", "conn-other"] {
+            registry
+                .create_for_request_remote(id, &request_remote, &s)
+                .await
+                .expect("pc");
+        }
+        registry
+            .index_grant_connection("GS-1", "conn-g1-main")
+            .await;
+        registry
+            .index_grant_connection("GS-1", "conn-g1-file")
+            .await;
+        registry.index_grant_connection("GS-2", "conn-other").await;
+        assert_eq!(registry.connections_for_grant("GS-1").await.len(), 2);
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+        close_grant_session(&registry, &worker_mgr, None, "GS-1", "test").await;
+
+        assert!(registry.get("conn-g1-main").await.is_none());
+        assert!(registry.get("conn-g1-file").await.is_none());
+        assert!(registry.get("conn-other").await.is_some());
+        // The emptied grant key is pruned; the unrelated grant survives.
+        assert!(registry.connections_for_grant("GS-1").await.is_empty());
+        assert_eq!(registry.connections_for_grant("GS-2").await, ["conn-other"]);
+    }
+
+    /// `cleanup_pc` prunes the grant reverse-index on teardown so a later directed
+    /// revocation can never reach a stale connection id, and drops the grant key
+    /// once its last connection departs.
+    #[tokio::test]
+    async fn cleanup_pc_unindexes_grant_connection() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+            grant_session_id: None,
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-g", &request_remote, &s)
+            .await
+            .expect("pc");
+        registry.index_grant_connection("GS-9", "conn-g").await;
+        assert_eq!(registry.connections_for_grant("GS-9").await, ["conn-g"]);
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+        cleanup_pc(&registry, &worker_mgr, None, "conn-g", "test").await;
+
+        assert!(registry.connections_for_grant("GS-9").await.is_empty());
     }
 
     /// `register_data_channel_router` is async-callable on a
