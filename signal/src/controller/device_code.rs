@@ -166,32 +166,52 @@ pub async fn update_device_code(
     let id = path.into_inner();
     let params = body.into_inner();
 
-    let model = device_code::Entity::find_by_id(id).one(db).await?;
-
-    if let Some(model) = model {
-        let mut active_model: device_code::ActiveModel = model.into();
-        active_model.device_code = Set(params.device_code.clone());
-        active_model.updated_at = Set(chrono::Utc::now());
-        let result = active_model.update(db).await?;
-        let connection_map_guard = connection_map.read().await;
-        let mut is_online = false;
-        for (_cid, cstate) in connection_map_guard.iter() {
-            if cstate.device_code.as_ref() == Some(&params.device_code) {
-                is_online = true;
-                break;
-            }
-        }
-        Ok(
-            HttpResponse::Ok().json(RestResponse::succeed_with_data(DeviceCodeItem::from_model(
-                result, is_online,
-            ))),
-        )
-    } else {
-        Err(DeskSignalError::new_custom_error(
+    let Some(result) = apply_device_code_update(db, id, &params.device_code).await? else {
+        return Err(DeskSignalError::new_custom_error(
             DeskErrorCode::SYSTEM_ERROR,
             "Device code not found",
-        ))
+        ));
+    };
+    let connection_map_guard = connection_map.read().await;
+    let mut is_online = false;
+    for (_cid, cstate) in connection_map_guard.iter() {
+        if cstate.device_code.as_ref() == Some(&params.device_code) {
+            is_online = true;
+            break;
+        }
     }
+    Ok(
+        HttpResponse::Ok().json(RestResponse::succeed_with_data(DeviceCodeItem::from_model(
+            result, is_online,
+        ))),
+    )
+}
+
+/// Apply a device-code edit: rotate the stored code and, when the code actually
+/// changes, bump `generation` so every access grant minted at the old generation is
+/// refused at redeem / stamp time (the `authorize` generation check). This is the
+/// single-instance signal's equivalent of the manager's dial-code regeneration
+/// (rule 22): no cross-instance directed teardown, since the generation bump alone
+/// supersedes the old code. A same-code edit only refreshes `updated_at`, leaving
+/// the generation untouched. Returns the updated model, or `None` if no code with
+/// that id exists.
+pub async fn apply_device_code_update<C: ConnectionTrait>(
+    db: &C,
+    id: i32,
+    new_code: &str,
+) -> Result<Option<device_code::Model>, DbErr> {
+    let Some(model) = device_code::Entity::find_by_id(id).one(db).await? else {
+        return Ok(None);
+    };
+    let code_changed = model.device_code != new_code;
+    let previous_generation = model.generation;
+    let mut active: device_code::ActiveModel = model.into();
+    active.device_code = Set(new_code.to_string());
+    active.updated_at = Set(chrono::Utc::now());
+    if code_changed {
+        active.generation = Set(previous_generation + 1);
+    }
+    Ok(Some(active.update(db).await?))
 }
 
 #[utoipa::path(
@@ -281,4 +301,71 @@ pub async fn batch_delete_device_codes(
     }
 
     Ok(HttpResponse::Ok().json(RestResponse::succeed()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::{Database, DatabaseConnection, Schema};
+
+    async fn setup() -> DatabaseConnection {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let schema = Schema::new(db.get_database_backend());
+        db.execute(&schema.create_table_from_entity(device_code::Entity))
+            .await
+            .unwrap();
+        db
+    }
+
+    async fn seed(db: &DatabaseConnection, client_id: &str, code: &str) -> device_code::Model {
+        device_code::ActiveModel {
+            client_id: Set(client_id.to_string()),
+            device_code: Set(code.to_string()),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn changing_the_code_bumps_generation() {
+        let db = setup().await;
+        let seeded = seed(&db, "client-a", "OLD123").await;
+        assert_eq!(seeded.generation, 0);
+
+        let updated = apply_device_code_update(&db, seeded.id, "NEW456")
+            .await
+            .unwrap()
+            .expect("code exists");
+        // A rotated code supersedes the old generation so old grants are refused.
+        assert_eq!(updated.device_code, "NEW456");
+        assert_eq!(updated.generation, 1);
+    }
+
+    #[tokio::test]
+    async fn same_code_leaves_generation_untouched() {
+        let db = setup().await;
+        let seeded = seed(&db, "client-a", "SAME00").await;
+
+        let updated = apply_device_code_update(&db, seeded.id, "SAME00")
+            .await
+            .unwrap()
+            .expect("code exists");
+        // No code change ⇒ no regeneration ⇒ generation is untouched.
+        assert_eq!(updated.generation, 0);
+    }
+
+    #[tokio::test]
+    async fn unknown_id_is_none() {
+        let db = setup().await;
+        assert!(
+            apply_device_code_update(&db, 999, "X")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 }
