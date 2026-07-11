@@ -60,6 +60,37 @@ impl Default for SecuritySettings {
 }
 
 impl SecuritySettings {
+    /// A ceiling with every capability dimension left unset (`None` — "prompt"),
+    /// the restrictive default for a shareable access-grant code with no explicit
+    /// owner configuration. Constructed explicitly rather than via [`Default`] so
+    /// it stays all-`None` independently of any future change to the global
+    /// [`Default`] (which governs the host's own settings, a separate concern): a
+    /// code must never silently widen to full control because the global default
+    /// flipped.
+    pub fn all_prompt() -> Self {
+        Self {
+            allow_remote_control: None,
+            allow_clipboard_sync: None,
+            allow_private_screen: None,
+            allow_whiteboard: None,
+            allow_terminal: None,
+            allow_file_browse: None,
+            allow_file_transfer: None,
+            approval_timeout: None,
+        }
+    }
+
+    /// Parse an owner-configured per-code capability ceiling from its stored JSON
+    /// form (the `device_code.capabilities` column). A missing column or any parse
+    /// failure yields the restrictive [`Self::all_prompt`] ceiling — a code never
+    /// fails open to a wider ceiling than the owner configured.
+    pub fn parse_code_ceiling(stored: Option<&str>) -> Self {
+        match stored {
+            Some(json) => serde_json::from_str(json).unwrap_or_else(|_| Self::all_prompt()),
+            None => Self::all_prompt(),
+        }
+    }
+
     /// Normalize an unset `approval_timeout` (`None`) to the finite default.
     ///
     /// Under the current semantics only the explicit present value `Some(0)`
@@ -83,6 +114,43 @@ mod tests {
         assert_eq!(
             SecuritySettings::default().approval_timeout,
             Some(DEFAULT_APPROVAL_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn all_prompt_leaves_every_capability_unset() {
+        let c = SecuritySettings::all_prompt();
+        assert_eq!(c.allow_remote_control, None);
+        assert_eq!(c.allow_clipboard_sync, None);
+        assert_eq!(c.allow_private_screen, None);
+        assert_eq!(c.allow_whiteboard, None);
+        assert_eq!(c.allow_terminal, None);
+        assert_eq!(c.allow_file_browse, None);
+        assert_eq!(c.allow_file_transfer, None);
+        assert_eq!(c.approval_timeout, None);
+    }
+
+    #[test]
+    fn parse_code_ceiling_falls_back_to_all_prompt() {
+        // Missing config → all-prompt (restrictive).
+        assert_eq!(
+            SecuritySettings::parse_code_ceiling(None),
+            SecuritySettings::all_prompt()
+        );
+        // Malformed JSON → all-prompt, never fails open.
+        assert_eq!(
+            SecuritySettings::parse_code_ceiling(Some("{not json")),
+            SecuritySettings::all_prompt()
+        );
+        // Valid config round-trips.
+        let configured = SecuritySettings {
+            allow_terminal: Some(true),
+            ..SecuritySettings::all_prompt()
+        };
+        let json = serde_json::to_string(&configured).unwrap();
+        assert_eq!(
+            SecuritySettings::parse_code_ceiling(Some(&json)),
+            configured
         );
     }
 

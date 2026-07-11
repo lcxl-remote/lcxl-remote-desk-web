@@ -35,6 +35,7 @@ use crate::{
         init::init_system,
         login::{change_password, get_captcha, login_account, login_tauri, logout_account},
         manager_link::{query_manager_link_status, retry_manager_link},
+        redeem::redeem_code,
         service_mgmt::{install_service, uninstall_service},
         settings::{
             ack_security_approval, query_ai_policy_settings, query_collection_policy_settings,
@@ -171,8 +172,15 @@ pub fn configure_api_surface(
     // Signaling WS is registered at the top level (outside the `/api` scope) so
     // it bypasses `reject_anonymous_users` — the handler performs its own
     // token/session auth. It MUST be registered before the `/api` scope below.
+    //
+    // Code redemption is likewise a top-level public route: the redeemer is
+    // anonymous (it has no owner session yet), so it must bypass the owner-only
+    // guard. It mints a capability-scoped code-session, never a full session, and
+    // only exists where an embedded signal (and its connection map) does. Its
+    // exact `/api/desk/redeem-code` path, registered before the `/api` scope, is
+    // matched here rather than by the guarded scope.
     if opts.include_signaling {
-        cfg.service(open_signaling_handle);
+        cfg.service(open_signaling_handle).service(redeem_code);
     }
 
     cfg.service(

@@ -5,6 +5,7 @@ use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 use desk_signal_facade::{
     model::{
+        code_session::{CODE_SESSION_KEY, CodeSessionCookie},
         probe::{SIGNALING_PROBE_HEADER, SIGNALING_PROBE_HEADER_VALUE, is_probe_query},
         signal::RemoteDeskTypeEnum,
         version::VersionInfo,
@@ -133,23 +134,39 @@ pub async fn open_signaling_handle(
         .map(|vi| vi.remote_desk_type)
         .unwrap_or(RemoteDeskTypeEnum::Browser);
 
-    let (user, adjudicated_type) = match adjudicate_role(token_outcome, reported_type) {
+    let (user, adjudicated_type, code_session) = match adjudicate_role(token_outcome, reported_type)
+    {
         RoleDecision::Reject => {
             log::warn!("Invalid node token provided");
             return Err(actix_web::error::ErrorUnauthorized("Unauthorized"));
         }
         RoleDecision::Node(role) => {
             info!("Node token validated successfully");
-            (CurrentUser::new_admin("server_node"), role)
+            (CurrentUser::new_admin("server_node"), role, None)
         }
         RoleDecision::Cookie => {
             // No token: authenticate via the session cookie. Such a connection is
-            // always a Browser, regardless of any self-reported role.
-            let Some(u) = session.get_current_user::<CurrentUser>()? else {
+            // always a Browser, regardless of any self-reported role. Prefer the
+            // owner (single-account `CurrentUser`); otherwise accept a
+            // capability-scoped code-session (an anonymous redeemer). Anything else
+            // is rejected — a bare anonymous connection is never admitted here.
+            if let Some(u) = session.get_current_user::<CurrentUser>()? {
+                (u, RemoteDeskTypeEnum::Browser, None)
+            } else if let Some(cs) = session.get::<CodeSessionCookie>(CODE_SESSION_KEY)? {
+                // Synthesize a routing identity that pins signaling to the redeemed
+                // target (reusing the device-scoped `forward_to_peer` isolation).
+                // Its authority is *not* owner: the capability ceiling is enforced
+                // via the code-session `AuthContext` principal downstream, and it
+                // is never stored back as a `CurrentUser`, so it cannot reach the
+                // owner-only REST surface.
+                let mut u = CurrentUser::new_admin("code_session");
+                u.access = Some("device_user".to_string());
+                u.target_connection_id = Some(cs.target_connection_id.clone());
+                (u, RemoteDeskTypeEnum::Browser, Some(cs))
+            } else {
                 log::warn!("User not logged in and no valid node token provided");
                 return Err(actix_web::error::ErrorUnauthorized("Unauthorized"));
-            };
-            (u, RemoteDeskTypeEnum::Browser)
+            }
         }
     };
 
@@ -204,6 +221,7 @@ pub async fn open_signaling_handle(
             ip,
             turn_settings,
             conn_device_map.map(|d| d.into_inner()),
+            code_session,
         )
         .await;
         if let Err(e) = result {

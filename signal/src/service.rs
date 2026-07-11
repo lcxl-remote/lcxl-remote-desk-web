@@ -125,6 +125,7 @@ pub async fn handle_signaling(
     ip: Option<String>,
     turn: Option<TurnSettings>,
     conn_device_map: Option<Arc<crate::turn_usage::ConnectionDeviceMap>>,
+    code_session: Option<desk_signal_facade::model::code_session::CodeSessionCookie>,
 ) -> Result<(), DeskSignalError> {
     log::info!("Handling signaling");
     let random_uuid = Uuid::new_v4();
@@ -161,7 +162,15 @@ pub async fn handle_signaling(
 
     // Signal is the OSS single-account central brain: it resolves the connection's
     // identity so its control-frame authorizer can stamp a trusted actor/target.
-    let auth_context = single_account_auth_context(client_version_info.remote_desk_type);
+    // A capability-scoped code-session resolves to its own principal (never the
+    // single-account owner) so the RequestRemote authorizer stamps the redeemed
+    // code's ceiling rather than full control.
+    let auth_context = match &code_session {
+        Some(cs) => desk_signal_facade::model::auth_context::AuthContext::code_session(
+            cs.code_session_id.clone(),
+        ),
+        None => single_account_auth_context(client_version_info.remote_desk_type),
+    };
 
     // The central-brain injection points: a single-account policy decision point
     // that authorizes/orchestrates the control-end AI frames, and a collect

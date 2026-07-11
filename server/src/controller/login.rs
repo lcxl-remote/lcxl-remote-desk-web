@@ -4,10 +4,6 @@ use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 use desk_server_version::SERVER_API_VERSION;
 use log::{error, info};
 
-use std::collections::HashMap;
-use std::time::Instant;
-use tokio::sync::RwLock;
-
 use crate::{
     error::DeskErrorCode,
     model::{
@@ -16,9 +12,6 @@ use crate::{
     },
 };
 use desk_utils::rest::RestResponse;
-
-static DEVICE_CODE_RATE_LIMIT: std::sync::LazyLock<RwLock<HashMap<String, (u32, Instant)>>> =
-    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
 pub const TAG: &str = "Auth";
 
@@ -33,10 +26,8 @@ pub const TAG: &str = "Auth";
 )]
 #[post("/api/login/account")]
 pub async fn login_account(
-    req: actix_web::HttpRequest,
     requst_json: web::Json<LoginParams>,
     settings: web::Data<SharedSettings>,
-    connection_map: web::Data<desk_signal::model::SharedConnectionMap>,
     session: Session,
 ) -> Result<HttpResponse, AWError> {
     let params = requst_json.into_inner();
@@ -45,76 +36,10 @@ pub async fn login_account(
         settings.args.startup_mode.as_ref().to_string()
     };
 
-    if params.login_type == "device_code" {
-        // Use the real TCP peer address, not `realip_remote_addr()`: the latter
-        // trusts a client-supplied `X-Forwarded-For` header, which an attacker can
-        // rotate to defeat the per-IP rate limit below. The peer address cannot be
-        // spoofed. (Behind a reverse proxy this collapses to the proxy IP, which
-        // only makes the anti-abuse limit stricter, never bypassable.)
-        let ip = rate_limit_client_ip(&req);
-
-        let mut rate_limit = DEVICE_CODE_RATE_LIMIT.write().await;
-        let now = Instant::now();
-
-        // Rate limit: 5 times per minute per IP
-        if let Some((count, last_time)) = rate_limit.get_mut(&ip) {
-            if now.duration_since(*last_time).as_secs() < 60 {
-                if *count >= 5 {
-                    return Ok(HttpResponse::Forbidden().json(RestResponse::<()>::failed(
-                        DeskErrorCode::SYSTEM_ERROR,
-                        "Too many attempts. Please try again later.".to_string(),
-                    )));
-                }
-                *count += 1;
-            } else {
-                *count = 1;
-                *last_time = now;
-            }
-        } else {
-            rate_limit.insert(ip, (1, now));
-        }
-
-        let device_code = params.device_code.clone().unwrap_or_default();
-        if device_code.is_empty() {
-            return Ok(HttpResponse::Forbidden().json(RestResponse::<()>::failed(
-                DeskErrorCode::SYSTEM_ERROR,
-                "Device code is empty".to_string(),
-            )));
-        }
-
-        let connection_map_guard = connection_map.read().await;
-        let mut target_connection_id = None;
-
-        for (cid, cstate) in connection_map_guard.iter() {
-            if cstate.device_code.as_ref() == Some(&device_code) {
-                target_connection_id = Some(cid.clone());
-                break;
-            }
-        }
-
-        if let Some(target_id) = target_connection_id {
-            let mut user_info = CurrentUser::new_admin("device_user");
-            user_info.access = Some("device_user".to_string());
-            user_info.target_connection_id = Some(target_id.clone());
-            session.set_current_user(&user_info)?;
-
-            let result = LoginResult {
-                status: String::from("ok"),
-                login_type: params.login_type,
-                current_authority: String::from("device_user"),
-                api_version: SERVER_API_VERSION,
-                target_connection_id: Some(target_id),
-                startup_mode: Some(startup_mode),
-            };
-            info!("Device code login successful");
-            return Ok(HttpResponse::Ok().json(result));
-        } else {
-            return Ok(HttpResponse::Forbidden().json(RestResponse::<()>::failed(
-                DeskErrorCode::SYSTEM_ERROR,
-                "Device code not found or device is offline".to_string(),
-            )));
-        }
-    }
+    // Device-code redemption no longer logs in as a full account. An anonymous
+    // redeemer is a capability-scoped code-session minted by `redeem_code`
+    // (`/api/desk/redeem-code`), never the owner. Account login is
+    // username/password only.
     {
         let settings = settings.read().await;
         if settings.user.login_user_name != params.username {
@@ -322,15 +247,6 @@ pub async fn login_tauri(
     Ok(HttpResponse::Ok().json(result))
 }
 
-/// Resolve the client IP for anti-abuse rate limiting from the real TCP peer
-/// address, deliberately ignoring `X-Forwarded-For`. A header-based source can be
-/// rotated by an attacker to evade a per-IP limit; the peer address cannot.
-fn rate_limit_client_ip(req: &actix_web::HttpRequest) -> String {
-    req.peer_addr()
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,18 +259,6 @@ mod tests {
         web,
     };
     use std::env;
-
-    /// The rate-limit IP comes from the TCP peer address and must ignore a
-    /// spoofable `X-Forwarded-For` header.
-    #[test]
-    fn rate_limit_ip_uses_peer_addr_not_xff() {
-        let peer: std::net::SocketAddr = "9.9.9.9:40000".parse().unwrap();
-        let req = TestRequest::default()
-            .peer_addr(peer)
-            .insert_header(("X-Forwarded-For", "1.2.3.4"))
-            .to_http_request();
-        assert_eq!(rate_limit_client_ip(&req), "9.9.9.9");
-    }
 
     fn create_test_settings() -> SharedSettings {
         let mut settings = Settings::default();
@@ -375,13 +279,9 @@ mod tests {
     #[actix_web::test]
     async fn test_login_success() {
         let settings = create_test_settings();
-        let connection_map = web::Data::new(desk_signal::model::SharedConnectionMap::from(
-            std::collections::BTreeMap::new(),
-        ));
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(settings))
-                .app_data(connection_map)
                 .wrap(SessionMiddleware::new(
                     CookieSessionStore::default(),
                     Key::generate(),
@@ -411,13 +311,9 @@ mod tests {
     #[actix_web::test]
     async fn test_login_failure() {
         let settings = create_test_settings();
-        let connection_map = web::Data::new(desk_signal::model::SharedConnectionMap::from(
-            std::collections::BTreeMap::new(),
-        ));
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(settings))
-                .app_data(connection_map)
                 .wrap(SessionMiddleware::new(
                     CookieSessionStore::default(),
                     Key::generate(),
