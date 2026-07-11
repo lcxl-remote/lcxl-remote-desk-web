@@ -1,18 +1,20 @@
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Monitor, Terminal as TerminalIcon, Folder, ArrowLeft, Cpu, Globe, Server, Clock } from "lucide-react"
+import { Monitor, Terminal as TerminalIcon, Folder, ArrowLeft, Cpu, Globe, Server, Clock, Lock } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card"
 import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Badge } from "@/components/ui/badge"
+import { useRestrictedSession } from "@/features/desk/restricted-session"
 
 export default function DeskDashboard() {
     const { id: deskId } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const { t } = useTranslation()
     const { data: connections, isLoading } = useListConnections()
+    const restricted = useRestrictedSession(deskId)
 
     const connection = connections?.find((s: any) => s.connection_id === deskId)
 
@@ -53,6 +55,12 @@ export default function DeskDashboard() {
                                 {connection.version_info?.display_name || t('pages.deskDashboard.unnamedConnection')}
                             </h2>
                             <Badge variant="default" className="bg-green-500 hover:bg-green-600">{t('pages.deskDashboard.online')}</Badge>
+                            {restricted.isRestricted && (
+                                <Badge variant="outline" className="gap-1 border-amber-500 text-amber-500">
+                                    <Lock className="h-3 w-3" />
+                                    {t('pages.desk.restricted.indicator')}
+                                </Badge>
+                            )}
                         </div>
                         <p className="text-muted-foreground">
                             {t('pages.deskDashboard.connectionId')}{connection.connection_id}
@@ -116,6 +124,7 @@ export default function DeskDashboard() {
                         </CardFooter>
                     </Card>
 
+                    {restricted.capabilityVisible('allow_terminal') && (
                     <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(`/desk/${deskId}/terminal`)}>
                         <CardHeader>
                             <CardTitle className="flex items-center gap-2">
@@ -135,7 +144,9 @@ export default function DeskDashboard() {
                             <Button className="w-full" variant="secondary">{t('pages.deskDashboard.openTerminal')}</Button>
                         </CardFooter>
                     </Card>
+                    )}
 
+                    {restricted.capabilityVisible('allow_file_browse') && (
                     <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(`/desk/${deskId}/files`)}>
                         <CardHeader>
                             <CardTitle className="flex items-center gap-2">
@@ -155,6 +166,7 @@ export default function DeskDashboard() {
                             <Button className="w-full" variant="secondary">{t('pages.deskDashboard.browseFiles')}</Button>
                         </CardFooter>
                     </Card>
+                    )}
                 </div>
             </div>
         </div>

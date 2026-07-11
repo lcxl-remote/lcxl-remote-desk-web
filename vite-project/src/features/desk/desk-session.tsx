@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react"
 import type { MouseEvent as ReactMouseEvent } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle, AlertTriangle, Sparkles, SignalHigh, SignalMedium, SignalLow } from "lucide-react"
+import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle, AlertTriangle, Sparkles, SignalHigh, SignalMedium, SignalLow, Lock } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { connectionQuality } from "./connection-quality"
 import {
@@ -39,6 +39,7 @@ import { useResolutionToast } from "./use-resolution-toast"
 import { isWebRtcAvailable } from "./webrtc-support"
 import { useToast } from "@/hooks/use-toast"
 import type { DeskSettings } from "@/services/types"
+import { useRestrictedSession } from "@/features/desk/restricted-session"
 import {
     SIGNALING_TYPE_CODE_REQUEST_REMOTE,
     SIGNALING_TYPE_CODE_REQUIRE_CONTROL,
@@ -122,14 +123,26 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
 
     const { isConnected, subscribe, sendMessage, sendTracked, cancelQueued } = useDeskSignaling(deskId || null)
 
+    // Restriction state derived from the redeemed grant (if any) for this target.
+    const restricted = useRestrictedSession(deskId);
+    const grantSessionId = restricted.grantSessionId;
+
     const handleConnect = useCallback(() => {
         if (deskId && !hasRequestedRef.current) {
             console.log("WebSocket opened, requesting remote connection directly:", deskId);
-            sendMessage(SIGNALING_TYPE_CODE_REQUEST_REMOTE, { connection_id: deskId }, deskId);
+            // Carry the grant token so the trusted central looks up the grant and
+            // stamps the code's ceiling; owner sessions have no grant and omit it.
+            const requestData: { connection_id: string; grant_session_id?: string } = {
+                connection_id: deskId,
+            };
+            if (grantSessionId) {
+                requestData.grant_session_id = grantSessionId;
+            }
+            sendMessage(SIGNALING_TYPE_CODE_REQUEST_REMOTE, requestData, deskId);
             hasRequestedRef.current = true;
             setHasRequested(true);
         }
-    }, [deskId, sendMessage]);
+    }, [deskId, sendMessage, grantSessionId]);
 
     useEffect(() => {
         if (isConnected) {
@@ -674,13 +687,18 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     };
 
     const handleRequestControl = () => {
+        // In a restricted session, only auto-request the capabilities the code's
+        // ceiling does not deny; an owner session leaves every dimension visible so
+        // this keeps the previous unconditional behaviour.
+        const wantClipboard = !hasControl && restricted.capabilityVisible('allow_clipboard_sync');
+        const wantFileTransfer = !hasControl && restricted.capabilityVisible('allow_file_transfer');
         const requestControlData = {
             accept: !hasControl,
-            accept_clipboard_sync: !hasControl, // Auto-request clipboard by default on control
-            accept_file_transfer: !hasControl,
+            accept_clipboard_sync: wantClipboard, // Auto-request clipboard when the ceiling allows it
+            accept_file_transfer: wantFileTransfer,
         };
         // Auto-enable UI state if asking for control
-        if (!hasControl && window.isSecureContext !== false) {
+        if (wantClipboard && window.isSecureContext !== false) {
             if (!clipboardEnabled) toggleClipboard();
         }
 
@@ -1364,21 +1382,35 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                                     inert={!isControlBarExpanded ? true : undefined}
                                 >
                                     <div className="controlButtons">
-                                    <Tooltip>
-                                        <TooltipTrigger asChild>
-                                            <Button
-                                                variant="ghost"
-                                                className="controlButton"
-                                                onClick={handleRequestControl}
-                                                disabled={isWaitingApproval}
-                                            >
-                                                {isWaitingApproval ? <Loader2 className="animate-spin" /> : hasControl ? <XSquare /> : <MousePointer2 />}
-                                            </Button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>
-                                            <p>{isWaitingApproval ? t('pages.desk.waitingPermission') : hasControl ? t('pages.desk.exitControl') : t('pages.desk.requestControl')}</p>
-                                        </TooltipContent>
-                                    </Tooltip>
+                                    {restricted.isRestricted && (
+                                        <Tooltip>
+                                            <TooltipTrigger asChild>
+                                                <span className="controlButton flex items-center justify-center text-amber-400 cursor-default" aria-label={t('pages.desk.restricted.indicator')}>
+                                                    <Lock />
+                                                </span>
+                                            </TooltipTrigger>
+                                            <TooltipContent>
+                                                <p>{t('pages.desk.restricted.indicator')}</p>
+                                            </TooltipContent>
+                                        </Tooltip>
+                                    )}
+                                    {restricted.capabilityVisible('allow_remote_control') && (
+                                        <Tooltip>
+                                            <TooltipTrigger asChild>
+                                                <Button
+                                                    variant="ghost"
+                                                    className="controlButton"
+                                                    onClick={handleRequestControl}
+                                                    disabled={isWaitingApproval}
+                                                >
+                                                    {isWaitingApproval ? <Loader2 className="animate-spin" /> : hasControl ? <XSquare /> : <MousePointer2 />}
+                                                </Button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>
+                                                <p>{isWaitingApproval ? t('pages.desk.waitingPermission') : hasControl ? t('pages.desk.exitControl') : t('pages.desk.requestControl')}</p>
+                                            </TooltipContent>
+                                        </Tooltip>
+                                    )}
 
                                     <Tooltip>
                                         <TooltipTrigger asChild>
@@ -1395,20 +1427,22 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                                         </TooltipContent>
                                     </Tooltip>
 
-                                    <Tooltip>
-                                        <TooltipTrigger asChild>
-                                            <Button
-                                                variant="ghost"
-                                                className="controlButton"
-                                                onClick={() => setIsConfigOpen(true)}
-                                            >
-                                                <Settings />
-                                            </Button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>
-                                            <p>{t('pages.desk.settings')}</p>
-                                        </TooltipContent>
-                                    </Tooltip>
+                                    {restricted.ownerPlaneVisible && (
+                                        <Tooltip>
+                                            <TooltipTrigger asChild>
+                                                <Button
+                                                    variant="ghost"
+                                                    className="controlButton"
+                                                    onClick={() => setIsConfigOpen(true)}
+                                                >
+                                                    <Settings />
+                                                </Button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>
+                                                <p>{t('pages.desk.settings')}</p>
+                                            </TooltipContent>
+                                        </Tooltip>
+                                    )}
 
                                     <Tooltip>
                                         <TooltipTrigger asChild>
@@ -1446,24 +1480,26 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                                         </defs>
                                     </svg>
 
-                                    <Tooltip>
-                                        <TooltipTrigger asChild>
-                                            <Button
-                                                variant="ghost"
-                                                className={`controlButton ${showDiagnose ? "bg-white/20" : ""}`}
-                                                onClick={() => setShowDiagnose(!showDiagnose)}
-                                                onMouseEnter={() => setIsDiagnoseHovered(true)}
-                                                onMouseLeave={() => setIsDiagnoseHovered(false)}
-                                            >
-                                                <Sparkles style={{ stroke: "url(#ai-rainbow-gradient)" }} />
-                                            </Button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>
-                                            <p>{showDiagnose ? t('pages.desk.diagnose.hidePanel') : t('pages.desk.diagnose.showPanel')}</p>
-                                        </TooltipContent>
-                                    </Tooltip>
+                                    {restricted.ownerPlaneVisible && (
+                                        <Tooltip>
+                                            <TooltipTrigger asChild>
+                                                <Button
+                                                    variant="ghost"
+                                                    className={`controlButton ${showDiagnose ? "bg-white/20" : ""}`}
+                                                    onClick={() => setShowDiagnose(!showDiagnose)}
+                                                    onMouseEnter={() => setIsDiagnoseHovered(true)}
+                                                    onMouseLeave={() => setIsDiagnoseHovered(false)}
+                                                >
+                                                    <Sparkles style={{ stroke: "url(#ai-rainbow-gradient)" }} />
+                                                </Button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>
+                                                <p>{showDiagnose ? t('pages.desk.diagnose.hidePanel') : t('pages.desk.diagnose.showPanel')}</p>
+                                            </TooltipContent>
+                                        </Tooltip>
+                                    )}
 
-                                    {hasControl && isPrivateScreenSupported && (
+                                    {hasControl && isPrivateScreenSupported && restricted.capabilityVisible('allow_private_screen') && (
                                         <Tooltip>
                                             <TooltipTrigger asChild>
                                                 <Button
@@ -1480,7 +1516,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                                         </Tooltip>
                                     )}
 
-                                    {hasControl && (
+                                    {hasControl && restricted.capabilityVisible('allow_clipboard_sync') && (
                                         <Tooltip>
                                             <TooltipTrigger asChild>
                                                 <Button
@@ -1526,24 +1562,26 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                                     )}
 
                                     {/* Whiteboard button */}
-                                    <Tooltip>
-                                        <TooltipTrigger asChild>
-                                            <Button
-                                                variant="ghost"
-                                                className={`controlButton ${whiteboard.isActive ? 'text-yellow-400' : ''}`}
-                                                onClick={whiteboard.toggleWhiteboard}
-                                                disabled={!whiteboard.canActivate}
-                                            >
-                                                <PenTool />
-                                            </Button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>
-                                            <p>{whiteboard.canActivate
-                                                ? (whiteboard.isActive ? t('pages.desk.closeWhiteboard') : t('pages.desk.openWhiteboard'))
-                                                : t('pages.desk.whiteboardUnavailable')}
-                                            </p>
-                                        </TooltipContent>
-                                    </Tooltip>
+                                    {restricted.capabilityVisible('allow_whiteboard') && (
+                                        <Tooltip>
+                                            <TooltipTrigger asChild>
+                                                <Button
+                                                    variant="ghost"
+                                                    className={`controlButton ${whiteboard.isActive ? 'text-yellow-400' : ''}`}
+                                                    onClick={whiteboard.toggleWhiteboard}
+                                                    disabled={!whiteboard.canActivate}
+                                                >
+                                                    <PenTool />
+                                                </Button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>
+                                                <p>{whiteboard.canActivate
+                                                    ? (whiteboard.isActive ? t('pages.desk.closeWhiteboard') : t('pages.desk.openWhiteboard'))
+                                                    : t('pages.desk.whiteboardUnavailable')}
+                                                </p>
+                                            </TooltipContent>
+                                        </Tooltip>
+                                    )}
 
                                     {/* Microphone button */}
                                     <Tooltip>

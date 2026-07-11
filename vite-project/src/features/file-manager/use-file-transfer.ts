@@ -9,6 +9,7 @@ import {
     SIGNALING_TYPE_CODE_CLOSE_CONTROL,
 } from '../desk/constants';
 import { createAcceptGate } from './upload-accept-gate';
+import { readSessionGrant } from '@/features/desk/session-grant';
 import {
     BufferedDownloadSink,
     StreamingDownloadSink,
@@ -484,11 +485,21 @@ export function useFileTransfer(deskId: string | undefined) {
             wsRef.current = ws;
 
             ws.onopen = () => {
-                // Request remote session
+                // Request remote session. The file transfer rides a second WebRTC
+                // connection to the same target, so it must carry the same grant token
+                // as the main session for the trusted central to stamp the code's
+                // ceiling on it; an owner session has no grant and omits it.
+                const grant = readSessionGrant(deskId);
+                const signaling_data: { connection_id: string; grant_session_id?: string } = {
+                    connection_id: deskId,
+                };
+                if (grant?.grantSessionId) {
+                    signaling_data.grant_session_id = grant.grantSessionId;
+                }
                 const msg = {
                     request_id: uuidv4(),
                     signaling_type: SIGNALING_TYPE_CODE_REQUEST_REMOTE,
-                    signaling_data: { connection_id: deskId },
+                    signaling_data,
                     to_connection_id: deskId,
                 };
                 ws.send(JSON.stringify(msg));

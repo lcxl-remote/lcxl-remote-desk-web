@@ -20,8 +20,10 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useToast } from "@/hooks/use-toast"
 import { useLoginAccount } from "@/services/hooks/authController/useLoginAccount"
+import { useRedeemCode } from "@/services/hooks/authController/useRedeemCode"
 import { useGetCurrentUser } from "@/services/hooks/userController/useGetCurrentUser"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
+import { saveSessionGrant, clearSessionGrant } from "@/features/desk/session-grant"
 import { ModeToggle } from "@/components/mode-toggle"
 import { LanguageToggle } from "@/components/language-toggle"
 
@@ -43,6 +45,7 @@ export default function LoginPage() {
     const [activeTab, setActiveTab] = useState("account")
 
     const { mutateAsync: login } = useLoginAccount()
+    const { mutateAsync: redeem } = useRedeemCode()
     const { refetch: fetchUserInfo } = useGetCurrentUser()
     const { data: serverInfoResp, isLoading: isServerInfoLoading } = useQueryServerInfo()
 
@@ -103,13 +106,45 @@ export default function LoginPage() {
         },
     })
 
+    // Redeem an access-grant code into a capability-scoped session, then open the
+    // resolved target. This replaces the legacy "device-code login": the redeemer is
+    // no longer the owner but a restricted session, so the grant token is stored for
+    // this target and carried on every RequestRemote.
+    async function onRedeemCode(values: FormValues) {
+        const resp = await redeem({ data: { code: (values.deviceCode || "").trim() } })
+        // The kubb client rejects a `success:false` envelope, so reaching here means
+        // the redemption succeeded and `data` is present.
+        const result = resp?.data
+        if (!result?.target_connection_id) {
+            throw new Error(t("pages.login.deviceCode.offline"))
+        }
+        if (result.grant_session_id) {
+            // A capability-scoped session: remember the grant + ceiling for this target.
+            saveSessionGrant(result.target_connection_id, {
+                grantSessionId: result.grant_session_id,
+                accessCeiling: result.access_ceiling ?? null,
+                source: "device-code",
+            })
+        } else {
+            // Full control (no grant): drop any stale restricted grant for this target
+            // so a residual token cannot downgrade the session.
+            clearSessionGrant(result.target_connection_id)
+        }
+        toast({ title: t("pages.login.deviceCode.redeemSuccess") })
+        navigate(`/desk/${result.target_connection_id}`)
+    }
+
     async function onSubmit(values: FormValues) {
         try {
+            if (values.type === "device_code") {
+                await onRedeemCode(values)
+                return
+            }
+
             const response = await login({
                 data: {
-                    username: values.type === "account" ? (values.username || "") : "",
-                    password: values.type === "account" ? (values.password || "") : "",
-                    device_code: values.type === "device_code" ? values.deviceCode : undefined,
+                    username: values.username || "",
+                    password: values.password || "",
                     autoLogin: values.autoLogin,
                     type: values.type,
                 }
@@ -121,14 +156,6 @@ export default function LoginPage() {
                     title: t("pages.login.success"),
                 })
                 await fetchUserInfo()
-
-                if (values.type === "device_code") {
-                    const targetConnectionId = (response as any).targetConnectionId;
-                    if (targetConnectionId) {
-                        navigate(`/desk/${targetConnectionId}`)
-                        return;
-                    }
-                }
 
                 const redirect = searchParams.get("redirect") || "/"
                 navigate(redirect)
@@ -145,10 +172,6 @@ export default function LoginPage() {
                 errorMsg = error.response.data.message;
             } else if (typeof error?.response?.data === 'string') {
                 errorMsg = error.response.data;
-            }
-
-            if (values.type === "device_code" && error?.response?.status === 403) {
-                errorMsg = t("pages.login.deviceCode.offline");
             }
 
             toast({
@@ -253,9 +276,10 @@ export default function LoginPage() {
                                             </FormItem>
                                         )}
                                     />
+                                    <p className="text-xs text-muted-foreground">{t('pages.login.deviceCode.hint')}</p>
                                     <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
                                         {form.formState.isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                                        {t('pages.login.submit')}
+                                        {t('pages.login.deviceCode.connect')}
                                     </Button>
                                 </form>
                             </Form>
