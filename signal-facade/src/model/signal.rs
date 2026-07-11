@@ -138,6 +138,15 @@ pub enum SignalingType {
     #[wincode(tag = 211)]
     RevokeSupportCode = 211,
 
+    /// Central brain (manager) → host (desk server): direct-close every in-flight
+    /// grant session for a device that was minted at a superseded generation, after
+    /// the device's dial code is regenerated. Carries the target device and the
+    /// revoked generation (see [`RevokeAccessGrantData`]); the host closes every
+    /// grant it holds whose recorded generation is `≤ revoked_generation`. A plain
+    /// signal server issues no such teardown, so it ignores this.
+    #[wincode(tag = 212)]
+    RevokeAccessGrant = 212,
+
     #[wincode(tag = 301)]
     UpdateDeskSettings = 301,
 

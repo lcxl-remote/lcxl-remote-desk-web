@@ -1,3 +1,4 @@
+pub mod access_grant;
 pub mod audio_capture;
 pub mod auth_context;
 pub mod code_session;

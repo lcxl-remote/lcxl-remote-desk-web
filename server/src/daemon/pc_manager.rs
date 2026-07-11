@@ -531,6 +531,16 @@ pub enum Admission {
 /// constructor-time cycle that the runtime-injection design was
 /// chosen to break. Tests that never set the handle keep the legacy
 /// "log + drop" behaviour.
+/// One entry of the grant-session reverse index: the generation the grant was
+/// minted at plus every live connection sharing it. All connections of one grant
+/// share the same generation (the central stamps it per RequestRemote); a directed
+/// teardown closes them together.
+#[derive(Debug, Default)]
+struct GrantSessionEntry {
+    generation: i64,
+    connections: HashSet<String>,
+}
+
 #[derive(Clone, Default)]
 pub struct PcRegistry {
     inner: Arc<RwLock<HashMap<String, Arc<RwLock<PeerConnectionContext>>>>>,
@@ -550,17 +560,18 @@ pub struct PcRegistry {
     /// point back at these so the node never relays through itself. Shared via
     /// `Arc` so registry clones stay cheap and consistent.
     own_turn_endpoints: Arc<HashSet<String>>,
-    /// Reverse index `grant_session_id -> connection_ids` for every connection
-    /// admitted under a redeemed grant (its `RequestRemoteAuthz` stamp carried a
-    /// `grant_session_id`). Lets the daemon target a whole logical grant session
-    /// for directed teardown / revocation — closing every connection that shares
-    /// one grant in a single sweep — instead of the coarse restricted-set. Owner /
-    /// unrestricted / legacy-support connections carry no grant and never appear
-    /// here. Populated by [`Self::index_grant_connection`] in
-    /// [`handle_request_remote`], pruned by [`Self::unindex_grant_connection`] on
-    /// every [`cleanup_pc`] teardown. Shared via `Arc` so registry clones stay
-    /// consistent.
-    grant_sessions: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    /// Reverse index `grant_session_id -> {generation, connection_ids}` for every
+    /// connection admitted under a redeemed grant (its `RequestRemoteAuthz` stamp
+    /// carried a `grant_session_id`). Lets the daemon target a whole logical grant
+    /// session for directed teardown / revocation — closing every connection that
+    /// shares one grant in a single sweep — instead of the coarse restricted-set.
+    /// The recorded generation lets a dial-code regeneration close every grant
+    /// minted at a superseded generation (see [`close_grants_up_to_generation`]).
+    /// Owner / unrestricted connections carry no grant and never appear here.
+    /// Populated by [`Self::index_grant_connection`] in [`handle_request_remote`],
+    /// pruned by [`Self::unindex_grant_connection`] on every [`cleanup_pc`]
+    /// teardown. Shared via `Arc` so registry clones stay consistent.
+    grant_sessions: Arc<RwLock<HashMap<String, GrantSessionEntry>>>,
     /// Signaling-connection admission classes, keyed by the server-authoritative
     /// `from_connection_id`. Recorded when a connection's `RequestRemote` is
     /// authorized (owner → [`Admission::OwnerFull`]; redeemed grant / legacy
@@ -654,13 +665,18 @@ impl PcRegistry {
     /// Record that `connection_id` was admitted under grant `grant_session_id`.
     /// Idempotent; multiple connections (main / file-transfer / reconnect) of one
     /// grant accumulate under the same key so a directed teardown reaches them all.
-    async fn index_grant_connection(&self, grant_session_id: &str, connection_id: &str) {
-        self.grant_sessions
-            .write()
-            .await
-            .entry(grant_session_id.to_string())
-            .or_default()
-            .insert(connection_id.to_string());
+    async fn index_grant_connection(
+        &self,
+        grant_session_id: &str,
+        generation: i64,
+        connection_id: &str,
+    ) {
+        let mut map = self.grant_sessions.write().await;
+        let entry = map.entry(grant_session_id.to_string()).or_default();
+        // All connections of one grant share its generation; record it on first
+        // insert (later inserts carry the same value).
+        entry.generation = generation;
+        entry.connections.insert(connection_id.to_string());
     }
 
     /// Drop `connection_id` from whatever grant session held it, removing the
@@ -669,9 +685,9 @@ impl PcRegistry {
     /// no grant.
     async fn unindex_grant_connection(&self, connection_id: &str) {
         let mut map = self.grant_sessions.write().await;
-        map.retain(|_, conns| {
-            conns.remove(connection_id);
-            !conns.is_empty()
+        map.retain(|_, entry| {
+            entry.connections.remove(connection_id);
+            !entry.connections.is_empty()
         });
     }
 
@@ -683,8 +699,22 @@ impl PcRegistry {
             .read()
             .await
             .get(grant_session_id)
-            .map(|conns| conns.iter().cloned().collect())
+            .map(|entry| entry.connections.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Snapshot the grant-session ids whose recorded generation is at or below
+    /// `revoked_generation`. Used by [`close_grants_up_to_generation`] to direct-
+    /// close every session minted before a dial-code regeneration. Owner sessions
+    /// (never indexed) are unaffected.
+    async fn grants_up_to_generation(&self, revoked_generation: i64) -> Vec<String> {
+        self.grant_sessions
+            .read()
+            .await
+            .iter()
+            .filter(|(_, entry)| entry.generation <= revoked_generation)
+            .map(|(gsid, _)| gsid.clone())
+            .collect()
     }
 
     /// Record how `connection_id` was admitted (owner vs. capped). Called from
@@ -1623,6 +1653,10 @@ pub async fn handle_request_remote(
     // The grant logical-session id this connection belongs to (`None` when there
     // is no grant). Indexes the connection for grant-directed teardown.
     grant_session_id: Option<String>,
+    // The device generation this grant was minted at (stamped by the central).
+    // Recorded with the grant so a dial-code regeneration can direct-close every
+    // session at a superseded generation. Ignored when there is no grant.
+    grant_generation: i64,
 ) -> Result<(), DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
     let request_remote = model.get_data::<RequestRemoteModel>()?;
@@ -1696,7 +1730,7 @@ pub async fn handle_request_remote(
         // Index the connection under its grant so a directed revocation / teardown
         // can reach every connection that shares the grant in one sweep.
         registry
-            .index_grant_connection(gsid, from_connection_id)
+            .index_grant_connection(gsid, grant_generation, from_connection_id)
             .await;
     }
 
@@ -2893,6 +2927,25 @@ pub async fn close_grant_session(
     let ids = registry.connections_for_grant(grant_session_id).await;
     for id in ids {
         cleanup_pc(registry, worker_mgr, virtual_display, &id, reason).await;
+    }
+}
+
+/// Tear down every grant session whose recorded generation is at or below
+/// `revoked_generation` — the directed teardown the manager triggers after a device
+/// dial-code regeneration (each superseded grant is closed via
+/// [`close_grant_session`], so all of its connections end together). Owner sessions
+/// carry no grant and are never indexed, so they are untouched. A no-op when no
+/// held grant is at or below the revoked generation.
+pub async fn close_grants_up_to_generation(
+    registry: &PcRegistry,
+    worker_mgr: &WorkerManager,
+    virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
+    revoked_generation: i64,
+    reason: &str,
+) {
+    let gsids = registry.grants_up_to_generation(revoked_generation).await;
+    for gsid in gsids {
+        close_grant_session(registry, worker_mgr, virtual_display, &gsid, reason).await;
     }
 }
 
@@ -4458,6 +4511,7 @@ mod tests {
             &model,
             None,
             None,
+            0,
         )
         .await
         .expect("handle ok");
@@ -4514,6 +4568,7 @@ mod tests {
             &model,
             None,
             None,
+            0,
         )
         .await
         .expect("handle ok");
@@ -4584,6 +4639,7 @@ mod tests {
             &model,
             Some(ceiling.clone()),
             Some("GS-1".to_string()),
+            5,
         )
         .await
         .expect("handle ok");
@@ -4623,6 +4679,11 @@ mod tests {
             registry.connections_for_grant("GS-1").await,
             ["conn-grant-1"]
         );
+        // The stamped generation (5) is recorded with the grant so a later
+        // regeneration can direct-close it by generation: revoking up to 5 selects
+        // it, up to 4 does not.
+        assert_eq!(registry.grants_up_to_generation(5).await, ["GS-1"]);
+        assert!(registry.grants_up_to_generation(4).await.is_empty());
     }
 
     /// A grant `RequestRemote` (ceiling `Some`) is fail-closed when the daemon has
@@ -4665,6 +4726,7 @@ mod tests {
             &model,
             Some(ceiling),
             Some("GS-2".to_string()),
+            9,
         )
         .await;
 
@@ -4733,6 +4795,7 @@ mod tests {
             &model,
             None,
             None,
+            0,
         )
         .await
         .expect("handle ok");
@@ -4865,6 +4928,7 @@ mod tests {
             &model,
             None,
             None,
+            0,
         )
         .await
         .expect("handle ok");
@@ -5703,12 +5767,14 @@ mod tests {
                 .expect("pc");
         }
         registry
-            .index_grant_connection("GS-1", "conn-g1-main")
+            .index_grant_connection("GS-1", 5, "conn-g1-main")
             .await;
         registry
-            .index_grant_connection("GS-1", "conn-g1-file")
+            .index_grant_connection("GS-1", 5, "conn-g1-file")
             .await;
-        registry.index_grant_connection("GS-2", "conn-other").await;
+        registry
+            .index_grant_connection("GS-2", 5, "conn-other")
+            .await;
         assert_eq!(registry.connections_for_grant("GS-1").await.len(), 2);
 
         let shared = SharedSettings::from(s);
@@ -5722,6 +5788,47 @@ mod tests {
         // The emptied grant key is pruned; the unrelated grant survives.
         assert!(registry.connections_for_grant("GS-1").await.is_empty());
         assert_eq!(registry.connections_for_grant("GS-2").await, ["conn-other"]);
+    }
+
+    /// A dial-code regeneration direct-closes every grant minted at or below the
+    /// revoked generation and leaves newer grants (and never-indexed owner sessions)
+    /// alone — the generation-scoped teardown driven by an inbound `RevokeAccessGrant`.
+    #[tokio::test]
+    async fn close_grants_up_to_generation_closes_only_superseded_grants() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+            grant_session_id: None,
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        for id in ["conn-old", "conn-new"] {
+            registry
+                .create_for_request_remote(id, &request_remote, &s)
+                .await
+                .expect("pc");
+        }
+        // Two grants of the same device at different generations: gen 3 (stale after
+        // a bump to 4) and gen 4 (the current one).
+        registry
+            .index_grant_connection("GS-old", 3, "conn-old")
+            .await;
+        registry
+            .index_grant_connection("GS-new", 4, "conn-new")
+            .await;
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+        // Regeneration to generation 4 revokes everything at generation <= 3.
+        close_grants_up_to_generation(&registry, &worker_mgr, None, 3, "dial_code_regenerated")
+            .await;
+
+        // The superseded grant's connection is gone; the current-generation grant
+        // survives untouched.
+        assert!(registry.get("conn-old").await.is_none());
+        assert!(registry.get("conn-new").await.is_some());
+        assert!(registry.connections_for_grant("GS-old").await.is_empty());
+        assert_eq!(registry.connections_for_grant("GS-new").await, ["conn-new"]);
     }
 
     /// `cleanup_pc` prunes the grant reverse-index on teardown so a later directed
@@ -5739,7 +5846,7 @@ mod tests {
             .create_for_request_remote("conn-g", &request_remote, &s)
             .await
             .expect("pc");
-        registry.index_grant_connection("GS-9", "conn-g").await;
+        registry.index_grant_connection("GS-9", 5, "conn-g").await;
         assert_eq!(registry.connections_for_grant("GS-9").await, ["conn-g"]);
 
         let shared = SharedSettings::from(s);

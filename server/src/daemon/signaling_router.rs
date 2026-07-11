@@ -226,6 +226,11 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::RequestSupportCode
         | SignalingType::RevokeSupportCode => RouteOwnership::Daemon,
 
+        // Grant-session revocation: manager → daemon, pushed after a dial-code
+        // regeneration. The daemon direct-closes the affected grant connections
+        // locally; never forwarded to the worker.
+        SignalingType::RevokeAccessGrant => RouteOwnership::Daemon,
+
         // Remote-collect request: manager → daemon. In the thin-edge model the
         // daemon runs its read-only collectors on behalf of the central
         // orchestrator and streams a chunked CollectResponse back; handled inline
@@ -650,10 +655,14 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             // bare (non-central) request carries none. A temporary-support session
             // now arrives as an ordinary redeemed grant (its ceiling comes from the
             // device's per-code capabilities), so there is no separate support path.
-            let (access_ceiling, grant_session_id) =
+            let (access_ceiling, grant_session_id, grant_generation) =
                 match ctx.inbound_request_remote_authz.as_ref() {
-                    Some(a) => (a.access_ceiling.clone(), a.grant_session_id.clone()),
-                    None => (None, None),
+                    Some(a) => (
+                        a.access_ceiling.clone(),
+                        a.grant_session_id.clone(),
+                        a.generation,
+                    ),
+                    None => (None, None, 0),
                 };
             let result = pc_manager::handle_request_remote(
                 &ctx.pc_registry,
@@ -667,6 +676,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                 model,
                 access_ceiling,
                 grant_session_id,
+                grant_generation,
             )
             .await;
 
@@ -869,6 +879,11 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // the manager (asking for / revoking a code); a stray inbound copy is
         // swallowed (the daemon never consumes its own request).
         SignalingType::RequestSupportCode | SignalingType::RevokeSupportCode => Ok(()),
+        // Grant-session teardown from the manager after a dial-code regeneration.
+        // The source gate (`is_trusted_central_only`) has already dropped any
+        // non-central origin before reaching here; the daemon direct-closes every
+        // grant it holds at a superseded generation.
+        SignalingType::RevokeAccessGrant => handle_revoke_access_grant_inbound(ctx, model).await,
         // Remote-collect request from the manager: run the daemon-side read-only
         // collectors and stream a chunked CollectResponse back. The source gate
         // (`handle_inbound_signaling_text`) has already dropped any non-Manager
@@ -1191,6 +1206,41 @@ fn handle_support_code_issued_inbound(
             state.request_stop();
         }
     });
+    Ok(())
+}
+
+/// Apply an inbound `RevokeAccessGrant` from the manager (the source gate has
+/// already dropped any non-central origin). Direct-closes every grant session this
+/// host holds whose recorded generation is `≤ revoked_generation`, cutting an
+/// already-established peer connection immediately after a dial-code regeneration —
+/// the in-flight teardown that the `authorize` generation check alone can only
+/// enforce on the session's *next* `RequestRemote`.
+async fn handle_revoke_access_grant_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    use desk_signal_facade::model::access_grant::RevokeAccessGrantData;
+    let payload = match model.get_data::<RevokeAccessGrantData>() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("[grant] bad RevokeAccessGrant payload: {e}");
+            return Ok(());
+        }
+    };
+    log::info!(
+        "[grant] manager revoked grants for device {} at generation <= {} (reason: {})",
+        payload.target_device,
+        payload.revoked_generation,
+        payload.reason
+    );
+    pc_manager::close_grants_up_to_generation(
+        &ctx.pc_registry,
+        &ctx.worker_mgr,
+        ctx.virtual_display.as_ref(),
+        payload.revoked_generation,
+        &payload.reason,
+    )
+    .await;
     Ok(())
 }
 

@@ -1374,6 +1374,15 @@ impl<U: SignalingUser> SignalingHandler<U> {
                      not be sent inbound — dropping"
                 );
             }
+            SignalingType::RevokeAccessGrant => {
+                // Manager → host only (a grant-session teardown pushed after a
+                // dial-code regeneration). It is server-originated, so a connection
+                // sending it inbound is misbehaving; drop it.
+                log::warn!(
+                    "Received RevokeAccessGrant from a client; it is server-originated and must \
+                     not be sent inbound — dropping"
+                );
+            }
         }
         Ok(())
     }

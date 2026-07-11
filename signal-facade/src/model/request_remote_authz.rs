@@ -68,6 +68,12 @@ pub struct RequestRemoteAuthz {
     /// **stamped** value, never the browser-writable selector. `None` for owner
     /// sessions (which are not revocable grants).
     pub grant_session_id: Option<String>,
+    /// The device's live code generation at stamp time, recorded by the host
+    /// alongside the grant so a later dial-code regeneration can direct-close every
+    /// in-flight session minted at a superseded generation (`generation ≤ revoked`).
+    /// Meaningful only for grant sessions (`grant_session_id.is_some()`); an owner
+    /// session is never indexed or revoked, so its value is a `0` placeholder.
+    pub generation: i64,
     /// The `request_id` of the frame this stamp authorizes; must match, so a
     /// stamp cannot be lifted onto a different frame.
     pub request_id: String,
@@ -126,6 +132,7 @@ mod tests {
             version: REQUEST_REMOTE_AUTHZ_VERSION,
             access_ceiling: None,
             grant_session_id: None,
+            generation: 0,
             request_id: "req-1".to_string(),
             audience: "host-client-abc".to_string(),
             expires_at: Some("2999-01-01T00:00:00Z".to_string()),

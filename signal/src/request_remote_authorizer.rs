@@ -111,6 +111,7 @@ fn build_stamped_outcome(
     model: &SignalingModel,
     access_ceiling: Option<desk_signal_facade::model::security_settings::SecuritySettings>,
     grant_session_id: Option<String>,
+    generation: i64,
     audience: String,
     expires_at_rfc3339: String,
 ) -> RequestRemoteOutcome {
@@ -124,6 +125,7 @@ fn build_stamped_outcome(
         version: REQUEST_REMOTE_AUTHZ_VERSION,
         access_ceiling,
         grant_session_id,
+        generation,
         request_id: model.request_id.clone(),
         audience,
         expires_at: Some(expires_at_rfc3339),
@@ -183,7 +185,7 @@ impl SignalRequestRemoteAuthorizer {
         principal: &GrantPrincipal,
         audience: &str,
         model: &SignalingModel,
-    ) -> Option<(Option<SecuritySettings>, Option<String>)> {
+    ) -> Option<(Option<SecuritySettings>, Option<String>, i64)> {
         let grant_session_id = model
             .get_data::<RequestRemoteModel>()
             .ok()
@@ -196,7 +198,9 @@ impl SignalRequestRemoteAuthorizer {
             .flatten()?;
         let current_generation = self.generation_lookup.current_generation(audience).await?;
         let ceiling = record.authorize(principal, audience, current_generation)?;
-        Some((ceiling, Some(grant_session_id)))
+        // Echo the live generation into the stamp so the host records it with the
+        // grant and can direct-close the session on a later regeneration.
+        Some((ceiling, Some(grant_session_id), current_generation))
     }
 }
 
@@ -244,7 +248,9 @@ impl RequestRemoteAuthorizer for SignalRequestRemoteAuthorizer {
             // → no ceiling (full control). The server resolves this from the
             // session, so a control end cannot fake it.
             if owner_actor_user_id(&actor.auth_context).is_some() {
-                return build_stamped_outcome(model, None, None, audience, expires_at);
+                // Owner session: no ceiling, no grant → never indexed / revoked on
+                // the host, so a `0` generation placeholder is never consulted.
+                return build_stamped_outcome(model, None, None, 0, audience, expires_at);
             }
 
             // A code-session authorizes solely through the grant it redeemed: stamp
@@ -256,10 +262,11 @@ impl RequestRemoteAuthorizer for SignalRequestRemoteAuthorizer {
                     .resolve_code_ceiling(&principal, &audience, model)
                     .await
                 {
-                    Some((ceiling, grant_session_id)) => build_stamped_outcome(
+                    Some((ceiling, grant_session_id, generation)) => build_stamped_outcome(
                         model,
                         ceiling,
                         grant_session_id,
+                        generation,
                         audience,
                         expires_at,
                     ),
@@ -375,8 +382,9 @@ mod tests {
                 &model,
             )
             .await;
-        // Stamps the code's ceiling (not full control) and echoes the grant id.
-        assert_eq!(resolved, Some((Some(code_ceiling()), Some(gsid))));
+        // Stamps the code's ceiling (not full control), echoes the grant id, and
+        // reports the live generation (0) for the host to record with the grant.
+        assert_eq!(resolved, Some((Some(code_ceiling()), Some(gsid), 0)));
     }
 
     #[tokio::test]
@@ -507,6 +515,7 @@ mod tests {
             &model,
             None,
             None,
+            0,
             "client-abc".to_string(),
             "2999-01-01T00:00:00Z".to_string(),
         );
@@ -552,6 +561,7 @@ mod tests {
             &model,
             None,
             None,
+            0,
             "client-abc".to_string(),
             "2999-01-01T00:00:00Z".to_string(),
         );

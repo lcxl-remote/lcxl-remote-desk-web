@@ -1723,7 +1723,8 @@ fn gate_fleet_exec_frame(
 /// accepted only from the trusted-central link. A Local / remote-signaling origin
 /// (no trusted PDP) must never inject operator templates, weaken the command
 /// blocklist, drive an evidence collection, dispatch a sealed execution plan,
-/// drive a remote read, or surface a forged support code to the local user.
+/// drive a remote read, surface a forged support code to the local user, or forge
+/// a grant-session teardown that tears down a legitimate session.
 fn is_trusted_central_only(t: SignalingType) -> bool {
     matches!(
         t,
@@ -1733,6 +1734,7 @@ fn is_trusted_central_only(t: SignalingType) -> bool {
             | SignalingType::EdgeExecRequest
             | SignalingType::RemoteToolRequest
             | SignalingType::SupportCodeIssued
+            | SignalingType::RevokeAccessGrant
     )
 }
 
@@ -1961,6 +1963,7 @@ mod tests {
             version: REQUEST_REMOTE_AUTHZ_VERSION,
             access_ceiling: ceiling,
             grant_session_id: None,
+            generation: 0,
             request_id: "req-1".to_string(),
             audience: RR_AUDIENCE.to_string(),
             expires_at: Some("2999-01-01T00:00:00Z".to_string()),
@@ -1973,6 +1976,9 @@ mod tests {
         // source gate must confine it to the trusted-central link — otherwise a
         // bare relay could push a forged code to the host UI.
         assert!(is_trusted_central_only(SignalingType::SupportCodeIssued));
+        // A `RevokeAccessGrant` is likewise server-originated (regeneration teardown);
+        // confining it stops a bare relay forging a teardown of a live session.
+        assert!(is_trusted_central_only(SignalingType::RevokeAccessGrant));
         // Alongside the other central→daemon plumbing.
         assert!(is_trusted_central_only(SignalingType::CommandBlocklistSync));
         assert!(is_trusted_central_only(SignalingType::CollectRequest));
