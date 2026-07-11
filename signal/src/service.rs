@@ -177,6 +177,8 @@ pub async fn handle_signaling(
     let collect_observer = std::sync::Arc::new(
         crate::diagnose_orchestrator::SignalCollectObserver::new(connection_map.clone()),
     );
+    let request_remote_authorizer =
+        std::sync::Arc::new(crate::request_remote_authorizer::SignalRequestRemoteAuthorizer::new());
 
     let mut handler = SignalingHandler::init(
         connection_id,
@@ -192,6 +194,7 @@ pub async fn handle_signaling(
     )
     .await?
     .with_control_authorizer(control_authorizer)
+    .with_request_remote_authorizer(request_remote_authorizer)
     .with_collect_observer(collect_observer);
 
     handler.do_handle_signaling(stream).await?;

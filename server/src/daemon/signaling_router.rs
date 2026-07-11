@@ -420,6 +420,16 @@ pub struct RouterContext {
     /// context (like `inbound_authz`) so the `route()` / handler signatures stay
     /// untouched.
     pub inbound_restricted: bool,
+    /// The validated capability-ceiling stamp for the current inbound
+    /// `RequestRemote`, set per call by the proxy after `gate_request_remote_frame`
+    /// accepts a wrapped frame on the trusted-central link. `None` for a bare
+    /// (non-central) request or a non-`RequestRemote` frame. A `Some` whose
+    /// `access_ceiling` is `Some(_)` marks a redeemed-grant session (restricted);
+    /// an `access_ceiling` of `None` is a central-verified owner/full session.
+    /// Threaded through the context (like `inbound_authz`) so the handler
+    /// signatures stay untouched.
+    pub inbound_request_remote_authz:
+        Option<desk_signal_facade::model::request_remote_authz::RequestRemoteAuthz>,
     /// Per-attempt `request_id`s of fleet executions currently dispatched to the
     /// worker. When the worker replies with `WorkerToService::ExecResult` whose
     /// `request_id` is in this set, the proxy emits a `EdgeExecResult(614)`
@@ -563,6 +573,14 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             let user_name = "worker_node".to_string();
             let has_tauri = ctx.host_control_hub.has_tauri_ui();
             let capabilities = ctx.worker_mgr.worker_capabilities();
+            // A session is restricted when it arrived on the restricted support
+            // upstream OR carries a redeemed-grant ceiling stamp (an owner stamp
+            // has `access_ceiling == None`, which is not a restriction).
+            let restricted = ctx.inbound_restricted
+                || ctx
+                    .inbound_request_remote_authz
+                    .as_ref()
+                    .is_some_and(|a| a.access_ceiling.is_some());
             let result = pc_manager::handle_request_remote(
                 &ctx.pc_registry,
                 &ctx.outbound_tx,
@@ -573,7 +591,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                 Some(&ctx.worker_mgr),
                 ctx.virtual_display.as_ref(),
                 model,
-                ctx.inbound_restricted,
+                restricted,
             )
             .await;
 
@@ -3435,6 +3453,7 @@ mod tests {
             diagnose_tasks: Default::default(),
             inbound_authz: None,
             inbound_restricted: false,
+            inbound_request_remote_authz: None,
             edge_exec_pending: Default::default(),
             support_link_state: Arc::new(crate::daemon::support_link_state::SupportLinkState::new()),
         }

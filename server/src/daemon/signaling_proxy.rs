@@ -20,6 +20,7 @@ use desk_ipc_protocol::message::{
     ERROR_CODE_MEDIA_TRANSPORT_STUCK, VirtualDisplayModeOutcome, WorkerToService,
 };
 use desk_signal_facade::model::{
+    request_remote_authz::{AuthorizedRequestRemote, RequestRemoteAuthz},
     signal::{RemoteDeskTypeEnum, SignalingModel, SignalingResponseState, SignalingType},
     version::VersionInfo,
     virtual_display::ChangeDisplaySettingsPayload,
@@ -172,6 +173,7 @@ pub async fn run_signaling_proxy(
         // Per-call restriction flag: set by the inbound dispatcher when the frame
         // arrived on the support upstream. The shared base context is unrestricted.
         inbound_restricted: false,
+        inbound_request_remote_authz: None,
         // Fleet exec correlation set, shared with the worker-message loop below so
         // a worker `ExecResult` for an in-flight fleet attempt is relayed to the
         // manager as a `EdgeExecResult`.
@@ -1544,6 +1546,99 @@ fn gate_authz_frame(
     AuthzGateOutcome::Pass(unwrapped, Some(wrapper.authz))
 }
 
+/// Outcome of the source-gated capability-ceiling check for a `RequestRemote`.
+enum RequestRemoteGateOutcome {
+    /// Forward this (possibly unwrapped) model to the router, carrying the
+    /// validated capability-ceiling stamp when the request arrived wrapped from
+    /// the trusted-central link.
+    Pass(SignalingModel, Option<RequestRemoteAuthz>),
+    /// Drop the frame; the string explains why (for logging).
+    Drop(String),
+}
+
+/// Source-gate an inbound `RequestRemote` against the capability-ceiling stamp
+/// rules. This is the anti-downgrade anchor (mirrors [`gate_authz_frame`]): the
+/// trusted-central link always stamps every `RequestRemote` (owner → no ceiling,
+/// redeemed grant → its ceiling), so on that link a bare request is illegitimate
+/// and dropped, and a stamp from any other source is an illegitimate injection
+/// and dropped.
+///
+/// - A **wrapper** (`AuthorizedRequestRemote`) is only legitimate from
+///   `TrustedCentral`; on any other source it is dropped.
+/// - On `TrustedCentral` a **bare** `RequestRemote` is dropped — a forged frame,
+///   a relay fault, or a grant session stripping its stamp to masquerade as an
+///   owner. Dropping it here is the only defense (there is no physical restricted
+///   upstream to fall back on).
+/// - On `TrustedCentral` a wrapper is validated against the frame (`request_id`),
+///   this daemon's audience, and expiry; on success the inner frame is unwrapped
+///   and forwarded with the validated stamp (the ceiling the router / worker
+///   enforce).
+/// - On a non-central source (loopback / relay / support) a bare `RequestRemote`
+///   passes through unchanged: the owner-only relay path, where there is no
+///   central to stamp and redeemed codes are hard-rejected at redeem time.
+fn gate_request_remote_frame(
+    model: SignalingModel,
+    source: InboundSignalingSource,
+    expected_audience: &str,
+    now_rfc3339: &str,
+) -> RequestRemoteGateOutcome {
+    let has_wrapper = model
+        .get_raw_data()
+        .as_ref()
+        .and_then(|v| v.as_object())
+        .map(|o| o.contains_key("authz") && o.contains_key("inner"))
+        .unwrap_or(false);
+
+    if !has_wrapper {
+        if source == InboundSignalingSource::TrustedCentral {
+            return RequestRemoteGateOutcome::Drop(
+                "bare RequestRemote from trusted-central source (capability-ceiling stamp required)"
+                    .to_string(),
+            );
+        }
+        return RequestRemoteGateOutcome::Pass(model, None);
+    }
+
+    if source != InboundSignalingSource::TrustedCentral {
+        return RequestRemoteGateOutcome::Drop(format!(
+            "RequestRemote carried a capability-ceiling stamp from non-central source {source:?}"
+        ));
+    }
+
+    let raw = match model.get_raw_data().clone() {
+        Some(v) => v,
+        None => return RequestRemoteGateOutcome::Drop("stamped frame had no data".to_string()),
+    };
+    let wrapper: AuthorizedRequestRemote = match serde_json::from_value(raw) {
+        Ok(w) => w,
+        Err(e) => {
+            return RequestRemoteGateOutcome::Drop(format!(
+                "malformed RequestRemote stamp wrapper: {e}"
+            ));
+        }
+    };
+
+    if let Err(e) = wrapper
+        .authz
+        .validate(&model.request_id, expected_audience, now_rfc3339)
+    {
+        return RequestRemoteGateOutcome::Drop(format!("RequestRemote stamp rejected: {e:?}"));
+    }
+
+    // Validated: forward the inner frame as a bare RequestRemote plus the
+    // validated stamp, which the router threads into the session's restriction /
+    // capability-ceiling enforcement.
+    let unwrapped = SignalingModel::new(
+        &model.request_id,
+        model.signaling_type,
+        model.from_connection_id.clone(),
+        model.to_connection_id.clone(),
+        Some(wrapper.inner),
+        model.response_state.clone(),
+    );
+    RequestRemoteGateOutcome::Pass(unwrapped, Some(wrapper.authz))
+}
+
 /// True for the trusted-central plumbing frames that drive an evidence
 /// collection or a remote read-tool call. Unlike the AI control frames these may
 /// arrive either bare or wrapped, so they get the optional-wrapper gate rather
@@ -1817,6 +1912,38 @@ async fn handle_inbound_signaling_text(
         return InboundOutcome::Continue;
     }
 
+    // `RequestRemote` carries the capability-ceiling stamp: required and validated
+    // on the trusted-central link (a bare one there is dropped as a downgrade
+    // attempt), rejected if stamped from a non-central source, passed through bare
+    // on the owner-only relay path. The validated stamp rides into the router via
+    // the context so the freshly-created session inherits its restriction /
+    // ceiling.
+    if parsed.signaling_type == SignalingType::RequestRemote {
+        match gate_request_remote_frame(parsed, source, &expected_audience, &now) {
+            RequestRemoteGateOutcome::Pass(unwrapped, authz) => {
+                let restricted = source.is_restricted();
+                let effective_ctx;
+                let ctx_ref = if authz.is_some() || restricted {
+                    effective_ctx = RouterContext {
+                        inbound_request_remote_authz: authz,
+                        inbound_restricted: restricted,
+                        ..router_ctx.clone()
+                    };
+                    &effective_ctx
+                } else {
+                    router_ctx
+                };
+                if let Err(e) = signaling_router::route(&unwrapped, ctx_ref).await {
+                    warn!("[Proxy] router handler failed for RequestRemote: {e}");
+                }
+            }
+            RequestRemoteGateOutcome::Drop(reason) => {
+                warn!("[Proxy] Dropping RequestRemote: {reason}");
+            }
+        }
+        return InboundOutcome::Continue;
+    }
+
     let (parsed, authz) = match gate_authz_frame(parsed, source, &expected_audience, &now) {
         AuthzGateOutcome::Pass(m, authz) => (m, authz),
         AuthzGateOutcome::Drop(reason) => {
@@ -1861,7 +1988,148 @@ mod tests {
     use crate::daemon::pc_manager::PcRegistry;
     use crate::host_control::HostControlHub;
     use crate::model::settings::{Settings, SharedSettings};
-    use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
+    use desk_signal_facade::model::request_remote_authz::REQUEST_REMOTE_AUTHZ_VERSION;
+    use desk_signal_facade::model::security_settings::SecuritySettings;
+    use desk_signal_facade::model::signal::{RequestRemoteModel, SignalingModel, SignalingType};
+
+    const RR_AUDIENCE: &str = "host-client-abc";
+    const RR_NOW: &str = "2026-01-01T00:00:00Z";
+
+    fn bare_request_remote() -> SignalingModel {
+        let data = serde_json::to_value(RequestRemoteModel::default()).unwrap();
+        SignalingModel::new(
+            "req-1",
+            SignalingType::RequestRemote,
+            Some("browser-1".to_string()),
+            Some("host-1".to_string()),
+            Some(data),
+            None,
+        )
+    }
+
+    fn stamped_request_remote(authz: RequestRemoteAuthz) -> SignalingModel {
+        let wrapper = AuthorizedRequestRemote {
+            inner: serde_json::to_value(RequestRemoteModel::default()).unwrap(),
+            authz,
+        };
+        SignalingModel::new(
+            "req-1",
+            SignalingType::RequestRemote,
+            Some("browser-1".to_string()),
+            Some("host-1".to_string()),
+            Some(serde_json::to_value(&wrapper).unwrap()),
+            None,
+        )
+    }
+
+    fn authz(ceiling: Option<SecuritySettings>) -> RequestRemoteAuthz {
+        RequestRemoteAuthz {
+            version: REQUEST_REMOTE_AUTHZ_VERSION,
+            access_ceiling: ceiling,
+            grant_session_id: None,
+            request_id: "req-1".to_string(),
+            audience: RR_AUDIENCE.to_string(),
+            expires_at: Some("2999-01-01T00:00:00Z".to_string()),
+        }
+    }
+
+    #[test]
+    fn request_remote_bare_from_trusted_central_is_dropped() {
+        // Anti-downgrade anchor: the central always stamps, so a bare request on
+        // that link is forged / a stripped stamp and must be dropped.
+        match gate_request_remote_frame(
+            bare_request_remote(),
+            InboundSignalingSource::TrustedCentral,
+            RR_AUDIENCE,
+            RR_NOW,
+        ) {
+            RequestRemoteGateOutcome::Drop(_) => {}
+            RequestRemoteGateOutcome::Pass(..) => panic!("bare central RequestRemote must drop"),
+        }
+    }
+
+    #[test]
+    fn request_remote_stamp_from_non_central_is_dropped() {
+        // A stamp is only legitimate from the trusted-central link; injecting one
+        // from a relay is rejected.
+        match gate_request_remote_frame(
+            stamped_request_remote(authz(None)),
+            InboundSignalingSource::RemoteSignaling,
+            RR_AUDIENCE,
+            RR_NOW,
+        ) {
+            RequestRemoteGateOutcome::Drop(_) => {}
+            RequestRemoteGateOutcome::Pass(..) => panic!("non-central stamp must drop"),
+        }
+    }
+
+    #[test]
+    fn request_remote_stamp_failing_validation_is_dropped() {
+        // Wrong audience → validate() fails → drop.
+        match gate_request_remote_frame(
+            stamped_request_remote(authz(None)),
+            InboundSignalingSource::TrustedCentral,
+            "some-other-host",
+            RR_NOW,
+        ) {
+            RequestRemoteGateOutcome::Drop(_) => {}
+            RequestRemoteGateOutcome::Pass(..) => panic!("audience mismatch must drop"),
+        }
+    }
+
+    #[test]
+    fn request_remote_valid_owner_stamp_passes_and_unwraps() {
+        // A valid owner stamp (no ceiling) unwraps to a bare RequestRemote and
+        // carries the validated stamp; the inner payload is restored.
+        match gate_request_remote_frame(
+            stamped_request_remote(authz(None)),
+            InboundSignalingSource::TrustedCentral,
+            RR_AUDIENCE,
+            RR_NOW,
+        ) {
+            RequestRemoteGateOutcome::Pass(unwrapped, Some(a)) => {
+                assert_eq!(a.access_ceiling, None);
+                // The inner frame parses back as a plain RequestRemoteModel (no
+                // authz/inner wrapper left).
+                assert!(unwrapped.get_data::<RequestRemoteModel>().is_ok());
+            }
+            _ => panic!("valid owner stamp must pass with its authz"),
+        }
+    }
+
+    #[test]
+    fn request_remote_valid_grant_stamp_passes_with_ceiling() {
+        let ceiling = SecuritySettings {
+            allow_terminal: Some(true),
+            ..SecuritySettings::default()
+        };
+        match gate_request_remote_frame(
+            stamped_request_remote(authz(Some(ceiling.clone()))),
+            InboundSignalingSource::TrustedCentral,
+            RR_AUDIENCE,
+            RR_NOW,
+        ) {
+            RequestRemoteGateOutcome::Pass(_, Some(a)) => {
+                assert_eq!(a.access_ceiling, Some(ceiling));
+            }
+            _ => panic!("valid grant stamp must pass with its ceiling"),
+        }
+    }
+
+    #[test]
+    fn request_remote_bare_from_relay_passes_unchanged() {
+        // The owner-only relay path (no central to stamp) still relays a bare
+        // request through unchanged.
+        match gate_request_remote_frame(
+            bare_request_remote(),
+            InboundSignalingSource::RemoteSignaling,
+            RR_AUDIENCE,
+            RR_NOW,
+        ) {
+            RequestRemoteGateOutcome::Pass(_, None) => {}
+            _ => panic!("bare relay RequestRemote must pass unstamped"),
+        }
+    }
 
     #[test]
     fn manager_link_should_connect_requires_config_and_not_disabled() {
@@ -2032,6 +2300,7 @@ mod tests {
             diagnose_tasks: Default::default(),
             inbound_authz: None,
             inbound_restricted: false,
+            inbound_request_remote_authz: None,
             edge_exec_pending: Default::default(),
             support_link_state: Arc::new(crate::daemon::support_link_state::SupportLinkState::new()),
         };
