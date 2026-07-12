@@ -29,7 +29,7 @@ A code's ceiling is only the upper bound. The capability actually in force for e
 
 1. the **code's ceiling** — what the owner allowed for this code;
 2. the host's **global access settings** — `[security]` in `config.toml`; and
-3. the **live approval** at the host — when the meet of (1) and (2) is left unset ("ask"), the host's local user is prompted, and may choose to remember the answer.
+3. the **live approval** at the host — when the meet of (1) and (2) is left unset ("ask"), the host's local user is prompted. For a code / support session the answer applies to **that request only**: it is never persisted into the host's global access settings, so a borrowed session's on-device prompt can never widen what the owner configured (an owner's own session keeps the usual "remember" behaviour).
 
 So **Deny** anywhere wins (hard-denied); an unset dimension on either side always prompts; and **Allow** on both the ceiling and the global setting is the only combination that passes without a prompt. Enforcement is entirely **host-side** — the ceiling returned at redemption is a UX hint for the controller, never the security boundary.
 
