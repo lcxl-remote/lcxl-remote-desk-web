@@ -1,5 +1,5 @@
 export default {
-  'pages.layouts.userLayout.title': '远程桌面管理系统',
+  'pages.layouts.userLayout.title': 'AI 赋能，连接无界',
   'pages.login.accountLogin.tab': '账户密码登录',
   'pages.login.accountLogin.errorMessage': '错误的用户名和密码',
   'pages.login.failure': '登录失败，请重试！',
@@ -25,7 +25,7 @@ export default {
   'pages.login.forgotPasswordContent': '打开 conf/config.toml 文件并检查 [user] 中的内容',
   'pages.init.title': '系统初始化',
   'pages.init.welcome': '欢迎使用 LCXL Remote Desk',
-  'pages.init.subWelcome': '安全、快速、跨平台的远程桌面解决方案',
+  'pages.init.subWelcome': 'AI 赋能，连接无界',
   'pages.init.next': '下一步',
   'pages.init.back': '上一步',
   'pages.init.skip': '跳过',

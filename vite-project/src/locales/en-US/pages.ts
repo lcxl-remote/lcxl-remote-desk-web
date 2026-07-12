@@ -1,5 +1,5 @@
 export default {
-  'pages.layouts.userLayout.title': 'Remote Desktop Management System',
+  'pages.layouts.userLayout.title': 'Connect anywhere with AI',
   'pages.login.accountLogin.tab': 'Account Login',
   'pages.login.accountLogin.errorMessage': 'Incorrect username/password',
   'pages.login.failure': 'Login failed, please try again!',
@@ -24,7 +24,7 @@ export default {
   'pages.login.registerAccount': 'Register Account',
   'pages.init.title': 'System Initialization',
   'pages.init.welcome': 'Welcome to LCXL Remote Desk',
-  'pages.init.subWelcome': 'Secure, fast, and cross-platform remote desktop solution',
+  'pages.init.subWelcome': 'Connect anywhere with AI',
   'pages.init.next': 'Next',
   'pages.init.back': 'Back',
   'pages.init.skip': 'Skip',
