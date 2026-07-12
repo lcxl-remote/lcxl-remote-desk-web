@@ -18,6 +18,7 @@ import { useTranslation } from "react-i18next"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { useGetCurrentUser } from "@/services/hooks/userController/useGetCurrentUser"
 import { useLogoutAccount } from "@/services/hooks/authController/useLogoutAccount"
+import { clearAllGrants } from "@/features/desk/session-grant"
 import { Badge } from "@/components/ui/badge"
 
 import {
@@ -63,6 +64,9 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     const user = userResp?.data
 
     const handleLogout = () => {
+        // Clear every redeemed grant so one account's restricted sessions never
+        // linger into the next account signed in on this tab.
+        clearAllGrants()
         logout().catch(console.error)
         navigate("/user/login", { replace: true })
     }

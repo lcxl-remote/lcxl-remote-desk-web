@@ -29,7 +29,9 @@ export interface SessionGrant {
     source: GrantSource;
 }
 
-const keyFor = (deskId: string) => `desk-grant:${deskId}`;
+const GRANT_KEY_PREFIX = 'desk-grant:';
+
+const keyFor = (deskId: string) => `${GRANT_KEY_PREFIX}${deskId}`;
 
 /// Persist a restricted grant for a target. Called right after a successful redeem,
 /// before navigating to the desk view.
@@ -64,6 +66,23 @@ export function readSessionGrant(deskId: string): SessionGrant | null {
 export function clearSessionGrant(deskId: string): void {
     try {
         sessionStorage.removeItem(keyFor(deskId));
+    } catch {
+        // Best-effort; see saveSessionGrant.
+    }
+}
+
+/// Drop every stored grant, for all targets. Called on logout so one account's
+/// redeemed grants never linger into the next account signed in on the same tab
+/// (they would be rejected server-side by principal, but must not leak as UX state
+/// either). Mirrors the native clients' `clearAllGrants` on sign-out.
+export function clearAllGrants(): void {
+    try {
+        const keys: string[] = [];
+        for (let i = 0; i < sessionStorage.length; i++) {
+            const key = sessionStorage.key(i);
+            if (key?.startsWith(GRANT_KEY_PREFIX)) keys.push(key);
+        }
+        keys.forEach((key) => sessionStorage.removeItem(key));
     } catch {
         // Best-effort; see saveSessionGrant.
     }

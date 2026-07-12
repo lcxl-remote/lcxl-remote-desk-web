@@ -4,6 +4,7 @@ import {
     saveSessionGrant,
     readSessionGrant,
     clearSessionGrant,
+    clearAllGrants,
 } from './session-grant';
 import { deriveRestrictedSession } from './restricted-session';
 import type { SecuritySettings } from '@/services/types';
@@ -37,6 +38,18 @@ describe('session-grant storage', () => {
     it('ignores a grant with an empty token', () => {
         sessionStorage.setItem('desk-grant:desk-x', JSON.stringify({ grantSessionId: '', accessCeiling: null }));
         expect(readSessionGrant('desk-x')).toBeNull();
+    });
+
+    it('clearAllGrants drops every target but leaves unrelated keys', () => {
+        saveSessionGrant('desk-a', { grantSessionId: 'gs-a', accessCeiling: null, source: 'support' });
+        saveSessionGrant('desk-b', { grantSessionId: 'gs-b', accessCeiling: null, source: 'device-code' });
+        sessionStorage.setItem('unrelated', 'keep-me');
+
+        clearAllGrants();
+
+        expect(readSessionGrant('desk-a')).toBeNull();
+        expect(readSessionGrant('desk-b')).toBeNull();
+        expect(sessionStorage.getItem('unrelated')).toBe('keep-me');
     });
 });
 

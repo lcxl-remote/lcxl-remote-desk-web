@@ -48,6 +48,16 @@ export interface RestrictedSession {
 
 // Derive the restriction state for a target from its stored grant. Pure — exported
 // for unit tests.
+//
+// The absence of a grant is treated as an owner (full) session. This is correct for
+// the flows that reach here (redeem stores a grant; owner-connect clears it), but the
+// grant lives only in this tab's sessionStorage: a non-owner who deep-links the
+// target in a fresh tab has no grant and is rendered as owner, showing owner-plane
+// affordances. That is a UX artifact only — the host independently fail-closes, and
+// the manager's RequestRemote authorizer rejects a non-owner with no valid grant, so
+// no owner-plane action succeeds. A fully robust indicator would require a
+// server-authoritative "my relationship to this device" signal rather than the tab's
+// volatile grant; that is a deliberate follow-up, not a safety gap.
 export function deriveRestrictedSession(deskId: string | undefined): RestrictedSession {
     const grant = deskId ? readSessionGrant(deskId) : null;
     const isRestricted = grant != null;
