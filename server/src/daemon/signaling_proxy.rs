@@ -453,7 +453,9 @@ pub async fn run_signaling_proxy(
                 // first IDR clears each PC's `media_paused` flag in
                 // place. For the very first Capabilities (no PCs yet,
                 // no cached offers) this is a no-op.
-                pc_registry.resume_active_media(&worker_mgr).await;
+                pc_registry
+                    .resume_active_media(&worker_mgr, virtual_display.as_ref())
+                    .await;
                 // Virtual display reattach: tell the supervisor a
                 // worker is alive, so a freshly-spawned worker that
                 // arrives mid-session gets AttachVirtualDisplay

@@ -913,17 +913,58 @@ impl PcRegistry {
     /// `Capabilities` after a desktop / crash swap. PCs without a cached
     /// offer (request_remote arrived but offer didn't yet) are skipped —
     /// the standard `handle_offer` path still owns first-time StartMedia.
-    pub async fn resume_active_media(&self, worker_mgr: &WorkerManager) {
-        let snapshot: Vec<(String, Option<StartMediaPayload>)> = {
+    pub async fn resume_active_media(
+        &self,
+        worker_mgr: &WorkerManager,
+        virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
+    ) {
+        let snapshot: Vec<(String, Option<StartMediaPayload>, Option<Admission>)> = {
             let map = self.inner.read().await;
+            let admissions = self.admissions.read().await;
             let mut out = Vec::with_capacity(map.len());
             for (id, ctx) in map.iter() {
                 let cached = ctx.read().await.cached_start_media.read().await.clone();
-                out.push((id.clone(), cached));
+                out.push((id.clone(), cached, admissions.get(id).cloned()));
             }
             out
         };
-        for (id, payload) in snapshot {
+        for (id, payload, admission) in snapshot {
+            // Re-register the capability ceiling with the freshly spawned worker
+            // before any media / terminal / file frame for this connection. A worker
+            // swap (desktop change / UAC / lock screen / crash recovery) starts a
+            // worker with an empty `ConnectionCeilingStore`, so without this the
+            // worker-side `meet(ceiling, global)` gates for terminal / file-browse /
+            // private-screen would fall back to global-only and a capped grant
+            // session would silently escalate to owner-level access. Done for every
+            // capped connection — including ones with no cached offer, since those
+            // still accept worker-bound capability frames. Fail-closed: if the
+            // ceiling cannot reach the new worker we tear the connection down rather
+            // than resume it uncapped (mirrors the admit path at `handle_request_remote`).
+            if let Some(Admission::Capped(ceiling)) = admission.as_ref() {
+                if let Err(e) = worker_mgr
+                    .send_to_worker(ServiceToWorker::SetConnectionCeiling(
+                        desk_ipc_protocol::message::SetConnectionCeilingPayload {
+                            connection_id: id.clone(),
+                            ceiling: Some(ceiling.clone()),
+                        },
+                    ))
+                    .await
+                {
+                    log::warn!(
+                        "[pc_manager] resume: ceiling re-registration for capped session {id} \
+                         failed ({e}); tearing down to avoid running uncapped"
+                    );
+                    cleanup_pc(
+                        self,
+                        worker_mgr,
+                        virtual_display,
+                        &id,
+                        "resume: ceiling re-registration failed",
+                    )
+                    .await;
+                    continue;
+                }
+            }
             let payload = match payload {
                 Some(p) => p,
                 None => {
@@ -4273,7 +4314,7 @@ mod tests {
 
         // No PCs registered, no worker active — resume must just iterate
         // zero entries and return cleanly.
-        registry.resume_active_media(&worker_mgr).await;
+        registry.resume_active_media(&worker_mgr, None).await;
     }
 
     /// `reset_media_for` on an unknown connection_id is a silent no-op:
@@ -4436,11 +4477,103 @@ mod tests {
         // The worker_mgr has no active worker so any send_to_worker
         // would log a warning, but the snapshot loop must skip the PC
         // entirely because cached_start_media is None.
-        registry.resume_active_media(&worker_mgr).await;
+        registry.resume_active_media(&worker_mgr, None).await;
 
         // Cached slot stays None.
         let ctx = registry.get("conn-no-offer").await.unwrap();
         assert!(ctx.read().await.cached_start_media.read().await.is_none());
+    }
+
+    /// After a worker swap the freshly spawned worker has an empty
+    /// `ConnectionCeilingStore`, so `resume_active_media` must re-register the
+    /// capability ceiling of every `Admission::Capped` connection before any
+    /// worker-bound frame — otherwise the worker-side `meet(ceiling, global)`
+    /// gates fall back to global-only and a capped grant session silently
+    /// escalates. Re-sent even for a connection with no cached offer, since it
+    /// still accepts terminal / file frames.
+    #[tokio::test]
+    async fn resume_active_media_resends_ceiling_for_capped_admission() {
+        use desk_ipc_protocol::message::ServiceToWorker;
+
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+            grant_session_id: None,
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-cap", &request_remote, &s)
+            .await
+            .expect("create");
+        let ceiling = SecuritySettings {
+            allow_terminal: Some(false),
+            ..Default::default()
+        };
+        registry
+            .record_admission("conn-cap", Admission::Capped(ceiling.clone()))
+            .await;
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+
+        registry.resume_active_media(&worker_mgr, None).await;
+
+        // The capped connection's ceiling was re-registered even though it had no
+        // cached StartMedia (offer not yet exchanged).
+        let mut saw_ceiling = false;
+        while let Ok(msg) = ipc_rx.try_recv() {
+            if let ServiceToWorker::SetConnectionCeiling(p) = msg {
+                assert_eq!(p.connection_id, "conn-cap");
+                assert_eq!(p.ceiling, Some(ceiling.clone()));
+                saw_ceiling = true;
+            }
+        }
+        assert!(
+            saw_ceiling,
+            "resume must re-register the capped connection's ceiling with the new worker"
+        );
+        // Fail-closed: with a reachable worker the ceiling send succeeded, so the
+        // connection stays admitted rather than being torn down.
+        assert!(registry.get("conn-cap").await.is_some());
+    }
+
+    /// Fail-closed on resume: if the ceiling re-registration cannot reach the new
+    /// worker (no active worker installed), the capped connection is torn down
+    /// rather than resumed uncapped.
+    #[tokio::test]
+    async fn resume_active_media_tears_down_capped_when_ceiling_undeliverable() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+            grant_session_id: None,
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-cap-dead", &request_remote, &s)
+            .await
+            .expect("create");
+        registry
+            .record_admission(
+                "conn-cap-dead",
+                Admission::Capped(SecuritySettings::default()),
+            )
+            .await;
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        // No active worker installed: send_to_worker fails, so the ceiling cannot
+        // be delivered and the capped connection must be torn down.
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+
+        registry.resume_active_media(&worker_mgr, None).await;
+
+        assert!(
+            registry.get("conn-cap-dead").await.is_none(),
+            "a capped connection whose ceiling cannot be re-registered must be torn down"
+        );
     }
 
     /// Audio frames go through the same entry point but route to
