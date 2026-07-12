@@ -16,6 +16,16 @@ import {
     DialogHeader,
     DialogTitle,
 } from "@/components/ui/dialog"
+import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 
 import { useListDeviceCodes } from "@/services/hooks/deviceCodeController/useListDeviceCodes"
 import { useCreateDeviceCode } from "@/services/hooks/deviceCodeController/useCreateDeviceCode"
@@ -64,6 +74,11 @@ export function DeviceCodeList() {
     const [editItem, setEditItem] = useState<DeviceCodeItem | null>(null)
     const [editForm, setEditForm] = useState<{ deviceCode: string; capabilities: SecuritySettings | null }>({ deviceCode: '', capabilities: null })
 
+    // Confirmation dialogs (frontend AlertDialog, not the browser's native confirm()).
+    const [deleteId, setDeleteId] = useState<number | null>(null)
+    const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
+    const [regenItem, setRegenItem] = useState<DeviceCodeItem | null>(null)
+
     const handleOpenCreate = () => {
         setCreateForm({ clientId: uuidv4(), deviceCode: generateDeviceCode(), capabilities: null })
         setIsCreateOpen(true)
@@ -93,15 +108,14 @@ export function DeviceCodeList() {
         }
     }
 
-    const handleDelete = async (id: number) => {
-        if (!confirm(t('pages.deviceCodeList.deleteConfirm.description'))) return
-
+    const confirmDelete = async () => {
+        if (deleteId == null) return
         try {
-            await deleteDeviceCode({ id })
+            await deleteDeviceCode({ id: deleteId })
             toast({
                 title: t('pages.deviceCodeList.deleteSuccess')
             })
-            setSelectedIds(prev => prev.filter(i => i !== id))
+            setSelectedIds(prev => prev.filter(i => i !== deleteId))
             refetch()
         } catch (error) {
             toast({
@@ -109,6 +123,8 @@ export function DeviceCodeList() {
                 title: t('pages.deviceCodeList.deleteFailed'),
                 description: (error as Error).message
             })
+        } finally {
+            setDeleteId(null)
         }
     }
 
@@ -146,14 +162,14 @@ export function DeviceCodeList() {
     // Regenerate a code's dial code in place: rotate to a fresh code (which bumps the
     // server-side generation and thereby invalidates every grant minted from the old
     // code) while preserving the configured capability ceiling.
-    const handleRegenerate = async (item: DeviceCodeItem) => {
-        if (!confirm(t('pages.deviceCodeList.regenerateConfirm'))) return
+    const confirmRegenerate = async () => {
+        if (!regenItem) return
         try {
             await updateDeviceCode({
-                id: item.id,
+                id: regenItem.id,
                 data: {
                     device_code: generateDeviceCode(),
-                    capabilities: item.capabilities ?? null
+                    capabilities: regenItem.capabilities ?? null
                 }
             })
             toast({ title: t('pages.deviceCodeList.regenerateSuccess') })
@@ -164,13 +180,13 @@ export function DeviceCodeList() {
                 title: t('pages.deviceCodeList.regenerateFailed'),
                 description: (error as Error).message
             })
+        } finally {
+            setRegenItem(null)
         }
     }
 
-    const handleBatchDelete = async () => {
-        if (!selectedIds.length) return;
-        if (!confirm(t('pages.deviceCodeList.batchDeleteConfirm'))) return;
-
+    const confirmBatchDelete = async () => {
+        if (!selectedIds.length) return
         try {
             await batchDeleteDeviceCodes({ data: { ids: selectedIds } })
             toast({
@@ -184,6 +200,8 @@ export function DeviceCodeList() {
                 title: t('pages.deviceCodeList.deleteFailed'),
                 description: (error as Error).message
             })
+        } finally {
+            setBatchDeleteOpen(false)
         }
     }
 
@@ -198,7 +216,7 @@ export function DeviceCodeList() {
                 </div>
                 <div className="flex gap-2 items-center">
                     {selectedIds.length > 0 && (
-                        <Button variant="destructive" onClick={handleBatchDelete} disabled={isBatchDeleting}>
+                        <Button variant="destructive" onClick={() => setBatchDeleteOpen(true)} disabled={isBatchDeleting}>
                             {isBatchDeleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}
                             {t('pages.deviceCodeList.batchDelete')} ({selectedIds.length})
                         </Button>
@@ -291,10 +309,10 @@ export function DeviceCodeList() {
                                                     <Button variant="ghost" size="icon" onClick={() => handleOpenEdit(item)} title={t('pages.deviceCodeList.action.edit')}>
                                                         <Edit2 className="h-4 w-4" />
                                                     </Button>
-                                                    <Button variant="ghost" size="icon" className="ml-2" onClick={() => handleRegenerate(item)} title={t('pages.deviceCodeList.regenerate')}>
+                                                    <Button variant="ghost" size="icon" className="ml-2" onClick={() => setRegenItem(item)} title={t('pages.deviceCodeList.regenerate')}>
                                                         <RefreshCw className="h-4 w-4" />
                                                     </Button>
-                                                    <Button variant="destructive" size="icon" className="ml-2" disabled={item.isOnline} onClick={() => handleDelete(item.id)} title={t('pages.deviceCodeList.action.delete')}>
+                                                    <Button variant="destructive" size="icon" className="ml-2" disabled={item.isOnline} onClick={() => setDeleteId(item.id)} title={t('pages.deviceCodeList.action.delete')}>
                                                         <Trash2 className="h-4 w-4" />
                                                     </Button>
                                                 </TableCell>
@@ -309,14 +327,14 @@ export function DeviceCodeList() {
             </Card>
 
             <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
-                <DialogContent>
+                <DialogContent className="flex max-h-[90dvh] flex-col">
                     <DialogHeader>
                         <DialogTitle>{t('pages.deviceCodeList.createModal.title')}</DialogTitle>
                         <DialogDescription>
                             {t('pages.deviceCodeList.createModal.description')}
                         </DialogDescription>
                     </DialogHeader>
-                    <div className="grid gap-4 py-4">
+                    <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto py-4">
                         <div className="grid grid-cols-4 items-center gap-4">
                             <Label htmlFor="clientId" className="text-right">
                                 {t('pages.deviceCodeList.column.clientId')}
@@ -358,14 +376,14 @@ export function DeviceCodeList() {
             </Dialog>
 
             <Dialog open={!!editItem} onOpenChange={(open) => !open && setEditItem(null)}>
-                <DialogContent>
+                <DialogContent className="flex max-h-[90dvh] flex-col">
                     <DialogHeader>
                         <DialogTitle>{t('pages.deviceCodeList.editModal.title')}</DialogTitle>
                         <DialogDescription>
                             {t('pages.deviceCodeList.editModal.description')}
                         </DialogDescription>
                     </DialogHeader>
-                    <div className="grid gap-4 py-4">
+                    <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto py-4">
                         <div className="grid grid-cols-4 items-center gap-4">
                             <Label htmlFor="editClientId" className="text-right">
                                 {t('pages.deviceCodeList.column.clientId')}
@@ -404,6 +422,63 @@ export function DeviceCodeList() {
                     </DialogFooter>
                 </DialogContent>
             </Dialog>
+
+            <AlertDialog open={deleteId != null} onOpenChange={(open) => !open && setDeleteId(null)}>
+                <AlertDialogContent>
+                    <AlertDialogHeader>
+                        <AlertDialogTitle>{t('pages.deviceCodeList.deleteConfirm.title')}</AlertDialogTitle>
+                        <AlertDialogDescription>
+                            {t('pages.deviceCodeList.deleteConfirm.description')}
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                        <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+                        <AlertDialogAction
+                            onClick={confirmDelete}
+                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                        >
+                            {t('pages.deviceCodeList.action.delete')}
+                        </AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
+
+            <AlertDialog open={batchDeleteOpen} onOpenChange={setBatchDeleteOpen}>
+                <AlertDialogContent>
+                    <AlertDialogHeader>
+                        <AlertDialogTitle>{t('pages.deviceCodeList.deleteConfirm.title')}</AlertDialogTitle>
+                        <AlertDialogDescription>
+                            {t('pages.deviceCodeList.batchDeleteConfirm.description')}
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                        <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+                        <AlertDialogAction
+                            onClick={confirmBatchDelete}
+                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                        >
+                            {t('pages.deviceCodeList.batchDelete')}
+                        </AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
+
+            <AlertDialog open={!!regenItem} onOpenChange={(open) => !open && setRegenItem(null)}>
+                <AlertDialogContent>
+                    <AlertDialogHeader>
+                        <AlertDialogTitle>{t('pages.deviceCodeList.regenerate')}</AlertDialogTitle>
+                        <AlertDialogDescription>
+                            {t('pages.deviceCodeList.regenerateConfirm')}
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                        <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+                        <AlertDialogAction onClick={confirmRegenerate}>
+                            {t('common.confirm')}
+                        </AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
         </div>
     )
 }
