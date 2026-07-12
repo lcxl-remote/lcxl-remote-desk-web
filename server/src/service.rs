@@ -1,12 +1,6 @@
 pub mod audio_playback;
 pub mod auto_start;
-pub mod clipboard_event;
-pub mod data_channel;
 pub mod file_manager;
-pub mod file_transfer;
-pub mod keyboard_event;
-pub mod mouse_event;
 pub mod signaling;
 pub mod terminal;
 pub mod turn_usage_collector;
-pub mod whiteboard_event;
