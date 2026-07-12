@@ -91,6 +91,7 @@ pub async fn handle_file_transfer_event(
                             allow_transfer,
                             SecurityPermissionType::FileTransfer,
                             Some(connection_id),
+                            false,
                         )
                         .await;
                         *cache_write = Some(approved);

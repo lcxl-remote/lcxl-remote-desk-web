@@ -130,12 +130,20 @@ pub async fn handle_manager_terminal_start(
     let allow_terminal = desk_session
         .effective_permission(from_connection_id, global_terminal, |c| c.allow_terminal)
         .await;
+    // Capped grant / code-session: honor the prompt but never persist it to the
+    // owner's global allow_terminal.
+    let suppress_remember = desk_session
+        .connection_ceilings
+        .get(from_connection_id)
+        .await
+        .is_some();
     let approved = check_security_permission(
         &desk_session.settings,
         &desk_session.host_control_hub,
         allow_terminal,
         SecurityPermissionType::Terminal,
         Some(from_connection_id.to_string()),
+        suppress_remember,
     )
     .await;
 
@@ -408,12 +416,20 @@ pub async fn handle_list_terminals(
         }
         None => global_terminal,
     };
+    // Capped grant / code-session: honor the prompt but never persist it to the
+    // owner's global allow_terminal. Connection-less (HTTP-API / owner) requests
+    // carry no ceiling.
+    let suppress_remember = match from_connection_id.as_deref() {
+        Some(cid) => desk_session.connection_ceilings.get(cid).await.is_some(),
+        None => false,
+    };
     let approved = check_security_permission(
         &desk_session.settings,
         &desk_session.host_control_hub,
         allow_terminal,
         SecurityPermissionType::Terminal,
         from_connection_id.clone(),
+        suppress_remember,
     )
     .await;
     if !approved {

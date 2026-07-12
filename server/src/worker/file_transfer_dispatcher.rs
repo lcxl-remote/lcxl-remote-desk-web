@@ -420,6 +420,9 @@ impl FileTransferDispatcher {
             allow_transfer,
             SecurityPermissionType::FileTransfer,
             Some(connection_id.to_string()),
+            // Capped grant / code-session: honor the prompt but never persist it to
+            // the owner's global allow_file_transfer.
+            ceiling.is_some(),
         )
         .await;
         let mut inner = self.inner.lock().await;

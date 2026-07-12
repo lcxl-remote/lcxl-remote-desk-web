@@ -381,12 +381,20 @@ impl DeskSession {
                                 c.allow_private_screen
                             })
                             .await;
+                        // A capped grant / code-session (it has a per-connection
+                        // ceiling) must not persist its prompt to the host global.
+                        let suppress_remember = self
+                            .connection_ceilings
+                            .get(from_connection_id)
+                            .await
+                            .is_some();
                         let approved = check_security_permission(
                             &self.settings,
                             &self.host_control_hub,
                             allow_private_screen,
                             SecurityPermissionType::PrivateScreen,
                             Some(from_connection_id.to_string()),
+                            suppress_remember,
                         )
                         .await;
 

@@ -70,6 +70,7 @@ pub async fn handle_whiteboard_event(
                             allow_whiteboard,
                             SecurityPermissionType::Whiteboard,
                             Some(connection_id.clone()),
+                            false,
                         )
                         .await;
                         *cache_write = Some(approved);

@@ -179,12 +179,20 @@ pub async fn handle_manager_file_list(
         }
         None => global_file_browse,
     };
+    // Capped grant / code-session: honor the prompt but never persist it to the
+    // owner's global allow_file_browse. Connection-less (HTTP-API / owner) requests
+    // carry no ceiling.
+    let suppress_remember = match from_connection_id.as_deref() {
+        Some(cid) => desk_session.connection_ceilings.get(cid).await.is_some(),
+        None => false,
+    };
     let approved = check_security_permission(
         &desk_session.settings,
         &desk_session.host_control_hub,
         allow_file_browse,
         SecurityPermissionType::FileBrowse,
         from_connection_id.clone(),
+        suppress_remember,
     )
     .await;
 
@@ -256,12 +264,20 @@ pub async fn handle_manager_file_delete(
         }
         None => global_file_browse,
     };
+    // Capped grant / code-session: honor the prompt but never persist it to the
+    // owner's global allow_file_browse. Connection-less (HTTP-API / owner) requests
+    // carry no ceiling.
+    let suppress_remember = match from_connection_id.as_deref() {
+        Some(cid) => desk_session.connection_ceilings.get(cid).await.is_some(),
+        None => false,
+    };
     let approved = check_security_permission(
         &desk_session.settings,
         &desk_session.host_control_hub,
         allow_file_browse,
         SecurityPermissionType::FileBrowse,
         from_connection_id.clone(),
+        suppress_remember,
     )
     .await;
 

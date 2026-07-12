@@ -3223,6 +3223,9 @@ pub async fn handle_require_control(
                 allow_control,
                 SecurityPermissionType::RemoteControl,
                 Some(from_connection_id.to_string()),
+                // Capped grant / code-session: honor the prompt but never widen the
+                // owner's global allow_* from a borrowed session's "remember".
+                access_ceiling.is_some(),
             )
             .await
         };
@@ -3270,6 +3273,7 @@ pub async fn handle_require_control(
             allow_clipboard,
             SecurityPermissionType::ClipboardSync,
             Some(from_connection_id.to_string()),
+            access_ceiling.is_some(),
         )
         .await
     };

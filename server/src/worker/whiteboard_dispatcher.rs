@@ -133,6 +133,9 @@ impl WhiteboardDispatcher {
             allow_whiteboard,
             SecurityPermissionType::Whiteboard,
             Some(connection_id.to_string()),
+            // Capped grant / code-session: honor the prompt but never persist it to
+            // the owner's global allow_whiteboard.
+            ceiling.is_some(),
         )
         .await;
         let mut inner = self.inner.lock().await;

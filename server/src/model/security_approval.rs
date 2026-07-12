@@ -134,13 +134,23 @@ pub type SecurityApprovalReceiver = std::sync::mpsc::Receiver<SecurityApprovalCo
 /// - `None` → ask the user via the Host Control Hub; deny if no UI is available.
 ///
 /// If the user checks "remember", the corresponding `settings.security.allow_*`
-/// field is updated and persisted (kept here, not in the hub, per plan review #1).
+/// field is updated and persisted (kept here, not in the hub, per plan review #1) —
+/// **unless `suppress_remember` is set**. A capped grant / code-session connection
+/// passes `suppress_remember = true`: its prompt fires because the meet of the
+/// owner's per-code ceiling and the global landed on `None`, and letting the local
+/// user's "remember" widen the owner's **global** `allow_*` would leak a
+/// per-session decision into the owner's own future sessions and every other code
+/// (capabilities are the owner's to configure, not to grant ad-hoc through a
+/// borrowed session's prompt). The approval is still honored for this one request;
+/// only the global persistence is skipped. An owner session (`suppress_remember =
+/// false`) keeps the original remember-to-global behavior.
 pub async fn check_security_permission(
     settings: &SharedSettings,
     hub: &Arc<HostControlHub>,
     permission: Option<bool>,
     permission_type: SecurityPermissionType,
     from_connection_id: Option<String>,
+    suppress_remember: bool,
 ) -> bool {
     match permission {
         Some(true) => true,
@@ -153,7 +163,13 @@ pub async fn check_security_permission(
             };
             let response = hub.request_approval(req).await;
 
-            if response.remember {
+            if response.remember && suppress_remember {
+                log::info!(
+                    "[security] not persisting a capped session's approval to the host global \
+                     (per-code ceiling stays authoritative)"
+                );
+            }
+            if response.remember && !suppress_remember {
                 let mut settings_write = settings.write().await;
                 match permission_type {
                     SecurityPermissionType::RemoteControl => {
@@ -311,6 +327,7 @@ mod tests {
                 Some(true),
                 SecurityPermissionType::RemoteControl,
                 None,
+                false,
             ),
         )
         .await
@@ -331,6 +348,7 @@ mod tests {
                 Some(false),
                 SecurityPermissionType::RemoteControl,
                 None,
+                false,
             ),
         )
         .await
@@ -357,11 +375,43 @@ mod tests {
             None,
             SecurityPermissionType::Terminal,
             None,
+            false,
         )
         .await;
         assert!(approved);
         let s = settings.read().await;
         assert_eq!(s.security.allow_terminal, Some(true));
+    }
+
+    /// F3: a capped grant / code-session (`suppress_remember = true`) that the local
+    /// user approves *with* remember is honored for this request but must NOT widen
+    /// the host global — the owner's per-code ceiling stays the only authority.
+    #[tokio::test]
+    async fn capped_session_remember_does_not_write_global() {
+        let settings = shared_settings_for_test();
+        let before = settings.read().await.security.allow_terminal;
+        let hub = Arc::new(HostControlHub::new_local());
+        spawn_responder(
+            &hub,
+            ApprovalResponse {
+                approved: true,
+                remember: true,
+            },
+        );
+
+        let approved = check_security_permission(
+            &settings,
+            &hub,
+            None,
+            SecurityPermissionType::Terminal,
+            None,
+            true,
+        )
+        .await;
+        // Honored for this one request...
+        assert!(approved);
+        // ...but the global is untouched (no leak into the owner's future sessions).
+        assert_eq!(settings.read().await.security.allow_terminal, before);
     }
 
     // U-21: None + hub returns deny without remember → settings unchanged.
@@ -384,6 +434,7 @@ mod tests {
             None,
             SecurityPermissionType::FileBrowse,
             None,
+            false,
         )
         .await;
         assert!(!approved);
@@ -428,7 +479,8 @@ mod tests {
                     remember: true,
                 },
             );
-            let _ = check_security_permission(&settings, &hub, None, perm.clone(), None).await;
+            let _ =
+                check_security_permission(&settings, &hub, None, perm.clone(), None, false).await;
             let s = settings.read().await;
             assert_eq!(getter(&s), Some(true), "field mismatch for {:?}", perm);
         }
