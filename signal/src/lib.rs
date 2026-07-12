@@ -14,6 +14,7 @@ pub mod model_provider;
 pub mod request_remote_authorizer;
 pub mod service;
 pub mod terminal_orchestrator;
+pub mod terminal_start_authorizer;
 pub mod turn_usage;
 pub mod usage_query;
 pub mod usage_retention;

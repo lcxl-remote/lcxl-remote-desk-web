@@ -9,6 +9,7 @@ import { useTranslation } from "react-i18next"
 import { Loader2, TerminalSquare, ArrowLeft } from "lucide-react"
 import { Sparkles, WandSparkles } from "lucide-react"
 import { useListTerminal } from "@/services/hooks/terminalController/useListTerminal"
+import { readSessionGrant } from "@/features/desk/session-grant"
 import { useDeviceId } from "@/hooks/use-device-id"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -241,6 +242,14 @@ function TerminalView({ connectionId, deviceId, command, onClose, orgId }: { con
             // owning the connection; the OSS signal leaves it unset and routes by
             // the path connection_id (dual-target wire model).
             if (deviceId) url.searchParams.append("device_id", deviceId);
+            // A capability-scoped code-session carries the grant it redeemed so the
+            // central can stamp the terminal with the code's ceiling (the terminal WS
+            // is a distinct connection that never does a RequestRemote). An owner
+            // session has no grant and omits it (stamped with full control).
+            const grant = readSessionGrant(connectionId);
+            if (grant?.grantSessionId) {
+                url.searchParams.append("grant_session_id", grant.grantSessionId);
+            }
 
             const connectWS = () => {
                 try {

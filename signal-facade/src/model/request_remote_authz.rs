@@ -128,6 +128,24 @@ pub struct AuthorizedRequestRemote {
     pub authz: RequestRemoteAuthz,
 }
 
+/// A `StartTerminal` frame's data wrapped with its trusted stamp, the terminal
+/// analogue of [`AuthorizedRequestRemote`]. The remote terminal opens on a
+/// **distinct** WS connection that never does a `RequestRemote`, so it carries no
+/// admission / ceiling on the host; the central stamps this "admission-establishing"
+/// frame exactly like a `RequestRemote` (owner → `access_ceiling: None`, redeemed
+/// code → `Some(ceiling)`) so the host can register the ceiling, record an
+/// admission, and index the connection under its grant. Reuses [`RequestRemoteAuthz`]
+/// verbatim (same request_id / audience / expiry / grant discipline); the wire types
+/// stay distinct only so the host's source-gate dispatches by `signaling_type`
+/// without ambiguity. `inner` is the original serialized
+/// [`super::terminal::StartTerminalSession`], kept byte-for-byte so the host unwraps
+/// it back unchanged after validating `authz`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizedTerminalStart {
+    pub inner: serde_json::Value,
+    pub authz: RequestRemoteAuthz,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

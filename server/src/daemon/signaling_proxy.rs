@@ -20,7 +20,7 @@ use desk_ipc_protocol::message::{
     ERROR_CODE_MEDIA_TRANSPORT_STUCK, VirtualDisplayModeOutcome, WorkerToService,
 };
 use desk_signal_facade::model::{
-    request_remote_authz::{AuthorizedRequestRemote, RequestRemoteAuthz},
+    request_remote_authz::{AuthorizedRequestRemote, AuthorizedTerminalStart, RequestRemoteAuthz},
     signal::{RemoteDeskTypeEnum, SignalingModel, SignalingResponseState, SignalingType},
     version::VersionInfo,
     virtual_display::ChangeDisplaySettingsPayload,
@@ -171,6 +171,7 @@ pub async fn run_signaling_proxy(
         // dispatcher; the shared base context carries none.
         inbound_authz: None,
         inbound_request_remote_authz: None,
+        inbound_start_terminal_authz: None,
         // Fleet exec correlation set, shared with the worker-message loop below so
         // a worker `ExecResult` for an in-flight fleet attempt is relayed to the
         // manager as a `EdgeExecResult`.
@@ -1576,6 +1577,87 @@ fn gate_request_remote_frame(
     RequestRemoteGateOutcome::Pass(unwrapped, Some(wrapper.authz))
 }
 
+/// Source-gate an inbound `StartTerminal` against the capability-ceiling stamp
+/// rules, the terminal analogue of [`gate_request_remote_frame`]. The remote
+/// terminal opens on a distinct WS connection that never does a `RequestRemote`, so
+/// `StartTerminal` is *its* admission-establishing frame and must carry the same
+/// stamp discipline:
+///
+/// - A **wrapper** (`AuthorizedTerminalStart`) is only legitimate from
+///   `TrustedCentral`; on any other source it is dropped (a non-central stamp is an
+///   illegitimate injection).
+/// - On `TrustedCentral` a **bare** `StartTerminal` is dropped — the central always
+///   stamps (owner → no ceiling, redeemed code → its ceiling), so a bare one is a
+///   forged frame or a stamp-stripping downgrade attempt.
+/// - On `TrustedCentral` a wrapper is validated against the frame (`request_id`),
+///   this daemon's audience, and expiry; on success the inner `StartTerminalSession`
+///   is unwrapped and forwarded with the validated stamp (which
+///   `handle_start_terminal_inbound` turns into the connection's ceiling + admission
+///   + grant index).
+/// - On a non-central source (loopback / relay) a bare `StartTerminal` passes
+///   through unchanged: the owner-only relay path, where there is no central to
+///   stamp and redeemed codes are hard-rejected at redeem time — identical to the
+///   `RequestRemote` owner relay.
+fn gate_start_terminal_frame(
+    model: SignalingModel,
+    source: InboundSignalingSource,
+    expected_audience: &str,
+    now_rfc3339: &str,
+) -> RequestRemoteGateOutcome {
+    let has_wrapper = model
+        .get_raw_data()
+        .as_ref()
+        .and_then(|v| v.as_object())
+        .map(|o| o.contains_key("authz") && o.contains_key("inner"))
+        .unwrap_or(false);
+
+    if !has_wrapper {
+        if source == InboundSignalingSource::TrustedCentral {
+            return RequestRemoteGateOutcome::Drop(
+                "bare StartTerminal from trusted-central source (capability-ceiling stamp required)"
+                    .to_string(),
+            );
+        }
+        return RequestRemoteGateOutcome::Pass(model, None);
+    }
+
+    if source != InboundSignalingSource::TrustedCentral {
+        return RequestRemoteGateOutcome::Drop(format!(
+            "StartTerminal carried a capability-ceiling stamp from non-central source {source:?}"
+        ));
+    }
+
+    let raw = match model.get_raw_data().clone() {
+        Some(v) => v,
+        None => return RequestRemoteGateOutcome::Drop("stamped frame had no data".to_string()),
+    };
+    let wrapper: AuthorizedTerminalStart = match serde_json::from_value(raw) {
+        Ok(w) => w,
+        Err(e) => {
+            return RequestRemoteGateOutcome::Drop(format!(
+                "malformed StartTerminal stamp wrapper: {e}"
+            ));
+        }
+    };
+
+    if let Err(e) = wrapper
+        .authz
+        .validate(&model.request_id, expected_audience, now_rfc3339)
+    {
+        return RequestRemoteGateOutcome::Drop(format!("StartTerminal stamp rejected: {e:?}"));
+    }
+
+    let unwrapped = SignalingModel::new(
+        &model.request_id,
+        model.signaling_type,
+        model.from_connection_id.clone(),
+        model.to_connection_id.clone(),
+        Some(wrapper.inner),
+        model.response_state.clone(),
+    );
+    RequestRemoteGateOutcome::Pass(unwrapped, Some(wrapper.authz))
+}
+
 /// True for the trusted-central plumbing frames that drive an evidence
 /// collection or a remote read-tool call. Unlike the AI control frames these may
 /// arrive either bare or wrapped, so they get the optional-wrapper gate rather
@@ -1888,6 +1970,37 @@ async fn handle_inbound_signaling_text(
         return InboundOutcome::Continue;
     }
 
+    // `StartTerminal` carries the same capability-ceiling stamp as `RequestRemote`
+    // (it is the admission-establishing frame for the distinct terminal WS): required
+    // and validated on the trusted-central link, rejected if stamped from a
+    // non-central source, passed through bare on the owner-only relay path. The
+    // validated stamp rides into the router via the context so
+    // `handle_start_terminal_inbound` can register the connection's ceiling +
+    // admission + grant index.
+    if parsed.signaling_type == SignalingType::StartTerminal {
+        match gate_start_terminal_frame(parsed, source, &expected_audience, &now) {
+            RequestRemoteGateOutcome::Pass(unwrapped, authz) => {
+                let effective_ctx;
+                let ctx_ref = if authz.is_some() {
+                    effective_ctx = RouterContext {
+                        inbound_start_terminal_authz: authz,
+                        ..router_ctx.clone()
+                    };
+                    &effective_ctx
+                } else {
+                    router_ctx
+                };
+                if let Err(e) = signaling_router::route(&unwrapped, ctx_ref).await {
+                    warn!("[Proxy] router handler failed for StartTerminal: {e}");
+                }
+            }
+            RequestRemoteGateOutcome::Drop(reason) => {
+                warn!("[Proxy] Dropping StartTerminal: {reason}");
+            }
+        }
+        return InboundOutcome::Continue;
+    }
+
     let (parsed, authz) = match gate_authz_frame(parsed, source, &expected_audience, &now) {
         AuthzGateOutcome::Pass(m, authz) => (m, authz),
         AuthzGateOutcome::Drop(reason) => {
@@ -2090,6 +2203,136 @@ mod tests {
         }
     }
 
+    fn start_terminal_session() -> desk_signal_facade::model::terminal::StartTerminalSession {
+        desk_signal_facade::model::terminal::StartTerminalSession {
+            command: "cmd.exe".to_string(),
+            device_id: None,
+            grant_session_id: None,
+        }
+    }
+
+    fn bare_start_terminal() -> SignalingModel {
+        SignalingModel::new(
+            "req-1",
+            SignalingType::StartTerminal,
+            Some("browser-1".to_string()),
+            Some("host-1".to_string()),
+            Some(serde_json::to_value(start_terminal_session()).unwrap()),
+            None,
+        )
+    }
+
+    fn stamped_start_terminal(authz: RequestRemoteAuthz) -> SignalingModel {
+        let wrapper = AuthorizedTerminalStart {
+            inner: serde_json::to_value(start_terminal_session()).unwrap(),
+            authz,
+        };
+        SignalingModel::new(
+            "req-1",
+            SignalingType::StartTerminal,
+            Some("browser-1".to_string()),
+            Some("host-1".to_string()),
+            Some(serde_json::to_value(&wrapper).unwrap()),
+            None,
+        )
+    }
+
+    #[test]
+    fn start_terminal_bare_from_trusted_central_is_dropped() {
+        // Terminal mirrors RequestRemote: the central always stamps, so a bare
+        // StartTerminal on that link is forged / a stripped stamp and must drop.
+        match gate_start_terminal_frame(
+            bare_start_terminal(),
+            InboundSignalingSource::TrustedCentral,
+            RR_AUDIENCE,
+            RR_NOW,
+        ) {
+            RequestRemoteGateOutcome::Drop(_) => {}
+            RequestRemoteGateOutcome::Pass(..) => panic!("bare central StartTerminal must drop"),
+        }
+    }
+
+    #[test]
+    fn start_terminal_stamp_from_non_central_is_dropped() {
+        match gate_start_terminal_frame(
+            stamped_start_terminal(authz(None)),
+            InboundSignalingSource::RemoteSignaling,
+            RR_AUDIENCE,
+            RR_NOW,
+        ) {
+            RequestRemoteGateOutcome::Drop(_) => {}
+            RequestRemoteGateOutcome::Pass(..) => panic!("non-central terminal stamp must drop"),
+        }
+    }
+
+    #[test]
+    fn start_terminal_stamp_failing_validation_is_dropped() {
+        match gate_start_terminal_frame(
+            stamped_start_terminal(authz(None)),
+            InboundSignalingSource::TrustedCentral,
+            "some-other-host",
+            RR_NOW,
+        ) {
+            RequestRemoteGateOutcome::Drop(_) => {}
+            RequestRemoteGateOutcome::Pass(..) => panic!("terminal audience mismatch must drop"),
+        }
+    }
+
+    #[test]
+    fn start_terminal_valid_owner_stamp_passes_and_unwraps() {
+        match gate_start_terminal_frame(
+            stamped_start_terminal(authz(None)),
+            InboundSignalingSource::TrustedCentral,
+            RR_AUDIENCE,
+            RR_NOW,
+        ) {
+            RequestRemoteGateOutcome::Pass(unwrapped, Some(a)) => {
+                assert_eq!(a.access_ceiling, None);
+                // The inner frame parses back as a plain StartTerminalSession.
+                assert!(
+                    unwrapped
+                        .get_data::<desk_signal_facade::model::terminal::StartTerminalSession>()
+                        .is_ok()
+                );
+            }
+            _ => panic!("valid owner terminal stamp must pass with its authz"),
+        }
+    }
+
+    #[test]
+    fn start_terminal_valid_grant_stamp_passes_with_ceiling() {
+        let ceiling = SecuritySettings {
+            allow_terminal: Some(true),
+            ..SecuritySettings::default()
+        };
+        match gate_start_terminal_frame(
+            stamped_start_terminal(authz(Some(ceiling.clone()))),
+            InboundSignalingSource::TrustedCentral,
+            RR_AUDIENCE,
+            RR_NOW,
+        ) {
+            RequestRemoteGateOutcome::Pass(_, Some(a)) => {
+                assert_eq!(a.access_ceiling, Some(ceiling));
+            }
+            _ => panic!("valid grant terminal stamp must pass with its ceiling"),
+        }
+    }
+
+    #[test]
+    fn start_terminal_bare_from_relay_passes_unchanged() {
+        // Owner-only relay path (no central to stamp) relays a bare StartTerminal
+        // through unchanged, admitted as owner downstream.
+        match gate_start_terminal_frame(
+            bare_start_terminal(),
+            InboundSignalingSource::RemoteSignaling,
+            RR_AUDIENCE,
+            RR_NOW,
+        ) {
+            RequestRemoteGateOutcome::Pass(_, None) => {}
+            _ => panic!("bare relay StartTerminal must pass unstamped"),
+        }
+    }
+
     #[test]
     fn manager_link_should_connect_requires_config_and_not_disabled() {
         let url = Some("wss://manager.example/api/desk/signaling".to_string());
@@ -2170,6 +2413,7 @@ mod tests {
             diagnose_tasks: Default::default(),
             inbound_authz: None,
             inbound_request_remote_authz: None,
+            inbound_start_terminal_authz: None,
             edge_exec_pending: Default::default(),
             support_link_state: Arc::new(crate::daemon::support_link_state::SupportLinkState::new()),
         };

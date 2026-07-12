@@ -585,6 +585,14 @@ pub struct PcRegistry {
     /// reuses the same connection id for owner-plane frames. Shared via `Arc` so
     /// registry clones stay consistent.
     admissions: Arc<RwLock<HashMap<String, Admission>>>,
+    /// Connection ids that are **terminal** WS connections (a distinct connection
+    /// per open terminal, admitted via `StartTerminal` rather than `RequestRemote`
+    /// and holding no PC). Tracked so a teardown — the connection's own
+    /// `CloseTerminal`, or a grant-directed revocation sweeping [`cleanup_pc`] — can
+    /// kill the worker-side shell and clear the connection's ceiling / admission,
+    /// which the PC-focused cleanup path would otherwise skip (no PC to close, no
+    /// media to stop). Shared via `Arc` so registry clones stay consistent.
+    terminal_connections: Arc<RwLock<HashSet<String>>>,
     /// Test-only phantom PC counter added to `len()`. See
     /// [`Self::set_test_len_extra`] — it lets the signaling router unit
     /// tests simulate multi-PC topologies without building real
@@ -681,9 +689,9 @@ impl PcRegistry {
 
     /// Drop `connection_id` from whatever grant session held it, removing the
     /// grant key entirely once its last connection departs. Called by
-    /// [`cleanup_pc`] on every teardown path; a no-op for connections that carry
-    /// no grant.
-    async fn unindex_grant_connection(&self, connection_id: &str) {
+    /// [`cleanup_pc`] on every teardown path and by the terminal connection's own
+    /// `CloseTerminal` cleanup; a no-op for connections that carry no grant.
+    pub(crate) async fn unindex_grant_connection(&self, connection_id: &str) {
         let mut map = self.grant_sessions.write().await;
         map.retain(|_, entry| {
             entry.connections.remove(connection_id);
@@ -742,6 +750,35 @@ impl PcRegistry {
     /// capped for the life of its signaling connection.
     pub async fn clear_admission(&self, connection_id: &str) {
         self.admissions.write().await.remove(connection_id);
+    }
+
+    /// Mark `connection_id` as a terminal WS connection (see
+    /// [`Self::terminal_connections`]). Called from `handle_start_terminal_inbound`
+    /// once the terminal's admission is recorded.
+    pub async fn mark_terminal_connection(&self, connection_id: &str) {
+        self.terminal_connections
+            .write()
+            .await
+            .insert(connection_id.to_string());
+    }
+
+    /// Whether `connection_id` is a tracked terminal WS connection. Used by
+    /// [`cleanup_pc`] to run terminal-specific teardown (kill the shell, clear the
+    /// ceiling) that the PC-focused path would otherwise skip.
+    pub async fn is_terminal_connection(&self, connection_id: &str) -> bool {
+        self.terminal_connections
+            .read()
+            .await
+            .contains(connection_id)
+    }
+
+    /// Drop `connection_id` from the terminal set. Called when the terminal is torn
+    /// down (its own `CloseTerminal` or a grant-directed sweep).
+    pub async fn unmark_terminal_connection(&self, connection_id: &str) {
+        self.terminal_connections
+            .write()
+            .await
+            .remove(connection_id);
     }
 
     /// Whether any registered `PeerConnectionContext` currently has
@@ -2906,6 +2943,42 @@ async fn cleanup_pc(
         .await
     {
         log::debug!("[pc_manager] StopMedia for {connection_id} could not reach worker: {e}");
+    }
+
+    // Terminal WS connections hold no PC and no media, so the steps above are a
+    // no-op for them. A directed teardown (grant revoke / dial-code regeneration)
+    // sweeping this path must still physically end the terminal: kill the worker
+    // shell and clear the connection's ceiling + admission so nothing survives the
+    // revocation. Idempotent with the terminal's own `CloseTerminal` cleanup.
+    if registry.is_terminal_connection(connection_id).await {
+        if let Err(e) = worker_mgr
+            .send_to_worker(ServiceToWorker::CloseTerminalRequest(
+                desk_ipc_protocol::message::CloseTerminalPayload {
+                    connection_id: connection_id.to_string(),
+                },
+            ))
+            .await
+        {
+            log::debug!(
+                "[pc_manager] CloseTerminalRequest for {connection_id} could not reach worker: {e}"
+            );
+        }
+        if let Err(e) = worker_mgr
+            .send_to_worker(ServiceToWorker::SetConnectionCeiling(
+                desk_ipc_protocol::message::SetConnectionCeilingPayload {
+                    connection_id: connection_id.to_string(),
+                    ceiling: None,
+                },
+            ))
+            .await
+        {
+            log::debug!(
+                "[pc_manager] ceiling clear for terminal {connection_id} could not reach worker: {e}"
+            );
+        }
+        registry.clear_admission(connection_id).await;
+        registry.unmark_terminal_connection(connection_id).await;
+        log::info!("[pc_manager] terminal connection {connection_id} torn down (reason: {reason})");
     }
 
     // Codex P1 #1: re-derive the exclusive-mode desired flag on
@@ -5999,6 +6072,62 @@ mod tests {
         cleanup_pc(&registry, &worker_mgr, None, "conn-g", "test").await;
 
         assert!(registry.connections_for_grant("GS-9").await.is_empty());
+    }
+
+    /// A grant-directed teardown (revocation / dial-code regeneration) must
+    /// physically end an open **terminal** connection of that grant — not just its
+    /// PC-bearing connections. The terminal WS holds no PC, so `cleanup_pc`'s PC /
+    /// media steps are no-ops for it; the terminal-aware branch must still send the
+    /// worker a `CloseTerminalRequest` (kill the shell) and a `SetConnectionCeiling`
+    /// clear, and drop the connection's admission / terminal mark / grant index.
+    /// Without this a revoked code's terminals would keep running (the codex Major).
+    #[tokio::test]
+    async fn close_grant_session_tears_down_terminal_connection() {
+        use desk_ipc_protocol::message::ServiceToWorker;
+
+        let registry = PcRegistry::new();
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let settings = actix_web::web::Data::new(SharedSettings::from(s));
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+
+        // A capped terminal connection (no PC) indexed under grant GS-T.
+        let ceiling = SecuritySettings {
+            allow_terminal: Some(true),
+            ..Default::default()
+        };
+        registry
+            .record_admission("term-1", Admission::Capped(ceiling))
+            .await;
+        registry.index_grant_connection("GS-T", 0, "term-1").await;
+        registry.mark_terminal_connection("term-1").await;
+
+        close_grant_session(&registry, &worker_mgr, None, "GS-T", "test-revoke").await;
+
+        let mut saw_close = false;
+        let mut saw_ceiling_clear = false;
+        while let Ok(msg) = ipc_rx.try_recv() {
+            match msg {
+                ServiceToWorker::CloseTerminalRequest(p) if p.connection_id == "term-1" => {
+                    saw_close = true;
+                }
+                ServiceToWorker::SetConnectionCeiling(p)
+                    if p.connection_id == "term-1" && p.ceiling.is_none() =>
+                {
+                    saw_ceiling_clear = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_close, "grant revoke must close the terminal shell");
+        assert!(
+            saw_ceiling_clear,
+            "grant revoke must clear the terminal ceiling"
+        );
+        assert!(registry.admission("term-1").await.is_none());
+        assert!(!registry.is_terminal_connection("term-1").await);
+        assert!(registry.connections_for_grant("GS-T").await.is_empty());
     }
 
     /// A capped connection's admission record survives a `CloseControl` PC teardown

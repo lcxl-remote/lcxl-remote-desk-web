@@ -12,6 +12,16 @@ pub struct StartTerminalSession {
     /// by the path `connection_id` (dual-target wire model).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
+    /// Browser-supplied (untrusted) grant-session selector, mirroring
+    /// `RequestRemoteModel::grant_session_id`. A capability-scoped code-session
+    /// carries the grant it redeemed so the central can look up and stamp the
+    /// code's capability ceiling onto the `StartTerminal` frame (the terminal WS is
+    /// a distinct connection that never does a `RequestRemote`, so it cannot inherit
+    /// the control session's stamp). It is only a lookup key: the authorization fact
+    /// is the server-side principal / target / generation check. `None` for an owner
+    /// session (stamped with no ceiling).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_session_id: Option<String>,
 }
 
 /// Terminal list
@@ -97,6 +107,7 @@ mod wincode_tests {
         let original = StartTerminalSession {
             command: r"C:\Windows\System32\cmd.exe,/k,echo,hello".to_string(),
             device_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            grant_session_id: Some("GRANTSESSION00000000000000000000".to_string()),
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
@@ -104,6 +115,7 @@ mod wincode_tests {
             wincode::config::deserialize(&bytes, config).expect("decode");
         assert_eq!(back.command, original.command);
         assert_eq!(back.device_id, original.device_id);
+        assert_eq!(back.grant_session_id, original.grant_session_id);
     }
 
     #[test]

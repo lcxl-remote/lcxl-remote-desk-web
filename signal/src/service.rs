@@ -95,7 +95,7 @@ impl Drop for ConnectionDeviceGuard {
 ///   **no** temp-code / central-brain privileges (only the manager attaches those),
 ///   so it is ordinary single-account routing-only, exactly like a `Browser`. Made
 ///   an explicit, tested seam so the role is never silently mishandled.
-fn single_account_auth_context(
+pub(crate) fn single_account_auth_context(
     remote_desk_type: RemoteDeskTypeEnum,
 ) -> desk_signal_facade::model::auth_context::AuthContext {
     use desk_signal_facade::model::auth_context::AuthContext;
@@ -112,6 +112,24 @@ fn single_account_auth_context(
             crate::control_authorizer::SINGLE_ACCOUNT_USER_ID,
             remote_desk_type,
         ),
+    }
+}
+
+/// Map a resolved browser identity to its `AuthContext`, the single source of truth
+/// shared by the main signaling connection and the terminal WS connection (so a
+/// code-session vs owner stamp can never drift between them, per the design's shared
+/// resolver requirement). A redeemed code-session resolves to its own principal
+/// (never the single-account owner) so the capability-ceiling stamps use the code's
+/// ceiling rather than full control.
+pub(crate) fn browser_auth_context(
+    code_session: Option<&desk_signal_facade::model::code_session::CodeSessionCookie>,
+    remote_desk_type: RemoteDeskTypeEnum,
+) -> desk_signal_facade::model::auth_context::AuthContext {
+    match code_session {
+        Some(cs) => desk_signal_facade::model::auth_context::AuthContext::code_session(
+            cs.code_session_id.clone(),
+        ),
+        None => single_account_auth_context(remote_desk_type),
     }
 }
 
@@ -165,12 +183,8 @@ pub async fn handle_signaling(
     // A capability-scoped code-session resolves to its own principal (never the
     // single-account owner) so the RequestRemote authorizer stamps the redeemed
     // code's ceiling rather than full control.
-    let auth_context = match &code_session {
-        Some(cs) => desk_signal_facade::model::auth_context::AuthContext::code_session(
-            cs.code_session_id.clone(),
-        ),
-        None => single_account_auth_context(client_version_info.remote_desk_type),
-    };
+    let auth_context =
+        browser_auth_context(code_session.as_ref(), client_version_info.remote_desk_type);
 
     // The central-brain injection points: a single-account policy decision point
     // that authorizes/orchestrates the control-end AI frames, and a collect

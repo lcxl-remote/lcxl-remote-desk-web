@@ -70,13 +70,15 @@ impl DeviceGenerationLookup for DbDeviceGenerationLookup {
 }
 
 /// Validity window of an injected stamp (seconds); matches the AI authorizer's
-/// `AUTHZ_TTL_SECS` and doubles as the edge-enforced replay window.
-const REQUEST_REMOTE_AUTHZ_TTL_SECS: i64 = 300;
+/// `AUTHZ_TTL_SECS` and doubles as the edge-enforced replay window. Shared with the
+/// terminal-start stamp so both capability stamps expire on the same schedule.
+pub(crate) const REQUEST_REMOTE_AUTHZ_TTL_SECS: i64 = 300;
 
 /// Resolve the owner (single-account) user id from a sending connection's auth
 /// context. Only a cookie-authenticated control end is a valid actor; a token
-/// (node) connection or an anonymous one is not.
-fn owner_actor_user_id(ctx: &AuthContext) -> Option<i32> {
+/// (node) connection or an anonymous one is not. Shared with the terminal-start
+/// authorizer so owner detection cannot drift between the two capability stamps.
+pub(crate) fn owner_actor_user_id(ctx: &AuthContext) -> Option<i32> {
     if ctx.auth_kind == AuthKind::CookieAuth {
         ctx.user_id
     } else {
@@ -84,11 +86,36 @@ fn owner_actor_user_id(ctx: &AuthContext) -> Option<i32> {
     }
 }
 
+/// Resolve the capability ceiling to stamp for a code-session actor against the
+/// resolved target `audience`, keyed by the browser-supplied (untrusted)
+/// `grant_session_id` selector. The authorization fact is the server-side lookup:
+/// the grant's `principal` / `target` / live `generation` must all match. Returns
+/// `(ceiling, Some(grant_session_id), generation)` on success, or `None` to reject.
+/// Shared by the `RequestRemote` and `StartTerminal` stamps so a code-session
+/// authorizes identically on both connections.
+pub(crate) async fn resolve_grant_ceiling(
+    grant_store: &Arc<dyn AccessGrantStore>,
+    generation_lookup: &Arc<dyn DeviceGenerationLookup>,
+    principal: &GrantPrincipal,
+    audience: &str,
+    grant_session_id: Option<&str>,
+) -> Option<(Option<SecuritySettings>, Option<String>, i64)> {
+    let grant_session_id = grant_session_id?;
+    let record = grant_store.lookup(grant_session_id).await.ok().flatten()?;
+    let current_generation = generation_lookup.current_generation(audience).await?;
+    let ceiling = record.authorize(principal, audience, current_generation)?;
+    Some((
+        ceiling,
+        Some(grant_session_id.to_string()),
+        current_generation,
+    ))
+}
+
 /// Resolve the audience (target edge `client_id`) from the receiving connection's
 /// validated state. The target must be a token-authenticated `Server` carrying a
 /// client id; a control end can never satisfy this. Pure over the validated
 /// fields so it is unit-testable without a live connection.
-fn resolve_target_audience(
+pub(crate) fn resolve_target_audience(
     auth_kind: AuthKind,
     remote_desk_type: RemoteDeskTypeEnum,
     client_id: Option<&str>,
@@ -189,18 +216,17 @@ impl SignalRequestRemoteAuthorizer {
         let grant_session_id = model
             .get_data::<RequestRemoteModel>()
             .ok()
-            .and_then(|m| m.grant_session_id)?;
-        let record = self
-            .grant_store
-            .lookup(&grant_session_id)
-            .await
-            .ok()
-            .flatten()?;
-        let current_generation = self.generation_lookup.current_generation(audience).await?;
-        let ceiling = record.authorize(principal, audience, current_generation)?;
+            .and_then(|m| m.grant_session_id);
         // Echo the live generation into the stamp so the host records it with the
         // grant and can direct-close the session on a later regeneration.
-        Some((ceiling, Some(grant_session_id), current_generation))
+        resolve_grant_ceiling(
+            &self.grant_store,
+            &self.generation_lookup,
+            principal,
+            audience,
+            grant_session_id.as_deref(),
+        )
+        .await
     }
 }
 

@@ -433,6 +433,16 @@ pub struct RouterContext {
     /// signatures stay untouched.
     pub inbound_request_remote_authz:
         Option<desk_signal_facade::model::request_remote_authz::RequestRemoteAuthz>,
+    /// The validated capability-ceiling stamp for the current inbound
+    /// `StartTerminal`, set per call by the proxy after `gate_start_terminal_frame`
+    /// accepts a wrapped frame on the trusted-central link. `None` for a bare
+    /// (non-central) `StartTerminal` (owner-only relay path) or any other frame.
+    /// `handle_start_terminal_inbound` consumes it to register the terminal
+    /// connection's worker ceiling, record its admission, and index it under its
+    /// grant — the terminal analogue of `inbound_request_remote_authz` (the terminal
+    /// WS is a distinct connection that never does a `RequestRemote`).
+    pub inbound_start_terminal_authz:
+        Option<desk_signal_facade::model::request_remote_authz::RequestRemoteAuthz>,
     /// Per-attempt `request_id`s of fleet executions currently dispatched to the
     /// worker. When the worker replies with `WorkerToService::ExecResult` whose
     /// `request_id` is in this set, the proxy emits a `EdgeExecResult(614)`
@@ -473,19 +483,27 @@ fn is_baseline_signaling_type(t: SignalingType) -> bool {
 }
 
 /// Connection-scoped capability frames whose enforcement is a per-dimension
-/// `access_ceiling` gate: the terminal family, the file-browse family, and
-/// private-screen enable. These are only ever legitimate **after** an authorized
-/// `RequestRemote` has recorded the connection's admission (owner → `OwnerFull`,
-/// redeemed grant → `Capped`) and provisioned its worker-side ceiling. An
-/// un-admitted connection sending one is anomalous: no ceiling has reached the
-/// worker yet, so the worker-side `meet` gate would fall back to the host global
-/// (fail-open). door1 therefore denies these for an un-admitted connection.
+/// `access_ceiling` gate: the terminal I/O family, the file-browse family, and
+/// private-screen enable. These are only ever legitimate **after** the connection's
+/// admission has been recorded (owner → `OwnerFull`, redeemed grant → `Capped`) and
+/// its worker-side ceiling provisioned. An un-admitted connection sending one is
+/// anomalous: no ceiling has reached the worker yet, so the worker-side `meet` gate
+/// would fall back to the host global (fail-open). door1 therefore denies these for
+/// an un-admitted connection.
+///
+/// `StartTerminal` is deliberately **excluded**: like `RequestRemote`, it is the
+/// admission-*establishing* frame for the terminal WS (a distinct connection that
+/// never does a `RequestRemote`). Its own source-gate (`gate_start_terminal_frame`)
+/// requires and validates a capability stamp on the trusted-central link, and
+/// `handle_start_terminal_inbound` records the admission + ceiling from that stamp —
+/// so it must be allowed to reach the handler on an un-admitted connection, exactly
+/// as `RequestRemote` is. The remaining terminal I/O frames stay gated here and pass
+/// once `StartTerminal` has established the admission.
 fn is_connection_scoped_capability_frame(t: SignalingType) -> bool {
     use SignalingType::*;
     matches!(
         t,
-        StartTerminal
-            | SendDataToTerminal
+        SendDataToTerminal
             | ResizeTerminal
             | CloseTerminal
             | ListTerminal
@@ -2018,6 +2036,16 @@ async fn handle_start_terminal_inbound(
             return Ok(());
         }
     };
+    // The terminal WS is a distinct connection that never does a `RequestRemote`, so
+    // this is its admission-establishing frame: register the connection's capability
+    // ceiling + admission (+ grant index) from the validated stamp before shipping
+    // the request to the worker, so the worker-side `meet(ceiling, global)` gate
+    // enforces it from the very first terminal request. Fail-closed: a capped ceiling
+    // that cannot reach the worker refuses the terminal (never starts it ceiling-less).
+    if !register_terminal_admission(ctx, connection_id).await {
+        return Ok(());
+    }
+
     let payload = StartTerminalRequestPayload {
         request_id: model.request_id.clone(),
         connection_id: connection_id.to_string(),
@@ -2031,6 +2059,65 @@ async fn handle_start_terminal_inbound(
         log::warn!("[router] failed to send typed StartTerminalRequest: {e}");
     }
     Ok(())
+}
+
+/// Register a terminal connection's admission, worker ceiling, and grant index from
+/// the validated `StartTerminal` stamp (the terminal analogue of what
+/// `handle_request_remote` does for a control connection). Returns `false` — refuse
+/// the terminal — only when a capped ceiling fails to reach the worker (fail-closed:
+/// a terminal must never run with no worker-side cap, which would fall back to the
+/// host global). A central stamp with `access_ceiling: None` is an owner session; a
+/// bare frame (owner-only relay / local path, no stamp) is likewise admitted as
+/// owner with no ceiling.
+async fn register_terminal_admission(ctx: &RouterContext, connection_id: &str) -> bool {
+    match ctx.inbound_start_terminal_authz.as_ref() {
+        Some(authz) => {
+            if let Some(ceiling) = authz.access_ceiling.as_ref() {
+                if let Err(e) = ctx
+                    .worker_mgr
+                    .send_to_worker(ServiceToWorker::SetConnectionCeiling(
+                        desk_ipc_protocol::message::SetConnectionCeilingPayload {
+                            connection_id: connection_id.to_string(),
+                            ceiling: Some(ceiling.clone()),
+                        },
+                    ))
+                    .await
+                {
+                    log::warn!(
+                        "[router] StartTerminal ceiling registration failed for {connection_id}: \
+                         {e}; refusing terminal"
+                    );
+                    return false;
+                }
+                ctx.pc_registry
+                    .record_admission(
+                        connection_id,
+                        pc_manager::Admission::Capped(ceiling.clone()),
+                    )
+                    .await;
+            } else {
+                ctx.pc_registry
+                    .record_admission(connection_id, pc_manager::Admission::OwnerFull)
+                    .await;
+            }
+            // Index a capped terminal under its grant so a directed revocation /
+            // dial-code regeneration tears it down with the rest of the session.
+            if let Some(gsid) = authz.grant_session_id.as_deref() {
+                ctx.pc_registry
+                    .index_grant_connection(gsid, authz.generation, connection_id)
+                    .await;
+            }
+        }
+        None => {
+            ctx.pc_registry
+                .record_admission(connection_id, pc_manager::Admission::OwnerFull)
+                .await;
+        }
+    }
+    ctx.pc_registry
+        .mark_terminal_connection(connection_id)
+        .await;
+    true
 }
 
 async fn handle_send_data_to_terminal_inbound(
@@ -2118,6 +2205,35 @@ async fn handle_close_terminal_inbound(
         .await
     {
         log::warn!("[router] failed to send typed CloseTerminalRequest: {e}");
+    }
+
+    // Clear the terminal connection's whole capability footprint so nothing survives
+    // its close: worker ceiling, admission, grant index, terminal mark. Gated on the
+    // terminal marker so a stray `CloseTerminal` from a non-terminal connection can
+    // never clear that connection's admission. The connection id is a fresh UUID
+    // (never reused), but clearing promptly also bounds the maps' growth.
+    if ctx.pc_registry.is_terminal_connection(connection_id).await {
+        if let Err(e) = ctx
+            .worker_mgr
+            .send_to_worker(ServiceToWorker::SetConnectionCeiling(
+                desk_ipc_protocol::message::SetConnectionCeilingPayload {
+                    connection_id: connection_id.to_string(),
+                    ceiling: None,
+                },
+            ))
+            .await
+        {
+            log::debug!(
+                "[router] terminal ceiling clear for {connection_id} did not reach worker: {e}"
+            );
+        }
+        ctx.pc_registry.clear_admission(connection_id).await;
+        ctx.pc_registry
+            .unindex_grant_connection(connection_id)
+            .await;
+        ctx.pc_registry
+            .unmark_terminal_connection(connection_id)
+            .await;
     }
     Ok(())
 }
@@ -3643,6 +3759,7 @@ mod tests {
             diagnose_tasks: Default::default(),
             inbound_authz: None,
             inbound_request_remote_authz: None,
+            inbound_start_terminal_authz: None,
             edge_exec_pending: Default::default(),
             support_link_state: Arc::new(crate::daemon::support_link_state::SupportLinkState::new()),
         }
@@ -3786,9 +3903,11 @@ mod tests {
         // Un-admitted WS connection: a connection-scoped capability frame is
         // denied — it would otherwise reach the worker before any ceiling was
         // provisioned and be evaluated against the host global (F1/N1
-        // pre-RequestRemote window).
+        // pre-RequestRemote window). `StartTerminal` is deliberately NOT in this
+        // list: like `RequestRemote` it is the admission-establishing frame for the
+        // terminal WS, gated by its own source-gate + handler, so it must reach the
+        // handler on an un-admitted connection (asserted permitted below).
         for t in [
-            StartTerminal,
             SendDataToTerminal,
             ResizeTerminal,
             CloseTerminal,
@@ -3802,8 +3921,10 @@ mod tests {
                 "un-admitted capability frame {t:?} must be denied at door1"
             );
         }
-        // Un-admitted owner-plane / baseline frames still pass here (owner-plane is
-        // authorized at the central; a code-session cannot originate them).
+        // Un-admitted owner-plane / baseline / admission-establishing frames still
+        // pass here (owner-plane is authorized at the central; a code-session cannot
+        // originate them; `RequestRemote` / `StartTerminal` are gated by their own
+        // source-gate + handler).
         assert!(door1_permits(
             &ConnectionGate::UnadmittedConnection,
             ManagerUpdateSettings
@@ -3812,6 +3933,10 @@ mod tests {
             &ConnectionGate::UnadmittedConnection,
             RequestRemote
         ));
+        assert!(
+            door1_permits(&ConnectionGate::UnadmittedConnection, StartTerminal),
+            "StartTerminal is admission-establishing and must pass door1 un-admitted"
+        );
         // Server-internal (REST-initiated, `from_connection_id == None`) frames —
         // already authorized at the REST layer — pass, including the capability
         // frames a REST file/terminal listing legitimately emits.
@@ -4011,6 +4136,7 @@ mod tests {
                 serde_json::to_value(desk_signal_facade::model::terminal::StartTerminalSession {
                     command: "C:\\Windows\\System32\\cmd.exe".to_string(),
                     device_id: None,
+                    grant_session_id: None,
                 })
                 .unwrap(),
             ),
@@ -4047,6 +4173,93 @@ mod tests {
                 "{t:?} must succeed inline (no bridge fallback exists)",
             );
         }
+    }
+
+    /// A stamped owner `StartTerminal` on an un-admitted terminal WS connection
+    /// establishes the connection's admission (owner → `OwnerFull`) and marks it as
+    /// a terminal — the admission-establishing role that lets its later
+    /// SendData/Resize/Close frames pass door1. No ceiling send is needed for an
+    /// owner, so this runs without an active worker.
+    #[tokio::test]
+    async fn route_start_terminal_owner_stamp_records_admission_and_marks_terminal() {
+        let mut ctx = make_ctx();
+        ctx.inbound_start_terminal_authz = Some(
+            desk_signal_facade::model::request_remote_authz::RequestRemoteAuthz {
+                version:
+                    desk_signal_facade::model::request_remote_authz::REQUEST_REMOTE_AUTHZ_VERSION,
+                access_ceiling: None,
+                grant_session_id: None,
+                generation: 0,
+                request_id: "rt".to_string(),
+                audience: "aud".to_string(),
+                expires_at: None,
+            },
+        );
+        let model = SignalingModel::new(
+            "rt",
+            SignalingType::StartTerminal,
+            Some("term-x".to_string()),
+            None,
+            Some(
+                serde_json::to_value(desk_signal_facade::model::terminal::StartTerminalSession {
+                    command: "cmd.exe".to_string(),
+                    device_id: None,
+                    grant_session_id: None,
+                })
+                .unwrap(),
+            ),
+            None,
+        );
+        route(&model, &ctx).await.expect("ok");
+        assert!(matches!(
+            ctx.pc_registry.admission("term-x").await,
+            Some(pc_manager::Admission::OwnerFull)
+        ));
+        assert!(ctx.pc_registry.is_terminal_connection("term-x").await);
+        // A bare frame (owner-only relay, no stamp) admits as owner the same way.
+        let mut ctx2 = make_ctx();
+        ctx2.inbound_start_terminal_authz = None;
+        route(&model, &ctx2).await.expect("ok");
+        assert!(matches!(
+            ctx2.pc_registry.admission("term-x").await,
+            Some(pc_manager::Admission::OwnerFull)
+        ));
+    }
+
+    /// A `CloseTerminal` clears the terminal connection's whole capability
+    /// footprint: admission, terminal mark, and grant reverse-index (so a later
+    /// directed revocation cannot reach a stale id).
+    #[tokio::test]
+    async fn route_close_terminal_clears_terminal_footprint() {
+        let ctx = make_ctx();
+        let ceiling = SecuritySettings {
+            allow_terminal: Some(true),
+            ..Default::default()
+        };
+        ctx.pc_registry
+            .record_admission("term-c", pc_manager::Admission::Capped(ceiling))
+            .await;
+        ctx.pc_registry
+            .index_grant_connection("GS-c", 0, "term-c")
+            .await;
+        ctx.pc_registry.mark_terminal_connection("term-c").await;
+        let model = SignalingModel::new(
+            "rc",
+            SignalingType::CloseTerminal,
+            Some("term-c".to_string()),
+            None,
+            None,
+            None,
+        );
+        route(&model, &ctx).await.expect("ok");
+        assert!(ctx.pc_registry.admission("term-c").await.is_none());
+        assert!(!ctx.pc_registry.is_terminal_connection("term-c").await);
+        assert!(
+            ctx.pc_registry
+                .connections_for_grant("GS-c")
+                .await
+                .is_empty()
+        );
     }
 
     /// Terminal requests without a `from_connection_id` are protocol

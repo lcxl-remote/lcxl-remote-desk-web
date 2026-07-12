@@ -1,14 +1,19 @@
+use crate::controller::signaling::resolve_browser_identity;
+use crate::request_remote_authorizer::DbDeviceGenerationLookup;
+use crate::service::browser_auth_context;
+use crate::terminal_start_authorizer::SignalTerminalStartAuthorizer;
 use crate::{model::SharedConnectionMap, service::SignalingContext, version};
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
-use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 use desk_signal_facade::model::{
     signal::{RemoteDeskTypeEnum, SignalingModel, SignalingType, TurnProvider},
     terminal::{StartTerminalPath, StartTerminalSession},
     version::VersionInfo,
 };
+use desk_signal_facade::service::{RequestRemoteOutcome, TerminalStartAuthorizer};
 use desk_turn::model::TurnApiState;
 use log::{error, info};
+use std::sync::Arc;
 
 use uuid::Uuid;
 
@@ -35,13 +40,14 @@ pub async fn open_terminal_session(
     stream: web::Payload,
     turn_api_state: Option<web::Data<TurnApiState>>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    let user_opt = session.get_current_user::<CurrentUser>()?;
-
-    let user = if let Some(user) = user_opt {
-        user
-    } else {
-        return Err(actix_web::error::ErrorUnauthorized("User not logged in"));
+    // Resolve the browser identity with the same owner-vs-code-session adjudication
+    // as the main signaling connection (shared resolver, no drift): the resulting
+    // `AuthContext` is what the terminal-start authorizer stamps the ceiling from.
+    let (user, code_session) = match resolve_browser_identity(&session)? {
+        Some(identity) => identity,
+        None => return Err(actix_web::error::ErrorUnauthorized("User not logged in")),
     };
+    let auth_context = browser_auth_context(code_session.as_ref(), RemoteDeskTypeEnum::Browser);
     if query_list.command.is_empty() {
         return Err(actix_web::error::ErrorBadRequest(
             "No terminal command provided",
@@ -93,21 +99,46 @@ pub async fn open_terminal_session(
         ip,
         turn_provider,
         None,
-        desk_signal_facade::model::auth_context::AuthContext::anonymous(
-            RemoteDeskTypeEnum::Browser,
-        ),
+        auth_context,
         desk_server_version::SERVER_API_VERSION,
     )
     .await?;
 
-    // send start terminal command
+    // Build the StartTerminal frame, then stamp it with the caller's capability
+    // ceiling exactly like a RequestRemote (owner -> no ceiling, redeemed code ->
+    // its ceiling, else reject). The terminal WS is a distinct connection that never
+    // does a RequestRemote, so this stamp is how the host registers the ceiling,
+    // records an admission, and indexes the connection under its grant.
     let start_terminal_command = SignalingModel::new_request(
         SignalingType::StartTerminal,
         Some(to_connection_id.clone()),
         Some(&start_terminal_session),
     )?;
+    let terminal_authorizer = SignalTerminalStartAuthorizer::new(
+        crate::access_grant::global_access_grant_store(),
+        Arc::new(DbDeviceGenerationLookup::new(crate::db::get_db().clone())),
+    );
+    let stamped_start = match TerminalStartAuthorizer::authorize(
+        &terminal_authorizer,
+        &signaling_context.connection_state,
+        connection_map.get_ref(),
+        &start_terminal_command,
+    )
+    .await
+    {
+        RequestRemoteOutcome::Forward(model) => model,
+        RequestRemoteOutcome::Reject { code, message } => {
+            log::warn!(
+                "[terminal] StartTerminal denied (code={}): {message}",
+                code.code()
+            );
+            // Drop `signaling_context` (closing the just-upgraded socket) without
+            // spawning the handler; the browser sees the terminal WS close.
+            return Ok(res);
+        }
+    };
     signaling_context
-        .forward_to_peer(&start_terminal_command, false)
+        .forward_to_peer(&stamped_start, false)
         .await?;
     signaling_context
         .connection_state

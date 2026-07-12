@@ -250,6 +250,30 @@ pub trait RequestRemoteAuthorizer: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RequestRemoteOutcome> + Send + 'a>>;
 }
 
+// ====== TerminalStartAuthorizer (StartTerminal capability-ceiling stamp) ======
+
+/// Stamps a trusted capability ceiling onto a `StartTerminal` frame before it is
+/// relayed to the host — the terminal analogue of [`RequestRemoteAuthorizer`]. The
+/// remote terminal opens on a distinct WS connection that never does a
+/// `RequestRemote`, so without this stamp the host has no admission / ceiling for it
+/// (and its first door would either reject it or fall back to the host global). The
+/// manager and the signal server each implement it (rule 22, same shape): an owner
+/// session stamps `access_ceiling: None` (full control), a valid redeemed grant
+/// stamps `Some(ceiling)`, and anything else is a default-deny reject. Reuses
+/// [`RequestRemoteOutcome`]: `Forward` carries the frame wrapped in an
+/// `AuthorizedTerminalStart`, `Reject` fails the terminal open. Unlike
+/// `RequestRemoteAuthorizer` this is invoked directly by the terminal WS controller
+/// (which builds the `StartTerminal` frame itself) rather than through the signaling
+/// handler's per-type dispatch.
+pub trait TerminalStartAuthorizer: Send + Sync {
+    fn authorize<'a>(
+        &'a self,
+        actor: &'a ConnectionState,
+        connection_map: &'a SharedConnectionMap,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RequestRemoteOutcome> + Send + 'a>>;
+}
+
 // ====== OwnerPlaneAuthorizer (owner-plane management-frame gate) ======
 
 /// Outcome of authorizing an owner-plane management frame before it is relayed to

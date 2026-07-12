@@ -19,6 +19,35 @@ use crate::{model::SharedConnectionMap, service::handle_signaling};
 
 pub const TAG: &str = "Signaling";
 
+/// Resolve a cookie-authenticated browser identity from the session: the
+/// single-account owner (`CurrentUser`), else a capability-scoped code-session
+/// (`CodeSessionCookie`, synthesized into a device-scoped routing identity), else
+/// `None` (unauthenticated). The single source of truth for browser identity,
+/// shared by the main signaling connection and the terminal WS connection so their
+/// owner-vs-code-session adjudication cannot drift (a code-session's ceiling must be
+/// enforced identically on both). Returns the routing `CurrentUser` plus the raw
+/// `CodeSessionCookie` (so the caller can derive the `AuthContext` via
+/// [`crate::service::browser_auth_context`]).
+pub(crate) fn resolve_browser_identity(
+    session: &Session,
+) -> Result<Option<(CurrentUser, Option<CodeSessionCookie>)>, actix_web::Error> {
+    if let Some(u) = session.get_current_user::<CurrentUser>()? {
+        Ok(Some((u, None)))
+    } else if let Some(cs) = session.get::<CodeSessionCookie>(CODE_SESSION_KEY)? {
+        // Synthesize a routing identity that pins signaling to the redeemed target
+        // (reusing the device-scoped `forward_to_peer` isolation). Its authority is
+        // *not* owner: the capability ceiling is enforced via the code-session
+        // `AuthContext` principal downstream, and it is never stored back as a
+        // `CurrentUser`, so it cannot reach the owner-only REST surface.
+        let mut u = CurrentUser::new_admin("code_session");
+        u.access = Some("device_user".to_string());
+        u.target_connection_id = Some(cs.target_connection_id.clone());
+        Ok(Some((u, Some(cs))))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Result of validating the (optional) node token presented on the signaling
 /// query string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,26 +175,16 @@ pub async fn open_signaling_handle(
         }
         RoleDecision::Cookie => {
             // No token: authenticate via the session cookie. Such a connection is
-            // always a Browser, regardless of any self-reported role. Prefer the
-            // owner (single-account `CurrentUser`); otherwise accept a
-            // capability-scoped code-session (an anonymous redeemer). Anything else
-            // is rejected — a bare anonymous connection is never admitted here.
-            if let Some(u) = session.get_current_user::<CurrentUser>()? {
-                (u, RemoteDeskTypeEnum::Browser, None)
-            } else if let Some(cs) = session.get::<CodeSessionCookie>(CODE_SESSION_KEY)? {
-                // Synthesize a routing identity that pins signaling to the redeemed
-                // target (reusing the device-scoped `forward_to_peer` isolation).
-                // Its authority is *not* owner: the capability ceiling is enforced
-                // via the code-session `AuthContext` principal downstream, and it
-                // is never stored back as a `CurrentUser`, so it cannot reach the
-                // owner-only REST surface.
-                let mut u = CurrentUser::new_admin("code_session");
-                u.access = Some("device_user".to_string());
-                u.target_connection_id = Some(cs.target_connection_id.clone());
-                (u, RemoteDeskTypeEnum::Browser, Some(cs))
-            } else {
-                log::warn!("User not logged in and no valid node token provided");
-                return Err(actix_web::error::ErrorUnauthorized("Unauthorized"));
+            // always a Browser, regardless of any self-reported role. Owner or
+            // code-session is resolved by the shared `resolve_browser_identity`;
+            // anything else is rejected — a bare anonymous connection is never
+            // admitted here.
+            match resolve_browser_identity(&session)? {
+                Some((u, code_session)) => (u, RemoteDeskTypeEnum::Browser, code_session),
+                None => {
+                    log::warn!("User not logged in and no valid node token provided");
+                    return Err(actix_web::error::ErrorUnauthorized("Unauthorized"));
+                }
             }
         }
     };
