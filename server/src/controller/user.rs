@@ -163,18 +163,29 @@ async fn code_session_scoped_permitted(
     if target != cs.target_connection_id {
         return false;
     }
-    // Grant freshness + principal binding. The authoritative ceiling is the live
-    // grant record's, not a cookie-cached copy.
+    // Grant freshness + principal binding + generation. The authoritative ceiling is
+    // the live grant record's, not a cookie-cached copy. `record.authorize` binds all
+    // three exactly like the signaling RequestRemote authorizer, so a REST request is
+    // held to the same freshness: a regenerated (bumped) or deleted device code
+    // supersedes the grant's generation and this fails closed.
     let store = desk_signal::access_grant::global_access_grant_store();
     let ceiling = match store.lookup(&cs.grant_session_id).await {
-        Ok(Some(record))
-            if record.principal == GrantPrincipal::from_code_session(&cs.code_session_id) =>
-        {
-            match record.access_ceiling {
-                Some(ceiling) => ceiling,
-                // A code grant always carries a ceiling; a missing one is a
-                // malformed record — fail closed.
-                None => return false,
+        Ok(Some(record)) => {
+            let Some(current_generation) =
+                desk_signal::access_grant::current_device_generation(&record.target_device).await
+            else {
+                // Device code gone (deleted) or DB unavailable → fail closed.
+                return false;
+            };
+            match record.authorize(
+                &GrantPrincipal::from_code_session(&cs.code_session_id),
+                &record.target_device,
+                current_generation,
+            ) {
+                // A code grant always carries a ceiling; a missing one is a malformed
+                // record — fail closed.
+                Some(Some(ceiling)) => ceiling,
+                _ => return false,
             }
         }
         _ => return false,
@@ -378,6 +389,44 @@ mod tests {
         };
         let grant_session_id = store.mint(&record, 300).await.unwrap().grant_session_id;
 
+        // The REST guard now binds a code session to its device's live generation
+        // (like signaling), so seed the process-global signal device-code table with
+        // the redeemed device at the grant's generation. `init_db` is idempotent
+        // (process-global OnceCell); the row insert is guarded so parallel tests
+        // sharing the DB do not collide.
+        {
+            use sea_orm::{
+                ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter,
+            };
+            let sig_dir =
+                std::env::temp_dir().join(format!("scope-e2e-sig-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&sig_dir).unwrap();
+            desk_signal::db::init_db(&sig_dir.to_string_lossy())
+                .await
+                .unwrap();
+            let db = desk_signal::db::get_db();
+            let exists = desk_signal::entity::device_code::Entity::find()
+                .filter(desk_signal::entity::device_code::Column::ClientId.eq("dev-1-client"))
+                .one(db)
+                .await
+                .unwrap()
+                .is_some();
+            if !exists {
+                desk_signal::entity::device_code::ActiveModel {
+                    client_id: Set("dev-1-client".to_string()),
+                    device_code: Set("E2ECODE".to_string()),
+                    capabilities: Set(None),
+                    generation: Set(0),
+                    created_at: Set(chrono::Utc::now()),
+                    updated_at: Set(chrono::Utc::now()),
+                    ..Default::default()
+                }
+                .insert(db)
+                .await
+                .unwrap();
+            }
+        }
+
         let seed_gsid = grant_session_id.clone();
         let seed = move |session: Session| {
             let gsid = seed_gsid.clone();
@@ -488,6 +537,37 @@ mod tests {
             ),
             StatusCode::OK
         );
+
+        // Regenerating the device code bumps its generation, superseding the grant's
+        // (gen 0) → the same still-live grant loses REST access, exactly as the
+        // signaling authorizer refuses it (F4: REST bound to generation freshness).
+        let set_generation = |g: i32| async move {
+            use sea_orm::{
+                ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter,
+            };
+            let db = desk_signal::db::get_db();
+            let row = desk_signal::entity::device_code::Entity::find()
+                .filter(desk_signal::entity::device_code::Column::ClientId.eq("dev-1-client"))
+                .one(db)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut active: desk_signal::entity::device_code::ActiveModel = row.into();
+            active.generation = Set(g);
+            active.update(db).await.unwrap();
+        };
+        set_generation(1).await;
+        assert_eq!(
+            status_of!(
+                at::TestRequest::get()
+                    .uri("/api/desk/file/list?connection_id=dev-1")
+                    .cookie(cookie.clone())
+                    .to_request()
+            ),
+            StatusCode::FORBIDDEN
+        );
+        // Restore the generation so the revoke step isolates grant-store freshness.
+        set_generation(0).await;
 
         // Revoke the grant → the same cookie loses all scoped REST access (grant
         // freshness binding).

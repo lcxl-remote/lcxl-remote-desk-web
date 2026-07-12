@@ -19,6 +19,25 @@ pub fn global_access_grant_store() -> Arc<InProcessAccessGrantStore> {
         .clone()
 }
 
+/// The live code generation for the device registered under `client_id`, or `None`
+/// if no such device code exists (or the signal DB is not initialized in this
+/// process, e.g. a pure desk-server mode). Mirrors the RequestRemote authorizer's
+/// [`crate::request_remote_authorizer::DbDeviceGenerationLookup`] so a code
+/// session's REST access is bound to the same generation freshness as its
+/// signaling: a regenerated (bumped) or deleted device code makes the check fail,
+/// invalidating a grant minted at the superseded generation.
+pub async fn current_device_generation(client_id: &str) -> Option<i64> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = crate::db::try_get_db()?;
+    crate::entity::device_code::Entity::find()
+        .filter(crate::entity::device_code::Column::ClientId.eq(client_id))
+        .one(db)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| row.generation as i64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
