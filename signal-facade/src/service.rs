@@ -250,6 +250,44 @@ pub trait RequestRemoteAuthorizer: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RequestRemoteOutcome> + Send + 'a>>;
 }
 
+// ====== OwnerPlaneAuthorizer (owner-plane management-frame gate) ======
+
+/// Outcome of authorizing an owner-plane management frame before it is relayed to
+/// the host.
+pub enum OwnerPlaneOutcome {
+    /// The actor is the device owner (or org-authorized); relay the frame.
+    Allow,
+    /// The actor is not the owner (e.g. a capped grant-holder); default-deny. An
+    /// error response is returned to the sender.
+    Reject {
+        code: DeskErrorCode,
+        message: String,
+    },
+}
+
+/// Default-denies owner-plane device-management frames
+/// (`ManagerUpdateSettings` / `ManagerQuerySettings` / `ManagerSystemInfo` /
+/// `ManagerSystemStatue` / `ChangeDisplaySettings`) for any sender that is not the
+/// target device's owner (or an org-authorized operator). These frames carry no
+/// capability ceiling and are meaningful only to the owner, so a capped
+/// grant-holder session must never reach them.
+///
+/// `Some` only in the manager, where the owner/grant distinction is computed
+/// per-target (a `CookieAuth` browser is not intrinsically owner or grant — it
+/// depends on the target device). The signal server leaves it unset: there the
+/// same frames are already denied for code sessions inside `forward_to_peer`
+/// (`is_owner_plane_management_frame`), and an owner drives its own device by
+/// cookie session, so no central owner-plane gate is needed (rule 22 keeps both
+/// control-end flows identical).
+pub trait OwnerPlaneAuthorizer: Send + Sync {
+    fn authorize<'a>(
+        &'a self,
+        actor: &'a ConnectionState,
+        connection_map: &'a SharedConnectionMap,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = OwnerPlaneOutcome> + Send + 'a>>;
+}
+
 // ====== AuditObserver trait ======
 
 /// Consumes inbound `AiAuditEvent` frames for persistence. The manager
@@ -615,6 +653,11 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// otherwise); `None` only where the host applies no central trust, in which
     /// case requests relay unstamped.
     pub request_remote_authorizer: Option<Arc<dyn RequestRemoteAuthorizer>>,
+    /// Owner-plane management-frame gate. `Some` only in the manager (which
+    /// default-denies owner-plane frames from a non-owner grant-holder); `None` in
+    /// the signal server, where those frames relay through `forward_to_peer`'s own
+    /// code-session denial unchanged.
+    pub owner_plane_authorizer: Option<Arc<dyn OwnerPlaneAuthorizer>>,
     /// Audit persistence observer for inbound `AiAuditEvent` frames. `Some` only
     /// in the manager (which persists them); `None` elsewhere, where they are
     /// ignored.
@@ -810,6 +853,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             turn,
             control_authorizer: None,
             request_remote_authorizer: None,
+            owner_plane_authorizer: None,
             audit_observer: None,
             collect_observer: None,
             edge_exec_observer: None,
@@ -835,6 +879,17 @@ impl<U: SignalingUser> SignalingHandler<U> {
         authorizer: Arc<dyn RequestRemoteAuthorizer>,
     ) -> Self {
         self.request_remote_authorizer = Some(authorizer);
+        self
+    }
+
+    /// Attach the owner-plane management-frame gate (the manager owner check). The
+    /// signal server never calls this, leaving those frames gated only by
+    /// `forward_to_peer`'s code-session denial.
+    pub fn with_owner_plane_authorizer(
+        mut self,
+        authorizer: Arc<dyn OwnerPlaneAuthorizer>,
+    ) -> Self {
+        self.owner_plane_authorizer = Some(authorizer);
         self
     }
 
@@ -1199,6 +1254,39 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 );
                 self.forward_to_peer(&new_signaling_model, false).await?;
             }
+            // Owner-plane device-management frames. These carry no capability
+            // ceiling and are meaningful only for the target device's owner
+            // (settings read / write, system info, virtual-display mode change). In
+            // the manager a `CookieAuth` browser is owner or grant-holder depending
+            // on the target, so the owner-plane authorizer default-denies any
+            // non-owner (a capped grant-holder must never reach them) before
+            // relaying. The signal server leaves the authorizer unset; its own
+            // code-session denial in `forward_to_peer`
+            // (`is_owner_plane_management_frame`) still applies, so its behaviour is
+            // unchanged. Kept in lock-step with `is_owner_plane_management_frame`.
+            SignalingType::ManagerSystemInfo
+            | SignalingType::ManagerSystemStatue
+            | SignalingType::ManagerQuerySettings
+            | SignalingType::ManagerUpdateSettings
+            | SignalingType::ChangeDisplaySettings => {
+                if let Some(authorizer) = self.owner_plane_authorizer.clone() {
+                    match authorizer
+                        .authorize(
+                            &self.connection_state,
+                            &self.connection_map,
+                            &signaling_model,
+                        )
+                        .await
+                    {
+                        OwnerPlaneOutcome::Allow => {}
+                        OwnerPlaneOutcome::Reject { code, message } => {
+                            return DeskSignalFacadeError::custom_error(code, &message);
+                        }
+                    }
+                }
+                self.forward_to_peer(&signaling_model, false).await?;
+            }
+
             // Forwarding types
             SignalingType::Offer
             | SignalingType::Answer
@@ -1206,14 +1294,9 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::AcceptControl
             | SignalingType::DenyControl
             | SignalingType::CloseControl
-            | SignalingType::ChangeDisplaySettings
             | SignalingType::UpdateDeskSettings
             | SignalingType::ManagerFileList
             | SignalingType::ManagerFileDelete
-            | SignalingType::ManagerSystemInfo
-            | SignalingType::ManagerSystemStatue
-            | SignalingType::ManagerQuerySettings
-            | SignalingType::ManagerUpdateSettings
             | SignalingType::ListTerminal
             | SignalingType::EnablePrivateScreen
             | SignalingType::PrivateScreenStateChanged
