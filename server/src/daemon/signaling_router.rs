@@ -1268,6 +1268,26 @@ async fn handle_revoke_access_grant_inbound(
             return Ok(());
         }
     };
+    // Session-scoped teardown (the owner ended one temporary-support session):
+    // close exactly that grant session, leaving its generation-mates up. A
+    // generation-scoped frame (no session id) closes the whole superseded range.
+    if let Some(grant_session_id) = payload.grant_session_id.as_deref() {
+        log::info!(
+            "[grant] manager revoked grant session {} for device {} (reason: {})",
+            grant_session_id,
+            payload.target_device,
+            payload.reason
+        );
+        pc_manager::close_grant_session(
+            &ctx.pc_registry,
+            &ctx.worker_mgr,
+            ctx.virtual_display.as_ref(),
+            grant_session_id,
+            &payload.reason,
+        )
+        .await;
+        return Ok(());
+    }
     log::info!(
         "[grant] manager revoked grants for device {} at generation <= {} (reason: {})",
         payload.target_device,
@@ -4273,6 +4293,64 @@ mod tests {
             None,
         );
         assert!(route(&model, &ctx).await.is_ok());
+    }
+
+    /// A session-scoped `RevokeAccessGrant` (carrying a `grant_session_id`, as the
+    /// manager sends when the owner ends a single support session) tears down exactly
+    /// that grant's connections, not a whole generation range.
+    #[tokio::test]
+    async fn route_revoke_access_grant_session_scoped_closes_only_that_grant() {
+        use desk_signal_facade::model::access_grant::RevokeAccessGrantData;
+        use desk_signal_facade::model::signal::RequestRemoteModel;
+
+        let ctx = make_ctx();
+        let s = crate::model::settings::Settings::default();
+        let rr = RequestRemoteModel {
+            ice_servers: vec![],
+            grant_session_id: Some("GS-supp".to_string()),
+        };
+        // Two grant sessions live; only GS-supp is targeted.
+        ctx.pc_registry
+            .create_for_request_remote("conn-supp", &rr, &s)
+            .await
+            .expect("pc");
+        ctx.pc_registry
+            .index_grant_connection("GS-supp", 0, "conn-supp")
+            .await;
+        ctx.pc_registry
+            .create_for_request_remote("conn-other", &rr, &s)
+            .await
+            .expect("pc");
+        ctx.pc_registry
+            .index_grant_connection("GS-other", 0, "conn-other")
+            .await;
+
+        let data = RevokeAccessGrantData {
+            target_device: "pub-11".to_string(),
+            revoked_generation: 0,
+            grant_session_id: Some("GS-supp".to_string()),
+            reason: "support_ended".to_string(),
+        };
+        let model = SignalingModel::new(
+            "r-rag",
+            SignalingType::RevokeAccessGrant,
+            None,
+            None,
+            Some(serde_json::to_value(&data).unwrap()),
+            None,
+        );
+        assert!(route(&model, &ctx).await.is_ok());
+
+        // The targeted grant's connection is gone; the untargeted grant survives —
+        // proving the session-scoped branch, not the generation sweep, ran.
+        assert!(ctx.pc_registry.get("conn-supp").await.is_none());
+        assert!(
+            ctx.pc_registry
+                .connections_for_grant("GS-supp")
+                .await
+                .is_empty()
+        );
+        assert!(ctx.pc_registry.get("conn-other").await.is_some());
     }
 
     /// Batch 1: `UpdateDeskSettings` is fully handled by the router —

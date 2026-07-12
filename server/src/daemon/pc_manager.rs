@@ -665,7 +665,7 @@ impl PcRegistry {
     /// Record that `connection_id` was admitted under grant `grant_session_id`.
     /// Idempotent; multiple connections (main / file-transfer / reconnect) of one
     /// grant accumulate under the same key so a directed teardown reaches them all.
-    async fn index_grant_connection(
+    pub(crate) async fn index_grant_connection(
         &self,
         grant_session_id: &str,
         generation: i64,
