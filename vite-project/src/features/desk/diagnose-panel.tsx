@@ -399,8 +399,12 @@ export function DiagnosePanel({
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-sm">
-                {/* Standing reminder that AI output is fallible and should be verified. */}
-                <p className="mb-3 rounded-md bg-muted/50 px-2 py-1 text-xs text-muted-foreground">
+                {/* Standing reminder that AI output is fallible and should be verified.
+                    The panel is a fixed dark overlay (bg-black/70 text-white) regardless
+                    of the app theme, so use theme-independent light-on-dark colors here
+                    instead of the themeable muted tokens, which turn dark-on-dark and
+                    become unreadable under the light theme. */}
+                <p className="mb-3 rounded-md bg-white/10 px-2 py-1 text-xs text-white/60">
                     {t("pages.desk.diagnose.aiDisclaimer")}
                 </p>
                 {/* Conversation transcript (prior settled turns) */}

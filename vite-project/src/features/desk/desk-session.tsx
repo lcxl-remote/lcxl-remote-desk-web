@@ -910,14 +910,14 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                 <h2 className="text-lg font-semibold">{t('pages.desk.title')} - {deskId}</h2>
                 <div className="flex items-center gap-4">
                     {hasControl && (
-                        <div className="text-sm font-medium text-blue-500">Controlling</div>
+                        <div className="text-sm font-medium text-blue-500">{t('pages.desk.status.controlling')}</div>
                     )}
                     {isConnected && (
                         <ConnectionQualityBadge packetLoss={rtcStats.packetLoss} rtt={rtcStats.rtt} />
                     )}
                     <div className="flex items-center gap-2">
                         <div className={`h-2 w-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
-                        <span className="text-sm text-muted-foreground">{isConnected ? 'Connected' : 'Disconnected'}</span>
+                        <span className="text-sm text-muted-foreground">{isConnected ? t('pages.desk.status.connected') : t('pages.desk.status.disconnected')}</span>
                     </div>
                 </div>
             </div>
@@ -925,7 +925,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                 {!isConnected && (
                     <div className="flex flex-col items-center gap-2 text-white z-50">
                         <Loader2 className="h-8 w-8 animate-spin" />
-                        <span>Connecting...</span>
+                        <span>{t('pages.desk.status.connecting')}</span>
                     </div>
                 )}
 

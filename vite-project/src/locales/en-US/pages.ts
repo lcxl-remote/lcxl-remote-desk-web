@@ -496,6 +496,12 @@ export default {
   'pages.desk.startMic': 'Start Microphone',
   'pages.desk.stopMic': 'Stop Microphone',
   'pages.desk.title': 'Remote Desk',
+  // Session status shown in the desk header: whether this browser currently holds
+  // input control of the remote device, and the media-connection state.
+  'pages.desk.status.controlling': 'In control',
+  'pages.desk.status.connected': 'Connected',
+  'pages.desk.status.disconnected': 'Disconnected',
+  'pages.desk.status.connecting': 'Connecting to remote…',
   'pages.desk.diagnose.title': 'AI Diagnose',
   'pages.desk.diagnose.aiDisclaimer': 'AI can make mistakes. Please double-check its responses.',
   'pages.desk.diagnose.showPanel': 'AI Diagnose',

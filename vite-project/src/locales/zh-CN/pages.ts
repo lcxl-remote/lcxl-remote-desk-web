@@ -494,6 +494,12 @@ export default {
   'pages.desk.startMic': '打开麦克风',
   'pages.desk.stopMic': '关闭麦克风',
   'pages.desk.title': '远程桌面',
+  // Session status shown in the desk header: whether this browser currently holds
+  // input control of the remote device, and the media-connection state.
+  'pages.desk.status.controlling': '键鼠控制中',
+  'pages.desk.status.connected': '已连接',
+  'pages.desk.status.disconnected': '已断开',
+  'pages.desk.status.connecting': '正在连接远程…',
   'pages.desk.diagnose.title': 'AI 诊断',
   'pages.desk.diagnose.aiDisclaimer': 'AI 可能会出错，请注意核查 AI 回答。',
   'pages.desk.diagnose.showPanel': 'AI 诊断',
