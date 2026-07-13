@@ -528,7 +528,12 @@ async fn relay_or_not_found(
     }
 
     if ignore_connection_not_found {
-        log::warn!(
+        // Benign by contract: the caller flagged this miss as expected. A frame
+        // reaches here when the daemon fans a browser-bound copy out to *every*
+        // upstream link (local signal + manager + remote signal), so a central
+        // that does not hold the target connection is simply "not the owner". Keep
+        // it at debug so a genuine SESSION_NOT_FOUND is not drowned in this noise.
+        log::debug!(
             "Connection {} is not found to forward signaling, ignore it: {:?}",
             to_connection_id,
             model
@@ -542,6 +547,46 @@ async fn relay_or_not_found(
             to_connection_id, model
         ),
     )
+}
+
+/// What to do with an inbound frame that matched no pending request-callback on
+/// this central. The daemon broadcasts every browser-bound frame to *all* of the
+/// host's upstream links (see `signaling_proxy`), so a response can land on a
+/// central that neither issued the originating request (its callback lives on
+/// another upstream) nor holds the target connection — such a copy is simply "not
+/// for this central" and must not surface as an error.
+enum UnmatchedForward<'a> {
+    /// An orphaned response with no deliverable target (a body-less list/manager
+    /// response carries no `to_connection_id`). It can never be delivered here —
+    /// drop it quietly.
+    Drop,
+    /// Attempt delivery to this target connection (local map, then relay).
+    Deliver {
+        to: &'a str,
+        /// Treat a local + relay miss as benign rather than SESSION_NOT_FOUND.
+        ignore_not_found: bool,
+    },
+    /// A *request* with no target connection — a genuine protocol error.
+    MissingTarget,
+}
+
+/// Classify an unmatched frame (see [`UnmatchedForward`]). A response that cannot
+/// be delivered on this central is always benign (it is a broadcast copy for
+/// another upstream / instance, or its origin browser has gone): with no target it
+/// is dropped, and with an unreachable target the miss is ignored. Only a request
+/// still requires a target and surfaces a miss as an error.
+fn classify_unmatched_forward(
+    model: &SignalingModel,
+    ignore_connection_not_found: bool,
+) -> UnmatchedForward<'_> {
+    match model.to_connection_id.as_deref() {
+        Some(to) => UnmatchedForward::Deliver {
+            to,
+            ignore_not_found: ignore_connection_not_found || model.is_response(),
+        },
+        None if model.is_response() => UnmatchedForward::Drop,
+        None => UnmatchedForward::MissingTarget,
+    }
 }
 
 // ====== 通用工具函数 ======
@@ -1031,31 +1076,55 @@ impl<U: SignalingUser> SignalingHandler<U> {
             })?;
             return Ok(());
         }
-        let to_connection_id = signaling_model.check_and_get_to_connection_id()?;
-        let from_connection_id = self.connection_state.model.connection_id.clone();
+        // No pending request-callback matched here. The daemon fans every
+        // browser-bound frame out to all of the host's upstream links, so a
+        // response can reach a central that neither owns the origin callback nor
+        // holds the target connection. Such a copy is not an error (see
+        // `classify_unmatched_forward`).
+        match classify_unmatched_forward(signaling_model, ignore_connection_not_found) {
+            UnmatchedForward::Drop => {
+                log::debug!(
+                    "Dropping orphaned {} response (no local callback, no target); it is a \
+                     broadcast copy destined for another upstream",
+                    signaling_model.signaling_type
+                );
+                Ok(())
+            }
+            // A request with no target is a real protocol error; reuse the shared
+            // check to produce the canonical message.
+            UnmatchedForward::MissingTarget => {
+                signaling_model.check_and_get_to_connection_id().map(|_| ())
+            }
+            UnmatchedForward::Deliver {
+                to,
+                ignore_not_found,
+            } => {
+                let from_connection_id = self.connection_state.model.connection_id.clone();
 
-        // Local fast path: the target connection is held by this instance.
-        if deliver_to_local_peer(
-            &self.connection_map,
-            &from_connection_id,
-            to_connection_id,
-            signaling_model,
-        )
-        .await?
-        {
-            return Ok(());
+                // Local fast path: the target connection is held by this instance.
+                if deliver_to_local_peer(
+                    &self.connection_map,
+                    &from_connection_id,
+                    to,
+                    signaling_model,
+                )
+                .await?
+                {
+                    return Ok(());
+                }
+
+                // Not held locally: try the cross-instance relay, else honor the
+                // ignore flag / surface SESSION_NOT_FOUND.
+                relay_or_not_found(
+                    &self.peer_relay,
+                    to,
+                    &from_connection_id,
+                    signaling_model,
+                    ignore_not_found,
+                )
+                .await
+            }
         }
-
-        // Not held locally: try the cross-instance relay, else honor the
-        // ignore flag / surface SESSION_NOT_FOUND.
-        relay_or_not_found(
-            &self.peer_relay,
-            to_connection_id,
-            &from_connection_id,
-            signaling_model,
-            ignore_connection_not_found,
-        )
-        .await
     }
 
     /// Handle incoming signaling message
@@ -1800,5 +1869,96 @@ mod tests {
         relay_or_not_found(&relay, "to", "from", &model, true)
             .await
             .expect("relay NotFound with ignore is Ok");
+    }
+
+    /// Build a frame with the given target and response/request nature.
+    fn frame(to: Option<&str>, is_response: bool) -> SignalingModel {
+        SignalingModel::new(
+            "req-1",
+            SignalingType::ListTerminal,
+            None,
+            to.map(str::to_string),
+            None,
+            is_response.then(crate::model::signal::SignalingResponseState::success),
+        )
+    }
+
+    /// A body-less response with no `to_connection_id` (e.g. a `ListTerminal`
+    /// response the daemon broadcast to a non-owning upstream) is dropped, not
+    /// surfaced as "To connection id can't be none".
+    #[test]
+    fn classify_orphaned_response_without_target_is_dropped() {
+        let model = frame(None, true);
+        assert!(matches!(
+            classify_unmatched_forward(&model, false),
+            UnmatchedForward::Drop
+        ));
+    }
+
+    /// A *request* with no target is still a protocol error (a client must address
+    /// its request), regardless of the ignore flag.
+    #[test]
+    fn classify_request_without_target_is_missing_target() {
+        let model = frame(None, false);
+        assert!(matches!(
+            classify_unmatched_forward(&model, true),
+            UnmatchedForward::MissingTarget
+        ));
+    }
+
+    /// A response addressed to a connection this central does not hold (e.g. a
+    /// `TerminalStarted` broadcast to a non-owning upstream) is delivered
+    /// best-effort: a local + relay miss must be ignored, never SESSION_NOT_FOUND.
+    #[test]
+    fn classify_response_with_target_ignores_miss() {
+        let model = frame(Some("peer"), true);
+        match classify_unmatched_forward(&model, false) {
+            UnmatchedForward::Deliver {
+                to,
+                ignore_not_found,
+            } => {
+                assert_eq!(to, "peer");
+                assert!(ignore_not_found, "a response miss must be benign");
+            }
+            other => panic!(
+                "expected Deliver, got a different variant: {}",
+                match other {
+                    UnmatchedForward::Drop => "Drop",
+                    UnmatchedForward::MissingTarget => "MissingTarget",
+                    UnmatchedForward::Deliver { .. } => unreachable!(),
+                }
+            ),
+        }
+    }
+
+    /// A *request* addressed to an absent connection keeps strict semantics: with
+    /// no ignore flag a miss surfaces SESSION_NOT_FOUND so a control end learns the
+    /// peer is offline.
+    #[test]
+    fn classify_request_with_target_is_strict_by_default() {
+        let model = frame(Some("peer"), false);
+        match classify_unmatched_forward(&model, false) {
+            UnmatchedForward::Deliver {
+                to,
+                ignore_not_found,
+            } => {
+                assert_eq!(to, "peer");
+                assert!(!ignore_not_found, "a request miss must stay strict");
+            }
+            _ => panic!("expected Deliver"),
+        }
+    }
+
+    /// The explicit ignore flag still wins for a request (best-effort terminal
+    /// replies pass it), so a miss is swallowed.
+    #[test]
+    fn classify_request_with_target_honors_explicit_ignore() {
+        let model = frame(Some("peer"), false);
+        match classify_unmatched_forward(&model, true) {
+            UnmatchedForward::Deliver {
+                ignore_not_found, ..
+            } => assert!(ignore_not_found),
+            _ => panic!("expected Deliver"),
+        }
     }
 }
