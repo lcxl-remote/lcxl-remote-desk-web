@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { AiGeneratedMark } from '@/components/ai-generated-mark';
 import { agentErrorMessage } from '@/lib/agent-error-i18n';
 import type {
     CommandSuggestion,
@@ -265,6 +266,10 @@ export function TerminalCopilotPanel({
 
                             {turn.answer ? (
                                 <div className="space-y-3">
+                                    {/* AI-generated marking (Art.50(2)) for the
+                                        copilot answer. Driven by the answer being
+                                        present, not by provenance (fail-closed). */}
+                                    <AiGeneratedMark provenance={turn.provenance} />
                                     {turn.answer.explanation_md && (
                                         <p className="whitespace-pre-wrap text-sm text-foreground">
                                             {turn.answer.explanation_md}

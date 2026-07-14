@@ -16,6 +16,7 @@
 //! (`awc`), so callers spawn these on actix's single-threaded runtime.
 
 use actix_web::web;
+use desk_agent_protocol::provenance::AiProvenance;
 use desk_agent_protocol::terminal_complete::{TerminalCompleteAsk, TerminalCompleteResult};
 use desk_agent_protocol::terminal_copilot::{TerminalCopilotAsk, TerminalCopilotEvent};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
@@ -105,7 +106,7 @@ async fn dial(
     db: &DatabaseConnection,
     messages: Vec<ChatMessage>,
     sink: &mut dyn TurnSink,
-) -> Result<ModelTurn, AgentError> {
+) -> Result<(ModelTurn, Option<String>), AgentError> {
     let config = model_provider::load(db)
         .await
         .map_err(|e| transport_error(format!("failed to load model provider config: {e}")))?;
@@ -113,7 +114,8 @@ async fn dial(
     let request = ModelRequest::text_only(messages, ResponseFormatSpec::None);
     let turn = seam.call(request, sink).await?;
     record_usage(db, config.model.as_deref().unwrap_or_default(), &turn.usage).await;
-    Ok(turn)
+    // Return the model name so the caller can stamp AI provenance on the answer.
+    Ok((turn, config.model))
 }
 
 /// Redact every browser-supplied free-text field of a copilot ask fail-closed. Any
@@ -177,7 +179,10 @@ async fn run_completion_turn(
     // Completion has no progressive UI: the candidates render together, so the
     // model text is not streamed.
     match dial(db, messages, &mut NullTurnSink).await {
-        Ok(turn) => {
+        // Completion is short AI text; whether it falls under the Art.50(2)
+        // marking obligation depends on the short-text carve-out, so the model
+        // name is not stamped here yet.
+        Ok((turn, _model)) => {
             let completions = parse_completions(&turn.text, &prefix, &default_shell);
             TerminalCompleteResult::ok(request_id, completions)
         }
@@ -214,8 +219,13 @@ async fn run_copilot_turn(
     messages.extend(build_copilot_history_messages(&ask.history));
     messages.push(build_copilot_user_message(&ask));
     match dial(db, messages, sink).await {
-        Ok(turn) => {
+        Ok((turn, model)) => {
             let (answer, _outcome) = parse_copilot_answer(&turn.text, &default_shell);
+            // Mark the AI-generated answer with machine-readable provenance (Art.50(2)).
+            sink.set_provenance(AiProvenance::stamp(
+                model,
+                Some(chrono::Utc::now().to_rfc3339()),
+            ));
             sink.emit_final(answer);
         }
         Err(transport) => sink.emit_error(transport),

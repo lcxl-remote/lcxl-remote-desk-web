@@ -6,6 +6,7 @@ import {
     SIGNALING_TYPE_CODE_TERMINAL_COPILOT_EVENT,
     SIGNALING_TYPE_CODE_TERMINAL_COPILOT_CANCEL,
 } from '../desk/constants';
+import type { AiProvenance } from '@/components/ai-generated-mark';
 import type { SignalingMessage, SignalingSubscriber } from '../desk/use-desk-signaling';
 
 // Wire types — mirror `desk_agent_protocol::terminal_copilot`. They ride the
@@ -62,6 +63,8 @@ export type TerminalCopilotEvent = {
     tool_name?: string | null;
     answer?: TerminalCopilotAnswer | null;
     error?: AgentError | null;
+    /** `final`: machine-readable AI marking for the answer content frame. */
+    provenance?: AiProvenance | null;
 };
 
 /** Non-authoritative terminal context — a prompt hint only. The server
@@ -92,6 +95,12 @@ export type TerminalCopilotTurn = {
     mode: TerminalCopilotMode;
     /** The structured answer, set on the turn's terminal `final` frame. */
     answer: TerminalCopilotAnswer | null;
+    /**
+     * Machine-readable AI marking for the answer (Art.50(2)), set on the `final`
+     * frame. Null does not mean "not AI" — an answer being present already marks
+     * the content AI (fail-closed); this only carries model / timestamp metadata.
+     */
+    provenance: AiProvenance | null;
 };
 
 export type CopilotState = {
@@ -240,7 +249,10 @@ export function useTerminalCopilot({
                 conversationId,
                 mode: input.mode,
                 // Append the in-flight turn; its answer fills in on the Final frame.
-                turns: [...prev.turns, { question, mode: input.mode, answer: null }],
+                turns: [
+                    ...prev.turns,
+                    { question, mode: input.mode, answer: null, provenance: null },
+                ],
                 partialText: '',
                 tools: [],
                 error: null,
@@ -297,7 +309,11 @@ export function useTerminalCopilot({
                         const answer = event.answer ?? { explanation_md: '', suggestions: [] };
                         const turns = prev.turns.slice();
                         if (turns.length) {
-                            turns[turns.length - 1] = { ...turns[turns.length - 1], answer };
+                            turns[turns.length - 1] = {
+                                ...turns[turns.length - 1],
+                                answer,
+                                provenance: event.provenance ?? null,
+                            };
                         }
                         return { ...prev, phase: 'done', partialText: '', turns };
                     }

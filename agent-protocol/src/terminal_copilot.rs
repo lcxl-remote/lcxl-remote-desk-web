@@ -21,6 +21,7 @@ use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::exec::ExecDecision;
+use crate::provenance::AiProvenance;
 use crate::{AgentError, RiskLevel};
 
 /// Which kind of help the operator asked for.
@@ -199,6 +200,12 @@ pub struct TerminalCopilotEvent {
     /// `kind = Error`: the failure (carries `safe_for_model` / `retryable`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<AgentError>,
+    /// Machine-readable AI marking for the `Final` (answer) content frame. Absent
+    /// on non-content frames (partial / tool / error). Its absence on a content
+    /// frame does not mean "not AI" — the frame kind already establishes that;
+    /// consumers mark such frames AI regardless (fail-closed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<AiProvenance>,
 }
 
 impl TerminalCopilotEvent {
@@ -213,7 +220,16 @@ impl TerminalCopilotEvent {
             tool_name: None,
             answer: None,
             error: None,
+            provenance: None,
         }
+    }
+
+    /// Attach machine-readable AI provenance to the `Final` content frame.
+    /// Emitters call this on the answer frame; a frame without it is still
+    /// treated as AI by its kind (fail-closed).
+    pub fn with_provenance(mut self, provenance: AiProvenance) -> Self {
+        self.provenance = Some(provenance);
+        self
     }
 
     /// A `Partial` frame carrying a streaming explanation fragment.
@@ -326,6 +342,43 @@ mod tests {
         let decoded: TerminalCopilotEvent =
             wincode::config::deserialize(&bytes, cfg).expect("wincode decode");
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn final_frame_carries_provenance_and_round_trips() {
+        use crate::provenance::{AI_MARKING_SCHEME_V1, AiProvenance};
+
+        let original =
+            TerminalCopilotEvent::final_answer("req-1", 7, sample_answer()).with_provenance(
+                AiProvenance::stamp(Some("gpt-4o".into()), Some("2026-07-14T00:00:00Z".into())),
+            );
+        let prov = original
+            .provenance
+            .as_ref()
+            .expect("final frame carries provenance");
+        assert_eq!(prov.marking_scheme.as_deref(), Some(AI_MARKING_SCHEME_V1));
+
+        let json = serde_json::to_string(&original).expect("json encode");
+        let back: TerminalCopilotEvent = serde_json::from_str(&json).expect("json decode");
+        assert_eq!(original, back);
+
+        let cfg = unbounded_config();
+        let bytes = wincode::config::serialize(&original, cfg).expect("wincode encode");
+        let decoded: TerminalCopilotEvent =
+            wincode::config::deserialize(&bytes, cfg).expect("wincode decode");
+        assert_eq!(decoded, original);
+    }
+
+    /// A non-content frame (partial) omits provenance entirely from its JSON.
+    #[test]
+    fn partial_frame_omits_provenance() {
+        let p = TerminalCopilotEvent::partial("r", 0, "frag");
+        assert!(p.provenance.is_none());
+        let json = serde_json::to_string(&p).expect("json encode");
+        assert!(
+            !json.contains("provenance"),
+            "partial frame should omit provenance: {json}"
+        );
     }
 
     #[test]

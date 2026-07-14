@@ -54,6 +54,7 @@ function renderPanel(
                         question: "check nginx",
                         mode: "how_to",
                         answer: { explanation_md: "", suggestions },
+                        provenance: null,
                     },
                 ],
             }}
@@ -91,6 +92,7 @@ describe("TerminalCopilotPanel exec promotion", () => {
                             question: "first",
                             mode: "how_to",
                             answer: { explanation_md: "a", suggestions: [suggestion()] },
+                            provenance: null,
                         },
                         {
                             question: "second",
@@ -99,6 +101,7 @@ describe("TerminalCopilotPanel exec promotion", () => {
                                 explanation_md: "b",
                                 suggestions: [suggestion({ command: "systemctl restart nginx" })],
                             },
+                            provenance: null,
                         },
                     ],
                 }}
@@ -234,6 +237,13 @@ describe("TerminalCopilotPanel exec promotion", () => {
         renderPanel([suggestion()], exec);
         expect(screen.queryByText(/execution ceiling/i)).not.toBeInTheDocument();
         expect(screen.getByText("Blocked: matches a prohibited pattern")).toBeInTheDocument();
+    });
+
+    it("marks the copilot answer as AI-generated even without provenance (Art.50(2), fail-closed)", () => {
+        // The rendered turn carries a non-null answer but null provenance; the
+        // marking must still show, driven by the answer being AI content.
+        renderPanel([suggestion()]);
+        expect(screen.getByText("AI-generated")).toBeInTheDocument();
     });
 
     it("discloses that the user is interacting with an AI (Art.50(1)), alongside the accuracy disclaimer", () => {

@@ -8,6 +8,7 @@
 //! model's own output never carries those fields, so a prompt-injected model
 //! cannot mark a command as safe to run.
 
+use desk_agent_protocol::provenance::AiProvenance;
 use desk_agent_protocol::terminal_copilot::{
     CommandSuggestion, CopilotHistoryTurn, TerminalCopilotAnswer, TerminalCopilotAsk,
     TerminalCopilotEvent, TerminalCopilotMode,
@@ -364,6 +365,11 @@ pub struct CopilotStreamSink<S> {
     /// Byte length of `text` already emitted as prose, so each delta streams only
     /// the new safe prefix.
     emitted: usize,
+    /// Machine-readable AI marking stamped onto the terminal `Final` frame, when
+    /// the upper layer (which knows the model and has a clock) injected one. This
+    /// crate has neither, so it carries the pre-built stamp rather than building
+    /// it here.
+    provenance: Option<AiProvenance>,
 }
 
 impl<S: CopilotFrameSink> CopilotStreamSink<S> {
@@ -379,6 +385,7 @@ impl<S: CopilotFrameSink> CopilotStreamSink<S> {
             stream_text: false,
             text: String::new(),
             emitted: 0,
+            provenance: None,
         }
     }
 
@@ -387,6 +394,14 @@ impl<S: CopilotFrameSink> CopilotStreamSink<S> {
     pub fn streaming_text(mut self) -> Self {
         self.stream_text = true;
         self
+    }
+
+    /// Inject the AI provenance to stamp onto the terminal `Final` frame. The
+    /// upper layer builds it (it knows the model and has a clock, which this crate
+    /// lacks) and sets it once the model is resolved, before the answer is
+    /// emitted; this crate only carries it through.
+    pub fn set_provenance(&mut self, provenance: AiProvenance) {
+        self.provenance = Some(provenance);
     }
 
     fn next_seq(&mut self) -> u32 {
@@ -402,11 +417,11 @@ impl<S: CopilotFrameSink> CopilotStreamSink<S> {
             return;
         }
         let seq = self.next_seq();
-        self.sink.emit(TerminalCopilotEvent::final_answer(
-            self.request_id.clone(),
-            seq,
-            answer,
-        ));
+        let mut frame = TerminalCopilotEvent::final_answer(self.request_id.clone(), seq, answer);
+        if let Some(provenance) = &self.provenance {
+            frame = frame.with_provenance(provenance.clone());
+        }
+        self.sink.emit(frame);
         self.terminated = true;
     }
 
@@ -797,6 +812,40 @@ mod tests {
         assert_eq!(ev[0].tool_name.as_deref(), Some("read_system_info"));
         assert!(ev[1].is_terminal());
         assert!(s.is_terminated());
+    }
+
+    /// An injected provenance is stamped onto the terminal `Final` frame; a sink
+    /// without one still emits the answer (fail-closed at the UI, not here).
+    #[test]
+    fn stream_sink_stamps_injected_provenance_on_final() {
+        let (store, sink) = recorder();
+        let mut s = CopilotStreamSink::new(sink, "req-p");
+        s.set_provenance(AiProvenance::stamp(
+            Some("gpt-4o".into()),
+            Some("2026-07-14T00:00:00Z".into()),
+        ));
+        s.emit_final(TerminalCopilotAnswer {
+            explanation_md: "done".into(),
+            suggestions: Vec::new(),
+        });
+        let ev = store.borrow();
+        let prov = ev[0]
+            .provenance
+            .as_ref()
+            .expect("final frame carries the injected provenance");
+        assert_eq!(prov.model_id.as_deref(), Some("gpt-4o"));
+    }
+
+    /// With no provenance injected, the Final frame simply omits it.
+    #[test]
+    fn stream_sink_final_without_provenance_omits_it() {
+        let (store, sink) = recorder();
+        let mut s = CopilotStreamSink::new(sink, "req-n");
+        s.emit_final(TerminalCopilotAnswer {
+            explanation_md: "done".into(),
+            suggestions: Vec::new(),
+        });
+        assert!(store.borrow()[0].provenance.is_none());
     }
 
     /// Once a terminal frame is emitted, every later frame is suppressed — exactly
