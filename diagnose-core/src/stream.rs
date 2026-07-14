@@ -16,6 +16,7 @@
 //! [`StreamingTurnSink::turn_started`] before running the turn.
 
 use desk_agent_protocol::diagnose::DiagnoseEvent;
+use desk_agent_protocol::provenance::AiProvenance;
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 
 use crate::agent_loop::{CircuitBreakReason, LoopOutcome};
@@ -44,6 +45,11 @@ pub struct StreamingTurnSink<S> {
     request_id: String,
     seq: u32,
     terminated: bool,
+    /// Machine-readable AI marking stamped onto the terminal `Answer` frame, when
+    /// the upper layer (which knows the model and has a clock) injected one before
+    /// running the turn. This crate has neither, so it carries the pre-built stamp
+    /// rather than building it here.
+    provenance: Option<AiProvenance>,
 }
 
 impl<S: DiagnoseFrameSink> StreamingTurnSink<S> {
@@ -54,7 +60,17 @@ impl<S: DiagnoseFrameSink> StreamingTurnSink<S> {
             request_id: request_id.into(),
             seq: 0,
             terminated: false,
+            provenance: None,
         }
+    }
+
+    /// Inject the AI provenance to stamp onto the terminal `Answer` frame. The
+    /// upper layer builds it (it knows the marking scheme and has a clock, which
+    /// this crate lacks) and sets it before the turn runs; this crate only carries
+    /// it through. The answer is marked AI by its frame kind regardless, so a sink
+    /// with no injected provenance still emits a valid (unenriched) answer frame.
+    pub fn set_provenance(&mut self, provenance: AiProvenance) {
+        self.provenance = Some(provenance);
     }
 
     fn next_seq(&mut self) -> u32 {
@@ -161,8 +177,11 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
             return;
         }
         let seq = self.next_seq();
-        self.sink
-            .emit(DiagnoseEvent::answer(&self.request_id, seq, text));
+        let mut frame = DiagnoseEvent::answer(&self.request_id, seq, text);
+        if let Some(provenance) = &self.provenance {
+            frame = frame.with_provenance(provenance.clone());
+        }
+        self.sink.emit(frame);
         self.terminated = true;
     }
 
@@ -279,6 +298,38 @@ mod tests {
         assert_eq!(ev[3].answer.as_deref(), Some("all good"));
         assert!(ev[3].is_terminal());
         assert!(b.is_terminated());
+    }
+
+    /// An injected provenance is stamped onto the terminal `Answer` frame so the
+    /// AI-generated diagnosis answer carries a machine-readable marking.
+    #[test]
+    fn answer_frame_carries_injected_provenance() {
+        let (store, sink) = recorder();
+        let mut b = StreamingTurnSink::new(sink, "req-1");
+        b.set_provenance(AiProvenance::stamp(
+            None,
+            Some("2026-07-14T00:00:00Z".into()),
+        ));
+        b.on_answer_committed("all good");
+        let ev = store.borrow();
+        let prov = ev[0]
+            .provenance
+            .as_ref()
+            .expect("answer frame carries the injected provenance");
+        assert_eq!(
+            prov.marking_scheme.as_deref(),
+            Some(desk_agent_protocol::provenance::AI_MARKING_SCHEME_V1)
+        );
+    }
+
+    /// With no provenance injected, the answer frame simply omits it (the frame
+    /// kind still marks it AI; a missing marking never downgrades it).
+    #[test]
+    fn answer_frame_without_provenance_omits_it() {
+        let (store, sink) = recorder();
+        let mut b = StreamingTurnSink::new(sink, "req-1");
+        b.on_answer_committed("all good");
+        assert!(store.borrow()[0].provenance.is_none());
     }
 
     /// A mutating tool's approval wait flags `awaiting_approval` on its
