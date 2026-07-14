@@ -364,6 +364,18 @@ describe("DiagnosePanel", () => {
         expect(onClose).toHaveBeenCalled();
     });
 
+    it("discloses from the first interaction that the user is talking to an AI (Art.50(1))", () => {
+        // The identity disclosure is a standing element shown from the idle phase,
+        // separate from and alongside the accuracy disclaimer.
+        renderPanel({ phase: "idle" });
+        expect(
+            screen.getByText("You are interacting with an AI assistant."),
+        ).toBeInTheDocument();
+        expect(
+            screen.getByText("AI can make mistakes. Please double-check its responses."),
+        ).toBeInTheDocument();
+    });
+
     it("caps its height to the containing desk view, not the viewport, so the footer stays inside an unfullscreened window", () => {
         // The panel is absolutely positioned inside the (shorter-than-viewport)
         // desk view, which clips overflow. A viewport-relative `85vh` cap let a

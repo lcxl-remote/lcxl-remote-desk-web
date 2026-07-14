@@ -235,4 +235,16 @@ describe("TerminalCopilotPanel exec promotion", () => {
         expect(screen.queryByText(/execution ceiling/i)).not.toBeInTheDocument();
         expect(screen.getByText("Blocked: matches a prohibited pattern")).toBeInTheDocument();
     });
+
+    it("discloses that the user is interacting with an AI (Art.50(1)), alongside the accuracy disclaimer", () => {
+        // The identity disclosure is a standing element at the top of the log,
+        // distinct from the accuracy disclaimer in the footer.
+        renderPanel([suggestion()]);
+        expect(
+            screen.getByText("You are interacting with an AI assistant."),
+        ).toBeInTheDocument();
+        expect(
+            screen.getByText("AI can make mistakes. Please double-check its responses."),
+        ).toBeInTheDocument();
+    });
 });

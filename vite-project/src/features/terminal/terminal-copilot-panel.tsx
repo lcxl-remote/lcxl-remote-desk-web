@@ -241,6 +241,17 @@ export function TerminalCopilotPanel({
             </div>
 
             <div ref={logRef} className="flex-1 space-y-4 overflow-y-auto p-3">
+                {/* AI interaction disclosure: informs the user, from the first interaction
+                    and for every session, that they are interacting with an AI assistant.
+                    Standing element at the top of the log (never a one-time, dismissible
+                    banner) so it is always present and clearly distinguishable. Distinct from
+                    the aiDisclaimer accuracy caveat in the footer. */}
+                <p
+                    role="note"
+                    className="rounded-md border border-border bg-muted/50 px-2 py-1 text-xs font-medium text-foreground"
+                >
+                    {t('pages.deskTerminal.copilot.aiIdentityNotice')}
+                </p>
                 {state.turns.map((turn, turnIndex) => {
                     const isLast = turnIndex === state.turns.length - 1;
                     return (

@@ -399,6 +399,20 @@ export function DiagnosePanel({
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-sm">
+                {/* AI interaction disclosure: informs the user, from the first interaction
+                    and for every session, that they are interacting with an AI assistant.
+                    Kept as a standing element at the top of the panel (never a one-time,
+                    dismissible banner) so it is always present and clearly distinguishable.
+                    Distinct from aiDisclaimer below, which is an accuracy caveat rather than
+                    an identity notice. Higher contrast than the disclaimer to stand out; uses
+                    theme-independent light-on-dark colors to stay readable on the fixed dark
+                    overlay under any app theme. */}
+                <p
+                    role="note"
+                    className="mb-2 rounded-md border border-white/20 bg-white/10 px-2 py-1 text-xs font-medium text-white/90"
+                >
+                    {t("pages.desk.diagnose.aiIdentityNotice")}
+                </p>
                 {/* Standing reminder that AI output is fallible and should be verified.
                     The panel is a fixed dark overlay (bg-black/70 text-white) regardless
                     of the app theme, so use theme-independent light-on-dark colors here
