@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
+use crate::provenance::AiProvenance;
 use crate::{AgentError, AgentErrorKind, RiskLevel};
 
 /// Control end → server: start a diagnosis. Carries only non-authoritative
@@ -345,6 +346,12 @@ pub struct DiagnoseEvent {
     /// `kind = Answer`: the agentic turn's final natural-language answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
+    /// Machine-readable AI marking for the content frames (`Final` / `Answer`).
+    /// Absent on non-content frames (status / tool / error). Its absence on a
+    /// content frame does not mean "not AI" — the frame kind already establishes
+    /// that; consumers mark such frames AI regardless (fail-closed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<AiProvenance>,
 }
 
 impl DiagnoseEvent {
@@ -365,7 +372,16 @@ impl DiagnoseEvent {
             awaiting_approval: false,
             tool_ok: None,
             answer: None,
+            provenance: None,
         }
+    }
+
+    /// Attach machine-readable AI provenance to a content frame (`Final` /
+    /// `Answer`). Emitters call this on the content frames they build; frames
+    /// without it are still treated as AI by their kind (fail-closed).
+    pub fn with_provenance(mut self, provenance: AiProvenance) -> Self {
+        self.provenance = Some(provenance);
+        self
     }
 
     /// A `Status` frame announcing a lifecycle phase.
@@ -752,6 +768,44 @@ mod tests {
             "serialized chunk frame ({} bytes) too close to the {}-byte cap",
             json.len(),
             SIGNALING_FRAME_LIMIT
+        );
+    }
+
+    #[test]
+    fn final_frame_carries_provenance_and_round_trips() {
+        use crate::provenance::{AI_MARKING_SCHEME_V1, AiProvenance};
+
+        let ev = DiagnoseEvent::final_result("req_9", 3, sample_diagnosis()).with_provenance(
+            AiProvenance::stamp(Some("gpt-4o".into()), Some("2026-07-14T00:00:00Z".into())),
+        );
+        assert_eq!(ev.kind, DiagnoseEventKind::Final);
+        let prov = ev
+            .provenance
+            .as_ref()
+            .expect("content frame carries provenance");
+        assert_eq!(prov.marking_scheme.as_deref(), Some(AI_MARKING_SCHEME_V1));
+
+        let json = serde_json::to_string(&ev).expect("json encode");
+        let back: DiagnoseEvent = serde_json::from_str(&json).expect("json decode");
+        assert_eq!(ev, back);
+
+        let config = unbounded_config();
+        let bytes = wincode::config::serialize(&ev, config).expect("wincode encode");
+        let back2: DiagnoseEvent =
+            wincode::config::deserialize(&bytes, config).expect("wincode decode");
+        assert_eq!(ev, back2);
+    }
+
+    /// Non-content frames (status / tool / error) omit provenance, and the field
+    /// stays out of their serialized JSON.
+    #[test]
+    fn non_content_frame_omits_provenance() {
+        let ev = DiagnoseEvent::status("req_9", 0, "modeling");
+        assert!(ev.provenance.is_none());
+        let json = serde_json::to_string(&ev).expect("json encode");
+        assert!(
+            !json.contains("provenance"),
+            "status frame should omit provenance: {json}"
         );
     }
 

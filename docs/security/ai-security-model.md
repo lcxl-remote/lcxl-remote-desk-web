@@ -39,3 +39,7 @@ Wire protocols are isolated behind adapters on the central brain (OpenAI-compati
 ## AI Interaction Disclosure
 
 The AI diagnose and Terminal Copilot panels disclose, from the first interaction and for every session, that you are interacting with an AI assistant. The notice is a standing element at the top of each panel — never a one-time, dismissible banner — kept clearly distinguishable from the separate accuracy reminder ("AI can make mistakes"). This makes the AI's identity explicit rather than merely implied by naming.
+
+## AI-Generated Content Marking
+
+AI-generated output carries machine-readable provenance on its wire frame and a visible "AI-generated" marking in the UI. The marking is driven by the content being AI-generated, not by the provenance metadata being present, so a missing or stripped provenance never downgrades content to "not AI" (fail-closed). Provenance, when known, records which model produced the content and when.

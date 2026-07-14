@@ -23,6 +23,7 @@ use desk_agent_protocol::diagnose::{
     CollectRequest, CollectResponse, DiagnoseEvent, DiagnoseRequestData,
 };
 use desk_agent_protocol::evidence::EvidenceSnapshot;
+use desk_agent_protocol::provenance::AiProvenance;
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_diagnose_core::DEFAULT_MAX_CONTEXT_BYTES;
 use desk_diagnose_core::parser::parse_diagnosis;
@@ -358,10 +359,14 @@ pub async fn run_model_phase(
         .iter()
         .map(|c| c.capability.clone())
         .collect();
+    // Mark the AI-generated result with machine-readable provenance (Art.50(2)).
+    let provenance =
+        AiProvenance::stamp(config.model.clone(), Some(chrono::Utc::now().to_rfc3339()));
     stream_event(
         map,
         &ctx.browser_connection_id,
-        &DiagnoseEvent::final_result(&ctx.request_id, seq::TERMINAL, diagnosis),
+        &DiagnoseEvent::final_result(&ctx.request_id, seq::TERMINAL, diagnosis)
+            .with_provenance(provenance),
     )
     .await;
 }

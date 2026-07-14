@@ -8,6 +8,7 @@ import {
     SIGNALING_TYPE_CODE_RESOLVE_EXEC,
 } from './constants';
 import type { ExecPreview } from '../exec/use-confirm-exec';
+import type { AiProvenance } from '@/components/ai-generated-mark';
 import type { SignalingMessage, SignalingSubscriber } from './use-desk-signaling';
 
 // Wire types — mirror `desk_agent_protocol::diagnose`. These ride the
@@ -86,6 +87,8 @@ export type DiagnoseEvent = {
     tool_ok?: boolean | null;
     /** `answer`: the agentic turn's final natural-language answer. */
     answer?: string | null;
+    /** `final` / `answer`: machine-readable AI marking for the content frame. */
+    provenance?: AiProvenance | null;
 };
 
 /** A tool call's lifecycle status, shown in the agentic activity timeline. */
@@ -246,6 +249,13 @@ export type DiagnoseState = {
     /** The agentic turn's final answer text, set on an `answer` frame. */
     answer: string | null;
     /**
+     * Machine-readable AI marking for the current result / answer (Art.50(2)),
+     * set on a `final` / `answer` frame. Null does not mean "not AI" — the
+     * result / answer being present already marks the content AI (fail-closed);
+     * this only carries the model / timestamp metadata when known.
+     */
+    provenance: AiProvenance | null;
+    /**
      * A mutating command the agentic loop initiated and is now blocked on,
      * awaiting the operator's approval. Set from the unsolicited `ExecPreview`
      * the backend pushes while the loop is parked; cleared once the operator
@@ -270,6 +280,7 @@ const INITIAL_STATE: DiagnoseState = {
     turnId: null,
     tools: [],
     answer: null,
+    provenance: null,
     pendingExec: null,
     history: [],
 };
@@ -479,6 +490,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                             ...prev,
                             phase: 'done',
                             result: event.final_result ?? null,
+                            provenance: event.provenance ?? null,
                             pendingExec: null,
                         };
                     case 'error':
@@ -524,6 +536,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                             ...prev,
                             phase: 'done',
                             answer: event.answer ?? '',
+                            provenance: event.provenance ?? null,
                             pendingExec: null,
                         };
                     default:

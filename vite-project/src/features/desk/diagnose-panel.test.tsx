@@ -20,6 +20,7 @@ const baseState: DiagnoseState = {
     turnId: null,
     tools: [],
     answer: null,
+    provenance: null,
     pendingExec: null,
     history: [],
 };
@@ -362,6 +363,30 @@ describe("DiagnosePanel", () => {
         const { onClose } = renderPanel({ phase: "idle" });
         fireEvent.click(screen.getByLabelText("Close"));
         expect(onClose).toHaveBeenCalled();
+    });
+
+    it("marks the structured diagnosis result as AI-generated (Art.50(2))", () => {
+        renderPanel({
+            phase: "done",
+            provenance: { model_id: "gpt-4o", marking_scheme: "lcxl-ai-provenance/1" },
+            result: {
+                summary: "Port 8080 is busy",
+                confidence: "high",
+                findings: [],
+                commands: [],
+                next_steps: [],
+                missing_info: [],
+                collected: [],
+            },
+        });
+        expect(screen.getByText("AI-generated")).toBeInTheDocument();
+    });
+
+    it("marks the agentic free-text answer as AI-generated even without provenance (fail-closed)", () => {
+        // No provenance on the frame: the answer is still AI content, so the mark
+        // must show regardless.
+        renderPanel({ phase: "done", answer: "the host is healthy", provenance: null });
+        expect(screen.getByText("AI-generated")).toBeInTheDocument();
     });
 
     it("discloses from the first interaction that the user is talking to an AI (Art.50(1))", () => {

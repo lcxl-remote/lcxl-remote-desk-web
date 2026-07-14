@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next"
 import { Loader2, Stethoscope, X, UserCog, AlertCircle, Play, Check, Ban, Terminal as TerminalIcon, Wrench, Clock, CheckCircle2, XCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { AiGeneratedMark } from "@/components/ai-generated-mark"
 import { agentErrorMessage } from "@/lib/agent-error-i18n"
 import {
     extractStreamingSummary,
@@ -550,6 +551,16 @@ export function DiagnosePanel({
                 {/* Result (done) */}
                 {state.phase === "done" && (
                     <div className="flex flex-col gap-4">
+                        {/* AI-generated marking (Art.50(2)) for any AI-derived
+                            result / answer. Shown by the presence of AI content,
+                            not by provenance being set (fail-closed); provenance
+                            enriches the tooltip with the model when known. */}
+                        {(result || state.answer !== null || streamingSummary) && (
+                            <AiGeneratedMark
+                                provenance={state.provenance}
+                                className="self-start border-white/25 bg-white/10 text-white/80"
+                            />
+                        )}
                         {result ? (
                             <>
                                 {/* Summary + confidence */}
