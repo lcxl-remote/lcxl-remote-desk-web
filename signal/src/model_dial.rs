@@ -50,6 +50,15 @@ const REQUEST_TIMEOUT_SECS: u64 = 180;
 /// which Relaxed permits while still blocking the cloud-metadata floor.
 const SSRF_MODE_ENV: &str = "LRD_PROVIDER_SSRF_MODE";
 
+/// Environment variable toggling public-plaintext TLS enforcement on the model
+/// dial (`true` / `false`). Defaults to `true` (enforce): a dial to a *public*
+/// model endpoint over `http://` is refused so the api_key never crosses an
+/// untrusted network in the clear. A self-hosted brain pointing at a local gateway
+/// (`http://localhost`, `http://192.168.x.x`) is unaffected — private / loopback
+/// targets are always allowed over plaintext. Mirrors the manager's cluster-shared
+/// `enforce_public_tls`; signal is single-instance so this is a process setting.
+const ENFORCE_PUBLIC_TLS_ENV: &str = "LRD_ENFORCE_PUBLIC_TLS";
+
 /// Resolve the configured SSRF mode from the environment, defaulting to
 /// `Relaxed` when unset or unparseable.
 pub(crate) fn configured_ssrf_mode() -> desk_utils::ssrf::ProviderSsrfMode {
@@ -64,14 +73,33 @@ fn ssrf_mode_from_env_value(raw: Option<&str>) -> desk_utils::ssrf::ProviderSsrf
         .unwrap_or(desk_utils::ssrf::ProviderSsrfMode::Relaxed)
 }
 
-/// A connect-time DNS resolver that drops any candidate address blocked by the
-/// active [`desk_utils::ssrf::ProviderSsrfMode`]. Resolution happens per
-/// connection, just before connecting, so a domain that rebinds to an internal /
-/// metadata IP is still caught. The original host / SNI is preserved, so TLS
+/// Resolve public-TLS enforcement from the environment, defaulting to `true`.
+pub(crate) fn configured_enforce_public_tls() -> bool {
+    enforce_public_tls_from_env_value(std::env::var(ENFORCE_PUBLIC_TLS_ENV).ok().as_deref())
+}
+
+/// Map a raw env value to the enforcement flag, defaulting to `true` (enforce)
+/// when absent or unparseable. Only an explicit falsey value disables it. Split
+/// out so it is unit-testable without mutating the process environment.
+fn enforce_public_tls_from_env_value(raw: Option<&str>) -> bool {
+    !matches!(
+        raw.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("false" | "0" | "no" | "off")
+    )
+}
+
+/// A connect-time DNS resolver that drops any candidate address forbidden by the
+/// active transport policy (SSRF mode + public-TLS enforcement), via
+/// [`desk_utils::ssrf::check_transport`]. Resolution happens per connection, just
+/// before connecting, so a domain that rebinds to an internal / metadata IP is
+/// still caught. The scheme is fixed per dial and baked in, so the plaintext-vs-TLS
+/// decision needs no second lookup. The original host / SNI is preserved, so TLS
 /// certificate validation is unaffected.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct SsrfResolver {
     mode: desk_utils::ssrf::ProviderSsrfMode,
+    scheme_is_tls: bool,
+    enforce_public_tls: bool,
 }
 
 impl actix_tls::connect::Resolve for SsrfResolver {
@@ -83,22 +111,37 @@ impl actix_tls::connect::Resolve for SsrfResolver {
         'a,
         Result<Vec<std::net::SocketAddr>, Box<dyn std::error::Error>>,
     > {
-        let mode = self.mode;
+        let policy = *self;
         Box::pin(async move {
             let resolved = tokio::net::lookup_host((host, port)).await?;
+            let allow_private = policy.mode == desk_utils::ssrf::ProviderSsrfMode::Relaxed;
             let allowed: Vec<std::net::SocketAddr> = resolved
-                .filter(|addr| desk_utils::ssrf::check_resolved_ip(addr.ip(), mode).is_ok())
+                .filter(|addr| {
+                    desk_utils::ssrf::check_transport(
+                        addr.ip(),
+                        allow_private,
+                        policy.scheme_is_tls,
+                        policy.enforce_public_tls,
+                    )
+                    .is_ok()
+                })
                 .collect();
             if allowed.is_empty() {
                 // Coarse error: the caller must not learn which internal address
                 // was probed.
                 return Err(Box::<dyn std::error::Error>::from(
-                    "provider host resolves to a blocked address",
+                    "provider host resolves to a blocked or plaintext-refused address",
                 ));
             }
             Ok(allowed)
         })
     }
+}
+
+/// Whether a provider `base_url` uses a TLS scheme (`https`). Anything else is
+/// treated as plaintext so the guard fails closed toward requiring TLS.
+fn base_url_scheme_is_tls(base_url: &str) -> bool {
+    base_url.trim().to_ascii_lowercase().starts_with("https://")
 }
 
 /// Which provider wire dialect to speak.
@@ -215,11 +258,16 @@ impl ModelSeam for SignalModelSeam {
         .expect("ring provider supports the default TLS protocol versions")
         .with_root_certificates(std::sync::Arc::new(root_store))
         .with_no_client_auth();
-        // Guard the outbound dial with the SSRF resolver: every resolved IP is
-        // validated just before connecting (authoritative anti-rebinding check).
+        // Guard the outbound dial with the transport resolver: every resolved IP is
+        // validated just before connecting (authoritative anti-rebinding check),
+        // and a plaintext dial to a public endpoint is refused when enforcement is
+        // on. The scheme is fixed for this dial (the provider base_url), so bake it
+        // in — no second lookup.
         let tcp = actix_tls::connect::Connector::new(actix_tls::connect::Resolver::custom(
             SsrfResolver {
                 mode: configured_ssrf_mode(),
+                scheme_is_tls: base_url_scheme_is_tls(&self.base_url),
+                enforce_public_tls: configured_enforce_public_tls(),
             },
         ))
         .service();
@@ -711,6 +759,27 @@ mod tests {
             ssrf_mode_from_env_value(Some("off")),
             ProviderSsrfMode::Relaxed
         );
+    }
+
+    #[test]
+    fn enforce_public_tls_defaults_on_and_only_explicit_falsey_disables() {
+        // Secure by default: unset / blank / garbage all enforce.
+        assert!(enforce_public_tls_from_env_value(None));
+        assert!(enforce_public_tls_from_env_value(Some("")));
+        assert!(enforce_public_tls_from_env_value(Some("true")));
+        assert!(enforce_public_tls_from_env_value(Some("garbage")));
+        // Only an explicit falsey value disables (case-insensitive).
+        for v in ["false", "0", "no", "off", "OFF", " False "] {
+            assert!(!enforce_public_tls_from_env_value(Some(v)), "value {v:?}");
+        }
+    }
+
+    #[test]
+    fn base_url_scheme_detection() {
+        assert!(base_url_scheme_is_tls("https://api.openai.com/v1"));
+        assert!(base_url_scheme_is_tls("HTTPS://API.EXAMPLE"));
+        assert!(!base_url_scheme_is_tls("http://localhost:11434/v1"));
+        assert!(!base_url_scheme_is_tls("localhost:11434"));
     }
 
     fn text_request(format: ResponseFormatSpec) -> ModelRequest {
