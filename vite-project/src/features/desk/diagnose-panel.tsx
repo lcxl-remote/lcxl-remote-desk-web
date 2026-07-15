@@ -265,12 +265,22 @@ function ConversationHistory({ turns }: { turns: DiagnoseHistoryTurn[] }) {
     return (
         <div className="flex flex-col gap-3 border-b border-white/10 pb-3">
             {turns.map((turn) => {
-                const reply = turn.error
-                    ? turn.error
-                    : turn.answer ?? turn.result?.summary ?? turn.summary
+                const aiReply =
+                    turn.answer ?? turn.result?.summary ?? turn.summary
+                const reply = turn.error ? turn.error : aiReply
                 return (
                     <div key={turn.requestId} className="flex flex-col gap-1.5">
                         <QuestionBubble question={turn.question} />
+                        {/* AI-generated marking (Art.50(2)) for a settled AI
+                            answer, mirroring the live turn. Driven by an AI
+                            reply being present, not by provenance (fail-closed);
+                            an error turn carries no AI content, so no marking. */}
+                        {turn.phase === "done" && aiReply && (
+                            <AiGeneratedMark
+                                provenance={turn.provenance}
+                                className="self-start border-white/25 bg-white/10 text-white/80"
+                            />
+                        )}
                         <div
                             className={`max-w-[90%] self-start whitespace-pre-wrap rounded-lg rounded-bl-sm px-2.5 py-1.5 text-xs ${
                                 turn.phase === "error"

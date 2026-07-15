@@ -219,6 +219,13 @@ export type DiagnoseHistoryTurn = {
     phase: 'done' | 'error';
     /** Failure message if the turn errored. */
     error: string | null;
+    /**
+     * Machine-readable AI marking (Art.50(2)) captured for this settled turn,
+     * so the transcript keeps marking past AI answers the same way the live
+     * turn does. Null does not mean "not AI" — an AI reply being present marks
+     * the turn (fail-closed); this only carries model / timestamp when known.
+     */
+    provenance: AiProvenance | null;
 };
 
 export type DiagnoseState = {
@@ -305,6 +312,7 @@ function snapshotLiveTurn(prev: DiagnoseState): DiagnoseHistoryTurn[] {
             tools: prev.tools,
             phase: prev.phase,
             error: prev.error,
+            provenance: prev.provenance,
         },
     ];
 }
