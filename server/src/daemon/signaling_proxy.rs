@@ -1140,6 +1140,37 @@ fn signaling_scheme_is_tls(url: &str) -> bool {
     lower.starts_with("wss://") || lower.starts_with("https://")
 }
 
+/// Redact the `token` query-parameter value in a URL so the full dial URL can be
+/// logged for debugging without leaking the manager / signaling credential (which
+/// is carried in the `token` query field). A URL that does not parse is returned
+/// unchanged (it would not have connected either).
+fn redact_token_in_url(raw: &str) -> String {
+    let Ok(mut url) = url::Url::parse(raw) else {
+        return raw.to_string();
+    };
+    if url.query().is_none() {
+        return url.to_string();
+    }
+    let redacted: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(k, v)| {
+            if k.eq_ignore_ascii_case("token") {
+                (k.into_owned(), "***".to_string())
+            } else {
+                (k.into_owned(), v.into_owned())
+            }
+        })
+        .collect();
+    {
+        let mut qs = url.query_pairs_mut();
+        qs.clear();
+        for (k, v) in &redacted {
+            qs.append_pair(k, v);
+        }
+    }
+    url.to_string()
+}
+
 async fn maintain_proxy_connection(
     settings: web::Data<SharedSettings>,
     router_ctx: &RouterContext,
@@ -1211,6 +1242,17 @@ async fn maintain_proxy_connection(
     // it into the resolver — no second lookup that could rebind. `allow_private` is
     // always true here: signaling legitimately reaches LAN / loopback targets.
     let scheme_is_tls = signaling_scheme_is_tls(&signaling_url);
+    // The actix-tls resolver short-circuits an IP-literal host before the custom
+    // guard resolver runs, so a literal target would bypass the guard entirely.
+    // Judge a literal here, statically, before the dial (a domain is deferred to
+    // the guard, which judges each resolved candidate against DNS rebinding).
+    desk_utils::ssrf::check_transport_for_url(
+        &signaling_url,
+        true,
+        scheme_is_tls,
+        require_secure_signaling,
+    )
+    .map_err(|e| format!("signaling target refused: {e}"))?;
     let guard = crate::transport_guard::TransportGuardResolver::system(
         crate::transport_guard::TransportPolicy {
             allow_private: true,
@@ -1241,7 +1283,7 @@ async fn maintain_proxy_connection(
     };
 
     info!("[Proxy] Connecting to: {signaling_url}");
-    debug!("[Proxy] Full URL: {connect_url}");
+    debug!("[Proxy] Full URL: {}", redact_token_in_url(&connect_url));
 
     let (_resp, framed) = client
         .ws(&connect_url)
@@ -2093,6 +2135,28 @@ mod tests {
         // TLS for a public target rather than assuming it is secure.
         assert!(!signaling_scheme_is_tls("sig.example:8443"));
         assert!(!signaling_scheme_is_tls(""));
+    }
+
+    #[test]
+    fn redact_token_in_url_masks_only_the_token() {
+        let out = redact_token_in_url(
+            "wss://sig.example/api/desk/signaling?token=SECRET123&build_number=42&probe=1",
+        );
+        // The credential is gone; the rest of the query survives for debugging.
+        assert!(!out.contains("SECRET123"), "token must not appear: {out}");
+        assert!(out.contains("token=%2A%2A%2A") || out.contains("token=***"));
+        assert!(out.contains("build_number=42"));
+        assert!(out.contains("probe=1"));
+    }
+
+    #[test]
+    fn redact_token_in_url_is_noop_without_token_or_query() {
+        assert_eq!(
+            redact_token_in_url("wss://sig.example/api/desk/signaling"),
+            "wss://sig.example/api/desk/signaling"
+        );
+        // A malformed URL is returned unchanged.
+        assert_eq!(redact_token_in_url("not a url"), "not a url");
     }
 
     fn bare_request_remote() -> SignalingModel {

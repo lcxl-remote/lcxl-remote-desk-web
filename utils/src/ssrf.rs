@@ -113,52 +113,45 @@ impl std::error::Error for SsrfError {}
 
 /// Validate a provider URL at write time (when a user saves a provider config).
 ///
-/// Parses the scheme and host: the scheme is checked against the mode, and if the
-/// host is an IP literal it is judged immediately. Domain hosts are deferred to
-/// the authoritative connect-time check ([`check_resolved_ip`]) because DNS can
-/// rebind between save and dial.
-pub fn check_provider_url(raw: &str, mode: ProviderSsrfMode) -> Result<(), SsrfError> {
+/// The two policies compose **orthogonally**, exactly as at connect time (see
+/// [`check_transport`]): `mode` governs whether a *private* target is reachable
+/// (`Relaxed` allows local gateways, `Strict` does not), while `enforce_public_tls`
+/// governs whether a *public* target may be dialed over *plaintext*. `http` and
+/// `https` are both structurally valid schemes; a plaintext scheme is not rejected
+/// on its own — only a public plaintext target under enforcement is. Any other
+/// scheme is rejected.
+///
+/// An IP-literal host is judged immediately; a registered name (domain) is deferred
+/// to the authoritative connect-time check because DNS can rebind between save and
+/// dial.
+pub fn check_provider_url(
+    raw: &str,
+    mode: ProviderSsrfMode,
+    enforce_public_tls: bool,
+) -> Result<(), SsrfError> {
     let url = url::Url::parse(raw).map_err(|_| SsrfError::InvalidUrl)?;
-    if !scheme_allowed(url.scheme(), mode) {
+    let scheme = url.scheme().to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
         return Err(SsrfError::SchemeNotAllowed);
     }
-    match url.host() {
-        Some(url::Host::Ipv4(v4)) => {
-            if is_blocked(IpAddr::V4(v4), mode) {
-                return Err(SsrfError::BlockedAddress);
-            }
-        }
-        Some(url::Host::Ipv6(v6)) => {
-            if is_blocked(IpAddr::V6(v6), mode) {
-                return Err(SsrfError::BlockedAddress);
-            }
-        }
-        // Domain hosts are resolved and re-checked at connect time.
-        Some(url::Host::Domain(_)) => {}
-        None => return Err(SsrfError::MissingHost),
-    }
-    Ok(())
+    let host = url.host_str().ok_or(SsrfError::MissingHost)?;
+    check_transport_for_host(
+        host,
+        mode == ProviderSsrfMode::Relaxed,
+        scheme == "https",
+        enforce_public_tls,
+    )
 }
 
-/// Validate a single resolved IP at connect time. This is the authoritative
-/// check: it runs on every candidate address the resolver returns, just before
-/// the socket connects, so a domain that rebinds to an internal IP is still
-/// caught.
+/// Validate a single resolved IP at connect time against the SSRF address floor
+/// (private reachability by `mode`), ignoring the TLS policy. Retained for callers
+/// that judge an already-resolved address without a scheme in hand; the transport
+/// (TLS) policy is applied separately via [`check_transport`].
 pub fn check_resolved_ip(ip: IpAddr, mode: ProviderSsrfMode) -> Result<(), SsrfError> {
     if is_blocked(ip, mode) {
         Err(SsrfError::BlockedAddress)
     } else {
         Ok(())
-    }
-}
-
-/// Whether a scheme is permitted under the active mode.
-fn scheme_allowed(scheme: &str, mode: ProviderSsrfMode) -> bool {
-    match mode {
-        ProviderSsrfMode::Strict => scheme.eq_ignore_ascii_case("https"),
-        ProviderSsrfMode::Relaxed => {
-            scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http")
-        }
     }
 }
 
@@ -311,6 +304,70 @@ pub fn check_transport(
                 Err(SsrfError::InsecureTransport)
             }
         }
+    }
+}
+
+/// Parse a URL host component as an IP literal, tolerating the `[..]` bracket form
+/// used for an IPv6 authority. Returns `None` for a registered name (a domain),
+/// which needs DNS and is judged at connect time by the resolver.
+pub fn host_as_ip_literal(host: &str) -> Option<IpAddr> {
+    let trimmed = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    trimmed.parse::<IpAddr>().ok()
+}
+
+/// Connect-time transport judgment for a dial target's *host string*, applied
+/// **before** the dial.
+///
+/// This closes a gap in the actix-tls connect pipeline: its resolver
+/// short-circuits an IP-literal host (constructing the `SocketAddr` directly) and
+/// never invokes the custom [`Resolve`] adapter that runs [`check_transport`] per
+/// candidate. A literal target would therefore bypass the address floor and the
+/// public-plaintext policy entirely. Calling this before every dial restores the
+/// guard for literals:
+///
+/// - **IP-literal host** → judged immediately with [`check_transport`]. This is
+///   authoritative for a literal: there is no DNS step, so the address cannot
+///   rebind and a one-shot static check is equivalent to the per-candidate
+///   connect-time check. `AlwaysBlock` is rejected regardless of the switches.
+/// - **Registered name (domain) host** → `Ok(())`: actix-tls *does* invoke the
+///   custom adapter for a domain, so each resolved candidate is judged there
+///   (authoritative against DNS rebinding).
+///
+/// Argument order mirrors [`check_transport`].
+pub fn check_transport_for_host(
+    host: &str,
+    allow_private: bool,
+    scheme_is_tls: bool,
+    enforce_public_tls: bool,
+) -> Result<(), SsrfError> {
+    match host_as_ip_literal(host) {
+        Some(ip) => check_transport(ip, allow_private, scheme_is_tls, enforce_public_tls),
+        None => Ok(()),
+    }
+}
+
+/// Convenience over [`check_transport_for_host`] that extracts the host from a full
+/// URL string. A URL that does not parse, or has no host, is treated as `Ok(())`
+/// (deferred): the dial that follows fails on its own if the URL is unusable.
+/// `scheme_is_tls` is still supplied by the caller because the TLS-ness of a scheme
+/// is caller-specific (`wss`/`https` vs `ws`/`http`).
+pub fn check_transport_for_url(
+    url: &str,
+    allow_private: bool,
+    scheme_is_tls: bool,
+    enforce_public_tls: bool,
+) -> Result<(), SsrfError> {
+    match url::Url::parse(url.trim())
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+    {
+        Some(host) => {
+            check_transport_for_host(&host, allow_private, scheme_is_tls, enforce_public_tls)
+        }
+        None => Ok(()),
     }
 }
 
@@ -528,75 +585,173 @@ mod tests {
     }
 
     #[test]
-    fn strict_requires_https_scheme() {
-        assert_eq!(
-            check_provider_url("http://api.example.com/v1", ProviderSsrfMode::Strict),
-            Err(SsrfError::SchemeNotAllowed)
-        );
-        assert!(check_provider_url("https://api.example.com/v1", ProviderSsrfMode::Strict).is_ok());
-    }
-
-    #[test]
-    fn relaxed_allows_http_scheme() {
-        assert!(check_provider_url("http://localhost:11434/v1", ProviderSsrfMode::Relaxed).is_ok());
-        assert!(
-            check_provider_url("https://api.example.com/v1", ProviderSsrfMode::Relaxed).is_ok()
-        );
-    }
-
-    #[test]
-    fn non_http_schemes_rejected() {
+    fn provider_url_scheme_structural_check() {
+        // http and https are both structurally valid; any other scheme is rejected
+        // regardless of mode / switch.
         for mode in [ProviderSsrfMode::Strict, ProviderSsrfMode::Relaxed] {
             assert_eq!(
-                check_provider_url("file:///etc/passwd", mode),
+                check_provider_url("file:///etc/passwd", mode, true),
                 Err(SsrfError::SchemeNotAllowed)
             );
             assert_eq!(
-                check_provider_url("gopher://127.0.0.1/", mode),
+                check_provider_url("gopher://127.0.0.1/", mode, true),
                 Err(SsrfError::SchemeNotAllowed)
             );
         }
     }
 
     #[test]
-    fn url_with_ip_literal_judged_at_write_time() {
-        // Strict rejects an https URL whose host is a private IP literal.
+    fn provider_url_public_plaintext_gated_by_switch_not_mode() {
+        // A public http provider is saveable when enforcement is off, WITHOUT
+        // switching to Relaxed (which would also open private targets) — the two
+        // switches are orthogonal.
         assert_eq!(
-            check_provider_url("https://192.168.1.10/v1", ProviderSsrfMode::Strict),
-            Err(SsrfError::BlockedAddress)
+            check_provider_url("http://203.0.113.5/v1", ProviderSsrfMode::Strict, true),
+            Err(SsrfError::InsecureTransport)
         );
-        // Relaxed permits the same private literal (local gateway).
-        assert!(check_provider_url("https://192.168.1.10/v1", ProviderSsrfMode::Relaxed).is_ok());
-        // Metadata literal rejected even under Relaxed (and over http).
-        assert_eq!(
-            check_provider_url(
-                "http://169.254.169.254/latest/meta-data/",
-                ProviderSsrfMode::Relaxed
-            ),
-            Err(SsrfError::BlockedAddress)
+        assert!(
+            check_provider_url("http://203.0.113.5/v1", ProviderSsrfMode::Strict, false).is_ok()
         );
-        // Bracketed IPv6 metadata literal.
-        assert_eq!(
-            check_provider_url("https://[fd00:ec2::254]/", ProviderSsrfMode::Relaxed),
-            Err(SsrfError::BlockedAddress)
+        // https public is always fine under either mode.
+        assert!(
+            check_provider_url("https://203.0.113.5/v1", ProviderSsrfMode::Strict, true).is_ok()
+        );
+        // A public *domain* over http is deferred at write time (Ok); the
+        // connect-time resolver enforces TLS once the address is known.
+        assert!(
+            check_provider_url("http://api.example.com/v1", ProviderSsrfMode::Strict, true).is_ok()
         );
     }
 
     #[test]
-    fn url_with_domain_host_deferred_to_connect_time() {
-        // A domain literal passes write-time (scheme ok); the connect-time IP
-        // check is where rebinding to an internal address is caught.
-        assert!(check_provider_url("https://api.openai.com/v1", ProviderSsrfMode::Strict).is_ok());
+    fn provider_url_private_reachability_gated_by_mode_not_switch() {
+        // Strict blocks a private literal, Relaxed allows it — independent of the
+        // TLS switch, and no TLS is imposed on a private target.
+        assert_eq!(
+            check_provider_url("http://192.168.1.10/v1", ProviderSsrfMode::Strict, true),
+            Err(SsrfError::BlockedAddress)
+        );
         assert!(
-            check_provider_url("http://my-gateway.local/v1", ProviderSsrfMode::Relaxed).is_ok()
+            check_provider_url("http://192.168.1.10/v1", ProviderSsrfMode::Relaxed, true).is_ok()
+        );
+        assert!(
+            check_provider_url("http://localhost:11434/v1", ProviderSsrfMode::Relaxed, true)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn provider_url_metadata_floor_always_blocked() {
+        // The metadata / link-local floor is blocked under any mode, scheme, or switch.
+        for mode in [ProviderSsrfMode::Strict, ProviderSsrfMode::Relaxed] {
+            for enforce in [true, false] {
+                assert_eq!(
+                    check_provider_url("http://169.254.169.254/latest/meta-data/", mode, enforce),
+                    Err(SsrfError::BlockedAddress)
+                );
+                assert_eq!(
+                    check_provider_url("https://[fd00:ec2::254]/", mode, enforce),
+                    Err(SsrfError::BlockedAddress)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn provider_url_domain_host_deferred_to_connect_time() {
+        // A registered name passes write-time (scheme ok); the connect-time IP check
+        // is where rebinding to an internal address is caught.
+        assert!(
+            check_provider_url("https://api.openai.com/v1", ProviderSsrfMode::Strict, true).is_ok()
+        );
+        assert!(
+            check_provider_url(
+                "http://my-gateway.local/v1",
+                ProviderSsrfMode::Relaxed,
+                true
+            )
+            .is_ok()
         );
     }
 
     #[test]
     fn invalid_url_rejected_when_validating() {
         assert_eq!(
-            check_provider_url("definitely not a url", ProviderSsrfMode::Strict),
+            check_provider_url("definitely not a url", ProviderSsrfMode::Strict, true),
             Err(SsrfError::InvalidUrl)
         );
+    }
+
+    #[test]
+    fn host_as_ip_literal_parses_literals_and_rejects_names() {
+        assert_eq!(host_as_ip_literal("203.0.113.5"), Some(v4(203, 0, 113, 5)));
+        assert_eq!(
+            host_as_ip_literal("[::1]"),
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST))
+        );
+        assert_eq!(
+            host_as_ip_literal("::1"),
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST))
+        );
+        assert_eq!(host_as_ip_literal("api.openai.com"), None);
+        assert_eq!(host_as_ip_literal("localhost"), None);
+    }
+
+    #[test]
+    fn check_transport_for_host_guards_ip_literals() {
+        // Public IP literal over plaintext with enforcement on → refused (this is
+        // the bypass the actix-tls short-circuit would otherwise open).
+        assert_eq!(
+            check_transport_for_host("203.0.113.5", true, false, true),
+            Err(SsrfError::InsecureTransport)
+        );
+        // Same literal over TLS → allowed.
+        assert!(check_transport_for_host("203.0.113.5", true, true, true).is_ok());
+        // Same literal over plaintext with enforcement off → allowed (escape hatch).
+        assert!(check_transport_for_host("203.0.113.5", true, false, false).is_ok());
+        // Metadata floor literal → always blocked, ignoring both switches and scheme.
+        for (tls, enforce) in [(true, true), (false, false), (true, false)] {
+            assert_eq!(
+                check_transport_for_host("169.254.169.254", true, tls, enforce),
+                Err(SsrfError::BlockedAddress)
+            );
+        }
+        // IPv4-mapped IPv6 metadata literal cannot slip past via the bracket form.
+        assert_eq!(
+            check_transport_for_host("[::ffff:169.254.169.254]", true, true, true),
+            Err(SsrfError::BlockedAddress)
+        );
+        // Private literal over plaintext → allowed when allow_private; blocked when not.
+        assert!(check_transport_for_host("10.0.0.5", true, false, true).is_ok());
+        assert_eq!(
+            check_transport_for_host("10.0.0.5", false, false, true),
+            Err(SsrfError::BlockedAddress)
+        );
+    }
+
+    #[test]
+    fn check_transport_for_host_defers_domains() {
+        // A domain host is never judged here (deferred to the connect-time resolver),
+        // even a public plaintext one under enforcement.
+        assert!(check_transport_for_host("api.openai.com", true, false, true).is_ok());
+        assert!(check_transport_for_host("localhost", true, false, true).is_ok());
+    }
+
+    #[test]
+    fn check_transport_for_url_extracts_host_and_guards() {
+        // Public IP-literal URL over plaintext under enforcement → refused.
+        assert_eq!(
+            check_transport_for_url("http://203.0.113.5:8080/v1", true, false, true),
+            Err(SsrfError::InsecureTransport)
+        );
+        // Metadata literal URL → always blocked (ws scheme, TLS on, enforcement off).
+        assert_eq!(
+            check_transport_for_url("wss://169.254.169.254/api", true, true, false),
+            Err(SsrfError::BlockedAddress)
+        );
+        // Domain URL → deferred (Ok) regardless of plaintext + enforcement.
+        assert!(check_transport_for_url("http://api.openai.com/v1", true, false, true).is_ok());
+        // Unparseable / hostless → deferred (Ok), left to the dial to fail.
+        assert!(check_transport_for_url("not a url", true, false, true).is_ok());
     }
 }

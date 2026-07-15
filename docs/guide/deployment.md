@@ -64,9 +64,9 @@ For multi-session hosts or capturing secure surfaces, run the [service-daemon mo
 When exposing the server to the public internet (typically behind a TLS-terminating reverse proxy), note:
 
 - **`LRD_COOKIE_SECURE`** — controls the session cookie `Secure` attribute. It defaults to `false` so a local / LAN HTTP setup keeps its session. Set `LRD_COOKIE_SECURE=true` for an HTTPS deployment so the cookie is only ever sent over HTTPS.
-- **`LRD_PROVIDER_SSRF_MODE`** — guards the central brain's outbound dial to a user-configured model provider `base_url` against SSRF (an internal service or a cloud metadata endpoint). Values:
-  - `relaxed` (default) — allows `http` and private / loopback targets (local model gateways like `http://localhost:11434`) but still blocks the cloud-metadata ranges.
-  - `strict` — `https` only; rejects private / loopback / CGNAT / ULA and cloud-metadata ranges; re-validates the resolved IP at connect time (anti DNS-rebinding). Use this if untrusted users can configure the provider.
-  - `off` — no validation (only for unusual self-host setups).
+- **`LRD_PROVIDER_SSRF_MODE`** — guards the central brain's outbound dial to a user-configured model provider `base_url` against SSRF (an internal service or a cloud metadata endpoint). Governs **private reachability only** (orthogonal to the TLS switch below); the cloud-metadata ranges are blocked in every mode. Values:
+  - `relaxed` (default) — allows private / loopback targets (local model gateways like `http://localhost:11434`).
+  - `strict` — rejects private / loopback / CGNAT / ULA targets; re-validates the resolved IP at connect time (anti DNS-rebinding). Use this if untrusted users can configure the provider.
+- **`LRD_ENFORCE_PUBLIC_TLS`** — whether a *public* target may be dialed over *plaintext* (`http`). Defaults to `true` (only an explicit `false` / `0` / `no` / `off` turns it off). When on, a plaintext dial to a public address is refused before connecting, so the api_key never leaves in the clear; private / loopback / LAN targets are always exempt and the cloud-metadata floor is always blocked regardless. Orthogonal to the SSRF mode: to allow a public plaintext provider, turn this off — you do **not** need `relaxed` (which would additionally open private targets).
 - **Runtime API docs endpoints are not served** (Swagger UI / ReDoc / RapiDoc / Scalar / `/openapi.json`); generate the spec offline with `dump-openapi` (see the [REST API reference](/reference/api)).
 - Put the server behind a reverse proxy that terminates TLS, passes through `Host`, and forwards the WebSocket `Upgrade` headers for signaling.

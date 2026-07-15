@@ -11,7 +11,7 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::error::DeskSignalError;
-use crate::model_dial::{SignalModelSeam, configured_ssrf_mode};
+use crate::model_dial::{SignalModelSeam, configured_enforce_public_tls, configured_ssrf_mode};
 use crate::model_provider::{self, ModelProviderPublic, ModelProviderUpdate};
 
 pub const TAG: &str = "ModelProvider";
@@ -71,7 +71,12 @@ pub async fn update_model_provider(
     if let Some(base_url) = config.base_url.as_deref()
         && !base_url.trim().is_empty()
     {
-        desk_utils::ssrf::check_provider_url(base_url, configured_ssrf_mode()).map_err(|_| {
+        desk_utils::ssrf::check_provider_url(
+            base_url,
+            configured_ssrf_mode(),
+            configured_enforce_public_tls(),
+        )
+        .map_err(|_| {
             DeskSignalError::new_custom_error(
                 DeskErrorCode::INVALID_PARAMS,
                 "base_url is not permitted by the server's provider policy",

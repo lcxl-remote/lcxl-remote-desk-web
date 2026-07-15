@@ -244,7 +244,17 @@ fn build_probe_query(token: Option<&str>) -> Option<String> {
 
 /// Probe one `ws(s)` (or `http(s)`) URL with the given token. Never panics;
 /// classifies every failure into a coarse [`ProbeOutcome`].
-async fn probe_signaling(client: &awc::Client, ws_url: &str, token: Option<&str>) -> ProbeOutcome {
+async fn probe_signaling(
+    client: &awc::Client,
+    ws_url: &str,
+    token: Option<&str>,
+    require_secure_signaling: bool,
+) -> ProbeOutcome {
+    // Guard IP-literal targets before dialing (the resolver-based guard never sees
+    // them). A domain is deferred to the connect-time resolver / error mapping.
+    if let Some(refused) = precheck_literal_target(ws_url, require_secure_signaling) {
+        return refused;
+    }
     let Some(http_url) = probe_http_url(ws_url) else {
         return ProbeOutcome::Blocked;
     };
@@ -315,19 +325,29 @@ impl ConsoleProbe {
 /// `http` fallback uses the plaintext-scheme client, so a *public* console is
 /// refused over `http` when secure-signaling is enforced (a private / LAN console
 /// still answers over `http`).
-async fn probe_console(secure: &awc::Client, plain: &awc::Client, host: &str) -> ConsoleProbe {
+async fn probe_console(
+    secure: &awc::Client,
+    plain: &awc::Client,
+    host: &str,
+    require_secure_signaling: bool,
+) -> ConsoleProbe {
+    // Each scheme attempt guards its IP-literal target before dialing (a refused
+    // literal simply counts as "did not answer over that scheme").
     let https = format!("https://{host}");
-    if secure
-        .get(&https)
-        .timeout(PROBE_TIMEOUT)
-        .send()
-        .await
-        .is_ok()
+    if precheck_literal_target(&https, require_secure_signaling).is_none()
+        && secure
+            .get(&https)
+            .timeout(PROBE_TIMEOUT)
+            .send()
+            .await
+            .is_ok()
     {
         return ConsoleProbe::Https;
     }
     let http = format!("http://{host}");
-    if plain.get(&http).timeout(PROBE_TIMEOUT).send().await.is_ok() {
+    if precheck_literal_target(&http, require_secure_signaling).is_none()
+        && plain.get(&http).timeout(PROBE_TIMEOUT).send().await.is_ok()
+    {
         return ConsoleProbe::Http;
     }
     ConsoleProbe::Unreachable
@@ -336,6 +356,31 @@ async fn probe_console(secure: &awc::Client, plain: &awc::Client, host: &str) ->
 /// Whether a resolved signaling scheme is TLS-encrypted.
 fn scheme_is_secure(scheme: Option<&str>) -> bool {
     matches!(scheme, Some("wss") | Some("https"))
+}
+
+/// Static pre-dial transport judgment for an IP-literal probe target. The
+/// actix-tls resolver short-circuits an IP literal before the custom transport
+/// guard runs, so a literal must be judged here, before the dial. Returns
+/// `Some(outcome)` when the literal is refused (caller skips the dial); `None`
+/// when it is allowed, the host is a domain (judged at connect time by the guard
+/// resolver), or the URL does not parse (left to the normal dial + error mapping).
+/// `allow_private` is always true here (host↔manager wiring reaches LAN targets).
+fn precheck_literal_target(url: &str, require_secure_signaling: bool) -> Option<ProbeOutcome> {
+    let parsed = url::Url::parse(url.trim()).ok()?;
+    let host = parsed.host_str()?;
+    let scheme_is_tls = scheme_is_secure(Some(parsed.scheme()));
+    match desk_utils::ssrf::check_transport_for_host(
+        host,
+        true,
+        scheme_is_tls,
+        require_secure_signaling,
+    ) {
+        Ok(()) => None,
+        Err(desk_utils::ssrf::SsrfError::InsecureTransport) => {
+            Some(ProbeOutcome::InsecureTransport)
+        }
+        Err(_) => Some(ProbeOutcome::Blocked),
+    }
 }
 
 /// Turn a chosen probe outcome (plus resolved scheme/url and optional console
@@ -402,14 +447,15 @@ async fn resolve_bare_host(
     plain: &awc::Client,
     host: &str,
     token: Option<&str>,
+    require_secure_signaling: bool,
 ) -> (ProbeOutcome, String, String) {
     let wss_url = format!("wss://{host}{SIGNALING_PATH}");
-    let wss_outcome = probe_signaling(secure, &wss_url, token).await;
+    let wss_outcome = probe_signaling(secure, &wss_url, token, require_secure_signaling).await;
     if wss_outcome.reached() {
         return (wss_outcome, "wss".to_string(), wss_url);
     }
     let ws_url = format!("ws://{host}{SIGNALING_PATH}");
-    let ws_outcome = probe_signaling(plain, &ws_url, token).await;
+    let ws_outcome = probe_signaling(plain, &ws_url, token, require_secure_signaling).await;
     if ws_outcome.reached() {
         return (ws_outcome, "ws".to_string(), ws_url);
     }
@@ -484,11 +530,17 @@ pub async fn verify_connection(
     let (outcome, scheme, resolved_url) = if looks_like_full_url(&input) {
         let scheme = url::Url::parse(&input).ok().map(|u| u.scheme().to_string());
         let client = client_for_url(&input, &client_secure, &client_plain);
-        let outcome = probe_signaling(client, &input, token).await;
+        let outcome = probe_signaling(client, &input, token, require_secure_signaling).await;
         (outcome, scheme, Some(input.clone()))
     } else {
-        let (outcome, scheme, url) =
-            resolve_bare_host(&client_secure, &client_plain, &input, token).await;
+        let (outcome, scheme, url) = resolve_bare_host(
+            &client_secure,
+            &client_plain,
+            &input,
+            token,
+            require_secure_signaling,
+        )
+        .await;
         (outcome, Some(scheme), Some(url))
     };
 
@@ -496,7 +548,15 @@ pub async fn verify_connection(
     // whether it answered over TLS.
     let console = if is_manager {
         match host_of(&input) {
-            Some(host) => Some(probe_console(&client_secure, &client_plain, &host).await),
+            Some(host) => Some(
+                probe_console(
+                    &client_secure,
+                    &client_plain,
+                    &host,
+                    require_secure_signaling,
+                )
+                .await,
+            ),
             None => Some(ConsoleProbe::Unreachable),
         }
     } else {
@@ -562,6 +622,46 @@ mod tests {
         );
         assert_eq!(host_of("a.example:8443").as_deref(), Some("a.example"));
         assert_eq!(host_of("a.example").as_deref(), Some("a.example"));
+    }
+
+    #[test]
+    fn precheck_literal_target_guards_ip_literals_before_dial() {
+        // Public IP literal over plaintext with enforcement on → refused before dial
+        // (this is the actix-tls short-circuit path the resolver-based guard misses).
+        assert_eq!(
+            precheck_literal_target("ws://203.0.113.5/api/desk/signaling", true),
+            Some(ProbeOutcome::InsecureTransport)
+        );
+        assert_eq!(
+            precheck_literal_target("http://203.0.113.5:8443", true),
+            Some(ProbeOutcome::InsecureTransport)
+        );
+        // Same literal over TLS, or with enforcement off → allowed (deferred to dial).
+        assert_eq!(
+            precheck_literal_target("wss://203.0.113.5/api/desk/signaling", true),
+            None
+        );
+        assert_eq!(
+            precheck_literal_target("ws://203.0.113.5/api/desk/signaling", false),
+            None
+        );
+        // Metadata floor literal → always blocked, ignoring the switch and scheme.
+        for enforce in [true, false] {
+            assert_eq!(
+                precheck_literal_target("wss://169.254.169.254/api", enforce),
+                Some(ProbeOutcome::Blocked)
+            );
+        }
+        // Private literal → allowed over plaintext (host↔manager reaches the LAN).
+        assert_eq!(
+            precheck_literal_target("ws://10.0.0.5/api/desk/signaling", true),
+            None
+        );
+        // Domain host → deferred to the connect-time resolver (None here).
+        assert_eq!(
+            precheck_literal_target("ws://sig.example/api/desk/signaling", true),
+            None
+        );
     }
 
     #[test]

@@ -64,9 +64,9 @@ server 内置信令、STUN 与 TURN。跨 NAT 连接时：
 把 server 暴露到公网时（通常置于终结 TLS 的反向代理之后），注意：
 
 - **`LRD_COOKIE_SECURE`**——控制会话 Cookie 的 `Secure` 属性。默认 `false`，以便本地 / 局域网 HTTP 访问保留会话。HTTPS 部署应设 `LRD_COOKIE_SECURE=true`，使 Cookie 仅经 HTTPS 发送。
-- **`LRD_PROVIDER_SSRF_MODE`**——防护中心大脑代用户拨号其配置的模型供应商 `base_url` 时的 SSRF（指向内网服务或云元数据端点）。取值：
-  - `relaxed`（默认）——允许 `http` 与私网 / 回环目标（本地模型网关，如 `http://localhost:11434`），但仍拒绝云元数据段。
-  - `strict`——仅 `https`；拒绝私网 / 回环 / CGNAT / ULA 与云元数据段；连接期再校验解析到的 IP（防 DNS 重绑定）。当不可信用户可配置供应商时使用。
-  - `off`——不校验（仅限特殊自建场景）。
+- **`LRD_PROVIDER_SSRF_MODE`**——防护中心大脑代用户拨号其配置的模型供应商 `base_url` 时的 SSRF（指向内网服务或云元数据端点）。**只管私网可达性**（与下方 TLS 开关正交）；云元数据段在任何模式下都被拦截。取值：
+  - `relaxed`（默认）——允许私网 / 回环目标（本地模型网关，如 `http://localhost:11434`）。
+  - `strict`——拒绝私网 / 回环 / CGNAT / ULA 目标；连接期再校验解析到的 IP（防 DNS 重绑定）。当不可信用户可配置供应商时使用。
+- **`LRD_ENFORCE_PUBLIC_TLS`**——是否允许以**明文**（`http`）拨号**公网**目标。默认 `true`（仅显式设为 `false` / `0` / `no` / `off` 才关闭）。开启时，对公网地址的明文拨号会在连接前被拒（api_key 绝不明文外泄）；私网 / 回环 / 局域网目标始终豁免，云元数据段无论如何始终拦截。与 SSRF 模式正交：要放行公网明文供应商，关闭本开关即可，**无需**切到 `relaxed`（那会额外放开私网目标）。
 - **运行时不再提供 API 文档端点**（Swagger UI / ReDoc / RapiDoc / Scalar / `/openapi.json`）；用离线 `dump-openapi` 生成规范（见 [REST API 参考](/zh/reference/api)）。
 - 把 server 置于反向代理之后，由其终结 TLS、透传 `Host`，并为信令转发 WebSocket `Upgrade` 头。

@@ -244,6 +244,17 @@ impl ModelSeam for SignalModelSeam {
     ) -> Result<ModelTurn, AgentError> {
         use futures_util::StreamExt;
 
+        // The actix-tls resolver short-circuits an IP-literal host before the custom
+        // `SsrfResolver` runs, so judge a literal target here, before the dial (a
+        // domain is deferred to the resolver, authoritative against DNS rebinding).
+        desk_utils::ssrf::check_transport_for_url(
+            &self.base_url,
+            configured_ssrf_mode() == desk_utils::ssrf::ProviderSsrfMode::Relaxed,
+            base_url_scheme_is_tls(&self.base_url),
+            configured_enforce_public_tls(),
+        )
+        .map_err(|e| transport_error(format!("model request failed: {e}")))?;
+
         // A TLS-capable client: `awc::Client::default()` has no TLS connector and
         // fails instantly on `https://` gateways. Pin the `ring` provider (the
         // rustls default `aws_lc_rs` fast-fails the process on Windows).
