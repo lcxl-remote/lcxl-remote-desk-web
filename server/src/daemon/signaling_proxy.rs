@@ -1329,7 +1329,10 @@ async fn maintain_proxy_connection(
         .await
         .map_err(|e| format!("WebSocket connect failed: {e:?}"))?;
 
-    info!("[Proxy] Connected to {signaling_url}");
+    info!(
+        "[Proxy] Connected to {}",
+        redact_token_in_url(&signaling_url)
+    );
 
     // A successful (re)connection clears any prior fatal rejection so the host UI
     // stops showing the blocked state once registration goes through.
@@ -1345,7 +1348,10 @@ async fn maintain_proxy_connection(
     if let Some(rx) = manager_link_enabled_rx.as_ref()
         && !*rx.borrow()
     {
-        info!("[Proxy] Manager link disabled; closing {signaling_url}");
+        info!(
+            "[Proxy] Manager link disabled; closing {}",
+            redact_token_in_url(&signaling_url)
+        );
         let _ = sink.send(awc::ws::Message::Close(None)).await;
         return Ok(ProxyConnectionOutcome::Closed);
     }
@@ -1432,14 +1438,20 @@ async fn maintain_proxy_connection(
             // host disables the manager link at runtime. `None` links resolve a
             // never-completing future, so this branch is inert for them.
             _ = wait_manager_link_disabled(&mut manager_link_enabled_rx) => {
-                info!("[Proxy] Manager link disabled; closing {signaling_url}");
+                info!(
+            "[Proxy] Manager link disabled; closing {}",
+            redact_token_in_url(&signaling_url)
+        );
                 let _ = sink.send(awc::ws::Message::Close(None)).await;
                 break;
             }
         }
     }
 
-    info!("[Proxy] Connection to {signaling_url} ended");
+    info!(
+        "[Proxy] Connection to {} ended",
+        redact_token_in_url(&signaling_url)
+    );
     Ok(ProxyConnectionOutcome::Closed)
 }
 
