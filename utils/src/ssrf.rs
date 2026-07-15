@@ -183,6 +183,20 @@ fn normalize(ip: IpAddr) -> IpAddr {
 /// The cloud-metadata hard floor: rejected under both `Strict` and `Relaxed`.
 /// Covers the most dangerous SSRF target (credential-bearing instance metadata)
 /// plus unspecified addresses, across IPv4 and IPv6.
+///
+/// Maintenance model: the common case needs no per-vendor list, because the bulk
+/// is the `169.254.0.0/16` link-local range holding the de-facto metadata address
+/// `169.254.169.254` (shared by AWS, GCP, Azure, Oracle, Tencent Cloud, and most
+/// others). Only a vendor that puts metadata on a NON-link-local address which
+/// also falls inside a private/CGNAT/ULA range must be carved out individually
+/// (otherwise it would be misclassified as private and let through) — the AWS
+/// IPv6 address `fd00:ec2::254` below is one such carve-out.
+///
+/// Known outlier NOT yet covered here: Alibaba Cloud metadata `100.100.100.200`,
+/// which sits inside CGNAT `100.64.0.0/10` and is therefore currently classified
+/// as private rather than blocked. Whether to add it to this floor or make the
+/// floor configurable is an open follow-up; the addresses are intentionally
+/// hardcoded because this is a security floor an operator must not weaken.
 fn is_metadata_floor(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
