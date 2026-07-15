@@ -246,6 +246,35 @@ describe("TerminalCopilotPanel exec promotion", () => {
         expect(screen.getByText("AI-generated")).toBeInTheDocument();
     });
 
+    it("marks the streaming answer as AI-generated on first exposure, before it settles (Art.50(2))", () => {
+        // A turn still streaming (no committed answer yet) with partial text must
+        // already carry the marking, so a dropped final frame never leaves the
+        // exposed AI text unmarked.
+        render(
+            <TerminalCopilotPanel
+                state={{
+                    ...baseState,
+                    phase: "running",
+                    partialText: "checking the service status",
+                    turns: [
+                        {
+                            question: "check nginx",
+                            mode: "how_to",
+                            answer: null,
+                            provenance: null,
+                        },
+                    ],
+                }}
+                onAsk={vi.fn()}
+                onReset={vi.fn()}
+                onClose={vi.fn()}
+                onFill={vi.fn()}
+            />,
+        );
+        expect(screen.getByText("checking the service status")).toBeInTheDocument();
+        expect(screen.getByText("AI-generated")).toBeInTheDocument();
+    });
+
     it("discloses that the user is interacting with an AI (Art.50(1)), alongside the accuracy disclaimer", () => {
         // The identity disclosure is a standing element at the top of the log,
         // distinct from the accuracy disclaimer in the footer.

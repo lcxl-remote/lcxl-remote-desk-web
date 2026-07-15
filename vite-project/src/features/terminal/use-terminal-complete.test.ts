@@ -156,6 +156,37 @@ describe('useTerminalComplete', () => {
         expect(result.current.best?.completion).toBe('status nginx');
     });
 
+    it('carries the AI marking (Art.50(2)) so the ghost can name the model', () => {
+        const { result, feed } = renderComplete();
+        act(() => result.current.requestCompletion('systemctl ', ctx));
+        act(() => vi.advanceTimersByTime(100));
+        feed(
+            resultFrame({
+                request_id: 'req-1',
+                completions: [
+                    { completion: 'status nginx', note: 'status', risk: 'low', decision: 'not_executable' },
+                ],
+                provenance: { model_id: 'gpt-4o', marking_scheme: 'lcxl-ai-provenance/1' },
+            }),
+        );
+        expect(result.current.provenance?.model_id).toBe('gpt-4o');
+    });
+
+    it('leaves provenance null when the result omits it (fail-closed: the ghost still marks by source)', () => {
+        const { result, feed } = renderComplete();
+        act(() => result.current.requestCompletion('systemctl ', ctx));
+        act(() => vi.advanceTimersByTime(100));
+        feed(
+            resultFrame({
+                request_id: 'req-1',
+                completions: [
+                    { completion: 'status nginx', note: 'status', risk: 'low', decision: 'not_executable' },
+                ],
+            }),
+        );
+        expect(result.current.provenance).toBeNull();
+    });
+
     it('discards a stale result whose request_id is not the active one', () => {
         const { result, feed } = renderComplete();
         act(() => result.current.requestCompletion('systemctl ', ctx));

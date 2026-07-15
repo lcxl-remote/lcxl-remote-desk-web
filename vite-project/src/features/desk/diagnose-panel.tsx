@@ -515,9 +515,17 @@ export function DiagnosePanel({
                             {statusLabel(state.status)}
                         </div>
                         {streamingSummary && (
-                            <p className="whitespace-pre-wrap text-sm text-white/90">
-                                {streamingSummary}
-                            </p>
+                            <div className="flex flex-col gap-2">
+                                {/* AI-generated marking (Art.50(2)) for the streaming
+                                    answer, shown the moment text is exposed — not only
+                                    after the turn settles — so first exposure is always
+                                    marked. Driven by the AI text being present
+                                    (fail-closed); the model is not yet known mid-stream. */}
+                                <AiGeneratedMark className="self-start border-white/25 bg-white/10 text-white/80" />
+                                <p className="whitespace-pre-wrap text-sm text-white/90">
+                                    {streamingSummary}
+                                </p>
+                            </div>
                         )}
                         <ToolTimeline tools={state.tools} />
                         {state.pendingExec && onApproveExec && onRejectExec && (

@@ -143,6 +143,11 @@ export function useTerminalComplete({
     // The prefix the current `completions` were computed for; the component
     // renders ghost text only while its live input still equals this.
     const [completionPrefix, setCompletionPrefix] = useState<string>('');
+    // AI marking for the current candidates (Art.50(2)); carried so the ghost's
+    // visible mark can name the producing model. Null does not mean "not AI" —
+    // an AI candidate is marked by being shown (fail-closed); this only enriches
+    // the tooltip when the model / timestamp is known.
+    const [provenance, setProvenance] = useState<AiProvenance | null>(null);
     const activeRequestRef = useRef<string | null>(null);
     const sentPrefixRef = useRef<string>('');
     const timerRef = useRef<number | undefined>(undefined);
@@ -160,6 +165,7 @@ export function useTerminalComplete({
         activeRequestRef.current = null;
         setCompletions([]);
         setCompletionPrefix('');
+        setProvenance(null);
     }, []);
 
     const requestCompletion = useCallback(
@@ -170,6 +176,7 @@ export function useTerminalComplete({
                 activeRequestRef.current = null;
                 setCompletions([]);
                 setCompletionPrefix('');
+                setProvenance(null);
                 return;
             }
             timerRef.current = window.setTimeout(() => {
@@ -204,10 +211,12 @@ export function useTerminalComplete({
                 // Disabled / rate-limited / failed: stay quiet, no suggestion.
                 setCompletions([]);
                 setCompletionPrefix('');
+                setProvenance(null);
                 return;
             }
             setCompletions(result.completions ?? []);
             setCompletionPrefix(sentPrefixRef.current);
+            setProvenance(result.provenance ?? null);
         };
         return subscribe(handle);
     }, [subscribe]);
@@ -225,6 +234,9 @@ export function useTerminalComplete({
         completions,
         /** The prefix `completions` were computed for. */
         completionPrefix,
+        /** AI marking for the current candidates (Art.50(2)); enriches the ghost
+         *  mark's model tooltip when known. */
+        provenance,
         /** The first non-blocked AI candidate, or null. */
         best: firstShowable(completions),
         requestCompletion,

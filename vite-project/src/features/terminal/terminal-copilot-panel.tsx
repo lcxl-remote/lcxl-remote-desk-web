@@ -311,9 +311,18 @@ export function TerminalCopilotPanel({
                                         )}
 
                                         {running && state.partialText && (
-                                            <p className="whitespace-pre-wrap text-sm text-muted-foreground">
-                                                {state.partialText}
-                                            </p>
+                                            <div className="space-y-2">
+                                                {/* AI-generated marking (Art.50(2)) for the
+                                                    streaming answer, shown as soon as text is
+                                                    exposed — not only once the answer settles —
+                                                    so first exposure is always marked. Driven by
+                                                    the AI text being present (fail-closed); the
+                                                    model is not yet known mid-stream. */}
+                                                <AiGeneratedMark />
+                                                <p className="whitespace-pre-wrap text-sm text-muted-foreground">
+                                                    {state.partialText}
+                                                </p>
+                                            </div>
                                         )}
 
                                         {running &&

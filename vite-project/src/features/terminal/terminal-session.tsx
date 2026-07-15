@@ -18,7 +18,7 @@ import { v4 } from "uuid"
 import { useDeskSignaling } from "../desk/use-desk-signaling"
 import { useTerminalCopilot, type TerminalCopilotMode, type TerminalContext } from "./use-terminal-copilot"
 import { TerminalCopilotPanel } from "./terminal-copilot-panel"
-import { AiGeneratedMark } from "@/components/ai-generated-mark"
+import { AiGeneratedMark, type AiProvenance } from "@/components/ai-generated-mark"
 import { ModelSelector } from "../desk/model-selector"
 import { useConfirmExec } from "../exec/use-confirm-exec"
 import {
@@ -86,7 +86,7 @@ function TerminalView({ connectionId, deviceId, command, onClose, orgId }: { con
     completionEnabledRef.current = completionEnabled
     const historyRef = useRef<string[]>([])
     const currentPrefixRef = useRef<string>("")
-    const [ghost, setGhost] = useState<{ suffix: string; note: string; source: 'ai' | 'history' } | null>(null)
+    const [ghost, setGhost] = useState<{ suffix: string; note: string; source: 'ai' | 'history'; provenance?: AiProvenance | null } | null>(null)
     const ghostRef = useRef(ghost)
     ghostRef.current = ghost
 
@@ -183,9 +183,9 @@ function TerminalView({ connectionId, deviceId, command, onClose, orgId }: { con
     useEffect(() => {
         if (!completionEnabledRef.current) return
         if (complete.best && complete.completionPrefix === currentPrefixRef.current) {
-            setGhost({ suffix: complete.best.completion, note: complete.best.note, source: 'ai' })
+            setGhost({ suffix: complete.best.completion, note: complete.best.note, source: 'ai', provenance: complete.provenance })
         }
-    }, [complete.best, complete.completionPrefix])
+    }, [complete.best, complete.completionPrefix, complete.provenance])
 
     useEffect(() => {
         if (!terminalRef.current || !connectionId) return
@@ -529,7 +529,7 @@ function TerminalView({ connectionId, deviceId, command, onClose, orgId }: { con
                             it carries the visible "AI-generated" marking (the L1 history
                             guess is local, not AI, and is not marked). */}
                         {ghost.source === 'ai' && (
-                            <AiGeneratedMark className="ml-auto shrink-0 border-white/25 bg-white/10 text-gray-300" />
+                            <AiGeneratedMark provenance={ghost.provenance} className="ml-auto shrink-0 border-white/25 bg-white/10 text-gray-300" />
                         )}
                         <span className={`${ghost.source === 'ai' ? '' : 'ml-auto '}shrink-0 rounded border border-gray-600 px-1.5 py-0.5 text-[10px] text-gray-400`}>
                             {t('pages.deskTerminal.completion.acceptHint')}
