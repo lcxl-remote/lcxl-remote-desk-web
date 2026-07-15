@@ -3,6 +3,13 @@
 
 import type { ConnectionVerifyResult, SecuritySettings } from "@/services/types"
 
+/**
+ * `DeskErrorCode::CONNECTION_INSECURE_TRANSPORT` — the probe refused a public
+ * target dialed over a plaintext scheme while `require_secure_signaling` is on.
+ * Mirrors the backend constant in `web/utils/src/error.rs`.
+ */
+export const CONNECTION_INSECURE_TRANSPORT = 68
+
 export const SECURITY_CAPABILITIES = [
     "allow_remote_control",
     "allow_clipboard_sync",
@@ -45,6 +52,19 @@ export function isInsecureConnection(
     result: ConnectionVerifyResult | null | undefined,
 ): boolean {
     return !!result?.reached && result.secure === false
+}
+
+/**
+ * Whether the probe HARD-refused the target because it is public and was dialed
+ * over plaintext while `require_secure_signaling` is on. Unlike
+ * {@link isInsecureConnection} (a reachable-but-plaintext warning), this is a
+ * refusal: the target is never reached, so the wizard must block and prompt the
+ * user to switch to `wss://` / `https://` or deliberately disable the switch.
+ */
+export function isInsecureTransportRefused(
+    result: ConnectionVerifyResult | null | undefined,
+): boolean {
+    return result?.error_code === CONNECTION_INSECURE_TRANSPORT
 }
 
 /**

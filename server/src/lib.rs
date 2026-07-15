@@ -15,6 +15,7 @@ pub mod model;
 pub mod openapi;
 pub mod service;
 pub mod telemetry;
+pub mod transport_guard;
 pub mod version;
 pub mod worker;
 

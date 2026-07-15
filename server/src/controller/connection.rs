@@ -9,14 +9,15 @@
 //! the zero-side-effect `?probe=1` marker protocol (see
 //! [`desk_signal_facade::model::probe`]).
 //!
-//! Outbound dials are SSRF-guarded at connect time by [`desk_utils::ssrf`]:
-//! anonymous (pre-init) callers may only reach public addresses (`Strict`);
-//! authenticated (post-init) callers may also reach private / LAN addresses for a
-//! self-hosted signaling server (`Relaxed`), while the cloud-metadata floor stays
-//! blocked in both. The URL scheme allowlist (`ws` / `wss` / `http` / `https` plus
-//! the `wss`→`ws` fallback) is enforced here — deliberately not via
-//! `check_provider_url`, whose `Strict` mode is https-only and would reject the
-//! `ws` / `http` this feature needs.
+//! Outbound dials are transport-guarded at connect time via
+//! [`crate::transport_guard`]: the cloud-metadata floor is always blocked, private
+//! / LAN targets stay reachable (this endpoint always dials the host's own
+//! self-hosted signaling server / manager, legitimately on a private address), and
+//! a *public* target dialed over a plaintext scheme (`ws` / `http`) is refused when
+//! the host's `require_secure_signaling` switch is on. One client is built per
+//! scheme so the plaintext-vs-TLS decision is made on the single authoritative
+//! resolution. The URL scheme allowlist (`ws` / `wss` / `http` / `https` plus the
+//! `wss`→`ws` fallback) is enforced here.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,7 +30,7 @@ use desk_signal_facade::model::{
     signal::RemoteDeskTypeEnum,
     version::VersionInfo,
 };
-use desk_utils::{error::DeskErrorCode, rest::RestResponse, ssrf::ProviderSsrfMode};
+use desk_utils::{error::DeskErrorCode, rest::RestResponse};
 use log::debug;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -103,6 +104,9 @@ enum ProbeOutcome {
     /// The target was refused before dialing (unsupported scheme) or blocked by
     /// the SSRF guard at connect time.
     Blocked,
+    /// The target resolved to a public address dialed over a plaintext scheme
+    /// while `require_secure_signaling` is on. Refused before any TCP connect.
+    InsecureTransport,
     /// The probe timed out.
     Timeout,
     /// The target could not be reached (DNS failure, connection refused, TLS
@@ -166,47 +170,17 @@ fn host_of(input: &str) -> Option<String> {
     }
 }
 
-/// A connect-time DNS resolver that drops any candidate address blocked by the
-/// active [`ProviderSsrfMode`]. Resolution runs per connection, just before the
-/// socket connects, so a domain (or a rebinding one) that maps to an internal /
-/// metadata address is caught authoritatively; IP literals are checked too since
-/// `lookup_host` echoes them back through the same filter.
-#[derive(Clone)]
-struct SsrfResolver {
-    mode: ProviderSsrfMode,
-}
-
-impl actix_tls::connect::Resolve for SsrfResolver {
-    fn lookup<'a>(
-        &'a self,
-        host: &'a str,
-        port: u16,
-    ) -> futures_util::future::LocalBoxFuture<
-        'a,
-        Result<Vec<std::net::SocketAddr>, Box<dyn std::error::Error>>,
-    > {
-        let mode = self.mode;
-        Box::pin(async move {
-            let resolved = tokio::net::lookup_host((host, port)).await?;
-            let allowed: Vec<std::net::SocketAddr> = resolved
-                .filter(|addr| desk_utils::ssrf::check_resolved_ip(addr.ip(), mode).is_ok())
-                .collect();
-            if allowed.is_empty() {
-                // Coarse error: the caller must not learn which internal address
-                // was probed.
-                return Err(Box::<dyn std::error::Error>::from(
-                    "host resolves to a blocked address",
-                ));
-            }
-            Ok(allowed)
-        })
-    }
-}
-
-/// Build an SSRF-guarded, TLS-capable `awc` client for the active mode. awc does
+/// Build an SSRF-guarded, TLS-capable `awc` client for one probe scheme. awc does
 /// not follow redirects by default, which is the behavior we want (no redirect to
 /// an internal address).
-fn build_probe_client(mode: ProviderSsrfMode) -> awc::Client {
+///
+/// The connect-time guard runs on the single authoritative resolution: the
+/// metadata floor is always blocked, private / LAN targets stay reachable (this is
+/// the self-hosted case, so `allow_private` is always true), and a *public* target
+/// dialed over a plaintext scheme is refused when `require_secure_signaling` is on.
+/// `scheme_is_tls` is fixed per client so the plaintext-vs-TLS decision needs no
+/// second lookup — hence one client per scheme rather than one shared client.
+fn build_probe_client(scheme_is_tls: bool, require_secure_signaling: bool) -> awc::Client {
     let mut root_store = rustls::RootCertStore::empty();
     // `certs` carries the successfully-loaded roots even when some platform certs
     // failed to parse; ignoring partial `errors` is fine for a probe client.
@@ -217,11 +191,15 @@ fn build_probe_client(mode: ProviderSsrfMode) -> awc::Client {
         .with_root_certificates(Arc::new(root_store))
         .with_no_client_auth();
 
+    let guard = crate::transport_guard::TransportGuardResolver::system(
+        crate::transport_guard::TransportPolicy {
+            allow_private: true,
+            scheme_is_tls,
+            enforce_public_tls: require_secure_signaling,
+        },
+    );
     let tcp =
-        actix_tls::connect::Connector::new(actix_tls::connect::Resolver::custom(SsrfResolver {
-            mode,
-        }))
-        .service();
+        actix_tls::connect::Connector::new(actix_tls::connect::Resolver::custom(guard)).service();
 
     awc::Client::builder()
         .connector(
@@ -231,6 +209,20 @@ fn build_probe_client(mode: ProviderSsrfMode) -> awc::Client {
                 .rustls_0_23(Arc::new(tls_config)),
         )
         .finish()
+}
+
+/// Pick the right per-scheme probe client for a `ws(s)`/`http(s)` URL.
+fn client_for_url<'a>(
+    url: &str,
+    secure: &'a awc::Client,
+    plain: &'a awc::Client,
+) -> &'a awc::Client {
+    let lower = url.trim().to_ascii_lowercase();
+    if lower.starts_with("wss://") || lower.starts_with("https://") {
+        secure
+    } else {
+        plain
+    }
 }
 
 /// Build a fully-valid `VersionInfo` probe query (all required fields present so
@@ -286,7 +278,11 @@ async fn probe_signaling(client: &awc::Client, ws_url: &str, token: Option<&str>
 /// Coarse classification of an `awc` send error string into a [`ProbeOutcome`].
 fn classify_send_error(err: &str) -> ProbeOutcome {
     let lower = err.to_ascii_lowercase();
-    if lower.contains("blocked address") {
+    if lower.contains("requires tls") {
+        // The transport guard refused a public plaintext candidate. Checked before
+        // the generic "blocked address" so it maps to the dedicated outcome.
+        ProbeOutcome::InsecureTransport
+    } else if lower.contains("blocked address") {
         ProbeOutcome::Blocked
     } else if lower.contains("timed out") || lower.contains("timeout") {
         ProbeOutcome::Timeout
@@ -315,10 +311,13 @@ impl ConsoleProbe {
 }
 
 /// Probe the manager console origin, preferring `https` and falling back to
-/// plaintext `http` so a self-hosted manager without TLS is still reachable.
-async fn probe_console(client: &awc::Client, host: &str) -> ConsoleProbe {
+/// plaintext `http` so a self-hosted manager without TLS is still reachable. The
+/// `http` fallback uses the plaintext-scheme client, so a *public* console is
+/// refused over `http` when secure-signaling is enforced (a private / LAN console
+/// still answers over `http`).
+async fn probe_console(secure: &awc::Client, plain: &awc::Client, host: &str) -> ConsoleProbe {
     let https = format!("https://{host}");
-    if client
+    if secure
         .get(&https)
         .timeout(PROBE_TIMEOUT)
         .send()
@@ -328,13 +327,7 @@ async fn probe_console(client: &awc::Client, host: &str) -> ConsoleProbe {
         return ConsoleProbe::Https;
     }
     let http = format!("http://{host}");
-    if client
-        .get(&http)
-        .timeout(PROBE_TIMEOUT)
-        .send()
-        .await
-        .is_ok()
-    {
+    if plain.get(&http).timeout(PROBE_TIMEOUT).send().await.is_ok() {
         return ConsoleProbe::Http;
     }
     ConsoleProbe::Unreachable
@@ -370,6 +363,12 @@ fn build_result(
             DeskErrorCode::CONNECTION_TARGET_BLOCKED.code(),
             "the target address or scheme is not allowed".to_string(),
         ),
+        ProbeOutcome::InsecureTransport => (
+            DeskErrorCode::CONNECTION_INSECURE_TRANSPORT.code(),
+            "the target is public but the URL is plaintext; use wss:// / https:// \
+             or disable secure-signaling enforcement"
+                .to_string(),
+        ),
         ProbeOutcome::Timeout => (
             DeskErrorCode::TIMEOUT.code(),
             "the connection attempt timed out".to_string(),
@@ -399,21 +398,29 @@ fn build_result(
 /// reachable, returns the `wss` outcome (so the message reflects the primary
 /// attempt) with the `wss` URL.
 async fn resolve_bare_host(
-    client: &awc::Client,
+    secure: &awc::Client,
+    plain: &awc::Client,
     host: &str,
     token: Option<&str>,
 ) -> (ProbeOutcome, String, String) {
     let wss_url = format!("wss://{host}{SIGNALING_PATH}");
-    let wss_outcome = probe_signaling(client, &wss_url, token).await;
+    let wss_outcome = probe_signaling(secure, &wss_url, token).await;
     if wss_outcome.reached() {
         return (wss_outcome, "wss".to_string(), wss_url);
     }
     let ws_url = format!("ws://{host}{SIGNALING_PATH}");
-    let ws_outcome = probe_signaling(client, &ws_url, token).await;
+    let ws_outcome = probe_signaling(plain, &ws_url, token).await;
     if ws_outcome.reached() {
         return (ws_outcome, "ws".to_string(), ws_url);
     }
-    // Neither reachable: report the primary (wss) attempt against the wss URL.
+    // Neither reachable. If the plaintext attempt was refused specifically because
+    // the target is public and secure-signaling is enforced, surface that (it is
+    // more actionable than the wss "unreachable"): the user should switch to wss://
+    // or deliberately disable enforcement. Otherwise report the primary (wss)
+    // attempt against the wss URL.
+    if ws_outcome == ProbeOutcome::InsecureTransport {
+        return (ws_outcome, "ws".to_string(), ws_url);
+    }
     (wss_outcome, "wss".to_string(), wss_url)
 }
 
@@ -443,14 +450,16 @@ pub async fn verify_connection(
     // orthogonal: before the system is initialized the onboarding wizard runs with
     // no account so the endpoint is open; once initialized it requires a logged-in
     // session.
-    let initialized = {
+    let (initialized, require_secure_signaling) = {
         let s = settings.read().await;
-        !s.user.login_password.is_empty()
+        (
+            !s.user.login_password.is_empty(),
+            s.system.require_secure_signaling,
+        )
     };
     if initialized && session.get_current_user::<CurrentUser>()?.is_none() {
         return Err(actix_web::error::ErrorUnauthorized("Unauthorized"));
     }
-    let mode = ProviderSsrfMode::Relaxed;
 
     let input = params.input.trim().to_string();
     if input.is_empty() {
@@ -465,15 +474,21 @@ pub async fn verify_connection(
     let token = params.token.as_deref().filter(|t| !t.is_empty());
     let is_manager = params.target.eq_ignore_ascii_case("manager");
 
-    let client = build_probe_client(mode);
+    // One client per scheme: the transport guard bakes `scheme_is_tls` in so a
+    // public plaintext candidate is refused before any TCP connect (no second
+    // lookup that could rebind). Both share the same secure-signaling enforcement.
+    let client_secure = build_probe_client(true, require_secure_signaling);
+    let client_plain = build_probe_client(false, require_secure_signaling);
 
     // Resolve scheme / URL and run the primary signaling probe.
     let (outcome, scheme, resolved_url) = if looks_like_full_url(&input) {
         let scheme = url::Url::parse(&input).ok().map(|u| u.scheme().to_string());
-        let outcome = probe_signaling(&client, &input, token).await;
+        let client = client_for_url(&input, &client_secure, &client_plain);
+        let outcome = probe_signaling(client, &input, token).await;
         (outcome, scheme, Some(input.clone()))
     } else {
-        let (outcome, scheme, url) = resolve_bare_host(&client, &input, token).await;
+        let (outcome, scheme, url) =
+            resolve_bare_host(&client_secure, &client_plain, &input, token).await;
         (outcome, Some(scheme), Some(url))
     };
 
@@ -481,7 +496,7 @@ pub async fn verify_connection(
     // whether it answered over TLS.
     let console = if is_manager {
         match host_of(&input) {
-            Some(host) => Some(probe_console(&client, &host).await),
+            Some(host) => Some(probe_console(&client_secure, &client_plain, &host).await),
             None => Some(ConsoleProbe::Unreachable),
         }
     } else {
@@ -659,40 +674,45 @@ mod tests {
         assert!(r.ok && r.secure);
     }
 
-    #[actix_web::test]
-    async fn ssrf_resolver_enforces_mode_per_resolved_ip() {
-        use actix_tls::connect::Resolve;
-        // Private / loopback / LAN: blocked under Strict, allowed under Relaxed.
-        // The verify endpoint uses Relaxed so a self-hosted signaling server /
-        // manager on a LAN address (e.g. `192.168.x.x`) is reachable. No external
-        // DNS: IP literals resolve locally.
-        for host in ["127.0.0.1", "192.168.50.50", "10.0.0.5"] {
-            assert!(
-                (SsrfResolver {
-                    mode: ProviderSsrfMode::Strict
-                })
-                .lookup(host, 443)
-                .await
-                .is_err()
-            );
-            assert!(
-                (SsrfResolver {
-                    mode: ProviderSsrfMode::Relaxed
-                })
-                .lookup(host, 443)
-                .await
-                .is_ok()
-            );
-        }
-        // Cloud metadata: blocked under BOTH modes (the hard floor).
-        for mode in [ProviderSsrfMode::Strict, ProviderSsrfMode::Relaxed] {
-            assert!(
-                (SsrfResolver { mode })
-                    .lookup("169.254.169.254", 80)
-                    .await
-                    .is_err()
-            );
-        }
+    #[test]
+    fn insecure_transport_error_maps_to_dedicated_code() {
+        // The transport guard's "requires tls" marker classifies to
+        // InsecureTransport (checked before the generic "blocked address").
+        assert_eq!(
+            classify_send_error(
+                "target requires TLS: plaintext transport to a public address is not allowed"
+            ),
+            ProbeOutcome::InsecureTransport
+        );
+        // ...and it carries its own error code (not the opaque TARGET_BLOCKED), so
+        // the wizard can prompt "use wss:// or disable enforcement".
+        let r = build_result(
+            &ProbeOutcome::InsecureTransport,
+            Some("ws://public.example/x".into()),
+            Some("ws".into()),
+            None,
+            false,
+        );
+        assert!(!r.reached && !r.ok && !r.secure);
+        assert_eq!(
+            r.error_code,
+            DeskErrorCode::CONNECTION_INSECURE_TRANSPORT.code()
+        );
+    }
+
+    #[test]
+    fn client_for_url_picks_scheme() {
+        // A throwaway pair of clients; only their identity is compared.
+        let secure = build_probe_client(true, true);
+        let plain = build_probe_client(false, true);
+        let s_ptr = std::ptr::from_ref(client_for_url("wss://h/x", &secure, &plain));
+        assert_eq!(s_ptr, std::ptr::from_ref(&secure));
+        let s_ptr = std::ptr::from_ref(client_for_url("https://h", &secure, &plain));
+        assert_eq!(s_ptr, std::ptr::from_ref(&secure));
+        let p_ptr = std::ptr::from_ref(client_for_url("ws://h/x", &secure, &plain));
+        assert_eq!(p_ptr, std::ptr::from_ref(&plain));
+        let p_ptr = std::ptr::from_ref(client_for_url("http://h", &secure, &plain));
+        assert_eq!(p_ptr, std::ptr::from_ref(&plain));
     }
 
     fn settings_for_verify(initialized: bool) -> web::Data<SharedSettings> {

@@ -39,6 +39,18 @@ A logged-in client that wants to connect as a host (`remote_desk_type=server`) o
 - **Open-source desk-server** returns the co-located `local_signaling_token` (the same secret the embedded host worker uses). It ignores the request `name` and stores nothing. Registered only in modes with an embedded signaling server (`default` / `signaling` / `service-daemon`); a pure `desk-server` does not offer it.
 - **Enterprise manager** mints a per-user token in its token table.
 
+## Outbound transport security
+
+The tokens above authenticate the host to the signaling server / manager, but a token is only as safe as the transport carrying it. When a desk-server dials **out** to a remote signaling server or a manager, the outbound connection is guarded at **connect time** on the resolved IP:
+
+- **Cloud-metadata floor (always blocked).** The link-local metadata range (`169.254.0.0/16`, including `169.254.169.254`) and equivalents are never dialed, under any setting. No switch weakens this.
+- **Private / loopback / LAN (always allowed over plaintext).** A self-hosted signaling server on `127.0.0.1`, `192.168.x.x`, `10.x`, etc. commonly has no TLS and its traffic never crosses an untrusted network, so plaintext (`ws://` / `http://`) is permitted.
+- **Public addresses (TLS required by default).** When `require_secure_signaling` is on (the default), a **public** target dialed over a plaintext scheme is **refused before any TCP connection is made**, so the access token and all signaling are never sent in the clear across the internet. Use `wss://` / `https://`, or — for a deliberate trusted-network exception — turn the switch off in the **Desk Connection** settings page (`system.require_secure_signaling = false`).
+
+Because the check runs on the resolved IP at the moment of connection (not on the URL string), a domain that resolves to a public address cannot bypass it, and a domain that later rebinds to an internal address is caught on the next dial. The scheme is fixed per dial, so the plaintext-vs-TLS decision is made on a single authoritative DNS resolution with no second lookup. The onboarding wizard and the **Desk Connection** page surface a public-plaintext refusal with an actionable message (switch to `wss://`/`https://`, or disable enforcement).
+
+This outbound guard is separate from the model-provider SSRF guard (`ProviderSsrfMode`, `strict` / `relaxed`), which governs a different outbound path (the AI model API) and its own private-address posture.
+
 ## Notes
 
 - **Browser connections do not carry a token.** They authenticate with the Actix-Session cookie. Route extractors must use `Option<web::Query<VersionInfo>>`, and manager signaling routes are excluded from the global Session middleware.

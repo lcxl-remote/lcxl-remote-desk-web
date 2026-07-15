@@ -1,21 +1,28 @@
-//! SSRF guard for model-provider outbound dials (single source of truth shared
-//! by the manager and the open-source signal orchestrator).
+//! SSRF / transport judgment core for outbound dials (single source of truth
+//! shared by the manager, the open-source signal orchestrator, and the desk
+//! server's signaling / connection-verify path).
 //!
-//! Users configure a provider `base_url` that the server then dials. In a
-//! multi-tenant deployment any registered (untrusted) user can point that URL at
-//! an internal service or a cloud metadata endpoint and read the response back —
-//! a classic SSRF. This module is the pure judgment core: it decides, per a
-//! deployment-configured [`ProviderSsrfMode`], whether a URL (write time) or a
-//! resolved IP (connect time, authoritative against DNS rebinding) is allowed.
+//! Two related concerns live here as pure functions:
+//!
+//! - **Model-provider SSRF** ([`ProviderSsrfMode`], [`check_provider_url`],
+//!   [`check_resolved_ip`]): users configure a provider `base_url` that the server
+//!   then dials. In a multi-tenant deployment any registered (untrusted) user can
+//!   point that URL at an internal service or a cloud-metadata endpoint and read
+//!   the response back — a classic SSRF. The mode decides whether a URL (write
+//!   time) or a resolved IP (connect time, authoritative against DNS rebinding) is
+//!   allowed.
+//! - **Transport policy** ([`AddressClass`], [`classify_address`],
+//!   [`check_transport`]): the connect-time judgment that additionally refuses a
+//!   *plaintext* dial to a *public* address (used by the signaling proxy and the
+//!   connection-verify probe), while always blocking the cloud-metadata floor and
+//!   always permitting private / LAN targets over plaintext.
 //!
 //! It is intentionally dependency-light: only `url` for parsing and `std::net`
-//! for address classification. No HTTP client, no TLS, no config reading — the
-//! callers (manager / signal) own those and feed this module already-parsed
-//! inputs. Keeping it pure also keeps it trivially unit-testable without a
+//! for address classification. No HTTP client, no TLS, no DNS, no config reading —
+//! the callers own those and feed this module already-parsed inputs (the actix
+//! `Resolve` adapter that runs [`check_transport`] per candidate lives in the desk
+//! server, not here). Keeping it pure keeps it trivially unit-testable without a
 //! network.
-//!
-//! The guard's scope is **model-provider outbound only**. It is not wired into
-//! signaling / WebRTC / TURN, host↔manager connections, or any other REST path.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv6Addr};
@@ -36,8 +43,6 @@ pub enum ProviderSsrfMode {
     /// targets (local model gateways like ollama / vLLM) are permitted, but the
     /// cloud-metadata hard floor is still enforced.
     Relaxed,
-    /// No validation at all. An explicit opt-out for unusual self-host setups.
-    Off,
 }
 
 impl FromStr for ProviderSsrfMode {
@@ -49,7 +54,6 @@ impl FromStr for ProviderSsrfMode {
         match s.trim().to_ascii_lowercase().as_str() {
             "strict" => Ok(ProviderSsrfMode::Strict),
             "relaxed" => Ok(ProviderSsrfMode::Relaxed),
-            "off" => Ok(ProviderSsrfMode::Off),
             _ => Err(()),
         }
     }
@@ -61,7 +65,6 @@ impl ProviderSsrfMode {
         match self {
             ProviderSsrfMode::Strict => "strict",
             ProviderSsrfMode::Relaxed => "relaxed",
-            ProviderSsrfMode::Off => "off",
         }
     }
 }
@@ -85,6 +88,10 @@ pub enum SsrfError {
     SchemeNotAllowed,
     /// The target address falls in a denied range for the active mode.
     BlockedAddress,
+    /// A plaintext (non-TLS) scheme targets a public address while public-TLS
+    /// enforcement is on. Kept distinct from [`SsrfError::BlockedAddress`] so a
+    /// caller can surface a "use TLS" hint rather than an opaque "blocked".
+    InsecureTransport,
 }
 
 impl fmt::Display for SsrfError {
@@ -94,6 +101,9 @@ impl fmt::Display for SsrfError {
             SsrfError::MissingHost => "provider URL has no host",
             SsrfError::SchemeNotAllowed => "provider URL scheme is not allowed",
             SsrfError::BlockedAddress => "provider URL resolves to a blocked address",
+            SsrfError::InsecureTransport => {
+                "plaintext transport to a public address is not allowed"
+            }
         };
         f.write_str(msg)
     }
@@ -108,9 +118,6 @@ impl std::error::Error for SsrfError {}
 /// the authoritative connect-time check ([`check_resolved_ip`]) because DNS can
 /// rebind between save and dial.
 pub fn check_provider_url(raw: &str, mode: ProviderSsrfMode) -> Result<(), SsrfError> {
-    if mode == ProviderSsrfMode::Off {
-        return Ok(());
-    }
     let url = url::Url::parse(raw).map_err(|_| SsrfError::InvalidUrl)?;
     if !scheme_allowed(url.scheme(), mode) {
         return Err(SsrfError::SchemeNotAllowed);
@@ -145,16 +152,13 @@ pub fn check_resolved_ip(ip: IpAddr, mode: ProviderSsrfMode) -> Result<(), SsrfE
     }
 }
 
-/// Whether a scheme is permitted under the active mode. `Off` is handled by the
-/// caller before this is reached.
+/// Whether a scheme is permitted under the active mode.
 fn scheme_allowed(scheme: &str, mode: ProviderSsrfMode) -> bool {
     match mode {
         ProviderSsrfMode::Strict => scheme.eq_ignore_ascii_case("https"),
         ProviderSsrfMode::Relaxed => {
             scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http")
         }
-        // Not reached: callers short-circuit Off before scheme validation.
-        ProviderSsrfMode::Off => true,
     }
 }
 
@@ -162,7 +166,6 @@ fn scheme_allowed(scheme: &str, mode: ProviderSsrfMode) -> bool {
 fn is_blocked(ip: IpAddr, mode: ProviderSsrfMode) -> bool {
     let ip = normalize(ip);
     match mode {
-        ProviderSsrfMode::Off => false,
         ProviderSsrfMode::Relaxed => is_metadata_floor(ip),
         ProviderSsrfMode::Strict => is_metadata_floor(ip) || is_private_or_loopback(ip),
     }
@@ -234,6 +237,83 @@ fn is_private_or_loopback(ip: IpAddr) -> bool {
     }
 }
 
+/// Transport-security classification of a resolved candidate address, layered on
+/// top of the SSRF ranges. Where [`check_resolved_ip`] answers "may I reach this
+/// address at all", this answers "what transport policy applies", so a plaintext
+/// dial to a *public* address can be blocked while private / loopback targets
+/// (local gateways, self-hosted signaling on a LAN) stay reachable over plaintext.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressClass {
+    /// The cloud-metadata hard floor (see [`is_metadata_floor`]). Never reachable,
+    /// under any mode or switch — this is a security floor, not a TLS policy.
+    AlwaysBlock,
+    /// A private / loopback / CGNAT / ULA address (see [`is_private_or_loopback`]).
+    /// Reachable over plaintext without any TLS requirement: these are LAN /
+    /// local-gateway targets where TLS is commonly absent and the traffic never
+    /// crosses an untrusted network.
+    PrivateExempt,
+    /// Any other (public / internet-routable) address. Plaintext to such a target
+    /// crosses untrusted networks, so a public-TLS switch may require TLS.
+    TlsRequired,
+}
+
+/// Classify a resolved IP for transport policy. Metadata floor wins first (it must
+/// never be reachable), then private/loopback, else public. The IP is IPv4-mapped
+/// normalized first so `::ffff:169.254.169.254` cannot slip past the floor.
+pub fn classify_address(ip: IpAddr) -> AddressClass {
+    let ip = normalize(ip);
+    if is_metadata_floor(ip) {
+        AddressClass::AlwaysBlock
+    } else if is_private_or_loopback(ip) {
+        AddressClass::PrivateExempt
+    } else {
+        AddressClass::TlsRequired
+    }
+}
+
+/// The authoritative connect-time transport judgment, run per resolved candidate
+/// just before the socket connects. It composes the SSRF address floor with the
+/// public-plaintext TLS policy in one place so callers cannot get the layering
+/// wrong:
+///
+/// - [`AddressClass::AlwaysBlock`] → always rejected (`BlockedAddress`), ignoring
+///   both `allow_private` and `enforce_public_tls`. The metadata floor is not a
+///   TLS policy and no switch may weaken it.
+/// - [`AddressClass::PrivateExempt`] → reachable iff `allow_private` (the SSRF
+///   mode: `Relaxed`/signaling allow it, `Strict` does not). No TLS requirement is
+///   ever imposed on private targets.
+/// - [`AddressClass::TlsRequired`] → reachable over TLS always; over plaintext only
+///   when `enforce_public_tls` is off (an operator escape hatch). Otherwise
+///   rejected with [`SsrfError::InsecureTransport`].
+///
+/// `scheme_is_tls` is fixed per dial (the caller knows the scheme it is about to
+/// use — `wss`/`https` vs `ws`/`http`) and baked into the resolver, so the decision
+/// is made on the single authoritative resolution with no second lookup.
+pub fn check_transport(
+    ip: IpAddr,
+    allow_private: bool,
+    scheme_is_tls: bool,
+    enforce_public_tls: bool,
+) -> Result<(), SsrfError> {
+    match classify_address(ip) {
+        AddressClass::AlwaysBlock => Err(SsrfError::BlockedAddress),
+        AddressClass::PrivateExempt => {
+            if allow_private {
+                Ok(())
+            } else {
+                Err(SsrfError::BlockedAddress)
+            }
+        }
+        AddressClass::TlsRequired => {
+            if scheme_is_tls || !enforce_public_tls {
+                Ok(())
+            } else {
+                Err(SsrfError::InsecureTransport)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,11 +325,7 @@ mod tests {
 
     #[test]
     fn mode_roundtrips_via_str() {
-        for m in [
-            ProviderSsrfMode::Strict,
-            ProviderSsrfMode::Relaxed,
-            ProviderSsrfMode::Off,
-        ] {
+        for m in [ProviderSsrfMode::Strict, ProviderSsrfMode::Relaxed] {
             assert_eq!(ProviderSsrfMode::from_str(m.as_str()), Ok(m));
         }
         assert_eq!(
@@ -261,6 +337,9 @@ mod tests {
             Ok(ProviderSsrfMode::Relaxed)
         );
         assert!(ProviderSsrfMode::from_str("nonsense").is_err());
+        // `off` was removed (it was an escape hatch that bypassed the metadata
+        // floor); it no longer parses to any mode.
+        assert!(ProviderSsrfMode::from_str("off").is_err());
     }
 
     #[test]
@@ -342,11 +421,7 @@ mod tests {
 
     #[test]
     fn public_addresses_allowed_everywhere() {
-        for mode in [
-            ProviderSsrfMode::Strict,
-            ProviderSsrfMode::Relaxed,
-            ProviderSsrfMode::Off,
-        ] {
+        for mode in [ProviderSsrfMode::Strict, ProviderSsrfMode::Relaxed] {
             assert!(check_resolved_ip(v4(1, 1, 1, 1), mode).is_ok());
             assert!(check_resolved_ip(v4(8, 8, 8, 8), mode).is_ok());
             assert!(
@@ -360,11 +435,96 @@ mod tests {
     }
 
     #[test]
-    fn off_allows_everything() {
-        assert!(check_resolved_ip(v4(169, 254, 169, 254), ProviderSsrfMode::Off).is_ok());
-        assert!(check_resolved_ip(v4(127, 0, 0, 1), ProviderSsrfMode::Off).is_ok());
-        assert!(check_provider_url("http://169.254.169.254/latest", ProviderSsrfMode::Off).is_ok());
-        assert!(check_provider_url("not a url", ProviderSsrfMode::Off).is_ok());
+    fn classify_address_three_states() {
+        // Metadata floor → AlwaysBlock (both IP families).
+        assert_eq!(
+            classify_address(v4(169, 254, 169, 254)),
+            AddressClass::AlwaysBlock
+        );
+        assert_eq!(classify_address(v4(0, 0, 0, 0)), AddressClass::AlwaysBlock);
+        assert_eq!(
+            classify_address(IpAddr::V6(Ipv6Addr::new(
+                0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254
+            ))),
+            AddressClass::AlwaysBlock
+        );
+        // IPv4-mapped metadata is normalized before classification.
+        assert_eq!(
+            classify_address(IpAddr::V6(
+                Ipv4Addr::new(169, 254, 169, 254).to_ipv6_mapped()
+            )),
+            AddressClass::AlwaysBlock
+        );
+        // Private / loopback / CGNAT / ULA → PrivateExempt.
+        for ip in [
+            v4(127, 0, 0, 1),
+            v4(10, 1, 2, 3),
+            v4(192, 168, 1, 1),
+            v4(100, 64, 0, 1),
+        ] {
+            assert_eq!(classify_address(ip), AddressClass::PrivateExempt);
+        }
+        assert_eq!(
+            classify_address(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            AddressClass::PrivateExempt
+        );
+        // Public → TlsRequired.
+        assert_eq!(classify_address(v4(1, 1, 1, 1)), AddressClass::TlsRequired);
+        assert_eq!(
+            classify_address(IpAddr::V6(Ipv6Addr::new(
+                0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1111
+            ))),
+            AddressClass::TlsRequired
+        );
+    }
+
+    #[test]
+    fn check_transport_metadata_floor_never_reachable() {
+        // AlwaysBlock ignores both `allow_private` and `enforce_public_tls`: every
+        // combination rejects, and always as BlockedAddress (never InsecureTransport).
+        for &allow_private in &[true, false] {
+            for &scheme_is_tls in &[true, false] {
+                for &enforce in &[true, false] {
+                    assert_eq!(
+                        check_transport(
+                            v4(169, 254, 169, 254),
+                            allow_private,
+                            scheme_is_tls,
+                            enforce
+                        ),
+                        Err(SsrfError::BlockedAddress)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn check_transport_private_gated_by_allow_private_only() {
+        // Private targets: reachable over plaintext when allowed, never subject to
+        // the TLS switch (a LAN gateway on http is fine).
+        assert!(check_transport(v4(192, 168, 1, 10), true, false, true).is_ok());
+        assert!(check_transport(v4(192, 168, 1, 10), true, false, false).is_ok());
+        // When private is disallowed (Strict-style), blocked regardless of scheme.
+        assert_eq!(
+            check_transport(v4(192, 168, 1, 10), false, true, false),
+            Err(SsrfError::BlockedAddress)
+        );
+    }
+
+    #[test]
+    fn check_transport_public_plaintext_gated_by_switch() {
+        let public = v4(1, 1, 1, 1);
+        // TLS scheme: always allowed, switch on or off.
+        assert!(check_transport(public, true, true, true).is_ok());
+        assert!(check_transport(public, true, true, false).is_ok());
+        // Plaintext + switch on → InsecureTransport (distinct from BlockedAddress).
+        assert_eq!(
+            check_transport(public, true, false, true),
+            Err(SsrfError::InsecureTransport)
+        );
+        // Plaintext + switch off → escape hatch allows it.
+        assert!(check_transport(public, true, false, false).is_ok());
     }
 
     #[test]

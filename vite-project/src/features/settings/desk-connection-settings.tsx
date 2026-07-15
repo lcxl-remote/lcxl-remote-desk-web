@@ -9,6 +9,7 @@ import { useQuerySettings } from "@/services/hooks/settingsController/useQuerySe
 import { useUpdateSettings } from "@/services/hooks/settingsController/useUpdateSettings"
 import { useVerifyConnection } from "@/services/hooks/connectionController/useVerifyConnection"
 import type { ConnectionVerifyResult } from "@/services/types"
+import { CONNECTION_INSECURE_TRANSPORT } from "@/features/auth/init/wizard-logic"
 import { mergeSystemSettings } from "@/features/settings/settings-payload"
 import { ManagerLinkBanner } from "@/features/settings/manager-link-banner"
 
@@ -32,6 +33,9 @@ const deskConnectionSchema = z.object({
     // Host-local toggle: disable the manager connection without clearing the
     // address so it can be re-enabled later.
     manager_enabled: z.boolean(),
+    // Refuse a plaintext (`ws://` / `http://`) dial to a PUBLIC signaling /
+    // manager address. Loopback / LAN targets are always allowed over plaintext.
+    require_secure_signaling: z.boolean(),
 })
 
 type DeskConnectionFormValues = z.infer<typeof deskConnectionSchema>
@@ -65,6 +69,7 @@ export function DeskConnectionSettings() {
             manager_url: null,
             manager_api_token: null,
             manager_enabled: true,
+            require_secure_signaling: true,
         },
     })
 
@@ -78,6 +83,8 @@ export function DeskConnectionSettings() {
                 manager_api_token: data.manager_api_token || null,
                 // Unset / true both mean enabled; only an explicit false disables.
                 manager_enabled: data.manager_enabled !== false,
+                // Fail secure: unset / true both mean "require TLS for public".
+                require_secure_signaling: data.require_secure_signaling !== false,
             })
         }
     }, [settingsResponse?.data, isLoading, form])
@@ -321,6 +328,21 @@ export function DeskConnectionSettings() {
                                         </FormItem>
                                     )}
                                 />
+                                <FormField
+                                    control={form.control}
+                                    name="require_secure_signaling"
+                                    render={({ field }) => (
+                                        <FormItem className="flex flex-row items-center justify-between rounded-lg border p-4">
+                                            <div className="space-y-0.5">
+                                                <FormLabel className="text-base">{t("pages.deskConnection.requireSecureSignaling")}</FormLabel>
+                                                <FormDescription>{t("pages.deskConnection.requireSecureSignaling.description")}</FormDescription>
+                                            </div>
+                                            <FormControl>
+                                                <Switch checked={field.value} onCheckedChange={field.onChange} />
+                                            </FormControl>
+                                        </FormItem>
+                                    )}
+                                />
                             </div>
 
                             <div className="flex justify-end">
@@ -387,7 +409,13 @@ function ConnectionStatusRow({
                         {t("pages.deskConnection.status.error")}
                     </Badge>
                 )
-                reason = state.result.message
+                // A public target refused over plaintext gets a localized, actionable
+                // hint ("use wss:// or turn off the switch") instead of the raw
+                // backend message; other failures show the backend message as-is.
+                reason =
+                    state.result.error_code === CONNECTION_INSECURE_TRANSPORT
+                        ? t("pages.deskConnection.status.insecureTransport")
+                        : state.result.message
             }
             break
         default:

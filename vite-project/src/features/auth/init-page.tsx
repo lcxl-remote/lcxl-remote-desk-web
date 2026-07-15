@@ -25,9 +25,11 @@ import {
     type SecurityToggles,
     buildSecurityPayload,
     isInsecureConnection,
+    isInsecureTransportRefused,
     isManagerConfigured,
     managerNextDecision,
 } from "@/features/auth/init/wizard-logic"
+import type { ConnectionVerifyResult } from "@/services/types"
 
 // Default manager domain prefilled into the wizard's domain field.
 const DEFAULT_MANAGER_DOMAIN = "lcxbox.app"
@@ -50,6 +52,16 @@ export default function InitPage() {
 
     const { mutateAsync: initSystem } = useInitSystem()
     const { mutateAsync: verifyConnection } = useVerifyConnection()
+
+    // Message for a failed probe: a public plaintext refusal gets an actionable,
+    // localized hint (use https/wss, or disable the switch in settings); other
+    // failures fall back to the backend message or a generic "unreachable".
+    const verifyFailureMessage = (result: ConnectionVerifyResult | null | undefined): string => {
+        if (isInsecureTransportRefused(result)) {
+            return t("pages.init.manager.insecureTransportRefused")
+        }
+        return result?.message || t("pages.init.manager.unreachable")
+    }
 
     const [step, setStep] = useState(1)
 
@@ -122,7 +134,7 @@ export default function InitPage() {
             } else {
                 setSchemeStatus({
                     kind: "error",
-                    message: result?.message || t("pages.init.manager.unreachable"),
+                    message: verifyFailureMessage(result),
                 })
             }
         } catch {
@@ -153,7 +165,7 @@ export default function InitPage() {
             } else {
                 setSchemeStatus({
                     kind: "error",
-                    message: result?.message || t("pages.init.manager.unreachable"),
+                    message: verifyFailureMessage(result),
                 })
             }
         } catch {
@@ -189,7 +201,7 @@ export default function InitPage() {
             } else if (decision === "token") {
                 setManagerNextError(t("pages.init.manager.tokenRejected"))
             } else {
-                setManagerNextError(result?.message || t("pages.init.manager.unreachable"))
+                setManagerNextError(verifyFailureMessage(result))
             }
         } catch {
             setManagerNextError(t("pages.init.manager.unreachable"))
@@ -248,7 +260,7 @@ export default function InitPage() {
             } else if (decision === "token") {
                 setManagerNextError(t("pages.init.manager.tokenRejected"))
             } else {
-                setManagerNextError(result?.message || t("pages.init.manager.unreachable"))
+                setManagerNextError(verifyFailureMessage(result))
             }
         } catch {
             setManagerNextError(t("pages.init.manager.unreachable"))

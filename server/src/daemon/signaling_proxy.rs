@@ -1132,6 +1132,14 @@ fn fatal_registration_reject(model: &SignalingModel) -> Option<(i32, String)> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Whether a signaling URL uses a TLS scheme (`wss` / `https`). Anything else
+/// (`ws` / `http` / malformed) is treated as plaintext, so the transport guard
+/// fails closed toward requiring TLS for a public target.
+fn signaling_scheme_is_tls(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("wss://") || lower.starts_with("https://")
+}
+
 async fn maintain_proxy_connection(
     settings: web::Data<SharedSettings>,
     router_ctx: &RouterContext,
@@ -1163,6 +1171,15 @@ async fn maintain_proxy_connection(
         s.system.get_client_id().map_err(|e| format!("{e}"))?
     };
 
+    // Whether the host refuses a plaintext dial to a *public* signaling / manager
+    // address. Loopback / private / LAN targets (the local loopback link, a
+    // self-hosted server on a LAN) stay reachable over plaintext regardless; only
+    // an internet-routable plaintext target is refused when this is on.
+    let require_secure_signaling = {
+        let s = settings.read().await;
+        s.system.require_secure_signaling
+    };
+
     // Every upstream link registers as a normal `Server` connection. Temporary
     // support no longer opens a dedicated restricted upstream: a support code is
     // requested over this same `Server` link and redeemed into a capability-scoped
@@ -1188,9 +1205,25 @@ async fn maintain_proxy_connection(
     for cert in load_native_certs().expect("could not load platform certs") {
         root_store.add(cert).unwrap();
     }
+    // Guard the outbound dial at connect time: the metadata floor is always
+    // blocked, and a plaintext (`ws://`) scheme to a public address is refused when
+    // `require_secure_signaling` is on. The scheme is fixed for this dial, so bake
+    // it into the resolver — no second lookup that could rebind. `allow_private` is
+    // always true here: signaling legitimately reaches LAN / loopback targets.
+    let scheme_is_tls = signaling_scheme_is_tls(&signaling_url);
+    let guard = crate::transport_guard::TransportGuardResolver::system(
+        crate::transport_guard::TransportPolicy {
+            allow_private: true,
+            scheme_is_tls,
+            enforce_public_tls: require_secure_signaling,
+        },
+    );
+    let tcp =
+        actix_tls::connect::Connector::new(actix_tls::connect::Resolver::custom(guard)).service();
     let client = Client::builder()
         .connector(
             Connector::new()
+                .connector(tcp)
                 .timeout(Duration::from_secs(10))
                 .rustls_0_23(Arc::new(
                     ClientConfig::builder()
@@ -2045,6 +2078,22 @@ mod tests {
 
     const RR_AUDIENCE: &str = "host-client-abc";
     const RR_NOW: &str = "2026-01-01T00:00:00Z";
+
+    #[test]
+    fn signaling_scheme_is_tls_recognizes_secure_schemes() {
+        assert!(signaling_scheme_is_tls(
+            "wss://sig.example/api/desk/signaling"
+        ));
+        assert!(signaling_scheme_is_tls("HTTPS://sig.example"));
+        assert!(!signaling_scheme_is_tls(
+            "ws://sig.example/api/desk/signaling"
+        ));
+        assert!(!signaling_scheme_is_tls("http://sig.example"));
+        // Malformed / schemeless fails closed to plaintext, so the guard requires
+        // TLS for a public target rather than assuming it is secure.
+        assert!(!signaling_scheme_is_tls("sig.example:8443"));
+        assert!(!signaling_scheme_is_tls(""));
+    }
 
     fn bare_request_remote() -> SignalingModel {
         let data = serde_json::to_value(RequestRemoteModel::default()).unwrap();

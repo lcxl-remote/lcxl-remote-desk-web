@@ -166,6 +166,19 @@ pub struct SystemSettings {
     /// Not surfaced in the settings UI yet — edit the config file
     /// directly or rely on the default.
     pub webrtc_ice_failed_timeout_secs: Option<u64>,
+
+    /// Whether the host refuses to dial a remote signaling server / manager over
+    /// a plaintext scheme (`ws://` / `http://`) when the target resolves to a
+    /// *public* (internet-routable) address. Defaults to `true` (secure): a
+    /// public plaintext dial would carry the API token and all signaling in the
+    /// clear across untrusted networks. Loopback / private / LAN targets are
+    /// always reachable over plaintext regardless of this switch (a self-hosted
+    /// signaling server on a LAN commonly has no TLS), and the cloud-metadata
+    /// hard floor is always blocked. Set to `false` only as a deliberate escape
+    /// hatch for a trusted-network deployment that intentionally runs a public
+    /// endpoint without TLS. A plain `bool` (not `Option`) so an update payload
+    /// that omits it fails secure to `true`.
+    pub require_secure_signaling: bool,
 }
 
 /// Render an `Option<String>` secret for `Debug`: keep the `Some`/`None`
@@ -227,6 +240,7 @@ impl std::fmt::Debug for SystemSettings {
                 "webrtc_ice_failed_timeout_secs",
                 &self.webrtc_ice_failed_timeout_secs,
             )
+            .field("require_secure_signaling", &self.require_secure_signaling)
             .finish()
     }
 }
@@ -306,6 +320,8 @@ impl Default for SystemSettings {
             worker_heartbeat_timeout_secs: None,
             webrtc_ice_disconnected_timeout_secs: None,
             webrtc_ice_failed_timeout_secs: None,
+            // Secure by default: refuse public plaintext signaling dials.
+            require_secure_signaling: true,
         }
     }
 }
@@ -417,5 +433,30 @@ mod tests {
         let serialized = toml::to_string(&settings).expect("serialize");
         let reloaded: SystemSettings = toml::from_str(&serialized).expect("deserialize");
         assert_eq!(reloaded.manager_enabled, Some(false));
+    }
+
+    #[test]
+    fn require_secure_signaling_defaults_true_and_fails_secure_when_absent() {
+        // Secure by default.
+        assert!(SystemSettings::default().require_secure_signaling);
+        // A config / update payload that omits the field (older console, hand-edited
+        // TOML) deserializes to the secure default rather than `false`.
+        let reloaded: SystemSettings = toml::from_str("port = 8081").expect("deserialize");
+        assert!(
+            reloaded.require_secure_signaling,
+            "omitted field must fail secure to true"
+        );
+    }
+
+    #[test]
+    fn require_secure_signaling_disabled_survives_toml_round_trip() {
+        // The deliberate escape hatch persists across a save/load.
+        let settings = SystemSettings {
+            require_secure_signaling: false,
+            ..SystemSettings::default()
+        };
+        let serialized = toml::to_string(&settings).expect("serialize");
+        let reloaded: SystemSettings = toml::from_str(&serialized).expect("deserialize");
+        assert!(!reloaded.require_secure_signaling);
     }
 }

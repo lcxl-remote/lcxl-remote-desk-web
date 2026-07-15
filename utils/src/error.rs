@@ -306,6 +306,12 @@ impl DeskErrorCode {
     /// A connection-verify target was refused before dialing: an unsupported URL
     /// scheme, or an address blocked by the SSRF guard.
     pub const CONNECTION_TARGET_BLOCKED: DeskErrorCode = DeskErrorCode(67);
+    /// A connection-verify target resolved to a public address dialed over a
+    /// plaintext scheme (`ws://` / `http://`) while `require_secure_signaling` is
+    /// on. Distinct from `CONNECTION_TARGET_BLOCKED` so the wizard can prompt the
+    /// user to use TLS (`wss://`) or, deliberately, disable the switch — rather
+    /// than showing an opaque "blocked".
+    pub const CONNECTION_INSECURE_TRANSPORT: DeskErrorCode = DeskErrorCode(68);
 
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 

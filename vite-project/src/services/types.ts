@@ -2876,6 +2876,12 @@ export type RestResponseSystemSettings = {
         */
         port?: number;
         /**
+         * @description Whether the host refuses to dial a remote signaling server / manager over\na plaintext scheme (`ws://` / `http://`) when the target resolves to a\n*public* (internet-routable) address. Defaults to `true` (secure): a\npublic plaintext dial would carry the API token and all signaling in the\nclear across untrusted networks. Loopback / private / LAN targets are\nalways reachable over plaintext regardless of this switch (a self-hosted\nsignaling server on a LAN commonly has no TLS), and the cloud-metadata\nhard floor is always blocked. Set to `false` only as a deliberate escape\nhatch for a trusted-network deployment that intentionally runs a public\nendpoint without TLS. A plain `bool` (not `Option`) so an update payload\nthat omits it fails secure to `true`.
+         * @default true
+         * @type boolean | undefined
+        */
+        require_secure_signaling?: boolean;
+        /**
          * @description Stable cookie signing key for session middleware (hex-encoded).\nAuto-generated and persisted so sessions survive daemon restarts.
          * @type string,null
         */
@@ -3621,6 +3627,12 @@ export type SystemSettings = {
      * @type integer | undefined, int32
     */
     port?: number;
+    /**
+     * @description Whether the host refuses to dial a remote signaling server / manager over\na plaintext scheme (`ws://` / `http://`) when the target resolves to a\n*public* (internet-routable) address. Defaults to `true` (secure): a\npublic plaintext dial would carry the API token and all signaling in the\nclear across untrusted networks. Loopback / private / LAN targets are\nalways reachable over plaintext regardless of this switch (a self-hosted\nsignaling server on a LAN commonly has no TLS), and the cloud-metadata\nhard floor is always blocked. Set to `false` only as a deliberate escape\nhatch for a trusted-network deployment that intentionally runs a public\nendpoint without TLS. A plain `bool` (not `Option`) so an update payload\nthat omits it fails secure to `true`.
+     * @default true
+     * @type boolean | undefined
+    */
+    require_secure_signaling?: boolean;
     /**
      * @description Stable cookie signing key for session middleware (hex-encoded).\nAuto-generated and persisted so sessions survive daemon restarts.
      * @type string,null

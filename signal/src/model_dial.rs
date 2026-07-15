@@ -42,7 +42,7 @@ const CONNECT_TIMEOUT_SECS: u64 = 30;
 const REQUEST_TIMEOUT_SECS: u64 = 180;
 
 /// Environment variable selecting the model-provider SSRF guard mode
-/// (`strict` / `relaxed` / `off`). The portable signal server is single-instance
+/// (`strict` / `relaxed`). The portable signal server is single-instance
 /// and single-account (the provider is configured by the trusted operator), so
 /// this is a plain process-level setting rather than cluster-shared state. It
 /// defaults to [`ProviderSsrfMode::Relaxed`]: a self-hosted brain commonly points
@@ -704,7 +704,13 @@ mod tests {
             ssrf_mode_from_env_value(Some("STRICT")),
             ProviderSsrfMode::Strict
         );
-        assert_eq!(ssrf_mode_from_env_value(Some("off")), ProviderSsrfMode::Off);
+        // The former `off` escape hatch was removed; a stale `off` value no longer
+        // parses and falls back to the safe default (Relaxed still blocks the
+        // cloud-metadata floor), rather than disabling the SSRF guard entirely.
+        assert_eq!(
+            ssrf_mode_from_env_value(Some("off")),
+            ProviderSsrfMode::Relaxed
+        );
     }
 
     fn text_request(format: ResponseFormatSpec) -> ModelRequest {

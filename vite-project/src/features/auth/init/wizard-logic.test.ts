@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest"
 import type { ConnectionVerifyResult } from "@/services/types"
 import {
+    CONNECTION_INSECURE_TRANSPORT,
     SECURITY_CAPABILITIES,
     buildSecurityPayload,
     isInsecureConnection,
+    isInsecureTransportRefused,
     isManagerConfigured,
     managerNextDecision,
     type SecurityToggles,
@@ -75,6 +77,24 @@ describe("isInsecureConnection", () => {
         expect(isInsecureConnection(result({ reached: false, secure: false }))).toBe(false)
         expect(isInsecureConnection(null)).toBe(false)
         expect(isInsecureConnection(undefined)).toBe(false)
+    })
+})
+
+describe("isInsecureTransportRefused", () => {
+    it("flags a public-plaintext refusal by its error code", () => {
+        expect(
+            isInsecureTransportRefused(
+                result({ reached: false, error_code: CONNECTION_INSECURE_TRANSPORT }),
+            ),
+        ).toBe(true)
+    })
+
+    it("is not a refusal for a reachable-but-plaintext downgrade or other codes", () => {
+        // A soft insecure warning (reached over plaintext) is NOT a hard refusal.
+        expect(isInsecureTransportRefused(result({ reached: true, secure: false }))).toBe(false)
+        expect(isInsecureTransportRefused(result({ error_code: 64 }))).toBe(false)
+        expect(isInsecureTransportRefused(null)).toBe(false)
+        expect(isInsecureTransportRefused(undefined)).toBe(false)
     })
 })
 
