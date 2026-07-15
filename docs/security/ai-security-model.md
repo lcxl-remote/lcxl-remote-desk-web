@@ -43,3 +43,5 @@ The AI diagnose and Terminal Copilot panels disclose, from the first interaction
 ## AI-Generated Content Marking
 
 AI-generated output carries machine-readable provenance on its wire frame and a visible "AI-generated" marking in the UI. The marking is driven by the content being AI-generated, not by the provenance metadata being present, so a missing or stripped provenance never downgrades content to "not AI" (fail-closed). Provenance, when known, records which model produced the content and when.
+
+This covers every surface that shows model text: the diagnosis answer, the terminal copilot answer, and the inline command completion. A model-generated command suggestion is a novel output, not an assistive edit of what you typed, so it is marked; the completion's zero-latency local guess from your own recent history is not AI and is not marked.

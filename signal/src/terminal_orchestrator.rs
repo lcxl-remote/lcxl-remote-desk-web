@@ -179,15 +179,30 @@ async fn run_completion_turn(
     // Completion has no progressive UI: the candidates render together, so the
     // model text is not streamed.
     match dial(db, messages, &mut NullTurnSink).await {
-        // Completion is short AI text; whether it falls under the Art.50(2)
-        // marking obligation depends on the short-text carve-out, so the model
-        // name is not stamped here yet.
-        Ok((turn, _model)) => {
+        Ok((turn, model)) => {
             let completions = parse_completions(&turn.text, &prefix, &default_shell);
-            TerminalCompleteResult::ok(request_id, completions)
+            mark_completions(TerminalCompleteResult::ok(request_id, completions), model)
         }
         Err(transport) => TerminalCompleteResult::failed(request_id, transport),
     }
+}
+
+/// Stamp the AI marking onto a completion result that carries candidates
+/// (Art.50(2)). The completions are novel model-generated command suggestions, not
+/// an assistive edit of the operator's input, so they are marked; an empty result
+/// shows nothing AI-generated and is left unmarked. `model` is the resolved model
+/// name when known (the desk-server config may leave it unset).
+fn mark_completions(
+    result: TerminalCompleteResult,
+    model: Option<String>,
+) -> TerminalCompleteResult {
+    if result.completions.is_empty() {
+        return result;
+    }
+    result.with_provenance(AiProvenance::stamp(
+        model,
+        Some(chrono::Utc::now().to_rfc3339()),
+    ))
 }
 
 /// Run one copilot turn: redact fail-closed, make a single tool-free model call,
@@ -374,6 +389,55 @@ mod tests {
             redact_completion_ask(&redactor, &mut ask),
             CompletionRedaction::DeclineSensitivePrefix
         ));
+    }
+
+    fn sample_completion() -> desk_agent_protocol::terminal_complete::CommandCompletion {
+        use desk_agent_protocol::RiskLevel;
+        use desk_agent_protocol::exec::ExecDecision;
+        desk_agent_protocol::terminal_complete::CommandCompletion {
+            completion: "ctl status nginx".into(),
+            note: "Show the nginx service status.".into(),
+            risk: RiskLevel::Low,
+            decision: ExecDecision::NotExecutable,
+        }
+    }
+
+    /// A result carrying candidates is marked AI-generated with the resolved model;
+    /// an empty result shows nothing AI-generated and stays unmarked.
+    #[test]
+    fn mark_completions_marks_only_nonempty_results() {
+        let marked = mark_completions(
+            TerminalCompleteResult::ok("r", vec![sample_completion()]),
+            Some("gpt-4o".into()),
+        );
+        let prov = marked.provenance.expect("candidates carry a marking");
+        assert_eq!(prov.model_id.as_deref(), Some("gpt-4o"));
+        assert_eq!(
+            prov.marking_scheme.as_deref(),
+            Some(desk_agent_protocol::provenance::AI_MARKING_SCHEME_V1)
+        );
+
+        let empty = mark_completions(
+            TerminalCompleteResult::ok("r", Vec::new()),
+            Some("gpt-4o".into()),
+        );
+        assert!(empty.provenance.is_none());
+    }
+
+    /// The desk-server config may not surface a model name; the candidates are still
+    /// marked (the marking scheme establishes AI-generation; the model is optional).
+    #[test]
+    fn mark_completions_marks_even_without_a_model_name() {
+        let marked = mark_completions(
+            TerminalCompleteResult::ok("r", vec![sample_completion()]),
+            None,
+        );
+        let prov = marked.provenance.expect("candidates carry a marking");
+        assert!(prov.model_id.is_none());
+        assert_eq!(
+            prov.marking_scheme.as_deref(),
+            Some(desk_agent_protocol::provenance::AI_MARKING_SCHEME_V1)
+        );
     }
 
     /// Copilot context redaction scrubs a secret out of the recent scrollback and

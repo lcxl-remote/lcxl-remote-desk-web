@@ -18,6 +18,7 @@ import { v4 } from "uuid"
 import { useDeskSignaling } from "../desk/use-desk-signaling"
 import { useTerminalCopilot, type TerminalCopilotMode, type TerminalContext } from "./use-terminal-copilot"
 import { TerminalCopilotPanel } from "./terminal-copilot-panel"
+import { AiGeneratedMark } from "@/components/ai-generated-mark"
 import { ModelSelector } from "../desk/model-selector"
 import { useConfirmExec } from "../exec/use-confirm-exec"
 import {
@@ -524,7 +525,13 @@ function TerminalView({ connectionId, deviceId, command, onClose, orgId }: { con
                         {ghost.note && (
                             <span className="truncate text-gray-400">— {ghost.note}</span>
                         )}
-                        <span className="ml-auto shrink-0 rounded border border-gray-600 px-1.5 py-0.5 text-[10px] text-gray-400">
+                        {/* Art.50(2): an AI-sourced suggestion is a novel model output, so
+                            it carries the visible "AI-generated" marking (the L1 history
+                            guess is local, not AI, and is not marked). */}
+                        {ghost.source === 'ai' && (
+                            <AiGeneratedMark className="ml-auto shrink-0 border-white/25 bg-white/10 text-gray-300" />
+                        )}
+                        <span className={`${ghost.source === 'ai' ? '' : 'ml-auto '}shrink-0 rounded border border-gray-600 px-1.5 py-0.5 text-[10px] text-gray-400`}>
                             {t('pages.deskTerminal.completion.acceptHint')}
                         </span>
                     </div>

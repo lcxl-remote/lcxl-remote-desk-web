@@ -5,6 +5,7 @@ import {
 } from '../desk/constants';
 import type { SignalingMessage, SignalingSubscriber } from '../desk/use-desk-signaling';
 import type { ExecDecision, RiskLevel, AgentError } from './use-terminal-copilot';
+import type { AiProvenance } from '@/components/ai-generated-mark';
 
 // Wire types — mirror `desk_agent_protocol::terminal_complete`. They ride the
 // `TerminalComplete{Ask,Result}` signaling types as `signaling_data`; like the
@@ -33,6 +34,9 @@ export type TerminalCompleteResult = {
     request_id: string;
     completions: CommandCompletion[];
     error?: AgentError | null;
+    /** Machine-readable AI marking for the candidates (Art.50(2)); present when the
+     *  result carries AI-generated candidates, absent on an empty / failed result. */
+    provenance?: AiProvenance | null;
 };
 
 // L1 known-command corpus: common command lines offered as an instant suggestion

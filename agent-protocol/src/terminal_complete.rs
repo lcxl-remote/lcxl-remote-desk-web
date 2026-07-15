@@ -24,6 +24,7 @@ use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::exec::ExecDecision;
+use crate::provenance::AiProvenance;
 use crate::{AgentError, RiskLevel};
 
 /// Non-authoritative terminal context for a completion ask, supplied by the
@@ -119,6 +120,14 @@ pub struct TerminalCompleteResult {
     /// `completions` is empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<AgentError>,
+    /// Machine-readable AI marking for the candidates (EU AI Act Art.50(2)). The
+    /// completions are model-generated command suggestions — a novel output, not an
+    /// assistive edit of the operator's input — so they carry a marking. Set by the
+    /// orchestrator when the result carries candidates; absent on an empty or failed
+    /// result (nothing AI-generated is shown). The upper layer builds it (it knows
+    /// the model and has a clock, which the protocol crate lacks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<AiProvenance>,
 }
 
 impl TerminalCompleteResult {
@@ -128,6 +137,7 @@ impl TerminalCompleteResult {
             request_id: request_id.into(),
             completions,
             error: None,
+            provenance: None,
         }
     }
 
@@ -137,7 +147,15 @@ impl TerminalCompleteResult {
             request_id: request_id.into(),
             completions: Vec::new(),
             error: Some(error),
+            provenance: None,
         }
+    }
+
+    /// Attach the machine-readable AI marking for the candidates (Art.50(2)). The
+    /// orchestrator stamps it when the result carries candidates.
+    pub fn with_provenance(mut self, provenance: AiProvenance) -> Self {
+        self.provenance = Some(provenance);
+        self
     }
 
     /// Whether this result reports a failure.
@@ -250,5 +268,36 @@ mod tests {
         let decoded: TerminalCompleteResult =
             wincode::config::deserialize(&bytes, cfg).expect("wincode decode");
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn provenance_round_trips_and_defaults_to_none() {
+        let cfg = unbounded_config();
+        // A bare result carries no marking (empty / legacy / open-source parity).
+        let bare = TerminalCompleteResult::ok("req-1", vec![sample_completion()]);
+        assert!(bare.provenance.is_none());
+
+        let marked =
+            TerminalCompleteResult::ok("req-1", vec![sample_completion()]).with_provenance(
+                AiProvenance::stamp(Some("gpt-4o".into()), Some("2026-07-14T00:00:00Z".into())),
+            );
+        let bytes = wincode::config::serialize(&marked, cfg).expect("wincode encode");
+        let decoded: TerminalCompleteResult =
+            wincode::config::deserialize(&bytes, cfg).expect("wincode decode");
+        assert_eq!(decoded, marked);
+        assert_eq!(
+            decoded.provenance.unwrap().marking_scheme.as_deref(),
+            Some(crate::provenance::AI_MARKING_SCHEME_V1)
+        );
+    }
+
+    /// A JSON body omitting `provenance` (an open-source desk-server or an older
+    /// control end) decodes to `None` — wire-parity, like `model_id` / `org_id`.
+    #[test]
+    fn provenance_is_serde_default_for_wire_parity() {
+        let without: TerminalCompleteResult =
+            serde_json::from_str(r#"{"request_id":"r","completions":[]}"#)
+                .expect("decode without provenance");
+        assert!(without.provenance.is_none());
     }
 }
