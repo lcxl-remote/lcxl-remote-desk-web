@@ -1140,13 +1140,49 @@ fn signaling_scheme_is_tls(url: &str) -> bool {
     lower.starts_with("wss://") || lower.starts_with("https://")
 }
 
+/// Normalize a signaling URL exactly as the dial does, then guard the (possibly
+/// IP-literal) target before connecting. Returns the cleaned URL to dial, or an
+/// error when the transport policy refuses it.
+///
+/// The dial strips control characters, and `char::is_control` covers code points
+/// (e.g. U+007F) that URL parsing does not — so guarding the *raw* string would let
+/// a control-prefixed literal fail the parse (and be deferred as if it were a
+/// domain) yet clean up into a valid IP-literal dial, re-opening the metadata floor
+/// and the public-plaintext refusal for literals. Cleaning first and guarding the
+/// exact string that is dialed closes that mismatch. The actix-tls resolver
+/// short-circuits an IP literal before the custom guard resolver runs, which is why
+/// a literal must be judged here rather than only in the resolver.
+fn guard_and_clean_signaling_url(
+    signaling_url: &str,
+    require_secure_signaling: bool,
+) -> Result<String, String> {
+    let url_clean = signaling_url.trim().trim_matches(|c: char| c.is_control());
+    let scheme_is_tls = signaling_scheme_is_tls(url_clean);
+    desk_utils::ssrf::check_transport_for_url(
+        url_clean,
+        true,
+        scheme_is_tls,
+        require_secure_signaling,
+    )
+    .map_err(|e| format!("signaling target refused: {e}"))?;
+    Ok(url_clean.to_string())
+}
+
 /// Redact the `token` query-parameter value in a URL so the full dial URL can be
 /// logged for debugging without leaking the manager / signaling credential (which
-/// is carried in the `token` query field). A URL that does not parse is returned
-/// unchanged (it would not have connected either).
+/// is carried in the `token` query field). If the URL does not parse, fail safe by
+/// dropping the entire query string (where the token lives) rather than logging it
+/// verbatim.
 fn redact_token_in_url(raw: &str) -> String {
     let Ok(mut url) = url::Url::parse(raw) else {
-        return raw.to_string();
+        // Unparseable: the token can only be in the query, so truncate at the first
+        // `?` and mark it redacted. Never log the raw string (it may carry the token).
+        let base = raw.split('?').next().unwrap_or("");
+        return if base.len() == raw.len() {
+            base.to_string()
+        } else {
+            format!("{base}?<redacted>")
+        };
     };
     if url.query().is_none() {
         return url.to_string();
@@ -1241,18 +1277,10 @@ async fn maintain_proxy_connection(
     // `require_secure_signaling` is on. The scheme is fixed for this dial, so bake
     // it into the resolver — no second lookup that could rebind. `allow_private` is
     // always true here: signaling legitimately reaches LAN / loopback targets.
-    let scheme_is_tls = signaling_scheme_is_tls(&signaling_url);
-    // The actix-tls resolver short-circuits an IP-literal host before the custom
-    // guard resolver runs, so a literal target would bypass the guard entirely.
-    // Judge a literal here, statically, before the dial (a domain is deferred to
-    // the guard, which judges each resolved candidate against DNS rebinding).
-    desk_utils::ssrf::check_transport_for_url(
-        &signaling_url,
-        true,
-        scheme_is_tls,
-        require_secure_signaling,
-    )
-    .map_err(|e| format!("signaling target refused: {e}"))?;
+    // Normalize the URL exactly as the dial does and guard the (possibly literal)
+    // target before connecting. Returns the cleaned URL that will be dialed.
+    let url_clean = guard_and_clean_signaling_url(&signaling_url, require_secure_signaling)?;
+    let scheme_is_tls = signaling_scheme_is_tls(&url_clean);
     let guard = crate::transport_guard::TransportGuardResolver::system(
         crate::transport_guard::TransportPolicy {
             allow_private: true,
@@ -1275,7 +1303,6 @@ async fn maintain_proxy_connection(
         )
         .finish();
 
-    let url_clean = signaling_url.trim().trim_matches(|c: char| c.is_control());
     let connect_url = if url_clean.contains('?') {
         format!("{url_clean}&{version_query}")
     } else {
@@ -2138,6 +2165,33 @@ mod tests {
     }
 
     #[test]
+    fn guard_and_clean_signaling_url_catches_control_prefixed_literal() {
+        // A control-char (U+007F) prefix makes URL parsing fail, but the dial strips
+        // it via `char::is_control`, cleaning up into a metadata IP-literal dial. The
+        // guard must judge the CLEANED string, so this is refused, not deferred.
+        assert!(
+            guard_and_clean_signaling_url("\u{7f}ws://169.254.169.254/api/desk/signaling", true)
+                .is_err(),
+            "control-prefixed metadata literal must be refused after cleaning"
+        );
+        // Public plaintext literal with a control prefix is likewise refused under
+        // enforcement (the cleaned `ws://` dial would otherwise leak the token).
+        assert!(
+            guard_and_clean_signaling_url("\u{7f}ws://203.0.113.5/api/desk/signaling", true)
+                .is_err(),
+            "control-prefixed public plaintext literal must be refused"
+        );
+        // A clean legitimate wss literal / domain passes and returns the dial URL.
+        assert_eq!(
+            guard_and_clean_signaling_url("  wss://sig.example/api/desk/signaling  ", true)
+                .as_deref(),
+            Ok("wss://sig.example/api/desk/signaling")
+        );
+        // Same public literal over TLS is fine.
+        assert!(guard_and_clean_signaling_url("wss://203.0.113.5/api", true).is_ok());
+    }
+
+    #[test]
     fn redact_token_in_url_masks_only_the_token() {
         let out = redact_token_in_url(
             "wss://sig.example/api/desk/signaling?token=SECRET123&build_number=42&probe=1",
@@ -2155,8 +2209,17 @@ mod tests {
             redact_token_in_url("wss://sig.example/api/desk/signaling"),
             "wss://sig.example/api/desk/signaling"
         );
-        // A malformed URL is returned unchanged.
+        // A malformed URL with no query is returned unchanged (no token to leak).
         assert_eq!(redact_token_in_url("not a url"), "not a url");
+    }
+
+    #[test]
+    fn redact_token_in_url_fails_safe_on_unparseable_url_with_query() {
+        // An unparseable URL that still carries a query must never be logged verbatim
+        // (the token lives in the query); drop the whole query instead.
+        let out = redact_token_in_url("\u{7f}ws://169.254.169.254/api?token=SECRET123&probe=1");
+        assert!(!out.contains("SECRET123"), "token must not appear: {out}");
+        assert!(out.ends_with("?<redacted>"), "query must be dropped: {out}");
     }
 
     fn bare_request_remote() -> SignalingModel {
