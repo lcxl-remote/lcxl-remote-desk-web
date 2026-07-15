@@ -1181,15 +1181,12 @@ fn guard_and_clean_signaling_url(
 /// fragment) rather than logging it verbatim.
 fn redact_token_in_url(raw: &str) -> String {
     let Ok(mut url) = url::Url::parse(raw) else {
-        // Unparseable: a credential can only be in the query or fragment, so keep
-        // only the part before the first `?`/`#`. Never log the raw string.
-        let cut = raw.find(['?', '#']).unwrap_or(raw.len());
-        let base = &raw[..cut];
-        return if cut == raw.len() {
-            base.to_string()
-        } else {
-            format!("{base}?<redacted>")
-        };
+        // Unparseable: any part of the raw string may carry a credential (userinfo,
+        // query, or fragment) and we have no parser to isolate the safe parts, so log
+        // a fixed placeholder — nothing from `raw` is emitted. An unparseable URL
+        // would not have dialed anyway (awc's `http::Uri` parser rejects it too), so
+        // no useful debugging information is lost.
+        return "<unparseable url>".to_string();
     };
     // Userinfo may carry credentials; strip it. A fragment is never dialed and could
     // carry an appended token, so drop it.
@@ -2229,17 +2226,25 @@ mod tests {
             redact_token_in_url("wss://sig.example/api/desk/signaling"),
             "wss://sig.example/api/desk/signaling"
         );
-        // A malformed URL with no query is returned unchanged (no token to leak).
-        assert_eq!(redact_token_in_url("not a url"), "not a url");
+        // A malformed URL is logged as a fixed placeholder (nothing from it emitted).
+        assert_eq!(redact_token_in_url("not a url"), "<unparseable url>");
     }
 
     #[test]
-    fn redact_token_in_url_fails_safe_on_unparseable_url_with_query() {
-        // An unparseable URL that still carries a query must never be logged verbatim
-        // (the token lives in the query); drop the whole query instead.
-        let out = redact_token_in_url("\u{7f}ws://169.254.169.254/api?token=SECRET123&probe=1");
-        assert!(!out.contains("SECRET123"), "token must not appear: {out}");
-        assert!(out.ends_with("?<redacted>"), "query must be dropped: {out}");
+    fn redact_token_in_url_fails_safe_on_unparseable_url_with_credentials() {
+        // An unparseable URL must never be logged verbatim: neither a token in the
+        // query/fragment nor userinfo credentials may survive. A control char (U+007F)
+        // makes parsing fail while the string still carries both.
+        for raw in [
+            "\u{7f}ws://169.254.169.254/api?token=SECRET123&probe=1",
+            "\u{7f}wss://user:s3cret@sig.example/api",
+        ] {
+            let out = redact_token_in_url(raw);
+            assert_eq!(
+                out, "<unparseable url>",
+                "must be a fixed placeholder: {out}"
+            );
+        }
     }
 
     #[test]
