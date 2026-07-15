@@ -1157,6 +1157,11 @@ fn guard_and_clean_signaling_url(
     require_secure_signaling: bool,
 ) -> Result<String, String> {
     let url_clean = signaling_url.trim().trim_matches(|c: char| c.is_control());
+    // Drop any fragment: a dial URL has none, and the auth token is appended as a
+    // `?token=...` query below — after a fragment that query would both fail to
+    // reach the server-side token read and land inside the fragment (defeating log
+    // redaction). Stripping it keeps the token in a proper query.
+    let url_clean = url_clean.split('#').next().unwrap_or(url_clean);
     let scheme_is_tls = signaling_scheme_is_tls(url_clean);
     desk_utils::ssrf::check_transport_for_url(
         url_clean,
@@ -1168,40 +1173,46 @@ fn guard_and_clean_signaling_url(
     Ok(url_clean.to_string())
 }
 
-/// Redact the `token` query-parameter value in a URL so the full dial URL can be
-/// logged for debugging without leaking the manager / signaling credential (which
-/// is carried in the `token` query field). If the URL does not parse, fail safe by
-/// dropping the entire query string (where the token lives) rather than logging it
-/// verbatim.
+/// Render a dial URL for logging with every credential-bearing part neutralized:
+/// the `token` query value is masked, any userinfo (`user:pass@`) is stripped, and
+/// any fragment is dropped (a malformed base could otherwise push the appended
+/// token into the fragment). If the URL does not parse, fail safe by keeping only
+/// the part before the first `?`/`#` (a credential can only live in the query or
+/// fragment) rather than logging it verbatim.
 fn redact_token_in_url(raw: &str) -> String {
     let Ok(mut url) = url::Url::parse(raw) else {
-        // Unparseable: the token can only be in the query, so truncate at the first
-        // `?` and mark it redacted. Never log the raw string (it may carry the token).
-        let base = raw.split('?').next().unwrap_or("");
-        return if base.len() == raw.len() {
+        // Unparseable: a credential can only be in the query or fragment, so keep
+        // only the part before the first `?`/`#`. Never log the raw string.
+        let cut = raw.find(['?', '#']).unwrap_or(raw.len());
+        let base = &raw[..cut];
+        return if cut == raw.len() {
             base.to_string()
         } else {
             format!("{base}?<redacted>")
         };
     };
-    if url.query().is_none() {
-        return url.to_string();
-    }
-    let redacted: Vec<(String, String)> = url
-        .query_pairs()
-        .map(|(k, v)| {
-            if k.eq_ignore_ascii_case("token") {
-                (k.into_owned(), "***".to_string())
-            } else {
-                (k.into_owned(), v.into_owned())
+    // Userinfo may carry credentials; strip it. A fragment is never dialed and could
+    // carry an appended token, so drop it.
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_fragment(None);
+    if url.query().is_some() {
+        let redacted: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(k, v)| {
+                if k.eq_ignore_ascii_case("token") {
+                    (k.into_owned(), "***".to_string())
+                } else {
+                    (k.into_owned(), v.into_owned())
+                }
+            })
+            .collect();
+        {
+            let mut qs = url.query_pairs_mut();
+            qs.clear();
+            for (k, v) in &redacted {
+                qs.append_pair(k, v);
             }
-        })
-        .collect();
-    {
-        let mut qs = url.query_pairs_mut();
-        qs.clear();
-        for (k, v) in &redacted {
-            qs.append_pair(k, v);
         }
     }
     url.to_string()
@@ -1309,7 +1320,10 @@ async fn maintain_proxy_connection(
         format!("{url_clean}?{version_query}")
     };
 
-    info!("[Proxy] Connecting to: {signaling_url}");
+    info!(
+        "[Proxy] Connecting to: {}",
+        redact_token_in_url(&signaling_url)
+    );
     debug!("[Proxy] Full URL: {}", redact_token_in_url(&connect_url));
 
     let (_resp, framed) = client
@@ -2189,6 +2203,12 @@ mod tests {
         );
         // Same public literal over TLS is fine.
         assert!(guard_and_clean_signaling_url("wss://203.0.113.5/api", true).is_ok());
+        // A fragment is stripped from the dialed URL (the token query is appended
+        // later and must not land in a fragment).
+        assert_eq!(
+            guard_and_clean_signaling_url("wss://sig.example/api#frag", true).as_deref(),
+            Ok("wss://sig.example/api")
+        );
     }
 
     #[test]
@@ -2220,6 +2240,25 @@ mod tests {
         let out = redact_token_in_url("\u{7f}ws://169.254.169.254/api?token=SECRET123&probe=1");
         assert!(!out.contains("SECRET123"), "token must not appear: {out}");
         assert!(out.ends_with("?<redacted>"), "query must be dropped: {out}");
+    }
+
+    #[test]
+    fn redact_token_in_url_masks_token_in_fragment_and_userinfo() {
+        // A token pushed into the fragment (e.g. by an appended query after a `#`)
+        // must not survive: the fragment is dropped entirely.
+        let frag = redact_token_in_url("wss://sig.example/api#x?token=SECRET123&probe=1");
+        assert!(
+            !frag.contains("SECRET123"),
+            "fragment token must not appear: {frag}"
+        );
+        // Userinfo credentials are stripped, and a real token query is still masked.
+        let ui = redact_token_in_url("wss://user:s3cret@sig.example/api?token=SECRET123");
+        assert!(!ui.contains("SECRET123"), "token must not appear: {ui}");
+        assert!(!ui.contains("s3cret"), "userinfo must not appear: {ui}");
+        assert!(
+            !ui.contains("user@") && !ui.contains("user:"),
+            "userinfo stripped: {ui}"
+        );
     }
 
     fn bare_request_remote() -> SignalingModel {
