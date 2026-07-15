@@ -53,6 +53,27 @@ export type AiExecutionPolicyUpdate = {
     execution_mode?: (null | ExecutionMode);
 };
 
+/**
+ * @description Machine-readable marking for a unit of AI-generated content.
+*/
+export type AiProvenance = {
+    /**
+     * @description RFC3339 timestamp of when the content was generated; emitter-stamped (this\ncrate stays free of a clock dependency).
+     * @type string,null
+    */
+    generated_at?: string | null;
+    /**
+     * @description Which marking scheme was applied, for forward compatibility as marking\nmatures (e.g. towards watermarking). Emitters set [`AI_MARKING_SCHEME_V1`].
+     * @type string,null
+    */
+    marking_scheme?: string | null;
+    /**
+     * @description The model that produced the content, if known (emitter-stamped). Free-form\nmodel name (e.g. `gpt-4o`), not a database row id.
+     * @type string,null
+    */
+    model_id?: string | null;
+};
+
 export type ApprovalAckParams = {
     /**
      * @type string
@@ -1969,6 +1990,7 @@ export type ProviderTestDto = {
      * @type integer, int64
     */
     latency_ms: number;
+    provenance?: (null | AiProvenance);
     /**
      * @description A short snippet of the model\'s reply (bounded), when it returned text.
      * @type string,null
@@ -2486,6 +2508,7 @@ export type RestResponseProviderTestDto = {
          * @type integer, int64
         */
         latency_ms: number;
+        provenance?: (null | AiProvenance);
         /**
          * @description A short snippet of the model\'s reply (bounded), when it returned text.
          * @type string,null
@@ -4831,6 +4854,11 @@ export type OpenTerminalSessionQueryParams = {
      * @type string,null
     */
     device_id?: string | null;
+    /**
+     * @description Browser-supplied (untrusted) grant-session selector, mirroring\n`RequestRemoteModel::grant_session_id`. A capability-scoped code-session\ncarries the grant it redeemed so the central can look up and stamp the\ncode\'s capability ceiling onto the `StartTerminal` frame (the terminal WS is\na distinct connection that never does a `RequestRemote`, so it cannot inherit\nthe control session\'s stamp). It is only a lookup key: the authorization fact\nis the server-side principal / target / generation check. `None` for an owner\nsession (stamped with no ceiling).
+     * @type string,null
+    */
+    grant_session_id?: string | null;
 };
 
 /**

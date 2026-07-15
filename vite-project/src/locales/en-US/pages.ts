@@ -927,7 +927,7 @@ export default {
   'pages.aiModel.settings.testConnection': 'Test connection',
   'pages.aiModel.settings.testSucceed': 'Connection OK',
   'pages.aiModel.settings.testFailed': 'Connection test failed',
-  'pages.aiModel.settings.testResult': '{{latency}} ms latency, reply: {{sample}}',
+  'pages.aiModel.settings.testResult': '{{latency}} ms latency, AI-generated reply: {{sample}}',
   'pages.aiModel.settings.testResultNoSample': '{{latency}} ms latency (no text returned)',
   'pages.aiModel.settings.tlsHint': 'When this host connects to a central signaling server, strongly prefer wss:// behind a TLS reverse proxy so evidence in transit cannot be read by other applications on the network.',
   'pages.executionMode.suggestOnly': 'Suggest only (no execution)',

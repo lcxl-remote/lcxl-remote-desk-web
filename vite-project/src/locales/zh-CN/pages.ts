@@ -920,7 +920,7 @@ export default {
   'pages.aiModel.settings.testConnection': '测试连接',
   'pages.aiModel.settings.testSucceed': '连接正常',
   'pages.aiModel.settings.testFailed': '连接测试失败',
-  'pages.aiModel.settings.testResult': '延迟 {{latency}} ms，回复：{{sample}}',
+  'pages.aiModel.settings.testResult': '延迟 {{latency}} ms，AI 生成的回复：{{sample}}',
   'pages.aiModel.settings.testResultNoSample': '延迟 {{latency}} ms（模型未返回文本）',
   'pages.aiModel.settings.tlsHint': '当本机连接中心信令服务器时，强烈建议通过 TLS 反向代理使用 wss://，以防传输中的证据被网络上的其他应用读取。',
   'pages.executionMode.suggestOnly': '仅建议（不执行）',

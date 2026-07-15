@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use actix_web::{HttpResponse, get, post, web};
+use desk_agent_protocol::provenance::AiProvenance;
 use desk_diagnose_core::chat::{ChatMessage, ChatRole};
 use desk_diagnose_core::prompt::ResponseFormatSpec;
 use desk_diagnose_core::seam::{ModelRequest, ModelSeam, NullTurnSink};
@@ -27,6 +28,11 @@ pub struct ProviderTestDto {
     pub latency_ms: u64,
     /// A short snippet of the model's reply (bounded), when it returned text.
     pub sample: Option<String>,
+    /// Machine-readable AI marking for `sample` (EU AI Act Art.50(2)): the snippet
+    /// is model-generated text shown to the operator, so it carries a marking.
+    /// Present only when a `sample` is returned; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<AiProvenance>,
 }
 
 #[utoipa::path(
@@ -79,7 +85,10 @@ pub async fn update_model_provider(
 /// Run a minimal chat probe against `seam` and shape the outcome. Kept separate
 /// from the handler so tests can inject a stub [`ModelSeam`] and exercise the
 /// success / error mapping without a real upstream call.
-async fn run_probe(seam: &dyn ModelSeam) -> Result<ProviderTestDto, DeskSignalError> {
+async fn run_probe(
+    seam: &dyn ModelSeam,
+    model: Option<String>,
+) -> Result<ProviderTestDto, DeskSignalError> {
     let mut request = ModelRequest::text_only(
         vec![ChatMessage::text(
             "probe",
@@ -103,12 +112,20 @@ async fn run_probe(seam: &dyn ModelSeam) -> Result<ProviderTestDto, DeskSignalEr
     // Bound the snippet; do not match the text exactly (a small cap may truncate a
     // healthy reply), just prove the chain returned something.
     let trimmed = turn.text.trim();
-    let sample = if trimmed.is_empty() {
+    let sample: Option<String> = if trimmed.is_empty() {
         None
     } else {
         Some(trimmed.chars().take(200).collect())
     };
-    Ok(ProviderTestDto { latency_ms, sample })
+    // Mark the AI-generated snippet (Art.50(2)) only when the probe returned text.
+    let provenance = sample
+        .is_some()
+        .then(|| AiProvenance::stamp(model, Some(chrono::Utc::now().to_rfc3339())));
+    Ok(ProviderTestDto {
+        latency_ms,
+        sample,
+        provenance,
+    })
 }
 
 #[utoipa::path(
@@ -129,7 +146,7 @@ pub async fn test_model_provider() -> Result<HttpResponse, DeskSignalError> {
     })?;
     // A reachable-but-broken chain (bad key, wrong model, unreachable host) is a
     // business outcome surfaced as the failure body with the real reason.
-    let dto = run_probe(&seam).await?;
+    let dto = run_probe(&seam, config.model.clone()).await?;
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(dto)))
 }
 
@@ -185,13 +202,31 @@ mod tests {
 
     #[tokio::test]
     async fn probe_success_trims_reply_into_sample() {
-        let dto = run_probe(&OkSeam).await.expect("probe ok");
+        let dto = run_probe(&OkSeam, Some("gpt-4o".into()))
+            .await
+            .expect("probe ok");
         assert_eq!(dto.sample.as_deref(), Some("pong"));
+    }
+
+    /// A returned sample is marked AI-generated (Art.50(2)) with the probed model.
+    #[tokio::test]
+    async fn probe_sample_is_marked_with_the_model() {
+        let dto = run_probe(&OkSeam, Some("gpt-4o".into()))
+            .await
+            .expect("probe ok");
+        let prov = dto.provenance.expect("a returned sample carries a marking");
+        assert_eq!(prov.model_id.as_deref(), Some("gpt-4o"));
+        assert_eq!(
+            prov.marking_scheme.as_deref(),
+            Some(desk_agent_protocol::provenance::AI_MARKING_SCHEME_V1)
+        );
     }
 
     #[tokio::test]
     async fn probe_error_surfaces_upstream_reason_as_business_failure() {
-        let err = run_probe(&ErrSeam).await.expect_err("probe should fail");
+        let err = run_probe(&ErrSeam, Some("gpt-4o".into()))
+            .await
+            .expect_err("probe should fail");
         assert!(matches!(err, DeskSignalError::CustomError(_)));
         assert!(
             err.to_string().contains("boom"),
