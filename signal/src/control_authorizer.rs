@@ -461,6 +461,7 @@ mod tests {
                 }),
             },
             reason: Some("operator promoted a copilot suggestion".to_string()),
+            org_id: None,
         })
         .unwrap();
         SignalingModel::new(

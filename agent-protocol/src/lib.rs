@@ -861,6 +861,15 @@ pub struct AgentRequestData {
     pub operation: AgentOperation,
     /// Free-text "why"; flows into `AgentEnvelope.audit.reason`.
     pub reason: Option<String>,
+    /// Manager-only org context hint: the id of the organization the operator is
+    /// acting within. NON-authoritative — the manager validates the operator's
+    /// membership in this org AND the org's device-access grant to the target
+    /// device before trusting it, then adjudicates the request against that single
+    /// org's policy. The open-source single-instance desk-server has no org concept
+    /// and **ignores** this field; `None` (the default, sent by every non-manager
+    /// client) is the personal view.
+    #[serde(default)]
+    pub org_id: Option<i32>,
 }
 
 /// Result of one capability call. Reused verbatim by the IPC layer so the
@@ -1011,6 +1020,7 @@ mod tests {
                 }),
             },
             reason: Some("why".into()),
+            org_id: None,
         };
         let json = serde_json::to_string(&req).expect("encode");
         assert!(!json.contains("\"actor\""));

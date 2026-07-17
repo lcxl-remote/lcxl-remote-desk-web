@@ -256,6 +256,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         deskId: deskId || null,
         subscribe,
         sendMessage,
+        orgId,
     });
 
     // The daemon keeps the WebRTC PC alive across worker

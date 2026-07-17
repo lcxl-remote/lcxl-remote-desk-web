@@ -105,6 +105,13 @@ type UseConfirmExecProps = {
         connectionId?: string,
         requestId?: string,
     ) => string;
+    /** Manager-only active-organization hint. Set only in the console's org view;
+     *  omitted (undefined) by the personal view and the open-source control end, so
+     *  no `org_id` rides the wire and the request resolves against the personal
+     *  subject. The manager validates it (membership + the org's device-access
+     *  grant) before adjudicating the exec against that single org, and a non-owner
+     *  must carry it — the server otherwise denies with a generic permission error. */
+    orgId?: number;
 };
 
 /**
@@ -116,7 +123,7 @@ type UseConfirmExecProps = {
  * re-runs classification on the relayed command, so a control-end-reported
  * decision is never trusted.
  */
-export function useConfirmExec({ deskId, subscribe, sendMessage }: UseConfirmExecProps) {
+export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseConfirmExecProps) {
     // Keyed by the caller's row index.
     const [entries, setEntries] = useState<Record<number, ExecEntry>>({});
     // Map an in-flight ConfirmExec signaling request_id -> row index, so the
@@ -144,6 +151,10 @@ export function useConfirmExec({ deskId, subscribe, sendMessage }: UseConfirmExe
                     },
                 },
                 reason: input.reason,
+                // Manager-only org hint; undefined omits it from the wire so the
+                // open-source single-instance desk-server (which ignores it) and the
+                // personal view behave identically.
+                org_id: orgId ?? undefined,
             };
             const requestId = sendMessage(SIGNALING_TYPE_CODE_CONFIRM_EXEC, data, deskId);
             previewReqToRow.current[requestId] = rowIndex;
@@ -158,7 +169,7 @@ export function useConfirmExec({ deskId, subscribe, sendMessage }: UseConfirmExe
                 },
             }));
         },
-        [deskId, sendMessage],
+        [deskId, sendMessage, orgId],
     );
 
     const approve = useCallback(

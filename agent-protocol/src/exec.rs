@@ -141,6 +141,15 @@ pub struct ConfirmExecData {
     pub operation: AgentOperation,
     /// Free-text "why" from the control end; flows into the audit event.
     pub reason: Option<String>,
+    /// Manager-only org context hint: the id of the organization the operator is
+    /// acting within. NON-authoritative — the manager validates the operator's
+    /// membership in this org AND the org's device-access grant to the target
+    /// device before trusting it, then adjudicates the exec against that single
+    /// org's policy and command templates. The open-source single-instance
+    /// desk-server has no org concept and **ignores** this field; `None` (the
+    /// default, sent by every non-manager client) is the personal view.
+    #[serde(default)]
+    pub org_id: Option<i32>,
 }
 
 /// Server → control end (`ExecPreview`): the classification result the

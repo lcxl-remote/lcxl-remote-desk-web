@@ -57,7 +57,7 @@ function executablePreview(): ExecPreview {
     };
 }
 
-function render() {
+function render(orgId?: number) {
     // Controllable signaling subscription: `feed` synchronously delivers a
     // message to the hook's registered handler, mirroring the real lossless
     // fan-out. Call sites already wrap `feed` in `act(...)`.
@@ -68,7 +68,7 @@ function render() {
             handlers.delete(h);
         };
     };
-    const props = { deskId: 'desk-1', subscribe, sendMessage };
+    const props = { deskId: 'desk-1', subscribe, sendMessage, orgId };
     const hook = renderHook((p: typeof props) => useConfirmExec(p), { initialProps: props });
     const feed = (msg: SignalingMessage) => {
         handlers.forEach((h) => h(msg));
@@ -101,6 +101,22 @@ describe('useConfirmExec', () => {
             operation: { input: { params: { cwd: string | null } } };
         };
         expect(payload.operation.input.params.cwd).toBe('/var/log');
+    });
+
+    it('carries the org hint in the ConfirmExec payload when set, and omits it otherwise', () => {
+        // Org view: org_id rides the wire so a non-owner is adjudicated against it.
+        const org = render(9);
+        act(() => org.hook.result.current.requestPreview(0, input));
+        const orgPayload = sendMessage.mock.calls[0][1] as { org_id?: number };
+        expect(orgPayload.org_id).toBe(9);
+
+        // Personal view: no org_id, so the open-source server and personal subject
+        // behave identically.
+        sendMessage.mockClear();
+        const personal = render();
+        act(() => personal.hook.result.current.requestPreview(0, input));
+        const personalPayload = sendMessage.mock.calls[0][1] as { org_id?: number };
+        expect(personalPayload.org_id).toBeUndefined();
     });
 
     it('marks a non-executable (blocked) preview as an error with the reason', () => {

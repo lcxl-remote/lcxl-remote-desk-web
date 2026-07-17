@@ -5949,6 +5949,7 @@ mod tests {
                 }),
             },
             reason: Some("diagnose cpu".to_string()),
+            org_id: None,
         };
         let raw = serde_json::to_value(&req).unwrap();
         handle_agent_request_inbound(&ctx, &agent_request_model(raw))
@@ -5993,6 +5994,7 @@ mod tests {
                 }),
             },
             reason: None,
+            org_id: None,
         };
         let raw = serde_json::to_value(&req).unwrap();
         handle_agent_request_inbound(&ctx, &agent_request_model(raw))
@@ -6358,6 +6360,7 @@ mod tests {
                 input: OperationInput::Exec(input),
             },
             reason: None,
+            org_id: None,
         };
         SignalingModel::new(
             request_id,
@@ -7770,6 +7773,7 @@ mod tests {
                 input: OperationInput::Exec(input),
             },
             reason: None,
+            org_id: None,
         };
         let model = SignalingModel::new(
             "r1",
@@ -7844,6 +7848,7 @@ mod tests {
                 }),
             },
             reason: None,
+            org_id: None,
         };
         let model = SignalingModel::new(
             "r-exec",
