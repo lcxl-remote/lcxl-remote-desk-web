@@ -3330,21 +3330,47 @@ fn pep_validate_edge_exec_plan(
         return Some(format!("pep_rejected:blocklist:{rule}"));
     }
 
-    // Exact-argv whitelist: the plan's `template_id` must be in the synced
-    // allowlist, and re-rendering that template with the fleet-fixed limits must
-    // reproduce the plan byte-for-byte (program + argv + risk + fingerprint).
-    // The fingerprint folds in the limits, so a mismatched timeout / output cap
-    // is caught here too.
-    let Some(template) = templates.iter().find(|t| t.template_id == plan.template_id) else {
-        return Some("pep_rejected:template_not_in_allowlist".to_string());
-    };
-    let expected = build_exact_argv_draft(template, ExecLimits::defaults(), plan.cwd.clone());
-    if expected.program != plan.program
-        || expected.argv != plan.argv
-        || expected.risk != plan.risk
-        || expected.fingerprint != plan.fingerprint
+    // Exact-argv whitelist: the plan's `template_id` must name a synced template
+    // whose *authoritative* re-render reproduces the plan field-for-field. Fleet
+    // exec has no per-request limit input, so the authoritative render is always
+    // the fixed fleet defaults with no cwd (identical to the sealing side in
+    // `fleet_approval::verify_template_unchanged`). The plan's own `cwd` /
+    // `timeout_ms` / output caps are therefore compared *against those
+    // authoritative values* — never fed back into the expected render. If the
+    // render used the plan's own limits, a tampered limit would be hashed into
+    // both sides and the fingerprint would still agree (self-consistent tamper);
+    // rebuilding from the fixed authority is what makes a widened timeout / output
+    // cap detectable. A `template_id` is unique only per-org, so several synced
+    // templates can share it; try every candidate and accept if any one
+    // reproduces the plan exactly.
+    let mut saw_candidate = false;
+    let mut faithful = false;
+    for template in templates
+        .iter()
+        .filter(|t| t.template_id == plan.template_id)
     {
-        return Some("pep_rejected:template_drift".to_string());
+        saw_candidate = true;
+        let expected = build_exact_argv_draft(template, ExecLimits::defaults(), None);
+        if expected.program == plan.program
+            && expected.argv == plan.argv
+            && expected.risk == plan.risk
+            && expected.shell == plan.shell
+            && expected.cwd == plan.cwd
+            && expected.timeout_ms == plan.timeout_ms
+            && expected.max_stdout_bytes == plan.max_stdout_bytes
+            && expected.max_stderr_bytes == plan.max_stderr_bytes
+            && expected.fingerprint == plan.fingerprint
+        {
+            faithful = true;
+            break;
+        }
+    }
+    if !faithful {
+        return Some(if saw_candidate {
+            "pep_rejected:template_drift".to_string()
+        } else {
+            "pep_rejected:template_not_in_allowlist".to_string()
+        });
     }
 
     // max_risk ceiling (independent of the manager's per-device decision).
@@ -6842,6 +6868,103 @@ mod tests {
             desk_agent_protocol::exec_policy::builtin_blocklist(),
         )
         .expect("tampered fingerprint must reject");
+        assert!(reason.contains("template_drift"), "{reason}");
+    }
+
+    #[test]
+    fn pep_accepts_a_later_same_id_candidate() {
+        // `template_id` is unique only per-org, so the daemon can hold several
+        // synced templates sharing an id. A find-first check would compare only the
+        // first and reject a legitimate plan rendered from the second; enumeration
+        // must accept the plan that faithfully matches any candidate.
+        let wrong = SyncedCommandTemplate {
+            template_id: "svc_restart".into(),
+            argv: vec!["net".into(), "start".into(), "spooler".into()],
+            effect: desk_agent_protocol::exec::ExecEffect::Mutating,
+        };
+        let right = fleet_template();
+        let plan = fleet_plan(&right, "a1");
+        // `wrong` is listed first, so find-first would have failed here.
+        let templates = vec![wrong, right];
+        assert_eq!(
+            pep_validate_edge_exec_plan(
+                &plan,
+                desk_agent_protocol::RiskLevel::High,
+                &templates,
+                desk_agent_protocol::exec_policy::builtin_blocklist(),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn pep_rejects_self_consistent_limit_tamper() {
+        // The strongest tamper: widen a limit *and* recompute the fingerprint so the
+        // plan is internally self-consistent. Rebuilding `expected` from the plan's
+        // own limits would hash the tampered value into both sides and pass; the PEP
+        // must instead compare against the fixed fleet authority, so
+        // `expected.timeout_ms (= defaults) != plan.timeout_ms` rejects it.
+        let template = fleet_template();
+        let mut plan = fleet_plan(&template, "a1");
+        let tampered = desk_agent_protocol::exec_policy::ExecLimits {
+            timeout_ms: plan.timeout_ms.saturating_mul(10),
+            max_stdout_bytes: plan.max_stdout_bytes,
+            max_stderr_bytes: plan.max_stderr_bytes,
+        };
+        plan.timeout_ms = tampered.timeout_ms;
+        plan.fingerprint = desk_agent_protocol::exec_policy::fingerprint(
+            &plan.program,
+            &plan.argv,
+            plan.cwd.as_deref(),
+            &tampered,
+        );
+        let reason = pep_validate_edge_exec_plan(
+            &plan,
+            desk_agent_protocol::RiskLevel::High,
+            std::slice::from_ref(&template),
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
+        )
+        .expect("self-consistent limit tamper must reject");
+        assert!(reason.contains("template_drift"), "{reason}");
+    }
+
+    #[test]
+    fn pep_rejects_self_consistent_cwd_tamper() {
+        // Same self-consistent shape, but injecting a cwd (the authority is None).
+        let template = fleet_template();
+        let mut plan = fleet_plan(&template, "a1");
+        let injected = Some("C:/Windows/System32".to_string());
+        plan.cwd = injected.clone();
+        plan.fingerprint = desk_agent_protocol::exec_policy::fingerprint(
+            &plan.program,
+            &plan.argv,
+            injected.as_deref(),
+            &ExecLimits::defaults(),
+        );
+        let reason = pep_validate_edge_exec_plan(
+            &plan,
+            desk_agent_protocol::RiskLevel::High,
+            std::slice::from_ref(&template),
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
+        )
+        .expect("self-consistent cwd tamper must reject");
+        assert!(reason.contains("template_drift"), "{reason}");
+    }
+
+    #[test]
+    fn pep_rejects_shell_kind_tamper() {
+        // The authority renders operator argv as a direct native spawn; flipping the
+        // shell kind must be caught even though the fingerprint does not fold it in.
+        let template = fleet_template();
+        let mut plan = fleet_plan(&template, "a1");
+        plan.shell = desk_agent_protocol::exec::ExecShellKind::Powershell;
+        let reason = pep_validate_edge_exec_plan(
+            &plan,
+            desk_agent_protocol::RiskLevel::High,
+            std::slice::from_ref(&template),
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
+        )
+        .expect("shell-kind tamper must reject");
         assert!(reason.contains("template_drift"), "{reason}");
     }
 
