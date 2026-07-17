@@ -28,17 +28,31 @@ use crate::exec::ExecEffect;
 /// - v1: `{ version, templates }`.
 /// - v2: adds `command_template_revision` (the shared monotonic revision the
 ///   manager stamped the set with).
+/// - v3: adds `epoch`. The set is now **narrowed** to the device's authorized
+///   organizations, so a `revision=N` no longer means the same set it did under
+///   the old all-org semantics. The epoch names the wire-semantics generation:
+///   the daemon accepts a payload only when `(epoch, revision)` is not strictly
+///   older than the last it applied, so once it accepts a narrowed v3 set an old
+///   manager's all-org set (epoch 0) can no longer downgrade it.
 ///
-/// During a rolling upgrade an old daemon (which only knows v1) receives a v2
+/// During a rolling upgrade an old daemon (which only knows v1) receives a newer
 /// payload and safely ignores it — it keeps its prior template set rather than
 /// misapplying an unknown shape; a fleet exec request it cannot template-match is
 /// then refused by its PEP, never mis-executed.
-pub const COMMAND_TEMPLATE_SYNC_VERSION: u16 = 2;
+pub const COMMAND_TEMPLATE_SYNC_VERSION: u16 = 3;
 
 /// Oldest `CommandTemplateSync` payload version a current daemon still accepts.
 /// A v1 payload (from an old manager during a rolling upgrade) carries no
 /// revision and still replaces the cache.
 pub const MIN_COMMAND_TEMPLATE_SYNC_VERSION: u16 = 1;
+
+/// The wire-semantics generation the current manager stamps on a v3 payload. A
+/// payload with no `epoch` (v1 / v2 from an older manager) is read as epoch 0, so
+/// this scoped generation (epoch 1) always outranks the old all-org semantics and
+/// a rolling-upgrade downgrade cannot re-widen an already-narrowed cache. Bump this
+/// only when a change again alters what a given `revision` means (e.g. a different
+/// narrowing dimension); a plain content change just advances the revision.
+pub const COMMAND_TEMPLATE_SYNC_EPOCH: u16 = 1;
 
 /// One operator-configured exact-argv command template, as synced from the
 /// manager to the daemon.
@@ -83,12 +97,20 @@ pub struct CommandTemplateSyncPayload {
     pub templates: Vec<SyncedCommandTemplate>,
     /// The shared monotonic command-template revision in force when the manager
     /// built this payload (v2+). `None` on a v1 payload from an old manager. The
-    /// daemon stores it for diagnostics; it does **not** ACK an applied revision —
-    /// execution-time safety comes from the daemon PEP re-validate plus the
-    /// manager intent-transaction recheck, not from this value (no per-device
-    /// applied-revision tracking in v1).
+    /// daemon uses `(epoch, revision)` to reject a strictly-older sync so a
+    /// rolling-upgrade peer cannot overwrite a newer set with a stale one;
+    /// execution-time safety still comes from the daemon PEP re-validate plus the
+    /// manager intent-transaction recheck.
     #[serde(default)]
     pub command_template_revision: Option<i64>,
+    /// The wire-semantics generation (v3+). `0` (the default, and what a v1 / v2
+    /// payload decodes to) is the legacy all-org semantics; the current manager
+    /// stamps [`COMMAND_TEMPLATE_SYNC_EPOCH`] for the narrowed set. Compared before
+    /// `command_template_revision` so a higher epoch always wins regardless of the
+    /// revision number, which is what stops an old all-org manager (epoch 0) from
+    /// downgrading a daemon that already accepted a narrowed set.
+    #[serde(default)]
+    pub epoch: u16,
 }
 
 /// Why an operator template's argv was rejected.
@@ -198,33 +220,38 @@ mod tests {
     }
 
     #[test]
-    fn v2_payload_round_trips_with_revision() {
+    fn v3_payload_round_trips_with_revision_and_epoch() {
         let payload = CommandTemplateSyncPayload {
             version: COMMAND_TEMPLATE_SYNC_VERSION,
             templates: vec![sample_template()],
             command_template_revision: Some(42),
+            epoch: COMMAND_TEMPLATE_SYNC_EPOCH,
         };
         let json = serde_json::to_string(&payload).unwrap();
         let back: CommandTemplateSyncPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(back, payload);
         assert_eq!(back.command_template_revision, Some(42));
+        assert_eq!(back.epoch, 1);
     }
 
     #[test]
-    fn v1_payload_without_revision_deserializes_as_none() {
-        // A v1 frame from an old manager has no `command_template_revision` field;
-        // a current daemon must still decode it (serde default → None) and apply it.
+    fn v1_payload_without_revision_or_epoch_deserializes_as_defaults() {
+        // A v1 / v2 frame from an old manager has no `epoch` (and v1 no revision);
+        // a current daemon must still decode it (serde default → None / 0), reading
+        // it as the legacy all-org epoch 0.
         let v1_json = r#"{"version":1,"templates":[{"template_id":"docker_ps","argv":["docker","ps"],"effect":"read_only"}]}"#;
         let payload: CommandTemplateSyncPayload = serde_json::from_str(v1_json).unwrap();
         assert_eq!(payload.version, 1);
         assert_eq!(payload.command_template_revision, None);
+        assert_eq!(payload.epoch, 0);
         assert_eq!(payload.templates, vec![sample_template()]);
     }
 
     #[test]
     fn current_version_is_in_supported_range() {
         // The emitted version must not be below the minimum supported one.
-        assert_eq!(COMMAND_TEMPLATE_SYNC_VERSION, 2);
+        assert_eq!(COMMAND_TEMPLATE_SYNC_VERSION, 3);
         assert_eq!(MIN_COMMAND_TEMPLATE_SYNC_VERSION, 1);
+        assert_eq!(COMMAND_TEMPLATE_SYNC_EPOCH, 1);
     }
 }

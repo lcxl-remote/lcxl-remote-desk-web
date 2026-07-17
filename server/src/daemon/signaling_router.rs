@@ -1211,10 +1211,18 @@ fn handle_command_template_sync_inbound(
         return Ok(());
     }
     let revision = payload.command_template_revision;
-    let accepted = ctx.command_templates.replace(payload.templates, revision);
-    log::info!(
-        "[router] applied operator command-template sync: {accepted} template(s) (revision {revision:?})"
-    );
+    let epoch = payload.epoch;
+    match ctx
+        .command_templates
+        .replace(payload.templates, epoch, revision)
+    {
+        Some(accepted) => log::info!(
+            "[router] applied operator command-template sync: {accepted} template(s) (epoch {epoch}, revision {revision:?})"
+        ),
+        None => log::info!(
+            "[router] ignored stale operator command-template sync (epoch {epoch}, revision {revision:?})"
+        ),
+    }
     Ok(())
 }
 
@@ -6534,6 +6542,7 @@ mod tests {
             version: COMMAND_TEMPLATE_SYNC_VERSION,
             templates,
             command_template_revision: Some(1),
+            epoch: desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
         };
         SignalingModel::new(
             "rs",
@@ -6686,6 +6695,7 @@ mod tests {
                 argv: vec!["net".into(), "stop".into(), "spooler".into()],
                 effect: ExecEffect::Mutating,
             }],
+            0,
             Some(1),
         );
 
@@ -6722,6 +6732,7 @@ mod tests {
                 argv: vec!["net".into(), "stop".into(), "spooler".into()],
                 effect: ExecEffect::Mutating,
             }],
+            0,
             Some(1),
         );
 
@@ -6755,6 +6766,7 @@ mod tests {
                 argv: vec!["net".into(), "stop".into(), "spooler".into()],
                 effect: ExecEffect::Mutating,
             }],
+            0,
             Some(1),
         );
 
@@ -7041,7 +7053,7 @@ mod tests {
         ctx.inbound_authz = None;
         let template = fleet_template();
         ctx.command_templates
-            .replace(vec![template.clone()], Some(1));
+            .replace(vec![template.clone()], 0, Some(1));
         let plan = fleet_plan(&template, "a1");
 
         handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
@@ -7069,7 +7081,7 @@ mod tests {
         ));
         let template = fleet_template();
         ctx.command_templates
-            .replace(vec![template.clone()], Some(1));
+            .replace(vec![template.clone()], 0, Some(1));
         let plan = fleet_plan(&template, "a1");
 
         handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
@@ -7099,6 +7111,7 @@ mod tests {
                 argv: vec!["net".into(), "start".into(), "spooler".into()],
                 effect: desk_agent_protocol::exec::ExecEffect::Mutating,
             }],
+            0,
             Some(1),
         );
         let plan = fleet_plan(&fleet_template(), "a1");
@@ -7128,7 +7141,7 @@ mod tests {
         ));
         let template = fleet_template();
         ctx.command_templates
-            .replace(vec![template.clone()], Some(1));
+            .replace(vec![template.clone()], 0, Some(1));
         let plan = fleet_plan(&template, "a1");
 
         handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
@@ -7160,7 +7173,7 @@ mod tests {
         ));
         let template = fleet_template();
         ctx.command_templates
-            .replace(vec![template.clone()], Some(1));
+            .replace(vec![template.clone()], 0, Some(1));
         let plan = fleet_plan(&template, "a1");
 
         handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))

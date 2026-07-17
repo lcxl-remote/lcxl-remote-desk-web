@@ -2827,6 +2827,7 @@ mod tests {
                 effect: ExecEffect::ReadOnly,
             }],
             command_template_revision: Some(1),
+            epoch: 0,
         };
         let model = SignalingModel::new(
             "rs",
@@ -2898,6 +2899,7 @@ mod tests {
                     effect: ExecEffect::ReadOnly,
                 }],
                 command_template_revision: revision,
+                epoch: 0,
             };
             let model = SignalingModel::new(
                 "rs",
@@ -2910,7 +2912,8 @@ mod tests {
             serde_json::to_string(&model).unwrap()
         };
 
-        // v1 (no revision) from trusted central: applied; cache revision stays None.
+        // v1 (no epoch, no revision) from trusted central: applied; the watermark
+        // records the defaults (epoch 0, revision 0).
         handle_inbound_signaling_text(
             make_text(1, None),
             &router_ctx,
@@ -2919,7 +2922,7 @@ mod tests {
         )
         .await;
         assert_eq!(router_ctx.command_templates.len(), 1);
-        assert_eq!(router_ctx.command_templates.revision(), None);
+        assert_eq!(router_ctx.command_templates.revision(), Some(0));
 
         // An unsupported future version is ignored — the cache keeps the v1 apply.
         handle_inbound_signaling_text(
@@ -2930,7 +2933,7 @@ mod tests {
         )
         .await;
         assert_eq!(router_ctx.command_templates.len(), 1);
-        assert_eq!(router_ctx.command_templates.revision(), None);
+        assert_eq!(router_ctx.command_templates.revision(), Some(0));
     }
 
     // ====== Source-gated authorization wrapper ======
