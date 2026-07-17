@@ -400,15 +400,20 @@ impl MediaProducer {
         }
     }
 
-    /// Live-update knobs (fps / quality). The video pipeline thread
-    /// owns the encoder + ticker, so we deliver via the per-connection
-    /// `settings_tx` mpsc channel; the loop's `try_recv` drains all
-    /// pending updates on the next tick and rebuilds ticker (fps) +
-    /// encoder (quality / bitrate). `bitrate_kbps` is currently routed
-    /// to the encoder rebuild path but per-codec mapping (h264 bps vs
-    /// vpx bps vs av1 quality-only) lives outside this fn — the
-    /// encoder factory pulls from the merged DeskSettings, not from
-    /// the IPC payload directly. No-op on unknown connection_id.
+    /// Live-update knobs (fps / quality / bitrate cap). The video
+    /// pipeline thread owns the encoder + ticker, so we deliver via the
+    /// per-connection `settings_tx` mpsc channel; the loop's `try_recv`
+    /// drains all pending updates on the next tick, retuning the frame
+    /// interval (fps) and rebuilding the encoder (quality).
+    ///
+    /// `bitrate_kbps` does *not* go through the rebuild path: it is
+    /// folded into a tri-state cap directive and applied in place via
+    /// [`VideoEncoder::set_bitrate_cap`], because cap updates arrive at
+    /// REMB cadence (~1 Hz) and rebuilding per update would cause an
+    /// IDR storm. Codecs that do not implement `set_bitrate_cap` fall
+    /// back to the trait default and ignore the cap.
+    ///
+    /// No-op on unknown connection_id.
     ///
     /// Audio is intentionally not subscribed: Opus owns its frame size
     /// (20 ms fixed) and bitrate is set at create time; runtime audio
