@@ -6,12 +6,13 @@
 //! mapping from an [`AgentEnvelope`] + outcome, and the [`AuditSink`] contract
 //! that consumes them.
 //!
-//! The event fields mirror the `ai_audit_event` Sea-ORM entity **minus** the
-//! database primary key, so a persistence sink can map an [`AuditEvent`] onto a
-//! row one-to-one. The current form is single-machine (the server logs events);
-//! the database-backed sink lands in M2. Because this crate is whitelisted as a
-//! cross-boundary dependency, both the device-side emitter (worker) and the
-//! future parent-repo persistence sink share this one definition.
+//! The event fields correspond closely to the `ai_audit_event` Sea-ORM entity,
+//! so a persistence sink can map an [`AuditEvent`] onto a row with little
+//! translation. The mapping is deliberately not one-to-one: the row carries a
+//! database primary key and a sink-stamped receive time that no emitter can
+//! supply. Because this crate is whitelisted as a cross-boundary dependency,
+//! both the device-side emitter (worker) and the persistence sink share this one
+//! definition.
 //!
 //! Two invariants the builders enforce:
 //! - **Summaries only.** `input_summary` / `output_summary` carry counts and
@@ -107,18 +108,23 @@ impl AuditEventType {
     }
 }
 
-/// One audit event. Field-for-field compatible with the `ai_audit_event`
-/// entity minus its database `id`. `created_at` is an RFC3339 string (the
-/// emitter stamps it) so this crate stays free of a `chrono` dependency; the
-/// persistence sink parses it into a timestamp column.
+/// One audit event, as reported by its emitter. `occurred_at` is an RFC3339
+/// string (the emitter stamps it) so this crate stays free of a `chrono`
+/// dependency; the persistence sink parses it into a timestamp column.
+///
+/// `occurred_at` describes when the emitter believes the event happened. It is
+/// self-reported and therefore only as trustworthy as the emitter's clock, so a
+/// sink must not use it for retention or ordering decisions — it should stamp
+/// its own receive time for those.
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct AuditEvent {
     /// Stable event identifier (emitter-generated, e.g. a UUID).
     pub event_id: String,
-    /// RFC3339 timestamp; emitter-stamped.
-    pub created_at: String,
+    /// RFC3339 timestamp of when the event occurred; emitter-stamped, so it is
+    /// not authoritative on the receiving side.
+    pub occurred_at: String,
 
     // ---- correlation ----
     pub request_id: String,
@@ -164,13 +170,13 @@ impl AuditEvent {
     /// summaries, duration) are set by the named constructors.
     fn from_envelope(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         event_type: AuditEventType,
         envelope: &AgentEnvelope,
     ) -> Self {
         AuditEvent {
             event_id,
-            created_at,
+            occurred_at,
             request_id: envelope.request_id.0.clone(),
             task_id: envelope.parent_task_id.as_ref().map(|t| t.0.clone()),
             policy_name: envelope.scope.policy_name.clone(),
@@ -199,9 +205,9 @@ impl AuditEvent {
     }
 
     /// `ai.task.created` — the call was accepted and is about to run.
-    pub fn task_created(event_id: String, created_at: String, envelope: &AgentEnvelope) -> Self {
+    pub fn task_created(event_id: String, occurred_at: String, envelope: &AgentEnvelope) -> Self {
         let mut event =
-            Self::from_envelope(event_id, created_at, AuditEventType::TaskCreated, envelope);
+            Self::from_envelope(event_id, occurred_at, AuditEventType::TaskCreated, envelope);
         event.result = "created".to_string();
         event
     }
@@ -211,14 +217,14 @@ impl AuditEvent {
     /// redaction count, and how long the collection took.
     pub fn context_collected(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         envelope: &AgentEnvelope,
         output: &OperationOutput,
         duration_ms: i64,
     ) -> Self {
         let mut event = Self::from_envelope(
             event_id,
-            created_at,
+            occurred_at,
             AuditEventType::ContextCollected,
             envelope,
         );
@@ -237,13 +243,13 @@ impl AuditEvent {
     /// `ai.task.completed` — the call finished successfully.
     pub fn task_completed(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         envelope: &AgentEnvelope,
         duration_ms: i64,
     ) -> Self {
         let mut event = Self::from_envelope(
             event_id,
-            created_at,
+            occurred_at,
             AuditEventType::TaskCompleted,
             envelope,
         );
@@ -257,13 +263,13 @@ impl AuditEvent {
     /// carry policy detail — see `AgentError::safe_for_model`).
     pub fn task_failed(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         envelope: &AgentEnvelope,
         error: &AgentError,
         duration_ms: i64,
     ) -> Self {
         let mut event =
-            Self::from_envelope(event_id, created_at, AuditEventType::TaskFailed, envelope);
+            Self::from_envelope(event_id, occurred_at, AuditEventType::TaskFailed, envelope);
         event.capability = envelope
             .operation
             .input
@@ -283,12 +289,16 @@ impl AuditEvent {
     /// is not stored.
     pub fn task_failed_for_request(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         request_id: &str,
         error: &AgentError,
     ) -> Self {
-        let mut event =
-            Self::task_scoped(event_id, created_at, AuditEventType::TaskFailed, request_id);
+        let mut event = Self::task_scoped(
+            event_id,
+            occurred_at,
+            AuditEventType::TaskFailed,
+            request_id,
+        );
         event.result = "error".to_string();
         event.output_summary = Some(format!("{:?}", error.kind));
         event
@@ -301,13 +311,13 @@ impl AuditEvent {
     /// engine carries identity through the orchestrator.
     fn task_scoped(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         event_type: AuditEventType,
         request_id: &str,
     ) -> Self {
         AuditEvent {
             event_id,
-            created_at,
+            occurred_at,
             request_id: request_id.to_string(),
             event_type: event_type.as_str().to_string(),
             ..Default::default()
@@ -319,7 +329,7 @@ impl AuditEvent {
     /// prompt itself is never stored.
     pub fn model_requested(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         request_id: &str,
         caller: &CallerRef,
         input_summary: String,
@@ -327,7 +337,7 @@ impl AuditEvent {
     ) -> Self {
         let mut event = Self::task_scoped(
             event_id,
-            created_at,
+            occurred_at,
             AuditEventType::ModelRequested,
             request_id,
         );
@@ -345,7 +355,7 @@ impl AuditEvent {
     #[allow(clippy::too_many_arguments)]
     pub fn model_responded(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         request_id: &str,
         caller: &CallerRef,
         output_summary: String,
@@ -355,7 +365,7 @@ impl AuditEvent {
     ) -> Self {
         let mut event = Self::task_scoped(
             event_id,
-            created_at,
+            occurred_at,
             AuditEventType::ModelResponded,
             request_id,
         );
@@ -375,13 +385,13 @@ impl AuditEvent {
     /// description, never the unredacted data.
     pub fn redaction_failed(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         request_id: &str,
         reason: &str,
     ) -> Self {
         let mut event = Self::task_scoped(
             event_id,
-            created_at,
+            occurred_at,
             AuditEventType::RedactionFailed,
             request_id,
         );
@@ -392,10 +402,10 @@ impl AuditEvent {
 
     /// `ai.task.cancelled` — the diagnose task was cancelled (e.g. operator
     /// handoff to manual remote control).
-    pub fn task_cancelled(event_id: String, created_at: String, request_id: &str) -> Self {
+    pub fn task_cancelled(event_id: String, occurred_at: String, request_id: &str) -> Self {
         let mut event = Self::task_scoped(
             event_id,
-            created_at,
+            occurred_at,
             AuditEventType::TaskCancelled,
             request_id,
         );
@@ -411,13 +421,13 @@ impl AuditEvent {
     /// orchestrator task-scoped events.
     fn exec_scoped(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         event_type: AuditEventType,
         exec_request_id: &str,
     ) -> Self {
         AuditEvent {
             event_id,
-            created_at,
+            occurred_at,
             request_id: exec_request_id.to_string(),
             event_type: event_type.as_str().to_string(),
             ..Default::default()
@@ -428,7 +438,7 @@ impl AuditEvent {
     /// produced. `summary` is content-free (the impact description / template).
     pub fn capability_requested(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         exec_request_id: &str,
         capability: Option<&str>,
         risk: &str,
@@ -436,7 +446,7 @@ impl AuditEvent {
     ) -> Self {
         let mut event = Self::exec_scoped(
             event_id,
-            created_at,
+            occurred_at,
             AuditEventType::CapabilityRequested,
             exec_request_id,
         );
@@ -451,14 +461,14 @@ impl AuditEvent {
     /// not permitted by the active mode. `reason` is content-free.
     pub fn capability_denied(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         exec_request_id: &str,
         risk: &str,
         reason: String,
     ) -> Self {
         let mut event = Self::exec_scoped(
             event_id,
-            created_at,
+            occurred_at,
             AuditEventType::CapabilityDenied,
             exec_request_id,
         );
@@ -472,14 +482,14 @@ impl AuditEvent {
     /// against the active scope (the user approved).
     pub fn capability_allowed(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         exec_request_id: &str,
         capability: Option<&str>,
         risk: &str,
     ) -> Self {
         let mut event = Self::exec_scoped(
             event_id,
-            created_at,
+            occurred_at,
             AuditEventType::CapabilityAllowed,
             exec_request_id,
         );
@@ -493,13 +503,13 @@ impl AuditEvent {
     /// server minted `approval_id`.
     pub fn approval_granted(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         exec_request_id: &str,
         approval_id: &str,
     ) -> Self {
         let mut event = Self::exec_scoped(
             event_id,
-            created_at,
+            occurred_at,
             AuditEventType::ApprovalGranted,
             exec_request_id,
         );
@@ -509,10 +519,10 @@ impl AuditEvent {
     }
 
     /// `ai.approval.denied` — the user rejected a previewed execution.
-    pub fn approval_denied(event_id: String, created_at: String, exec_request_id: &str) -> Self {
+    pub fn approval_denied(event_id: String, occurred_at: String, exec_request_id: &str) -> Self {
         let mut event = Self::exec_scoped(
             event_id,
-            created_at,
+            occurred_at,
             AuditEventType::ApprovalDenied,
             exec_request_id,
         );
@@ -523,7 +533,7 @@ impl AuditEvent {
     /// `ai.command.executed` — an approved command was dispatched to the worker.
     pub fn command_executed(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         exec_request_id: &str,
         approval_id: &str,
         capability: Option<&str>,
@@ -531,7 +541,7 @@ impl AuditEvent {
     ) -> Self {
         let mut event = Self::exec_scoped(
             event_id,
-            created_at,
+            occurred_at,
             AuditEventType::CommandExecuted,
             exec_request_id,
         );
@@ -547,7 +557,7 @@ impl AuditEvent {
     /// `duration_ms` mirror the read-collection events.
     pub fn command_completed(
         event_id: String,
-        created_at: String,
+        occurred_at: String,
         exec_request_id: &str,
         success: bool,
         summary: String,
@@ -556,7 +566,7 @@ impl AuditEvent {
     ) -> Self {
         let mut event = Self::exec_scoped(
             event_id,
-            created_at,
+            occurred_at,
             AuditEventType::CommandCompleted,
             exec_request_id,
         );
@@ -776,12 +786,25 @@ mod tests {
     }
 
     #[test]
+    fn wire_json_names_the_timestamp_occurred_at() {
+        // The emitter-stamped time must never travel as `created_at`: a sink that
+        // sees that name is liable to treat it as its own insert time and use it
+        // for retention or ordering, which the emitter must not be able to steer.
+        let env = envelope(process_list_input());
+        let e = AuditEvent::task_created("evt_1".into(), "2026-06-12T10:00:00Z".into(), &env);
+        let json = serde_json::to_string(&e).unwrap();
+
+        assert!(json.contains("\"occurred_at\":\"2026-06-12T10:00:00Z\""));
+        assert!(!json.contains("created_at"));
+    }
+
+    #[test]
     fn task_created_maps_trusted_subject_fields() {
         let env = envelope(process_list_input());
         let e = AuditEvent::task_created("evt_1".into(), "2026-06-12T10:00:00Z".into(), &env);
 
         assert_eq!(e.event_id, "evt_1");
-        assert_eq!(e.created_at, "2026-06-12T10:00:00Z");
+        assert_eq!(e.occurred_at, "2026-06-12T10:00:00Z");
         assert_eq!(e.event_type, "ai.task.created");
         assert_eq!(e.request_id, "req_42");
         assert_eq!(e.task_id.as_deref(), Some("task_7"));
