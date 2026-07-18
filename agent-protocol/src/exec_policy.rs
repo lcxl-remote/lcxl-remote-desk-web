@@ -115,6 +115,15 @@ pub fn build_exact_argv_draft(
 /// not a cryptographic commitment (the draft is held server-side and immutable),
 /// only a tamper check. Shared so the manager (preview) and the daemon (PEP)
 /// compute the identical value.
+///
+/// It deliberately covers only what the worker *runs* — program, argv, cwd, and the
+/// execution limits — not the *classification* fields (`risk` / effect / `shell`),
+/// which are derived from the template and can change without the argv changing (an
+/// `effect` edited read_only → mutating lifts the risk but leaves the argv, and so
+/// this fingerprint, identical). Callers that must reject classification drift —
+/// the single-device PEP and the fleet approval / dispatch re-checks — compare the
+/// **whole rebuilt [`ExecPlanDraft`]** (which carries `risk` / `shell` /
+/// `template_id`), not just this hash.
 pub fn fingerprint(
     program: &str,
     argv: &[String],
@@ -448,6 +457,36 @@ mod tests {
         );
         let draft = build_exact_argv_draft(&t, ExecLimits::defaults(), None);
         assert_eq!(draft.risk, RiskLevel::High);
+    }
+
+    #[test]
+    fn effect_flip_keeps_fingerprint_but_changes_the_full_draft() {
+        // A template edited in place from read_only to mutating — same id, same argv —
+        // keeps the identical fingerprint (which hashes only program/argv/cwd/limits)
+        // but lifts the derived risk. A drift check that compares only the fingerprint
+        // would miss this; a whole-draft comparison (used by the PEP and the fleet
+        // approval / dispatch re-checks) catches it — which is exactly why those paths
+        // compare every draft field rather than trusting the fingerprint alone.
+        let argv = &["custom-tool", "--flag"];
+        let read_only = build_exact_argv_draft(
+            &template("t", argv, ExecEffect::ReadOnly),
+            ExecLimits::defaults(),
+            None,
+        );
+        let mutating = build_exact_argv_draft(
+            &template("t", argv, ExecEffect::Mutating),
+            ExecLimits::defaults(),
+            None,
+        );
+        assert_eq!(
+            read_only.fingerprint, mutating.fingerprint,
+            "fingerprint is blind to the effect flip"
+        );
+        assert_ne!(read_only.risk, mutating.risk, "derived risk changed");
+        assert_ne!(
+            read_only, mutating,
+            "the whole rebuilt draft differs, so a full-field drift check rejects it"
+        );
     }
 
     #[test]

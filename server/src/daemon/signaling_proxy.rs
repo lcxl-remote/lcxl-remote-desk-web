@@ -2816,7 +2816,8 @@ mod tests {
 
     fn command_template_sync_text() -> String {
         use desk_agent_protocol::command_template::{
-            COMMAND_TEMPLATE_SYNC_VERSION, CommandTemplateSyncPayload, SyncedCommandTemplate,
+            COMMAND_TEMPLATE_SYNC_EPOCH, COMMAND_TEMPLATE_SYNC_VERSION, CommandTemplateSyncPayload,
+            SyncedCommandTemplate,
         };
         use desk_agent_protocol::exec::ExecEffect;
         let payload = CommandTemplateSyncPayload {
@@ -2827,7 +2828,7 @@ mod tests {
                 effect: ExecEffect::ReadOnly,
             }],
             command_template_revision: Some(1),
-            epoch: 0,
+            epoch: COMMAND_TEMPLATE_SYNC_EPOCH,
         };
         let model = SignalingModel::new(
             "rs",
@@ -2878,19 +2879,20 @@ mod tests {
         assert_eq!(router_ctx.command_templates.len(), 1);
     }
 
-    /// A current daemon accepts a v1 payload (from an old manager during a rolling
-    /// upgrade — no revision, applied as `None`) and ignores a payload whose
-    /// version is outside the supported range (a future version reaching this
-    /// older daemon), leaving the cache untouched.
+    /// A current daemon applies a current-epoch sync, ignores a payload whose version
+    /// is outside the supported range (a future version reaching this older daemon),
+    /// and drops a pre-narrowing (epoch 0) frame at the epoch floor — each leaving the
+    /// prior applied set intact.
     #[tokio::test]
-    async fn command_template_sync_accepts_v1_and_ignores_unknown_version() {
+    async fn command_template_sync_applies_current_epoch_and_ignores_unknown_version() {
         use desk_agent_protocol::command_template::{
-            CommandTemplateSyncPayload, SyncedCommandTemplate,
+            COMMAND_TEMPLATE_SYNC_EPOCH, COMMAND_TEMPLATE_SYNC_VERSION, CommandTemplateSyncPayload,
+            SyncedCommandTemplate,
         };
         use desk_agent_protocol::exec::ExecEffect;
         let (router_ctx, _out_tx) = make_router_ctx();
 
-        let make_text = |version: u16, revision: Option<i64>| {
+        let make_text = |version: u16, epoch: u16, revision: Option<i64>| {
             let payload = CommandTemplateSyncPayload {
                 version,
                 templates: vec![SyncedCommandTemplate {
@@ -2899,7 +2901,7 @@ mod tests {
                     effect: ExecEffect::ReadOnly,
                 }],
                 command_template_revision: revision,
-                epoch: 0,
+                epoch,
             };
             let model = SignalingModel::new(
                 "rs",
@@ -2912,28 +2914,42 @@ mod tests {
             serde_json::to_string(&model).unwrap()
         };
 
-        // v1 (no epoch, no revision) from trusted central: applied; the watermark
-        // records the defaults (epoch 0, revision 0).
+        // A current-epoch sync from trusted central is applied.
         handle_inbound_signaling_text(
-            make_text(1, None),
+            make_text(
+                COMMAND_TEMPLATE_SYNC_VERSION,
+                COMMAND_TEMPLATE_SYNC_EPOCH,
+                Some(3),
+            ),
             &router_ctx,
             InboundSignalingSource::TrustedCentral,
             false,
         )
         .await;
         assert_eq!(router_ctx.command_templates.len(), 1);
-        assert_eq!(router_ctx.command_templates.revision(), Some(0));
+        assert_eq!(router_ctx.command_templates.revision(), Some(3));
 
-        // An unsupported future version is ignored — the cache keeps the v1 apply.
+        // An unsupported future version is ignored — the cache keeps the prior apply.
         handle_inbound_signaling_text(
-            make_text(99, Some(5)),
+            make_text(99, COMMAND_TEMPLATE_SYNC_EPOCH, Some(5)),
             &router_ctx,
             InboundSignalingSource::TrustedCentral,
             false,
         )
         .await;
         assert_eq!(router_ctx.command_templates.len(), 1);
-        assert_eq!(router_ctx.command_templates.revision(), Some(0));
+        assert_eq!(router_ctx.command_templates.revision(), Some(3));
+
+        // A pre-narrowing (epoch 0) frame is dropped by the epoch floor even from a
+        // trusted source — it can never re-widen the narrowed cache.
+        handle_inbound_signaling_text(
+            make_text(COMMAND_TEMPLATE_SYNC_VERSION, 0, Some(9)),
+            &router_ctx,
+            InboundSignalingSource::TrustedCentral,
+            false,
+        )
+        .await;
+        assert_eq!(router_ctx.command_templates.revision(), Some(3));
     }
 
     // ====== Source-gated authorization wrapper ======

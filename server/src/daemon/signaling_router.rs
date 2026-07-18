@@ -31,7 +31,9 @@ use desk_agent_protocol::diagnose::{
     COLLECT_CHUNK_PAYLOAD_LIMIT, CollectRequest, CollectResponse, CollectResponseError,
     DiagnoseEvent,
 };
-use desk_agent_protocol::edge_exec::{EdgeExecDisposition, EdgeExecResultPayload};
+use desk_agent_protocol::edge_exec::{
+    EdgeExecDisposition, EdgeExecRequestPayload, EdgeExecResultPayload,
+};
 use desk_agent_protocol::exec::{
     ConfirmExecData, ExecDecision, ExecEffect, ExecPlan, ExecPreview, ExecResultPayload,
     ResolveExecData,
@@ -296,12 +298,12 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::AgentRequest => RouteOwnership::Worker,
 
         // ---- Error / Unknown ----
-        // After batch 4 these are daemon-owned. `Error` is something
-        // the daemon emits at the wire level (legacy: worker bounced
-        // it through the bridge after `handle_message` failed; now
-        // worker errors take the typed `WorkerToService::SignalingError`
-        // path so the daemon can ferry them back). `Unknown` is the
-        // serde-default catch-all for unrecognised wire enum values
+        // These are daemon-owned. `Error` is something the daemon emits
+        // at the wire level (an earlier design bounced it through the
+        // bridge after `handle_message` failed; now worker errors take
+        // the typed `WorkerToService::SignalingError` path so the daemon
+        // can ferry them back). `Unknown` is the serde-default catch-all
+        // for unrecognised wire enum values
         // — bouncing it to the worker would only round-trip an error
         // back. Both swallow at the daemon with a trace log.
         SignalingType::Error | SignalingType::Unknown => RouteOwnership::Daemon,
@@ -644,8 +646,7 @@ fn risk_str(risk: desk_agent_protocol::RiskLevel) -> &'static str {
 /// `ServiceToWorker::*` typed IPC variants; daemon-emitted notifications
 /// and dead-enum variants (`Answer`, `Init`, `Heartbeat`, `Error`,
 /// `Unknown`, ...) are trace-logged + dropped. There is no fallback
-/// path — batch 4 of the typed-IPC migration removed the
-/// `SignalingMessage` bridge.
+/// path — the typed-IPC migration removed the `SignalingMessage` bridge.
 pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), RouterError> {
     // First fail-closed door: capability-capped sessions (a redeemed grant or a
     // legacy support session — both carry an `access_ceiling`) may only use the
@@ -815,10 +816,9 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // Daemon-emitted or dead inbound; the browser should never
         // send these at us but if it does, swallow rather than
         // routing onward. See classify() doc-comments for per-variant
-        // rationale. After batch 4 `Error` and `Unknown` join this
-        // group (they used to be worker-bound for verbose logging,
-        // but since the bridge is gone there is no point round-tripping
-        // them).
+        // rationale. `Error` and `Unknown` are in this group too (they
+        // used to be worker-bound for verbose logging, but since the
+        // bridge is gone there is no point round-tripping them).
         SignalingType::Answer
         | SignalingType::Init
         | SignalingType::AcceptControl
@@ -862,7 +862,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             handle_enable_private_screen_inbound(ctx, model).await
         }
         SignalingType::UpdateDeskSettings => handle_update_desk_settings_inbound(ctx, model).await,
-        // Batch 2 of the typed-IPC migration — manager plane.
+        // Manager-plane typed-IPC dispatch.
         SignalingType::ManagerSystemInfo => handle_manager_system_info_inbound(ctx, model).await,
         SignalingType::ManagerQuerySettings => {
             handle_manager_query_settings_inbound(ctx, model).await
@@ -872,7 +872,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         SignalingType::ManagerUpdateSettings => {
             handle_manager_update_settings_inbound(ctx, model).await
         }
-        // Batch 3 of the typed-IPC migration — terminal plane.
+        // Terminal-plane typed-IPC dispatch.
         SignalingType::StartTerminal => handle_start_terminal_inbound(ctx, model).await,
         SignalingType::SendDataToTerminal => handle_send_data_to_terminal_inbound(ctx, model).await,
         SignalingType::ResizeTerminal => handle_resize_terminal_inbound(ctx, model).await,
@@ -1197,10 +1197,12 @@ fn handle_command_template_sync_inbound(
             return Ok(());
         }
     };
-    // Accept any version in the supported range. A v1 payload (old manager during
-    // a rolling upgrade) carries no revision but still replaces the cache; a v2
-    // payload carries the shared revision. A version outside the range (e.g. a
-    // future v3 reaching this older daemon) is safely ignored.
+    // Accept any version in the supported range; a version outside it (e.g. a
+    // future version reaching an older daemon) is safely ignored. The set-narrowing
+    // wire epoch — not the payload version — is what guards against a stale
+    // pre-narrowing sender: `replace` rejects any frame below the current epoch
+    // floor, so a payload that predates set narrowing (epoch 0) never widens the
+    // cache regardless of its version.
     if !(MIN_COMMAND_TEMPLATE_SYNC_VERSION..=COMMAND_TEMPLATE_SYNC_VERSION)
         .contains(&payload.version)
     {
@@ -1716,7 +1718,7 @@ async fn handle_change_display_settings_inbound(
     Ok(())
 }
 
-/// Batch 1: parse the inbound `EnablePrivateScreen` payload and ship
+/// Parse the inbound `EnablePrivateScreen` payload and ship
 /// it to the worker as typed [`ServiceToWorker::EnablePrivateScreen`].
 /// Replaces the legacy `SignalingMessage` opaque envelope.
 ///
@@ -1841,7 +1843,7 @@ async fn handle_update_desk_settings_inbound(
     Ok(())
 }
 
-// ---- Batch 2: manager plane typed-IPC dispatch helpers ----
+// ---- Manager-plane typed-IPC dispatch helpers ----
 //
 // All five share the same skeleton — pull `from_connection_id` (the
 // browser's PC ID), build the typed `ServiceToWorker::Manager*Request`
@@ -2016,7 +2018,7 @@ async fn handle_manager_update_settings_inbound(
     Ok(())
 }
 
-// ---- Batch 3: terminal-plane typed-IPC dispatch helpers ----
+// ---- Terminal-plane typed-IPC dispatch helpers ----
 //
 // The 5 inbound terminal request types share the same skeleton as the
 // manager-plane helpers — pull `from_connection_id`, build the typed
@@ -3315,15 +3317,32 @@ pub(crate) fn send_edge_exec_result(
     );
 }
 
-/// Re-validate a manager-sealed [`ExecPlan`] against this daemon's own view
-/// (defense in depth — the manager draft is never trusted). Returns the model-
-/// safe rejection reason on the first failure, or `None` when the plan passes
-/// every check. The order mirrors the manager's preview: blocklist → exact-argv
-/// whitelist + fingerprint → `risk <= max_risk`.
-fn pep_validate_edge_exec_plan(
+/// Whether the sealed plan's own render matches the [`ExecPlanDraft`] a validator
+/// authoritatively reconstructed. Compares every executable field (the ids and
+/// approval token are not on the draft). Shared by the fleet and agentic PEP paths.
+fn plan_matches_draft(
+    plan: &ExecPlan,
+    expected: &desk_agent_protocol::exec::ExecPlanDraft,
+) -> bool {
+    expected.program == plan.program
+        && expected.argv == plan.argv
+        && expected.risk == plan.risk
+        && expected.shell == plan.shell
+        && expected.cwd == plan.cwd
+        && expected.template_id == plan.template_id
+        && expected.timeout_ms == plan.timeout_ms
+        && expected.max_stdout_bytes == plan.max_stdout_bytes
+        && expected.max_stderr_bytes == plan.max_stderr_bytes
+        && expected.fingerprint == plan.fingerprint
+}
+
+/// Source-agnostic PEP checks that every sealed [`ExecPlan`] must pass regardless
+/// of how it was rendered: the effective blocklist over the full argv, and the
+/// `risk <= max_risk` ceiling. The template-reproduction check differs by source
+/// and lives in the per-source validators.
+fn pep_common_checks(
     plan: &ExecPlan,
     max_risk: desk_agent_protocol::RiskLevel,
-    templates: &[desk_agent_protocol::command_template::SyncedCommandTemplate],
     blocklist: &[desk_agent_protocol::command_blocklist::BlocklistRule],
 ) -> Option<String> {
     // The blocklist operates over the full argv (program is `argv[0]`), matched
@@ -3338,19 +3357,45 @@ fn pep_validate_edge_exec_plan(
         return Some(format!("pep_rejected:blocklist:{rule}"));
     }
 
-    // Exact-argv whitelist: the plan's `template_id` must name a synced template
-    // whose *authoritative* re-render reproduces the plan field-for-field. Fleet
-    // exec has no per-request limit input, so the authoritative render is always
-    // the fixed fleet defaults with no cwd (identical to the sealing side in
-    // `fleet_approval::verify_template_unchanged`). The plan's own `cwd` /
-    // `timeout_ms` / output caps are therefore compared *against those
-    // authoritative values* — never fed back into the expected render. If the
-    // render used the plan's own limits, a tampered limit would be hashed into
-    // both sides and the fingerprint would still agree (self-consistent tamper);
-    // rebuilding from the fixed authority is what makes a widened timeout / output
-    // cap detectable. A `template_id` is unique only per-org, so several synced
-    // templates can share it; try every candidate and accept if any one
-    // reproduces the plan exactly.
+    // max_risk ceiling (independent of the manager's per-device decision).
+    if plan.risk > max_risk {
+        return Some(format!(
+            "pep_rejected:risk_exceeds_max:{:?}>{:?}",
+            plan.risk, max_risk
+        ));
+    }
+
+    None
+}
+
+/// Re-validate a manager-sealed **fleet** [`ExecPlan`] against this daemon's own
+/// view (defense in depth — the manager draft is never trusted). Returns the
+/// model-safe rejection reason on the first failure, or `None` when the plan
+/// passes. Order: common checks (blocklist, risk ceiling) → exact-argv whitelist
+/// + fingerprint.
+///
+/// Fleet exec has no per-request limit input, so the authoritative render is
+/// always the fixed fleet defaults with no cwd (identical to the sealing side in
+/// `fleet_approval::verify_template_unchanged`). The plan's own `cwd` /
+/// `timeout_ms` / output caps are therefore compared *against those authoritative
+/// values* — never fed back into the expected render. If the render used the
+/// plan's own limits, a tampered limit would be hashed into both sides and the
+/// fingerprint would still agree (self-consistent tamper); rebuilding from the
+/// fixed authority is what makes a widened timeout / output cap detectable. A
+/// `template_id` is unique only per-org, so several synced **operator** templates
+/// can share it; try every candidate and accept if any one reproduces the plan
+/// exactly. This path never consults the built-in templates — a fleet plan must
+/// come from an operator template.
+fn validate_fleet_edge_exec(
+    plan: &ExecPlan,
+    max_risk: desk_agent_protocol::RiskLevel,
+    templates: &[desk_agent_protocol::command_template::SyncedCommandTemplate],
+    blocklist: &[desk_agent_protocol::command_blocklist::BlocklistRule],
+) -> Option<String> {
+    if let Some(reason) = pep_common_checks(plan, max_risk, blocklist) {
+        return Some(reason);
+    }
+
     let mut saw_candidate = false;
     let mut faithful = false;
     for template in templates
@@ -3359,16 +3404,7 @@ fn pep_validate_edge_exec_plan(
     {
         saw_candidate = true;
         let expected = build_exact_argv_draft(template, ExecLimits::defaults(), None);
-        if expected.program == plan.program
-            && expected.argv == plan.argv
-            && expected.risk == plan.risk
-            && expected.shell == plan.shell
-            && expected.cwd == plan.cwd
-            && expected.timeout_ms == plan.timeout_ms
-            && expected.max_stdout_bytes == plan.max_stdout_bytes
-            && expected.max_stderr_bytes == plan.max_stderr_bytes
-            && expected.fingerprint == plan.fingerprint
-        {
+        if plan_matches_draft(plan, &expected) {
             faithful = true;
             break;
         }
@@ -3381,12 +3417,61 @@ fn pep_validate_edge_exec_plan(
         });
     }
 
-    // max_risk ceiling (independent of the manager's per-device decision).
-    if plan.risk > max_risk {
-        return Some(format!(
-            "pep_rejected:risk_exceeds_max:{:?}>{:?}",
-            plan.risk, max_risk
-        ));
+    None
+}
+
+/// Re-validate a manager-sealed **agentic** [`ExecPlan`] by re-running the shared
+/// command classifier over the daemon-only `validation_input` envelope. Returns
+/// the model-safe rejection reason on the first failure, or `None` when the plan
+/// passes. Order: common checks (blocklist, risk ceiling) → re-classification.
+///
+/// The agentic plan was sealed at the manager from a per-turn classification of
+/// this exact input (built-in **or** operator template, clamped per-turn limits +
+/// the input's cwd), which the fixed fleet render cannot reproduce. So instead of
+/// re-rendering a template with fleet defaults, the daemon feeds `validation_input`
+/// back through [`classify_command_with_all`] with its own operator snapshot and
+/// effective blocklist — the same function, the same tables the manager used — and
+/// requires the result to be `ConfirmRequired` with a draft that reproduces the
+/// sealed plan field-for-field. This naturally covers both the built-in and
+/// operator template families and the per-turn clamped limits / cwd, and it makes
+/// an in-bounds limit tamper detectable: the classifier re-derives the limits from
+/// the input, so a plan whose limits were altered away from what the input yields
+/// no longer matches.
+///
+/// Honest boundary: this defeats a tamper that alters only the sealed plan's
+/// **executable / classification draft fields** (program, argv, cwd, shell, risk,
+/// template_id, limits, fingerprint) — a self-consistent forgery of what would run.
+/// It does not by itself vouch for the two id fields that are not on the draft
+/// (`exec_request_id`, `approval_id`); those are bound separately in
+/// [`handle_edge_exec_request_inbound`] (frame-id match + non-empty approval token),
+/// and their values remain transport-trusted manager metadata, not an independent
+/// cryptographic commitment. Nor is it a commitment against a manager that alters
+/// `validation_input` and `plan` in lockstep — that is the same trust level as the
+/// fleet path, where the manager is the PDP.
+fn validate_agentic_edge_exec(
+    plan: &ExecPlan,
+    validation_input: &desk_agent_protocol::ExecInput,
+    max_risk: desk_agent_protocol::RiskLevel,
+    templates: &[desk_agent_protocol::command_template::SyncedCommandTemplate],
+    blocklist: &[desk_agent_protocol::command_blocklist::BlocklistRule],
+) -> Option<String> {
+    if let Some(reason) = pep_common_checks(plan, max_risk, blocklist) {
+        return Some(reason);
+    }
+
+    let outcome = desk_diagnose_core::exec_classify::classify_command_with_all(
+        validation_input,
+        templates,
+        blocklist,
+    );
+    if outcome.classification.decision != ExecDecision::ConfirmRequired {
+        return Some("pep_rejected:agentic_not_executable".to_string());
+    }
+    let Some(expected) = outcome.draft else {
+        return Some("pep_rejected:agentic_no_draft".to_string());
+    };
+    if !plan_matches_draft(plan, &expected) {
+        return Some("pep_rejected:agentic_reclassify_drift".to_string());
     }
 
     None
@@ -3418,7 +3503,11 @@ async fn handle_edge_exec_request_inbound(
         return Ok(());
     };
 
-    let plan = match model.get_data::<ExecPlan>() {
+    // The frame carries a source-tagged envelope (`Fleet` / `Agentic`), never a
+    // bare `ExecPlan`: the two sources need different re-validation (fleet re-renders
+    // an operator template with fixed defaults; agentic re-classifies the original
+    // input). A missing tag / missing agentic input is a decode error → rejected.
+    let payload = match model.get_data::<EdgeExecRequestPayload>() {
         Ok(p) => p,
         Err(e) => {
             send_edge_exec_result(
@@ -3431,6 +3520,38 @@ async fn handle_edge_exec_request_inbound(
             return Ok(());
         }
     };
+
+    // Bind the plan's identifiers to the authz-validated frame. The authz block was
+    // validated against `request_id` (the frame id) by the proxy gate, and the worker
+    // is correlated on that same `request_id`; a plan whose own `exec_request_id`
+    // names a *different* attempt, or that carries an empty `approval_id`, is
+    // malformed — the daemon must not let a plan self-report an id that diverges from
+    // the one the authz proof covers, nor dispatch a plan with no approval token. The
+    // whole-draft re-render can never catch these two fields (they are not on the
+    // draft), so gate them here.
+    {
+        let plan = payload.plan();
+        if plan.exec_request_id.0 != request_id {
+            send_edge_exec_result(
+                &ctx.outbound_tx,
+                &request_id,
+                EdgeExecDisposition::RejectedBeforeDispatch {
+                    reason: "pep_rejected:exec_request_id_mismatch".to_string(),
+                },
+            );
+            return Ok(());
+        }
+        if plan.approval_id.0.is_empty() {
+            send_edge_exec_result(
+                &ctx.outbound_tx,
+                &request_id,
+                EdgeExecDisposition::RejectedBeforeDispatch {
+                    reason: "pep_rejected:missing_approval_id".to_string(),
+                },
+            );
+            return Ok(());
+        }
+    }
 
     // Exec must be runnable in this startup mode. The manager's pre-claim version
     // gate normally prevents dispatch to a daemon that cannot execute, but a PEP
@@ -3448,10 +3569,23 @@ async fn handle_edge_exec_request_inbound(
 
     let templates = ctx.command_templates.snapshot();
     let effective_blocklist = ctx.command_blocklist.snapshot();
-    if let Some(reason) =
-        pep_validate_edge_exec_plan(&plan, authz.max_risk, &templates, &effective_blocklist)
-    {
-        log::warn!("[fleet-exec] PEP rejected plan for request {request_id}: {reason}");
+    let rejection = match &payload {
+        EdgeExecRequestPayload::Fleet { plan } => {
+            validate_fleet_edge_exec(plan, authz.max_risk, &templates, &effective_blocklist)
+        }
+        EdgeExecRequestPayload::Agentic {
+            plan,
+            validation_input,
+        } => validate_agentic_edge_exec(
+            plan,
+            validation_input,
+            authz.max_risk,
+            &templates,
+            &effective_blocklist,
+        ),
+    };
+    if let Some(reason) = rejection {
+        log::warn!("[edge-exec] PEP rejected plan for request {request_id}: {reason}");
         send_edge_exec_result(
             &ctx.outbound_tx,
             &request_id,
@@ -3460,7 +3594,9 @@ async fn handle_edge_exec_request_inbound(
         return Ok(());
     }
 
-    dispatch_fleet_exec_plan(ctx, &request_id, plan).await;
+    // Drop the daemon-only `validation_input`: only the frozen `ExecPlan` argv
+    // reaches the worker (the "worker never sees the command string" invariant).
+    dispatch_fleet_exec_plan(ctx, &request_id, payload.into_plan()).await;
     Ok(())
 }
 
@@ -3708,7 +3844,7 @@ mod tests {
             SignalingType::ConnectionList,
             SignalingType::ConnectionRemoved,
             SignalingType::Heartbeat,
-            // Batch 4: Error / Unknown are daemon-owned now.
+            // Error / Unknown are daemon-owned.
             SignalingType::Error,
             SignalingType::Unknown,
             // AgentResponse only flows worker → control end.
@@ -4097,10 +4233,10 @@ mod tests {
     /// `UNKNOWN_SIGNALING_TYPE` for the ones it can't handle and
     /// bounce a confusing error to the browser).
     ///
-    /// Batch 1 of the typed-IPC migration adds
-    /// `ChangeDisplaySettings` (dead enum), `PrivateScreenStateChanged`
-    /// (worker → browser only), and `AudioPlaybackError` (dead in
-    /// daemon-worker mode) to this list.
+    /// The router swallows `ChangeDisplaySettings` (dead enum),
+    /// `PrivateScreenStateChanged` (worker → browser only), and
+    /// `AudioPlaybackError` (dead in daemon-worker mode) as
+    /// daemon-emitted / dead variants that must never reach the worker.
     #[tokio::test]
     async fn route_swallows_daemon_emitted_variants() {
         let ctx = make_ctx();
@@ -4131,10 +4267,9 @@ mod tests {
     /// Pin behaviour: a stray inbound `AcceptControl` (which would
     /// be a protocol error from the browser, since the daemon emits
     /// AcceptControl outbound) is swallowed — `route` returns Ok
-    /// so the message never reaches the worker. After batch 4 the
-    /// SignalingMessage bridge is gone, so the only way for an
-    /// inbound `AcceptControl` to leak through would be a new
-    /// regression in `route()`'s match.
+    /// so the message never reaches the worker. The SignalingMessage
+    /// bridge is gone, so the only way for an inbound `AcceptControl`
+    /// to leak through would be a new regression in `route()`'s match.
     #[tokio::test]
     async fn route_inbound_accept_control_is_swallowed_not_bridged() {
         let ctx = make_ctx();
@@ -4151,7 +4286,7 @@ mod tests {
             .expect("AcceptControl inbound must be swallowed, not surfaced as error");
     }
 
-    /// Batch 3: every terminal-plane request type is now handled
+    /// Every terminal-plane request type is handled
     /// inline via typed `ServiceToWorker::*Request` IPC. Without an
     /// active worker the typed send is logged but the route call
     /// itself still succeeds.
@@ -4337,7 +4472,7 @@ mod tests {
         assert!(route(&model, &ctx).await.is_ok());
     }
 
-    /// Batch 2: manager-plane requests are handled inline by the
+    /// Manager-plane requests are handled inline by the
     /// router (typed `ServiceToWorker::Manager*Request` IPC). With no
     /// active worker the typed send is logged but the route call
     /// itself still succeeds.
@@ -4498,7 +4633,7 @@ mod tests {
         assert!(route(&model, &ctx).await.is_ok());
     }
 
-    /// Batch 1: `EnablePrivateScreen` is handled inline by the router
+    /// `EnablePrivateScreen` is handled inline by the router
     /// (typed [`ServiceToWorker::EnablePrivateScreen`] IPC). With no
     /// active worker the typed send is logged but the route call
     /// itself still succeeds.
@@ -4600,7 +4735,7 @@ mod tests {
         assert!(ctx.pc_registry.get("conn-other").await.is_some());
     }
 
-    /// Batch 1: `UpdateDeskSettings` is fully handled by the router —
+    /// `UpdateDeskSettings` is fully handled by the router —
     /// it both fans out the typed `UpdateMediaSettings` IPC for the
     /// encoder pipeline AND ships the full settings to the worker as
     /// typed [`ServiceToWorker::UpdateDeskSettings`].
@@ -5727,7 +5862,7 @@ mod tests {
         }
     }
 
-    // ───── Exclusive helper tests (stage 3.3) ─────
+    // ───── Exclusive helper tests ─────
 
     fn settings_with_exclusive(
         enabled: bool,
@@ -5848,8 +5983,8 @@ mod tests {
         assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
     }
 
-    /// An unknown *inner* read kind is the case a phase-1-only check
-    /// would miss: it would slip through to the typed `from_value` and
+    /// An unknown *inner* read kind is the case a single-pass (outer-only)
+    /// check would miss: it would slip through to the typed `from_value` and
     /// hard-fail. The descent to `operation.input.params.kind.kind`
     /// catches it as `UnsupportedCapability`.
     #[test]
@@ -6344,7 +6479,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    // ---- confirm-execution flow (PR2) ----
+    // ---- confirm-execution flow ----
 
     use desk_agent_protocol::exec::{
         ApprovalDecision, ExecPreview, ExecRequestId, ExecResultPayload, ResolveExecData,
@@ -6695,7 +6830,7 @@ mod tests {
                 argv: vec!["net".into(), "stop".into(), "spooler".into()],
                 effect: ExecEffect::Mutating,
             }],
-            0,
+            desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
             Some(1),
         );
 
@@ -6732,7 +6867,7 @@ mod tests {
                 argv: vec!["net".into(), "stop".into(), "spooler".into()],
                 effect: ExecEffect::Mutating,
             }],
-            0,
+            desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
             Some(1),
         );
 
@@ -6766,7 +6901,7 @@ mod tests {
                 argv: vec!["net".into(), "stop".into(), "spooler".into()],
                 effect: ExecEffect::Mutating,
             }],
-            0,
+            desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
             Some(1),
         );
 
@@ -6807,14 +6942,37 @@ mod tests {
     }
 
     fn fleet_exec_model(request_id: &str, plan: &ExecPlan) -> SignalingModel {
-        // After the proxy's dedicated gate unwraps the wrapper, the router handler
-        // sees the inner `ExecPlan` as the frame data.
+        // After the proxy's dedicated gate unwraps the authz wrapper, the router
+        // handler sees the inner source-tagged `EdgeExecRequestPayload` as the frame
+        // data; a fleet plan arrives tagged `Fleet`.
+        let payload = EdgeExecRequestPayload::Fleet { plan: plan.clone() };
         SignalingModel::new(
             request_id,
             SignalingType::EdgeExecRequest,
             None,
             None,
-            Some(serde_json::to_value(plan).unwrap()),
+            Some(serde_json::to_value(&payload).unwrap()),
+            None,
+        )
+    }
+
+    /// Build an agentic `EdgeExecRequest` frame: the plan tagged `Agentic` with the
+    /// daemon-only `validation_input` the PEP re-classifies.
+    fn agentic_exec_model(
+        request_id: &str,
+        plan: &ExecPlan,
+        validation_input: &desk_agent_protocol::ExecInput,
+    ) -> SignalingModel {
+        let payload = EdgeExecRequestPayload::Agentic {
+            plan: plan.clone(),
+            validation_input: validation_input.clone(),
+        };
+        SignalingModel::new(
+            request_id,
+            SignalingType::EdgeExecRequest,
+            None,
+            None,
+            Some(serde_json::to_value(&payload).unwrap()),
             None,
         )
     }
@@ -6830,7 +6988,7 @@ mod tests {
         let template = fleet_template();
         let plan = fleet_plan(&template, "a1");
         assert_eq!(
-            pep_validate_edge_exec_plan(
+            validate_fleet_edge_exec(
                 &plan,
                 desk_agent_protocol::RiskLevel::High,
                 std::slice::from_ref(&template),
@@ -6844,7 +7002,7 @@ mod tests {
     fn pep_rejects_template_not_in_allowlist() {
         let template = fleet_template();
         let plan = fleet_plan(&template, "a1");
-        let reason = pep_validate_edge_exec_plan(
+        let reason = validate_fleet_edge_exec(
             &plan,
             desk_agent_protocol::RiskLevel::High,
             &[],
@@ -6861,7 +7019,7 @@ mod tests {
         // Tamper with the argv after sealing; the fingerprint no longer matches
         // the re-rendered template.
         plan.argv.push("--force".into());
-        let reason = pep_validate_edge_exec_plan(
+        let reason = validate_fleet_edge_exec(
             &plan,
             desk_agent_protocol::RiskLevel::High,
             std::slice::from_ref(&template),
@@ -6876,7 +7034,7 @@ mod tests {
         let template = fleet_template();
         let mut plan = fleet_plan(&template, "a1");
         plan.fingerprint = "deadbeef".into();
-        let reason = pep_validate_edge_exec_plan(
+        let reason = validate_fleet_edge_exec(
             &plan,
             desk_agent_protocol::RiskLevel::High,
             std::slice::from_ref(&template),
@@ -6902,7 +7060,7 @@ mod tests {
         // `wrong` is listed first, so find-first would have failed here.
         let templates = vec![wrong, right];
         assert_eq!(
-            pep_validate_edge_exec_plan(
+            validate_fleet_edge_exec(
                 &plan,
                 desk_agent_protocol::RiskLevel::High,
                 &templates,
@@ -6933,7 +7091,7 @@ mod tests {
             plan.cwd.as_deref(),
             &tampered,
         );
-        let reason = pep_validate_edge_exec_plan(
+        let reason = validate_fleet_edge_exec(
             &plan,
             desk_agent_protocol::RiskLevel::High,
             std::slice::from_ref(&template),
@@ -6956,7 +7114,7 @@ mod tests {
             injected.as_deref(),
             &ExecLimits::defaults(),
         );
-        let reason = pep_validate_edge_exec_plan(
+        let reason = validate_fleet_edge_exec(
             &plan,
             desk_agent_protocol::RiskLevel::High,
             std::slice::from_ref(&template),
@@ -6973,7 +7131,7 @@ mod tests {
         let template = fleet_template();
         let mut plan = fleet_plan(&template, "a1");
         plan.shell = desk_agent_protocol::exec::ExecShellKind::Powershell;
-        let reason = pep_validate_edge_exec_plan(
+        let reason = validate_fleet_edge_exec(
             &plan,
             desk_agent_protocol::RiskLevel::High,
             std::slice::from_ref(&template),
@@ -6988,7 +7146,7 @@ mod tests {
         let template = fleet_template();
         let plan = fleet_plan(&template, "a1");
         // The plan is High; cap max_risk at Medium.
-        let reason = pep_validate_edge_exec_plan(
+        let reason = validate_fleet_edge_exec(
             &plan,
             desk_agent_protocol::RiskLevel::Medium,
             std::slice::from_ref(&template),
@@ -7008,7 +7166,7 @@ mod tests {
             effect: desk_agent_protocol::exec::ExecEffect::Mutating,
         };
         let plan = fleet_plan(&template, "a1");
-        let reason = pep_validate_edge_exec_plan(
+        let reason = validate_fleet_edge_exec(
             &plan,
             desk_agent_protocol::RiskLevel::Critical,
             std::slice::from_ref(&template),
@@ -7035,7 +7193,7 @@ mod tests {
                 .filter(|r| r.rule_id != "builtin.audit_log_tampering")
                 .cloned()
                 .collect();
-        let reason = pep_validate_edge_exec_plan(
+        let reason = validate_fleet_edge_exec(
             &plan,
             desk_agent_protocol::RiskLevel::Critical,
             std::slice::from_ref(&template),
@@ -7052,8 +7210,11 @@ mod tests {
         let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
         ctx.inbound_authz = None;
         let template = fleet_template();
-        ctx.command_templates
-            .replace(vec![template.clone()], 0, Some(1));
+        ctx.command_templates.replace(
+            vec![template.clone()],
+            desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
+            Some(1),
+        );
         let plan = fleet_plan(&template, "a1");
 
         handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
@@ -7080,8 +7241,11 @@ mod tests {
             desk_agent_protocol::RiskLevel::High,
         ));
         let template = fleet_template();
-        ctx.command_templates
-            .replace(vec![template.clone()], 0, Some(1));
+        ctx.command_templates.replace(
+            vec![template.clone()],
+            desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
+            Some(1),
+        );
         let plan = fleet_plan(&template, "a1");
 
         handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
@@ -7111,7 +7275,7 @@ mod tests {
                 argv: vec!["net".into(), "start".into(), "spooler".into()],
                 effect: desk_agent_protocol::exec::ExecEffect::Mutating,
             }],
-            0,
+            desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
             Some(1),
         );
         let plan = fleet_plan(&fleet_template(), "a1");
@@ -7140,8 +7304,11 @@ mod tests {
             desk_agent_protocol::RiskLevel::High,
         ));
         let template = fleet_template();
-        ctx.command_templates
-            .replace(vec![template.clone()], 0, Some(1));
+        ctx.command_templates.replace(
+            vec![template.clone()],
+            desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
+            Some(1),
+        );
         let plan = fleet_plan(&template, "a1");
 
         handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
@@ -7172,8 +7339,11 @@ mod tests {
             desk_agent_protocol::RiskLevel::High,
         ));
         let template = fleet_template();
-        ctx.command_templates
-            .replace(vec![template.clone()], 0, Some(1));
+        ctx.command_templates.replace(
+            vec![template.clone()],
+            desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
+            Some(1),
+        );
         let plan = fleet_plan(&template, "a1");
 
         handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
@@ -7188,6 +7358,311 @@ mod tests {
         }
         // The in-flight marker is cleared on a failed dispatch.
         assert!(ctx.edge_exec_pending.lock().unwrap().is_empty());
+    }
+
+    // ====== Agentic exec PEP (re-classification) ======
+
+    /// A shell `ExecInput` with the caller's own limits / cwd, mirroring what the
+    /// manager classified this turn.
+    fn agentic_input(
+        command: &str,
+        cwd: Option<&str>,
+        timeout_ms: u32,
+    ) -> desk_agent_protocol::ExecInput {
+        desk_agent_protocol::ExecInput {
+            target: desk_agent_protocol::ExecTarget::Shell {
+                shell: "powershell".into(),
+            },
+            command: command.into(),
+            cwd: cwd.map(str::to_string),
+            timeout_ms,
+            max_stdout_bytes: 0,
+            max_stderr_bytes: 0,
+        }
+    }
+
+    /// Seal a plan exactly as the manager would: classify the input against the
+    /// given operator templates + effective blocklist and freeze the resulting
+    /// draft. Panics if the input is not executable (the test author's mistake).
+    fn agentic_plan_from_input(
+        input: &desk_agent_protocol::ExecInput,
+        operator: &[SyncedCommandTemplate],
+        request_id: &str,
+    ) -> ExecPlan {
+        let outcome = desk_diagnose_core::exec_classify::classify_command_with_all(
+            input,
+            operator,
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
+        );
+        let draft = outcome
+            .draft
+            .expect("input must classify as confirm_required");
+        ExecPlan::from_draft(
+            ExecRequestId(request_id.to_string()),
+            ApprovalId("appr-1".to_string()),
+            draft,
+        )
+    }
+
+    /// A built-in template plan with a per-turn clamped timeout + cwd passes the
+    /// agentic PEP — the exact case the fleet-only PEP (fixed defaults, no cwd)
+    /// would have rejected. Re-classification reproduces the plan field-for-field.
+    #[test]
+    fn agentic_builtin_plan_with_cwd_and_clamped_limits_passes() {
+        let input = agentic_input("Get-Service -Name Spooler", Some("C:/work"), 5_000);
+        let plan = agentic_plan_from_input(&input, &[], "a1");
+        // Sanity: this plan would fail the fleet path (defaults 30s / no cwd).
+        assert!(
+            validate_fleet_edge_exec(
+                &plan,
+                desk_agent_protocol::RiskLevel::Critical,
+                &[],
+                desk_agent_protocol::exec_policy::builtin_blocklist(),
+            )
+            .is_some()
+        );
+        assert_eq!(
+            validate_agentic_edge_exec(
+                &plan,
+                &input,
+                desk_agent_protocol::RiskLevel::Critical,
+                &[],
+                desk_agent_protocol::exec_policy::builtin_blocklist(),
+            ),
+            None
+        );
+    }
+
+    /// An operator exact-argv template plan also passes the agentic PEP (the
+    /// classifier's Step 3 covers it).
+    #[test]
+    fn agentic_operator_template_plan_passes() {
+        let operator = vec![SyncedCommandTemplate {
+            template_id: "list_pods".into(),
+            argv: vec!["kubectl".into(), "get".into(), "pods".into()],
+            effect: ExecEffect::ReadOnly,
+        }];
+        let input = agentic_input("kubectl get pods", None, 0);
+        let plan = agentic_plan_from_input(&input, &operator, "a1");
+        assert_eq!(
+            validate_agentic_edge_exec(
+                &plan,
+                &input,
+                desk_agent_protocol::RiskLevel::High,
+                &operator,
+                desk_agent_protocol::exec_policy::builtin_blocklist(),
+            ),
+            None
+        );
+    }
+
+    /// A self-consistent in-bounds limit tamper (timeout widened to another valid
+    /// value + fingerprint recomputed) is caught: the classifier re-derives the
+    /// limit from the input, so the tampered plan no longer matches.
+    #[test]
+    fn agentic_in_bounds_limit_tamper_rejected() {
+        let input = agentic_input("Get-Service -Name Spooler", None, 5_000);
+        let mut plan = agentic_plan_from_input(&input, &[], "a1");
+        let tampered = desk_agent_protocol::exec_policy::ExecLimits {
+            timeout_ms: 20_000, // still within [1s, 60s], but not what the input yields
+            max_stdout_bytes: plan.max_stdout_bytes,
+            max_stderr_bytes: plan.max_stderr_bytes,
+        };
+        plan.timeout_ms = tampered.timeout_ms;
+        plan.fingerprint = desk_agent_protocol::exec_policy::fingerprint(
+            &plan.program,
+            &plan.argv,
+            plan.cwd.as_deref(),
+            &tampered,
+        );
+        let reason = validate_agentic_edge_exec(
+            &plan,
+            &input,
+            desk_agent_protocol::RiskLevel::High,
+            &[],
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
+        )
+        .expect("in-bounds limit tamper must reject");
+        assert!(reason.contains("agentic_reclassify_drift"), "{reason}");
+    }
+
+    /// The validation envelope and the sealed plan must agree: validating a plan
+    /// against a *different* input (a manager that swapped the command after
+    /// sealing) is rejected.
+    #[test]
+    fn agentic_input_mismatched_with_plan_rejected() {
+        let sealed_input = agentic_input("Get-Service -Name Spooler", None, 0);
+        let plan = agentic_plan_from_input(&sealed_input, &[], "a1");
+        let other_input = agentic_input("Get-Service -Name Dhcp", None, 0);
+        let reason = validate_agentic_edge_exec(
+            &plan,
+            &other_input,
+            desk_agent_protocol::RiskLevel::High,
+            &[],
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
+        )
+        .expect("mismatched input must reject");
+        assert!(reason.contains("agentic_reclassify_drift"), "{reason}");
+    }
+
+    /// A plan whose risk exceeds the authz ceiling is rejected on the agentic path
+    /// too (the source-agnostic common check).
+    #[test]
+    fn agentic_risk_above_max_rejected() {
+        let input = agentic_input("Get-Service -Name Spooler", None, 0);
+        let plan = agentic_plan_from_input(&input, &[], "a1");
+        // Get-Service is Low; cap below it is impossible, so use an operator High
+        // template instead to exercise the ceiling.
+        let operator = vec![SyncedCommandTemplate {
+            template_id: "danger".into(),
+            argv: vec!["kubectl".into(), "delete".into(), "ns".into()],
+            effect: ExecEffect::Mutating,
+        }];
+        let high_input = agentic_input("kubectl delete ns", None, 0);
+        let high_plan = agentic_plan_from_input(&high_input, &operator, "a2");
+        assert_eq!(plan.risk, desk_agent_protocol::RiskLevel::Low);
+        let reason = validate_agentic_edge_exec(
+            &high_plan,
+            &high_input,
+            desk_agent_protocol::RiskLevel::Medium,
+            &operator,
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
+        )
+        .expect("risk above max must reject");
+        assert!(reason.contains("risk_exceeds_max"), "{reason}");
+    }
+
+    /// A bare `ExecPlan` frame (no source tag) is a decode error → rejected before
+    /// dispatch. The wire no longer carries an untagged plan.
+    #[tokio::test]
+    async fn edge_exec_untagged_plan_is_rejected() {
+        let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ShellExecConfirmed],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::High,
+        ));
+        let plan = fleet_plan(&fleet_template(), "a1");
+        // Send the bare plan, not an EdgeExecRequestPayload.
+        let bare = SignalingModel::new(
+            "a1",
+            SignalingType::EdgeExecRequest,
+            None,
+            None,
+            Some(serde_json::to_value(&plan).unwrap()),
+            None,
+        );
+        handle_edge_exec_request_inbound(&ctx, &bare).await.unwrap();
+        match read_fleet_result(&mut rx).disposition {
+            EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
+                assert!(reason.contains("malformed_plan"), "{reason}");
+            }
+            other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
+        }
+    }
+
+    /// A plan whose own `exec_request_id` diverges from the authz-validated frame id
+    /// is rejected before dispatch: the whole-draft re-render cannot catch this field,
+    /// so the handler binds it to the frame id explicitly.
+    #[tokio::test]
+    async fn edge_exec_request_id_mismatch_is_rejected() {
+        let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ShellExecConfirmed],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::High,
+        ));
+        let template = fleet_template();
+        ctx.command_templates.replace(
+            vec![template.clone()],
+            desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
+            Some(1),
+        );
+        // The plan's exec_request_id is "other", but the frame id is "a1".
+        let plan = fleet_plan(&template, "other");
+        handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
+            .await
+            .unwrap();
+        match read_fleet_result(&mut rx).disposition {
+            EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
+                assert!(reason.contains("exec_request_id_mismatch"), "{reason}");
+            }
+            other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
+        }
+        assert!(ctx.edge_exec_pending.lock().unwrap().is_empty());
+    }
+
+    /// A plan with an empty `approval_id` (no proof it was user-approved) is rejected
+    /// before dispatch.
+    #[tokio::test]
+    async fn edge_exec_empty_approval_id_is_rejected() {
+        let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ShellExecConfirmed],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::High,
+        ));
+        let template = fleet_template();
+        ctx.command_templates.replace(
+            vec![template.clone()],
+            desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
+            Some(1),
+        );
+        let mut plan = fleet_plan(&template, "a1");
+        plan.approval_id = ApprovalId(String::new());
+        handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
+            .await
+            .unwrap();
+        match read_fleet_result(&mut rx).disposition {
+            EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
+                assert!(reason.contains("missing_approval_id"), "{reason}");
+            }
+            other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
+        }
+        assert!(ctx.edge_exec_pending.lock().unwrap().is_empty());
+    }
+
+    /// A valid agentic frame reaches the worker as a bare `ExecPlan` IPC payload:
+    /// the daemon strips the `validation_input` before dispatch (worker never sees
+    /// the command string).
+    #[tokio::test]
+    async fn agentic_valid_plan_dispatches_plan_only_to_worker() {
+        let (mut ctx, _rx, mut ipc_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.exec_supported = true;
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ShellExecConfirmed],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::High,
+        ));
+        let input = agentic_input("Get-Service -Name Spooler", Some("C:/work"), 5_000);
+        let plan = agentic_plan_from_input(&input, &[], "a1");
+
+        handle_edge_exec_request_inbound(&ctx, &agentic_exec_model("a1", &plan, &input))
+            .await
+            .unwrap();
+
+        match ipc_rx.try_recv().expect("ExecPlan IPC") {
+            ServiceToWorker::ExecPlan(payload) => {
+                assert_eq!(payload.request_id, "a1");
+                assert_eq!(payload.plan.template_id, plan.template_id);
+                assert_eq!(payload.plan.timeout_ms, 5_000);
+                assert_eq!(payload.plan.cwd.as_deref(), Some("C:/work"));
+                // The IPC payload is a bare ExecPlan; it structurally cannot carry
+                // the original command string / validation envelope.
+                let ipc_json = serde_json::to_string(&payload).unwrap();
+                assert!(!ipc_json.contains("validation_input"), "{ipc_json}");
+                assert!(
+                    !ipc_json.contains("Get-Service -Name Spooler"),
+                    "{ipc_json}"
+                );
+            }
+            other => panic!("expected ExecPlan IPC, got {other:?}"),
+        }
+        assert!(ctx.edge_exec_pending.lock().unwrap().contains("a1"));
     }
 
     /// SessionApproved: the first confirmation of a template prompts and parks a

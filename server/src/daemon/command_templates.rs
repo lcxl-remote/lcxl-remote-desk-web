@@ -13,7 +13,9 @@
 
 use std::sync::{Arc, RwLock};
 
-use desk_agent_protocol::command_template::{SyncedCommandTemplate, validate_template_argv};
+use desk_agent_protocol::command_template::{
+    COMMAND_TEMPLATE_SYNC_EPOCH, SyncedCommandTemplate, validate_template_argv,
+};
 
 /// Thread-safe cache of the operator templates. Reads (one per `ConfirmExec`)
 /// take a cheap `Arc` snapshot; writes (one per sync) replace the whole set.
@@ -21,14 +23,18 @@ use desk_agent_protocol::command_template::{SyncedCommandTemplate, validate_temp
 pub struct CommandTemplateCache {
     inner: RwLock<Arc<Vec<SyncedCommandTemplate>>>,
     /// The `(epoch, revision)` watermark of the last applied sync. `None` before
-    /// the first sync. A sync is applied only when its `(epoch, revision)` is not
-    /// strictly older (compared lexicographically, epoch first), so a stale or
-    /// rolling-upgrade peer cannot downgrade a newer set — in particular an old
-    /// all-org manager (epoch 0) can never re-widen a cache that already accepted a
-    /// narrowed set (epoch 1). Reset to `None` on restart (this is in-memory only);
-    /// the deployment barrier — upgrade daemons to accept the new epoch before
-    /// switching managers to emit it — keeps a restart from reconnecting to an
-    /// all-org manager and re-widening.
+    /// the first sync. Two guards order syncs: (1) a **hard epoch floor** —
+    /// [`COMMAND_TEMPLATE_SYNC_EPOCH`] — rejects any frame below the current wire
+    /// generation outright, independent of the watermark, so a stale pre-narrowing
+    /// (epoch 0) frame can never re-widen a narrowed cache even right after a restart
+    /// clears the in-memory watermark (the correctness no longer rests on a
+    /// deployment-ordering assumption); (2) within the current generation, a sync is
+    /// applied only when its `(epoch, revision)` is not strictly older (compared
+    /// lexicographically, epoch first), so an out-of-order re-push cannot pin the
+    /// cache on an older set. The manager advances the shared revision on every
+    /// set-affecting change — including a device→org access grant/revoke — so a scope
+    /// change always carries a strictly higher revision and a stale wider push is
+    /// rejected here.
     watermark: RwLock<Option<(u16, i64)>>,
 }
 
@@ -62,17 +68,34 @@ impl CommandTemplateCache {
             .map(|(epoch, _)| epoch)
     }
 
-    /// Replace the cache with a synced set, gated on a monotonic `(epoch, revision)`
-    /// watermark. A v1 payload carries no revision, read as `0`; a v1 / v2 payload
-    /// carries no epoch, read as `0`. Drops any entry whose argv fails the shape
-    /// check (fail-closed). Returns `Some(count)` when applied, or `None` when the
-    /// frame is rejected as strictly older than the last applied.
+    /// Replace the cache with a synced set, gated on a hard epoch floor plus a
+    /// monotonic `(epoch, revision)` watermark. A frame below
+    /// [`COMMAND_TEMPLATE_SYNC_EPOCH`] (e.g. an epoch-0 pre-narrowing payload) is
+    /// rejected outright, independent of the watermark, so it can never widen a
+    /// narrowed cache — including right after a restart, when the watermark is `None`.
+    /// A payload carrying no revision reads it as `0`. Drops any entry whose argv
+    /// fails the shape check (fail-closed). Returns `Some(count)` when applied, or
+    /// `None` when the frame is rejected (below the epoch floor, or strictly older
+    /// than the last applied).
     pub fn replace(
         &self,
         templates: Vec<SyncedCommandTemplate>,
         epoch: u16,
         revision: Option<i64>,
     ) -> Option<usize> {
+        // Hard epoch floor: no legitimate upstream emits a template sync below the
+        // current wire generation (the manager always stamps the current epoch, and
+        // no other source — an OSS/remote signal — ever pushes templates at all). The
+        // floor holds even when the in-memory watermark is `None` after a restart, so
+        // a stale pre-narrowing frame can never re-widen a narrowed cache on
+        // reconnect.
+        if epoch < COMMAND_TEMPLATE_SYNC_EPOCH {
+            log::warn!(
+                "[command-templates] dropping sync below the current wire epoch \
+                 (epoch {epoch} < {COMMAND_TEMPLATE_SYNC_EPOCH})"
+            );
+            return None;
+        }
         let incoming = (epoch, revision.unwrap_or(0));
         // Hold the watermark write lock across the check + both updates so two
         // concurrent syncs cannot interleave into a non-monotonic result. Lock order
@@ -173,13 +196,19 @@ mod tests {
     }
 
     #[test]
-    fn v1_replace_reads_epoch_and_revision_as_zero() {
-        // A v1 payload carries neither epoch nor revision; both default to 0 and
-        // the watermark records (0, 0).
+    fn a_frame_below_the_epoch_floor_is_rejected() {
+        // A pre-narrowing (epoch 0) payload is below the current wire generation and
+        // is rejected outright — nothing is applied, even on a fresh cache with no
+        // watermark. This is the restart-downgrade guard: no legitimate upstream ever
+        // sends below the current epoch.
         let cache = CommandTemplateCache::new();
-        cache.replace(vec![tpl("a", &["docker", "ps"])], 0, None);
-        assert_eq!(cache.epoch(), Some(0));
-        assert_eq!(cache.revision(), Some(0));
+        assert_eq!(
+            cache.replace(vec![tpl("a", &["docker", "ps"])], 0, None),
+            None
+        );
+        assert_eq!(cache.snapshot().len(), 0);
+        assert_eq!(cache.epoch(), None);
+        assert_eq!(cache.revision(), None);
     }
 
     #[test]
@@ -206,10 +235,10 @@ mod tests {
     }
 
     #[test]
-    fn a_lower_epoch_cannot_downgrade_even_with_a_higher_revision() {
-        // Once a narrowed (epoch 1) set is applied, an old all-org manager (epoch 0)
+    fn an_epoch_below_the_floor_cannot_downgrade_even_with_a_higher_revision() {
+        // Once a narrowed (epoch 1) set is applied, a pre-narrowing payload (epoch 0)
         // cannot re-widen the cache even though its revision counter is far higher —
-        // the epoch is compared first (H2, the rolling-upgrade downgrade guard).
+        // the hard epoch floor rejects it outright, before any watermark comparison.
         let cache = CommandTemplateCache::new();
         assert_eq!(
             cache.replace(vec![tpl("narrowed", &["docker", "ps"])], 1, Some(2)),
@@ -226,19 +255,19 @@ mod tests {
 
     #[test]
     fn a_higher_epoch_wins_regardless_of_revision() {
-        // A new epoch always outranks the old one, even at a lower revision number
-        // (the revision counters are per-epoch semantics and not comparable across
-        // epochs).
+        // A future epoch always outranks the current one, even at a lower revision
+        // number (the revision counters are per-epoch semantics and not comparable
+        // across epochs). Both epochs are at or above the floor.
         let cache = CommandTemplateCache::new();
         assert_eq!(
-            cache.replace(vec![tpl("old", &["docker", "ps"])], 0, Some(500)),
+            cache.replace(vec![tpl("cur", &["docker", "ps"])], 1, Some(500)),
             Some(1)
         );
         assert_eq!(
-            cache.replace(vec![tpl("new", &["Get-Disk"])], 1, Some(1)),
+            cache.replace(vec![tpl("next", &["Get-Disk"])], 2, Some(1)),
             Some(1)
         );
-        assert_eq!(cache.snapshot()[0].template_id, "new");
-        assert_eq!(cache.epoch(), Some(1));
+        assert_eq!(cache.snapshot()[0].template_id, "next");
+        assert_eq!(cache.epoch(), Some(2));
     }
 }
