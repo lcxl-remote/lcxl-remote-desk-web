@@ -22,14 +22,14 @@ use desk_input_injection::display_watcher;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
-        AgentResponsePayload, DesktopChangedPayload, ExecCancelPayload, ExecResultIpcPayload,
-        ExecSpawnReportPayload, FileTransferPayload, HeartbeatPayload, ListTerminalResponsePayload,
-        ManagerFileListResponsePayload, ManagerQuerySettingsResponsePayload,
-        ManagerResponseRefPayload, ManagerSystemInfoResponsePayload,
-        PrivateScreenStateChangedPayload, ReplyFromTerminalPayload, ServiceToWorker,
-        SignalingErrorPayload, StopMediaPayload, TerminalClosedPayload, TerminalStartedPayload,
-        VirtualDisplayAttachOutcome, VirtualDisplayAttachResultPayload, WorkerInitPayload,
-        WorkerToService,
+        AgentResponsePayload, DesktopChangedPayload, ExecCancelPayload, ExecHeartbeatPayload,
+        ExecResultIpcPayload, ExecSpawnReportPayload, FileTransferPayload, HeartbeatPayload,
+        ListTerminalResponsePayload, ManagerFileListResponsePayload,
+        ManagerQuerySettingsResponsePayload, ManagerResponseRefPayload,
+        ManagerSystemInfoResponsePayload, PrivateScreenStateChangedPayload,
+        ReplyFromTerminalPayload, ServiceToWorker, SignalingErrorPayload, StopMediaPayload,
+        TerminalClosedPayload, TerminalStartedPayload, VirtualDisplayAttachOutcome,
+        VirtualDisplayAttachResultPayload, WorkerInitPayload, WorkerToService,
     },
     transport::{read_message, write_message},
 };
@@ -43,6 +43,13 @@ use desk_signal_facade::model::system_info::SystemInfo;
 use desk_signal_facade::model::system_settings::RemoteSystemSettings;
 use desk_signal_facade::model::terminal::{TerminalList, TerminalOutputData};
 use desk_virtual_display::VirtualDisplayController;
+
+/// How often a running command reports that it is still running.
+///
+/// Long enough that a fleet of busy hosts does not flood the link, short enough
+/// that an operator watching a long command sees it move. Losing a beat costs
+/// nothing: the authoritative answer is a state query against the ledger.
+const EXEC_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 use log::{error, info, warn};
 use std::collections::HashSet;
 use std::{
@@ -1687,6 +1694,43 @@ impl WorkerSession {
                                         // Held for the whole run; dropping it
                                         // deregisters however the command ends.
                                         let _registration = registration;
+                                        // Report progress for as long as the
+                                        // command runs, so an upstream watching a
+                                        // long command never has to infer from
+                                        // silence whether it is still alive.
+                                        let heartbeat = {
+                                            let tx = writer_tx.clone();
+                                            let request_id = payload.request_id.clone();
+                                            let connection_id = payload.connection_id.clone();
+                                            tokio::spawn(async move {
+                                                let started = std::time::Instant::now();
+                                                let mut ticker = tokio::time::interval(
+                                                    EXEC_HEARTBEAT_INTERVAL,
+                                                );
+                                                // The first tick completes at once;
+                                                // the execution has only just begun,
+                                                // and the spawn report already said so.
+                                                ticker.tick().await;
+                                                loop {
+                                                    ticker.tick().await;
+                                                    let beat = ExecHeartbeatPayload {
+                                                        request_id: request_id.clone(),
+                                                        connection_id: connection_id.clone(),
+                                                        running_ms: started
+                                                            .elapsed()
+                                                            .as_millis()
+                                                            .min(u64::MAX as u128)
+                                                            as u64,
+                                                    };
+                                                    if tx
+                                                        .send(WorkerToService::ExecHeartbeat(beat))
+                                                        .is_err()
+                                                    {
+                                                        break;
+                                                    }
+                                                }
+                                            })
+                                        };
                                         // Report the spawn as soon as it is known,
                                         // ahead of the result: the daemon reserved
                                         // this execution and needs to know it is
@@ -1694,6 +1738,7 @@ impl WorkerSession {
                                         // without waiting for the command to end.
                                         let spawn_tx = writer_tx.clone();
                                         let spawn_request_id = payload.request_id.clone();
+                                        let spawn_connection_id = payload.connection_id.clone();
                                         let outcome = crate::worker::exec::execute_plan_cancellable(
                                             &payload.plan,
                                             move |report| {
@@ -1701,6 +1746,7 @@ impl WorkerSession {
                                                     .send(WorkerToService::ExecSpawnReport(
                                                         ExecSpawnReportPayload {
                                                             request_id: spawn_request_id,
+                                                            connection_id: spawn_connection_id,
                                                             report,
                                                         },
                                                     ))
@@ -1714,6 +1760,8 @@ impl WorkerSession {
                                             Some(cancel.subscribe()),
                                         )
                                         .await;
+                                        // Nothing is still running to report on.
+                                        heartbeat.abort();
                                         let result = desk_agent_protocol::exec::ExecResultPayload {
                                             exec_request_id: payload.plan.exec_request_id,
                                             outcome,

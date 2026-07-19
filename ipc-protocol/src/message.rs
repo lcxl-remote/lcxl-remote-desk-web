@@ -434,6 +434,14 @@ pub enum WorkerToService {
     /// This closes that gap in the normal case and, on failure, upgrades it to the
     /// stronger and more useful "provably never started".
     ExecSpawnReport(ExecSpawnReportPayload),
+
+    /// Worker → daemon: the command named by `request_id` is still running.
+    ///
+    /// Sent on a timer for as long as it runs. Losing one is harmless — it
+    /// carries elapsed time rather than a sequence, so a gap says nothing an
+    /// upstream would act on, and the authoritative answer is always a state
+    /// query against the daemon's ledger.
+    ExecHeartbeat(ExecHeartbeatPayload),
 }
 
 // ==================== Payload Types ====================
@@ -1321,7 +1329,22 @@ pub struct ExecSpawnReportPayload {
     /// The dispatch this reports on: the `request_id` the plan was sent under,
     /// which is also the execution generation the daemon's ledger keys on.
     pub request_id: String,
+    /// Echoed from the [`ExecPlanPayload`] so the daemon can route the outbound
+    /// lifecycle frame to whoever asked for the execution, exactly as it routes
+    /// the result.
+    pub connection_id: Option<String>,
     pub report: ExecSpawnReport,
+}
+
+/// Payload for [`WorkerToService::ExecHeartbeat`].
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ExecHeartbeatPayload {
+    pub request_id: String,
+    pub connection_id: Option<String>,
+    /// Milliseconds since the worker began this execution. The worker's own
+    /// elapsed time, not a wall clock, so nothing downstream has to reconcile two
+    /// machines' clocks to decide whether progress is being made.
+    pub running_ms: u64,
 }
 
 /// What became of a spawn attempt.
@@ -1363,6 +1386,7 @@ mod tests {
         ] {
             let original = WorkerToService::ExecSpawnReport(ExecSpawnReportPayload {
                 request_id: "gen-1".to_string(),
+                connection_id: Some("conn-1".to_string()),
                 report: report.clone(),
             });
             match wincode_round_trip(&original) {

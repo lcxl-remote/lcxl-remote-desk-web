@@ -16,6 +16,7 @@ use actix_web::web;
 use awc::{Client, Connector};
 use desk_agent_protocol::audit::AuditSink;
 use desk_agent_protocol::authz::{AuthorizationBlock, AuthorizedControlPayload};
+use desk_agent_protocol::exec_lifecycle::{ExecLifecycleEvent, ExecLifecyclePayload};
 use desk_ipc_protocol::message::{
     ERROR_CODE_MEDIA_TRANSPORT_STUCK, VirtualDisplayModeOutcome, WorkerToService,
 };
@@ -866,6 +867,33 @@ pub async fn run_signaling_proxy(
                 if matches!(payload.report, ExecSpawnReport::Failed { .. }) {
                     router_ctx.exec_capacity.release(&payload.request_id);
                 }
+                // Tell whoever asked that the command is up. A failed spawn is not
+                // reported here: it is terminal, and it travels on the result path
+                // like every other ending.
+                if let ExecSpawnReport::Started {
+                    containment_identity,
+                } = &payload.report
+                {
+                    send_exec_lifecycle(
+                        &router_ctx.outbound_tx,
+                        &payload.request_id,
+                        payload.connection_id.clone(),
+                        ExecLifecycleEvent::Accepted {
+                            containment_identity: containment_identity.clone(),
+                        },
+                    );
+                }
+                continue;
+            }
+            WorkerToService::ExecHeartbeat(payload) => {
+                send_exec_lifecycle(
+                    &router_ctx.outbound_tx,
+                    &payload.request_id,
+                    payload.connection_id.clone(),
+                    ExecLifecycleEvent::Heartbeat {
+                        running_ms: payload.running_ms,
+                    },
+                );
                 continue;
             }
             WorkerToService::ExecResult(payload) => {
@@ -2238,6 +2266,57 @@ mod tests {
 
     const RR_AUDIENCE: &str = "host-client-abc";
     const RR_NOW: &str = "2026-01-01T00:00:00Z";
+
+    /// Read the one lifecycle frame that was emitted.
+    fn expect_lifecycle(rx: &mut tokio::sync::broadcast::Receiver<String>) -> ExecLifecyclePayload {
+        let text = rx.try_recv().expect("no lifecycle frame was sent");
+        let frame: SignalingModel = serde_json::from_str(&text).unwrap();
+        assert_eq!(frame.signaling_type, SignalingType::ExecLifecycle);
+        frame.get_data::<ExecLifecyclePayload>().unwrap()
+    }
+
+    /// A started command is announced to whoever asked for it, carrying how the
+    /// host would reclaim it — the fact an upstream previously had to infer from
+    /// silence and a clock.
+    #[test]
+    fn a_started_command_is_announced_with_its_containment_identity() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<String>(8);
+        send_exec_lifecycle(
+            &tx,
+            "gen-1",
+            Some("conn-1".to_string()),
+            ExecLifecycleEvent::Accepted {
+                containment_identity: Some("pgid:4242".to_string()),
+            },
+        );
+
+        let payload = expect_lifecycle(&mut rx);
+        assert_eq!(payload.execution_generation, "gen-1");
+        assert_eq!(
+            payload.event,
+            ExecLifecycleEvent::Accepted {
+                containment_identity: Some("pgid:4242".to_string()),
+            }
+        );
+    }
+
+    /// A heartbeat carries the host's own elapsed time rather than a wall clock or
+    /// a sequence, so nothing downstream has to reconcile two clocks or survive a
+    /// counter resetting.
+    #[test]
+    fn a_heartbeat_carries_elapsed_time_and_nothing_else() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<String>(8);
+        send_exec_lifecycle(
+            &tx,
+            "gen-1",
+            None,
+            ExecLifecycleEvent::Heartbeat { running_ms: 12_345 },
+        );
+        assert_eq!(
+            expect_lifecycle(&mut rx).event,
+            ExecLifecycleEvent::Heartbeat { running_ms: 12_345 }
+        );
+    }
 
     #[test]
     fn signaling_scheme_is_tls_recognizes_secure_schemes() {
@@ -3757,5 +3836,43 @@ mod tests {
             let decoded = model.get_data::<AgentOutcome>().expect("outcome data");
             assert_eq!(decoded, outcome);
         }
+    }
+}
+
+/// Send an `ExecLifecycle(625)` about one execution to whoever asked for it.
+///
+/// Notification-style and best-effort: these frames report progress, and the
+/// authoritative answer is always a state query against the ledger. Dropping one
+/// therefore costs nothing an upstream would act on.
+fn send_exec_lifecycle(
+    outbound_tx: &tokio::sync::broadcast::Sender<String>,
+    execution_generation: &str,
+    to_connection_id: Option<String>,
+    event: ExecLifecycleEvent,
+) {
+    let payload = ExecLifecyclePayload {
+        execution_generation: execution_generation.to_string(),
+        event,
+    };
+    let data = match serde_json::to_value(&payload) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[exec-lifecycle] could not serialise the frame: {e}");
+            return;
+        }
+    };
+    let frame = SignalingModel::new(
+        execution_generation,
+        SignalingType::ExecLifecycle,
+        None,
+        to_connection_id,
+        Some(data),
+        None,
+    );
+    match serde_json::to_string(&frame) {
+        Ok(text) => {
+            let _ = outbound_tx.send(text);
+        }
+        Err(e) => log::warn!("[exec-lifecycle] could not serialise the frame: {e}"),
     }
 }
