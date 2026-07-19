@@ -31,6 +31,14 @@ fn is_m2_selectable(mode: ExecutionMode) -> bool {
 /// that ignores that rather than to size normal work.
 pub const DEFAULT_MAX_CONCURRENT_EXECUTIONS: u32 = 4;
 
+/// Bounds accepted from the settings UI. At least one, or the device could never
+/// run anything and the setting would become an obscure way to disable execution
+/// entirely — refusing execution is what the execution mode is for. The upper
+/// bound is a sanity rail, not a capability claim: the point of the ceiling is to
+/// stay well under what the machine can take.
+pub const MIN_MAX_CONCURRENT_EXECUTIONS: u32 = 1;
+pub const MAX_MAX_CONCURRENT_EXECUTIONS: u32 = 64;
+
 /// Persisted edge-local AI execution policy.
 ///
 /// Holds no model credentials (those live on the central brain); the fields are
@@ -72,6 +80,7 @@ impl AiExecutionPolicy {
     pub fn public_view(&self) -> AiExecutionPolicyPublic {
         AiExecutionPolicyPublic {
             execution_mode: self.execution_mode,
+            max_concurrent_executions: self.max_concurrent_executions,
         }
     }
 
@@ -84,6 +93,13 @@ impl AiExecutionPolicy {
         {
             self.execution_mode = execution_mode;
         }
+        // Clamped rather than rejected: this is a safety rail, and a caller that
+        // asks for more than the rail allows still gets a working device at the
+        // highest permitted value instead of a failed save.
+        if let Some(max) = update.max_concurrent_executions {
+            self.max_concurrent_executions =
+                max.clamp(MIN_MAX_CONCURRENT_EXECUTIONS, MAX_MAX_CONCURRENT_EXECUTIONS);
+        }
     }
 }
 
@@ -92,6 +108,8 @@ impl AiExecutionPolicy {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, Default)]
 pub struct AiExecutionPolicyPublic {
     pub execution_mode: ExecutionMode,
+    /// How many commands may run on this device at once.
+    pub max_concurrent_executions: u32,
 }
 
 /// Update body for `POST /api/desk/settings/ai-policy`.
@@ -100,11 +118,80 @@ pub struct AiExecutionPolicyUpdate {
     /// `None` leaves the stored mode unchanged. A not-yet-selectable mode
     /// (`session_approved` / `automated`) is ignored.
     pub execution_mode: Option<ExecutionMode>,
+    /// `None` leaves the stored ceiling unchanged. Out-of-range values are clamped
+    /// into [`MIN_MAX_CONCURRENT_EXECUTIONS`]..=[`MAX_MAX_CONCURRENT_EXECUTIONS`].
+    pub max_concurrent_executions: Option<u32>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ceiling defaults to a usable value and a config written before the field
+    /// existed picks it up, rather than deserializing to zero and silently refusing
+    /// every command.
+    #[test]
+    fn a_config_without_the_ceiling_gets_a_working_default() {
+        let policy: AiExecutionPolicy = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            policy.max_concurrent_executions,
+            DEFAULT_MAX_CONCURRENT_EXECUTIONS
+        );
+        assert!(policy.max_concurrent_executions >= MIN_MAX_CONCURRENT_EXECUTIONS);
+    }
+
+    /// An out-of-range ceiling is clamped, never stored as-is and never zero.
+    #[test]
+    fn the_ceiling_is_clamped_into_range() {
+        let mut policy = AiExecutionPolicy::default();
+
+        policy.apply_update(AiExecutionPolicyUpdate {
+            execution_mode: None,
+            max_concurrent_executions: Some(0),
+        });
+        assert_eq!(
+            policy.max_concurrent_executions,
+            MIN_MAX_CONCURRENT_EXECUTIONS
+        );
+
+        policy.apply_update(AiExecutionPolicyUpdate {
+            execution_mode: None,
+            max_concurrent_executions: Some(u32::MAX),
+        });
+        assert_eq!(
+            policy.max_concurrent_executions,
+            MAX_MAX_CONCURRENT_EXECUTIONS
+        );
+
+        policy.apply_update(AiExecutionPolicyUpdate {
+            execution_mode: None,
+            max_concurrent_executions: Some(8),
+        });
+        assert_eq!(policy.max_concurrent_executions, 8);
+    }
+
+    /// An update that only changes the mode leaves the ceiling alone, and vice
+    /// versa: the two fields are independently optional.
+    #[test]
+    fn each_field_can_be_updated_without_disturbing_the_other() {
+        let mut policy = AiExecutionPolicy {
+            execution_mode: ExecutionMode::SuggestOnly,
+            max_concurrent_executions: 9,
+        };
+        policy.apply_update(AiExecutionPolicyUpdate {
+            execution_mode: Some(ExecutionMode::ConfirmEachAction),
+            max_concurrent_executions: None,
+        });
+        assert_eq!(policy.max_concurrent_executions, 9);
+        assert_eq!(policy.execution_mode, ExecutionMode::ConfirmEachAction);
+
+        policy.apply_update(AiExecutionPolicyUpdate {
+            execution_mode: None,
+            max_concurrent_executions: Some(3),
+        });
+        assert_eq!(policy.execution_mode, ExecutionMode::ConfirmEachAction);
+        assert_eq!(policy.max_concurrent_executions, 3);
+    }
 
     /// Default execution mode is `suggest_only`, and a config written before the
     /// field existed deserializes to it (via `#[serde(default)]`).
@@ -132,16 +219,19 @@ mod tests {
         ] {
             s.apply_update(AiExecutionPolicyUpdate {
                 execution_mode: Some(mode),
+                max_concurrent_executions: None,
             });
             assert_eq!(s.execution_mode, mode);
         }
 
         s.apply_update(AiExecutionPolicyUpdate {
             execution_mode: Some(ExecutionMode::ConfirmEachAction),
+            max_concurrent_executions: None,
         });
         for mode in [ExecutionMode::SessionApproved, ExecutionMode::Automated] {
             s.apply_update(AiExecutionPolicyUpdate {
                 execution_mode: Some(mode),
+                max_concurrent_executions: None,
             });
             assert_eq!(
                 s.execution_mode,
@@ -161,6 +251,7 @@ mod tests {
         let mut s = AiExecutionPolicy::default();
         s.apply_update(AiExecutionPolicyUpdate {
             execution_mode: Some(ExecutionMode::ConfirmEachAction),
+            max_concurrent_executions: None,
         });
         assert_eq!(
             s.public_view().execution_mode,

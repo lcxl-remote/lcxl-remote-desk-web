@@ -941,6 +941,8 @@ export default {
   'pages.aiPolicy.description': 'This device\'s cap on AI actions. The effective mode is the more restrictive of the central grant and this ceiling, so a confirmed action needs both set above suggest-only.',
   'pages.aiPolicy.executionMode': 'Execution ceiling',
   'pages.aiPolicy.executionMode.description': 'The highest mode the AI may use on this device, regardless of the central grant.',
+  'pages.aiPolicy.maxConcurrentExecutions': 'Concurrent command limit',
+  'pages.aiPolicy.maxConcurrentExecutions.description': 'How many commands may run on this device at once (1-64). The device enforces this itself: a control end connecting through an open-source signal server never passes a central quota, so the device keeps its own ceiling. A command over the limit is refused without being accepted, so retrying later works normally.',
   'pages.aiPolicy.updateSucceedMessage': 'Local execution ceiling updated successfully',
   'pages.aiPolicy.updateFailedMessage': 'Failed to update the local execution ceiling',
   'pages.collectionPolicy.title': 'Evidence Collection Policy',

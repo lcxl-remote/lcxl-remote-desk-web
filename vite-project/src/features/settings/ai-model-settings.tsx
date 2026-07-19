@@ -46,8 +46,18 @@ const providerSchema = z.object({
 
 type ProviderFormValues = z.infer<typeof providerSchema>
 
+// Mirrors the server's clamp, so the UI refuses a value the server would have
+// silently adjusted rather than reporting success for something it did not save.
+const MIN_CONCURRENT_EXECUTIONS = 1
+const MAX_CONCURRENT_EXECUTIONS = 64
+
 const policySchema = z.object({
     execution_mode: z.enum(EXECUTION_MODES),
+    max_concurrent_executions: z
+        .number()
+        .int()
+        .min(MIN_CONCURRENT_EXECUTIONS)
+        .max(MAX_CONCURRENT_EXECUTIONS),
 })
 
 type PolicyFormValues = z.infer<typeof policySchema>
@@ -215,19 +225,26 @@ export function AiModelSettings() {
 
     const policyForm = useForm<PolicyFormValues>({
         resolver: zodResolver(policySchema),
-        defaultValues: { execution_mode: "suggest_only" },
+        defaultValues: { execution_mode: "suggest_only", max_concurrent_executions: 4 },
     })
 
     const didHydratePolicyRef = useRef(false)
     useEffect(() => {
         if (policyResponse?.data && !isPolicyLoading && !didHydratePolicyRef.current) {
             didHydratePolicyRef.current = true
-            policyForm.reset({ execution_mode: normalizeExecutionMode(policyResponse.data.execution_mode) })
+            policyForm.reset({
+                execution_mode: normalizeExecutionMode(policyResponse.data.execution_mode),
+                max_concurrent_executions:
+                    policyResponse.data.max_concurrent_executions ?? 4,
+            })
         }
     }, [policyResponse?.data, isPolicyLoading, policyForm])
 
     const onSubmitPolicy = async (values: PolicyFormValues) => {
-        const payload: AiExecutionPolicyUpdate = { execution_mode: values.execution_mode }
+        const payload: AiExecutionPolicyUpdate = {
+            execution_mode: values.execution_mode,
+            max_concurrent_executions: values.max_concurrent_executions,
+        }
         try {
             await updatePolicy({ data: payload })
             toast({
@@ -559,6 +576,41 @@ export function AiModelSettings() {
                                         </Select>
                                         <FormDescription>
                                             {t("pages.aiPolicy.executionMode.description")}
+                                        </FormDescription>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+                            <FormField
+                                control={policyForm.control}
+                                name="max_concurrent_executions"
+                                render={({ field }) => (
+                                    <FormItem>
+                                        <FormLabel>{t("pages.aiPolicy.maxConcurrentExecutions")}</FormLabel>
+                                        <FormControl>
+                                            <Input
+                                                type="number"
+                                                min={MIN_CONCURRENT_EXECUTIONS}
+                                                max={MAX_CONCURRENT_EXECUTIONS}
+                                                name={field.name}
+                                                ref={field.ref}
+                                                onBlur={field.onBlur}
+                                                value={field.value}
+                                                // The field is a number, so an
+                                                // emptied box must not become the
+                                                // string "" and slip past the
+                                                // numeric bounds.
+                                                onChange={(e) =>
+                                                    field.onChange(
+                                                        e.target.value === ""
+                                                            ? Number.NaN
+                                                            : e.target.valueAsNumber,
+                                                    )
+                                                }
+                                            />
+                                        </FormControl>
+                                        <FormDescription>
+                                            {t("pages.aiPolicy.maxConcurrentExecutions.description")}
                                         </FormDescription>
                                         <FormMessage />
                                     </FormItem>

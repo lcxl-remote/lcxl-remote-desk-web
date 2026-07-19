@@ -934,6 +934,8 @@ export default {
   'pages.aiPolicy.description': '本设备对 AI 行动的上限。生效模式取中心授权与此上限中更严格的一方，因此确认执行需两者都高于「仅建议」。',
   'pages.aiPolicy.executionMode': '执行上限',
   'pages.aiPolicy.executionMode.description': '无论中心授予什么，AI 在本设备上可用的最高模式。',
+  'pages.aiPolicy.maxConcurrentExecutions': '同时运行的命令数上限',
+  'pages.aiPolicy.maxConcurrentExecutions.description': '本设备最多同时运行几条命令（1–64）。这道限制由设备自己执行：控制端经开源信令服务器直连时不经过中心配额，因此设备保留自己的上限。超限的命令会被拒绝且不予受理，稍后重试可正常执行。',
   'pages.aiPolicy.updateSucceedMessage': '本地执行上限更新成功',
   'pages.aiPolicy.updateFailedMessage': '本地执行上限更新失败',
   'pages.collectionPolicy.title': '证据采集策略',

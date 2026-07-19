@@ -44,6 +44,12 @@ export type AiExecutionPolicyPublic = {
      * @type string
     */
     execution_mode: ExecutionMode;
+    /**
+     * @description How many commands may run on this device at once.
+     * @minLength 0
+     * @type integer, int32
+    */
+    max_concurrent_executions: number;
 };
 
 /**
@@ -51,6 +57,12 @@ export type AiExecutionPolicyPublic = {
 */
 export type AiExecutionPolicyUpdate = {
     execution_mode?: (null | ExecutionMode);
+    /**
+     * @description `None` leaves the stored ceiling unchanged. Out-of-range values are clamped\ninto [`MIN_MAX_CONCURRENT_EXECUTIONS`]..=[`MAX_MAX_CONCURRENT_EXECUTIONS`].
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    max_concurrent_executions?: number | null;
 };
 
 /**
@@ -2050,6 +2062,12 @@ export type RestResponseAiExecutionPolicyPublic = {
          * @type string
         */
         execution_mode: ExecutionMode;
+        /**
+         * @description How many commands may run on this device at once.
+         * @minLength 0
+         * @type integer, int32
+        */
+        max_concurrent_executions: number;
     };
     /**
      * @type string,null
