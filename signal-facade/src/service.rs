@@ -317,7 +317,7 @@ pub trait OwnerPlaneAuthorizer: Send + Sync {
 /// Consumes inbound `AiAuditEvent` frames for persistence. The manager
 /// implements this to write the audit row (after re-deriving the trusted
 /// subject from the reporting connection's `AuthContext` and applying the
-/// retention-level filter); the signal server leaves it unset, so audit frames
+/// persist-level filter); the signal server leaves it unset, so audit frames
 /// are simply ignored there. `source` is the reporting connection (a
 /// token-authenticated desk server).
 pub trait AuditObserver: Send + Sync {
