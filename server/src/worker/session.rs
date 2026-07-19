@@ -22,13 +22,14 @@ use desk_input_injection::display_watcher;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
-        AgentResponsePayload, DesktopChangedPayload, ExecResultIpcPayload, FileTransferPayload,
-        HeartbeatPayload, ListTerminalResponsePayload, ManagerFileListResponsePayload,
-        ManagerQuerySettingsResponsePayload, ManagerResponseRefPayload,
-        ManagerSystemInfoResponsePayload, PrivateScreenStateChangedPayload,
-        ReplyFromTerminalPayload, ServiceToWorker, SignalingErrorPayload, StopMediaPayload,
-        TerminalClosedPayload, TerminalStartedPayload, VirtualDisplayAttachOutcome,
-        VirtualDisplayAttachResultPayload, WorkerInitPayload, WorkerToService,
+        AgentResponsePayload, DesktopChangedPayload, ExecResultIpcPayload, ExecSpawnReportPayload,
+        FileTransferPayload, HeartbeatPayload, ListTerminalResponsePayload,
+        ManagerFileListResponsePayload, ManagerQuerySettingsResponsePayload,
+        ManagerResponseRefPayload, ManagerSystemInfoResponsePayload,
+        PrivateScreenStateChangedPayload, ReplyFromTerminalPayload, ServiceToWorker,
+        SignalingErrorPayload, StopMediaPayload, TerminalClosedPayload, TerminalStartedPayload,
+        VirtualDisplayAttachOutcome, VirtualDisplayAttachResultPayload, WorkerInitPayload,
+        WorkerToService,
     },
     transport::{read_message, write_message},
 };
@@ -1676,8 +1677,32 @@ impl WorkerSession {
                                     // the `AgentOutcome`, not the transport.
                                     let writer_tx = writer_tx.clone();
                                     tokio::spawn(async move {
-                                        let outcome =
-                                            crate::worker::exec::execute_plan(&payload.plan).await;
+                                        // Report the spawn as soon as it is known,
+                                        // ahead of the result: the daemon reserved
+                                        // this execution and needs to know it is
+                                        // actually running (and how to reclaim it)
+                                        // without waiting for the command to end.
+                                        let spawn_tx = writer_tx.clone();
+                                        let spawn_request_id = payload.request_id.clone();
+                                        let outcome = crate::worker::exec::execute_plan_reporting(
+                                            &payload.plan,
+                                            move |report| {
+                                                if spawn_tx
+                                                    .send(WorkerToService::ExecSpawnReport(
+                                                        ExecSpawnReportPayload {
+                                                            request_id: spawn_request_id,
+                                                            report,
+                                                        },
+                                                    ))
+                                                    .is_err()
+                                                {
+                                                    warn!(
+                                                        "writer task closed; dropping ExecSpawnReport"
+                                                    );
+                                                }
+                                            },
+                                        )
+                                        .await;
                                         let result = desk_agent_protocol::exec::ExecResultPayload {
                                             exec_request_id: payload.plan.exec_request_id,
                                             outcome,

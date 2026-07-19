@@ -828,6 +828,40 @@ pub async fn run_signaling_proxy(
             // the `ExecResultPayload` verbatim, correlated to the suggested
             // command by `exec_request_id`. Execution failures live inside the
             // payload's `AgentOutcome::Err`, not the transport.
+            // The spawn's own outcome, reported before the command finishes. It
+            // moves the ledger entry off `reserved`, which is what makes a later
+            // crash distinguishable: still `reserved` means the host died mid-spawn
+            // and genuinely cannot say what happened, whereas `running` means it
+            // started and only the result was lost.
+            WorkerToService::ExecSpawnReport(payload) => {
+                use desk_ipc_protocol::message::ExecSpawnReport;
+                let recorded = match &payload.report {
+                    ExecSpawnReport::Started {
+                        containment_identity,
+                    } => {
+                        router_ctx
+                            .exec_ledger
+                            .mark_running(&payload.request_id, containment_identity.as_deref())
+                            .await
+                    }
+                    ExecSpawnReport::Failed { reason } => {
+                        router_ctx
+                            .exec_ledger
+                            .mark_terminal(
+                                &payload.request_id,
+                                crate::daemon::exec_ledger::Terminal::SpawnFailed(reason.clone()),
+                            )
+                            .await
+                    }
+                };
+                if let Err(e) = recorded {
+                    log::error!(
+                        "[exec-ledger] could not record the spawn of {}: {e}",
+                        payload.request_id
+                    );
+                }
+                continue;
+            }
             WorkerToService::ExecResult(payload) => {
                 // Close out the ledger entry first, so the host's own record is
                 // settled before the answer leaves the machine. The generation is

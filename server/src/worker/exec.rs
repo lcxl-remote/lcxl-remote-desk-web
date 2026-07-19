@@ -28,6 +28,7 @@ use tokio::process::Command;
 
 use crate::diagnose::redaction::{Redactor, RegexRedactor};
 use crate::worker::exec_containment::Containment;
+use desk_ipc_protocol::message::ExecSpawnReport;
 
 /// Extra bytes read and retained past the payload cap so a secret that straddles
 /// the cap boundary is still seen *in full* by the redactor before the final cut
@@ -50,6 +51,21 @@ const REDACTION_MARGIN: usize = 8 * 1024;
 /// IPC boundary. Redaction is fail-closed: if the redactor errors, no output is
 /// returned.
 pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
+    execute_plan_reporting(plan, |_| {}).await
+}
+
+/// As [`execute_plan`], but calls `on_spawn` the moment the outcome of the spawn
+/// itself is known — before the command has finished.
+///
+/// The daemon reserved this execution before handing it over, and until the spawn
+/// is reported it cannot tell "still starting" from "started and then lost". That
+/// ambiguity is why a crash in the gap has to be recorded as indeterminate; this
+/// callback closes the gap and hands over the containment identity, which only
+/// exists on Unix once there is a pid.
+pub async fn execute_plan_reporting(
+    plan: &ExecPlan,
+    on_spawn: impl FnOnce(ExecSpawnReport),
+) -> AgentOutcome {
     // Establish the container before the spawn. Failing here refuses the command:
     // an execution that cannot be reclaimed is precisely what containment exists
     // to prevent, so running it anyway would defeat the purpose.
@@ -60,6 +76,9 @@ pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
                 "exec refused, no containment: template={} program={} error={e}",
                 plan.template_id, plan.program,
             );
+            on_spawn(ExecSpawnReport::Failed {
+                reason: format!("the host cannot contain this command: {e}"),
+            });
             return AgentOutcome::Err(err(
                 AgentErrorKind::Internal,
                 format!("the host cannot contain this command, so it was not run: {e}"),
@@ -88,6 +107,9 @@ pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
                 "exec spawn failed: template={} program={} error={e}",
                 plan.template_id, plan.program,
             );
+            on_spawn(ExecSpawnReport::Failed {
+                reason: format!("failed to start command: {e}"),
+            });
             return AgentOutcome::Err(err(
                 AgentErrorKind::Internal,
                 format!("failed to start command: {e}"),
@@ -104,11 +126,21 @@ pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
             "exec containment failed after spawn: template={} program={} error={e}",
             plan.template_id, plan.program,
         );
+        // The process did start, however briefly, so this is not reported as a
+        // failed spawn — saying "never ran" about something that did would be worse
+        // than saying nothing.
+        on_spawn(ExecSpawnReport::Started {
+            containment_identity: containment.identity().map(str::to_string),
+        });
         return AgentOutcome::Err(err(
             AgentErrorKind::Internal,
             format!("the command was started but could not be contained: {e}"),
         ));
     }
+
+    on_spawn(ExecSpawnReport::Started {
+        containment_identity: containment.identity().map(str::to_string),
+    });
 
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
@@ -272,6 +304,59 @@ mod tests {
     use super::*;
     use desk_agent_protocol::RiskLevel;
     use desk_agent_protocol::exec::ExecShellKind;
+
+    /// A successful spawn is reported before the command finishes, carrying the
+    /// containment identity the daemon needs to reclaim the tree if it later loses
+    /// track of it.
+    #[tokio::test]
+    async fn a_successful_spawn_is_reported_with_its_containment_identity() {
+        let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = reports.clone();
+        let outcome = execute_plan_reporting(&plan("echo hi", 5_000, 4096), move |r| {
+            sink.lock().unwrap().push(r)
+        })
+        .await;
+        assert!(matches!(outcome, AgentOutcome::Ok(_)), "{outcome:?}");
+
+        let reports = reports.lock().unwrap();
+        assert_eq!(reports.len(), 1, "exactly one spawn report per execution");
+        match &reports[0] {
+            ExecSpawnReport::Started {
+                containment_identity,
+            } => {
+                #[cfg(unix)]
+                assert!(
+                    containment_identity
+                        .as_deref()
+                        .is_some_and(|id| id.starts_with("pgid:")),
+                    "expected a process-group identity, got {containment_identity:?}"
+                );
+                #[cfg(not(unix))]
+                let _ = containment_identity;
+            }
+            other => panic!("expected Started, got {other:?}"),
+        }
+    }
+
+    /// A command that never starts is reported as a failed spawn, not as an unknown
+    /// outcome — the caller can safely retry this one, and only this one.
+    #[tokio::test]
+    async fn a_failed_spawn_is_reported_as_such() {
+        let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = reports.clone();
+        let mut p = plan("irrelevant", 5_000, 4096);
+        p.program = "definitely-not-a-real-program-xyz".into();
+        p.argv.clear();
+
+        let outcome = execute_plan_reporting(&p, move |r| sink.lock().unwrap().push(r)).await;
+        assert!(matches!(outcome, AgentOutcome::Err(_)), "{outcome:?}");
+
+        let reports = reports.lock().unwrap();
+        assert!(
+            matches!(reports.as_slice(), [ExecSpawnReport::Failed { .. }]),
+            "expected a single Failed report, got {reports:?}"
+        );
+    }
 
     /// The point of containment: a command that backgrounds a helper and then
     /// hangs must not leave that helper running once the command is reclaimed.

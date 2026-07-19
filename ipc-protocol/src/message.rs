@@ -412,6 +412,17 @@ pub enum WorkerToService {
     /// failures (timeout, spawn error) travel inside the payload's
     /// `AgentOutcome::Err`, not the transport.
     ExecResult(ExecResultIpcPayload),
+
+    /// Worker → daemon, sent the moment a [`ServiceToWorker::ExecPlan`] either
+    /// starts running or fails to start.
+    ///
+    /// Sent *before* the command's result, because the two answer different
+    /// questions. The daemon reserved this execution before handing it over and
+    /// until this arrives it cannot tell "still starting" from "started and lost",
+    /// which is the gap that forces a crash there to be recorded as indeterminate.
+    /// This closes that gap in the normal case and, on failure, upgrades it to the
+    /// stronger and more useful "provably never started".
+    ExecSpawnReport(ExecSpawnReportPayload),
 }
 
 // ==================== Payload Types ====================
@@ -1285,9 +1296,65 @@ pub struct ExecResultIpcPayload {
     pub audit_source_request_id: Option<String>,
 }
 
+/// Payload for [`WorkerToService::ExecSpawnReport`].
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ExecSpawnReportPayload {
+    /// The dispatch this reports on: the `request_id` the plan was sent under,
+    /// which is also the execution generation the daemon's ledger keys on.
+    pub request_id: String,
+    pub report: ExecSpawnReport,
+}
+
+/// What became of a spawn attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub enum ExecSpawnReport {
+    /// The process is running and contained.
+    Started {
+        /// How to find and reclaim its process tree — a job name on Windows, a
+        /// process group on Unix. `None` if the platform could not name the
+        /// container even after the spawn.
+        containment_identity: Option<String>,
+    },
+    /// The command never started, so it provably did not run. Worth distinguishing
+    /// from an unknown outcome: a caller may safely retry this one.
+    Failed {
+        /// Operator-facing reason (missing program, containment refused, …).
+        reason: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The spawn report round-trips both ways, including the containment identity
+    /// the daemon needs to reclaim a tree it has lost track of.
+    #[test]
+    fn exec_spawn_report_round_trips() {
+        for report in [
+            ExecSpawnReport::Started {
+                containment_identity: Some("pgid:4242".to_string()),
+            },
+            ExecSpawnReport::Started {
+                containment_identity: None,
+            },
+            ExecSpawnReport::Failed {
+                reason: "no such program".to_string(),
+            },
+        ] {
+            let original = WorkerToService::ExecSpawnReport(ExecSpawnReportPayload {
+                request_id: "gen-1".to_string(),
+                report: report.clone(),
+            });
+            match wincode_round_trip(&original) {
+                WorkerToService::ExecSpawnReport(p) => {
+                    assert_eq!(p.request_id, "gen-1");
+                    assert_eq!(p.report, report);
+                }
+                other => panic!("expected ExecSpawnReport, got {other:?}"),
+            }
+        }
+    }
 
     /// New `host_upstream_url` + repurposed `auth_token` fields round-trip cleanly.
     #[test]

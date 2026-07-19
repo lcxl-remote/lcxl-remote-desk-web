@@ -7922,6 +7922,63 @@ mod tests {
         }
     }
 
+    /// A dispatch the host reported as running is, after a crash, distinguishable
+    /// from one that died mid-spawn: the first is known to have started, the second
+    /// is genuinely unknown. Both refuse a second spawn.
+    #[tokio::test]
+    async fn a_started_dispatch_is_distinguishable_from_an_interrupted_one() {
+        let ctx = make_ctx().await;
+        let template = fleet_template();
+
+        // Started: the worker reported the spawn before anything was lost.
+        admit_exec(&ctx, &fleet_plan(&template, "started")).await;
+        ctx.exec_ledger
+            .mark_running("started", Some("pgid:4242"))
+            .await
+            .unwrap();
+
+        // Interrupted: reserved, then nothing — the host died inside the spawn.
+        admit_exec(&ctx, &fleet_plan(&template, "interrupted")).await;
+
+        let started = ctx.exec_ledger.get("started").await.unwrap().unwrap();
+        assert_eq!(started.state, "running");
+        assert_eq!(started.containment_identity.as_deref(), Some("pgid:4242"));
+        let interrupted = ctx.exec_ledger.get("interrupted").await.unwrap().unwrap();
+        assert_eq!(interrupted.state, "reserved");
+        assert_eq!(interrupted.containment_identity, None);
+
+        // Both are still in flight as far as the host is concerned, and neither may
+        // be spawned again.
+        assert_eq!(ctx.exec_ledger.in_flight().await.unwrap().len(), 2);
+        for generation in ["started", "interrupted"] {
+            assert!(matches!(
+                admit_exec(&ctx, &fleet_plan(&template, generation)).await,
+                ExecAdmission::AcceptedOutcomeUnknown(_)
+            ));
+        }
+    }
+
+    /// A spawn that provably failed is refused on redelivery with that reason,
+    /// rather than being reported as an unknown outcome.
+    #[tokio::test]
+    async fn a_failed_spawn_is_refused_rather_than_left_unknown() {
+        let ctx = make_ctx().await;
+        let template = fleet_template();
+        admit_exec(&ctx, &fleet_plan(&template, "a1")).await;
+        ctx.exec_ledger
+            .mark_terminal(
+                "a1",
+                crate::daemon::exec_ledger::Terminal::SpawnFailed("no such program".into()),
+            )
+            .await
+            .unwrap();
+
+        match admit_exec(&ctx, &fleet_plan(&template, "a1")).await {
+            ExecAdmission::Refused(reason) => assert!(reason.contains("failed to start")),
+            other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
     /// A plan naming no task is rejected: a result that cannot be attributed to a
     /// piece of work cannot be reconciled with anything.
     #[tokio::test]
