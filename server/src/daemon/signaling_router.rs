@@ -461,6 +461,11 @@ pub struct RouterContext {
     /// frame cannot spawn a second process. Not optional: a host without a ledger
     /// would silently double-execute, so there is no "skip it if absent" path.
     pub exec_ledger: Arc<crate::daemon::exec_ledger::ExecLedger>,
+    /// How many commands this host currently has running. Enforced locally on
+    /// every path, because a central quota only binds work the manager dispatched
+    /// and a control end can reach this host through an open-source signal server
+    /// without the manager being involved at all.
+    pub exec_capacity: Arc<crate::daemon::exec_capacity::ExecCapacity>,
 }
 
 /// What the ledger says should happen to an exec dispatch.
@@ -488,6 +493,25 @@ pub enum ExecAdmission {
 /// a process was started and the retry starts a second one.
 pub async fn admit_exec(ctx: &RouterContext, plan: &ExecPlan) -> ExecAdmission {
     use crate::daemon::exec_ledger::{Reservation, State};
+
+    // Capacity is checked before the ledger so a refused command leaves no trace:
+    // reserving first would burn the generation permanently on a dispatch that was
+    // never accepted, and the caller's legitimate retry would then be read as a
+    // redelivery of something that had already run.
+    let limit = ctx
+        .settings
+        .read()
+        .await
+        .ai_policy
+        .max_concurrent_executions as usize;
+    let timeout = std::time::Duration::from_millis(u64::from(plan.timeout_ms));
+    if let Err(full) = ctx
+        .exec_capacity
+        .try_admit(&plan.execution_generation, limit, timeout)
+    {
+        return ExecAdmission::Refused(full.to_string());
+    }
+
     let reservation = ctx
         .exec_ledger
         .reserve(
@@ -497,6 +521,12 @@ pub async fn admit_exec(ctx: &RouterContext, plan: &ExecPlan) -> ExecAdmission {
             None,
         )
         .await;
+    // Anything other than a fresh reservation means nothing new will run, so the
+    // slot goes straight back rather than waiting for a report that never comes.
+    if !matches!(reservation, Ok(Reservation::Granted)) {
+        ctx.exec_capacity.release(&plan.execution_generation);
+    }
+
     match reservation {
         Ok(Reservation::Granted) => ExecAdmission::Spawn,
         Ok(Reservation::FingerprintMismatch) => ExecAdmission::Refused(
@@ -3398,6 +3428,7 @@ async fn dispatch_exec_plan(
     audit_source_request_id: Option<String>,
 ) {
     let exec_request_id = plan.exec_request_id.clone();
+    let plan_generation = plan.execution_generation.clone();
 
     // Claim this dispatch in the ledger before the worker can start anything. A
     // redelivered frame is answered from the record instead of run a second time.
@@ -3472,6 +3503,8 @@ async fn dispatch_exec_plan(
         .send_to_worker(ServiceToWorker::ExecPlan(payload))
         .await
     {
+        // Nothing was started, so the slot is free again immediately.
+        ctx.exec_capacity.release(&plan_generation);
         send_exec_result(
             &ctx.outbound_tx,
             request_id,
@@ -3877,6 +3910,8 @@ async fn dispatch_fleet_exec_plan(ctx: &RouterContext, request_id: &str, plan: E
         if let Ok(mut pending) = ctx.edge_exec_pending.lock() {
             pending.remove(request_id);
         }
+        // Nothing was started, so the slot is free again immediately.
+        ctx.exec_capacity.release(request_id);
         send_edge_exec_result(
             &ctx.outbound_tx,
             request_id,
@@ -4155,6 +4190,7 @@ mod tests {
         let pc_registry = PcRegistry::new();
         let (worker_mgr, _) = WorkerManager::new(settings.clone(), pc_registry.clone());
         RouterContext {
+            exec_capacity: Arc::new(crate::daemon::exec_capacity::ExecCapacity::new()),
             exec_ledger: Arc::new(
                 crate::daemon::exec_ledger::ExecLedger::open_in_memory()
                     .await
@@ -7920,6 +7956,40 @@ mod tests {
             ExecAdmission::Refused(reason) => assert!(reason.contains("different command")),
             other => panic!("expected Refused, got {other:?}"),
         }
+    }
+
+    /// The host enforces its own ceiling, so a caller that ignores a central quota
+    /// — or reaches this host without a manager at all — is still bounded.
+    #[tokio::test]
+    async fn the_host_refuses_work_past_its_own_ceiling() {
+        let ctx = make_ctx().await;
+        {
+            let mut s = ctx.settings.write().await;
+            s.ai_policy.max_concurrent_executions = 2;
+        }
+        let template = fleet_template();
+
+        assert_eq!(
+            admit_exec(&ctx, &fleet_plan(&template, "a1")).await,
+            ExecAdmission::Spawn
+        );
+        assert_eq!(
+            admit_exec(&ctx, &fleet_plan(&template, "a2")).await,
+            ExecAdmission::Spawn
+        );
+        match admit_exec(&ctx, &fleet_plan(&template, "a3")).await {
+            ExecAdmission::Refused(reason) => assert!(reason.contains("2 permitted"), "{reason}"),
+            other => panic!("expected Refused, got {other:?}"),
+        }
+
+        // The refused dispatch must not have been reserved: it never ran, so the
+        // caller's retry of it has to be admissible rather than read as a replay.
+        assert!(ctx.exec_ledger.get("a3").await.unwrap().is_none());
+        ctx.exec_capacity.release("a1");
+        assert_eq!(
+            admit_exec(&ctx, &fleet_plan(&template, "a3")).await,
+            ExecAdmission::Spawn
+        );
     }
 
     /// A dispatch the host reported as running is, after a crash, distinguishable

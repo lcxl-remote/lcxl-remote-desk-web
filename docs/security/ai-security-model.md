@@ -16,6 +16,22 @@ The default execution mode is **suggest-only**: the model can propose commands b
 
 Both the **AI diagnosis panel** and the **terminal AI copilot** share one sealed confirmation chain. The copilot itself stays suggest-only — it never executes anything on its own. For a `confirm_required` suggestion, the operator may explicitly **promote it to execution**: that click relays the exact command to the host, which **re-classifies it server-side** (a control plane's self-reported decision is never trusted), mints the `exec_request_id`, and returns a preview the operator must **approve** before anything runs. Execution is gated by the same **local execution ceiling** — left at suggest-only it is off, so the Run action returns a non-executable preview that guides the owner to raise the ceiling first. Raising it opens confirmed execution for every AI surface on that device (diagnosis and copilot alike), not the copilot alone.
 
+## The device's own concurrency ceiling
+
+A host also caps how many commands may run **at the same time**
+(`ai_policy.max_concurrent_executions`, default 4). The device enforces this
+itself rather than trusting the caller to respect it.
+
+A central manager schedules against its own quota too, but that only binds work
+the manager dispatched — a control end reaching the device through an
+open-source signal server never goes through the manager at all. The device
+therefore keeps its own ceiling: whether a command is admitted does not depend
+on who scheduled it.
+
+A command over the ceiling is **refused without being accepted** — it is not
+recorded in the device's execution ledger, so a later retry is admitted normally
+rather than mistaken for a redelivery.
+
 ## Redaction Fails Closed
 
 The pipeline runs **collect → redact → model → render**. Collection and redaction happen on the **edge device**; the model call happens **centrally**. If redaction fails, the edge returns an error and the central brain aborts **before** the model is called. Evidence (with raw screenshot bytes stripped) is always redacted before it leaves the host or reaches the model.

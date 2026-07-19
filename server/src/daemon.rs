@@ -4,6 +4,7 @@ pub mod codec_negotiation;
 pub mod command_blocklist;
 pub mod command_templates;
 pub mod exec_approval;
+pub mod exec_capacity;
 pub mod exec_ledger;
 pub mod local_api;
 pub mod manager_link_gate;

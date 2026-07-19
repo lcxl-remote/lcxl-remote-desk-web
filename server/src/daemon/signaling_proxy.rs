@@ -147,6 +147,7 @@ pub async fn run_signaling_proxy(
     // regardless of which WS surfaced them.
     let router_ctx = RouterContext {
         exec_ledger: exec_ledger.clone(),
+        exec_capacity: Arc::new(crate::daemon::exec_capacity::ExecCapacity::new()),
         pc_registry: pc_registry.clone(),
         outbound_tx: outbound_tx.clone(),
         settings: settings.clone(),
@@ -860,6 +861,11 @@ pub async fn run_signaling_proxy(
                         payload.request_id
                     );
                 }
+                // A command that never started occupies nothing, so give its slot
+                // back now rather than letting the deadline reclaim it.
+                if matches!(payload.report, ExecSpawnReport::Failed { .. }) {
+                    router_ctx.exec_capacity.release(&payload.request_id);
+                }
                 continue;
             }
             WorkerToService::ExecResult(payload) => {
@@ -885,6 +891,8 @@ pub async fn run_signaling_proxy(
                         );
                     }
                 }
+                // The execution is accounted for; free its slot for the next one.
+                router_ctx.exec_capacity.release(&payload.request_id);
                 // Audit the completion (single-machine log sink). The summary is
                 // content-free (exit code / error kind only), never stdout.
                 {
@@ -2681,6 +2689,7 @@ mod tests {
         let pc_registry = PcRegistry::new();
         let (worker_mgr, _rx) = WorkerManager::new(settings.clone(), pc_registry.clone());
         let ctx = RouterContext {
+            exec_capacity: Arc::new(crate::daemon::exec_capacity::ExecCapacity::new()),
             exec_ledger: Arc::new(
                 crate::daemon::exec_ledger::ExecLedger::open_in_memory()
                     .await

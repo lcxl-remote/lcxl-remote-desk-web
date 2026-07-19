@@ -25,11 +25,17 @@ fn is_m2_selectable(mode: ExecutionMode) -> bool {
     )
 }
 
+/// Default ceiling on commands running at once on this device. Low on purpose:
+/// AI-driven execution is interactive and approved one command at a time, so
+/// several at once is already unusual, and the ceiling exists to bound a caller
+/// that ignores that rather than to size normal work.
+pub const DEFAULT_MAX_CONCURRENT_EXECUTIONS: u32 = 4;
+
 /// Persisted edge-local AI execution policy.
 ///
-/// Holds no model credentials (those live on the central brain); the only field
-/// is the local execution ceiling.
-#[derive(Clone, Debug, Deserialize, Serialize, Default)]
+/// Holds no model credentials (those live on the central brain); the fields are
+/// the local execution ceiling and how much may run at once.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AiExecutionPolicy {
     /// How far the AI may go in acting on the device. Default `suggest_only`
@@ -41,6 +47,24 @@ pub struct AiExecutionPolicy {
     /// not implemented and is refused. On a central link this caps the centrally
     /// granted mode; it never widens it.
     pub execution_mode: ExecutionMode,
+    /// How many commands may run concurrently on this device, across every
+    /// caller.
+    ///
+    /// Enforced by the host itself rather than trusted to the caller. A central
+    /// manager also schedules against its own quota, but that binds only work the
+    /// manager dispatched — a control end reaching this device through an
+    /// open-source signal server bypasses it entirely, so the device keeps its own
+    /// ceiling.
+    pub max_concurrent_executions: u32,
+}
+
+impl Default for AiExecutionPolicy {
+    fn default() -> Self {
+        Self {
+            execution_mode: ExecutionMode::default(),
+            max_concurrent_executions: DEFAULT_MAX_CONCURRENT_EXECUTIONS,
+        }
+    }
 }
 
 impl AiExecutionPolicy {
