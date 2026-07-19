@@ -1404,7 +1404,11 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::TerminalCopilotEvent
             | SignalingType::TerminalCompleteResult
             | SignalingType::ExecPreview
-            | SignalingType::ExecResult => {
+            | SignalingType::ExecResult
+            // Lifecycle frames report an execution's progress and answer a
+            // control frame; both are host-originated facts, relayed unchanged.
+            | SignalingType::ExecLifecycle
+            | SignalingType::ExecStateReply => {
                 // Generic forwarding
                 self.forward_to_peer(&signaling_model, false).await?;
             }
@@ -1443,6 +1447,10 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::TerminalCopilotCancel
             | SignalingType::TerminalCompleteAsk
             | SignalingType::ConfirmExec
+            // `ExecControl` acts on a command that is already running, so it goes
+            // through the authorizer rather than relaying: stopping someone else's
+            // execution is a decision, and one that has to be recorded.
+            | SignalingType::ExecControl
             | SignalingType::ResolveExec => {
                 let to_forward = if let Some(authorizer) = self.control_authorizer.clone() {
                     match authorizer

@@ -41,17 +41,18 @@ use desk_agent_protocol::exec::{
 use desk_agent_protocol::exec_policy::{ExecLimits, build_exact_argv_draft};
 
 use crate::diagnose::terminal_copilot::copilot_signaling_sink;
+use desk_agent_protocol::exec_lifecycle::{ExecControlAction, ExecControlPayload};
 use desk_agent_protocol::{
     ActorRef, ActorType, AgentEnvelope, AgentError, AgentErrorKind, AgentOperation, AgentOutcome,
     AgentRequestData, AgentScope, CallerRef, CallerType, Capability, ExecutionMode, OperationInput,
     ProtocolVersion, RequestId, TargetRef,
 };
 use desk_ipc_protocol::message::{
-    AgentRequestPayload, CloseTerminalPayload, EnablePrivateScreenPayload, ExecPlanPayload,
-    ListTerminalRequestPayload, ManagerFileDeleteRequestPayload, ManagerFileListRequestPayload,
-    ManagerRequestRefPayload, ManagerUpdateSettingsRequestPayload, ResizeTerminalPayload,
-    SendDataToTerminalPayload, ServiceToWorker, SetVirtualDisplayModePayload,
-    StartTerminalRequestPayload, UpdateDeskSettingsPayload,
+    AgentRequestPayload, CloseTerminalPayload, EnablePrivateScreenPayload, ExecCancelPayload,
+    ExecPlanPayload, ListTerminalRequestPayload, ManagerFileDeleteRequestPayload,
+    ManagerFileListRequestPayload, ManagerRequestRefPayload, ManagerUpdateSettingsRequestPayload,
+    ResizeTerminalPayload, SendDataToTerminalPayload, ServiceToWorker,
+    SetVirtualDisplayModePayload, StartTerminalRequestPayload, UpdateDeskSettingsPayload,
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams};
@@ -166,7 +167,9 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::TerminalCopilotEvent
         | SignalingType::TerminalCompleteResult
         | SignalingType::ExecPreview
-        | SignalingType::ExecResult => RouteOwnership::Daemon,
+        | SignalingType::ExecResult
+        | SignalingType::ExecLifecycle
+        | SignalingType::ExecStateReply => RouteOwnership::Daemon,
 
         // AI Diagnose request: control end → daemon. Unlike `AgentRequest`
         // (worker-bound raw capability call), the diagnose orchestrator runs
@@ -198,6 +201,11 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // IPC, like `Diagnose`. The worker only ever receives the sealed
         // `ServiceToWorker::ExecPlan` (a later step), never these.
         SignalingType::ConfirmExec | SignalingType::ResolveExec => RouteOwnership::Daemon,
+
+        // Acting on a running execution needs the durable ledger and the worker
+        // handle, both of which are the daemon's. The worker is told to stop a
+        // command, but never asked what it knows — the ledger outlives it.
+        SignalingType::ExecControl => RouteOwnership::Daemon,
 
         // Daemon-emitted notifications. Browsers don't send these
         // back at us, but if they did the daemon should swallow them
@@ -956,10 +964,12 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // TerminalCompleteResult only flows host → control end; an inbound copy
         // is a protocol error — swallow it.
         | SignalingType::TerminalCompleteResult
-        // ExecPreview / ExecResult only flow host → control end; an inbound
-        // copy is a protocol error — swallow it.
+        // ExecPreview / ExecResult and the lifecycle frames only flow host →
+        // control end; an inbound copy is a protocol error — swallow it.
         | SignalingType::ExecPreview
         | SignalingType::ExecResult
+        | SignalingType::ExecLifecycle
+        | SignalingType::ExecStateReply
         | SignalingType::Error
         | SignalingType::Unknown => {
             log::trace!(
@@ -1028,6 +1038,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // dispatch the sealed plan. The execution itself + outbound
         // `ExecResult` land with the worker executor in a later step.
         SignalingType::ResolveExec => handle_resolve_exec_inbound(ctx, model).await,
+        SignalingType::ExecControl => handle_exec_control_inbound(ctx, model).await,
         // AI audit events are emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never persists audit itself).
         SignalingType::AiAuditEvent => Ok(()),
@@ -3252,6 +3263,76 @@ async fn handle_confirm_exec_inbound(
 /// on approve, seal the stored draft into an `ExecPlan` and dispatch it. Reject
 /// just consumes the pending and ends. A missing / expired / already-consumed id
 /// on approve returns an error `ExecResult`.
+/// Handle an `ExecControl(623)`: stop an execution, or report on one.
+///
+/// Both actions answer with the same `ExecStateReply(624)` built from the durable
+/// ledger. The ledger is asked *after* a cancel has been passed to the worker so
+/// the reply reflects the request, and a generation the worker is not running is
+/// not an error — it has very likely just finished, and the ledger says so.
+async fn handle_exec_control_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let request_id = model.request_id.clone();
+    let to = model.from_connection_id.clone();
+
+    let payload = match model.get_data::<ExecControlPayload>() {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("[router] bad ExecControl payload: {e} (request_id={request_id})");
+            return Ok(());
+        }
+    };
+    let generation = payload.execution_generation.clone();
+
+    if let ExecControlAction::Cancel { requested_by } = &payload.action {
+        log::info!(
+            "[router] exec cancel requested: generation={generation} by={requested_by} \
+             (request_id={request_id})"
+        );
+        // Best-effort by design: the worker may be gone, or the command may have
+        // just finished. Either way the ledger below reports what is actually
+        // true, rather than this send's success standing in for it.
+        if let Err(e) = ctx
+            .worker_mgr
+            .send_to_worker(ServiceToWorker::ExecCancel(ExecCancelPayload {
+                execution_generation: generation.clone(),
+            }))
+            .await
+        {
+            log::warn!("[router] could not pass the cancel to the worker: {e}");
+        }
+        // `requested_by` is a wire hint only; the audit pipeline stamps the
+        // authenticated actor, so a control end cannot name someone else as the
+        // one who stopped a command.
+        ctx.audit
+            .record(AuditEvent::command_cancel_requested(
+                new_audit_event_id(),
+                audit_now(),
+                &generation,
+            ))
+            .await;
+    }
+
+    let reply = match ctx.exec_ledger.describe(&generation).await {
+        Ok(reply) => reply,
+        Err(e) => {
+            log::warn!("[router] could not read the exec ledger: {e} (generation={generation})");
+            return Ok(());
+        }
+    };
+
+    send_notification(
+        &ctx.outbound_tx,
+        &request_id,
+        SignalingType::ExecStateReply,
+        to,
+        &reply,
+        "ExecStateReply",
+    );
+    Ok(())
+}
+
 async fn handle_resolve_exec_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
@@ -8604,6 +8685,7 @@ mod tests {
     }
 
     use desk_agent_protocol::audit::AuditEventType;
+    use desk_agent_protocol::exec_lifecycle::{ExecState, ExecStateReplyPayload};
 
     /// A context whose audit sink records, so the emissions of a rejection path
     /// can be inspected.
@@ -8620,6 +8702,198 @@ mod tests {
         let sink = RecordingAuditSink::default();
         ctx.audit = Arc::new(sink.clone());
         (ctx, rx, sink)
+    }
+
+    fn exec_control_model(request_id: &str, action: ExecControlAction) -> SignalingModel {
+        SignalingModel::new(
+            request_id,
+            SignalingType::ExecControl,
+            Some("conn-1".to_string()),
+            None,
+            Some(
+                serde_json::to_value(ExecControlPayload {
+                    execution_generation: "gen-1".to_string(),
+                    action,
+                })
+                .unwrap(),
+            ),
+            None,
+        )
+    }
+
+    /// Read the one `ExecStateReply` the router emitted.
+    fn expect_state_reply(rx: &mut broadcast::Receiver<String>) -> ExecStateReplyPayload {
+        loop {
+            let text = rx.try_recv().expect("no frame was sent");
+            let frame: SignalingModel = serde_json::from_str(&text).unwrap();
+            if frame.signaling_type == SignalingType::ExecStateReply {
+                return frame.get_data::<ExecStateReplyPayload>().unwrap();
+            }
+        }
+    }
+
+    /// A query about an execution the host never accepted reports `unknown`,
+    /// which the control end must not read as a settled outcome.
+    #[tokio::test]
+    async fn a_query_for_an_unseen_generation_answers_unknown() {
+        let (ctx, mut rx) = make_ctx_with_rx().await;
+        handle_exec_control_inbound(
+            &ctx,
+            &exec_control_model("req-1", ExecControlAction::QueryState),
+        )
+        .await
+        .unwrap();
+
+        let reply = expect_state_reply(&mut rx);
+        assert_eq!(reply.execution_generation, "gen-1");
+        assert_eq!(reply.state, ExecState::Unknown);
+        assert!(!reply.state.is_settled());
+    }
+
+    /// A query is answered from the durable ledger, so a running execution is
+    /// reported as running along with how the host would reclaim it.
+    #[tokio::test]
+    async fn a_query_answers_from_the_ledger() {
+        let (ctx, mut rx) = make_ctx_with_rx().await;
+        ctx.exec_ledger
+            .reserve("task-1", "gen-1", "fp-1", None)
+            .await
+            .unwrap();
+        ctx.exec_ledger
+            .mark_running("gen-1", Some("pgid:99"))
+            .await
+            .unwrap();
+
+        handle_exec_control_inbound(
+            &ctx,
+            &exec_control_model("req-1", ExecControlAction::QueryState),
+        )
+        .await
+        .unwrap();
+
+        let reply = expect_state_reply(&mut rx);
+        assert_eq!(reply.state, ExecState::Running);
+        assert_eq!(reply.containment_identity.as_deref(), Some("pgid:99"));
+    }
+
+    /// A cancel reaches the worker as a stop for that exact generation, and is
+    /// still answered with the ledger's view rather than with the send's success.
+    #[tokio::test]
+    async fn a_cancel_reaches_the_worker_and_still_answers_from_the_ledger() {
+        let (ctx, mut rx) = make_ctx_with_rx().await;
+        let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        ctx.worker_mgr.install_active_for_test(worker_tx).await;
+        ctx.exec_ledger
+            .reserve("task-1", "gen-1", "fp-1", None)
+            .await
+            .unwrap();
+        ctx.exec_ledger.mark_running("gen-1", None).await.unwrap();
+
+        handle_exec_control_inbound(
+            &ctx,
+            &exec_control_model(
+                "req-1",
+                ExecControlAction::Cancel {
+                    requested_by: "operator:7".into(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        match worker_rx
+            .try_recv()
+            .expect("the worker was not told to stop")
+        {
+            ServiceToWorker::ExecCancel(p) => assert_eq!(p.execution_generation, "gen-1"),
+            other => panic!("expected an ExecCancel, got {other:?}"),
+        }
+        // Still running: a requested stop is not a terminal state, and reporting
+        // one here would tell the upstream the command had ended when it had not.
+        assert_eq!(expect_state_reply(&mut rx).state, ExecState::Running);
+    }
+
+    /// A cancel for an execution that already finished is not an error: it is
+    /// answered with the terminal state, which tells the upstream to stop asking.
+    #[tokio::test]
+    async fn cancelling_a_finished_execution_reports_it_settled() {
+        let (ctx, mut rx) = make_ctx_with_rx().await;
+        ctx.exec_ledger
+            .reserve("task-1", "gen-1", "fp-1", None)
+            .await
+            .unwrap();
+        ctx.exec_ledger
+            .mark_terminal(
+                "gen-1",
+                crate::daemon::exec_ledger::Terminal::Completed("{}".into()),
+            )
+            .await
+            .unwrap();
+
+        handle_exec_control_inbound(
+            &ctx,
+            &exec_control_model(
+                "req-1",
+                ExecControlAction::Cancel {
+                    requested_by: "operator:7".into(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let reply = expect_state_reply(&mut rx);
+        assert_eq!(reply.state, ExecState::Terminal);
+        assert!(reply.state.is_settled());
+    }
+
+    /// Every cancel is recorded, whether or not it stopped anything — a stop that
+    /// was asked for and never landed is precisely what an audit trail is for.
+    #[tokio::test]
+    async fn a_cancel_is_audited_even_when_it_stops_nothing() {
+        let (mut ctx, _rx) = make_ctx_with_rx().await;
+        let sink = RecordingAuditSink::default();
+        ctx.audit = Arc::new(sink.clone());
+
+        handle_exec_control_inbound(
+            &ctx,
+            &exec_control_model(
+                "req-1",
+                ExecControlAction::Cancel {
+                    requested_by: "operator:7".into(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            sink.event_types()
+                .contains(&"ai.command.cancel_requested".to_string()),
+            "the cancel was not recorded: {:?}",
+            sink.event_types()
+        );
+    }
+
+    /// A query changes nothing, so it is not an audit event and never reaches the
+    /// worker — asking must not be indistinguishable from acting.
+    #[tokio::test]
+    async fn a_query_neither_stops_anything_nor_is_audited() {
+        let (mut ctx, _rx) = make_ctx_with_rx().await;
+        let sink = RecordingAuditSink::default();
+        ctx.audit = Arc::new(sink.clone());
+        let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        ctx.worker_mgr.install_active_for_test(worker_tx).await;
+
+        handle_exec_control_inbound(
+            &ctx,
+            &exec_control_model("req-1", ExecControlAction::QueryState),
+        )
+        .await
+        .unwrap();
+
+        assert!(worker_rx.try_recv().is_err(), "a query reached the worker");
+        assert!(sink.event_types().is_empty(), "a query was audited");
     }
 
     /// A `ConfirmExec` whose payload cannot be parsed at all.

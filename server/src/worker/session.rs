@@ -22,8 +22,8 @@ use desk_input_injection::display_watcher;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
-        AgentResponsePayload, DesktopChangedPayload, ExecResultIpcPayload, ExecSpawnReportPayload,
-        FileTransferPayload, HeartbeatPayload, ListTerminalResponsePayload,
+        AgentResponsePayload, DesktopChangedPayload, ExecCancelPayload, ExecResultIpcPayload,
+        ExecSpawnReportPayload, FileTransferPayload, HeartbeatPayload, ListTerminalResponsePayload,
         ManagerFileListResponsePayload, ManagerQuerySettingsResponsePayload,
         ManagerResponseRefPayload, ManagerSystemInfoResponsePayload,
         PrivateScreenStateChangedPayload, ReplyFromTerminalPayload, ServiceToWorker,
@@ -843,6 +843,9 @@ impl WorkerSession {
         // DeskSession below each take a clone). Owner / unrestricted connections
         // are never registered (missing entry = global-only gating).
         let connection_ceilings = crate::worker::connection_ceiling::ConnectionCeilingStore::new();
+        // Stop switches for the commands currently running, so a cancel arriving
+        // on this loop can reach an execution running in a task of its own.
+        let exec_registry = crate::worker::exec_registry::ExecRegistry::new();
         let file_transfer_dispatcher = FileTransferDispatcher::new(
             file_sender,
             shared_settings.clone(),
@@ -1676,7 +1679,14 @@ impl WorkerSession {
                                     // `writer_tx`; execution failures travel inside
                                     // the `AgentOutcome`, not the transport.
                                     let writer_tx = writer_tx.clone();
+                                    // Register before the execution starts, so a
+                                    // cancel racing the spawn still finds it.
+                                    let (cancel, registration) =
+                                        exec_registry.register(&payload.plan.execution_generation);
                                     tokio::spawn(async move {
+                                        // Held for the whole run; dropping it
+                                        // deregisters however the command ends.
+                                        let _registration = registration;
                                         // Report the spawn as soon as it is known,
                                         // ahead of the result: the daemon reserved
                                         // this execution and needs to know it is
@@ -1684,7 +1694,7 @@ impl WorkerSession {
                                         // without waiting for the command to end.
                                         let spawn_tx = writer_tx.clone();
                                         let spawn_request_id = payload.request_id.clone();
-                                        let outcome = crate::worker::exec::execute_plan_reporting(
+                                        let outcome = crate::worker::exec::execute_plan_cancellable(
                                             &payload.plan,
                                             move |report| {
                                                 if spawn_tx
@@ -1701,6 +1711,7 @@ impl WorkerSession {
                                                     );
                                                 }
                                             },
+                                            Some(cancel.subscribe()),
                                         )
                                         .await;
                                         let result = desk_agent_protocol::exec::ExecResultPayload {
@@ -1725,6 +1736,17 @@ impl WorkerSession {
                                             warn!("writer task closed; dropping ExecResult");
                                         }
                                     });
+                                }
+                                ServiceToWorker::ExecCancel(ExecCancelPayload {
+                                    execution_generation,
+                                }) => {
+                                    // Nothing to stop is the ordinary outcome of a
+                                    // cancel that arrived just as the command
+                                    // finished; the daemon answers from its ledger.
+                                    let stopped = exec_registry.cancel(&execution_generation);
+                                    info!(
+                                        "Worker received ExecCancel generation={execution_generation} stopped={stopped}"
+                                    );
                                 }
                             }
                         }

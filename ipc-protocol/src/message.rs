@@ -241,6 +241,17 @@ pub enum ServiceToWorker {
     /// rides the capability envelope — only this dedicated variant carries an
     /// executable plan, so a read-only `AgentRequest` can never become one.
     ExecPlan(ExecPlanPayload),
+
+    /// Daemon → worker: stop the execution running under this generation and
+    /// reclaim its process tree.
+    ///
+    /// Fire-and-forget by design. The worker does not reply, because the only
+    /// answer worth having is the execution's own terminal result, which already
+    /// travels on [`WorkerToService::ExecResult`]. A separate acknowledgement
+    /// would say a stop was *requested*, which no upstream can act on — the
+    /// daemon answers "what state is it in now?" from its durable ledger, and
+    /// naming a generation the worker is not running is not an error there.
+    ExecCancel(ExecCancelPayload),
 }
 
 /// Messages sent from Worker process to Service Core (daemon) over the
@@ -1278,6 +1289,14 @@ pub struct ExecPlanPayload {
     /// `command_completed` audit event can be attributed to the real operator.
     /// `None` on the single-machine / non-manager path.
     pub audit_source_request_id: Option<String>,
+}
+
+/// Payload for [`ServiceToWorker::ExecCancel`].
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ExecCancelPayload {
+    /// The one dispatch to stop. Keyed on the generation rather than the task so
+    /// a cancel aimed at an earlier attempt can never kill its retry.
+    pub execution_generation: String,
 }
 
 /// Payload for [`WorkerToService::ExecResult`]. Embeds the

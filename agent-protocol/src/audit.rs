@@ -88,6 +88,11 @@ pub enum AuditEventType {
     CommandExecuted,
     /// An executed command finished (result returned).
     CommandCompleted,
+    /// Someone asked for a running command to be stopped. Recorded when the
+    /// request is made, not when it takes effect: whether the command actually
+    /// stopped is told by its own terminal result, and a stop that was requested
+    /// but never landed is exactly the thing worth having a record of.
+    CommandCancelRequested,
 }
 
 impl AuditEventType {
@@ -111,6 +116,7 @@ impl AuditEventType {
             AuditEventType::ApprovalDenied => "ai.approval.denied",
             AuditEventType::CommandExecuted => "ai.command.executed",
             AuditEventType::CommandCompleted => "ai.command.completed",
+            AuditEventType::CommandCancelRequested => "ai.command.cancel_requested",
         }
     }
 }
@@ -569,6 +575,31 @@ impl AuditEvent {
             exec_request_id,
         );
         event.result = "denied".to_string();
+        event
+    }
+
+    /// `ai.command.cancel_requested` — a stop was requested for one dispatch.
+    ///
+    /// Correlated by the execution generation rather than the exec request: a
+    /// cancel names one dispatch, and attributing it to the task would leave the
+    /// record unable to say which attempt someone meant to stop.
+    ///
+    /// Who asked is **not** taken from the request. `actor_id` is stamped by the
+    /// audit pipeline from the authenticated envelope, as it is for every other
+    /// event here; a requester named on the wire is a hint for the log, never the
+    /// record of who did it.
+    pub fn command_cancel_requested(
+        event_id: String,
+        occurred_at: String,
+        execution_generation: &str,
+    ) -> Self {
+        let mut event = Self::exec_scoped(
+            event_id,
+            occurred_at,
+            AuditEventType::CommandCancelRequested,
+            execution_generation,
+        );
+        event.result = "requested".to_string();
         event
     }
 
@@ -1149,6 +1180,10 @@ mod tests {
             (AuditEventType::ApprovalDenied, "ai.approval.denied"),
             (AuditEventType::CommandExecuted, "ai.command.executed"),
             (AuditEventType::CommandCompleted, "ai.command.completed"),
+            (
+                AuditEventType::CommandCancelRequested,
+                "ai.command.cancel_requested",
+            ),
         ];
         for (ty, dotted) in cases {
             assert_eq!(ty.as_str(), dotted);

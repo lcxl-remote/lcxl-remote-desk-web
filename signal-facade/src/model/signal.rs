@@ -366,6 +366,28 @@ pub enum SignalingType {
     #[wincode(tag = 622)]
     CommandBlocklistSync = 622,
 
+    /// Upstream → host: act on an execution already in flight. Carries
+    /// `desk_agent_protocol::exec_lifecycle::ExecControlPayload` — either a
+    /// cancel or a state query, both fenced by `execution_generation`. The host
+    /// answers both with [`SignalingType::ExecStateReply`].
+    #[wincode(tag = 623)]
+    ExecControl = 623,
+
+    /// Host → upstream: what the host's durable ledger says about one execution
+    /// generation. Carries `desk_agent_protocol::exec_lifecycle::
+    /// ExecStateReplyPayload`. The reply to both a cancel and a state query, so
+    /// an upstream has one rule to implement: keep asking until the state is
+    /// settled. Notification-style (`response_state = None`).
+    #[wincode(tag = 624)]
+    ExecStateReply = 624,
+
+    /// Host → upstream: an execution progressed without finishing. Carries
+    /// `desk_agent_protocol::exec_lifecycle::ExecLifecyclePayload` (accepted, or
+    /// still running). Removes the guessing an upstream had to do from a clock
+    /// while it heard nothing. Notification-style (`response_state = None`).
+    #[wincode(tag = 625)]
+    ExecLifecycle = 625,
+
     /// Error
     #[wincode(tag = -1)]
     Error = -1,
