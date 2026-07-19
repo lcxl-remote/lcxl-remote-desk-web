@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
     SIGNALING_TYPE_CODE_CONFIRM_EXEC,
+    SIGNALING_TYPE_CODE_EXEC_CONTROL,
+    SIGNALING_TYPE_CODE_EXEC_LIFECYCLE,
     SIGNALING_TYPE_CODE_EXEC_PREVIEW,
     SIGNALING_TYPE_CODE_EXEC_RESULT,
+    SIGNALING_TYPE_CODE_EXEC_STATE_REPLY,
     SIGNALING_TYPE_CODE_RESOLVE_EXEC,
 } from '../desk/constants';
 import type { SignalingMessage, SignalingSubscriber } from '../desk/use-desk-signaling';
@@ -61,14 +64,65 @@ export type ExecResultPayload = {
     outcome: ExecOutcome;
 };
 
+// Wire types — mirror `desk_agent_protocol::exec_lifecycle`.
+
+/** What the host's own ledger says about one dispatch. */
+export type ExecState =
+    | 'reserved'
+    | 'running'
+    | 'terminal'
+    | 'indeterminate'
+    | 'spawn_failed'
+    | 'unknown';
+
+export type ExecLifecyclePayload = {
+    execution_generation: string;
+} & (
+    | { event: 'accepted'; containment_identity: string | null }
+    | { event: 'heartbeat'; running_ms: number }
+);
+
+export type ExecStateReplyPayload = {
+    execution_generation: string;
+    state: ExecState;
+    containment_identity: string | null;
+    running_ms: number | null;
+    detail: string | null;
+};
+
+/** Whether a state settles the execution, so there is nothing left to wait for. */
+function isSettled(state: ExecState): boolean {
+    return state === 'terminal' || state === 'indeterminate' || state === 'spawn_failed';
+}
+
 // One execution's lifecycle, keyed by the row it belongs to.
-export type ExecPhase = 'previewing' | 'awaiting' | 'running' | 'done' | 'error';
+//
+// `dispatching` and `running` are deliberately distinct. Approving used to put a
+// row straight into `running`, which was a guess: the host had not said anything
+// yet, and a command that never started still looked like one that was working.
+// `running` is now only ever entered because the host said it had started.
+export type ExecPhase =
+    | 'previewing'
+    | 'awaiting'
+    | 'dispatching'
+    | 'running'
+    | 'done'
+    | 'error';
 
 export type ExecEntry = {
     phase: ExecPhase;
     preview: ExecPreview | null;
     /** Server-minted id once a preview is executable / approved. */
     execRequestId: string | null;
+    /** The id of the one dispatch, known from the frame that approved it. Cancel
+     *  and state queries name this rather than the task, so they can never hit a
+     *  retry of the same command. */
+    executionGeneration: string | null;
+    /** How long the host says it has been running, from its own clock. */
+    runningMs: number | null;
+    /** Set once a stop has been asked for; the command is not over until the host
+     *  says so, so this is shown alongside the phase rather than replacing it. */
+    cancelRequested: boolean;
     /** Result output on success. */
     output: ExecOutput | null;
     /** Human-readable error (preview-blocked, or execution failure). */
@@ -131,6 +185,9 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
     const previewReqToRow = useRef<Record<string, number>>({});
     // Map exec_request_id -> row index, so an ExecResult backfills the right row.
     const execIdToRow = useRef<Record<string, number>>({});
+    // Map execution generation -> row index, so the host's lifecycle frames and
+    // state replies land on the row that asked for that one dispatch.
+    const generationToRow = useRef<Record<string, number>>({});
 
     const requestPreview = useCallback(
         (rowIndex: number, input: ExecRequestInput) => {
@@ -164,6 +221,9 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                     phase: 'previewing',
                     preview: null,
                     execRequestId: null,
+                    executionGeneration: null,
+                    runningMs: null,
+                    cancelRequested: false,
                     output: null,
                     error: null,
                 },
@@ -176,14 +236,23 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
         (rowIndex: number) => {
             const entry = entries[rowIndex];
             if (!deskId || !entry?.execRequestId) return;
-            sendMessage(
+            // The frame that approves is the one that triggers the dispatch, so
+            // its id is the execution generation the host will report against.
+            const generation = sendMessage(
                 SIGNALING_TYPE_CODE_RESOLVE_EXEC,
                 { exec_request_id: entry.execRequestId, decision: 'approve' },
                 deskId,
             );
+            generationToRow.current[generation] = rowIndex;
             setEntries((prev) => ({
                 ...prev,
-                [rowIndex]: { ...prev[rowIndex], phase: 'running' },
+                [rowIndex]: {
+                    ...prev[rowIndex],
+                    // Not `running`: approving is a request, and only the host can
+                    // say whether the command actually started.
+                    phase: 'dispatching',
+                    executionGeneration: generation,
+                },
             }));
         },
         [deskId, entries, sendMessage],
@@ -204,6 +273,45 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                 delete next[rowIndex];
                 return next;
             });
+        },
+        [deskId, entries, sendMessage],
+    );
+
+    /** Ask the host to stop a running command and reclaim its process tree. */
+    const cancel = useCallback(
+        (rowIndex: number) => {
+            const entry = entries[rowIndex];
+            if (!deskId || !entry?.executionGeneration) return;
+            sendMessage(
+                SIGNALING_TYPE_CODE_EXEC_CONTROL,
+                {
+                    execution_generation: entry.executionGeneration,
+                    action: 'cancel',
+                    requested_by: 'control-end',
+                },
+                deskId,
+            );
+            // The row is not moved to a finished phase: a stop that was asked for
+            // is not a stop that happened, and only the host's own result says
+            // whether — and how far — the command ran.
+            setEntries((prev) => ({
+                ...prev,
+                [rowIndex]: { ...prev[rowIndex], cancelRequested: true },
+            }));
+        },
+        [deskId, entries, sendMessage],
+    );
+
+    /** Ask the host what it currently believes about this dispatch. */
+    const queryState = useCallback(
+        (rowIndex: number) => {
+            const entry = entries[rowIndex];
+            if (!deskId || !entry?.executionGeneration) return;
+            sendMessage(
+                SIGNALING_TYPE_CODE_EXEC_CONTROL,
+                { execution_generation: entry.executionGeneration, action: 'query_state' },
+                deskId,
+            );
         },
         [deskId, entries, sendMessage],
     );
@@ -234,15 +342,82 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                 setEntries((prev) => ({
                     ...prev,
                     [rowIndex]: {
+                        ...prev[rowIndex],
                         phase: preview.executable ? 'awaiting' : 'error',
                         preview,
                         execRequestId: preview.exec_request_id,
+                        executionGeneration: null,
+                        runningMs: null,
+                        cancelRequested: false,
                         output: null,
                         error: preview.executable
                             ? null
                             : (preview.blocked_reason ?? preview.policy_note ?? preview.impact),
                     },
                 }));
+                return;
+            }
+
+            if (message.signaling_type === SIGNALING_TYPE_CODE_EXEC_LIFECYCLE) {
+                const payload = message.signaling_data as ExecLifecyclePayload | null;
+                if (!payload) return;
+                const rowIndex = generationToRow.current[payload.execution_generation];
+                if (rowIndex === undefined) return;
+                setEntries((prev) => {
+                    const entry = prev[rowIndex];
+                    // A progress frame arriving after the result must not reopen a
+                    // finished row; the terminal answer already settled it.
+                    if (!entry || entry.phase === 'done' || entry.phase === 'error') {
+                        return prev;
+                    }
+                    return {
+                        ...prev,
+                        [rowIndex]: {
+                            ...entry,
+                            phase: 'running',
+                            runningMs:
+                                payload.event === 'heartbeat'
+                                    ? payload.running_ms
+                                    : entry.runningMs,
+                        },
+                    };
+                });
+                return;
+            }
+
+            if (message.signaling_type === SIGNALING_TYPE_CODE_EXEC_STATE_REPLY) {
+                const payload = message.signaling_data as ExecStateReplyPayload | null;
+                if (!payload) return;
+                const rowIndex = generationToRow.current[payload.execution_generation];
+                if (rowIndex === undefined) return;
+                setEntries((prev) => {
+                    const entry = prev[rowIndex];
+                    if (!entry || entry.phase === 'done' || entry.phase === 'error') {
+                        return prev;
+                    }
+                    // A settled state the result has not delivered means the host
+                    // has no answer to give — it lost track of the command, or the
+                    // spawn failed. Say so rather than waiting for a result that is
+                    // never coming.
+                    if (isSettled(payload.state) && payload.state !== 'terminal') {
+                        return {
+                            ...prev,
+                            [rowIndex]: {
+                                ...entry,
+                                phase: 'error',
+                                error: payload.detail ?? payload.state,
+                            },
+                        };
+                    }
+                    return {
+                        ...prev,
+                        [rowIndex]: {
+                            ...entry,
+                            phase: payload.state === 'running' ? 'running' : entry.phase,
+                            runningMs: payload.running_ms ?? entry.runningMs,
+                        },
+                    };
+                });
                 return;
             }
 
@@ -253,6 +428,10 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                 if (rowIndex === undefined) return;
                 delete execIdToRow.current[payload.exec_request_id];
                 const output = execOutputFromOutcome(payload.outcome);
+                // The dispatch is over, so stop routing its lifecycle frames.
+                for (const [generation, row] of Object.entries(generationToRow.current)) {
+                    if (row === rowIndex) delete generationToRow.current[generation];
+                }
                 setEntries((prev) => ({
                     ...prev,
                     [rowIndex]: {
@@ -270,5 +449,5 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
         return subscribe(handle);
     }, [subscribe]);
 
-    return { entries, requestPreview, approve, reject, dismiss };
+    return { entries, requestPreview, approve, reject, cancel, queryState, dismiss };
 }

@@ -32,6 +32,38 @@ A command over the ceiling is **refused without being accepted** — it is not
 recorded in the device's execution ledger, so a later retry is admitted normally
 rather than mistaken for a redelivery.
 
+## A Running Command Reports on Itself
+
+Once a command starts, the host **says so**. It reports that the command was
+accepted, reports periodically that it is still running, and answers a direct
+question about any dispatch it was ever told about.
+
+This replaces inference from a clock. Previously a control plane that heard
+nothing had to guess whether a long command was still working or had been lost,
+and a wrong guess about a command that changes the system is not a cosmetic
+error. Now silence is never interpreted: the authoritative answer is always the
+host's own durable record of that dispatch, which survives the process that
+wrote it.
+
+A host that lost track of an execution across a crash says exactly that —
+**indeterminate** — rather than claiming it failed. A command that may have
+changed the system is held for a human to look at, never quietly retried.
+
+## Stopping a Command
+
+A running command can be **stopped**, and stopping it reclaims the whole process
+tree — not only the process that was launched. A command that starts a helper,
+forks, or backgrounds work cannot leave that work running behind it. Because the
+host reclaims a container rather than signalling a process, a command that
+ignores signals is stopped just the same.
+
+Every stop is **recorded**, whether or not it landed, and the record attributes
+it to the authenticated operator — never to a name supplied in the request.
+
+A stop is a request, not an outcome. The command is not treated as over until
+the host reports its own ending, so a stopped command that had already made a
+change is not misreported as one that never ran.
+
 ## Redaction Fails Closed
 
 The pipeline runs **collect → redact → model → render**. Collection and redaction happen on the **edge device**; the model call happens **centrally**. If redaction fails, the edge returns an error and the central brain aborts **before** the model is called. Evidence (with raw screenshot bytes stripped) is always redacted before it leaves the host or reaches the model.

@@ -32,6 +32,7 @@ export type CopilotExecControls = {
     requestPreview: (rowIndex: number, input: ExecRequestInput) => void;
     approve: (rowIndex: number) => void;
     reject: (rowIndex: number) => void;
+    cancel: (rowIndex: number) => void;
     dismiss: (rowIndex: number) => void;
 };
 
@@ -161,6 +162,7 @@ function SuggestionRow({ index, suggestion, onFill, exec }: SuggestionRowProps) 
                             entry={entry}
                             onApprove={() => exec.approve(index)}
                             onReject={() => exec.reject(index)}
+                            onCancel={() => exec.cancel(index)}
                             onDismiss={() => exec.dismiss(index)}
                         />
                     )}

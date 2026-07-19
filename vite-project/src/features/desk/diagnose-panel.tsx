@@ -25,6 +25,7 @@ type ExecControls = {
     requestPreview: (rowIndex: number, input: ExecRequestInput) => void
     approve: (rowIndex: number) => void
     reject: (rowIndex: number) => void
+    cancel: (rowIndex: number) => void
     dismiss: (rowIndex: number) => void
 }
 
@@ -122,6 +123,7 @@ function ExecRow({
             entry={entry}
             onApprove={() => exec.approve(index)}
             onReject={() => exec.reject(index)}
+            onCancel={() => exec.cancel(index)}
             onDismiss={() => exec.dismiss(index)}
         />
     )

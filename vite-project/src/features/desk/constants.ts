@@ -44,6 +44,15 @@ export const SIGNALING_TYPE_CODE_EXEC_PREVIEW = 606;
 export const SIGNALING_TYPE_CODE_RESOLVE_EXEC = 607;
 export const SIGNALING_TYPE_CODE_EXEC_RESULT = 609;
 
+// Execution lifecycle: ExecControl (control end → host: cancel or state query),
+// and the host's answers — ExecStateReply (to both) and ExecLifecycle (accepted /
+// still running). Mirror `SignalingType::Exec{Control,StateReply,Lifecycle}`.
+// These let the control end show what a command is actually doing instead of
+// assuming it started, and stop one that is running.
+export const SIGNALING_TYPE_CODE_EXEC_CONTROL = 623;
+export const SIGNALING_TYPE_CODE_EXEC_STATE_REPLY = 624;
+export const SIGNALING_TYPE_CODE_EXEC_LIFECYCLE = 625;
+
 // Terminal AI copilot: the ask (control end → server), the notification-style
 // event stream (server → control end), and a cancel. Mirror
 // `SignalingType::TerminalCopilot{Ask,Event,Cancel}` (617/618/619).

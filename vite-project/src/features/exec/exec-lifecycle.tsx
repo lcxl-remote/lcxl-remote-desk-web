@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next"
-import { Loader2, Check, Ban } from "lucide-react"
+import { Loader2, Check, Ban, Square } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import type { ExecEntry } from "./use-confirm-exec"
@@ -20,11 +20,14 @@ export function ExecLifecycle({
     entry,
     onApprove,
     onReject,
+    onCancel,
     onDismiss,
 }: {
     entry: ExecEntry
     onApprove: () => void
     onReject: () => void
+    /** Ask the host to stop a running command. Omitted where no surface offers it. */
+    onCancel?: () => void
     onDismiss: () => void
 }) {
     const { t } = useTranslation()
@@ -75,11 +78,44 @@ export function ExecLifecycle({
         )
     }
 
+    // Waiting for the host to say it started. Distinct from `running`, which is
+    // only ever entered because the host reported it — an approval that never
+    // reached a host must not look like a command that is working.
+    if (entry.phase === "dispatching") {
+        return (
+            <div className="mt-2 flex items-center gap-2 text-xs text-blue-300">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {t("pages.exec.dispatching")}
+            </div>
+        )
+    }
+
     if (entry.phase === "running") {
         return (
             <div className="mt-2 flex items-center gap-2 text-xs text-blue-300">
                 <Loader2 className="h-3 w-3 animate-spin" />
-                {t("pages.exec.running")}
+                <span>
+                    {t("pages.exec.running")}
+                    {entry.runningMs !== null &&
+                        ` (${Math.round(entry.runningMs / 1000)}s)`}
+                </span>
+                {entry.cancelRequested ? (
+                    // The command is not over until the host says so, so the row
+                    // keeps showing it as running rather than as stopped.
+                    <span className="text-white/50">{t("pages.exec.cancelRequested")}</span>
+                ) : (
+                    onCancel && (
+                        <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-6 px-2 text-[10px]"
+                            onClick={onCancel}
+                        >
+                            <Square className="mr-1 h-3 w-3" />
+                            {t("pages.exec.cancel")}
+                        </Button>
+                    )
+                )}
             </div>
         )
     }
