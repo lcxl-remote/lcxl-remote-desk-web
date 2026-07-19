@@ -66,6 +66,12 @@ pub enum AuditEventType {
     TaskCancelled,
 
     // ---- confirmed-execution lifecycle ----
+    /// A central policy decision point authorized a command frame and forwarded
+    /// it. Emitted by the authorizing party itself, never by the host that
+    /// receives the frame, so it is the one record on this path that does not
+    /// depend on the host reporting anything. Authorization is not delivery:
+    /// the relay that follows can still fail.
+    CommandAuthorized,
     /// A command execution was requested and classified (preview produced).
     CapabilityRequested,
     /// The required exec capability was granted against the active scope.
@@ -96,6 +102,7 @@ impl AuditEventType {
             AuditEventType::ModelResponded => "ai.model.responded",
             AuditEventType::RedactionFailed => "ai.redaction.failed",
             AuditEventType::TaskCancelled => "ai.task.cancelled",
+            AuditEventType::CommandAuthorized => "ai.command.authorized",
             AuditEventType::CapabilityRequested => "ai.capability.requested",
             AuditEventType::CapabilityAllowed => "ai.capability.allowed",
             AuditEventType::CapabilityDenied => "ai.capability.denied",
@@ -432,6 +439,41 @@ impl AuditEvent {
             event_type: event_type.as_str().to_string(),
             ..Default::default()
         }
+    }
+
+    /// `ai.command.authorized` — a central policy decision point authorized a
+    /// command frame and is forwarding it.
+    ///
+    /// This is the only event on the confirmed-exec path emitted by the
+    /// authorizing party rather than by the host, which is the point of it: the
+    /// host cannot suppress it by declining to report. A frame authorized here
+    /// with no corresponding host-reported event is therefore visible, though it
+    /// has several possible causes besides a host withholding its audit — the
+    /// frame may never have arrived, the relay may have failed, or the report
+    /// may have been lost or throttled on the way back.
+    ///
+    /// Named `authorized` rather than `dispatched` or `delivered` deliberately:
+    /// the relay happens after this is recorded and can still fail.
+    ///
+    /// `policy_name` names the decision that authorized the frame. The remaining
+    /// subject fields (actor / device, and on the manager the org axis and policy
+    /// revision) are supplied by the persisting side from its trusted context,
+    /// never from the frame.
+    pub fn command_authorized(
+        event_id: String,
+        occurred_at: String,
+        request_id: &str,
+        policy_name: Option<String>,
+    ) -> Self {
+        let mut event = Self::exec_scoped(
+            event_id,
+            occurred_at,
+            AuditEventType::CommandAuthorized,
+            request_id,
+        );
+        event.policy_name = policy_name;
+        event.result = "authorized".to_string();
+        event
     }
 
     /// `ai.capability.requested` — an exec command was classified and a preview
@@ -1050,6 +1092,29 @@ mod tests {
         assert!(!summary.contains("secret-host"));
     }
 
+    /// The authorization event carries the deciding policy and correlates by the
+    /// frame's own request id — the key a host's lifecycle events echo back in
+    /// `task_id` and its rejections carry in `request_id`. It is not a sub-call,
+    /// so it has no `task_id` of its own.
+    #[test]
+    fn command_authorized_correlates_by_request_id_and_names_the_policy() {
+        let e = AuditEvent::command_authorized(
+            "id".into(),
+            "ts".into(),
+            "req-1",
+            Some("org-default".into()),
+        );
+        assert_eq!(e.event_type, "ai.command.authorized");
+        assert_eq!(e.request_id, "req-1");
+        assert_eq!(e.task_id, None);
+        assert_eq!(e.policy_name.as_deref(), Some("org-default"));
+        assert_eq!(e.result, "authorized");
+        // Subject fields are filled in by the persisting side from its trusted
+        // context, not by the builder.
+        assert_eq!(e.actor_id, "");
+        assert_eq!(e.device_id, "");
+    }
+
     #[test]
     fn event_type_round_trips() {
         let json = serde_json::to_string(&AuditEventType::ContextCollected).unwrap();
@@ -1072,6 +1137,7 @@ mod tests {
     #[test]
     fn exec_lifecycle_event_types_have_dotted_names() {
         let cases = [
+            (AuditEventType::CommandAuthorized, "ai.command.authorized"),
             (
                 AuditEventType::CapabilityRequested,
                 "ai.capability.requested",
