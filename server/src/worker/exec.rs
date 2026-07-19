@@ -25,6 +25,7 @@ use desk_agent_protocol::{AgentError, AgentErrorKind, AgentOutcome, ExecOutput, 
 use log::warn;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
+use tokio::sync::watch;
 
 use crate::diagnose::redaction::{Redactor, RegexRedactor};
 use crate::worker::exec_containment::Containment;
@@ -54,6 +55,63 @@ pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
     execute_plan_reporting(plan, |_| {}).await
 }
 
+/// A running execution's stop switch, held by whoever may need to stop it.
+///
+/// Cancelling reclaims the whole process tree rather than asking the command to
+/// stop, so it works on a command that ignores signals or has stopped reading its
+/// input. That is why there is no "this cannot be cancelled" answer: containment
+/// does not need the command's cooperation.
+#[derive(Clone, Debug)]
+pub struct ExecCancel(watch::Sender<bool>);
+
+impl ExecCancel {
+    pub fn new() -> Self {
+        Self(watch::channel(false).0)
+    }
+
+    /// Ask the execution to stop. Idempotent, and safe to call after it finished.
+    ///
+    /// Uses `send_replace` rather than `send` deliberately: `send` refuses to
+    /// update the value while nothing is listening, which would silently discard a
+    /// cancel issued in the gap between accepting an execution and it beginning to
+    /// watch — the exact race the retained value is here to win.
+    pub fn cancel(&self) {
+        self.0.send_replace(true);
+    }
+
+    /// A view for the execution itself to watch.
+    pub fn subscribe(&self) -> watch::Receiver<bool> {
+        self.0.subscribe()
+    }
+}
+
+impl Default for ExecCancel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Resolve once cancellation has been requested, or never if it cannot be.
+///
+/// A cancel that arrived before the execution began waiting is not missed: the
+/// channel retains its value, so the first check already observes it. If every
+/// sender is dropped without a cancel, this waits for ever rather than resolving
+/// — resolving would read as "cancelled" and kill a healthy command.
+async fn cancellation_requested(cancel: Option<watch::Receiver<bool>>) {
+    let Some(mut rx) = cancel else {
+        std::future::pending::<()>().await;
+        unreachable!()
+    };
+    loop {
+        if *rx.borrow_and_update() {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 /// As [`execute_plan`], but calls `on_spawn` the moment the outcome of the spawn
 /// itself is known — before the command has finished.
 ///
@@ -65,6 +123,20 @@ pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
 pub async fn execute_plan_reporting(
     plan: &ExecPlan,
     on_spawn: impl FnOnce(ExecSpawnReport),
+) -> AgentOutcome {
+    execute_plan_cancellable(plan, on_spawn, None).await
+}
+
+/// As [`execute_plan_reporting`], but stoppable through `cancel`.
+///
+/// Cancelling reclaims the process tree exactly as a timeout does. The outcome is
+/// [`AgentErrorKind::Cancelled`] rather than a success or a failure, because the
+/// command did start: how much of its effect landed before it was stopped is not
+/// something the host can know, and reporting either extreme would be a guess.
+pub async fn execute_plan_cancellable(
+    plan: &ExecPlan,
+    on_spawn: impl FnOnce(ExecSpawnReport),
+    cancel: Option<watch::Receiver<bool>>,
 ) -> AgentOutcome {
     // Establish the container before the spawn. Failing here refuses the command:
     // an execution that cannot be reclaimed is precisely what containment exists
@@ -159,25 +231,46 @@ pub async fn execute_plan_reporting(
         (out_bytes, out_over, err_bytes, err_over, status)
     };
 
-    let (out_bytes, stdout_overflowed, err_bytes, stderr_overflowed, status) =
-        match tokio::time::timeout(timeout, run).await {
-            Ok(result) => result,
-            Err(_) => {
-                // Reclaim the whole tree, not just the process we can see: killing
-                // the direct child alone is what let a timed-out command's helpers
-                // keep running past their deadline.
-                containment.reclaim();
-                let _ = child.start_kill();
-                warn!(
-                    "exec timed out: template={} program={} timeout_ms={}",
-                    plan.template_id, plan.program, plan.timeout_ms,
-                );
-                return AgentOutcome::Err(err(
-                    AgentErrorKind::Timeout,
-                    format!("command timed out after {} ms", plan.timeout_ms),
-                ));
-            }
-        };
+    // Race the command against both its deadline and a stop request. Losing to
+    // either reclaims the tree; the difference is only what the caller is told.
+    let raced = tokio::select! {
+        result = tokio::time::timeout(timeout, run) => Some(result),
+        _ = cancellation_requested(cancel) => None,
+    };
+
+    let Some(finished) = raced else {
+        // The tree goes, not just the process we can see. `child` is still borrowed
+        // by the abandoned future, but reclaiming the container already covers it —
+        // the child is a member of its own group.
+        containment.reclaim();
+        warn!(
+            "exec cancelled: template={} program={} generation={}",
+            plan.template_id, plan.program, plan.execution_generation,
+        );
+        return AgentOutcome::Err(err(
+            AgentErrorKind::Cancelled,
+            "the command was cancelled and its process tree reclaimed".to_string(),
+        ));
+    };
+
+    let (out_bytes, stdout_overflowed, err_bytes, stderr_overflowed, status) = match finished {
+        Ok(result) => result,
+        Err(_) => {
+            // Reclaim the whole tree, not just the process we can see: killing
+            // the direct child alone is what let a timed-out command's helpers
+            // keep running past their deadline.
+            containment.reclaim();
+            let _ = child.start_kill();
+            warn!(
+                "exec timed out: template={} program={} timeout_ms={}",
+                plan.template_id, plan.program, plan.timeout_ms,
+            );
+            return AgentOutcome::Err(err(
+                AgentErrorKind::Timeout,
+                format!("command timed out after {} ms", plan.timeout_ms),
+            ));
+        }
+    };
 
     let status = match status {
         Ok(status) => status,
@@ -390,6 +483,87 @@ mod tests {
             !marker.exists(),
             "a descendant outlived the reclaimed command"
         );
+    }
+
+    /// Cancelling a long-running command stops it well before its own deadline
+    /// and reclaims its descendants, exactly as a timeout does.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cancelled_command_takes_its_descendants_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("descendant-alive");
+        let marker_path = marker.to_string_lossy().to_string();
+
+        let cancel = ExecCancel::new();
+        let watcher = cancel.subscribe();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel.cancel();
+        });
+
+        let started = Instant::now();
+        // A 30-second command with a 30-second budget: only the cancel can end it
+        // this quickly, so a fast return cannot be a timeout in disguise.
+        let outcome = execute_plan_cancellable(
+            &plan(
+                &format!("(while true; do touch '{marker_path}'; sleep 0.05; done) & sleep 30"),
+                30_000,
+                4096,
+            ),
+            |_| {},
+            Some(watcher),
+        )
+        .await;
+
+        assert!(
+            matches!(&outcome, AgentOutcome::Err(e) if e.kind == AgentErrorKind::Cancelled),
+            "expected a cancellation, got {outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the cancel did not take effect promptly"
+        );
+
+        let _ = std::fs::remove_file(&marker);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            !marker.exists(),
+            "a descendant outlived the cancelled command"
+        );
+    }
+
+    /// A cancel that arrives before the command starts waiting is not lost — the
+    /// switch retains its state, so the race between requesting a stop and
+    /// beginning to watch for one has no losing side.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cancel_requested_up_front_is_not_missed() {
+        let cancel = ExecCancel::new();
+        cancel.cancel();
+        let outcome = execute_plan_cancellable(
+            &plan("sleep 30", 30_000, 4096),
+            |_| {},
+            Some(cancel.subscribe()),
+        )
+        .await;
+        assert!(
+            matches!(&outcome, AgentOutcome::Err(e) if e.kind == AgentErrorKind::Cancelled),
+            "expected a cancellation, got {outcome:?}"
+        );
+    }
+
+    /// Dropping every stop switch is not a cancellation. A command whose canceller
+    /// went away must run to its own conclusion rather than being killed by the
+    /// disappearance of something that never asked for anything.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn losing_the_stop_switch_does_not_stop_the_command() {
+        let cancel = ExecCancel::new();
+        let watcher = cancel.subscribe();
+        drop(cancel);
+        let outcome =
+            execute_plan_cancellable(&plan("echo hi", 5_000, 4096), |_| {}, Some(watcher)).await;
+        assert!(matches!(outcome, AgentOutcome::Ok(_)), "{outcome:?}");
     }
 
     /// A command that exits on its own is reclaimed too, so a helper it left

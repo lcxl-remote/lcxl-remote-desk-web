@@ -848,6 +848,11 @@ pub enum AgentErrorKind {
     /// which will not become permitted by waiting.
     HostAtCapacity,
     Timeout,
+    /// The command was stopped on request and its process tree reclaimed. It did
+    /// start, so this says nothing about how much of its effect landed before it
+    /// was stopped — a mutating command cancelled mid-flight needs review, not a
+    /// retry.
+    Cancelled,
     OutputLimitExceeded,
     InvalidInput,
     RedactionFailed,
