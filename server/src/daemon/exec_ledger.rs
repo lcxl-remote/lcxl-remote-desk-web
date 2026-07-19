@@ -34,6 +34,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use desk_agent_protocol::exec_lifecycle::{ExecState, ExecStateReplyPayload};
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
@@ -262,6 +263,63 @@ impl ExecLedger {
             .await
     }
 
+    /// Answer "what do you know about this generation?" in the shared wire shape.
+    ///
+    /// This is the reply to both a state query and a cancel: an upstream asking
+    /// either question wants the same fact back, so there is one answer type and
+    /// one rule for reading it (keep asking until the state is settled).
+    ///
+    /// A generation with no row reports [`ExecState::Unknown`] — distinct from any
+    /// settled state, because "I never accepted that" and "I accepted it and it
+    /// failed" call for opposite responses upstream.
+    pub async fn describe(&self, generation: &str) -> Result<ExecStateReplyPayload, DbErr> {
+        let Some(row) = self.get(generation).await? else {
+            return Ok(ExecStateReplyPayload {
+                execution_generation: generation.to_string(),
+                state: ExecState::Unknown,
+                containment_identity: None,
+                running_ms: None,
+                detail: None,
+            });
+        };
+
+        // An unreadable stored value is reported as indeterminate rather than
+        // guessed at or reported as unknown: the row proves the generation was
+        // accepted, so the one thing the host must not say is that it never saw it.
+        let state = match State::parse(&row.state) {
+            Some(State::Reserved) => ExecState::Reserved,
+            Some(State::Running) => ExecState::Running,
+            Some(State::Terminal) => ExecState::Terminal,
+            Some(State::SpawnFailed) => ExecState::SpawnFailed,
+            Some(State::Indeterminate) | None => ExecState::Indeterminate,
+        };
+
+        // Elapsed time is only meaningful while the command may still be running.
+        let running_ms = (!state.is_settled()).then(|| {
+            (chrono::Utc::now().naive_utc() - row.created_at)
+                .num_milliseconds()
+                .max(0) as u64
+        });
+
+        // `result_json` holds the spawn failure's reason; for a completed command it
+        // holds the output, which belongs on the result path rather than here.
+        let detail = match state {
+            ExecState::SpawnFailed => row.result_json.clone(),
+            ExecState::Indeterminate => Some(
+                "the host lost track of this execution and cannot say whether it ran".to_string(),
+            ),
+            _ => None,
+        };
+
+        Ok(ExecStateReplyPayload {
+            execution_generation: generation.to_string(),
+            state,
+            containment_identity: row.containment_identity.clone(),
+            running_ms,
+            detail,
+        })
+    }
+
     /// Everything this host still considers in flight — what a restarting daemon
     /// reads to find the executions it lost track of.
     pub async fn in_flight(&self) -> Result<Vec<exec_ledger_entry::Model>, DbErr> {
@@ -326,6 +384,83 @@ mod tests {
 
     async fn ledger() -> ExecLedger {
         ExecLedger::open_in_memory().await.unwrap()
+    }
+
+    /// A generation this host never accepted is reported as unknown, which an
+    /// upstream must not confuse with any settled state: "I never ran that" and
+    /// "I ran it and it failed" call for opposite responses.
+    #[tokio::test]
+    async fn an_unseen_generation_is_unknown_rather_than_settled() {
+        let l = ledger().await;
+        let reply = l.describe("never-seen").await.unwrap();
+        assert_eq!(reply.state, ExecState::Unknown);
+        assert!(!reply.state.is_settled());
+        assert_eq!(reply.running_ms, None);
+    }
+
+    /// The query answers with the live state and how the host would reclaim the
+    /// process tree, which is what a cancel needs to act on.
+    #[tokio::test]
+    async fn a_running_execution_reports_how_to_reclaim_it() {
+        let l = ledger().await;
+        l.reserve("task-1", "gen-1", "fp-1", None).await.unwrap();
+        assert_eq!(
+            l.describe("gen-1").await.unwrap().state,
+            ExecState::Reserved
+        );
+
+        l.mark_running("gen-1", Some("pgid:4242")).await.unwrap();
+        let reply = l.describe("gen-1").await.unwrap();
+        assert_eq!(reply.state, ExecState::Running);
+        assert_eq!(reply.containment_identity.as_deref(), Some("pgid:4242"));
+        assert!(
+            reply.running_ms.is_some(),
+            "a live execution reports elapsed time"
+        );
+    }
+
+    /// Once settled, elapsed time stops being reported — there is nothing still
+    /// elapsing, and a number here would read as progress.
+    #[tokio::test]
+    async fn a_settled_execution_reports_no_elapsed_time() {
+        let l = ledger().await;
+        l.reserve("task-1", "gen-1", "fp-1", None).await.unwrap();
+        l.mark_terminal("gen-1", Terminal::Completed("{}".into()))
+            .await
+            .unwrap();
+        let reply = l.describe("gen-1").await.unwrap();
+        assert_eq!(reply.state, ExecState::Terminal);
+        assert!(reply.state.is_settled());
+        assert_eq!(reply.running_ms, None);
+    }
+
+    /// A failed spawn hands back why, so an upstream can report it without having
+    /// to fetch a result that does not exist.
+    #[tokio::test]
+    async fn a_failed_spawn_explains_itself() {
+        let l = ledger().await;
+        l.reserve("task-1", "gen-1", "fp-1", None).await.unwrap();
+        l.mark_terminal("gen-1", Terminal::SpawnFailed("no such program".into()))
+            .await
+            .unwrap();
+        let reply = l.describe("gen-1").await.unwrap();
+        assert_eq!(reply.state, ExecState::SpawnFailed);
+        assert_eq!(reply.detail.as_deref(), Some("no such program"));
+    }
+
+    /// A row whose stored state cannot be read still proves the generation was
+    /// accepted, so the host reports indeterminate. Reporting it as unknown would
+    /// invite a redispatch of a command that may already have run.
+    #[tokio::test]
+    async fn an_unreadable_state_is_never_reported_as_unseen() {
+        let l = ledger().await;
+        l.reserve("task-1", "gen-1", "fp-1", None).await.unwrap();
+        l.db.execute_unprepared("UPDATE exec_ledger_entry SET state = 'nonsense'")
+            .await
+            .unwrap();
+        let reply = l.describe("gen-1").await.unwrap();
+        assert_eq!(reply.state, ExecState::Indeterminate);
+        assert!(reply.state.is_settled());
     }
 
     /// The first reservation wins; a replay of the same generation is refused a

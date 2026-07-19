@@ -36,6 +36,7 @@ pub mod diagnose;
 pub mod edge_exec;
 pub mod evidence;
 pub mod exec;
+pub mod exec_lifecycle;
 pub mod exec_policy;
 pub mod model_proxy;
 pub mod provenance;

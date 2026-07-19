@@ -64,6 +64,22 @@ impl State {
         }
     }
 
+    /// Read back a state stored by [`State::as_str`].
+    ///
+    /// A value this host does not recognise is treated as unreadable rather than
+    /// guessed at: claiming the wrong state about a command that may have run is
+    /// the failure the ledger exists to prevent.
+    pub fn parse(stored: &str) -> Option<Self> {
+        match stored {
+            "reserved" => Some(State::Reserved),
+            "running" => Some(State::Running),
+            "terminal" => Some(State::Terminal),
+            "indeterminate" => Some(State::Indeterminate),
+            "spawn_failed" => Some(State::SpawnFailed),
+            _ => None,
+        }
+    }
+
     /// Whether no further transition is possible from this state.
     pub fn is_final(self) -> bool {
         matches!(
