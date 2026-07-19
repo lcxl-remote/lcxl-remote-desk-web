@@ -328,6 +328,13 @@ fn get_current_session_id() -> u32 {
     0
 }
 
+/// How long an execution's stored output is kept before it ages out. The row that
+/// proves the execution happened is kept for ever; only the output goes.
+const EXEC_RESULT_RETENTION: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+/// How often the result sweep runs. Results age out on a day scale, so an hourly
+/// pass is ample and costs nothing.
+const EXEC_RESULT_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
 /// Open this host's durable exec ledger next to its config file.
 ///
 /// Common to every host form: the ledger is what makes "this dispatch already
@@ -345,7 +352,46 @@ async fn open_exec_ledger(
         .await
         .map_err(|e| format!("Failed to open the exec ledger in {dir}: {e}"))?;
     info!("Exec ledger initialized at {dir}");
-    Ok(Arc::new(ledger))
+
+    // Anything still marked in flight belongs to a process that is gone. Settle it
+    // as indeterminate now: the host genuinely cannot say whether those commands
+    // ran, and leaving them looking in-progress would tell a manager "still
+    // working on it" for ever.
+    match ledger.abandon_in_flight().await {
+        Ok(lost) if !lost.is_empty() => {
+            for row in &lost {
+                warn!(
+                    "[exec-ledger] lost track of execution {} (task {}) across a restart; \
+                     recorded as indeterminate, containment {:?}",
+                    row.execution_generation, row.task_id, row.containment_identity
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(e) => return Err(format!("Failed to settle abandoned executions: {e}")),
+    }
+
+    let ledger = Arc::new(ledger);
+    // Age out stored results on a long cycle. Only the results go; the rows are
+    // permanent, because a row is the proof its generation was already accepted.
+    {
+        let ledger = ledger.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(EXEC_RESULT_SWEEP_INTERVAL);
+            loop {
+                ticker.tick().await;
+                match ledger
+                    .forget_results_older_than(EXEC_RESULT_RETENTION)
+                    .await
+                {
+                    Ok(n) if n > 0 => info!("[exec-ledger] aged out {n} stored result(s)"),
+                    Ok(_) => {}
+                    Err(e) => warn!("[exec-ledger] result sweep failed: {e}"),
+                }
+            }
+        });
+    }
+    Ok(ledger)
 }
 
 /// Single-process entry into the daemon-worker pipeline, used by

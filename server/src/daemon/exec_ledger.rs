@@ -274,6 +274,25 @@ impl ExecLedger {
             .await
     }
 
+    /// Settle every execution still recorded as in flight as `indeterminate`.
+    ///
+    /// Called once at daemon startup. Anything the ledger still considers in
+    /// flight belongs to a process that is gone, so the host cannot say whether it
+    /// ran — and `indeterminate` says exactly that. Leaving the rows in `reserved`
+    /// or `running` would be worse than useless: a manager asking about them would
+    /// be told "not yet known" for ever, which reads as "still working on it".
+    ///
+    /// Returns what it settled, so the host can log which executions it lost track
+    /// of across the restart.
+    pub async fn abandon_in_flight(&self) -> Result<Vec<exec_ledger_entry::Model>, DbErr> {
+        let lost = self.in_flight().await?;
+        for row in &lost {
+            self.mark_terminal(&row.execution_generation, Terminal::Indeterminate)
+                .await?;
+        }
+        Ok(lost)
+    }
+
     /// Drop stored results older than `retain`, leaving the rows themselves.
     ///
     /// Only `result_json` goes. The row stays forever so the generation can never
@@ -480,6 +499,52 @@ mod tests {
         assert!(matches!(
             reopened
                 .reserve("task-1", "gen-1", "fp-1", None)
+                .await
+                .unwrap(),
+            Reservation::Duplicate(_)
+        ));
+    }
+
+    /// After a restart, executions the host lost track of are settled as
+    /// indeterminate rather than left looking like they are still progressing —
+    /// and they still refuse a second spawn.
+    #[tokio::test]
+    async fn a_restart_settles_what_it_lost_track_of() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().to_string_lossy().to_string();
+        {
+            let l = ExecLedger::open(&config_dir).await.unwrap();
+            l.reserve("task-1", "mid-spawn", "fp-1", None)
+                .await
+                .unwrap();
+            l.reserve("task-2", "was-running", "fp-2", None)
+                .await
+                .unwrap();
+            l.mark_running("was-running", Some("pgid:7")).await.unwrap();
+            l.reserve("task-3", "finished", "fp-3", None).await.unwrap();
+            l.mark_terminal("finished", Terminal::Completed("{}".into()))
+                .await
+                .unwrap();
+        }
+
+        let reopened = ExecLedger::open(&config_dir).await.unwrap();
+        let lost = reopened.abandon_in_flight().await.unwrap();
+        assert_eq!(lost.len(), 2, "both in-flight entries should be settled");
+
+        for generation in ["mid-spawn", "was-running"] {
+            let row = reopened.get(generation).await.unwrap().unwrap();
+            assert_eq!(row.state, State::Indeterminate.as_str(), "{generation}");
+        }
+        // An execution that had already finished keeps its own answer.
+        let finished = reopened.get("finished").await.unwrap().unwrap();
+        assert_eq!(finished.state, State::Terminal.as_str());
+        assert!(finished.result_json.is_some());
+
+        assert!(reopened.in_flight().await.unwrap().is_empty());
+        // Settled is still not re-runnable.
+        assert!(matches!(
+            reopened
+                .reserve("task-1", "mid-spawn", "fp-1", None)
                 .await
                 .unwrap(),
             Reservation::Duplicate(_)
