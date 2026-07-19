@@ -2254,6 +2254,44 @@ async fn handle_inbound_signaling_text(
     InboundOutcome::Continue
 }
 
+/// Send an `ExecLifecycle(625)` about one execution to whoever asked for it.
+///
+/// Notification-style and best-effort: these frames report progress, and the
+/// authoritative answer is always a state query against the ledger. Dropping one
+/// therefore costs nothing an upstream would act on.
+fn send_exec_lifecycle(
+    outbound_tx: &tokio::sync::broadcast::Sender<String>,
+    execution_generation: &str,
+    to_connection_id: Option<String>,
+    event: ExecLifecycleEvent,
+) {
+    let payload = ExecLifecyclePayload {
+        execution_generation: execution_generation.to_string(),
+        event,
+    };
+    let data = match serde_json::to_value(&payload) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[exec-lifecycle] could not serialise the frame: {e}");
+            return;
+        }
+    };
+    let frame = SignalingModel::new(
+        execution_generation,
+        SignalingType::ExecLifecycle,
+        None,
+        to_connection_id,
+        Some(data),
+        None,
+    );
+    match serde_json::to_string(&frame) {
+        Ok(text) => {
+            let _ = outbound_tx.send(text);
+        }
+        Err(e) => log::warn!("[exec-lifecycle] could not serialise the frame: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3836,43 +3874,5 @@ mod tests {
             let decoded = model.get_data::<AgentOutcome>().expect("outcome data");
             assert_eq!(decoded, outcome);
         }
-    }
-}
-
-/// Send an `ExecLifecycle(625)` about one execution to whoever asked for it.
-///
-/// Notification-style and best-effort: these frames report progress, and the
-/// authoritative answer is always a state query against the ledger. Dropping one
-/// therefore costs nothing an upstream would act on.
-fn send_exec_lifecycle(
-    outbound_tx: &tokio::sync::broadcast::Sender<String>,
-    execution_generation: &str,
-    to_connection_id: Option<String>,
-    event: ExecLifecycleEvent,
-) {
-    let payload = ExecLifecyclePayload {
-        execution_generation: execution_generation.to_string(),
-        event,
-    };
-    let data = match serde_json::to_value(&payload) {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!("[exec-lifecycle] could not serialise the frame: {e}");
-            return;
-        }
-    };
-    let frame = SignalingModel::new(
-        execution_generation,
-        SignalingType::ExecLifecycle,
-        None,
-        to_connection_id,
-        Some(data),
-        None,
-    );
-    match serde_json::to_string(&frame) {
-        Ok(text) => {
-            let _ = outbound_tx.send(text);
-        }
-        Err(e) => log::warn!("[exec-lifecycle] could not serialise the frame: {e}"),
     }
 }
