@@ -27,6 +27,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 use crate::diagnose::redaction::{Redactor, RegexRedactor};
+use crate::worker::exec_containment::Containment;
 
 /// Extra bytes read and retained past the payload cap so a secret that straddles
 /// the cap boundary is still seen *in full* by the redactor before the final cut
@@ -49,6 +50,23 @@ const REDACTION_MARGIN: usize = 8 * 1024;
 /// IPC boundary. Redaction is fail-closed: if the redactor errors, no output is
 /// returned.
 pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
+    // Establish the container before the spawn. Failing here refuses the command:
+    // an execution that cannot be reclaimed is precisely what containment exists
+    // to prevent, so running it anyway would defeat the purpose.
+    let mut containment = match Containment::prepare(&plan.execution_generation) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(
+                "exec refused, no containment: template={} program={} error={e}",
+                plan.template_id, plan.program,
+            );
+            return AgentOutcome::Err(err(
+                AgentErrorKind::Internal,
+                format!("the host cannot contain this command, so it was not run: {e}"),
+            ));
+        }
+    };
+
     let mut cmd = Command::new(&plan.program);
     cmd.args(&plan.argv)
         .stdin(Stdio::null())
@@ -58,6 +76,7 @@ pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
     if let Some(cwd) = &plan.cwd {
         cmd.current_dir(cwd);
     }
+    containment.apply(&mut cmd);
 
     let started = Instant::now();
     let mut child = match cmd.spawn() {
@@ -75,6 +94,21 @@ pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
             ));
         }
     };
+
+    // The child exists but nothing yet ties its descendants to us. Until this
+    // succeeds the tree is unreclaimable, so a failure kills the child outright
+    // rather than letting it run loose.
+    if let Err(e) = containment.adopt(&child) {
+        let _ = child.start_kill();
+        warn!(
+            "exec containment failed after spawn: template={} program={} error={e}",
+            plan.template_id, plan.program,
+        );
+        return AgentOutcome::Err(err(
+            AgentErrorKind::Internal,
+            format!("the command was started but could not be contained: {e}"),
+        ));
+    }
 
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
@@ -97,6 +131,10 @@ pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
         match tokio::time::timeout(timeout, run).await {
             Ok(result) => result,
             Err(_) => {
+                // Reclaim the whole tree, not just the process we can see: killing
+                // the direct child alone is what let a timed-out command's helpers
+                // keep running past their deadline.
+                containment.reclaim();
                 let _ = child.start_kill();
                 warn!(
                     "exec timed out: template={} program={} timeout_ms={}",
@@ -234,6 +272,67 @@ mod tests {
     use super::*;
     use desk_agent_protocol::RiskLevel;
     use desk_agent_protocol::exec::ExecShellKind;
+
+    /// The point of containment: a command that backgrounds a helper and then
+    /// hangs must not leave that helper running once the command is reclaimed.
+    /// Killing only the direct child — the behaviour before containment — left the
+    /// descendant alive past the deadline it was supposed to be bounded by.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_command_takes_its_descendants_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("descendant-alive");
+        let marker_path = marker.to_string_lossy().to_string();
+
+        // A grandchild that outlives its parent: it keeps re-creating the marker
+        // long past the command's own timeout, so a surviving process is visible
+        // as a marker that reappears after the command was reclaimed.
+        let outcome = execute_plan(&plan(
+            &format!("(while true; do touch '{marker_path}'; sleep 0.05; done) & sleep 30"),
+            300,
+            4096,
+        ))
+        .await;
+        assert!(
+            matches!(&outcome, AgentOutcome::Err(e) if e.kind == AgentErrorKind::Timeout),
+            "expected a timeout, got {outcome:?}"
+        );
+
+        // Give any survivor a generous chance to prove it is still running.
+        let _ = std::fs::remove_file(&marker);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            !marker.exists(),
+            "a descendant outlived the reclaimed command"
+        );
+    }
+
+    /// A command that exits on its own is reclaimed too, so a helper it left
+    /// behind does not survive the call.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_completed_command_does_not_leak_a_background_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("helper-alive");
+        let marker_path = marker.to_string_lossy().to_string();
+
+        // The helper's own output is redirected away: a background process that
+        // keeps the inherited stdout pipe open holds the executor's reader until
+        // the timeout, so the command would not "complete" at all.
+        let outcome = execute_plan(&plan(
+            &format!(
+                "(while true; do touch '{marker_path}'; sleep 0.05; done) >/dev/null 2>&1 & echo started"
+            ),
+            5_000,
+            4096,
+        ))
+        .await;
+        assert!(matches!(outcome, AgentOutcome::Ok(_)), "{outcome:?}");
+
+        let _ = std::fs::remove_file(&marker);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!marker.exists(), "a background helper outlived the command");
+    }
 
     /// Build a plan that runs a shell snippet through the OS default shell.
     /// These tests exercise the executor mechanics directly (not the classifier),
