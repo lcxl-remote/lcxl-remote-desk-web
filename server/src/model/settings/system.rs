@@ -295,6 +295,34 @@ impl SystemSettings {
             self.session_secret_key = previous.session_secret_key.clone();
         }
     }
+
+    /// A copy safe to serialize into an HTTP response: the secrets the console
+    /// has no use for are dropped.
+    ///
+    /// Redacting here rather than with `skip_serializing` on the fields is
+    /// deliberate — the same `Serialize` impl writes `config.toml`
+    /// ([`Settings::save`](crate::model::settings::Settings)), so skipping a
+    /// field would stop persisting it. The session key and IPC token would then
+    /// be regenerated on every restart, invalidating every session and changing
+    /// the IPC identity.
+    ///
+    /// Only the two purely-internal secrets are dropped. The other three the
+    /// masked `Debug` covers must stay in the response, and each for its own
+    /// reason: `signaling_token` and `manager_api_token` are typed by the user
+    /// into the connection form, which reloads them to edit; and
+    /// `local_signaling_token` is shown deliberately, so the operator can
+    /// configure a desk server against the co-located signaling server. Dropping
+    /// any of those breaks a feature rather than closing an exposure.
+    ///
+    /// Round-tripping stays safe because both dropped fields arrive back as
+    /// `None` and are restored by [`Self::preserve_internal_fields`].
+    pub fn without_internal_secrets(&self) -> SystemSettings {
+        SystemSettings {
+            tauri_ipc_token: None,
+            session_secret_key: None,
+            ..self.clone()
+        }
+    }
 }
 
 impl Default for SystemSettings {
@@ -374,6 +402,82 @@ mod tests {
         incoming.preserve_internal_fields(&previous);
 
         assert_eq!(incoming.client_id.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn api_view_drops_only_the_purely_internal_secrets() {
+        let settings = SystemSettings {
+            signaling_token: Some("sig-secret".to_string()),
+            manager_api_token: Some("mgr-secret".to_string()),
+            local_signaling_token: Some("local-secret".to_string()),
+            tauri_ipc_token: Some("tauri-secret".to_string()),
+            session_secret_key: Some("session-secret".to_string()),
+            ..SystemSettings::default()
+        };
+
+        let view = settings.without_internal_secrets();
+
+        assert_eq!(view.tauri_ipc_token, None);
+        assert_eq!(view.session_secret_key, None);
+        // The console needs these three: two are edited in the connection form,
+        // and the local token is displayed on purpose.
+        assert_eq!(view.signaling_token.as_deref(), Some("sig-secret"));
+        assert_eq!(view.manager_api_token.as_deref(), Some("mgr-secret"));
+        assert_eq!(view.local_signaling_token.as_deref(), Some("local-secret"));
+    }
+
+    /// The response body must not contain the dropped values in any form — the
+    /// point is what crosses the wire, not what the struct field holds.
+    #[test]
+    fn serialized_api_view_carries_no_internal_secret() {
+        let settings = SystemSettings {
+            tauri_ipc_token: Some("tauri-secret".to_string()),
+            session_secret_key: Some("session-secret".to_string()),
+            ..SystemSettings::default()
+        };
+
+        let json = serde_json::to_string(&settings.without_internal_secrets()).unwrap();
+
+        assert!(!json.contains("tauri-secret"), "leaked in: {json}");
+        assert!(!json.contains("session-secret"), "leaked in: {json}");
+    }
+
+    /// Redaction must not reach persistence. `config.toml` is written through
+    /// this same `Serialize`, so a `skip_serializing` on the fields would stop
+    /// storing them — regenerating the session key on every restart (logging
+    /// everyone out) and changing the IPC identity.
+    #[test]
+    fn persistence_still_serializes_the_secrets() {
+        let settings = SystemSettings {
+            tauri_ipc_token: Some("tauri-secret".to_string()),
+            session_secret_key: Some("session-secret".to_string()),
+            ..SystemSettings::default()
+        };
+
+        let toml_str = toml::to_string(&settings).unwrap();
+
+        assert!(toml_str.contains("tauri-secret"));
+        assert!(toml_str.contains("session-secret"));
+    }
+
+    /// The console reads the redacted view and posts the whole struct back, so
+    /// the dropped fields return as `None`. They must survive that round trip.
+    #[test]
+    fn round_tripping_the_api_view_keeps_the_stored_secrets() {
+        let stored = SystemSettings {
+            tauri_ipc_token: Some("tauri-secret".to_string()),
+            session_secret_key: Some("session-secret".to_string()),
+            ..SystemSettings::default()
+        };
+
+        let mut incoming = stored.without_internal_secrets();
+        incoming.preserve_internal_fields(&stored);
+
+        assert_eq!(incoming.tauri_ipc_token.as_deref(), Some("tauri-secret"));
+        assert_eq!(
+            incoming.session_secret_key.as_deref(),
+            Some("session-secret")
+        );
     }
 
     #[test]

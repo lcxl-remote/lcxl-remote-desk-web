@@ -53,7 +53,9 @@ pub async fn query_settings(settings: web::Data<SharedSettings>) -> Result<HttpR
         "Query settings successfully, settings: {:?}",
         system_settings
     );
-    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(system_settings)))
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
+        system_settings.without_internal_secrets(),
+    )))
 }
 
 #[utoipa::path(
