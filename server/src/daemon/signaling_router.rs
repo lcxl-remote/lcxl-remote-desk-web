@@ -3011,8 +3011,13 @@ async fn handle_confirm_exec_inbound(
             && ctx.session_approvals.is_granted(conn, template_id)
         {
             let exec_request_id = crate::daemon::exec_approval::mint_exec_request_id();
-            let (approval_id, plan) =
-                crate::daemon::exec_approval::seal_plan(exec_request_id.clone(), draft);
+            // The frame that triggers execution is this ConfirmExec itself: the
+            // session grant means no separate approval round happens.
+            let (approval_id, plan) = crate::daemon::exec_approval::seal_plan(
+                exec_request_id.clone(),
+                &request_id,
+                draft,
+            );
             // No new approval prompt; the prior session grant authorizes it.
             ctx.audit
                 .record(
@@ -3238,8 +3243,12 @@ async fn handle_resolve_exec_inbound(
             let capability =
                 OperationInput::required_capability(&consumed.classification).map(|c| c.as_str());
             let risk = risk_str(consumed.classification.risk);
+            // The ResolveExec frame carrying the approval is what triggers this
+            // dispatch, so it is the generation; the ConfirmExec that produced the
+            // preview only classified it.
             let (approval_id, plan) = crate::daemon::exec_approval::seal_plan(
                 data.exec_request_id.clone(),
+                &request_id,
                 consumed.draft,
             );
             // Approval granted → capability allowed → command dispatched.
@@ -3571,20 +3580,36 @@ async fn handle_edge_exec_request_inbound(
 
     // Bind the plan's identifiers to the authz-validated frame. The authz block was
     // validated against `request_id` (the frame id) by the proxy gate, and the worker
-    // is correlated on that same `request_id`; a plan whose own `exec_request_id`
-    // names a *different* attempt, or that carries an empty `approval_id`, is
-    // malformed — the daemon must not let a plan self-report an id that diverges from
-    // the one the authz proof covers, nor dispatch a plan with no approval token. The
-    // whole-draft re-render can never catch these two fields (they are not on the
-    // draft), so gate them here.
+    // is correlated on that same `request_id`; a plan whose own dispatch id names a
+    // *different* attempt, or that carries an empty `approval_id`, is malformed — the
+    // daemon must not let a plan self-report an id that diverges from the one the
+    // authz proof covers, nor dispatch a plan with no approval token. The whole-draft
+    // re-render can never catch these fields (they are not on the draft), so gate
+    // them here.
+    //
+    // The frame id is bound to `execution_generation`, the per-dispatch axis, not to
+    // `exec_request_id`. The task id is stable across retries by design, so requiring
+    // it to equal a per-delivery frame id would force it to change on every retry and
+    // collapse the two axes back into one. The task id is still checked, just for
+    // presence: a plan that names no task cannot be reconciled with anything.
     {
         let plan = payload.plan();
-        if plan.exec_request_id.0 != request_id {
+        if plan.execution_generation != request_id {
             send_edge_exec_result(
                 &ctx.outbound_tx,
                 &request_id,
                 EdgeExecDisposition::RejectedBeforeDispatch {
-                    reason: "pep_rejected:exec_request_id_mismatch".to_string(),
+                    reason: "pep_rejected:execution_generation_mismatch".to_string(),
+                },
+            );
+            return Ok(());
+        }
+        if plan.exec_request_id.0.is_empty() {
+            send_edge_exec_result(
+                &ctx.outbound_tx,
+                &request_id,
+                EdgeExecDisposition::RejectedBeforeDispatch {
+                    reason: "pep_rejected:missing_exec_request_id".to_string(),
                 },
             );
             return Ok(());
@@ -6979,11 +7004,13 @@ mod tests {
     }
 
     /// Seal a manager-style fleet `ExecPlan` from a template (fleet-fixed limits,
-    /// no cwd) under the given per-attempt request id.
+    /// no cwd) under the given per-attempt request id, which is the generation the
+    /// frame carries. The task id is the stable target identity.
     fn fleet_plan(template: &SyncedCommandTemplate, request_id: &str) -> ExecPlan {
         let draft = build_exact_argv_draft(template, ExecLimits::defaults(), None);
         ExecPlan::from_draft(
-            ExecRequestId(request_id.to_string()),
+            ExecRequestId("target-1".to_string()),
+            request_id,
             ApprovalId("appr-1".to_string()),
             draft,
         )
@@ -7446,7 +7473,8 @@ mod tests {
             .draft
             .expect("input must classify as confirm_required");
         ExecPlan::from_draft(
-            ExecRequestId(request_id.to_string()),
+            ExecRequestId("exec_task_1".to_string()),
+            request_id,
             ApprovalId("appr-1".to_string()),
             draft,
         )
@@ -7610,11 +7638,11 @@ mod tests {
         }
     }
 
-    /// A plan whose own `exec_request_id` diverges from the authz-validated frame id
-    /// is rejected before dispatch: the whole-draft re-render cannot catch this field,
+    /// A plan whose dispatch id diverges from the authz-validated frame id is
+    /// rejected before dispatch: the whole-draft re-render cannot catch this field,
     /// so the handler binds it to the frame id explicitly.
     #[tokio::test]
-    async fn edge_exec_request_id_mismatch_is_rejected() {
+    async fn edge_exec_generation_mismatch_is_rejected() {
         let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
         ctx.inbound_authz = Some(authz_block(
             vec![Capability::ShellExecConfirmed],
@@ -7628,18 +7656,92 @@ mod tests {
             desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
             Some(1),
         );
-        // The plan's exec_request_id is "other", but the frame id is "a1".
+        // The plan's generation is "other", but the frame id is "a1".
         let plan = fleet_plan(&template, "other");
         handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
             .await
             .unwrap();
         match read_fleet_result(&mut rx).disposition {
             EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
-                assert!(reason.contains("exec_request_id_mismatch"), "{reason}");
+                assert!(reason.contains("execution_generation_mismatch"), "{reason}");
             }
             other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
         }
         assert!(ctx.edge_exec_pending.lock().unwrap().is_empty());
+    }
+
+    /// A plan naming no task is rejected: a result that cannot be attributed to a
+    /// piece of work cannot be reconciled with anything.
+    #[tokio::test]
+    async fn edge_exec_missing_task_id_is_rejected() {
+        let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ShellExecConfirmed],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::High,
+        ));
+        let template = fleet_template();
+        ctx.command_templates.replace(
+            vec![template.clone()],
+            desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
+            Some(1),
+        );
+        let mut plan = fleet_plan(&template, "a1");
+        plan.exec_request_id = ExecRequestId(String::new());
+        handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
+            .await
+            .unwrap();
+        match read_fleet_result(&mut rx).disposition {
+            EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
+                assert!(reason.contains("missing_exec_request_id"), "{reason}");
+            }
+            other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
+        }
+    }
+
+    /// Retrying the same task under a new frame passes the PEP. Binding the frame
+    /// id to the task instead of the generation would reject this, which is why the
+    /// two axes are checked differently.
+    #[tokio::test]
+    async fn edge_exec_retry_of_the_same_task_passes_the_pep() {
+        let (mut ctx, _rx, mut ipc_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.exec_supported = true;
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ShellExecConfirmed],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::High,
+        ));
+        let template = fleet_template();
+        ctx.command_templates.replace(
+            vec![template.clone()],
+            desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
+            Some(1),
+        );
+
+        // Two dispatches of one task: same exec_request_id, different generations.
+        let first = fleet_plan(&template, "a1");
+        let retry = fleet_plan(&template, "a2");
+        assert_eq!(first.exec_request_id, retry.exec_request_id);
+
+        for (frame, plan) in [("a1", &first), ("a2", &retry)] {
+            handle_edge_exec_request_inbound(&ctx, &fleet_exec_model(frame, plan))
+                .await
+                .unwrap();
+            match ipc_rx.try_recv().expect("ExecPlan IPC") {
+                ServiceToWorker::ExecPlan(payload) => {
+                    assert_eq!(payload.request_id, frame);
+                    assert_eq!(payload.plan.execution_generation, frame);
+                    assert_eq!(payload.plan.exec_request_id, first.exec_request_id);
+                }
+                other => panic!("expected ExecPlan IPC, got {other:?}"),
+            }
+            assert!(
+                ctx.edge_exec_pending.lock().unwrap().contains(frame),
+                "dispatch {frame} was not marked in flight"
+            );
+        }
     }
 
     /// A plan with an empty `approval_id` (no proof it was user-approved) is rejected

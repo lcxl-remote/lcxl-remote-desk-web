@@ -284,11 +284,32 @@ pub struct ExecPlanDraft {
 /// (`ServiceToWorker::ExecPlan`). An [`ExecPlanDraft`] plus the server-minted
 /// [`ExecRequestId`] and [`ApprovalId`]. The worker executes `program` + `argv`
 /// verbatim and never sees the original command string.
+///
+/// # Two identity axes
+///
+/// A plan carries both, and they answer different questions:
+///
+/// - [`exec_request_id`](Self::exec_request_id) — the **task**: the piece of work
+///   an operator asked for. Stable across retries of that work.
+/// - [`execution_generation`](Self::execution_generation) — this **one dispatch**
+///   of it. A retry is a new generation of the same task.
+///
+/// The distinction is what lets a host say "I already ran this exact dispatch"
+/// while still allowing a genuine retry: deduplicating on the task would block
+/// legitimate retries, and deduplicating on nothing would let a redelivered frame
+/// run a command twice. Callers must supply both explicitly — never derive one
+/// from the other.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct ExecPlan {
+    /// The task axis: stable across retries, and what a control end correlates a
+    /// result to for display.
     pub exec_request_id: ExecRequestId,
+    /// The dispatch axis: unique per send, and what the host deduplicates on. It
+    /// equals the signalling frame's own `request_id`, which is both the worker's
+    /// correlation key and naturally distinct per delivery.
+    pub execution_generation: String,
     pub program: String,
     pub argv: Vec<String>,
     pub cwd: Option<String>,
@@ -308,13 +329,19 @@ impl ExecPlan {
     /// server-minted ids. The single place a draft becomes executable — keeps
     /// the field copy in one spot so the draft can never silently diverge from
     /// the plan.
+    ///
+    /// Both identity axes are parameters rather than derived, so every call site
+    /// has to state which id plays which role. Their meanings have differed
+    /// between dispatch paths before; making the compiler ask is the point.
     pub fn from_draft(
         exec_request_id: ExecRequestId,
+        execution_generation: impl Into<String>,
         approval_id: ApprovalId,
         draft: ExecPlanDraft,
     ) -> Self {
         ExecPlan {
             exec_request_id,
+            execution_generation: execution_generation.into(),
             program: draft.program,
             argv: draft.argv,
             cwd: draft.cwd,
@@ -437,16 +464,40 @@ mod tests {
         let draft = sample_draft();
         let plan = ExecPlan::from_draft(
             ExecRequestId("exec_1".into()),
+            "gen_1",
             ApprovalId("appr_1".into()),
             draft.clone(),
         );
         assert_eq!(plan.exec_request_id, ExecRequestId("exec_1".into()));
+        assert_eq!(plan.execution_generation, "gen_1");
         assert_eq!(plan.approval_id, ApprovalId("appr_1".into()));
         assert_eq!(plan.program, draft.program);
         assert_eq!(plan.argv, draft.argv);
         assert_eq!(plan.fingerprint, draft.fingerprint);
         assert_eq!(plan.template_id, draft.template_id);
         assert_eq!(plan.timeout_ms, draft.timeout_ms);
+    }
+
+    /// Retrying a task keeps its task id and takes a fresh generation. The two
+    /// axes must stay independent — collapsing them would either block retries or
+    /// let a redelivered dispatch run twice.
+    #[test]
+    fn a_retry_keeps_the_task_and_takes_a_new_generation() {
+        let draft = sample_draft();
+        let first = ExecPlan::from_draft(
+            ExecRequestId("exec_1".into()),
+            "gen_1",
+            ApprovalId("appr_1".into()),
+            draft.clone(),
+        );
+        let retry = ExecPlan::from_draft(
+            ExecRequestId("exec_1".into()),
+            "gen_2",
+            ApprovalId("appr_1".into()),
+            draft,
+        );
+        assert_eq!(first.exec_request_id, retry.exec_request_id);
+        assert_ne!(first.execution_generation, retry.execution_generation);
     }
 
     #[test]
@@ -526,6 +577,7 @@ mod tests {
         let config = unbounded_config();
         let plan = ExecPlan::from_draft(
             ExecRequestId("exec_1".into()),
+            "gen_1",
             ApprovalId("appr_1".into()),
             sample_draft(),
         );

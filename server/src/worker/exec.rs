@@ -251,6 +251,7 @@ mod tests {
         );
         ExecPlan {
             exec_request_id: desk_agent_protocol::exec::ExecRequestId("exec_t".into()),
+            execution_generation: "gen_t".into(),
             program,
             argv,
             cwd: None,

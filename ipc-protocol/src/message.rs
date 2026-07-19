@@ -2080,6 +2080,8 @@ mod tests {
             connection_id: "conn-term".to_string(),
             session: StartTerminalSession {
                 command: "C:\\Windows\\System32\\cmd.exe,/k,echo,hello".to_string(),
+                device_id: None,
+                grant_session_id: None,
             },
         });
         match wincode_round_trip(&msg) {
@@ -2425,6 +2427,8 @@ mod tests {
                 connection_id: "c".to_string(),
                 session: StartTerminalSession {
                     command: "cmd.exe".to_string(),
+                    device_id: None,
+                    grant_session_id: None,
                 },
             }),
             ServiceToWorker::SendDataToTerminalRequest(SendDataToTerminalPayload {
@@ -3111,6 +3115,7 @@ mod tests {
         use desk_agent_protocol::RiskLevel;
         use desk_agent_protocol::exec::{ApprovalId, ExecPlan, ExecRequestId, ExecShellKind};
         ExecPlan {
+            execution_generation: "gen-1".into(),
             exec_request_id: ExecRequestId("exec-1".to_string()),
             program: "docker".to_string(),
             argv: vec!["restart".to_string(), "web1".to_string()],

@@ -3185,7 +3185,8 @@ mod tests {
             None,
         );
         desk_agent_protocol::exec::ExecPlan::from_draft(
-            desk_agent_protocol::exec::ExecRequestId("a1".into()),
+            desk_agent_protocol::exec::ExecRequestId("target-1".into()),
+            "a1",
             desk_agent_protocol::exec::ApprovalId("appr-1".into()),
             draft,
         )

@@ -149,9 +149,25 @@ pub fn mint_exec_request_id() -> ExecRequestId {
 /// Seal a consumed draft into an approved [`ExecPlan`], minting the
 /// `approval_id`. The one place an approval id is created — a control-end /
 /// model-supplied value can never reach here.
-pub fn seal_plan(exec_request_id: ExecRequestId, draft: ExecPlanDraft) -> (ApprovalId, ExecPlan) {
+///
+/// On this path the two identity axes are already present and just need naming:
+/// `exec_request_id` is the daemon-minted task id, stable from the classifying
+/// `ConfirmExec` through to the `ResolveExec` that approves it, while
+/// `execution_generation` is the id of the frame that actually triggers this
+/// dispatch. Only one frame ever triggers execution — a preview that is merely
+/// classified is not a generation of anything.
+pub fn seal_plan(
+    exec_request_id: ExecRequestId,
+    execution_generation: &str,
+    draft: ExecPlanDraft,
+) -> (ApprovalId, ExecPlan) {
     let approval_id = ApprovalId(format!("appr_{}", uuid::Uuid::new_v4().simple()));
-    let plan = ExecPlan::from_draft(exec_request_id, approval_id.clone(), draft);
+    let plan = ExecPlan::from_draft(
+        exec_request_id,
+        execution_generation,
+        approval_id.clone(),
+        draft,
+    );
     (approval_id, plan)
 }
 
@@ -270,7 +286,7 @@ mod tests {
     fn seal_plan_mints_approval_and_preserves_draft() {
         let id = ExecRequestId("exec_1".into());
         let d = draft();
-        let (approval_id, plan) = seal_plan(id.clone(), d.clone());
+        let (approval_id, plan) = seal_plan(id.clone(), "gen-1", d.clone());
         assert!(approval_id.0.starts_with("appr_"));
         assert_eq!(plan.exec_request_id, id);
         assert_eq!(plan.approval_id, approval_id);

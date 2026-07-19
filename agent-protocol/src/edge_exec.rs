@@ -244,6 +244,7 @@ mod tests {
         use crate::exec::{ApprovalId, ExecPlanDraft, ExecRequestId, ExecShellKind};
         ExecPlan::from_draft(
             ExecRequestId("req-1".into()),
+            "gen-1",
             ApprovalId("appr-1".into()),
             ExecPlanDraft {
                 program: "powershell".into(),
