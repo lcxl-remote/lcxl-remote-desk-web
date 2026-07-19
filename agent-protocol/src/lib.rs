@@ -842,6 +842,10 @@ pub enum AgentErrorKind {
     UnsupportedPlatform,
     TargetOffline,
     SessionUnavailable,
+    /// The host is already running as many commands as it permits. Nothing ran,
+    /// and the condition is transient — distinct from a refusal on policy grounds,
+    /// which will not become permitted by waiting.
+    HostAtCapacity,
     Timeout,
     OutputLimitExceeded,
     InvalidInput,

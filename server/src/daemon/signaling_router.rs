@@ -481,8 +481,13 @@ pub enum ExecAdmission {
     /// "did not run": reporting it as such would license a retry of a change that
     /// may already have happened.
     AcceptedOutcomeUnknown(String),
-    /// Refused without spawning.
+    /// Refused without spawning, and waiting will not change that.
     Refused(String),
+    /// Refused without spawning because the host is at its ceiling. Nothing ran and
+    /// the condition is transient, so the caller may retry — kept apart from
+    /// `Refused` because treating a busy host as a policy denial would settle a
+    /// target that was never even attempted.
+    AtCapacity(String),
 }
 
 /// Ask the ledger whether this plan may be spawned, reserving it if so.
@@ -509,7 +514,7 @@ pub async fn admit_exec(ctx: &RouterContext, plan: &ExecPlan) -> ExecAdmission {
         .exec_capacity
         .try_admit(&plan.execution_generation, limit, timeout)
     {
-        return ExecAdmission::Refused(full.to_string());
+        return ExecAdmission::AtCapacity(full.to_string());
     }
 
     let reservation = ctx
@@ -3490,6 +3495,24 @@ async fn dispatch_exec_plan(
             );
             return;
         }
+        ExecAdmission::AtCapacity(reason) => {
+            send_exec_result(
+                &ctx.outbound_tx,
+                request_id,
+                to_connection_id,
+                ExecResultPayload {
+                    exec_request_id,
+                    // Retryable: nothing ran, and the ceiling frees up.
+                    outcome: AgentOutcome::Err(agent_error(
+                        AgentErrorKind::HostAtCapacity,
+                        &reason,
+                        true,
+                        true,
+                    )),
+                },
+            );
+            return;
+        }
     }
 
     let payload = ExecPlanPayload {
@@ -3884,6 +3907,14 @@ async fn dispatch_fleet_exec_plan(ctx: &RouterContext, request_id: &str, plan: E
                 &ctx.outbound_tx,
                 request_id,
                 EdgeExecDisposition::RejectedBeforeDispatch { reason },
+            );
+            return;
+        }
+        ExecAdmission::AtCapacity(reason) => {
+            send_edge_exec_result(
+                &ctx.outbound_tx,
+                request_id,
+                EdgeExecDisposition::HostAtCapacity { reason },
             );
             return;
         }
@@ -7977,9 +8008,13 @@ mod tests {
             admit_exec(&ctx, &fleet_plan(&template, "a2")).await,
             ExecAdmission::Spawn
         );
+        // Busy is not a refusal on the merits: it must stay distinguishable so the
+        // manager re-queues the target instead of retiring it as denied.
         match admit_exec(&ctx, &fleet_plan(&template, "a3")).await {
-            ExecAdmission::Refused(reason) => assert!(reason.contains("2 permitted"), "{reason}"),
-            other => panic!("expected Refused, got {other:?}"),
+            ExecAdmission::AtCapacity(reason) => {
+                assert!(reason.contains("2 permitted"), "{reason}")
+            }
+            other => panic!("expected AtCapacity, got {other:?}"),
         }
 
         // The refused dispatch must not have been reserved: it never ran, so the

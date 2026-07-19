@@ -105,6 +105,13 @@ pub enum EdgeExecDisposition {
         /// Model-safe reason (PEP failure class).
         reason: String,
     },
+    /// The host is at its own concurrency ceiling. Change did **not** run, and
+    /// unlike a policy rejection this will succeed later — the caller should retry
+    /// rather than treat the target as settled.
+    HostAtCapacity {
+        /// Operator-facing description of the ceiling that was hit.
+        reason: String,
+    },
     /// Plan accepted but could not be handed to the worker. Change did not run.
     DispatchFailedBeforeWorker {
         /// Model-safe reason (worker offline / IPC send failure).
@@ -124,13 +131,14 @@ pub enum EdgeExecDisposition {
 
 impl EdgeExecDisposition {
     /// Whether this disposition *proves* the change was not executed. Only the
-    /// two pre-dispatch variants do; `Executed` ran and `ExecutionStateUnknown`
-    /// is, by definition, uncertain.
+    /// pre-dispatch variants do; `Executed` ran and `ExecutionStateUnknown` is, by
+    /// definition, uncertain.
     pub fn proves_not_executed(&self) -> bool {
         matches!(
             self,
             EdgeExecDisposition::RejectedBeforeDispatch { .. }
                 | EdgeExecDisposition::DispatchFailedBeforeWorker { .. }
+                | EdgeExecDisposition::HostAtCapacity { .. }
         )
     }
 }
