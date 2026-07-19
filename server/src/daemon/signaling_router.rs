@@ -2716,6 +2716,26 @@ async fn handle_confirm_exec_inbound(
     let data = match model.get_data::<ConfirmExecData>() {
         Ok(d) => d,
         Err(e) => {
+            // A malformed payload still has to leave a trace. The manager records
+            // its own authorization of this frame, so a rejection that reported
+            // nothing would read as a dispatch the host never acknowledged. This
+            // is a protocol error rather than a capability decision — no capability
+            // has been determined yet — so it is a task failure. The parser's
+            // message may echo payload fragments and is deliberately not stored;
+            // only the error kind is.
+            ctx.audit
+                .record(AuditEvent::task_failed_for_request(
+                    new_audit_event_id(),
+                    audit_now(),
+                    &request_id,
+                    &agent_error(
+                        AgentErrorKind::InvalidInput,
+                        "bad ConfirmExec payload",
+                        false,
+                        true,
+                    ),
+                ))
+                .await;
             send_exec_preview(
                 &ctx.outbound_tx,
                 &request_id,
@@ -2737,6 +2757,21 @@ async fn handle_confirm_exec_inbound(
 
     // The operation must be an exec; a read operation is a protocol error.
     let OperationInput::Exec(exec_input) = data.operation.input else {
+        // Recorded for the same reason as the parse failure above: a protocol
+        // error, not a capability decision.
+        ctx.audit
+            .record(AuditEvent::task_failed_for_request(
+                new_audit_event_id(),
+                audit_now(),
+                &request_id,
+                &agent_error(
+                    AgentErrorKind::InvalidInput,
+                    "ConfirmExec requires an exec operation",
+                    false,
+                    true,
+                ),
+            ))
+            .await;
         send_exec_preview(
             &ctx.outbound_tx,
             &request_id,
@@ -2762,6 +2797,19 @@ async fn handle_confirm_exec_inbound(
 
     // Gate: confirmed execution is unavailable in ServiceDaemon mode.
     if !ctx.exec_supported {
+        // Unlike the two protocol errors above, this is a genuine capability
+        // refusal: the request was well-formed and the host is declining the
+        // capability outright. The risk is unknown here — classification has not
+        // run — so the ceiling is recorded rather than a computed value.
+        ctx.audit
+            .record(AuditEvent::capability_denied(
+                new_audit_event_id(),
+                audit_now(),
+                &request_id,
+                risk_str(desk_agent_protocol::RiskLevel::High),
+                "exec unsupported in this startup mode".to_string(),
+            ))
+            .await;
         send_exec_preview(
             &ctx.outbound_tx,
             &request_id,
@@ -7994,6 +8042,108 @@ mod tests {
                 .map(|e| e.event_type.clone())
                 .collect()
         }
+    }
+
+    use desk_agent_protocol::audit::AuditEventType;
+
+    /// A context whose audit sink records, so the emissions of a rejection path
+    /// can be inspected.
+    async fn audited_ctx(
+        exec_supported: bool,
+    ) -> (
+        RouterContext,
+        broadcast::Receiver<String>,
+        RecordingAuditSink,
+    ) {
+        let (mut ctx, rx) = make_ctx_with_rx();
+        ctx.exec_supported = exec_supported;
+        ctx.settings.write().await.ai_policy.execution_mode = ExecutionMode::ConfirmEachAction;
+        let sink = RecordingAuditSink::default();
+        ctx.audit = Arc::new(sink.clone());
+        (ctx, rx, sink)
+    }
+
+    /// A `ConfirmExec` whose payload cannot be parsed at all.
+    fn malformed_confirm_exec_model(request_id: &str) -> SignalingModel {
+        SignalingModel::new(
+            request_id,
+            SignalingType::ConfirmExec,
+            Some("conn-1".to_string()),
+            None,
+            Some(serde_json::json!({ "operation": "not-an-object" })),
+            None,
+        )
+    }
+
+    /// A `ConfirmExec` carrying a read operation rather than an exec one.
+    fn read_operation_confirm_exec_model(request_id: &str) -> SignalingModel {
+        SignalingModel::new(
+            request_id,
+            SignalingType::ConfirmExec,
+            Some("conn-1".to_string()),
+            None,
+            Some(process_list_request()),
+            None,
+        )
+    }
+
+    /// Every rejection of a `ConfirmExec` must report something. The manager
+    /// records its own authorization of the frame, so a path that returned a
+    /// preview but reported nothing would show up as a dispatch the host never
+    /// acknowledged — indistinguishable from a host suppressing its audit.
+    ///
+    /// The two protocol errors are task failures (no capability has been
+    /// determined yet); the unsupported-mode refusal is a capability denial.
+    /// None of them may store the payload or the parser's message.
+    #[tokio::test]
+    async fn every_confirm_exec_rejection_reports_an_event() {
+        for (model, expected_type, expected_result) in [
+            (
+                malformed_confirm_exec_model("r1"),
+                AuditEventType::TaskFailed.as_str(),
+                "error",
+            ),
+            (
+                read_operation_confirm_exec_model("r2"),
+                AuditEventType::TaskFailed.as_str(),
+                "error",
+            ),
+        ] {
+            let (ctx, _rx, sink) = audited_ctx(true).await;
+            handle_confirm_exec_inbound(&ctx, &model).await.unwrap();
+            let events = sink.events.lock().unwrap();
+            assert_eq!(events.len(), 1, "exactly one event per rejection");
+            assert_eq!(events[0].event_type, expected_type);
+            assert_eq!(events[0].result, expected_result);
+            // Correlated by request id, which is the key the manager's own
+            // authorization row carries.
+            assert_eq!(events[0].request_id, model.request_id);
+            assert!(
+                events[0].task_id.is_none(),
+                "a protocol rejection has no sub-call id"
+            );
+            // The summary is the error kind alone, never the payload or the
+            // parser's message.
+            assert_eq!(events[0].output_summary.as_deref(), Some("InvalidInput"));
+        }
+
+        // Exec unavailable in this startup mode: a real capability refusal.
+        let (ctx, _rx, sink) = audited_ctx(false).await;
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r3", "Get-Service"))
+            .await
+            .unwrap();
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].event_type,
+            AuditEventType::CapabilityDenied.as_str()
+        );
+        assert_eq!(events[0].result, "denied");
+        assert_eq!(events[0].request_id, "r3");
+        assert_eq!(
+            events[0].output_summary.as_deref(),
+            Some("exec unsupported in this startup mode")
+        );
     }
 
     #[tokio::test]
