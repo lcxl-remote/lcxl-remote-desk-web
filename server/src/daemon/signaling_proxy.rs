@@ -74,6 +74,9 @@ pub async fn run_signaling_proxy(
     // (host UI disabling the manager connection) tears the current manager /
     // support upstream down and puts the fleet audit sink back to purely-local.
     manager_link_gate: Arc<ManagerLinkGate>,
+    // This host's durable exec ledger. Opened by the daemon entry point, which is
+    // common to all three host forms, so every dispatch path has one.
+    exec_ledger: Arc<crate::daemon::exec_ledger::ExecLedger>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Signaling proxy starting");
 
@@ -143,6 +146,7 @@ pub async fn run_signaling_proxy(
     // remote manager) means the same PC handles inbound messages
     // regardless of which WS surfaced them.
     let router_ctx = RouterContext {
+        exec_ledger: exec_ledger.clone(),
         pc_registry: pc_registry.clone(),
         outbound_tx: outbound_tx.clone(),
         settings: settings.clone(),
@@ -825,6 +829,28 @@ pub async fn run_signaling_proxy(
             // command by `exec_request_id`. Execution failures live inside the
             // payload's `AgentOutcome::Err`, not the transport.
             WorkerToService::ExecResult(payload) => {
+                // Close out the ledger entry first, so the host's own record is
+                // settled before the answer leaves the machine. The generation is
+                // the frame id the plan was dispatched under.
+                {
+                    let result_json = serde_json::to_string(&payload.result.outcome)
+                        .unwrap_or_else(|_| "null".to_string());
+                    if let Err(e) = router_ctx
+                        .exec_ledger
+                        .mark_terminal(
+                            &payload.request_id,
+                            crate::daemon::exec_ledger::Terminal::Completed(result_json),
+                        )
+                        .await
+                    {
+                        // The command did run; failing to record that is bad but
+                        // withholding the result would be worse, so log and relay.
+                        log::error!(
+                            "[exec-ledger] could not record the result of {}: {e}",
+                            payload.request_id
+                        );
+                    }
+                }
                 // Audit the completion (single-machine log sink). The summary is
                 // content-free (exit code / error kind only), never stdout.
                 {
@@ -2614,13 +2640,18 @@ mod tests {
         );
     }
 
-    fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
+    async fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
         let (outbound_tx, _) = broadcast::channel::<String>(16);
         let shared = SharedSettings::from(Settings::default());
         let settings = web::Data::new(shared);
         let pc_registry = PcRegistry::new();
         let (worker_mgr, _rx) = WorkerManager::new(settings.clone(), pc_registry.clone());
         let ctx = RouterContext {
+            exec_ledger: Arc::new(
+                crate::daemon::exec_ledger::ExecLedger::open_in_memory()
+                    .await
+                    .expect("in-memory ledger"),
+            ),
             pc_registry,
             outbound_tx: outbound_tx.clone(),
             settings,
@@ -2659,7 +2690,7 @@ mod tests {
     /// a missing-id case as a `RouterError` and noisily warn-spam.
     #[tokio::test]
     async fn drops_worker_bound_message_without_from_connection_id() {
-        let (router_ctx, _out_tx) = make_router_ctx();
+        let (router_ctx, _out_tx) = make_router_ctx().await;
 
         let model = SignalingModel::new(
             "req-1",
@@ -2678,7 +2709,7 @@ mod tests {
     /// rather than crashing the proxy loop.
     #[tokio::test]
     async fn drops_malformed_json() {
-        let (router_ctx, _out_tx) = make_router_ctx();
+        let (router_ctx, _out_tx) = make_router_ctx().await;
         handle_inbound_signaling_text(
             "{ this is not valid json".to_string(),
             &router_ctx,
@@ -2742,7 +2773,7 @@ mod tests {
     /// frame is treated as transient and the loop continues.
     #[tokio::test]
     async fn quota_error_is_fatal_only_on_manager_link() {
-        let (router_ctx, _out_tx) = make_router_ctx();
+        let (router_ctx, _out_tx) = make_router_ctx().await;
         let text = error_frame(DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(), "full");
 
         let enabled = handle_inbound_signaling_text(
@@ -2777,7 +2808,7 @@ mod tests {
     /// returns the per-handler error which we log and return.
     #[tokio::test]
     async fn handles_router_error_without_panic() {
-        let (router_ctx, _out_tx) = make_router_ctx();
+        let (router_ctx, _out_tx) = make_router_ctx().await;
 
         let model = SignalingModel::new(
             "req-2",
@@ -2799,7 +2830,7 @@ mod tests {
     /// per-variant round-trip tests in `desk-ipc-protocol`.
     #[tokio::test]
     async fn worker_owned_with_from_connection_id_does_not_panic() {
-        let (router_ctx, _out_tx) = make_router_ctx();
+        let (router_ctx, _out_tx) = make_router_ctx().await;
 
         let model = SignalingModel::new(
             "req-3",
@@ -2846,7 +2877,7 @@ mod tests {
     /// link it is applied. This is the forged-sync rejection guarantee.
     #[tokio::test]
     async fn command_template_sync_is_accepted_only_from_trusted_central_source() {
-        let (router_ctx, _out_tx) = make_router_ctx();
+        let (router_ctx, _out_tx) = make_router_ctx().await;
 
         // Local source: dropped.
         handle_inbound_signaling_text(
@@ -2890,7 +2921,7 @@ mod tests {
             SyncedCommandTemplate,
         };
         use desk_agent_protocol::exec::ExecEffect;
-        let (router_ctx, _out_tx) = make_router_ctx();
+        let (router_ctx, _out_tx) = make_router_ctx().await;
 
         let make_text = |version: u16, epoch: u16, revision: Option<i64>| {
             let payload = CommandTemplateSyncPayload {

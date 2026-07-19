@@ -89,6 +89,7 @@ pub async fn run_service_daemon_inner(
         .await
         .map_err(|e| format!("Failed to init signal DB: {e}"))?;
     info!("Signal database initialized at {signal_db_dir}");
+    let exec_ledger = open_exec_ledger(&settings.args.config_file_path).await?;
     // Age-based retention cleanup for the local usage rollups (collect-only
     // telemetry, no billing coupling). One task per process; the delete is idempotent.
     tokio::spawn(desk_signal::usage_retention::run_retention_cleanup_loop(
@@ -263,6 +264,7 @@ pub async fn run_service_daemon_inner(
         let manager_link_state = Arc::clone(&manager_link_state);
         let support_link_state = Arc::clone(&support_link_state);
         let manager_link_gate = Arc::clone(&manager_link_gate);
+        let exec_ledger = exec_ledger.clone();
         actix_web::rt::spawn(async move {
             if let Err(e) = signaling_proxy::run_signaling_proxy(
                 settings,
@@ -274,6 +276,7 @@ pub async fn run_service_daemon_inner(
                 manager_link_state,
                 support_link_state,
                 manager_link_gate,
+                exec_ledger,
             )
             .await
             {
@@ -324,6 +327,26 @@ fn get_current_session_id() -> u32 {
     0
 }
 
+/// Open this host's durable exec ledger next to its config file.
+///
+/// Common to every host form: the ledger is what makes "this dispatch already
+/// ran here" answerable across a crash, so a host that failed to open one must
+/// not start rather than silently execute unrecorded.
+async fn open_exec_ledger(
+    config_file_path: &str,
+) -> Result<Arc<crate::daemon::exec_ledger::ExecLedger>, String> {
+    let dir = Path::new(config_file_path)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_string_lossy()
+        .to_string();
+    let ledger = crate::daemon::exec_ledger::ExecLedger::open(&dir)
+        .await
+        .map_err(|e| format!("Failed to open the exec ledger in {dir}: {e}"))?;
+    info!("Exec ledger initialized at {dir}");
+    Ok(Arc::new(ledger))
+}
+
 /// Single-process entry into the daemon-worker pipeline, used by
 /// [`crate::run_with_hub`] for both `StartupMode::Default` (portable) and
 /// `StartupMode::DeskServer` (headless desk node). Replaces the legacy
@@ -361,6 +384,8 @@ pub async fn start_inprocess_daemon(
     manager_link_gate: Arc<crate::daemon::manager_link_gate::ManagerLinkGate>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Starting in-process daemon (portable mode)");
+
+    let exec_ledger = open_exec_ledger(&args.config_file_path).await?;
 
     // Endpoints of this node's own bundled TURN (frozen at startup from the
     // running `TurnApiState`; empty when no embedded TURN runs) so the PC
@@ -409,6 +434,7 @@ pub async fn start_inprocess_daemon(
             manager_link_state,
             support_link_state,
             manager_link_gate,
+            exec_ledger,
         )
         .await
         {

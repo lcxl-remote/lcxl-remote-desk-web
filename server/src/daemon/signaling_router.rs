@@ -456,6 +456,81 @@ pub struct RouterContext {
     /// at its expiry; the signaling proxy's support loop drives the upstream from
     /// the same handle. Node-local runtime state (one desk-server process).
     pub support_link_state: Arc<crate::daemon::support_link_state::SupportLinkState>,
+    /// This host's durable record of the executions it has accepted. Every exec
+    /// dispatch reserves here before the plan reaches the worker, so a redelivered
+    /// frame cannot spawn a second process. Not optional: a host without a ledger
+    /// would silently double-execute, so there is no "skip it if absent" path.
+    pub exec_ledger: Arc<crate::daemon::exec_ledger::ExecLedger>,
+}
+
+/// What the ledger says should happen to an exec dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecAdmission {
+    /// First sighting of this dispatch: it is reserved and must be spawned.
+    Spawn,
+    /// Already run to completion; answer with the stored result instead of
+    /// running it again.
+    Replay(String),
+    /// Already accepted, but this host cannot say how it ended — still in flight,
+    /// interrupted mid-spawn, or the result has aged out. Crucially **not** a
+    /// "did not run": reporting it as such would license a retry of a change that
+    /// may already have happened.
+    AcceptedOutcomeUnknown(String),
+    /// Refused without spawning.
+    Refused(String),
+}
+
+/// Ask the ledger whether this plan may be spawned, reserving it if so.
+///
+/// Called immediately before the plan is handed to the worker on every dispatch
+/// path. The reservation has to be durable *first*: recording it afterwards would
+/// leave the exact window this exists to close, where a crash loses the fact that
+/// a process was started and the retry starts a second one.
+pub async fn admit_exec(ctx: &RouterContext, plan: &ExecPlan) -> ExecAdmission {
+    use crate::daemon::exec_ledger::{Reservation, State};
+    let reservation = ctx
+        .exec_ledger
+        .reserve(
+            &plan.exec_request_id.0,
+            &plan.execution_generation,
+            &plan.fingerprint,
+            None,
+        )
+        .await;
+    match reservation {
+        Ok(Reservation::Granted) => ExecAdmission::Spawn,
+        Ok(Reservation::FingerprintMismatch) => ExecAdmission::Refused(
+            "this dispatch id was already used for a different command".to_string(),
+        ),
+        Ok(Reservation::Duplicate(row)) => {
+            if row.state == State::SpawnFailed.as_str() {
+                // The earlier attempt provably never started, so replaying its
+                // recorded failure is honest and does not risk a double run.
+                return ExecAdmission::Refused(
+                    "this dispatch already failed to start on this host".to_string(),
+                );
+            }
+            match row.result_json {
+                Some(result) if row.state == State::Terminal.as_str() => {
+                    ExecAdmission::Replay(result)
+                }
+                _ => ExecAdmission::AcceptedOutcomeUnknown(format!(
+                    "this host already accepted this dispatch and its outcome is {}",
+                    if row.state == State::Terminal.as_str() {
+                        "no longer retained"
+                    } else {
+                        "not yet known"
+                    }
+                )),
+            }
+        }
+        Err(e) => {
+            // A ledger that cannot be written cannot promise "at most once", so the
+            // dispatch is refused rather than run unrecorded.
+            log::error!("[exec-ledger] refusing dispatch, ledger write failed: {e}");
+            ExecAdmission::Refused("the host could not record this execution".to_string())
+        }
+    }
 }
 
 /// Fresh audit event id.
@@ -3323,6 +3398,69 @@ async fn dispatch_exec_plan(
     audit_source_request_id: Option<String>,
 ) {
     let exec_request_id = plan.exec_request_id.clone();
+
+    // Claim this dispatch in the ledger before the worker can start anything. A
+    // redelivered frame is answered from the record instead of run a second time.
+    match admit_exec(ctx, &plan).await {
+        ExecAdmission::Spawn => {}
+        ExecAdmission::Replay(result) => {
+            let outcome = serde_json::from_str::<AgentOutcome>(&result).unwrap_or_else(|e| {
+                AgentOutcome::Err(agent_error(
+                    AgentErrorKind::Internal,
+                    &format!("stored result could not be read: {e}"),
+                    false,
+                    true,
+                ))
+            });
+            send_exec_result(
+                &ctx.outbound_tx,
+                request_id,
+                to_connection_id,
+                ExecResultPayload {
+                    exec_request_id,
+                    outcome,
+                },
+            );
+            return;
+        }
+        ExecAdmission::AcceptedOutcomeUnknown(reason) => {
+            // Deliberately not an error that reads as "did not run": the change may
+            // already have happened, and saying otherwise would invite a retry of it.
+            send_exec_result(
+                &ctx.outbound_tx,
+                request_id,
+                to_connection_id,
+                ExecResultPayload {
+                    exec_request_id,
+                    outcome: AgentOutcome::Err(agent_error(
+                        AgentErrorKind::Internal,
+                        &reason,
+                        false,
+                        true,
+                    )),
+                },
+            );
+            return;
+        }
+        ExecAdmission::Refused(reason) => {
+            send_exec_result(
+                &ctx.outbound_tx,
+                request_id,
+                to_connection_id,
+                ExecResultPayload {
+                    exec_request_id,
+                    outcome: AgentOutcome::Err(agent_error(
+                        AgentErrorKind::PermissionDenied,
+                        &reason,
+                        false,
+                        true,
+                    )),
+                },
+            );
+            return;
+        }
+    }
+
     let payload = ExecPlanPayload {
         request_id: request_id.to_string(),
         connection_id: to_connection_id.clone(),
@@ -3679,6 +3817,45 @@ async fn handle_edge_exec_request_inbound(
 /// send failure the plan never reached the worker, so the change definitely did
 /// not run → `DispatchFailedBeforeWorker`.
 async fn dispatch_fleet_exec_plan(ctx: &RouterContext, request_id: &str, plan: ExecPlan) {
+    // Claim this dispatch in the ledger before the worker can start anything.
+    match admit_exec(ctx, &plan).await {
+        ExecAdmission::Spawn => {}
+        ExecAdmission::Replay(result) => {
+            let outcome = serde_json::from_str::<AgentOutcome>(&result).unwrap_or_else(|e| {
+                AgentOutcome::Err(agent_error(
+                    AgentErrorKind::Internal,
+                    &format!("stored result could not be read: {e}"),
+                    false,
+                    true,
+                ))
+            });
+            send_edge_exec_result(
+                &ctx.outbound_tx,
+                request_id,
+                EdgeExecDisposition::Executed { outcome },
+            );
+            return;
+        }
+        ExecAdmission::AcceptedOutcomeUnknown(reason) => {
+            // `ExecutionStateUnknown` rather than a pre-dispatch variant: only the
+            // pre-dispatch ones assert the change did not run, and this one cannot.
+            send_edge_exec_result(
+                &ctx.outbound_tx,
+                request_id,
+                EdgeExecDisposition::ExecutionStateUnknown { reason },
+            );
+            return;
+        }
+        ExecAdmission::Refused(reason) => {
+            send_edge_exec_result(
+                &ctx.outbound_tx,
+                request_id,
+                EdgeExecDisposition::RejectedBeforeDispatch { reason },
+            );
+            return;
+        }
+    }
+
     // Register the in-flight correlation BEFORE sending so a fast worker reply
     // cannot race ahead of the marker.
     if let Ok(mut pending) = ctx.edge_exec_pending.lock() {
@@ -3969,7 +4146,7 @@ mod tests {
         }
     }
 
-    fn make_ctx() -> RouterContext {
+    async fn make_ctx() -> RouterContext {
         let (outbound_tx, _) = broadcast::channel::<String>(16);
         let shared = crate::model::settings::SharedSettings::from(
             crate::model::settings::Settings::default(),
@@ -3978,6 +4155,11 @@ mod tests {
         let pc_registry = PcRegistry::new();
         let (worker_mgr, _) = WorkerManager::new(settings.clone(), pc_registry.clone());
         RouterContext {
+            exec_ledger: Arc::new(
+                crate::daemon::exec_ledger::ExecLedger::open_in_memory()
+                    .await
+                    .expect("in-memory ledger"),
+            ),
             pc_registry,
             outbound_tx,
             settings,
@@ -4242,7 +4424,7 @@ mod tests {
         broadcast::Receiver<String>,
         tokio::sync::mpsc::UnboundedReceiver<ServiceToWorker>,
     ) {
-        let (mut ctx, rx) = make_ctx_with_rx();
+        let (mut ctx, rx) = make_ctx_with_rx().await;
         // Flip the system-level toggle on.
         ctx.settings.write().await.virtual_display.enabled = true;
         // Build an attached supervisor sharing the same worker_mgr the
@@ -4270,8 +4452,8 @@ mod tests {
     /// Variant of `make_ctx` that hands the caller a fresh
     /// `outbound_rx` so the test can assert on the error response
     /// the router emits via `outbound_tx`.
-    fn make_ctx_with_rx() -> (RouterContext, broadcast::Receiver<String>) {
-        let mut ctx = make_ctx();
+    async fn make_ctx_with_rx() -> (RouterContext, broadcast::Receiver<String>) {
+        let mut ctx = make_ctx().await;
         let rx = ctx.outbound_tx.subscribe();
         // Drain any pre-existing receiver before the test starts so
         // we never see stale messages from earlier construction.
@@ -4312,7 +4494,7 @@ mod tests {
     /// daemon-emitted / dead variants that must never reach the worker.
     #[tokio::test]
     async fn route_swallows_daemon_emitted_variants() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         for t in [
             SignalingType::Answer,
             SignalingType::Init,
@@ -4345,7 +4527,7 @@ mod tests {
     /// to leak through would be a new regression in `route()`'s match.
     #[tokio::test]
     async fn route_inbound_accept_control_is_swallowed_not_bridged() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         let model = SignalingModel::new(
             "stray-accept",
             SignalingType::AcceptControl,
@@ -4365,7 +4547,7 @@ mod tests {
     /// itself still succeeds.
     #[tokio::test]
     async fn route_terminal_requests_handled_inline_not_bridged() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         // Terminal frames are connection-scoped capability frames: door1 only
         // admits them once the connection has an admission (here an owner one),
         // matching production where they follow the session's `RequestRemote`.
@@ -4424,7 +4606,7 @@ mod tests {
     /// owner, so this runs without an active worker.
     #[tokio::test]
     async fn route_start_terminal_owner_stamp_records_admission_and_marks_terminal() {
-        let mut ctx = make_ctx();
+        let mut ctx = make_ctx().await;
         ctx.inbound_start_terminal_authz = Some(
             desk_signal_facade::model::request_remote_authz::RequestRemoteAuthz {
                 version:
@@ -4459,7 +4641,7 @@ mod tests {
         ));
         assert!(ctx.pc_registry.is_terminal_connection("term-x").await);
         // A bare frame (owner-only relay, no stamp) admits as owner the same way.
-        let mut ctx2 = make_ctx();
+        let mut ctx2 = make_ctx().await;
         ctx2.inbound_start_terminal_authz = None;
         route(&model, &ctx2).await.expect("ok");
         assert!(matches!(
@@ -4473,7 +4655,7 @@ mod tests {
     /// directed revocation cannot reach a stale id).
     #[tokio::test]
     async fn route_close_terminal_clears_terminal_footprint() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         let ceiling = SecuritySettings {
             allow_terminal: Some(true),
             ..Default::default()
@@ -4508,7 +4690,7 @@ mod tests {
     /// errors — daemon logs and drops, no panic, no IPC send.
     #[tokio::test]
     async fn route_terminal_request_without_connection_id_is_noop() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         for t in [
             SignalingType::StartTerminal,
             SignalingType::SendDataToTerminal,
@@ -4528,7 +4710,7 @@ mod tests {
     /// missing data; this case verifies a parse-failure surface.
     #[tokio::test]
     async fn route_start_terminal_with_invalid_payload_is_dropped() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         // Admit the connection so the frame reaches the payload-parse path rather
         // than being stopped at door1's un-admitted capability guard.
         ctx.pc_registry
@@ -4551,7 +4733,7 @@ mod tests {
     /// itself still succeeds.
     #[tokio::test]
     async fn route_manager_requests_handled_inline_not_bridged() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         let cases = [
             (SignalingType::ManagerSystemInfo, serde_json::Value::Null),
             (SignalingType::ManagerQuerySettings, serde_json::Value::Null),
@@ -4610,7 +4792,7 @@ mod tests {
     /// /api/desk/terminals/...` in portable mode.
     #[tokio::test]
     async fn route_manager_request_without_connection_id_forwards() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         for t in [
             SignalingType::ManagerSystemInfo,
             SignalingType::ManagerQuerySettings,
@@ -4649,7 +4831,7 @@ mod tests {
     /// guard on the file-list path lights up here.
     #[tokio::test]
     async fn route_manager_file_list_without_connection_id_forwards() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         let params = desk_signal_facade::model::files::FileListParams {
             path: "C:\\".to_string(),
             page_no: 1,
@@ -4672,7 +4854,7 @@ mod tests {
     /// without a `from_connection_id`. The router must forward it.
     #[tokio::test]
     async fn route_list_terminal_without_connection_id_forwards() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         let model = SignalingModel::new(
             "req-list-no-conn",
             SignalingType::ListTerminal,
@@ -4689,7 +4871,7 @@ mod tests {
     /// should log + drop.
     #[tokio::test]
     async fn route_manager_file_list_with_invalid_payload_is_dropped() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         // Admit the connection so the frame reaches the payload-parse path rather
         // than being stopped at door1's un-admitted capability guard.
         ctx.pc_registry
@@ -4712,7 +4894,7 @@ mod tests {
     /// itself still succeeds.
     #[tokio::test]
     async fn route_enable_private_screen_handled_inline_not_bridged() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         // EnablePrivateScreen is a connection-scoped capability frame — admit the
         // connection so door1 passes it to the inline handler.
         ctx.pc_registry
@@ -4736,7 +4918,7 @@ mod tests {
     /// IPC send.
     #[tokio::test]
     async fn route_enable_private_screen_without_connection_id_is_noop() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         let data =
             desk_signal_facade::model::private_screen::EnablePrivateScreenData { enable: false };
         let model = SignalingModel::new(
@@ -4758,7 +4940,7 @@ mod tests {
         use desk_signal_facade::model::access_grant::RevokeAccessGrantData;
         use desk_signal_facade::model::signal::RequestRemoteModel;
 
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         let s = crate::model::settings::Settings::default();
         let rr = RequestRemoteModel {
             ice_servers: vec![],
@@ -4814,7 +4996,7 @@ mod tests {
     /// typed [`ServiceToWorker::UpdateDeskSettings`].
     #[tokio::test]
     async fn route_update_desk_settings_handled_inline_not_bridged() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         let settings = desk_signal_facade::model::desk_settings::DeskSettings {
             video_fps: 45,
             video_quality: 33,
@@ -4839,7 +5021,7 @@ mod tests {
     async fn update_desk_settings_adaptive_bitrate_scopes_to_source_connection() {
         use crate::daemon::bitrate_controller::CapDirective;
 
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         let request_remote = desk_signal_facade::model::signal::RequestRemoteModel {
             ice_servers: vec![],
             grant_session_id: None,
@@ -4919,7 +5101,7 @@ mod tests {
     /// object) must not crash the router — it should log and drop.
     #[tokio::test]
     async fn route_update_desk_settings_with_invalid_payload_is_dropped() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         let model = SignalingModel::new(
             "r-bad",
             SignalingType::UpdateDeskSettings,
@@ -4937,7 +5119,7 @@ mod tests {
     /// a handler error to the caller.
     #[tokio::test]
     async fn route_close_control_empty_registry_is_ok() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         let model = SignalingModel::new(
             "r",
             SignalingType::CloseControl,
@@ -4966,7 +5148,7 @@ mod tests {
     /// the "only supported in service mode" message.
     #[tokio::test]
     async fn route_returns_error_when_supervisor_is_none() {
-        let (ctx, mut rx) = make_ctx_with_rx();
+        let (ctx, mut rx) = make_ctx_with_rx().await;
         let model = make_change_display_settings_model(
             "req-1",
             ChangeDisplaySettingsPayload {
@@ -4995,7 +5177,7 @@ mod tests {
     /// `FEATURE_UNAVAILABLE` + "not enabled".
     #[tokio::test]
     async fn route_returns_error_when_toggle_off() {
-        let (mut ctx, mut rx) = make_ctx_with_rx();
+        let (mut ctx, mut rx) = make_ctx_with_rx().await;
         ctx.virtual_display = Some(Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(
             ctx.worker_mgr.clone(),
         )));
@@ -5026,7 +5208,7 @@ mod tests {
     /// pipeline.
     #[tokio::test]
     async fn route_returns_error_when_supervisor_inactive() {
-        let (mut ctx, mut rx) = make_ctx_with_rx();
+        let (mut ctx, mut rx) = make_ctx_with_rx().await;
         ctx.virtual_display = Some(Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(
             ctx.worker_mgr.clone(),
         )));
@@ -5053,8 +5235,8 @@ mod tests {
     /// Build a router context with an *active* supervisor
     /// (`Attached` state). Used by the validation / dispatch tests
     /// below — they need to push past the FEATURE_UNAVAILABLE gates.
-    fn make_ctx_with_active_supervisor() -> (RouterContext, broadcast::Receiver<String>) {
-        let (mut ctx, rx) = make_ctx_with_rx();
+    async fn make_ctx_with_active_supervisor() -> (RouterContext, broadcast::Receiver<String>) {
+        let (mut ctx, rx) = make_ctx_with_rx().await;
         let supervisor = VirtualDisplaySupervisor::new_attached_for_test(
             ctx.worker_mgr.clone(),
             "MOCK\\DISPLAY1",
@@ -5068,7 +5250,7 @@ mod tests {
     /// fails inside the handler → INVALID_PARAMS.
     #[tokio::test]
     async fn route_returns_error_on_invalid_mode() {
-        let (ctx, mut rx) = make_ctx_with_active_supervisor();
+        let (ctx, mut rx) = make_ctx_with_active_supervisor().await;
         ctx.settings.write().await.virtual_display.enabled = true;
         let model = make_change_display_settings_model(
             "req-invalid-mode",
@@ -5099,7 +5281,7 @@ mod tests {
     /// parse fails → INVALID_PARAMS.
     #[tokio::test]
     async fn route_returns_error_on_payload_parse_fail() {
-        let (ctx, mut rx) = make_ctx_with_active_supervisor();
+        let (ctx, mut rx) = make_ctx_with_active_supervisor().await;
         ctx.settings.write().await.virtual_display.enabled = true;
         let model = SignalingModel::new(
             "req-bad-payload",
@@ -5129,7 +5311,7 @@ mod tests {
     /// REMOTE_DESK_OFFLINE.
     #[tokio::test]
     async fn route_returns_error_when_worker_unavailable() {
-        let (ctx, mut rx) = make_ctx_with_active_supervisor();
+        let (ctx, mut rx) = make_ctx_with_active_supervisor().await;
         ctx.settings.write().await.virtual_display.enabled = true;
         let model = make_change_display_settings_model(
             "req-no-worker",
@@ -5167,7 +5349,7 @@ mod tests {
         // send_to_worker reports success rather than "No active
         // worker". We re-implement parts of make_ctx_with_rx to
         // attach a worker.
-        let (mut ctx, mut rx) = make_ctx_with_rx();
+        let (mut ctx, mut rx) = make_ctx_with_rx().await;
         ctx.settings.write().await.virtual_display.enabled = true;
         // Live worker: hook a fake IPC sender into WorkerManager so
         // send_to_worker has a destination. The minimal version is
@@ -5237,7 +5419,7 @@ mod tests {
     /// virtual display IPCs emitted".
     #[tokio::test]
     async fn request_remote_skips_ensure_when_feature_disabled() {
-        let (mut ctx, _rx) = make_ctx_with_rx();
+        let (mut ctx, _rx) = make_ctx_with_rx().await;
         // Feature disabled by default in Settings::default(), but pin it.
         ctx.settings.write().await.virtual_display.enabled = false;
         let supervisor = Arc::new(VirtualDisplaySupervisor::new_attached_for_test(
@@ -5263,7 +5445,7 @@ mod tests {
     /// is skipped entirely. Route must not panic.
     #[tokio::test]
     async fn request_remote_skips_ensure_when_no_supervisor() {
-        let (mut ctx, _rx) = make_ctx_with_rx();
+        let (mut ctx, _rx) = make_ctx_with_rx().await;
         ctx.settings.write().await.virtual_display.enabled = true;
         ctx.virtual_display = None;
 
@@ -5279,7 +5461,7 @@ mod tests {
     /// is registered, and the supervisor remains Attached.
     #[tokio::test]
     async fn request_remote_invokes_ensure_when_enabled_and_supervisor_attached() {
-        let (mut ctx, _rx) = make_ctx_with_rx();
+        let (mut ctx, _rx) = make_ctx_with_rx().await;
         ctx.settings.write().await.virtual_display.enabled = true;
         let supervisor = Arc::new(VirtualDisplaySupervisor::new_attached_for_test(
             ctx.worker_mgr.clone(),
@@ -5303,7 +5485,7 @@ mod tests {
     /// registered.
     #[tokio::test]
     async fn request_remote_continues_when_provider_not_supported() {
-        let (mut ctx, _rx) = make_ctx_with_rx();
+        let (mut ctx, _rx) = make_ctx_with_rx().await;
         ctx.settings.write().await.virtual_display.enabled = true;
         let supervisor = Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(
             ctx.worker_mgr.clone(),
@@ -5978,7 +6160,7 @@ mod tests {
     #[tokio::test]
     async fn update_exclusive_skips_when_outcome_unchanged() {
         use crate::daemon::pc_manager::ControlOutcome;
-        let mut ctx = make_ctx();
+        let mut ctx = make_ctx().await;
         ctx.settings.write().await.virtual_display.enabled = true;
         ctx.settings.write().await.virtual_display.exclusive = true;
         let supervisor =
@@ -6095,7 +6277,7 @@ mod tests {
     /// and never forwards anything to the worker.
     #[tokio::test]
     async fn agent_request_unknown_kind_emits_unsupported_outcome() {
-        let (ctx, mut rx) = make_ctx_with_rx();
+        let (ctx, mut rx) = make_ctx_with_rx().await;
         let raw = serde_json::json!({
             "operation": {
                 "input": {
@@ -6118,7 +6300,7 @@ mod tests {
     /// handler rejects it as `UnsupportedCapability` without forwarding.
     #[tokio::test]
     async fn agent_request_exec_is_unsupported_until_m2() {
-        let (ctx, mut rx) = make_ctx_with_rx();
+        let (ctx, mut rx) = make_ctx_with_rx().await;
         let raw = serde_json::json!({
             "operation": {
                 "input": {
@@ -6153,7 +6335,7 @@ mod tests {
         use desk_agent_protocol::{
             AgentOperation, ContextKind, OperationInput, ProcessListParams, ReadContextInput,
         };
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
         ctx.worker_mgr.install_active_for_test(ipc_tx).await;
 
@@ -6200,7 +6382,7 @@ mod tests {
         use desk_agent_protocol::{
             AgentOperation, ContextKind, OperationInput, ProcessListParams, ReadContextInput,
         };
-        let (ctx, mut rx) = make_ctx_with_rx();
+        let (ctx, mut rx) = make_ctx_with_rx().await;
         // Default settings: no local model config exists to configure anymore.
         let req = AgentRequestData {
             operation: AgentOperation {
@@ -6365,7 +6547,7 @@ mod tests {
     /// wholesale error correlated to the request_id (never hangs the manager).
     #[tokio::test]
     async fn collect_request_without_orchestrator_replies_error() {
-        let (ctx, mut rx) = make_ctx_with_rx();
+        let (ctx, mut rx) = make_ctx_with_rx().await;
         handle_collect_request_inbound(&ctx, &collect_request_model(collect_request("rc-1")))
             .await
             .unwrap();
@@ -6382,7 +6564,7 @@ mod tests {
     /// default read set (system.info is collected on every CI host).
     #[tokio::test]
     async fn collect_request_streams_reassemblable_snapshot() {
-        let mut ctx = make_ctx_with_rx().0;
+        let mut ctx = make_ctx_with_rx().await.0;
         ctx.diagnose_orchestrator = Some(test_orchestrator(&ctx));
         // Subscribe after installing the orchestrator so the receiver is fresh.
         let mut rx = ctx.outbound_tx.subscribe();
@@ -6419,7 +6601,7 @@ mod tests {
     /// path to drive here.
     #[tokio::test]
     async fn diagnose_at_edge_replies_centralized_unavailable() {
-        let (ctx, mut rx) = make_ctx_with_rx();
+        let (ctx, mut rx) = make_ctx_with_rx().await;
         let raw = serde_json::to_value(DiagnoseRequestData {
             question: "why?".into(),
             include_screen: false,
@@ -6452,7 +6634,7 @@ mod tests {
         use desk_agent_protocol::terminal_copilot::{
             TerminalCopilotEvent, TerminalCopilotEventKind,
         };
-        let (ctx, mut rx) = make_ctx_with_rx();
+        let (ctx, mut rx) = make_ctx_with_rx().await;
         let ask = SignalingModel::new(
             "req-cop-1",
             SignalingType::TerminalCopilotAsk,
@@ -6478,7 +6660,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_complete_at_edge_replies_centralized_unavailable() {
         use desk_agent_protocol::terminal_complete::TerminalCompleteResult;
-        let (ctx, mut rx) = make_ctx_with_rx();
+        let (ctx, mut rx) = make_ctx_with_rx().await;
         let ask = SignalingModel::new(
             "req-comp-1",
             SignalingType::TerminalCompleteAsk,
@@ -6518,7 +6700,7 @@ mod tests {
     /// a slow model call does not keep running, and clears the registry entry.
     #[actix_web::test]
     async fn diagnose_cancel_aborts_inflight_task() {
-        let ctx = make_ctx();
+        let ctx = make_ctx().await;
         // Register a never-completing task under the cancel model's request_id,
         // standing in for an orchestrator run blocked on a slow model.
         let handle = actix_web::rt::spawn(async {
@@ -6544,7 +6726,7 @@ mod tests {
     /// audit, no frame.
     #[tokio::test]
     async fn diagnose_cancel_without_orchestrator_is_noop() {
-        let (ctx, mut rx) = make_ctx_with_rx();
+        let (ctx, mut rx) = make_ctx_with_rx().await;
         // No orchestrator injected; cancel has nothing to audit.
         handle_diagnose_cancel_inbound(&ctx, &diagnose_cancel_model())
             .await
@@ -6617,7 +6799,7 @@ mod tests {
     /// A ctx where confirmed execution is fully enabled (worker-supported mode +
     /// the given local execution mode).
     async fn exec_enabled_ctx(mode: ExecutionMode) -> (RouterContext, broadcast::Receiver<String>) {
-        let (mut ctx, rx) = make_ctx_with_rx();
+        let (mut ctx, rx) = make_ctx_with_rx().await;
         ctx.exec_supported = true;
         ctx.settings.write().await.ai_policy.execution_mode = mode;
         (ctx, rx)
@@ -6684,7 +6866,7 @@ mod tests {
     /// absent in tests → `TargetOffline`, not `PermissionDenied`).
     #[tokio::test]
     async fn injected_scope_authorizes_granted_capability() {
-        let (mut ctx, mut rx) = make_ctx_with_rx();
+        let (mut ctx, mut rx) = make_ctx_with_rx().await;
         ctx.inbound_authz = Some(authz_block(
             vec![Capability::ProcessList],
             vec![],
@@ -6704,7 +6886,7 @@ mod tests {
     /// decision (not the local default read scope) governs.
     #[tokio::test]
     async fn injected_empty_scope_denies_capability() {
-        let (mut ctx, mut rx) = make_ctx_with_rx();
+        let (mut ctx, mut rx) = make_ctx_with_rx().await;
         ctx.inbound_authz = Some(authz_block(
             vec![],
             vec![],
@@ -7670,6 +7852,76 @@ mod tests {
         assert!(ctx.edge_exec_pending.lock().unwrap().is_empty());
     }
 
+    /// A first dispatch is admitted and reserved; the identical frame arriving
+    /// again is not spawned a second time but answered from the record.
+    #[tokio::test]
+    async fn a_redelivered_dispatch_is_not_spawned_twice() {
+        let ctx = make_ctx().await;
+        let plan = fleet_plan(&fleet_template(), "a1");
+
+        assert_eq!(admit_exec(&ctx, &plan).await, ExecAdmission::Spawn);
+
+        // Still running as far as the host knows: the answer must not read as
+        // "did not run", or the caller would be entitled to retry the change.
+        match admit_exec(&ctx, &plan).await {
+            ExecAdmission::AcceptedOutcomeUnknown(reason) => {
+                assert!(reason.contains("not yet known"), "{reason}");
+            }
+            other => panic!("expected AcceptedOutcomeUnknown, got {other:?}"),
+        }
+    }
+
+    /// Once the result is recorded, a redelivery replays it rather than re-running.
+    #[tokio::test]
+    async fn a_redelivered_dispatch_replays_the_recorded_result() {
+        let ctx = make_ctx().await;
+        let plan = fleet_plan(&fleet_template(), "a1");
+        admit_exec(&ctx, &plan).await;
+        ctx.exec_ledger
+            .mark_terminal(
+                "a1",
+                crate::daemon::exec_ledger::Terminal::Completed(r#"{"Ok":null}"#.into()),
+            )
+            .await
+            .unwrap();
+
+        match admit_exec(&ctx, &plan).await {
+            ExecAdmission::Replay(result) => assert_eq!(result, r#"{"Ok":null}"#),
+            other => panic!("expected Replay, got {other:?}"),
+        }
+    }
+
+    /// Retrying the task under a fresh dispatch id is admitted: deduplication is on
+    /// the dispatch, not on the work.
+    #[tokio::test]
+    async fn a_genuine_retry_is_still_admitted() {
+        let ctx = make_ctx().await;
+        let template = fleet_template();
+        assert_eq!(
+            admit_exec(&ctx, &fleet_plan(&template, "a1")).await,
+            ExecAdmission::Spawn
+        );
+        assert_eq!(
+            admit_exec(&ctx, &fleet_plan(&template, "a2")).await,
+            ExecAdmission::Spawn
+        );
+    }
+
+    /// A replayed dispatch id carrying a different command is refused outright, so a
+    /// captured id cannot be turned into a vehicle for new content.
+    #[tokio::test]
+    async fn a_dispatch_id_cannot_be_reused_for_a_different_command() {
+        let ctx = make_ctx().await;
+        admit_exec(&ctx, &fleet_plan(&fleet_template(), "a1")).await;
+
+        let mut swapped = fleet_plan(&fleet_template(), "a1");
+        swapped.fingerprint = "a-different-command".into();
+        match admit_exec(&ctx, &swapped).await {
+            ExecAdmission::Refused(reason) => assert!(reason.contains("different command")),
+            other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
     /// A plan naming no task is rejected: a result that cannot be attributed to a
     /// piece of work cannot be reconciled with anything.
     #[tokio::test]
@@ -7741,6 +7993,49 @@ mod tests {
                 ctx.edge_exec_pending.lock().unwrap().contains(frame),
                 "dispatch {frame} was not marked in flight"
             );
+        }
+    }
+
+    /// End to end: a redelivered `EdgeExecRequest` never reaches the worker, and the
+    /// manager is told the outcome is unknown rather than that nothing ran.
+    #[tokio::test]
+    async fn a_redelivered_frame_never_reaches_the_worker() {
+        let (mut ctx, mut rx, mut ipc_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.exec_supported = true;
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ShellExecConfirmed],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::High,
+        ));
+        let template = fleet_template();
+        ctx.command_templates.replace(
+            vec![template.clone()],
+            desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
+            Some(1),
+        );
+        let plan = fleet_plan(&template, "a1");
+        let frame = fleet_exec_model("a1", &plan);
+
+        handle_edge_exec_request_inbound(&ctx, &frame)
+            .await
+            .unwrap();
+        assert!(
+            matches!(ipc_rx.try_recv(), Ok(ServiceToWorker::ExecPlan(_))),
+            "the first dispatch should reach the worker"
+        );
+
+        // The same frame again — a redelivery, not a retry.
+        handle_edge_exec_request_inbound(&ctx, &frame)
+            .await
+            .unwrap();
+        assert!(
+            ipc_rx.try_recv().is_err(),
+            "a redelivered frame must not spawn a second process"
+        );
+        match read_fleet_result(&mut rx).disposition {
+            EdgeExecDisposition::ExecutionStateUnknown { .. } => {}
+            other => panic!("expected ExecutionStateUnknown, got {other:?}"),
         }
     }
 
@@ -8074,7 +8369,7 @@ mod tests {
     async fn confirm_exec_unsupported_in_service_daemon_mode() {
         // exec_supported = false (default): confirmed execution is unavailable
         // in ServiceDaemon mode regardless of the local execution mode.
-        let (mut ctx, mut rx) = make_ctx_with_rx();
+        let (mut ctx, mut rx) = make_ctx_with_rx().await;
         ctx.settings.write().await.ai_policy.execution_mode = ExecutionMode::ConfirmEachAction;
         let _ = &mut ctx;
         handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "Get-Service -Name Spooler"))
@@ -8157,7 +8452,7 @@ mod tests {
         broadcast::Receiver<String>,
         RecordingAuditSink,
     ) {
-        let (mut ctx, rx) = make_ctx_with_rx();
+        let (mut ctx, rx) = make_ctx_with_rx().await;
         ctx.exec_supported = exec_supported;
         ctx.settings.write().await.ai_policy.execution_mode = ExecutionMode::ConfirmEachAction;
         let sink = RecordingAuditSink::default();
@@ -8495,7 +8790,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_request_plane_permanently_rejects_exec() {
-        let (ctx, mut rx) = make_ctx_with_rx(); // Even with execution fully enabled, the raw AgentRequest plane refuses
+        let (ctx, mut rx) = make_ctx_with_rx().await; // Even with execution fully enabled, the raw AgentRequest plane refuses
         // exec — it must go through the confirm flow.
         let input = desk_agent_protocol::ExecInput {
             target: desk_agent_protocol::ExecTarget::Shell {
@@ -8546,7 +8841,7 @@ mod tests {
         };
         use desk_agent_protocol::{ExecInput, ExecTarget, RiskLevel};
 
-        let (mut ctx, mut rx) = make_ctx_with_rx();
+        let (mut ctx, mut rx) = make_ctx_with_rx().await;
         ctx.exec_supported = true;
         // Local config: AI may only suggest, never execute.
         ctx.settings.write().await.ai_policy.execution_mode = ExecutionMode::SuggestOnly;
