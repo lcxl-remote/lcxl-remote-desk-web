@@ -3,7 +3,8 @@
 //! Covers the `VideoEncoder::set_bitrate_cap` contract: x264 / VP8 /
 //! VP9 / OpenH264 apply and clear a cap without being rebuilt and keep
 //! encoding afterwards; AV1 (SVT-AV1) reports the capability as
-//! unsupported. Rate behaviour itself (output shrinking under a tight
+//! unsupported (see `av1_encoder.rs` for why). Rate behaviour itself
+//! (output shrinking under a tight
 //! cap) is validated manually end-to-end, not asserted here, to keep
 //! these tests deterministic across codecs and platforms.
 
@@ -204,10 +205,16 @@ fn openh264_cap_cycle() {
 #[cfg(av1_supported)]
 #[test]
 fn av1_reports_unsupported() {
-    let mut encoder = Av1Encoder::new(Av1EncoderSettings::default(), &test_display_info())
-        .expect("av1 build failed");
+    // rtc=true is the production path, so build the encoder the way a
+    // live connection does: CBR rate control with a real target bitrate.
+    let settings = Av1EncoderSettings {
+        rtc: true,
+        ..Default::default()
+    };
+    let mut encoder =
+        Av1Encoder::new(settings, &test_display_info(), 30).expect("av1 build failed");
     assert!(
         !encoder.set_bitrate_cap(Some(500)),
-        "SVT-AV1 CRF mode has no runtime bitrate reconfig; set_bitrate_cap must report unsupported"
+        "set_bitrate_cap must report unsupported for SVT-AV1"
     );
 }

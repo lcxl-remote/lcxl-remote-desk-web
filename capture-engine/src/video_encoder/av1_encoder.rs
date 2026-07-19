@@ -194,6 +194,17 @@ impl VideoEncoder for Av1Encoder {
         // per-frame forced keyframes (`EncodeOptions::force_keyframe`) as a
         // future optimisation to avoid the rebuild.
     }
+
+    // `set_bitrate_cap` is deliberately left at the trait default (reports
+    // unsupported), so AV1 is the one codec that does not take part in the
+    // REMB-driven cap. This is a wrapper limitation, not a codec one:
+    // SVT-AV1 itself accepts a runtime bitrate change in CBR mode via a
+    // `RATE_CHANGE_EVENT` node on the input picture's `p_app_private` list,
+    // but `shiguredo_svt_av1` clears `p_app_private` on every `encode` call,
+    // exposes no field for it on `EncodeOptions`, and keeps its bindgen
+    // module private with no companion `-sys` crate — so the raw-API route
+    // used by the OpenH264 encoder is not available here. Lifting this needs
+    // an upstream change (or a fork) rather than a local workaround.
 }
 
 #[cfg(test)]
