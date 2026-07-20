@@ -81,6 +81,7 @@ impl SessionSeam for MemSession {
             )
         });
         let trigger_origin = params.trigger_origin;
+        let turn_id = params.turn_id.clone();
         session
             .begin_turn(
                 params.turn_id,
@@ -91,7 +92,7 @@ impl SessionSeam for MemSession {
                 params.now,
             )
             .map_err(|_| ClaimError::Busy)?;
-        session.trigger_origin = trigger_origin;
+        session.adopt_trigger(trigger_origin, &turn_id);
         *slot = Some(session.clone());
         Ok(session)
     }

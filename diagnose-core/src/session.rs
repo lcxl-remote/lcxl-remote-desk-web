@@ -244,6 +244,18 @@ pub struct PersistedAgentSession {
     /// carry-over). Gates whether the turn may start new mutations.
     #[serde(default)]
     pub trigger_origin: TriggerOrigin,
+    /// The automation chain the current turn belongs to: the id of the user turn
+    /// that began it. Reset to the claiming turn's id on a `User` claim; preserved
+    /// on an `ExecCompletion` claim, so one chain keeps one id. A pending entry
+    /// whose `chain_id` no longer equals this has been superseded by a newer user
+    /// turn and is stale.
+    #[serde(default)]
+    pub chain_id: String,
+    /// Automation turns already spent on the current chain, reset with the chain on
+    /// a `User` claim. Bounds a self-driving chain together with the configured
+    /// per-chain cap.
+    #[serde(default)]
+    pub automation_turns_used: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_control_connection_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -318,6 +330,8 @@ impl PersistedAgentSession {
             turn_start_scope: scope.clone(),
             scope_snapshot: scope,
             trigger_origin: TriggerOrigin::User,
+            chain_id: String::new(),
+            automation_turns_used: 0,
             active_control_connection_id: None,
             current_request_id: None,
             current_turn_id: None,
@@ -425,6 +439,19 @@ impl PersistedAgentSession {
     pub fn finish_turn(&mut self, terminal: TurnState, now: impl Into<String>) {
         self.turn_state = terminal;
         self.updated_at = now.into();
+    }
+
+    /// Adopt the claim's trigger origin at the turn boundary, called by every claim
+    /// path right after [`begin_turn`](Self::begin_turn). A `User` claim starts a
+    /// fresh automation chain — its id becomes `turn_id` and the per-chain budget
+    /// resets — while an `ExecCompletion` claim continues the existing chain (so a
+    /// self-driving chain keeps one id and one running budget).
+    pub fn adopt_trigger(&mut self, origin: TriggerOrigin, turn_id: &str) {
+        self.trigger_origin = origin;
+        if origin == TriggerOrigin::User {
+            self.chain_id = turn_id.to_string();
+            self.automation_turns_used = 0;
+        }
     }
 
     /// Enqueue a completed result as a pending auto-trigger, deduped by `event_id`.
@@ -1661,6 +1688,28 @@ mod tests {
         assert!(!s.remove_pending_auto_trigger("ev-b"));
         assert!(s.pending_auto_triggers.is_empty());
         assert_eq!(s.earliest_pending_at(), None);
+    }
+
+    /// A `User` claim resets the automation chain (new id) and its budget; an
+    /// `ExecCompletion` claim continues the existing chain and keeps the budget.
+    #[test]
+    fn adopt_trigger_resets_chain_on_user_and_preserves_on_automation() {
+        let mut s = session();
+        s.adopt_trigger(TriggerOrigin::User, "turn-1");
+        assert_eq!(s.trigger_origin, TriggerOrigin::User);
+        assert_eq!(s.chain_id, "turn-1");
+        s.automation_turns_used = 2;
+
+        // An automation claim keeps the chain id and the spent budget.
+        s.adopt_trigger(TriggerOrigin::ExecCompletion, "turn-2");
+        assert_eq!(s.trigger_origin, TriggerOrigin::ExecCompletion);
+        assert_eq!(s.chain_id, "turn-1", "automation continues the chain");
+        assert_eq!(s.automation_turns_used, 2, "budget carries within a chain");
+
+        // A new user turn starts a fresh chain and clears the budget.
+        s.adopt_trigger(TriggerOrigin::User, "turn-3");
+        assert_eq!(s.chain_id, "turn-3");
+        assert_eq!(s.automation_turns_used, 0);
     }
 
     /// A fresh session defaults to a `User` origin, and a persisted state written
