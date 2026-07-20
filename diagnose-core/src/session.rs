@@ -445,12 +445,25 @@ impl PersistedAgentSession {
     /// path right after [`begin_turn`](Self::begin_turn). A `User` claim starts a
     /// fresh automation chain — its id becomes `turn_id` and the per-chain budget
     /// resets — while an `ExecCompletion` claim continues the existing chain (so a
-    /// self-driving chain keeps one id and one running budget).
+    /// self-driving chain keeps one id) and **spends** one of its automation-turn
+    /// budget.
+    ///
+    /// The spend happens here, inside the claim, so it is atomic with the
+    /// `Idle → Running` CAS: two instances racing to fire the same chain's next
+    /// automation turn both attempt the claim, but only one's CAS lands, so the
+    /// budget advances exactly once per turn actually started. Counting at claim
+    /// (not on success) is deliberately fail-safe — a crashed automation turn still
+    /// consumes budget, so a turn that dies mid-run cannot be retried without bound.
     pub fn adopt_trigger(&mut self, origin: TriggerOrigin, turn_id: &str) {
         self.trigger_origin = origin;
-        if origin == TriggerOrigin::User {
-            self.chain_id = turn_id.to_string();
-            self.automation_turns_used = 0;
+        match origin {
+            TriggerOrigin::User => {
+                self.chain_id = turn_id.to_string();
+                self.automation_turns_used = 0;
+            }
+            TriggerOrigin::ExecCompletion => {
+                self.automation_turns_used = self.automation_turns_used.saturating_add(1);
+            }
         }
     }
 
@@ -1051,6 +1064,34 @@ mod tests {
             s.begin_turn("t4", None, None, 7, s.scope_snapshot.clone(), "t"),
             Err(TurnClaimError::Busy)
         );
+    }
+
+    /// A `User` claim starts a fresh chain (its turn id) and zeroes the budget; a
+    /// following `ExecCompletion` claim keeps the chain id and spends one budget per
+    /// claim; the next `User` claim resets both again.
+    #[test]
+    fn adopt_trigger_tracks_chain_and_spends_budget() {
+        let mut s = session();
+
+        // A user turn opens chain "u1" with a clean budget.
+        s.adopt_trigger(TriggerOrigin::User, "u1");
+        assert_eq!(s.trigger_origin, TriggerOrigin::User);
+        assert_eq!(s.chain_id, "u1");
+        assert_eq!(s.automation_turns_used, 0);
+
+        // Two automation turns on that chain each spend one budget; the chain id is
+        // preserved (an automation claim continues the chain, never opens a new one).
+        s.adopt_trigger(TriggerOrigin::ExecCompletion, "auto-a");
+        assert_eq!(s.trigger_origin, TriggerOrigin::ExecCompletion);
+        assert_eq!(s.chain_id, "u1", "an automation claim keeps the chain id");
+        assert_eq!(s.automation_turns_used, 1);
+        s.adopt_trigger(TriggerOrigin::ExecCompletion, "auto-b");
+        assert_eq!(s.automation_turns_used, 2);
+
+        // A new user turn supersedes the chain and resets the budget.
+        s.adopt_trigger(TriggerOrigin::User, "u2");
+        assert_eq!(s.chain_id, "u2");
+        assert_eq!(s.automation_turns_used, 0);
     }
 
     /// `finish_turn` settles only the turn machine; the execution machine is left
@@ -1688,28 +1729,6 @@ mod tests {
         assert!(!s.remove_pending_auto_trigger("ev-b"));
         assert!(s.pending_auto_triggers.is_empty());
         assert_eq!(s.earliest_pending_at(), None);
-    }
-
-    /// A `User` claim resets the automation chain (new id) and its budget; an
-    /// `ExecCompletion` claim continues the existing chain and keeps the budget.
-    #[test]
-    fn adopt_trigger_resets_chain_on_user_and_preserves_on_automation() {
-        let mut s = session();
-        s.adopt_trigger(TriggerOrigin::User, "turn-1");
-        assert_eq!(s.trigger_origin, TriggerOrigin::User);
-        assert_eq!(s.chain_id, "turn-1");
-        s.automation_turns_used = 2;
-
-        // An automation claim keeps the chain id and the spent budget.
-        s.adopt_trigger(TriggerOrigin::ExecCompletion, "turn-2");
-        assert_eq!(s.trigger_origin, TriggerOrigin::ExecCompletion);
-        assert_eq!(s.chain_id, "turn-1", "automation continues the chain");
-        assert_eq!(s.automation_turns_used, 2, "budget carries within a chain");
-
-        // A new user turn starts a fresh chain and clears the budget.
-        s.adopt_trigger(TriggerOrigin::User, "turn-3");
-        assert_eq!(s.chain_id, "turn-3");
-        assert_eq!(s.automation_turns_used, 0);
     }
 
     /// A fresh session defaults to a `User` origin, and a persisted state written
