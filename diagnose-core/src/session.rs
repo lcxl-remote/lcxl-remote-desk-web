@@ -352,6 +352,62 @@ impl PersistedAgentSession {
         true
     }
 
+    /// Transition an outstanding [`ExecutionState::Executing`] to
+    /// [`ExecutionState::OutcomeUnknown`] when a dispatched work item was recovered
+    /// with no result (its owner crashed before finalizing and the host is not known
+    /// to have completed it). Without this, a session left `Executing` by a
+    /// background dispatch whose owner dies would block new mutation forever, because
+    /// nothing else transitions it. Repurpose the running-task tool result (closing
+    /// `tool_call_id`, written by the `Dispatched` arm) as the placeholder a late
+    /// real result can still replace in place via [`reconcile_late_result`] /
+    /// [`apply_completion`], rewriting its text to the unknown-outcome placeholder.
+    ///
+    /// Only acts when the machine is `Executing` for this `execution_id` **and** the
+    /// running-task result closing `tool_call_id` is present (needed as the reconcile
+    /// anchor); returns whether the transition happened. Pure: the caller persists
+    /// under its own CAS.
+    ///
+    /// [`reconcile_late_result`]: Self::reconcile_late_result
+    /// [`apply_completion`]: Self::apply_completion
+    pub fn mark_execution_unknown(
+        &mut self,
+        execution_id: &str,
+        tool_call_id: &str,
+        now: impl Into<String>,
+    ) -> bool {
+        let (work_id, exec_request_id) = match &self.execution_state {
+            ExecutionState::Executing {
+                work_id,
+                execution_id: current,
+                exec_request_id,
+            } if current == execution_id => (*work_id, exec_request_id.clone()),
+            _ => return false,
+        };
+        // Anchor on the running-task tool result closing this call. Absent it there
+        // is nothing to reconcile a late result against, so leave the state as-is.
+        let placeholder_id = match self
+            .conversation
+            .iter_mut()
+            .find(|m| m.tool_call_id.as_deref() == Some(tool_call_id))
+        {
+            Some(msg) => {
+                msg.text = RECOVER_OUTCOME_UNKNOWN.to_string();
+                msg.message_id.clone()
+            }
+            None => return false,
+        };
+        let now = now.into();
+        self.execution_state = ExecutionState::OutcomeUnknown {
+            work_id,
+            execution_id: execution_id.to_string(),
+            exec_request_id,
+            placeholder_message_id: placeholder_id,
+            since: now.clone(),
+        };
+        self.updated_at = now;
+        true
+    }
+
     /// Append a mid-conversation system-event notification identified by `event_id`,
     /// idempotently. The appended [`ChatRole::SystemEvent`] message's `message_id`
     /// **is** the `event_id`, so a redelivery of the same logical event — the
@@ -1100,6 +1156,116 @@ mod tests {
         let base = s.conversation.len();
         assert!(!s.apply_completion("work:8:done", "e9", "call-1", "exit_code=0", "t1"));
         assert_eq!(s.conversation.len(), base);
+    }
+
+    /// Recovering a dispatched item with no result transitions `Executing` to
+    /// `OutcomeUnknown`, repurposing the running-task result as the reconcile anchor
+    /// (its text is rewritten to the unknown-outcome placeholder) and letting a late
+    /// real result still land in place.
+    #[test]
+    fn mark_execution_unknown_transitions_and_anchors_the_placeholder() {
+        let mut s = session();
+        // The dispatch closed the call with a running-task placeholder.
+        s.conversation.push(crate::chat::ChatMessage::tool_result(
+            "run-1",
+            "call-1",
+            "dispatched as background task exec_t9; still running",
+        ));
+        s.execution_state = ExecutionState::Executing {
+            work_id: 8,
+            execution_id: "e9".into(),
+            exec_request_id: "exec_t9".into(),
+        };
+        let base = s.conversation.len();
+
+        assert!(s.mark_execution_unknown("e9", "call-1", "2026-06-20T00:00:00Z"));
+        assert_eq!(s.conversation.len(), base, "no message appended");
+        match &s.execution_state {
+            ExecutionState::OutcomeUnknown {
+                work_id,
+                execution_id,
+                exec_request_id,
+                placeholder_message_id,
+                ..
+            } => {
+                assert_eq!(*work_id, 8);
+                assert_eq!(execution_id, "e9");
+                assert_eq!(exec_request_id, "exec_t9");
+                assert_eq!(placeholder_message_id, "run-1");
+            }
+            other => panic!("expected OutcomeUnknown, got {other:?}"),
+        }
+        let anchor = s
+            .conversation
+            .iter()
+            .find(|m| m.message_id == "run-1")
+            .unwrap();
+        assert_eq!(anchor.text, RECOVER_OUTCOME_UNKNOWN);
+        assert!(!s.execution_state.allows_new_mutation());
+
+        // A late real result reconciles the anchor in place.
+        assert!(s.reconcile_late_result("e9", "exit_code=0", "2026-06-20T00:01:00Z"));
+        assert_eq!(s.execution_state, ExecutionState::None);
+        let anchor = s
+            .conversation
+            .iter()
+            .find(|m| m.message_id == "run-1")
+            .unwrap();
+        assert_eq!(anchor.text, "exit_code=0");
+    }
+
+    /// The transition is scoped to the matching execution id: a mismatched id (a
+    /// stale recovery for an execution the session already moved past) is a no-op.
+    #[test]
+    fn mark_execution_unknown_ignores_a_mismatched_execution() {
+        let mut s = session();
+        s.conversation.push(crate::chat::ChatMessage::tool_result(
+            "run-1",
+            "call-1",
+            "still running",
+        ));
+        s.execution_state = ExecutionState::Executing {
+            work_id: 8,
+            execution_id: "e9".into(),
+            exec_request_id: "exec_t9".into(),
+        };
+        assert!(!s.mark_execution_unknown("e-other", "call-1", "2026-06-20T00:00:00Z"));
+        assert!(
+            matches!(s.execution_state, ExecutionState::Executing { .. }),
+            "state is untouched"
+        );
+    }
+
+    /// A session not in `Executing` (already settled to `None`, e.g. the completion
+    /// won the race) is a no-op — recovery must not resurrect a barred state.
+    #[test]
+    fn mark_execution_unknown_is_a_no_op_when_not_executing() {
+        let mut s = session();
+        s.conversation.push(crate::chat::ChatMessage::tool_result(
+            "run-1",
+            "call-1",
+            "exit_code=0",
+        ));
+        assert_eq!(s.execution_state, ExecutionState::None);
+        assert!(!s.mark_execution_unknown("e9", "call-1", "2026-06-20T00:00:00Z"));
+        assert_eq!(s.execution_state, ExecutionState::None);
+    }
+
+    /// Without the running-task result closing the call (nothing to reconcile a late
+    /// result against) the transition is refused, leaving `Executing` intact.
+    #[test]
+    fn mark_execution_unknown_requires_the_closing_result() {
+        let mut s = session();
+        s.execution_state = ExecutionState::Executing {
+            work_id: 8,
+            execution_id: "e9".into(),
+            exec_request_id: "exec_t9".into(),
+        };
+        assert!(!s.mark_execution_unknown("e9", "call-1", "2026-06-20T00:00:00Z"));
+        assert!(matches!(
+            s.execution_state,
+            ExecutionState::Executing { .. }
+        ));
     }
 
     /// Each claim rotates the fencing token, so a stale prior owner can be told
