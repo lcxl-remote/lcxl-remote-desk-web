@@ -39,6 +39,21 @@
 
 use tokio::process::{Child, Command};
 
+/// Whether this host can enforce the **native-hard** containment tier (aggregate
+/// CPU / memory / process-count hard limits), as opposed to the baseline tier every
+/// platform provides (bounded wall time + process-tree recycle + concurrency).
+///
+/// A plan whose template declares `required_enforcement = native_hard` is refused
+/// before dispatch on a host that returns `false`, so it can never run under weaker
+/// containment than it demanded. The baseline containment above is unconditional;
+/// this only gates the *extra* hard caps. It is `false` on every platform today —
+/// the native-hard backend (Linux cgroup `cpu.max` / `memory.max` / `pids.max`,
+/// Windows Job Object rate/commit limits) is a follow-on — so a native-hard
+/// template is currently unschedulable everywhere (fail-closed, by design).
+pub fn provides_native_hard() -> bool {
+    false
+}
+
 /// Why containment could not be established. The command must not be spawned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainmentError(pub String);

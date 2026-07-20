@@ -3697,6 +3697,18 @@ fn pep_common_checks(
         ));
     }
 
+    // Enforcement-tier fail-closed: a plan that demands native-hard containment must
+    // not spawn on a host that can only provide the baseline tier. This runs before
+    // dispatch (the reason surfaces as RejectedBeforeDispatch), so the host never
+    // silently downgrades — the manager only ever learns the command ran under the
+    // tier it required, or that it was refused.
+    if plan.containment.required_enforcement
+        == desk_agent_protocol::exec::RequiredEnforcement::NativeHard
+        && !crate::worker::exec_containment::provides_native_hard()
+    {
+        return Some("pep_rejected:native_hard_unavailable".to_string());
+    }
+
     None
 }
 
@@ -7579,6 +7591,25 @@ mod tests {
         )
         .expect("risk above max_risk must reject");
         assert!(reason.contains("risk_exceeds_max"), "{reason}");
+    }
+
+    #[test]
+    fn pep_rejects_a_native_hard_plan_when_the_host_cannot_enforce_it() {
+        // A plan demanding native-hard containment is refused before dispatch on a
+        // host that only provides the baseline tier (every host today), so it never
+        // runs under weaker containment than it required.
+        let template = fleet_template();
+        let mut plan = fleet_plan(&template, "a1");
+        plan.containment.required_enforcement =
+            desk_agent_protocol::exec::RequiredEnforcement::NativeHard;
+        let reason = validate_fleet_edge_exec(
+            &plan,
+            desk_agent_protocol::RiskLevel::Critical,
+            std::slice::from_ref(&template),
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
+        )
+        .expect("a native-hard plan must be refused when unavailable");
+        assert!(reason.contains("native_hard_unavailable"), "{reason}");
     }
 
     #[test]
