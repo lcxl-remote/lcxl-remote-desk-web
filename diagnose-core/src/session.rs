@@ -125,6 +125,33 @@ impl ExecutionState {
     pub fn allows_new_mutation(&self) -> bool {
         matches!(self, ExecutionState::None)
     }
+
+    /// The in-flight task a `wait_for_task` call could wait on, as
+    /// `(work_id, execution_id, exec_request_id)`. A dispatched background task
+    /// ([`Executing`]) or a recoverable unknown outcome ([`OutcomeUnknown`]) both
+    /// have a durable identity whose result may still arrive; an [`Interrupted`]
+    /// turn (no recoverable identity) and a clean [`None`] have nothing to wait on.
+    ///
+    /// [`Executing`]: ExecutionState::Executing
+    /// [`OutcomeUnknown`]: ExecutionState::OutcomeUnknown
+    /// [`Interrupted`]: ExecutionState::Interrupted
+    /// [`None`]: ExecutionState::None
+    pub fn waitable_task(&self) -> Option<(i64, &str, &str)> {
+        match self {
+            ExecutionState::Executing {
+                work_id,
+                execution_id,
+                exec_request_id,
+            }
+            | ExecutionState::OutcomeUnknown {
+                work_id,
+                execution_id,
+                exec_request_id,
+                ..
+            } => Some((*work_id, execution_id, exec_request_id)),
+            _ => None,
+        }
+    }
 }
 
 /// One agent conversation + session, in the shape the manager persists (and the

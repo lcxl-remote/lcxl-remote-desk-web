@@ -25,6 +25,11 @@ pub enum ToolEffect {
     ReadOnly,
     /// Changes device state; requires user approval before running.
     Mutating,
+    /// Waits on the session's own in-flight background task; changes no device
+    /// state and needs no capability grant. Exposed only while a task is running (or
+    /// its outcome is still recoverable), so the model can actively await a result
+    /// instead of ending the turn and being notified passively.
+    WaitTask,
 }
 
 /// A tool registered with the agent loop: its model-facing spec, the capability
@@ -48,7 +53,8 @@ impl RegisteredTool {
 /// confirm-or-higher mode.
 fn mode_allows_effect(mode: ExecutionMode, effect: ToolEffect) -> bool {
     match effect {
-        ToolEffect::ReadOnly => true,
+        // Reads and waiting on one's own task are allowed in every mode.
+        ToolEffect::ReadOnly | ToolEffect::WaitTask => true,
         ToolEffect::Mutating => matches!(
             mode,
             ExecutionMode::ConfirmEachAction
@@ -66,6 +72,11 @@ pub fn is_exposed(
     scope: &AgentScope,
     execution_state: &ExecutionState,
 ) -> bool {
+    // The wait tool operates on the session's own task, not the device: it needs no
+    // capability grant and is offered only while there is a task to wait on.
+    if tool.effect == ToolEffect::WaitTask {
+        return execution_state.waitable_task().is_some();
+    }
     if !scope.granted.contains(&tool.required_capability) {
         return false;
     }
@@ -221,6 +232,38 @@ mod tests {
             !names.contains(&"file_write".to_string()),
             "no new mutation while an outcome is unknown"
         );
+    }
+
+    /// The wait tool is exposed only while a task is in flight, needs no capability
+    /// grant, and is hidden once there is nothing to wait on.
+    #[test]
+    fn wait_task_exposed_only_with_an_in_flight_task() {
+        // An empty scope (no capabilities, SuggestOnly) — the wait tool ignores it.
+        let s = scope(&[], ExecutionMode::SuggestOnly);
+        let reg = vec![tool(
+            "wait_for_task",
+            Capability::SystemInfo,
+            ToolEffect::WaitTask,
+        )];
+
+        // No task in flight: hidden.
+        assert!(exposed_tools(&reg, &s, &ExecutionState::None).is_empty());
+
+        // A dispatched background task: exposed despite the empty scope.
+        let executing = ExecutionState::Executing {
+            work_id: 1,
+            execution_id: "e".into(),
+            exec_request_id: "exec_x".into(),
+        };
+        let names: Vec<_> = exposed_tools(&reg, &s, &executing)
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect();
+        assert_eq!(names, vec!["wait_for_task"]);
+
+        // An interrupted turn with no recoverable identity: nothing to wait on.
+        let interrupted = ExecutionState::Interrupted { since: "t".into() };
+        assert!(exposed_tools(&reg, &s, &interrupted).is_empty());
     }
 
     /// `lookup_exposed` rejects a tool the model was never shown (unknown name or

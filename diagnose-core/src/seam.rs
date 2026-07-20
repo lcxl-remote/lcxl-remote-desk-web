@@ -13,7 +13,7 @@
 //! accidentally require `Send`.
 
 use async_trait::async_trait;
-use desk_agent_protocol::{AgentError, AgentScope};
+use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope};
 
 use crate::chat::{ChatMessage, ModelTurn, ToolCall, ToolChoice, ToolSpec};
 use crate::prompt::ResponseFormatSpec;
@@ -183,6 +183,32 @@ pub enum ExecOutcome {
     Dispatched(ExecIdentity),
 }
 
+/// The result of a model actively waiting on a background task via
+/// [`wait_for_task`](ToolSeam::wait_for_task). Unlike the passive completion
+/// notification the publisher injects, a waited-for result becomes the real
+/// tool result of the wait call — the model asked and this is its answer.
+#[derive(Debug, Clone)]
+pub enum WaitOutcome {
+    /// The task reached a terminal result. `event_id` is the stable delivery id of
+    /// the completion (the manager's `work:{work_id}:done`), so the loop keys the
+    /// wait tool result on it and the background publisher's delivery of the same
+    /// result dedups instead of appending a second copy. A runtime without durable
+    /// completion passes `None`.
+    Completed {
+        output: ToolRunOutput,
+        event_id: Option<String>,
+    },
+    /// The wait elapsed while the task was still running: it remains a background
+    /// task and the model may wait again or do read-only work meanwhile.
+    StillRunning,
+    /// The task's outcome became unknown (recovered without a result). The loop
+    /// records [`ExecutionState::OutcomeUnknown`] so a late result can still
+    /// reconcile it; the conversation stays read-only until then.
+    ///
+    /// [`ExecutionState::OutcomeUnknown`]: crate::session::ExecutionState::OutcomeUnknown
+    Unknown,
+}
+
 /// Per-call context the loop hands the mutating seam: the turn's identity, the
 /// session subject the durable work item is pinned to, and the authorization it is
 /// minted under. The loop owns all of these (they come from the persisted session),
@@ -239,6 +265,28 @@ pub trait ToolSeam {
     async fn ack_delivery(&self, event_id: &str) -> Result<(), AgentError> {
         let _ = event_id;
         Ok(())
+    }
+
+    /// Actively wait for a dispatched background task to finish, identified by its
+    /// execution generation (`execution_id`) and stable task id (`exec_request_id`).
+    /// The loop has validated that this identity is the session's in-flight task.
+    /// Blocks up to a runtime-chosen bound, then reports whether the task completed,
+    /// is still running, or became unknown. The default is not supported (a
+    /// runtime without durable background tasks — Direct — runs exec synchronously,
+    /// so nothing is ever left running to wait on).
+    async fn wait_for_task(
+        &self,
+        exec_request_id: &str,
+        execution_id: &str,
+    ) -> Result<WaitOutcome, AgentError> {
+        let _ = (exec_request_id, execution_id);
+        Err(AgentError {
+            kind: AgentErrorKind::UnsupportedCapability,
+            message: "waiting for background tasks is not supported by this runtime".into(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        })
     }
 }
 

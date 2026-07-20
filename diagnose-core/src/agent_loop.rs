@@ -32,7 +32,7 @@ use crate::chat::{ChatMessage, ModelTurnError, TurnDisposition, classify_model_t
 use crate::registry::{RegisteredTool, ToolEffect, exposed_specs, lookup_exposed};
 use crate::seam::{
     ClaimError, ClaimTurnParams, ExecContext, ExecOutcome, ModelRequest, ModelSeam, SessionSeam,
-    ToolSeam, TurnSink,
+    ToolSeam, TurnSink, WaitOutcome,
 };
 use crate::session::{ExecutionState, SubjectMismatch, TurnState};
 
@@ -287,6 +287,9 @@ async fn run_inner(
                             )
                             .await?;
                         }
+                        ToolEffect::WaitTask => {
+                            run_wait(deps, session, call, &mut mint, &mut halted, sink).await?;
+                        }
                     }
                 }
                 deps.session_seam.save(session).await?;
@@ -451,12 +454,138 @@ async fn run_mutating<F: FnMut() -> String>(
     Ok(())
 }
 
+/// Run a `wait_for_task` call: the model actively waits on the background task it
+/// dispatched. Validated against the session's own execution identity (a control end
+/// can never steer it at another task), then handed to the seam. A completed result
+/// becomes this call's real tool result — keyed on the completion's delivery id so a
+/// racing publisher delivery dedups — and clears the execution machine so a follow-up
+/// may mutate again. A still-running wait closes the call with a "still running"
+/// note, leaving the task in flight. An unknown outcome degrades to
+/// [`ExecutionState::OutcomeUnknown`] with this call's result as the reconcile
+/// placeholder, so a late real result can still land.
+#[allow(clippy::too_many_arguments)]
+async fn run_wait<F: FnMut() -> String>(
+    deps: &LoopDeps<'_>,
+    session: &mut crate::session::PersistedAgentSession,
+    call: &crate::chat::ToolCall,
+    mint: &mut F,
+    halted: &mut Option<String>,
+    sink: &mut dyn TurnSink,
+) -> Result<(), AgentError> {
+    // A model-safe argument error becomes an error tool result; the turn continues.
+    let task_id = match crate::wait_tools::parse_wait_task_id(call) {
+        Ok(id) => id,
+        Err(e) => {
+            session.conversation.push(ChatMessage::tool_result(
+                mint(),
+                &call.id,
+                format!("wait error: {}", e.message),
+            ));
+            return Ok(());
+        }
+    };
+    // Only the session's own in-flight task may be waited on, matched by its stable
+    // id. No task, or a mismatched id, is a well-formed error result.
+    let Some((work_id, execution_id, exec_request_id)) = session
+        .execution_state
+        .waitable_task()
+        .map(|(w, e, r)| (w, e.to_string(), r.to_string()))
+    else {
+        session.conversation.push(ChatMessage::tool_result(
+            mint(),
+            &call.id,
+            "no background task is running; there is nothing to wait for",
+        ));
+        return Ok(());
+    };
+    if task_id != exec_request_id {
+        session.conversation.push(ChatMessage::tool_result(
+            mint(),
+            &call.id,
+            format!("no running background task with id `{task_id}`"),
+        ));
+        return Ok(());
+    }
+
+    sink.on_tool_started(&call.name, &call.id);
+    let outcome = deps
+        .tools
+        .wait_for_task(&exec_request_id, &execution_id)
+        .await;
+    let mut ack_event_id: Option<String> = None;
+    match outcome {
+        Ok(WaitOutcome::Completed { output, event_id }) => {
+            // Key on the stable delivery id so a racing publisher delivery of the
+            // same result dedups instead of appending a second copy.
+            let message_id = match &event_id {
+                Some(id) => id.clone(),
+                None => mint(),
+            };
+            ack_event_id = event_id;
+            let mut msg = ChatMessage::tool_result(message_id, &call.id, output.content);
+            msg.image_data_url = output.image_data_url;
+            session.conversation.push(msg);
+            // The awaited task settled: a follow-up may mutate again.
+            session.execution_state = ExecutionState::None;
+            sink.on_tool_finished(&call.id, true);
+        }
+        Ok(WaitOutcome::StillRunning) => {
+            session.conversation.push(ChatMessage::tool_result(
+                mint(),
+                &call.id,
+                format!(
+                    "background task {exec_request_id} is still running; its result will follow"
+                ),
+            ));
+            sink.on_tool_finished(&call.id, true);
+        }
+        Ok(WaitOutcome::Unknown) => {
+            // The task was recovered without a result. Degrade to an unknown outcome
+            // using this call's own result as the reconcile placeholder, and bar
+            // further mutation until a late result reconciles it.
+            let placeholder_id = mint();
+            session.conversation.push(ChatMessage::tool_result(
+                placeholder_id.clone(),
+                &call.id,
+                OUTCOME_UNKNOWN_PLACEHOLDER,
+            ));
+            session.execution_state = ExecutionState::OutcomeUnknown {
+                work_id,
+                execution_id,
+                exec_request_id,
+                placeholder_message_id: placeholder_id,
+                since: (deps.clock)(),
+            };
+            sink.on_tool_finished(&call.id, false);
+            *halted = Some("a prior command's outcome is unknown".to_string());
+        }
+        Err(e) if e.safe_for_model => {
+            session.conversation.push(ChatMessage::tool_result(
+                mint(),
+                &call.id,
+                format!("wait error: {}", e.message),
+            ));
+            sink.on_tool_finished(&call.id, false);
+        }
+        Err(e) => {
+            deps.session_seam.save(session).await?;
+            return Err(e);
+        }
+    }
+
+    deps.session_seam.save(session).await?;
+    if let Some(event_id) = ack_event_id {
+        let _ = deps.tools.ack_delivery(&event_id).await;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::chat::{ChatRole, ModelTurn, StopReason, ToolCall, ToolSpec};
     use crate::prompt::ResponseFormatSpec;
-    use crate::seam::{ToolRunOutput, TurnSink};
+    use crate::seam::{ToolRunOutput, TurnSink, WaitOutcome};
     use crate::session::PersistedAgentSession;
     use async_trait::async_trait;
     use desk_agent_protocol::{AgentScope, Capability, ExecutionMode};
@@ -587,12 +716,16 @@ mod tests {
     }
 
     fn tool_use(id: &str, name: &str) -> ModelTurn {
+        tool_use_args(id, name, "{}")
+    }
+
+    fn tool_use_args(id: &str, name: &str, args: &str) -> ModelTurn {
         ModelTurn {
             stop_reason: StopReason::ToolUse,
             tool_calls: vec![ToolCall {
                 id: id.into(),
                 name: name.into(),
-                arguments_json: "{}".into(),
+                arguments_json: args.into(),
             }],
             ..Default::default()
         }
@@ -1118,6 +1251,8 @@ mod tests {
         execs: RefCell<std::collections::VecDeque<ExecOutcome>>,
         exec_calls: Rc<RefCell<Vec<String>>>,
         acks: Rc<RefCell<Vec<String>>>,
+        waits: RefCell<std::collections::VecDeque<WaitOutcome>>,
+        wait_calls: Rc<RefCell<Vec<String>>>,
     }
     #[async_trait(?Send)]
     impl ToolSeam for ScriptedTools {
@@ -1143,6 +1278,20 @@ mod tests {
         async fn ack_delivery(&self, event_id: &str) -> Result<(), AgentError> {
             self.acks.borrow_mut().push(event_id.to_string());
             Ok(())
+        }
+        async fn wait_for_task(
+            &self,
+            exec_request_id: &str,
+            _execution_id: &str,
+        ) -> Result<WaitOutcome, AgentError> {
+            self.wait_calls
+                .borrow_mut()
+                .push(exec_request_id.to_string());
+            Ok(self
+                .waits
+                .borrow_mut()
+                .pop_front()
+                .expect("a scripted wait outcome"))
         }
     }
 
@@ -1176,11 +1325,17 @@ mod tests {
     }
 
     fn tools(execs: Vec<ExecOutcome>) -> ScriptedTools {
+        tools_with_waits(execs, vec![])
+    }
+
+    fn tools_with_waits(execs: Vec<ExecOutcome>, waits: Vec<WaitOutcome>) -> ScriptedTools {
         ScriptedTools {
             reads: Rc::new(RefCell::new(vec![])),
             execs: RefCell::new(execs.into()),
             exec_calls: Rc::new(RefCell::new(vec![])),
             acks: Rc::new(RefCell::new(vec![])),
+            waits: RefCell::new(waits.into()),
+            wait_calls: Rc::new(RefCell::new(vec![])),
         }
     }
 
@@ -1390,6 +1545,193 @@ mod tests {
         let follow_up: Vec<_> = reqs[1].tools.iter().map(|t| t.name.clone()).collect();
         assert!(!follow_up.contains(&"exec_command".to_string()));
         assert!(follow_up.contains(&"read_sys".to_string()));
+    }
+
+    /// Seed a session sitting on a dispatched background task, ready for a follow-up
+    /// turn that waits on it.
+    fn seeded_executing() -> MemSession {
+        let mut s = PersistedAgentSession::new(
+            "conv",
+            "actor",
+            "device",
+            1,
+            exec_scope(),
+            "2026-06-20T00:00:00Z",
+        );
+        s.execution_state = ExecutionState::Executing {
+            work_id: 8,
+            execution_id: "e9".into(),
+            exec_request_id: "exec_task9".into(),
+        };
+        MemSession {
+            inner: RefCell::new(Some(s)),
+        }
+    }
+
+    /// The registry offered while a task is in flight: the exec tool (hidden by the
+    /// exposure matrix while `Executing`) plus the wait tool.
+    fn wait_reg() -> Vec<RegisteredTool> {
+        let mut reg = vec![mutating_tool(
+            "exec_command",
+            Capability::ShellExecConfirmed,
+        )];
+        reg.extend(crate::wait_tools::wait_tool_registry());
+        reg
+    }
+
+    /// A `wait_for_task` that completes clears `Executing`, keys the result on the
+    /// delivery id (so a racing publisher dedups), and acks the delivery so the
+    /// publisher stands down.
+    #[tokio::test]
+    async fn wait_for_task_completes_clears_executing_and_acks() {
+        let sess = seeded_executing();
+        let model = ScriptModel {
+            turns: RefCell::new(
+                [
+                    tool_use_args("c2", "wait_for_task", r#"{"task_id":"exec_task9"}"#),
+                    answer("it finished"),
+                ]
+                .into(),
+            ),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let scripted = tools_with_waits(
+            vec![],
+            vec![WaitOutcome::Completed {
+                output: ToolRunOutput {
+                    content: "exit_code=0".into(),
+                    image_data_url: None,
+                },
+                event_id: Some("work:8:done".into()),
+            }],
+        );
+        let reg = wait_reg();
+        let clock = || "2026-06-20T00:01:00Z".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        let user = ChatMessage::text("u", ChatRole::User, "is it done?");
+        run_agent_turn(
+            &exec_deps(&sess, &model, &scripted, &reg, &clock),
+            exec_claim(),
+            user,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+
+        let s = sess.inner.borrow();
+        let s = s.as_ref().unwrap();
+        assert_eq!(
+            s.execution_state,
+            ExecutionState::None,
+            "the awaited task settled; mutation is allowed again"
+        );
+        let result = s
+            .conversation
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("c2"))
+            .unwrap();
+        assert_eq!(result.message_id, "work:8:done", "keyed on the delivery id");
+        assert_eq!(result.text, "exit_code=0");
+        assert_eq!(
+            *scripted.wait_calls.borrow(),
+            vec!["exec_task9".to_string()]
+        );
+        assert_eq!(*scripted.acks.borrow(), vec!["work:8:done".to_string()]);
+    }
+
+    /// A `wait_for_task` that times out with the task still running leaves it in
+    /// flight (`Executing`) and does not ack any delivery.
+    #[tokio::test]
+    async fn wait_for_task_still_running_keeps_the_task() {
+        let sess = seeded_executing();
+        let model = ScriptModel {
+            turns: RefCell::new(
+                [
+                    tool_use_args("c2", "wait_for_task", r#"{"task_id":"exec_task9"}"#),
+                    answer("still going"),
+                ]
+                .into(),
+            ),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let scripted = tools_with_waits(vec![], vec![WaitOutcome::StillRunning]);
+        let reg = wait_reg();
+        let clock = || "2026-06-20T00:01:00Z".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        let user = ChatMessage::text("u", ChatRole::User, "is it done?");
+        run_agent_turn(
+            &exec_deps(&sess, &model, &scripted, &reg, &clock),
+            exec_claim(),
+            user,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+
+        let s = sess.inner.borrow();
+        let s = s.as_ref().unwrap();
+        assert!(
+            matches!(s.execution_state, ExecutionState::Executing { .. }),
+            "the task is still running"
+        );
+        let result = s
+            .conversation
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("c2"))
+            .unwrap();
+        assert!(result.text.contains("still running"));
+        assert!(scripted.acks.borrow().is_empty());
+    }
+
+    /// A `wait_for_task` whose task became unknown degrades to `OutcomeUnknown`,
+    /// anchored on this call's own result so a late real result can reconcile it.
+    #[tokio::test]
+    async fn wait_for_task_unknown_degrades_to_outcome_unknown() {
+        let sess = seeded_executing();
+        let model = ScriptModel {
+            turns: RefCell::new(
+                [
+                    tool_use_args("c2", "wait_for_task", r#"{"task_id":"exec_task9"}"#),
+                    answer("its outcome is unknown"),
+                ]
+                .into(),
+            ),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let scripted = tools_with_waits(vec![], vec![WaitOutcome::Unknown]);
+        let reg = wait_reg();
+        let clock = || "2026-06-20T00:01:00Z".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        let user = ChatMessage::text("u", ChatRole::User, "is it done?");
+        run_agent_turn(
+            &exec_deps(&sess, &model, &scripted, &reg, &clock),
+            exec_claim(),
+            user,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+
+        let s = sess.inner.borrow();
+        let s = s.as_ref().unwrap();
+        match &s.execution_state {
+            ExecutionState::OutcomeUnknown {
+                execution_id,
+                placeholder_message_id,
+                ..
+            } => {
+                assert_eq!(execution_id, "e9");
+                // The placeholder anchors on this wait call's own result message.
+                let anchor = s
+                    .conversation
+                    .iter()
+                    .find(|m| &m.message_id == placeholder_message_id)
+                    .unwrap();
+                assert_eq!(anchor.tool_call_id.as_deref(), Some("c2"));
+            }
+            other => panic!("expected OutcomeUnknown, got {other:?}"),
+        }
+        assert!(scripted.acks.borrow().is_empty());
     }
 
     /// An executed result carrying a stable delivery id keys the tool-result

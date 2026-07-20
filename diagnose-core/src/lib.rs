@@ -44,6 +44,7 @@ pub mod stream;
 pub mod terminal_complete;
 pub mod terminal_copilot;
 pub mod trim;
+pub mod wait_tools;
 
 /// Default model context budget when `max_context_bytes` is unset (128 KB).
 pub const DEFAULT_MAX_CONTEXT_BYTES: usize = 131_072;
