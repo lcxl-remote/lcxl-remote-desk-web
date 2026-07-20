@@ -228,6 +228,18 @@ pub trait ToolSeam {
             reason: Some("mutating execution is not supported by this runtime".into()),
         })
     }
+
+    /// Acknowledge that the foreground path has durably saved the result of a
+    /// completion delivery, so this runtime may mark that delivery consumed and stop
+    /// the background publisher from also delivering it. Called after the session
+    /// save succeeds, with the delivery id the result was keyed on. Best-effort: the
+    /// loop ignores the outcome, because a lost ack only means the publisher
+    /// redelivers, which dedups on the same id. The default is a no-op for runtimes
+    /// with no durable completion delivery (Direct / read-only).
+    async fn ack_delivery(&self, event_id: &str) -> Result<(), AgentError> {
+        let _ = event_id;
+        Ok(())
+    }
 }
 
 /// Inputs to atomically claim a turn for a conversation. The subject fields pin

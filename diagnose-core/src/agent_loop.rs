@@ -332,15 +332,22 @@ async fn run_mutating<F: FnMut() -> String>(
     let outcome = deps.tools.confirm_and_exec(call, &ctx).await;
     session.turn_state = TurnState::Running;
 
+    // A stable delivery id the foreground path must ack (consume) after its save, so
+    // the background completion publisher does not also deliver the same result.
+    // Only the foreground-win result (Executed with a delivery id) is acked; a
+    // Dispatched outcome deliberately leaves the delivery pending for the publisher.
+    let mut ack_event_id: Option<String> = None;
+
     match outcome {
         Ok(ExecOutcome::Executed { output, event_id }) => {
             // Key the result message on the stable delivery id when the runtime has
             // one, so a late completion delivery of the same result is recognized as
             // already present (dedup by message_id) rather than appended twice.
-            let message_id = match event_id {
-                Some(id) => id,
+            let message_id = match &event_id {
+                Some(id) => id.clone(),
                 None => mint(),
             };
+            ack_event_id = event_id;
             let mut msg = ChatMessage::tool_result(message_id, &call.id, output.content);
             msg.image_data_url = output.image_data_url;
             session.conversation.push(msg);
@@ -427,6 +434,20 @@ async fn run_mutating<F: FnMut() -> String>(
             return Err(e);
         }
     }
+
+    // Persist the terminal outcome now, before returning to the batch loop, so a
+    // crash can never leave the durable execution record ahead of the session (which
+    // would strand the tool call and force a conservative unknown-outcome recovery).
+    deps.session_seam.save(session).await?;
+
+    // Post-save ack: the result is safely stored, so tell the seam the foreground
+    // consumed this delivery. Best-effort — if the ack is lost (0 rows / transport
+    // error) the background publisher delivers instead, and its append dedups by the
+    // delivery id the result message is already keyed on, so it never doubles.
+    if let Some(event_id) = ack_event_id {
+        let _ = deps.tools.ack_delivery(&event_id).await;
+    }
+
     Ok(())
 }
 
@@ -1096,6 +1117,7 @@ mod tests {
         reads: Rc<RefCell<Vec<String>>>,
         execs: RefCell<std::collections::VecDeque<ExecOutcome>>,
         exec_calls: Rc<RefCell<Vec<String>>>,
+        acks: Rc<RefCell<Vec<String>>>,
     }
     #[async_trait(?Send)]
     impl ToolSeam for ScriptedTools {
@@ -1117,6 +1139,10 @@ mod tests {
                 .borrow_mut()
                 .pop_front()
                 .expect("a scripted exec outcome"))
+        }
+        async fn ack_delivery(&self, event_id: &str) -> Result<(), AgentError> {
+            self.acks.borrow_mut().push(event_id.to_string());
+            Ok(())
         }
     }
 
@@ -1154,6 +1180,7 @@ mod tests {
             reads: Rc::new(RefCell::new(vec![])),
             execs: RefCell::new(execs.into()),
             exec_calls: Rc::new(RefCell::new(vec![])),
+            acks: Rc::new(RefCell::new(vec![])),
         }
     }
 
@@ -1354,6 +1381,9 @@ mod tests {
             .unwrap();
         assert!(closed.text.contains("background task"));
         assert!(closed.text.contains("exec_task9"));
+        // A dispatched task leaves its completion delivery for the publisher — the
+        // foreground never acks it.
+        assert!(scripted.acks.borrow().is_empty());
         // The follow-up model call did not advertise the mutating tool (no second
         // mutation while one is running) but kept the read tool.
         let reqs = model.requests.borrow();
@@ -1404,6 +1434,9 @@ mod tests {
             .unwrap();
         assert_eq!(result.message_id, "work:8:done");
         assert_eq!(result.text, "exit_code=0");
+        // The foreground path acked the delivery (post-save) so the publisher stands
+        // down.
+        assert_eq!(*scripted.acks.borrow(), vec!["work:8:done".to_string()]);
     }
 
     /// Two mutating calls in one turn run serially: a rejection halts the rest, so
