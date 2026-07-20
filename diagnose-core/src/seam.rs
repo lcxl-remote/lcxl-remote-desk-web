@@ -148,7 +148,17 @@ pub struct ExecIdentity {
 #[derive(Debug, Clone)]
 pub enum ExecOutcome {
     /// Approved and executed to a known, already-redacted result.
-    Executed(ToolRunOutput),
+    ///
+    /// `event_id` is the stable delivery id of this result when the runtime records
+    /// completions durably (the manager's `work:{work_id}:done`). The loop uses it
+    /// as the tool-result's `message_id`, so a later completion delivery of the same
+    /// result — a foreground save that crashed before acking its consume — is
+    /// recognized as already present and never appended twice. A runtime without
+    /// durable completion (Direct) passes `None` and the loop mints an id.
+    Executed {
+        output: ToolRunOutput,
+        event_id: Option<String>,
+    },
     /// The operator rejected the command; nothing ran.
     Rejected { reason: Option<String> },
     /// Approval expired before any decision; nothing ran.

@@ -333,9 +333,16 @@ async fn run_mutating<F: FnMut() -> String>(
     session.turn_state = TurnState::Running;
 
     match outcome {
-        Ok(ExecOutcome::Executed(out)) => {
-            let mut msg = ChatMessage::tool_result(mint(), &call.id, out.content);
-            msg.image_data_url = out.image_data_url;
+        Ok(ExecOutcome::Executed { output, event_id }) => {
+            // Key the result message on the stable delivery id when the runtime has
+            // one, so a late completion delivery of the same result is recognized as
+            // already present (dedup by message_id) rather than appended twice.
+            let message_id = match event_id {
+                Some(id) => id,
+                None => mint(),
+            };
+            let mut msg = ChatMessage::tool_result(message_id, &call.id, output.content);
+            msg.image_data_url = output.image_data_url;
             session.conversation.push(msg);
             sink.on_tool_finished(&call.id, true);
         }
@@ -1180,10 +1187,13 @@ mod tests {
             turns: RefCell::new([tool_use("c1", "exec_command"), answer("done")].into()),
             requests: Rc::new(RefCell::new(vec![])),
         };
-        let scripted = tools(vec![ExecOutcome::Executed(ToolRunOutput {
-            content: "exit_code=0".into(),
-            image_data_url: None,
-        })]);
+        let scripted = tools(vec![ExecOutcome::Executed {
+            output: ToolRunOutput {
+                content: "exit_code=0".into(),
+                image_data_url: None,
+            },
+            event_id: None,
+        }]);
         let reg = vec![mutating_tool(
             "exec_command",
             Capability::ShellExecConfirmed,
@@ -1350,6 +1360,50 @@ mod tests {
         let follow_up: Vec<_> = reqs[1].tools.iter().map(|t| t.name.clone()).collect();
         assert!(!follow_up.contains(&"exec_command".to_string()));
         assert!(follow_up.contains(&"read_sys".to_string()));
+    }
+
+    /// An executed result carrying a stable delivery id keys the tool-result
+    /// message on that id, so a late completion delivery of the same result dedups
+    /// against it instead of appending a duplicate.
+    #[tokio::test]
+    async fn executed_keys_the_result_message_on_the_delivery_id() {
+        let sess = MemSession::default();
+        let model = ScriptModel {
+            turns: RefCell::new([tool_use("c1", "exec_command"), answer("done")].into()),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let scripted = tools(vec![ExecOutcome::Executed {
+            output: ToolRunOutput {
+                content: "exit_code=0".into(),
+                image_data_url: None,
+            },
+            event_id: Some("work:8:done".into()),
+        }]);
+        let reg = vec![mutating_tool(
+            "exec_command",
+            Capability::ShellExecConfirmed,
+        )];
+        let clock = || "t".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        let user = ChatMessage::text("u", ChatRole::User, "restart it");
+        run_agent_turn(
+            &exec_deps(&sess, &model, &scripted, &reg, &clock),
+            exec_claim(),
+            user,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+
+        let s = sess.inner.borrow();
+        let s = s.as_ref().unwrap();
+        let result = s
+            .conversation
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("c1"))
+            .unwrap();
+        assert_eq!(result.message_id, "work:8:done");
+        assert_eq!(result.text, "exit_code=0");
     }
 
     /// Two mutating calls in one turn run serially: a rejection halts the rest, so
@@ -1542,10 +1596,13 @@ mod tests {
             turns: RefCell::new([tool_use("c1", "exec_command"), answer("ok")].into()),
             requests: Rc::new(RefCell::new(vec![])),
         };
-        let scripted = tools(vec![ExecOutcome::Executed(ToolRunOutput {
-            content: "exit_code=0".into(),
-            image_data_url: None,
-        })]);
+        let scripted = tools(vec![ExecOutcome::Executed {
+            output: ToolRunOutput {
+                content: "exit_code=0".into(),
+                image_data_url: None,
+            },
+            event_id: None,
+        }]);
         let reg = vec![mutating_tool(
             "exec_command",
             Capability::ShellExecConfirmed,
