@@ -249,6 +249,77 @@ pub enum ExecShellKind {
     Sh,
 }
 
+/// The OS-level containment tier a template demands. The edge fails closed
+/// **before spawn** if it cannot meet the tier — it is never a silent downgrade.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    Serialize,
+    Deserialize,
+    SchemaWrite,
+    SchemaRead,
+    ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RequiredEnforcement {
+    /// Bounded wall time + process-tree recycle + concurrency cap. Every platform
+    /// must satisfy this; it is the safe default.
+    #[default]
+    Baseline,
+    /// Baseline plus aggregate CPU / memory / process-count hard limits (Linux
+    /// cgroup v2, Windows Job Object). A device that cannot enforce it rejects the
+    /// plan before spawning.
+    NativeHard,
+}
+
+impl RequiredEnforcement {
+    /// A stable discriminant byte for the plan fingerprint. Kept explicit (not a
+    /// cast) so reordering the variants can never silently shift a fingerprint.
+    pub fn fingerprint_byte(self) -> u8 {
+        match self {
+            RequiredEnforcement::Baseline => 0,
+            RequiredEnforcement::NativeHard => 1,
+        }
+    }
+}
+
+/// The immutable containment declaration bound into an approved plan and shown at
+/// approval time. It carries the resource / governance envelope; the **wall-time
+/// limit is deliberately not here** — that is the plan's [`ExecPlanDraft::timeout_ms`]
+/// (the single source read by the worker, the capacity gate, and the manager wait),
+/// so it can never diverge between two copies.
+///
+/// The aggregate hard-limit fields (`max_processes` … `io_max_bytes_per_sec`) are
+/// only meaningful under [`RequiredEnforcement::NativeHard`]; a `Baseline` template
+/// leaves them `None` so an approval can never display a limit the edge silently
+/// ignores. They are declared and fingerprinted now; wiring them to the native
+/// backend (cgroup / Job Object) is a follow-on.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct ExecContainmentSnapshot {
+    /// Whether the command may run past the foreground wall-time ceiling. Only a
+    /// template on the long-running whitelist sets this; it gates whether the
+    /// product background cap (rather than the foreground cap) applies.
+    pub allow_background: bool,
+    /// OS enforcement tier the template demands.
+    pub required_enforcement: RequiredEnforcement,
+    /// Aggregate hard caps, all `None` unless the template is `NativeHard`.
+    pub max_processes: Option<u32>,
+    pub max_memory_bytes: Option<u64>,
+    pub cpu_max_percent: Option<u16>,
+    pub io_max_bytes_per_sec: Option<u64>,
+    /// The named resource profile this snapshot was resolved from, and that
+    /// profile's revision, so the approval binding is reproducible.
+    pub resource_profile_id: Option<String>,
+    pub resource_profile_revision: Option<i64>,
+}
+
 /// The daemon's authoritative, renderable-but-not-yet-approved execution plan.
 ///
 /// Built at `ConfirmExec` from the matched template + validated parameters and
@@ -278,6 +349,10 @@ pub struct ExecPlanDraft {
     pub timeout_ms: u32,
     pub max_stdout_bytes: u32,
     pub max_stderr_bytes: u32,
+    /// The resource / governance envelope this plan runs under (wall time excepted;
+    /// that is `timeout_ms`). Bound at seal time and fingerprinted.
+    #[serde(default)]
+    pub containment: ExecContainmentSnapshot,
 }
 
 /// The sealed, approved execution plan sent to the worker
@@ -322,6 +397,10 @@ pub struct ExecPlan {
     pub timeout_ms: u32,
     pub max_stdout_bytes: u32,
     pub max_stderr_bytes: u32,
+    /// The resource / governance envelope this plan runs under (wall time excepted;
+    /// that is `timeout_ms`). Copied verbatim from the sealed draft.
+    #[serde(default)]
+    pub containment: ExecContainmentSnapshot,
 }
 
 impl ExecPlan {
@@ -353,6 +432,7 @@ impl ExecPlan {
             timeout_ms: draft.timeout_ms,
             max_stdout_bytes: draft.max_stdout_bytes,
             max_stderr_bytes: draft.max_stderr_bytes,
+            containment: draft.containment,
         }
     }
 }
@@ -404,6 +484,7 @@ mod tests {
             timeout_ms: 10_000,
             max_stdout_bytes: 65_536,
             max_stderr_bytes: 65_536,
+            containment: ExecContainmentSnapshot::default(),
         }
     }
 

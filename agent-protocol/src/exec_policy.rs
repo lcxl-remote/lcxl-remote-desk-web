@@ -21,7 +21,7 @@ use std::sync::LazyLock;
 use crate::ExecInput;
 use crate::command_blocklist::{BlocklistMatcher, BlocklistRule, blocklist_match};
 use crate::command_template::SyncedCommandTemplate;
-use crate::exec::{ExecPlanDraft, ExecShellKind};
+use crate::exec::{ExecContainmentSnapshot, ExecPlanDraft, ExecShellKind};
 
 // ============================ Execution limits ============================
 
@@ -32,6 +32,51 @@ pub const DEFAULT_TIMEOUT_MS: u32 = 30_000;
 pub const MIN_TIMEOUT_MS: u32 = 1_000;
 pub const MAX_OUTPUT_BYTES: u32 = 1 << 20; // 1 MiB
 pub const DEFAULT_OUTPUT_BYTES: u32 = 64 * 1024;
+
+/// Absolute wall-time ceilings the product enforces, independent of any template,
+/// policy, or device setting. A **foreground** command (the default) may run up to
+/// [`PRODUCT_MAX_FOREGROUND_MS`]; only a template on the background whitelist may
+/// run up to [`PRODUCT_MAX_BACKGROUND_MS`]. There is deliberately **no unbounded
+/// option**: a finite wall time is the one fail-safe that holds even when the
+/// manager or network is unreachable.
+pub const PRODUCT_MAX_FOREGROUND_MS: u32 = 60_000; // 1 min
+pub const PRODUCT_MAX_BACKGROUND_MS: u32 = 7_200_000; // 2 h
+
+/// The effective wall time for a template dispatch under the layered cap.
+///
+/// The template's configured runtime is the baseline; a request only ever *lowers*
+/// it (a caller asking for less than the template allows), and each present policy
+/// / device ceiling clamps it further. Fleet has no per-request value (`request_ms
+/// = None`); a `None` policy / device layer does not constrain. The result is
+/// finally clamped to the product ceiling for the template's foreground /
+/// background class and floored at [`MIN_TIMEOUT_MS`], so it is always finite and
+/// never zero. A foreground template therefore can never exceed
+/// [`PRODUCT_MAX_FOREGROUND_MS`] however large its declared value.
+pub fn effective_wall_ms(
+    request_ms: Option<u32>,
+    template_ms: Option<u32>,
+    policy_ms: Option<u32>,
+    device_ms: Option<u32>,
+    allow_background: bool,
+) -> u32 {
+    let product = if allow_background {
+        PRODUCT_MAX_BACKGROUND_MS
+    } else {
+        PRODUCT_MAX_FOREGROUND_MS
+    };
+    // Baseline: the template's runtime, else the request's ask, else the default.
+    let mut wall = template_ms.or(request_ms).unwrap_or(DEFAULT_TIMEOUT_MS);
+    if let Some(r) = request_ms {
+        wall = wall.min(r);
+    }
+    if let Some(p) = policy_ms {
+        wall = wall.min(p);
+    }
+    if let Some(d) = device_ms {
+        wall = wall.min(d);
+    }
+    wall.min(product).max(MIN_TIMEOUT_MS)
+}
 
 /// Execution limits after clamping. A control end can never ask for an unbounded
 /// timeout or output buffer.
@@ -76,12 +121,49 @@ impl ExecLimits {
 
 // ============================ Draft construction ============================
 
+/// Resolve a template's declared containment into the effective wall time and the
+/// immutable [`ExecContainmentSnapshot`] bound into the plan.
+///
+/// This is the single place the manager (preview / dispatch rebuild) and the
+/// daemon (PEP rebuild) both derive the envelope from a template, so the two can
+/// never diverge on how a template's declaration becomes the sealed plan. Wall
+/// time is returned separately (it lives on the draft as `timeout_ms`, the single
+/// source); the snapshot carries only the resource / governance fields.
+pub fn resolve_template_containment(
+    template: &SyncedCommandTemplate,
+    request_wall_ms: Option<u32>,
+    policy_wall_ms: Option<u32>,
+    device_wall_ms: Option<u32>,
+) -> (u32, ExecContainmentSnapshot) {
+    let c = &template.containment;
+    let wall = effective_wall_ms(
+        request_wall_ms,
+        c.max_wall_time_ms,
+        policy_wall_ms,
+        device_wall_ms,
+        c.allow_background,
+    );
+    let snapshot = ExecContainmentSnapshot {
+        allow_background: c.allow_background,
+        required_enforcement: c.required_enforcement,
+        max_processes: c.max_processes,
+        max_memory_bytes: c.max_memory_bytes,
+        cpu_max_percent: c.cpu_max_percent,
+        io_max_bytes_per_sec: c.io_max_bytes_per_sec,
+        resource_profile_id: c.resource_profile_id.clone(),
+        resource_profile_revision: c.resource_profile_revision,
+    };
+    (wall, snapshot)
+}
+
 /// Build the immutable [`ExecPlanDraft`] for an exact-argv operator template.
 ///
 /// The template's `argv[0]` is the program and the rest are its arguments,
 /// executed verbatim as a direct spawn (no shell wrapping, no parameter
-/// substitution). Risk derives from the template's effect. The fingerprint is
-/// computed over the rendered plan + limits so the manager's preview draft and
+/// substitution). Risk derives from the template's effect. Wall time is the
+/// layered [`effective_wall_ms`] over the template's declared cap and `request_wall_ms`
+/// (fleet passes `None` — it has no per-request limit). The fingerprint is computed
+/// over the rendered plan + limits + containment so the manager's preview draft and
 /// the daemon's PEP re-validation produce the identical value.
 ///
 /// The caller is responsible for having validated the template's argv shape
@@ -89,12 +171,21 @@ impl ExecLimits {
 /// would panic on `argv[0]`, which a validated template can never have.
 pub fn build_exact_argv_draft(
     template: &SyncedCommandTemplate,
-    limits: ExecLimits,
+    request_wall_ms: Option<u32>,
+    max_stdout_bytes: u32,
+    max_stderr_bytes: u32,
     cwd: Option<String>,
 ) -> ExecPlanDraft {
     let program = template.argv[0].clone();
     let argv = template.argv[1..].to_vec();
-    let fingerprint = fingerprint(&program, &argv, cwd.as_deref(), &limits);
+    let (timeout_ms, containment) =
+        resolve_template_containment(template, request_wall_ms, None, None);
+    let limits = ExecLimits {
+        timeout_ms,
+        max_stdout_bytes,
+        max_stderr_bytes,
+    };
+    let fingerprint = fingerprint(&program, &argv, cwd.as_deref(), &limits, &containment);
     ExecPlanDraft {
         program,
         argv,
@@ -104,9 +195,10 @@ pub fn build_exact_argv_draft(
         risk: template.risk(),
         template_id: template.template_id.clone(),
         fingerprint,
-        timeout_ms: limits.timeout_ms,
-        max_stdout_bytes: limits.max_stdout_bytes,
-        max_stderr_bytes: limits.max_stderr_bytes,
+        timeout_ms,
+        max_stdout_bytes,
+        max_stderr_bytes,
+        containment,
     }
 }
 
@@ -116,19 +208,24 @@ pub fn build_exact_argv_draft(
 /// only a tamper check. Shared so the manager (preview) and the daemon (PEP)
 /// compute the identical value.
 ///
-/// It deliberately covers only what the worker *runs* — program, argv, cwd, and the
-/// execution limits — not the *classification* fields (`risk` / effect / `shell`),
-/// which are derived from the template and can change without the argv changing (an
-/// `effect` edited read_only → mutating lifts the risk but leaves the argv, and so
-/// this fingerprint, identical). Callers that must reject classification drift —
-/// the single-device PEP and the fleet approval / dispatch re-checks — compare the
-/// **whole rebuilt [`ExecPlanDraft`]** (which carries `risk` / `shell` /
-/// `template_id`), not just this hash.
+/// It deliberately covers only what the worker *runs* — program, argv, cwd, the
+/// execution limits, and the containment envelope — not the *classification*
+/// fields (`risk` / effect / `shell`), which are derived from the template and can
+/// change without the argv changing (an `effect` edited read_only → mutating lifts
+/// the risk but leaves the argv, and so this fingerprint, identical). Callers that
+/// must reject classification drift — the single-device PEP and the fleet approval
+/// / dispatch re-checks — compare the **whole rebuilt [`ExecPlanDraft`]** (which
+/// carries `risk` / `shell` / `template_id` / `containment`), not just this hash.
+///
+/// Wall time is fed via `limits.timeout_ms` (its single source); the containment
+/// snapshot contributes only its resource / governance fields, so a change to any
+/// declared cap (memory, enforcement tier, background flag, …) shifts the hash.
 pub fn fingerprint(
     program: &str,
     argv: &[String],
     cwd: Option<&str>,
     limits: &ExecLimits,
+    containment: &ExecContainmentSnapshot,
 ) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut feed = |bytes: &[u8]| {
@@ -148,6 +245,43 @@ pub fn fingerprint(
     feed(&limits.timeout_ms.to_le_bytes());
     feed(&limits.max_stdout_bytes.to_le_bytes());
     feed(&limits.max_stderr_bytes.to_le_bytes());
+    // Containment (wall time excluded — it is limits.timeout_ms above). Each
+    // Option feeds a presence byte so `None` and `Some(0)` never collide.
+    feed(&[containment.allow_background as u8]);
+    feed(&[containment.required_enforcement.fingerprint_byte()]);
+    let mut feed_opt = |present: bool, bytes: &[u8]| {
+        feed(&[present as u8]);
+        feed(bytes);
+    };
+    feed_opt(
+        containment.max_processes.is_some(),
+        &containment.max_processes.unwrap_or(0).to_le_bytes(),
+    );
+    feed_opt(
+        containment.max_memory_bytes.is_some(),
+        &containment.max_memory_bytes.unwrap_or(0).to_le_bytes(),
+    );
+    feed_opt(
+        containment.cpu_max_percent.is_some(),
+        &containment.cpu_max_percent.unwrap_or(0).to_le_bytes(),
+    );
+    feed_opt(
+        containment.io_max_bytes_per_sec.is_some(),
+        &containment.io_max_bytes_per_sec.unwrap_or(0).to_le_bytes(),
+    );
+    feed(
+        containment
+            .resource_profile_id
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes(),
+    );
+    feed(
+        &containment
+            .resource_profile_revision
+            .unwrap_or(0)
+            .to_le_bytes(),
+    );
     format!("{hash:016x}")
 }
 
@@ -421,6 +555,7 @@ mod tests {
             template_id: id.to_string(),
             argv: argv.iter().map(|s| s.to_string()).collect(),
             effect,
+            containment: Default::default(),
         }
     }
 
@@ -431,7 +566,8 @@ mod tests {
             &["docker", "ps", "-a"],
             ExecEffect::ReadOnly,
         );
-        let draft = build_exact_argv_draft(&t, ExecLimits::defaults(), None);
+        let draft =
+            build_exact_argv_draft(&t, None, DEFAULT_OUTPUT_BYTES, DEFAULT_OUTPUT_BYTES, None);
         assert_eq!(draft.program, "docker");
         assert_eq!(draft.argv, vec!["ps", "-a"]);
         assert_eq!(draft.shell, ExecShellKind::Native);
@@ -443,7 +579,8 @@ mod tests {
     #[test]
     fn build_exact_argv_draft_single_token_has_empty_args() {
         let t = template("get_disk", &["Get-Disk"], ExecEffect::ReadOnly);
-        let draft = build_exact_argv_draft(&t, ExecLimits::defaults(), None);
+        let draft =
+            build_exact_argv_draft(&t, None, DEFAULT_OUTPUT_BYTES, DEFAULT_OUTPUT_BYTES, None);
         assert_eq!(draft.program, "Get-Disk");
         assert!(draft.argv.is_empty());
     }
@@ -455,7 +592,8 @@ mod tests {
             &["net", "stop", "spooler"],
             ExecEffect::Mutating,
         );
-        let draft = build_exact_argv_draft(&t, ExecLimits::defaults(), None);
+        let draft =
+            build_exact_argv_draft(&t, None, DEFAULT_OUTPUT_BYTES, DEFAULT_OUTPUT_BYTES, None);
         assert_eq!(draft.risk, RiskLevel::High);
     }
 
@@ -470,12 +608,16 @@ mod tests {
         let argv = &["custom-tool", "--flag"];
         let read_only = build_exact_argv_draft(
             &template("t", argv, ExecEffect::ReadOnly),
-            ExecLimits::defaults(),
+            None,
+            DEFAULT_OUTPUT_BYTES,
+            DEFAULT_OUTPUT_BYTES,
             None,
         );
         let mutating = build_exact_argv_draft(
             &template("t", argv, ExecEffect::Mutating),
-            ExecLimits::defaults(),
+            None,
+            DEFAULT_OUTPUT_BYTES,
+            DEFAULT_OUTPUT_BYTES,
             None,
         );
         assert_eq!(
@@ -492,9 +634,10 @@ mod tests {
     #[test]
     fn fingerprint_is_stable_and_target_sensitive() {
         let limits = ExecLimits::defaults();
-        let a = fingerprint("docker", &["logs".into(), "web1".into()], None, &limits);
-        let a2 = fingerprint("docker", &["logs".into(), "web1".into()], None, &limits);
-        let b = fingerprint("docker", &["logs".into(), "web2".into()], None, &limits);
+        let c = ExecContainmentSnapshot::default();
+        let a = fingerprint("docker", &["logs".into(), "web1".into()], None, &limits, &c);
+        let a2 = fingerprint("docker", &["logs".into(), "web1".into()], None, &limits, &c);
+        let b = fingerprint("docker", &["logs".into(), "web2".into()], None, &limits, &c);
         assert_eq!(a, a2);
         assert_ne!(a, b);
     }
@@ -504,10 +647,146 @@ mod tests {
         // The fingerprint a draft carries must equal a direct recomputation —
         // this is what lets the daemon PEP re-validate a manager-built draft.
         let t = template("docker_ps", &["docker", "ps"], ExecEffect::ReadOnly);
-        let limits = ExecLimits::defaults();
-        let draft = build_exact_argv_draft(&t, limits, None);
-        let recomputed = fingerprint(&draft.program, &draft.argv, draft.cwd.as_deref(), &limits);
+        let draft =
+            build_exact_argv_draft(&t, None, DEFAULT_OUTPUT_BYTES, DEFAULT_OUTPUT_BYTES, None);
+        let limits = ExecLimits {
+            timeout_ms: draft.timeout_ms,
+            max_stdout_bytes: draft.max_stdout_bytes,
+            max_stderr_bytes: draft.max_stderr_bytes,
+        };
+        let recomputed = fingerprint(
+            &draft.program,
+            &draft.argv,
+            draft.cwd.as_deref(),
+            &limits,
+            &draft.containment,
+        );
         assert_eq!(draft.fingerprint, recomputed);
+    }
+
+    // ---- layered wall time + containment ----
+
+    use crate::command_template::TemplateContainment;
+    use crate::exec::RequiredEnforcement;
+
+    fn bg_template(
+        id: &str,
+        wall_ms: Option<u32>,
+        allow_background: bool,
+    ) -> SyncedCommandTemplate {
+        SyncedCommandTemplate {
+            template_id: id.to_string(),
+            argv: vec!["docker".to_string(), "ps".to_string()],
+            effect: ExecEffect::ReadOnly,
+            containment: TemplateContainment {
+                max_wall_time_ms: wall_ms,
+                allow_background,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn wall_defaults_when_nothing_is_specified() {
+        // Fleet baseline: no request, no template cap → the default timeout, not
+        // the product ceiling. This preserves the previous fleet runtime.
+        assert_eq!(
+            effective_wall_ms(None, None, None, None, false),
+            DEFAULT_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn foreground_template_cannot_exceed_the_foreground_ceiling() {
+        // A foreground template declaring 5 min is clamped to the 1-min product cap.
+        assert_eq!(
+            effective_wall_ms(None, Some(300_000), None, None, false),
+            PRODUCT_MAX_FOREGROUND_MS
+        );
+    }
+
+    #[test]
+    fn background_template_reaches_the_background_ceiling() {
+        // The same 5-min declaration is honored on the background whitelist, and a
+        // 3-h one is clamped to the 2-h product cap.
+        assert_eq!(
+            effective_wall_ms(None, Some(300_000), None, None, true),
+            300_000
+        );
+        assert_eq!(
+            effective_wall_ms(None, Some(10_800_000), None, None, true),
+            PRODUCT_MAX_BACKGROUND_MS
+        );
+    }
+
+    #[test]
+    fn a_request_only_lowers_the_wall_never_raises_it() {
+        // Request below the template value wins; a request above it cannot raise
+        // past the template's declared cap.
+        assert_eq!(
+            effective_wall_ms(Some(5_000), Some(20_000), None, None, false),
+            5_000
+        );
+        assert_eq!(
+            effective_wall_ms(Some(50_000), Some(20_000), None, None, false),
+            20_000
+        );
+    }
+
+    #[test]
+    fn policy_and_device_layers_each_clamp_down() {
+        assert_eq!(
+            effective_wall_ms(None, Some(50_000), Some(10_000), None, true),
+            10_000
+        );
+        assert_eq!(
+            effective_wall_ms(None, Some(50_000), None, Some(8_000), true),
+            8_000
+        );
+    }
+
+    #[test]
+    fn wall_is_floored_and_finite() {
+        // A tiny request floors at MIN_TIMEOUT_MS, never zero.
+        assert_eq!(
+            effective_wall_ms(Some(1), None, None, None, false),
+            MIN_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn background_draft_carries_the_long_wall_and_flag() {
+        let t = bg_template("long_job", Some(1_800_000), true);
+        let draft =
+            build_exact_argv_draft(&t, None, DEFAULT_OUTPUT_BYTES, DEFAULT_OUTPUT_BYTES, None);
+        assert_eq!(draft.timeout_ms, 1_800_000);
+        assert!(draft.containment.allow_background);
+    }
+
+    #[test]
+    fn fingerprint_is_sensitive_to_a_containment_change() {
+        // Two snapshots that differ only in a declared resource cap must produce
+        // distinct fingerprints, so the PEP's full-draft compare rejects a plan
+        // whose envelope was tampered with.
+        let limits = ExecLimits::defaults();
+        let base = ExecContainmentSnapshot::default();
+        let with_mem = ExecContainmentSnapshot {
+            required_enforcement: RequiredEnforcement::NativeHard,
+            max_memory_bytes: Some(512 << 20),
+            ..Default::default()
+        };
+        let a = fingerprint("docker", &["ps".into()], None, &limits, &base);
+        let b = fingerprint("docker", &["ps".into()], None, &limits, &with_mem);
+        assert_ne!(a, b);
+        // Presence is distinguished from a zero value.
+        let zero_mem = ExecContainmentSnapshot {
+            max_memory_bytes: Some(0),
+            ..Default::default()
+        };
+        assert_ne!(
+            fingerprint("docker", &["ps".into()], None, &limits, &base),
+            fingerprint("docker", &["ps".into()], None, &limits, &zero_mem),
+        );
     }
 
     // ---- blocklist (raw + argv consistency) ----

@@ -19,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::RiskLevel;
-use crate::exec::ExecEffect;
+use crate::exec::{ExecEffect, RequiredEnforcement};
 
 /// Current `CommandTemplateSync` payload wire version the manager emits. A daemon
 /// accepts any version in `[MIN_COMMAND_TEMPLATE_SYNC_VERSION,
@@ -34,12 +34,16 @@ use crate::exec::ExecEffect;
 ///   the daemon accepts a payload only when `(epoch, revision)` is not strictly
 ///   older than the last it applied, so once it accepts a narrowed v3 set an old
 ///   manager's all-org set (epoch 0) can no longer downgrade it.
+/// - v4: each template carries its [`TemplateContainment`] (wall-time cap,
+///   background whitelist, enforcement tier, resource caps) so the daemon rebuilds
+///   the identical sealed plan the manager did. A v1–v3 template deserializes with
+///   a `Baseline` default containment (serde default).
 ///
 /// During a rolling upgrade an old daemon (which only knows v1) receives a newer
 /// payload and safely ignores it — it keeps its prior template set rather than
 /// misapplying an unknown shape; a fleet exec request it cannot template-match is
 /// then refused by its PEP, never mis-executed.
-pub const COMMAND_TEMPLATE_SYNC_VERSION: u16 = 3;
+pub const COMMAND_TEMPLATE_SYNC_VERSION: u16 = 4;
 
 /// Oldest `CommandTemplateSync` payload version a current daemon still accepts.
 /// A v1 payload (from an old manager during a rolling upgrade) carries no
@@ -53,6 +57,37 @@ pub const MIN_COMMAND_TEMPLATE_SYNC_VERSION: u16 = 1;
 /// only when a change again alters what a given `revision` means (e.g. a different
 /// narrowing dimension); a plain content change just advances the revision.
 pub const COMMAND_TEMPLATE_SYNC_EPOCH: u16 = 1;
+
+/// The containment envelope an operator declares on a template. Wall time is an
+/// `Option` — `None` means "use the default cap"; a `Some` is itself still capped
+/// by the layered `min()` at draft time and never grants an unbounded run. The
+/// aggregate hard caps are only accepted when `required_enforcement` is
+/// `NativeHard` (enforced at manager save time), so a `Baseline` template can never
+/// declare a resource limit the edge would silently ignore.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TemplateContainment {
+    /// Requested wall-time cap in ms; `None` falls back to the default timeout.
+    #[serde(default)]
+    pub max_wall_time_ms: Option<u32>,
+    /// Whether this template may run past the foreground ceiling (long-running).
+    #[serde(default)]
+    pub allow_background: bool,
+    /// The OS enforcement tier this template demands.
+    #[serde(default)]
+    pub required_enforcement: RequiredEnforcement,
+    #[serde(default)]
+    pub max_processes: Option<u32>,
+    #[serde(default)]
+    pub max_memory_bytes: Option<u64>,
+    #[serde(default)]
+    pub cpu_max_percent: Option<u16>,
+    #[serde(default)]
+    pub io_max_bytes_per_sec: Option<u64>,
+    #[serde(default)]
+    pub resource_profile_id: Option<String>,
+    #[serde(default)]
+    pub resource_profile_revision: Option<i64>,
+}
 
 /// One operator-configured exact-argv command template, as synced from the
 /// manager to the daemon.
@@ -68,6 +103,10 @@ pub struct SyncedCommandTemplate {
     /// Whether running it changes state. Drives risk grading and the read-only
     /// vs. mutating execution-mode gate.
     pub effect: ExecEffect,
+    /// The containment envelope the operator configured. Defaults to `Baseline`
+    /// with no caps for a template synced from an older manager (serde default).
+    #[serde(default)]
+    pub containment: TemplateContainment,
 }
 
 impl SyncedCommandTemplate {
@@ -216,6 +255,7 @@ mod tests {
             template_id: "docker_ps".into(),
             argv: vec!["docker".into(), "ps".into()],
             effect: ExecEffect::ReadOnly,
+            containment: TemplateContainment::default(),
         }
     }
 
@@ -250,7 +290,7 @@ mod tests {
     #[test]
     fn current_version_is_in_supported_range() {
         // The emitted version must not be below the minimum supported one.
-        assert_eq!(COMMAND_TEMPLATE_SYNC_VERSION, 3);
+        assert_eq!(COMMAND_TEMPLATE_SYNC_VERSION, 4);
         assert_eq!(MIN_COMMAND_TEMPLATE_SYNC_VERSION, 1);
         assert_eq!(COMMAND_TEMPLATE_SYNC_EPOCH, 1);
     }

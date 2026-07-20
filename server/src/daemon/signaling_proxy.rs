@@ -3017,6 +3017,7 @@ mod tests {
                 template_id: "get_disk".into(),
                 argv: vec!["Get-Disk".into()],
                 effect: ExecEffect::ReadOnly,
+                containment: Default::default(),
             }],
             command_template_revision: Some(1),
             epoch: COMMAND_TEMPLATE_SYNC_EPOCH,
@@ -3090,6 +3091,7 @@ mod tests {
                     template_id: "get_disk".into(),
                     argv: vec!["Get-Disk".into()],
                     effect: ExecEffect::ReadOnly,
+                    containment: Default::default(),
                 }],
                 command_template_revision: revision,
                 epoch,
@@ -3369,10 +3371,13 @@ mod tests {
             template_id: "svc_restart".into(),
             argv: vec!["net".into(), "stop".into(), "spooler".into()],
             effect: desk_agent_protocol::exec::ExecEffect::Mutating,
+            containment: Default::default(),
         };
         let draft = desk_agent_protocol::exec_policy::build_exact_argv_draft(
             &template,
-            desk_agent_protocol::exec_policy::ExecLimits::defaults(),
+            None,
+            desk_agent_protocol::exec_policy::DEFAULT_OUTPUT_BYTES,
+            desk_agent_protocol::exec_policy::DEFAULT_OUTPUT_BYTES,
             None,
         );
         desk_agent_protocol::exec::ExecPlan::from_draft(

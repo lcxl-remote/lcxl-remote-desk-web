@@ -621,6 +621,7 @@ mod tests {
             timeout_ms,
             max_stdout_bytes: max_out,
             max_stderr_bytes: max_out,
+            containment: Default::default(),
         }
     }
 

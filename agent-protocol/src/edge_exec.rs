@@ -415,6 +415,7 @@ mod tests {
                 timeout_ms: 10_000,
                 max_stdout_bytes: 65_536,
                 max_stderr_bytes: 65_536,
+                containment: crate::exec::ExecContainmentSnapshot::default(),
             },
         )
     }

@@ -154,6 +154,7 @@ mod tests {
             template_id: id.to_string(),
             argv: argv.iter().map(|s| s.to_string()).collect(),
             effect: ExecEffect::ReadOnly,
+            containment: Default::default(),
         }
     }
 

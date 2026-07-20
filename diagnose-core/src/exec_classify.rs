@@ -26,7 +26,9 @@ mod tokenize;
 
 use desk_agent_protocol::command_blocklist::{BlocklistRule, blocklist_match};
 use desk_agent_protocol::command_template::SyncedCommandTemplate;
-use desk_agent_protocol::exec::{CommandClassification, ExecDecision, ExecPlanDraft};
+use desk_agent_protocol::exec::{
+    CommandClassification, ExecContainmentSnapshot, ExecDecision, ExecPlanDraft,
+};
 use desk_agent_protocol::exec_policy::{build_exact_argv_draft, builtin_blocklist, fingerprint};
 use desk_agent_protocol::{ExecInput, ExecTarget, RiskLevel};
 
@@ -126,7 +128,9 @@ pub fn classify_command_core(
         let limits = ExecLimits::clamped(input);
         let (program, argv) = (m.template.render)(&m.bound);
         let cwd = input.cwd.clone();
-        let fingerprint = fingerprint(&program, &argv, cwd.as_deref(), &limits);
+        // Built-in slot templates run foreground under the baseline envelope.
+        let containment = ExecContainmentSnapshot::default();
+        let fingerprint = fingerprint(&program, &argv, cwd.as_deref(), &limits, &containment);
 
         let impact = if m.bound.is_empty() {
             m.template.impact.to_string()
@@ -145,6 +149,7 @@ pub fn classify_command_core(
             timeout_ms: limits.timeout_ms,
             max_stdout_bytes: limits.max_stdout_bytes,
             max_stderr_bytes: limits.max_stderr_bytes,
+            containment,
         };
 
         return ClassifyOutcome {
@@ -169,7 +174,18 @@ pub fn classify_command_core(
         })
     {
         let limits = ExecLimits::clamped(input);
-        let draft = build_exact_argv_draft(t, limits, input.cwd.clone());
+        // The template path does not pre-compress the request to the foreground
+        // ceiling: the raw request (0 → None) feeds the layered `effective_wall_ms`,
+        // so a background-whitelisted template can still resolve past 60 s. Output
+        // caps stay clamped.
+        let request_wall = (input.timeout_ms != 0).then_some(input.timeout_ms);
+        let draft = build_exact_argv_draft(
+            t,
+            request_wall,
+            limits.max_stdout_bytes,
+            limits.max_stderr_bytes,
+            input.cwd.clone(),
+        );
         return ClassifyOutcome {
             classification: CommandClassification {
                 risk: t.risk(),
@@ -375,6 +391,7 @@ mod tests {
             template_id: template_id.to_string(),
             argv: argv.iter().map(|s| s.to_string()).collect(),
             effect,
+            containment: Default::default(),
         }
     }
 

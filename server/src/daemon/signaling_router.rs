@@ -38,7 +38,7 @@ use desk_agent_protocol::exec::{
     ConfirmExecData, ExecDecision, ExecEffect, ExecPlan, ExecPreview, ExecResultPayload,
     ResolveExecData,
 };
-use desk_agent_protocol::exec_policy::{ExecLimits, build_exact_argv_draft};
+use desk_agent_protocol::exec_policy::{DEFAULT_OUTPUT_BYTES, ExecLimits, build_exact_argv_draft};
 
 use crate::diagnose::terminal_copilot::copilot_signaling_sink;
 use desk_agent_protocol::exec_lifecycle::{ExecControlAction, ExecControlPayload};
@@ -3735,7 +3735,13 @@ fn validate_fleet_edge_exec(
         .filter(|t| t.template_id == plan.template_id)
     {
         saw_candidate = true;
-        let expected = build_exact_argv_draft(template, ExecLimits::defaults(), None);
+        let expected = build_exact_argv_draft(
+            template,
+            None,
+            DEFAULT_OUTPUT_BYTES,
+            DEFAULT_OUTPUT_BYTES,
+            None,
+        );
         if plan_matches_draft(plan, &expected) {
             faithful = true;
             break;
@@ -7111,6 +7117,7 @@ mod tests {
                 template_id: "get_disk".into(),
                 argv: vec!["Get-Disk".into()],
                 effect: ExecEffect::ReadOnly,
+                containment: Default::default(),
             }]),
             &ctx,
         )
@@ -7232,6 +7239,7 @@ mod tests {
                 template_id: "net_stop".into(),
                 argv: vec!["net".into(), "stop".into(), "spooler".into()],
                 effect: ExecEffect::Mutating,
+                containment: Default::default(),
             }],
             desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
             Some(1),
@@ -7269,6 +7277,7 @@ mod tests {
                 template_id: "net_stop".into(),
                 argv: vec!["net".into(), "stop".into(), "spooler".into()],
                 effect: ExecEffect::Mutating,
+                containment: Default::default(),
             }],
             desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
             Some(1),
@@ -7303,6 +7312,7 @@ mod tests {
                 template_id: "net_stop".into(),
                 argv: vec!["net".into(), "stop".into(), "spooler".into()],
                 effect: ExecEffect::Mutating,
+                containment: Default::default(),
             }],
             desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
             Some(1),
@@ -7330,6 +7340,7 @@ mod tests {
             template_id: "svc_restart".into(),
             argv: vec!["net".into(), "stop".into(), "spooler".into()],
             effect: desk_agent_protocol::exec::ExecEffect::Mutating,
+            containment: Default::default(),
         }
     }
 
@@ -7337,7 +7348,13 @@ mod tests {
     /// no cwd) under the given per-attempt request id, which is the generation the
     /// frame carries. The task id is the stable target identity.
     fn fleet_plan(template: &SyncedCommandTemplate, request_id: &str) -> ExecPlan {
-        let draft = build_exact_argv_draft(template, ExecLimits::defaults(), None);
+        let draft = build_exact_argv_draft(
+            template,
+            None,
+            DEFAULT_OUTPUT_BYTES,
+            DEFAULT_OUTPUT_BYTES,
+            None,
+        );
         ExecPlan::from_draft(
             ExecRequestId("target-1".to_string()),
             request_id,
@@ -7459,6 +7476,7 @@ mod tests {
             template_id: "svc_restart".into(),
             argv: vec!["net".into(), "start".into(), "spooler".into()],
             effect: desk_agent_protocol::exec::ExecEffect::Mutating,
+            containment: Default::default(),
         };
         let right = fleet_template();
         let plan = fleet_plan(&right, "a1");
@@ -7495,6 +7513,7 @@ mod tests {
             &plan.argv,
             plan.cwd.as_deref(),
             &tampered,
+            &plan.containment,
         );
         let reason = validate_fleet_edge_exec(
             &plan,
@@ -7518,6 +7537,7 @@ mod tests {
             &plan.argv,
             injected.as_deref(),
             &ExecLimits::defaults(),
+            &plan.containment,
         );
         let reason = validate_fleet_edge_exec(
             &plan,
@@ -7569,6 +7589,7 @@ mod tests {
             template_id: "danger".into(),
             argv: vec!["wevtutil".into(), "cl".into(), "System".into()],
             effect: desk_agent_protocol::exec::ExecEffect::Mutating,
+            containment: Default::default(),
         };
         let plan = fleet_plan(&template, "a1");
         let reason = validate_fleet_edge_exec(
@@ -7590,6 +7611,7 @@ mod tests {
             template_id: "danger".into(),
             argv: vec!["wevtutil".into(), "cl".into(), "System".into()],
             effect: desk_agent_protocol::exec::ExecEffect::Mutating,
+            containment: Default::default(),
         };
         let plan = fleet_plan(&template, "a1");
         let effective: Vec<desk_agent_protocol::command_blocklist::BlocklistRule> =
@@ -7679,6 +7701,7 @@ mod tests {
                 template_id: "svc_restart".into(),
                 argv: vec!["net".into(), "start".into(), "spooler".into()],
                 effect: desk_agent_protocol::exec::ExecEffect::Mutating,
+                containment: Default::default(),
             }],
             desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
             Some(1),
@@ -7847,6 +7870,7 @@ mod tests {
             template_id: "list_pods".into(),
             argv: vec!["kubectl".into(), "get".into(), "pods".into()],
             effect: ExecEffect::ReadOnly,
+            containment: Default::default(),
         }];
         let input = agentic_input("kubectl get pods", None, 0);
         let plan = agentic_plan_from_input(&input, &operator, "a1");
@@ -7880,6 +7904,7 @@ mod tests {
             &plan.argv,
             plan.cwd.as_deref(),
             &tampered,
+            &plan.containment,
         );
         let reason = validate_agentic_edge_exec(
             &plan,
@@ -7923,6 +7948,7 @@ mod tests {
             template_id: "danger".into(),
             argv: vec!["kubectl".into(), "delete".into(), "ns".into()],
             effect: ExecEffect::Mutating,
+            containment: Default::default(),
         }];
         let high_input = agentic_input("kubectl delete ns", None, 0);
         let high_plan = agentic_plan_from_input(&high_input, &operator, "a2");
