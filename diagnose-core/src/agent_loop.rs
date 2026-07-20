@@ -367,6 +367,17 @@ async fn run_mutating<F: FnMut() -> String>(
             sink.on_tool_finished(&call.id, false);
             *halted = Some("not executed: a prior command in this turn was not run".to_string());
         }
+        Ok(ExecOutcome::Cancelled { reason }) => {
+            let text = match reason {
+                Some(r) => format!("the command was cancelled before it ran: {r}"),
+                None => "the command was cancelled before it ran".to_string(),
+            };
+            session
+                .conversation
+                .push(ChatMessage::tool_result(mint(), &call.id, text));
+            sink.on_tool_finished(&call.id, false);
+            *halted = Some("not executed: a prior command in this turn was cancelled".to_string());
+        }
         Ok(ExecOutcome::ApprovalTimeout) => {
             session.conversation.push(ChatMessage::tool_result(
                 mint(),
@@ -1837,6 +1848,51 @@ mod tests {
         assert_eq!(s.conversation[3].tool_call_id.as_deref(), Some("c2"));
         assert!(s.conversation[3].text.contains("not executed"));
         assert_eq!(s.execution_state, ExecutionState::None);
+    }
+
+    /// A command cancelled before it dispatched closes the call with a truthful
+    /// "cancelled" result (not "rejected"), leaves the execution machine clean, and
+    /// halts the rest of the turn.
+    #[tokio::test]
+    async fn mutating_cancelled_before_dispatch_closes_truthfully() {
+        let sess = MemSession::default();
+        let model = ScriptModel {
+            turns: RefCell::new([tool_use("c1", "exec_command"), answer("ok")].into()),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let scripted = tools(vec![ExecOutcome::Cancelled {
+            reason: Some("operator stopped it".into()),
+        }]);
+        let reg = vec![mutating_tool(
+            "exec_command",
+            Capability::ShellExecConfirmed,
+        )];
+        let clock = || "t".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        let user = ChatMessage::text("u", ChatRole::User, "restart it");
+        run_agent_turn(
+            &exec_deps(&sess, &model, &scripted, &reg, &clock),
+            exec_claim(),
+            user,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+
+        let s = sess.inner.borrow();
+        let s = s.as_ref().unwrap();
+        let result = s
+            .conversation
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("c1"))
+            .unwrap();
+        assert!(result.text.contains("cancelled"));
+        assert!(!result.text.contains("rejected"));
+        assert_eq!(
+            s.execution_state,
+            ExecutionState::None,
+            "a never-dispatched cancel leaves the machine clean"
+        );
     }
 
     /// A backend transport error from the mutating seam (not model-safe) fails the

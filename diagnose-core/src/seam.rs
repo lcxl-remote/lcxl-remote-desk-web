@@ -161,6 +161,11 @@ pub enum ExecOutcome {
     },
     /// The operator rejected the command; nothing ran.
     Rejected { reason: Option<String> },
+    /// The command was cancelled before it dispatched; it provably never ran. Unlike
+    /// [`Rejected`](Self::Rejected) (a decision at the approval gate) this is a cancel
+    /// arriving while the command was still pending, and unlike
+    /// [`Unknown`](Self::Unknown) the outcome is certain: it did not run.
+    Cancelled { reason: Option<String> },
     /// Approval expired before any decision; nothing ran.
     ApprovalTimeout,
     /// The command may have run but its outcome is unknown (cancel / timeout /
