@@ -19,8 +19,18 @@ use serde::{Deserialize, Serialize};
 ///
 /// `Assistant` carries the model's own output (text and/or [`ToolCallRef`]s);
 /// `Tool` carries the result of a tool call back to the model, linked by
-/// [`ChatMessage::tool_call_id`]. The two new roles (vs the original
-/// system/user-only prompt) are what makes multi-turn tool-calling replayable.
+/// [`ChatMessage::tool_call_id`]. The two roles beyond the original
+/// system/user-only prompt (`Assistant` / `Tool`) are what makes multi-turn
+/// tool-calling replayable.
+///
+/// `SystemEvent` is a system-generated notification injected *mid-conversation* —
+/// e.g. a background task announcing it finished — as opposed to `System`, the
+/// steering prompt. It is a distinct internal role precisely so the two dialects
+/// can render it differently: the Anthropic adapter hoists every `System` message
+/// into the top-level `system` field, which would tear a mid-conversation event
+/// out of sequence, so a `SystemEvent` must never be treated as `System`. Each
+/// adapter maps it natively (see `as_str`), so the raw token is never sent as a
+/// provider role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatRole {
@@ -28,17 +38,24 @@ pub enum ChatRole {
     User,
     Assistant,
     Tool,
+    SystemEvent,
 }
 
 impl ChatRole {
     /// Lowercase wire token (`"system"` / `"user"` / `"assistant"` / `"tool"`),
     /// matching the OpenAI role strings the adapters emit.
+    ///
+    /// `SystemEvent` returns the sentinel `"system_event"`, which is **not** a
+    /// provider role: an adapter must special-case that variant (OpenAI → a
+    /// mid-conversation `system` message; Anthropic → a `user` turn with an
+    /// explicit delimiter) before it would ever fall through to this token.
     pub fn as_str(self) -> &'static str {
         match self {
             ChatRole::System => "system",
             ChatRole::User => "user",
             ChatRole::Assistant => "assistant",
             ChatRole::Tool => "tool",
+            ChatRole::SystemEvent => "system_event",
         }
     }
 }
@@ -110,6 +127,13 @@ impl ChatMessage {
             tool_calls,
             tool_call_id: None,
         }
+    }
+
+    /// A mid-conversation system-event notification (e.g. a background task
+    /// reporting completion). Carries no tool linkage; each adapter renders the
+    /// [`ChatRole::SystemEvent`] role in its own dialect.
+    pub fn system_event(message_id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self::text(message_id, ChatRole::SystemEvent, text)
     }
 
     /// A tool-result message answering the assistant's call `tool_call_id`.
@@ -340,6 +364,7 @@ mod tests {
             (ChatRole::User, "\"user\""),
             (ChatRole::Assistant, "\"assistant\""),
             (ChatRole::Tool, "\"tool\""),
+            (ChatRole::SystemEvent, "\"system_event\""),
         ] {
             assert_eq!(serde_json::to_string(&role).unwrap(), token);
             assert_eq!(role.as_str(), token.trim_matches('"'));
@@ -381,6 +406,21 @@ mod tests {
                 serde_json::from_str(&serde_json::to_string(m).unwrap()).unwrap();
             assert_eq!(&back, m);
         }
+    }
+
+    /// A system-event message carries the `SystemEvent` role, no tool linkage, and
+    /// round-trips through serde as the `system_event` token.
+    #[test]
+    fn system_event_message_round_trips() {
+        let ev = ChatMessage::system_event("m9", "task exec_a1b2 finished: exit 0");
+        assert_eq!(ev.role, ChatRole::SystemEvent);
+        assert!(ev.tool_calls.is_empty());
+        assert!(ev.tool_call_id.is_none());
+
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["role"], "system_event");
+        let back: ChatMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(back, ev);
     }
 
     /// `EndTurn` with no tool calls is an answer; carrying tool calls is a

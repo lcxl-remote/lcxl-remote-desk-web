@@ -460,6 +460,12 @@ impl StreamState {
 /// Map one [`ChatMessage`] to OpenAI message JSON (text-only diagnose shape; a
 /// vision image rides as a multimodal content array).
 fn openai_message_to_json(m: &ChatMessage) -> Value {
+    // A mid-conversation system event renders as an in-place `system` message. The
+    // diagnose path never produces this role, but the mapping is kept in step with
+    // the agentic adapter so no dialect can ever emit the raw sentinel token.
+    if m.role == ChatRole::SystemEvent {
+        return json!({ "role": "system", "content": m.text });
+    }
     let content = match &m.image_data_url {
         Some(url) => json!([
             {"type": "text", "text": m.text},
@@ -584,6 +590,15 @@ impl OpenAiStreamState {
 
 /// Map one non-system [`ChatMessage`] to an Anthropic `messages[]` entry.
 fn anthropic_message_to_json(m: &ChatMessage) -> Value {
+    // A mid-conversation system event degrades to a `user` turn with an explicit
+    // delimiter (Anthropic has no non-hoisted system role). Kept in step with the
+    // agentic adapter; the diagnose path never produces this role.
+    if m.role == ChatRole::SystemEvent {
+        return json!({
+            "role": "user",
+            "content": format!("[system-event] {}", m.text),
+        });
+    }
     let content = match &m.image_data_url {
         Some(url) => {
             // A data URL is `data:<media_type>;base64,<data>`; Anthropic wants the
@@ -887,6 +902,31 @@ mod tests {
         assert_eq!(body["system"], "you are a diagnostician");
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
         assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    /// A system-event message never emits the raw sentinel role: OpenAI renders an
+    /// in-place `system` message, Anthropic a delimited `user` turn (not hoisted).
+    /// Kept in step with the agentic adapter even though the diagnose path is
+    /// text-only.
+    #[test]
+    fn system_event_renders_natively_in_both_dialects() {
+        let req = ModelRequest::text_only(
+            vec![
+                ChatMessage::text("s", ChatRole::System, "rules"),
+                ChatMessage::system_event("ev", "task finished: exit 0"),
+            ],
+            ResponseFormatSpec::None,
+        );
+        let openai = build_openai_body("gpt-test", &req);
+        assert_eq!(openai["messages"][1]["role"], "system");
+        assert_eq!(openai["messages"][1]["content"], "task finished: exit 0");
+
+        let anthropic = build_anthropic_body("claude-x", &req);
+        assert_eq!(anthropic["system"], "rules");
+        let msgs = anthropic["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1, "the event is a turn, not hoisted");
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"], "[system-event] task finished: exit 0");
     }
 
     #[test]
