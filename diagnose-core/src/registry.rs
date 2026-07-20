@@ -15,7 +15,7 @@ use desk_agent_protocol::{AgentScope, Capability, ExecutionMode};
 use serde::{Deserialize, Serialize};
 
 use crate::chat::ToolSpec;
-use crate::session::ExecutionState;
+use crate::session::{ExecutionState, TriggerOrigin};
 
 /// Whether a tool reads state or changes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,13 +64,16 @@ fn mode_allows_effect(mode: ExecutionMode, effect: ToolEffect) -> bool {
     }
 }
 
-/// Whether a single tool is exposed under the given scope and execution state.
-/// Requires the granted capability, a mode that permits the effect, and — for a
-/// mutating tool — no in-flight execution whose outcome is unknown.
+/// Whether a single tool is exposed under the given scope, execution state, and
+/// trigger origin. Requires the granted capability, a mode that permits the
+/// effect, and — for a mutating tool — no in-flight execution whose outcome is
+/// unknown **and** a turn origin that may start a new mutation (an automation turn
+/// may not, so completions cannot self-trigger an unbounded execution chain).
 pub fn is_exposed(
     tool: &RegisteredTool,
     scope: &AgentScope,
     execution_state: &ExecutionState,
+    origin: TriggerOrigin,
 ) -> bool {
     // The wait tool operates on the session's own task, not the device: it needs no
     // capability grant and is offered only while there is a task to wait on.
@@ -83,7 +86,9 @@ pub fn is_exposed(
     if !mode_allows_effect(scope.mode, tool.effect) {
         return false;
     }
-    if tool.effect == ToolEffect::Mutating && !execution_state.allows_new_mutation() {
+    if tool.effect == ToolEffect::Mutating
+        && (!execution_state.allows_new_mutation() || !origin.allows_new_mutation())
+    {
         return false;
     }
     true
@@ -95,10 +100,11 @@ pub fn exposed_tools<'a>(
     registry: &'a [RegisteredTool],
     scope: &AgentScope,
     execution_state: &ExecutionState,
+    origin: TriggerOrigin,
 ) -> Vec<&'a RegisteredTool> {
     registry
         .iter()
-        .filter(|t| is_exposed(t, scope, execution_state))
+        .filter(|t| is_exposed(t, scope, execution_state, origin))
         .collect()
 }
 
@@ -107,25 +113,27 @@ pub fn exposed_specs(
     registry: &[RegisteredTool],
     scope: &AgentScope,
     execution_state: &ExecutionState,
+    origin: TriggerOrigin,
 ) -> Vec<ToolSpec> {
-    exposed_tools(registry, scope, execution_state)
+    exposed_tools(registry, scope, execution_state, origin)
         .into_iter()
         .map(|t| t.spec.clone())
         .collect()
 }
 
 /// Look up an exposed tool by the name the model used. Returns `None` if the name
-/// is unknown **or** the tool is not exposed under the current scope/state — so a
-/// model that names a tool it was never shown is rejected uniformly.
+/// is unknown **or** the tool is not exposed under the current scope/state/origin —
+/// so a model that names a tool it was never shown is rejected uniformly.
 pub fn lookup_exposed<'a>(
     registry: &'a [RegisteredTool],
     name: &str,
     scope: &AgentScope,
     execution_state: &ExecutionState,
+    origin: TriggerOrigin,
 ) -> Option<&'a RegisteredTool> {
     registry
         .iter()
-        .find(|t| t.name() == name && is_exposed(t, scope, execution_state))
+        .find(|t| t.name() == name && is_exposed(t, scope, execution_state, origin))
 }
 
 #[cfg(test)]
@@ -168,7 +176,7 @@ mod tests {
     fn exposure_requires_granted_capability() {
         let reg = registry();
         let s = scope(&[Capability::SystemInfo], ExecutionMode::ReadOnly);
-        let names: Vec<_> = exposed_tools(&reg, &s, &ExecutionState::None)
+        let names: Vec<_> = exposed_tools(&reg, &s, &ExecutionState::None, TriggerOrigin::User)
             .iter()
             .map(|t| t.name().to_string())
             .collect();
@@ -183,10 +191,15 @@ mod tests {
         let granted = [Capability::SystemInfo, Capability::LogRecent];
 
         for mode in [ExecutionMode::SuggestOnly, ExecutionMode::ReadOnly] {
-            let names: Vec<_> = exposed_tools(&reg, &scope(&granted, mode), &ExecutionState::None)
-                .iter()
-                .map(|t| t.name().to_string())
-                .collect();
+            let names: Vec<_> = exposed_tools(
+                &reg,
+                &scope(&granted, mode),
+                &ExecutionState::None,
+                TriggerOrigin::User,
+            )
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect();
             assert!(names.contains(&"file_read".to_string()));
             assert!(names.contains(&"sysinfo".to_string()));
             assert!(
@@ -200,6 +213,7 @@ mod tests {
             &reg,
             &scope(&granted, ExecutionMode::ConfirmEachAction),
             &ExecutionState::None,
+            TriggerOrigin::User,
         )
         .iter()
         .map(|t| t.name().to_string())
@@ -223,7 +237,7 @@ mod tests {
             placeholder_message_id: "p".into(),
             since: "t".into(),
         };
-        let names: Vec<_> = exposed_tools(&reg, &s, &unknown)
+        let names: Vec<_> = exposed_tools(&reg, &s, &unknown, TriggerOrigin::User)
             .iter()
             .map(|t| t.name().to_string())
             .collect();
@@ -247,7 +261,7 @@ mod tests {
         )];
 
         // No task in flight: hidden.
-        assert!(exposed_tools(&reg, &s, &ExecutionState::None).is_empty());
+        assert!(exposed_tools(&reg, &s, &ExecutionState::None, TriggerOrigin::User).is_empty());
 
         // A dispatched background task: exposed despite the empty scope.
         let executing = ExecutionState::Executing {
@@ -255,7 +269,7 @@ mod tests {
             execution_id: "e".into(),
             exec_request_id: "exec_x".into(),
         };
-        let names: Vec<_> = exposed_tools(&reg, &s, &executing)
+        let names: Vec<_> = exposed_tools(&reg, &s, &executing, TriggerOrigin::User)
             .iter()
             .map(|t| t.name().to_string())
             .collect();
@@ -263,7 +277,7 @@ mod tests {
 
         // An interrupted turn with no recoverable identity: nothing to wait on.
         let interrupted = ExecutionState::Interrupted { since: "t".into() };
-        assert!(exposed_tools(&reg, &s, &interrupted).is_empty());
+        assert!(exposed_tools(&reg, &s, &interrupted, TriggerOrigin::User).is_empty());
     }
 
     /// `lookup_exposed` rejects a tool the model was never shown (unknown name or
@@ -272,10 +286,83 @@ mod tests {
     fn lookup_rejects_unexposed_tool() {
         let reg = registry();
         let s = scope(&[Capability::SystemInfo], ExecutionMode::ReadOnly);
-        assert!(lookup_exposed(&reg, "sysinfo", &s, &ExecutionState::None).is_some());
+        assert!(
+            lookup_exposed(
+                &reg,
+                "sysinfo",
+                &s,
+                &ExecutionState::None,
+                TriggerOrigin::User
+            )
+            .is_some()
+        );
         // file_read needs LogRecent, which is not granted here.
-        assert!(lookup_exposed(&reg, "file_read", &s, &ExecutionState::None).is_none());
+        assert!(
+            lookup_exposed(
+                &reg,
+                "file_read",
+                &s,
+                &ExecutionState::None,
+                TriggerOrigin::User
+            )
+            .is_none()
+        );
         // Unknown name.
-        assert!(lookup_exposed(&reg, "nope", &s, &ExecutionState::None).is_none());
+        assert!(
+            lookup_exposed(&reg, "nope", &s, &ExecutionState::None, TriggerOrigin::User).is_none()
+        );
+    }
+
+    /// An automation turn ([`TriggerOrigin::ExecCompletion`]) never sees a mutating
+    /// tool — even with the capability granted, a permissive mode, and a clean
+    /// execution state — so a completion cannot self-trigger a new command. Read
+    /// tools stay available so the automation turn can still inspect the result.
+    #[test]
+    fn automation_origin_hides_mutating_keeps_read() {
+        let reg = registry();
+        let s = scope(
+            &[Capability::SystemInfo, Capability::LogRecent],
+            ExecutionMode::ConfirmEachAction,
+        );
+
+        // A user turn under the same scope/state does expose the mutating tool.
+        assert!(
+            lookup_exposed(
+                &reg,
+                "file_write",
+                &s,
+                &ExecutionState::None,
+                TriggerOrigin::User
+            )
+            .is_some()
+        );
+
+        // The automation turn hides it while keeping reads.
+        let names: Vec<_> = exposed_tools(
+            &reg,
+            &s,
+            &ExecutionState::None,
+            TriggerOrigin::ExecCompletion,
+        )
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect();
+        assert!(names.contains(&"file_read".to_string()));
+        assert!(names.contains(&"sysinfo".to_string()));
+        assert!(
+            !names.contains(&"file_write".to_string()),
+            "an automation turn must not be offered a mutating tool"
+        );
+        // And a direct call to the hidden tool is rejected uniformly.
+        assert!(
+            lookup_exposed(
+                &reg,
+                "file_write",
+                &s,
+                &ExecutionState::None,
+                TriggerOrigin::ExecCompletion
+            )
+            .is_none()
+        );
     }
 }

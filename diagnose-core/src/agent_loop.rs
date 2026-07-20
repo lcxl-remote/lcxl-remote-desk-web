@@ -166,6 +166,7 @@ async fn run_inner(
             deps.registry,
             &session.scope_snapshot,
             &session.execution_state,
+            session.trigger_origin,
         );
         // Assemble the model request: a freshly built system prompt prepended to a
         // trailing, budget-trimmed window of the stored conversation. The system
@@ -246,6 +247,7 @@ async fn run_inner(
                         &call.name,
                         &session.scope_snapshot,
                         &session.execution_state,
+                        session.trigger_origin,
                     ) else {
                         session.conversation.push(ChatMessage::tool_result(
                             mint(),
@@ -316,6 +318,21 @@ async fn run_mutating<F: FnMut() -> String>(
     halted: &mut Option<String>,
     sink: &mut dyn TurnSink,
 ) -> Result<(), AgentError> {
+    // Defence in depth behind the exposure gate: a mutating tool is never
+    // advertised to an automation turn ([`lookup_exposed`] would already reject
+    // it), but should one still reach here it is refused before any work is
+    // created, so a completion can never self-trigger a new command.
+    if !session.trigger_origin.allows_new_mutation() {
+        session.conversation.push(ChatMessage::tool_result(
+            mint(),
+            &call.id,
+            "not executed: an automation turn cannot start a new command",
+        ));
+        sink.on_tool_finished(&call.id, false);
+        *halted = Some("not executed: an automation turn cannot start a new command".to_string());
+        return Ok(());
+    }
+
     let ctx = ExecContext {
         conversation_id: session.conversation_id.clone(),
         turn_id: turn_id.to_string(),
@@ -625,6 +642,7 @@ mod tests {
                     params.now.clone(),
                 )
             });
+            let trigger_origin = params.trigger_origin;
             session
                 .begin_turn(
                     params.turn_id,
@@ -635,6 +653,7 @@ mod tests {
                     params.now,
                 )
                 .map_err(|_| ClaimError::Busy)?;
+            session.trigger_origin = trigger_origin;
             *slot = Some(session.clone());
             Ok(session)
         }
@@ -714,6 +733,7 @@ mod tests {
             turn_id: "turn-1".into(),
             request_id: Some("req".into()),
             connection_id: Some("conn".into()),
+            trigger_origin: crate::session::TriggerOrigin::User,
             now: "2026-06-20T00:00:00Z".into(),
         }
     }
@@ -1413,6 +1433,72 @@ mod tests {
         assert_eq!(s.conversation[2].text, "exit_code=0");
         assert_eq!(s.execution_state, ExecutionState::None);
         assert_eq!(s.turn_state, TurnState::Idle);
+    }
+
+    /// An automation turn ([`TriggerOrigin::ExecCompletion`]) never runs a mutating
+    /// tool: the exec tool is not advertised (layer 1), and a model that names it
+    /// anyway is answered with "not available" without the tool seam being called —
+    /// so a completion cannot self-trigger a new command. The read tool still works.
+    #[tokio::test]
+    async fn automation_turn_cannot_start_a_new_command() {
+        use crate::session::TriggerOrigin;
+        let sess = MemSession::default();
+        let model = ScriptModel {
+            turns: RefCell::new(
+                [
+                    tool_use("c1", "exec_command"),
+                    tool_use("c2", "read_sys"),
+                    answer("done"),
+                ]
+                .into(),
+            ),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        // The seam would panic if asked to execute (no scripted outcomes), proving
+        // it is never reached for the mutating call.
+        let scripted = tools(vec![]);
+        let reg = vec![
+            mutating_tool("exec_command", Capability::ShellExecConfirmed),
+            read_tool("read_sys", Capability::SystemInfo),
+        ];
+        let clock = || "t".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        let mut claim = exec_claim();
+        claim.trigger_origin = TriggerOrigin::ExecCompletion;
+        let user = ChatMessage::text("u", ChatRole::User, "the prior command finished");
+        let outcome = run_agent_turn(
+            &exec_deps(&sess, &model, &scripted, &reg, &clock),
+            claim,
+            user,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, LoopOutcome::Answered("done".into()));
+        // The tool seam was never asked to execute anything.
+        assert!(scripted.exec_calls.borrow().is_empty());
+
+        // Layer 1: the first model call did not advertise the mutating tool, but did
+        // advertise the read tool.
+        let reqs = model.requests.borrow();
+        let first: Vec<_> = reqs[0].tools.iter().map(|t| t.name.clone()).collect();
+        assert!(
+            !first.contains(&"exec_command".to_string()),
+            "an automation turn must not be offered a mutating tool"
+        );
+        assert!(first.contains(&"read_sys".to_string()));
+
+        // The exec call was rejected as not available (the seam was never reached).
+        let s = sess.inner.borrow();
+        let s = s.as_ref().unwrap();
+        let rejected = s
+            .conversation
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("c1"))
+            .unwrap();
+        assert!(rejected.text.contains("not available"));
+        assert_eq!(s.execution_state, ExecutionState::None);
     }
 
     /// An unknown-outcome execution closes the conversation with a placeholder tool

@@ -154,6 +154,38 @@ impl ExecutionState {
     }
 }
 
+/// What caused a turn to be claimed.
+///
+/// `User` is a control-end request (a browser / app follow-up). `ExecCompletion`
+/// is an automation turn the manager fires by itself after a background command
+/// finishes, so the model reacts to the result without a human prompt.
+///
+/// The origin is adopted at the turn boundary (part of the claim) and pins one
+/// security-relevant invariant for the whole turn: an automation turn must not be
+/// able to start **new** mutations. Otherwise a completion could trigger a turn
+/// that dispatches another command whose completion triggers another turn — an
+/// unbounded self-driving chain with no human in the loop. `allows_new_mutation`
+/// is the gate; the loop both hides mutating tools from an automation turn and
+/// refuses one defensively if it is somehow still requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerOrigin {
+    /// A control-end (browser / app) request. The default for any turn.
+    #[default]
+    User,
+    /// A manager-fired automation turn reacting to a completed background command.
+    ExecCompletion,
+}
+
+impl TriggerOrigin {
+    /// Whether a turn of this origin may start a **new** mutating command. Only a
+    /// `User` turn may; an `ExecCompletion` turn is barred so completions cannot
+    /// drive an unbounded self-triggering chain of executions.
+    pub fn allows_new_mutation(self) -> bool {
+        matches!(self, TriggerOrigin::User)
+    }
+}
+
 /// One agent conversation + session, in the shape the manager persists (and the
 /// Direct runtime keeps in memory).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +208,11 @@ pub struct PersistedAgentSession {
     pub scope_snapshot: AgentScope,
 
     // ---- Transient turn routing (rebinds each turn / on reconnect) ----
+    /// What caused the current turn to be claimed. Adopted from the claim at each
+    /// turn boundary, so it always reflects the in-progress turn (never a stale
+    /// carry-over). Gates whether the turn may start new mutations.
+    #[serde(default)]
+    pub trigger_origin: TriggerOrigin,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_control_connection_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -242,6 +279,7 @@ impl PersistedAgentSession {
             policy_revision,
             turn_start_scope: scope.clone(),
             scope_snapshot: scope,
+            trigger_origin: TriggerOrigin::User,
             active_control_connection_id: None,
             current_request_id: None,
             current_turn_id: None,
@@ -1456,8 +1494,23 @@ mod tests {
             crate::chat::ChatRole::User,
             "hi",
         ));
+        s.trigger_origin = TriggerOrigin::ExecCompletion;
         let json = serde_json::to_string(&s).unwrap();
         let back: PersistedAgentSession = serde_json::from_str(&json).unwrap();
         assert_eq!(back, s);
+        assert_eq!(back.trigger_origin, TriggerOrigin::ExecCompletion);
+    }
+
+    /// A fresh session defaults to a `User` origin, and a persisted state written
+    /// before the field existed decodes to `User` (serde default), so old sessions
+    /// keep the safe, unrestricted origin.
+    #[test]
+    fn trigger_origin_defaults_to_user() {
+        assert_eq!(session().trigger_origin, TriggerOrigin::User);
+
+        let mut json = serde_json::to_value(session()).unwrap();
+        json.as_object_mut().unwrap().remove("trigger_origin");
+        let back: PersistedAgentSession = serde_json::from_value(json).unwrap();
+        assert_eq!(back.trigger_origin, TriggerOrigin::User);
     }
 }

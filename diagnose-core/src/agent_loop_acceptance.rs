@@ -80,6 +80,7 @@ impl SessionSeam for MemSession {
                 params.now.clone(),
             )
         });
+        let trigger_origin = params.trigger_origin;
         session
             .begin_turn(
                 params.turn_id,
@@ -90,6 +91,7 @@ impl SessionSeam for MemSession {
                 params.now,
             )
             .map_err(|_| ClaimError::Busy)?;
+        session.trigger_origin = trigger_origin;
         *slot = Some(session.clone());
         Ok(session)
     }
@@ -219,6 +221,7 @@ fn claim(scope: AgentScope) -> ClaimTurnParams {
         turn_id: "turn-1".into(),
         request_id: Some("req".into()),
         connection_id: Some("conn".into()),
+        trigger_origin: crate::session::TriggerOrigin::User,
         now: "2026-06-21T00:00:00Z".into(),
     }
 }

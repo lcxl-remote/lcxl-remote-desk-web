@@ -308,6 +308,14 @@ pub struct ClaimTurnParams {
     pub turn_id: String,
     pub request_id: Option<String>,
     pub connection_id: Option<String>,
+    /// What caused this turn to be claimed. A control-end request is
+    /// [`TriggerOrigin::User`]; a manager-fired automation turn is
+    /// [`TriggerOrigin::ExecCompletion`], which the loop bars from starting new
+    /// mutations. Adopted onto the session at the turn boundary.
+    ///
+    /// [`TriggerOrigin::User`]: crate::session::TriggerOrigin::User
+    /// [`TriggerOrigin::ExecCompletion`]: crate::session::TriggerOrigin::ExecCompletion
+    pub trigger_origin: crate::session::TriggerOrigin,
     pub now: String,
 }
 
