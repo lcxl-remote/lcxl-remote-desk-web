@@ -141,6 +141,62 @@ impl EdgeExecDisposition {
                 | EdgeExecDisposition::HostAtCapacity { .. }
         )
     }
+
+    /// Turn the host's authoritative view of a dispatch into a disposition, for an
+    /// upstream whose live result never arrived (the wait elapsed, or the frame
+    /// was lost). This is the move from *guessing* to *asking*: a bare timeout used
+    /// to be reported as [`Self::ExecutionStateUnknown`] whether or not the command
+    /// had run, and here the host — the only party that knows — decides instead.
+    ///
+    /// The mapping:
+    /// - [`ExecState::Terminal`] with its stored result → replay it verbatim as
+    ///   [`Self::Executed`]. A terminal state whose result has aged out of the
+    ///   ledger is still genuinely uncertain to the upstream, so it stays unknown.
+    /// - [`ExecState::SpawnFailed`] / [`ExecState::Unknown`] → the host never ran
+    ///   it (a failed spawn, or no ledger record at all), so this *proves not
+    ///   executed*: reported as [`Self::DispatchFailedBeforeWorker`], which is
+    ///   retryable rather than held for review.
+    /// - [`ExecState::Indeterminate`] → the host lost track of it across a crash;
+    ///   this is the one truly-unknown case the whole design narrows down to.
+    /// - [`ExecState::Reserved`] / [`ExecState::Running`] → still in flight, so the
+    ///   upstream has no settled answer to adopt yet: unknown, and it may ask again.
+    pub fn from_reconciled_state(reply: &crate::exec_lifecycle::ExecStateReplyPayload) -> Self {
+        use crate::exec_lifecycle::ExecState;
+        match reply.state {
+            ExecState::Terminal => match reply
+                .result_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<AgentOutcome>(json).ok())
+            {
+                Some(outcome) => EdgeExecDisposition::Executed { outcome },
+                // Terminal, but the result is no longer holdable (aged out, or
+                // unreadable): the upstream cannot recover the answer, so it is
+                // honestly uncertain rather than reported as a specific outcome.
+                None => EdgeExecDisposition::ExecutionStateUnknown {
+                    reason: "the host finished this command but no longer holds its result".into(),
+                },
+            },
+            ExecState::SpawnFailed => EdgeExecDisposition::DispatchFailedBeforeWorker {
+                reason: reply
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "the command failed to start on the host".into()),
+            },
+            ExecState::Unknown => EdgeExecDisposition::DispatchFailedBeforeWorker {
+                reason: "the host has no record of accepting this command".into(),
+            },
+            ExecState::Indeterminate => EdgeExecDisposition::ExecutionStateUnknown {
+                reason: reply.detail.clone().unwrap_or_else(|| {
+                    "the host lost track of this command across a restart".into()
+                }),
+            },
+            ExecState::Reserved | ExecState::Running => {
+                EdgeExecDisposition::ExecutionStateUnknown {
+                    reason: "the command is still running on the host".into(),
+                }
+            }
+        }
+    }
 }
 
 /// Daemon → manager reply for a `EdgeExecRequest`, correlated by the
@@ -188,6 +244,100 @@ mod tests {
             }
             .proves_not_executed()
         );
+    }
+
+    fn ok_outcome_json() -> String {
+        serde_json::to_string(&AgentOutcome::Ok(OperationOutput::Exec(ExecOutput {
+            exit_code: 0,
+            stdout: "done".into(),
+            stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            duration_ms: 5,
+            redactions: vec![],
+        })))
+        .unwrap()
+    }
+
+    fn state_reply(
+        state: crate::exec_lifecycle::ExecState,
+        result_json: Option<String>,
+    ) -> crate::exec_lifecycle::ExecStateReplyPayload {
+        crate::exec_lifecycle::ExecStateReplyPayload {
+            execution_generation: "gen-1".into(),
+            state,
+            containment_identity: None,
+            running_ms: None,
+            detail: None,
+            result_json,
+        }
+    }
+
+    /// A terminal state replays the host's stored result verbatim, so an upstream
+    /// that lost the live result frame recovers the real answer instead of a guess.
+    #[test]
+    fn a_terminal_state_replays_the_stored_result() {
+        use crate::exec_lifecycle::ExecState;
+        let reply = state_reply(ExecState::Terminal, Some(ok_outcome_json()));
+        match EdgeExecDisposition::from_reconciled_state(&reply) {
+            EdgeExecDisposition::Executed { outcome } => {
+                assert!(matches!(outcome, AgentOutcome::Ok(_)));
+            }
+            other => panic!("expected the stored result replayed, got {other:?}"),
+        }
+    }
+
+    /// A terminal state whose result has aged out is honestly uncertain, not a
+    /// fabricated success.
+    #[test]
+    fn a_terminal_state_without_a_result_is_unknown_not_invented() {
+        use crate::exec_lifecycle::ExecState;
+        let reply = state_reply(ExecState::Terminal, None);
+        assert!(matches!(
+            EdgeExecDisposition::from_reconciled_state(&reply),
+            EdgeExecDisposition::ExecutionStateUnknown { .. }
+        ));
+    }
+
+    /// A host with no record of the dispatch, or a failed spawn, *proves* the
+    /// command did not run — the win over a bare timeout, which held it for review.
+    #[test]
+    fn no_record_or_failed_spawn_proves_not_executed() {
+        use crate::exec_lifecycle::ExecState;
+        for state in [ExecState::Unknown, ExecState::SpawnFailed] {
+            let disposition = EdgeExecDisposition::from_reconciled_state(&state_reply(state, None));
+            assert!(
+                disposition.proves_not_executed(),
+                "{state:?} should prove not executed, got {disposition:?}"
+            );
+        }
+    }
+
+    /// The one genuinely-uncertain case: the host crashed and cannot say. This is
+    /// what `ExecutionStateUnknown` is narrowed down to.
+    #[test]
+    fn only_a_lost_host_stays_unknown() {
+        use crate::exec_lifecycle::ExecState;
+        let reply = state_reply(ExecState::Indeterminate, None);
+        let disposition = EdgeExecDisposition::from_reconciled_state(&reply);
+        assert!(matches!(
+            disposition,
+            EdgeExecDisposition::ExecutionStateUnknown { .. }
+        ));
+        assert!(!disposition.proves_not_executed());
+    }
+
+    /// A still-running command has no settled answer to adopt, so the upstream
+    /// stays uncertain rather than inventing one.
+    #[test]
+    fn a_still_running_command_has_no_settled_answer() {
+        use crate::exec_lifecycle::ExecState;
+        for state in [ExecState::Reserved, ExecState::Running] {
+            assert!(matches!(
+                EdgeExecDisposition::from_reconciled_state(&state_reply(state, None)),
+                EdgeExecDisposition::ExecutionStateUnknown { .. }
+            ));
+        }
     }
 
     #[test]

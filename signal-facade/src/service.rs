@@ -361,6 +361,23 @@ pub trait EdgeExecObserver: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 }
 
+// ====== ExecStateReplyObserver trait ======
+
+/// Consumes inbound `ExecStateReply` frames that answer a query the manager
+/// itself issued (a reconcile of an execution whose live result it lost). The
+/// manager implements this to feed the reply into its state-query pending store,
+/// keyed by the execution generation and validated against the reporting
+/// connection; the signal server leaves it unset. A reply carrying a
+/// `to_connection_id` is a browser-initiated query's answer and is relayed to
+/// that peer instead — only a reply with no peer target is the manager's own.
+pub trait ExecStateReplyObserver: Send + Sync {
+    fn on_exec_state_reply<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
 // ====== RemoteToolObserver trait ======
 
 /// Consumes inbound `RemoteToolResponse` frames (chunks of an already-redacted
@@ -739,6 +756,9 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// `Some` only in the manager (which feeds them into its execution pending
     /// store); `None` elsewhere, where they are ignored.
     pub edge_exec_observer: Option<Arc<dyn EdgeExecObserver>>,
+    /// Reconcile-reply consumer for inbound `ExecStateReply` frames the manager
+    /// itself asked for. `Some` only in the manager; `None` elsewhere.
+    pub exec_state_reply_observer: Option<Arc<dyn ExecStateReplyObserver>>,
     /// Remote read-tool response consumer for inbound `RemoteToolResponse` frames.
     /// `Some` only in the manager (which feeds them into its remote-tool pending
     /// store); `None` elsewhere, where they are ignored.
@@ -926,6 +946,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             audit_observer: None,
             collect_observer: None,
             edge_exec_observer: None,
+            exec_state_reply_observer: None,
             remote_tool_observer: None,
             support_code_minter: None,
             fetch_connections_resolver: None,
@@ -982,6 +1003,17 @@ impl<U: SignalingUser> SignalingHandler<U> {
     /// frames are ignored there.
     pub fn with_edge_exec_observer(mut self, observer: Arc<dyn EdgeExecObserver>) -> Self {
         self.edge_exec_observer = Some(observer);
+        self
+    }
+
+    /// Attach a reconcile-reply consumer (the manager's state-query pending
+    /// store). The signal server never calls this, so an unrouted inbound
+    /// `ExecStateReply` is ignored there.
+    pub fn with_exec_state_reply_observer(
+        mut self,
+        observer: Arc<dyn ExecStateReplyObserver>,
+    ) -> Self {
+        self.exec_state_reply_observer = Some(observer);
         self
     }
 
@@ -1405,12 +1437,27 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::TerminalCompleteResult
             | SignalingType::ExecPreview
             | SignalingType::ExecResult
-            // Lifecycle frames report an execution's progress and answer a
-            // control frame; both are host-originated facts, relayed unchanged.
-            | SignalingType::ExecLifecycle
-            | SignalingType::ExecStateReply => {
+            // Progress frames are host-originated facts, relayed to the control
+            // end unchanged.
+            | SignalingType::ExecLifecycle => {
                 // Generic forwarding
                 self.forward_to_peer(&signaling_model, false).await?;
+            }
+
+            // A state reply answers either a browser's query or the manager's own
+            // reconcile. A browser-initiated query carries the browser as the
+            // reply's target, so it relays there; a reconcile the manager issued
+            // has no peer target, and its answer is consumed here instead of being
+            // forwarded to no one. The signal server has no reconcile consumer, so
+            // an unrouted reply is simply dropped.
+            SignalingType::ExecStateReply => {
+                if signaling_model.to_connection_id.is_some() {
+                    self.forward_to_peer(&signaling_model, false).await?;
+                } else if let Some(observer) = self.exec_state_reply_observer.clone() {
+                    observer
+                        .on_exec_state_reply(&self.connection_state, &signaling_model)
+                        .await;
+                }
             }
 
             // AI audit event (host → manager only). Consumed by the manager's

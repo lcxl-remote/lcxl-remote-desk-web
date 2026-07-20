@@ -280,6 +280,7 @@ impl ExecLedger {
                 containment_identity: None,
                 running_ms: None,
                 detail: None,
+                result_json: None,
             });
         };
 
@@ -301,13 +302,20 @@ impl ExecLedger {
                 .max(0) as u64
         });
 
-        // `result_json` holds the spawn failure's reason; for a completed command it
-        // holds the output, which belongs on the result path rather than here.
+        // `result_json` holds different things by state: a completed command's
+        // recorded outcome, or a failed spawn's reason. The outcome is offered as a
+        // replay source so an upstream that lost the live result frame can recover
+        // it (rather than travelling only on the live result path); the spawn
+        // reason is surfaced as human-readable detail.
         let detail = match state {
             ExecState::SpawnFailed => row.result_json.clone(),
             ExecState::Indeterminate => Some(
                 "the host lost track of this execution and cannot say whether it ran".to_string(),
             ),
+            _ => None,
+        };
+        let result_json = match state {
+            ExecState::Terminal => row.result_json.clone(),
             _ => None,
         };
 
@@ -317,6 +325,7 @@ impl ExecLedger {
             containment_identity: row.containment_identity.clone(),
             running_ms,
             detail,
+            result_json,
         })
     }
 
@@ -432,6 +441,31 @@ mod tests {
         assert_eq!(reply.state, ExecState::Terminal);
         assert!(reply.state.is_settled());
         assert_eq!(reply.running_ms, None);
+    }
+
+    /// A terminal reply carries the stored result verbatim, so an upstream that
+    /// lost the live result frame can replay the answer instead of guessing. A
+    /// still-running or unknown generation carries no result to replay.
+    #[tokio::test]
+    async fn a_terminal_reply_replays_the_stored_result() {
+        let l = ledger().await;
+        l.reserve("task-1", "gen-1", "fp-1", None).await.unwrap();
+        assert_eq!(l.describe("gen-1").await.unwrap().result_json, None);
+
+        l.mark_terminal("gen-1", Terminal::Completed("{\"status\":\"ok\"}".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            l.describe("gen-1").await.unwrap().result_json.as_deref(),
+            Some("{\"status\":\"ok\"}")
+        );
+
+        // Once the result ages out, the tombstone remains but there is nothing to
+        // replay — the reply is honest about no longer holding it.
+        l.forget_results_older_than(Duration::ZERO).await.unwrap();
+        let reply = l.describe("gen-1").await.unwrap();
+        assert_eq!(reply.state, ExecState::Terminal);
+        assert_eq!(reply.result_json, None);
     }
 
     /// A failed spawn hands back why, so an upstream can report it without having

@@ -169,6 +169,18 @@ pub struct ExecStateReplyPayload {
     /// Model-safe elaboration — why a state is indeterminate, or why a spawn
     /// failed. Never the command's output, which travels on the result path.
     pub detail: Option<String>,
+    /// The stored result of a settled execution, as the exact bytes the host
+    /// recorded (a serialized outcome). Present only for a [`ExecState::Terminal`]
+    /// and only while the host still holds it — a result that has aged out of the
+    /// ledger is gone, and the field is `None`.
+    ///
+    /// This is what makes the host authoritative on reconnect: an upstream that
+    /// lost the live result frame replays the answer from here rather than
+    /// guessing. It is deliberately the raw recorded bytes, not a re-derived
+    /// value, so the answer an upstream reconciles is the one the host actually
+    /// gave — never a re-interpretation of it.
+    #[serde(default)]
+    pub result_json: Option<String>,
 }
 
 #[cfg(test)]
@@ -296,6 +308,7 @@ mod tests {
                 containment_identity: Some("pgid:1".into()),
                 running_ms: Some(10),
                 detail: None,
+                result_json: None,
             };
             let json = serde_json::to_string(&reply).expect("encode");
             let back: ExecStateReplyPayload = serde_json::from_str(&json).expect("decode");
