@@ -24,7 +24,7 @@
 //! [`MAX_STEPS_PER_TURN`]: crate::MAX_STEPS_PER_TURN
 //! [`MAX_SAME_TOOL_PER_TURN`]: crate::MAX_SAME_TOOL_PER_TURN
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use desk_agent_protocol::AgentError;
 
@@ -177,6 +177,12 @@ async fn run_inner(
             &session.conversation,
             deps.max_context_bytes,
         ));
+        // The ids the model is about to see. A pending auto-trigger whose completion
+        // message is in this request is cleared once the model reacts to it (the
+        // assistant answer / tool-call save below), so it never fires an automation
+        // turn for a result the model already handled.
+        let request_message_ids: HashSet<String> =
+            messages.iter().map(|m| m.message_id.clone()).collect();
         let request = ModelRequest {
             messages,
             tools: specs,
@@ -196,6 +202,9 @@ async fn run_inner(
                     crate::chat::ChatRole::Assistant,
                     turn.text.clone(),
                 ));
+                // The model reacted to this request; drop any pending auto-trigger
+                // whose completion it saw here so it does not also fire a turn.
+                session.clear_reacted_auto_triggers(&request_message_ids);
                 deps.session_seam.save(session).await?;
                 sink.on_answer_committed(&turn.text);
                 return Ok(LoopOutcome::Answered(turn.text));
@@ -214,6 +223,10 @@ async fn run_inner(
                     turn.text.clone(),
                     refs,
                 ));
+                // The model reacted to this request (with tool calls); drop any
+                // pending auto-trigger whose completion it saw here. Persisted with
+                // the tool results at the save below.
+                session.clear_reacted_auto_triggers(&request_message_ids);
 
                 // Mutating tools in one turn run serially; once one is rejected,
                 // times out, or goes to an unknown outcome, the rest of the turn's
@@ -1499,6 +1512,69 @@ mod tests {
             .unwrap();
         assert!(rejected.text.contains("not available"));
         assert_eq!(s.execution_state, ExecutionState::None);
+    }
+
+    /// When the model reacts to a request that contained a pending auto-trigger's
+    /// completion message, the loop drops that pending entry (the model handled it,
+    /// so no automation turn should fire) — but leaves a pending entry whose
+    /// completion the model never saw.
+    #[tokio::test]
+    async fn reacting_to_a_completion_clears_its_pending_trigger() {
+        use crate::session::PendingAutoTrigger;
+        let sess = MemSession::default();
+        let model = ScriptModel {
+            turns: RefCell::new([answer("acknowledged")].into()),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let scripted = tools(vec![]);
+        let reg: Vec<RegisteredTool> = vec![];
+        let clock = || "t".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+
+        // Seed a session whose conversation already carries a completion message
+        // (id "done-1") plus a pending entry keyed on it, and a second pending entry
+        // ("done-absent") whose message is not in the conversation.
+        let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "t0");
+        seeded
+            .conversation
+            .push(ChatMessage::untrusted_output("done-1", "exit_code=0"));
+        seeded.add_pending_auto_trigger(PendingAutoTrigger {
+            work_id: 1,
+            execution_id: "e1".into(),
+            tool_call_id: "c1".into(),
+            event_id: "done-1".into(),
+            chain_id: "chain".into(),
+            resolution_org_id: None,
+            since: "t0".into(),
+        });
+        seeded.add_pending_auto_trigger(PendingAutoTrigger {
+            work_id: 2,
+            execution_id: "e2".into(),
+            tool_call_id: "c2".into(),
+            event_id: "done-absent".into(),
+            chain_id: "chain".into(),
+            resolution_org_id: None,
+            since: "t0".into(),
+        });
+        *sess.inner.borrow_mut() = Some(seeded);
+
+        let user = ChatMessage::text("u", ChatRole::User, "what happened?");
+        let outcome = run_agent_turn(
+            &exec_deps(&sess, &model, &scripted, &reg, &clock),
+            claim(),
+            user,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, LoopOutcome::Answered("acknowledged".into()));
+
+        let s = sess.inner.borrow();
+        let pending = &s.as_ref().unwrap().pending_auto_triggers;
+        // "done-1" was in the request the model answered, so it is drained; the
+        // entry the model never saw survives.
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].event_id, "done-absent");
     }
 
     /// An unknown-outcome execution closes the conversation with a placeholder tool

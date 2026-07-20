@@ -16,6 +16,8 @@
 //! rebound on reconnect; the **turn routing** fields (connection / request /
 //! turn id) are transient and rebind each turn.
 
+use std::collections::HashSet;
+
 use desk_agent_protocol::AgentScope;
 use serde::{Deserialize, Serialize};
 
@@ -186,6 +188,35 @@ impl TriggerOrigin {
     }
 }
 
+/// A completed background command whose result is in the conversation but which
+/// the model has not yet reacted to — a candidate for firing an automation turn.
+///
+/// The set of these on a session is the durable work-list the automation executor
+/// sweeps. An entry is added when a result is delivered (only while the automation
+/// gate is on) and removed once the model has seen it in a request it then reacted
+/// to (see [`PersistedAgentSession::clear_reacted_auto_triggers`]).
+///
+/// `event_id` is the `message_id` of the completion message in the conversation —
+/// the identity the reacted-check matches on and the dedup key. `chain_id` ties
+/// the entry to the automation chain that was current when the command was
+/// dispatched, so a later user turn that starts a fresh chain can be told this
+/// entry is stale. `resolution_org_id` pins the org context for re-evaluating
+/// authorization off-connection when the executor claims the turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAutoTrigger {
+    pub work_id: i64,
+    pub execution_id: String,
+    pub tool_call_id: String,
+    pub event_id: String,
+    pub chain_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_org_id: Option<i64>,
+    /// When the entry was enqueued (RFC3339 UTC). The earliest `since` across the
+    /// set is denormalized into an indexed column so the executor can find sessions
+    /// with pending work without scanning every session's JSON.
+    pub since: String,
+}
+
 /// One agent conversation + session, in the shape the manager persists (and the
 /// Direct runtime keeps in memory).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,6 +254,13 @@ pub struct PersistedAgentSession {
     // ---- The two orthogonal machines ----
     pub turn_state: TurnState,
     pub execution_state: ExecutionState,
+
+    /// Completed background results the model has not yet reacted to — the
+    /// automation executor's durable work-list. Empty unless the automation gate
+    /// added an entry on delivery; drained as the model reacts, so a session with
+    /// automation off never accumulates any. See [`PendingAutoTrigger`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_auto_triggers: Vec<PendingAutoTrigger>,
 
     /// Lease fencing token. Rotated on every claim (and on lease takeover during
     /// recovery), it identifies the *current* turn owner. A [`SessionSeam::save`]
@@ -285,6 +323,7 @@ impl PersistedAgentSession {
             current_turn_id: None,
             turn_state: TurnState::Idle,
             execution_state: ExecutionState::None,
+            pending_auto_triggers: Vec::new(),
             lease_token: 0,
             current_turn_steps: 0,
             current_turn_tokens: TokenUsage::default(),
@@ -378,9 +417,67 @@ impl PersistedAgentSession {
     /// Settle the turn machine at the end of a turn. Only the turn machine is
     /// touched — an in-flight [`ExecutionState`] is left for its own
     /// reconciliation. `now` updates the modified timestamp.
+    ///
+    /// Deliberately does **not** touch [`Self::pending_auto_triggers`]: a turn that
+    /// ended without reacting (a circuit break, a truncated turn) must leave its
+    /// pending entries queued. Draining happens only where the model actually
+    /// reacts — see [`Self::clear_reacted_auto_triggers`].
     pub fn finish_turn(&mut self, terminal: TurnState, now: impl Into<String>) {
         self.turn_state = terminal;
         self.updated_at = now.into();
+    }
+
+    /// Enqueue a completed result as a pending auto-trigger, deduped by `event_id`.
+    /// Returns whether it was newly added (`false` if an entry with the same
+    /// `event_id` is already queued). Pure: the caller persists under its own CAS
+    /// and syncs the denormalized index column from [`Self::earliest_pending_at`].
+    pub fn add_pending_auto_trigger(&mut self, trigger: PendingAutoTrigger) -> bool {
+        if self
+            .pending_auto_triggers
+            .iter()
+            .any(|p| p.event_id == trigger.event_id)
+        {
+            return false;
+        }
+        self.pending_auto_triggers.push(trigger);
+        true
+    }
+
+    /// Drop every pending auto-trigger the model has now seen and reacted to — one
+    /// whose `event_id` (the completion message's `message_id`) is among the
+    /// `message_id`s of the request the model just answered. Returns how many were
+    /// dropped.
+    ///
+    /// Called only where the model actually reacts (the assistant answer /
+    /// tool-call save), never on the generic turn-settle path — otherwise a turn
+    /// that circuit-broke before reacting (e.g. a one-step budget) would wrongly
+    /// drop a completion the model never saw. Pure.
+    pub fn clear_reacted_auto_triggers(&mut self, request_message_ids: &HashSet<String>) -> usize {
+        let before = self.pending_auto_triggers.len();
+        self.pending_auto_triggers
+            .retain(|p| !request_message_ids.contains(&p.event_id));
+        before - self.pending_auto_triggers.len()
+    }
+
+    /// Remove one pending auto-trigger by `event_id` (the executor settled or
+    /// skipped it). Returns whether one was removed. Pure.
+    pub fn remove_pending_auto_trigger(&mut self, event_id: &str) -> bool {
+        let before = self.pending_auto_triggers.len();
+        self.pending_auto_triggers
+            .retain(|p| p.event_id != event_id);
+        before != self.pending_auto_triggers.len()
+    }
+
+    /// The earliest `since` across the pending set, or `None` when empty — the
+    /// value denormalized into the indexed `pending_auto_trigger_at` column so the
+    /// executor can find sessions with pending work without scanning every
+    /// session's JSON. Timestamps are RFC3339 UTC, so the lexical minimum is the
+    /// chronological minimum.
+    pub fn earliest_pending_at(&self) -> Option<&str> {
+        self.pending_auto_triggers
+            .iter()
+            .map(|p| p.since.as_str())
+            .min()
     }
 
     /// Reconcile a late execution result against an unknown outcome (§6.2): if the
@@ -1495,10 +1592,75 @@ mod tests {
             "hi",
         ));
         s.trigger_origin = TriggerOrigin::ExecCompletion;
+        s.add_pending_auto_trigger(pending("ev-a", "2026-07-20T00:00:01Z"));
         let json = serde_json::to_string(&s).unwrap();
         let back: PersistedAgentSession = serde_json::from_str(&json).unwrap();
         assert_eq!(back, s);
         assert_eq!(back.trigger_origin, TriggerOrigin::ExecCompletion);
+        assert_eq!(back.pending_auto_triggers.len(), 1);
+
+        // A state written before the field existed decodes to an empty set.
+        let mut old = serde_json::to_value(session()).unwrap();
+        old.as_object_mut().unwrap().remove("pending_auto_triggers");
+        let back: PersistedAgentSession = serde_json::from_value(old).unwrap();
+        assert!(back.pending_auto_triggers.is_empty());
+    }
+
+    fn pending(event_id: &str, since: &str) -> PendingAutoTrigger {
+        PendingAutoTrigger {
+            work_id: 7,
+            execution_id: "e".into(),
+            tool_call_id: "call-1".into(),
+            event_id: event_id.into(),
+            chain_id: "chain-1".into(),
+            resolution_org_id: Some(3),
+            since: since.into(),
+        }
+    }
+
+    /// Pending auto-triggers are added deduped by `event_id`; `earliest_pending_at`
+    /// tracks the chronological (lexical, RFC3339 UTC) minimum `since`.
+    #[test]
+    fn pending_add_dedups_and_tracks_earliest() {
+        let mut s = session();
+        assert_eq!(s.earliest_pending_at(), None);
+
+        assert!(s.add_pending_auto_trigger(pending("ev-b", "2026-07-20T00:00:05Z")));
+        assert!(s.add_pending_auto_trigger(pending("ev-a", "2026-07-20T00:00:01Z")));
+        // A second entry for the same event_id is rejected (idempotent delivery).
+        assert!(!s.add_pending_auto_trigger(pending("ev-a", "2026-07-20T00:00:09Z")));
+
+        assert_eq!(s.pending_auto_triggers.len(), 2);
+        assert_eq!(s.earliest_pending_at(), Some("2026-07-20T00:00:01Z"));
+    }
+
+    /// `clear_reacted_auto_triggers` drops exactly the entries whose `event_id` is
+    /// in the request the model reacted to, and reports the count; `finish_turn`
+    /// never touches the set (a circuit-broken turn keeps its pending work).
+    #[test]
+    fn pending_clear_reacted_by_membership_and_finish_turn_preserves() {
+        let mut s = session();
+        s.add_pending_auto_trigger(pending("ev-a", "t1"));
+        s.add_pending_auto_trigger(pending("ev-b", "t2"));
+        s.add_pending_auto_trigger(pending("ev-c", "t3"));
+
+        // finish_turn must not drop anything.
+        s.finish_turn(TurnState::Idle, "t9");
+        assert_eq!(s.pending_auto_triggers.len(), 3);
+
+        // Only ev-a and ev-c were in the request the model reacted to.
+        let seen: HashSet<String> = ["ev-a".to_string(), "ev-c".to_string(), "m0".to_string()]
+            .into_iter()
+            .collect();
+        assert_eq!(s.clear_reacted_auto_triggers(&seen), 2);
+        assert_eq!(s.pending_auto_triggers.len(), 1);
+        assert_eq!(s.pending_auto_triggers[0].event_id, "ev-b");
+
+        // A direct removal by event_id.
+        assert!(s.remove_pending_auto_trigger("ev-b"));
+        assert!(!s.remove_pending_auto_trigger("ev-b"));
+        assert!(s.pending_auto_triggers.is_empty());
+        assert_eq!(s.earliest_pending_at(), None);
     }
 
     /// A fresh session defaults to a `User` origin, and a persisted state written
