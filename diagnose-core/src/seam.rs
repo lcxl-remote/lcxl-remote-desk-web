@@ -160,6 +160,17 @@ pub enum ExecOutcome {
     ///
     /// [`ExecutionState::OutcomeUnknown`]: crate::session::ExecutionState::OutcomeUnknown
     Unknown(ExecIdentity),
+    /// Approved and dispatched, but still running when the foreground wait elapsed:
+    /// the command became a background task. The loop closes the tool call
+    /// immediately with a task-id result (a well-formed message it never rewrites)
+    /// and records [`ExecutionState::Executing`]; the real result arrives later as a
+    /// completion notification appended to the conversation. Unlike
+    /// [`Unknown`](Self::Unknown) the outcome is not in doubt — a result is coming —
+    /// so the conversation is not degraded, only barred from starting a second
+    /// mutation until this one completes.
+    ///
+    /// [`ExecutionState::Executing`]: crate::session::ExecutionState::Executing
+    Dispatched(ExecIdentity),
 }
 
 /// Per-call context the loop hands the mutating seam: the turn's identity, the

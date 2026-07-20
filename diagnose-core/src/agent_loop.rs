@@ -379,6 +379,31 @@ async fn run_mutating<F: FnMut() -> String>(
             sink.on_tool_finished(&call.id, false);
             *halted = Some("not executed: a prior command's outcome is unknown".to_string());
         }
+        Ok(ExecOutcome::Dispatched(id)) => {
+            // Background task model: close the tool call now with a task-id result (a
+            // well-formed message the loop never rewrites) and record the outstanding
+            // dispatch. The real result is appended later as a completion
+            // notification. The conversation stays usable — a result is coming — but
+            // no second mutation starts until this one finishes (`Executing` blocks
+            // `allows_new_mutation`).
+            session.conversation.push(ChatMessage::tool_result(
+                mint(),
+                &call.id,
+                format!(
+                    "command dispatched as background task {}; still running, its result will follow",
+                    id.exec_request_id
+                ),
+            ));
+            session.execution_state = ExecutionState::Executing {
+                work_id: id.work_id,
+                execution_id: id.execution_id,
+                exec_request_id: id.exec_request_id,
+            };
+            sink.on_tool_finished(&call.id, true);
+            *halted = Some(
+                "a prior command in this turn is still running as a background task".to_string(),
+            );
+        }
         // A model-safe execution error becomes an error tool-result; a backend
         // transport error fails the turn.
         Err(e) if e.safe_for_model => {
@@ -1255,6 +1280,76 @@ mod tests {
         // The first model call DID advertise the mutating tool.
         let first: Vec<_> = reqs[0].tools.iter().map(|t| t.name.clone()).collect();
         assert!(first.contains(&"exec_command".to_string()));
+    }
+
+    /// A dispatched-to-background outcome closes the tool call with a task-id result
+    /// and records `Executing`; the conversation is not degraded (a result is
+    /// coming) but no second mutation is offered until it completes.
+    #[tokio::test]
+    async fn mutating_dispatched_closes_with_task_id_and_hides_mutating() {
+        let sess = MemSession::default();
+        let model = ScriptModel {
+            turns: RefCell::new(
+                [
+                    tool_use("c1", "exec_command"),
+                    tool_use("c2", "read_sys"),
+                    answer("status"),
+                ]
+                .into(),
+            ),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let scripted = tools(vec![ExecOutcome::Dispatched(ExecIdentity {
+            work_id: 8,
+            execution_id: "e9".into(),
+            exec_request_id: "exec_task9".into(),
+        })]);
+        let reg = vec![
+            mutating_tool("exec_command", Capability::ShellExecConfirmed),
+            read_tool("read_sys", Capability::SystemInfo),
+        ];
+        let clock = || "2026-06-20T00:00:09Z".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        let user = ChatMessage::text("u", ChatRole::User, "run a long job");
+        let outcome = run_agent_turn(
+            &exec_deps(&sess, &model, &scripted, &reg, &clock),
+            exec_claim(),
+            user,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, LoopOutcome::Answered("status".into()));
+        let s = sess.inner.borrow();
+        let s = s.as_ref().unwrap();
+        // The dispatch is recorded as an outstanding execution, not an unknown one.
+        match &s.execution_state {
+            ExecutionState::Executing {
+                work_id,
+                execution_id,
+                exec_request_id,
+            } => {
+                assert_eq!(*work_id, 8);
+                assert_eq!(execution_id, "e9");
+                assert_eq!(exec_request_id, "exec_task9");
+            }
+            other => panic!("expected Executing, got {other:?}"),
+        }
+        // The tool call is closed with a task-id result naming the running task.
+        let closed = s
+            .conversation
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("c1"))
+            .unwrap();
+        assert!(closed.text.contains("background task"));
+        assert!(closed.text.contains("exec_task9"));
+        // The follow-up model call did not advertise the mutating tool (no second
+        // mutation while one is running) but kept the read tool.
+        let reqs = model.requests.borrow();
+        let follow_up: Vec<_> = reqs[1].tools.iter().map(|t| t.name.clone()).collect();
+        assert!(!follow_up.contains(&"exec_command".to_string()));
+        assert!(follow_up.contains(&"read_sys".to_string()));
     }
 
     /// Two mutating calls in one turn run serially: a rejection halts the rest, so
