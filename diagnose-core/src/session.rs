@@ -476,13 +476,15 @@ impl PersistedAgentSession {
     ///   `event_id`, keeping the model history well-formed.
     /// - **Closed tool call** — the call already has a result (a background dispatch
     ///   closed it with a running-task placeholder): append the completion as a
-    ///   [`ChatRole::SystemEvent`] keyed by `event_id`.
+    ///   [`ChatRole::UntrustedOutput`] message keyed by `event_id`. The bytes are
+    ///   device output, so they are fenced as untrusted data rather than injected
+    ///   with `system` authority.
     ///
     /// In the last three cases an outstanding [`ExecutionState::Executing`] for this
     /// execution is cleared so a follow-up may mutate again. Returns whether the
     /// session was mutated. Pure: the caller persists under its own CAS.
     ///
-    /// [`ChatRole::SystemEvent`]: crate::chat::ChatRole::SystemEvent
+    /// [`ChatRole::UntrustedOutput`]: crate::chat::ChatRole::UntrustedOutput
     pub fn apply_completion(
         &mut self,
         event_id: &str,
@@ -522,7 +524,8 @@ impl PersistedAgentSession {
         }
 
         // Otherwise close the open call with the real result, or — if it is already
-        // closed — append the completion as a system event; both keyed by event id.
+        // closed — append the completion as fenced untrusted output (device bytes,
+        // never a `system` message); both keyed by event id.
         let open = unclosed_tool_call_ids(&self.conversation)
             .iter()
             .any(|id| id == tool_call_id);
@@ -535,7 +538,7 @@ impl PersistedAgentSession {
                 ));
         } else {
             self.conversation
-                .push(crate::chat::ChatMessage::system_event(
+                .push(crate::chat::ChatMessage::untrusted_output(
                     event_id,
                     result_text,
                 ));
@@ -1060,10 +1063,11 @@ mod tests {
     }
 
     /// A completion for an outstanding background dispatch (Executing, tool call
-    /// already closed with a running-task placeholder) appends a system event and
-    /// clears the execution machine; a redelivery is a no-op.
+    /// already closed with a running-task placeholder) appends the output as a
+    /// fenced untrusted-output message (never a system event) and clears the
+    /// execution machine; a redelivery is a no-op.
     #[test]
-    fn apply_completion_appends_system_event_for_a_closed_call() {
+    fn apply_completion_appends_untrusted_output_for_a_closed_call() {
         use crate::chat::{ChatMessage, ChatRole, ToolCallRef};
         let mut s = session();
         s.conversation.push(ChatMessage::assistant_tool_calls(
@@ -1092,7 +1096,11 @@ mod tests {
         assert_eq!(s.conversation.len(), base + 1);
         let ev = s.conversation.last().unwrap();
         assert_eq!(ev.message_id, "work:8:done");
-        assert_eq!(ev.role, ChatRole::SystemEvent);
+        assert_eq!(
+            ev.role,
+            ChatRole::UntrustedOutput,
+            "device output must be fenced as untrusted data, not a system message"
+        );
         assert_eq!(ev.text, "exit_code=0");
         assert_eq!(
             s.execution_state,
