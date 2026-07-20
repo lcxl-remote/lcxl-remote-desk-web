@@ -377,6 +377,96 @@ impl PersistedAgentSession {
         true
     }
 
+    /// Deliver a completed background execution's result into the conversation,
+    /// idempotently keyed by `event_id`. This is the durable completion queue's sink,
+    /// covering every way the result can relate to the conversation:
+    ///
+    /// - **Already delivered** — a message keyed by `event_id` is present (a
+    ///   foreground result the loop keyed on the delivery id, or a prior delivery of
+    ///   this same event): a no-op (`false`).
+    /// - **Recovered unknown outcome** — the execution machine is
+    ///   [`ExecutionState::OutcomeUnknown`] for this `execution_id`: replace the
+    ///   placeholder tool result in place and re-key it to `event_id` so a later
+    ///   redelivery is recognized as already delivered.
+    /// - **Open tool call** — the call is still unanswered (a foreground save was
+    ///   lost before it closed the call): close it with the real result, keyed by
+    ///   `event_id`, keeping the model history well-formed.
+    /// - **Closed tool call** — the call already has a result (a background dispatch
+    ///   closed it with a running-task placeholder): append the completion as a
+    ///   [`ChatRole::SystemEvent`] keyed by `event_id`.
+    ///
+    /// In the last three cases an outstanding [`ExecutionState::Executing`] for this
+    /// execution is cleared so a follow-up may mutate again. Returns whether the
+    /// session was mutated. Pure: the caller persists under its own CAS.
+    ///
+    /// [`ChatRole::SystemEvent`]: crate::chat::ChatRole::SystemEvent
+    pub fn apply_completion(
+        &mut self,
+        event_id: &str,
+        execution_id: &str,
+        tool_call_id: &str,
+        result_text: impl Into<String>,
+        now: impl Into<String>,
+    ) -> bool {
+        // Idempotent: a message keyed by this event is already in the conversation.
+        if self.conversation.iter().any(|m| m.message_id == event_id) {
+            return false;
+        }
+        let result_text = result_text.into();
+        let now = now.into();
+
+        // A recovered unknown outcome for this execution: replace the placeholder in
+        // place and re-key it to the event id so a redelivery dedups on it above.
+        if let ExecutionState::OutcomeUnknown {
+            execution_id: current,
+            placeholder_message_id,
+            ..
+        } = &self.execution_state
+            && current == execution_id
+        {
+            let placeholder_id = placeholder_message_id.clone();
+            if let Some(msg) = self
+                .conversation
+                .iter_mut()
+                .find(|m| m.message_id == placeholder_id)
+            {
+                msg.text = result_text;
+                msg.message_id = event_id.to_string();
+            }
+            self.execution_state = ExecutionState::None;
+            self.updated_at = now;
+            return true;
+        }
+
+        // Otherwise close the open call with the real result, or — if it is already
+        // closed — append the completion as a system event; both keyed by event id.
+        let open = unclosed_tool_call_ids(&self.conversation)
+            .iter()
+            .any(|id| id == tool_call_id);
+        if open {
+            self.conversation
+                .push(crate::chat::ChatMessage::tool_result(
+                    event_id,
+                    tool_call_id,
+                    result_text,
+                ));
+        } else {
+            self.conversation
+                .push(crate::chat::ChatMessage::system_event(
+                    event_id,
+                    result_text,
+                ));
+        }
+        if matches!(
+            &self.execution_state,
+            ExecutionState::Executing { execution_id: current, .. } if current == execution_id
+        ) {
+            self.execution_state = ExecutionState::None;
+        }
+        self.updated_at = now;
+        true
+    }
+
     /// The tool-call ids the conversation left unanswered — an assistant tool call
     /// with no matching tool result, left dangling when a turn was interrupted
     /// mid-execution. A recovering [`SessionSeam`] reads these to correlate the
@@ -884,6 +974,132 @@ mod tests {
         // A distinct event_id appends a new message.
         assert!(s.append_event_if_absent("ev-2", "task exec_b finished: exit 0", "t3"));
         assert_eq!(s.conversation.len(), base + 2);
+    }
+
+    /// A completion for an outstanding background dispatch (Executing, tool call
+    /// already closed with a running-task placeholder) appends a system event and
+    /// clears the execution machine; a redelivery is a no-op.
+    #[test]
+    fn apply_completion_appends_system_event_for_a_closed_call() {
+        use crate::chat::{ChatMessage, ChatRole, ToolCallRef};
+        let mut s = session();
+        s.conversation.push(ChatMessage::assistant_tool_calls(
+            "a1",
+            String::new(),
+            vec![ToolCallRef {
+                id: "call-1".into(),
+                name: "exec_command".into(),
+                arguments_json: "{}".into(),
+            }],
+        ));
+        // The dispatch already closed the call with a running-task placeholder.
+        s.conversation.push(ChatMessage::tool_result(
+            "run-1",
+            "call-1",
+            "dispatched; still running",
+        ));
+        s.execution_state = ExecutionState::Executing {
+            work_id: 8,
+            execution_id: "e9".into(),
+            exec_request_id: "exec_t9".into(),
+        };
+        let base = s.conversation.len();
+
+        assert!(s.apply_completion("work:8:done", "e9", "call-1", "exit_code=0", "t1"));
+        assert_eq!(s.conversation.len(), base + 1);
+        let ev = s.conversation.last().unwrap();
+        assert_eq!(ev.message_id, "work:8:done");
+        assert_eq!(ev.role, ChatRole::SystemEvent);
+        assert_eq!(ev.text, "exit_code=0");
+        assert_eq!(
+            s.execution_state,
+            ExecutionState::None,
+            "the dispatch is settled"
+        );
+
+        // Redelivery of the same event is a no-op.
+        assert!(!s.apply_completion("work:8:done", "e9", "call-1", "exit_code=0", "t2"));
+        assert_eq!(s.conversation.len(), base + 1);
+    }
+
+    /// A completion for a tool call still open (a foreground save was lost before it
+    /// closed the call) closes it with the real result, keyed by the event id.
+    #[test]
+    fn apply_completion_closes_an_open_call() {
+        use crate::chat::{ChatMessage, ChatRole, ToolCallRef};
+        let mut s = session();
+        s.conversation.push(ChatMessage::assistant_tool_calls(
+            "a1",
+            String::new(),
+            vec![ToolCallRef {
+                id: "call-1".into(),
+                name: "exec_command".into(),
+                arguments_json: "{}".into(),
+            }],
+        ));
+        // No tool result for call-1 yet — the call is open.
+        assert_eq!(s.unclosed_tool_call_ids(), vec!["call-1".to_string()]);
+
+        assert!(s.apply_completion("work:8:done", "e9", "call-1", "exit_code=0", "t1"));
+        assert!(
+            s.unclosed_tool_call_ids().is_empty(),
+            "the call is now closed"
+        );
+        let msg = s.conversation.last().unwrap();
+        assert_eq!(msg.message_id, "work:8:done");
+        assert_eq!(msg.role, ChatRole::Tool);
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(msg.text, "exit_code=0");
+    }
+
+    /// A completion for a recovered unknown outcome replaces the placeholder in place
+    /// (no second result) and re-keys it to the event id, so a redelivery dedups.
+    #[test]
+    fn apply_completion_reconciles_unknown_outcome_and_rekeys() {
+        let mut s = session();
+        s.conversation.push(crate::chat::ChatMessage::tool_result(
+            "ph-1",
+            "call-1",
+            "execution outcome unknown; the command may have executed",
+        ));
+        s.execution_state = ExecutionState::OutcomeUnknown {
+            work_id: 8,
+            execution_id: "e9".into(),
+            exec_request_id: "exec_t9".into(),
+            placeholder_message_id: "ph-1".into(),
+            since: "2026-06-20T00:00:00Z".into(),
+        };
+        let base = s.conversation.len();
+
+        assert!(s.apply_completion("work:8:done", "e9", "call-1", "exit_code=0", "t1"));
+        assert_eq!(s.conversation.len(), base, "no second result appended");
+        assert_eq!(s.execution_state, ExecutionState::None);
+        let msg = s
+            .conversation
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call-1"))
+            .unwrap();
+        assert_eq!(msg.text, "exit_code=0");
+        assert_eq!(msg.message_id, "work:8:done", "the placeholder is re-keyed");
+
+        // Redelivery finds the re-keyed message present and is a no-op.
+        assert!(!s.apply_completion("work:8:done", "e9", "call-1", "again", "t2"));
+        assert_eq!(s.conversation.len(), base);
+    }
+
+    /// A completion whose event id is already present (a foreground result the loop
+    /// keyed on the delivery id) is a no-op — it never doubles the result.
+    #[test]
+    fn apply_completion_dedups_a_foreground_keyed_result() {
+        let mut s = session();
+        s.conversation.push(crate::chat::ChatMessage::tool_result(
+            "work:8:done",
+            "call-1",
+            "exit_code=0",
+        ));
+        let base = s.conversation.len();
+        assert!(!s.apply_completion("work:8:done", "e9", "call-1", "exit_code=0", "t1"));
+        assert_eq!(s.conversation.len(), base);
     }
 
     /// Each claim rotates the fencing token, so a stale prior owner can be told
