@@ -352,6 +352,31 @@ impl PersistedAgentSession {
         true
     }
 
+    /// Append a mid-conversation system-event notification identified by `event_id`,
+    /// idempotently. The appended [`ChatRole::SystemEvent`] message's `message_id`
+    /// **is** the `event_id`, so a redelivery of the same logical event — the
+    /// durable completion queue is allowed to deliver more than once and requires
+    /// the sink to dedupe — finds it already present and is a no-op.
+    ///
+    /// Returns whether the message was newly appended (`true`) or already present
+    /// (`false`). Pure: the caller persists the mutated session under its own CAS.
+    ///
+    /// [`ChatRole::SystemEvent`]: crate::chat::ChatRole::SystemEvent
+    pub fn append_event_if_absent(
+        &mut self,
+        event_id: &str,
+        text: impl Into<String>,
+        now: impl Into<String>,
+    ) -> bool {
+        if self.conversation.iter().any(|m| m.message_id == event_id) {
+            return false;
+        }
+        self.conversation
+            .push(crate::chat::ChatMessage::system_event(event_id, text));
+        self.updated_at = now.into();
+        true
+    }
+
     /// The tool-call ids the conversation left unanswered — an assistant tool call
     /// with no matching tool result, left dangling when a turn was interrupted
     /// mid-execution. A recovering [`SessionSeam`] reads these to correlate the
@@ -830,6 +855,35 @@ mod tests {
 
         // A second reconcile is a no-op (already resolved).
         assert!(!s.reconcile_late_result("exec-1", "again", "2026-06-20T00:03:00Z"));
+    }
+
+    /// An event is appended once and keyed by its `event_id`; a redelivery of the
+    /// same event finds it present and is a no-op (the durable queue may deliver
+    /// more than once). A different event_id appends a second message.
+    #[test]
+    fn append_event_if_absent_is_idempotent_by_event_id() {
+        let mut s = session();
+        let base = s.conversation.len();
+
+        assert!(s.append_event_if_absent("ev-1", "task exec_a finished: exit 0", "t1"));
+        assert_eq!(s.conversation.len(), base + 1);
+        let msg = s.conversation.last().unwrap();
+        assert_eq!(msg.message_id, "ev-1");
+        assert_eq!(msg.role, crate::chat::ChatRole::SystemEvent);
+        assert_eq!(msg.text, "task exec_a finished: exit 0");
+
+        // Redelivery of the same event_id is a no-op, even with different text.
+        assert!(!s.append_event_if_absent("ev-1", "task exec_a finished: exit 99", "t2"));
+        assert_eq!(s.conversation.len(), base + 1, "no duplicate append");
+        assert_eq!(
+            s.conversation.last().unwrap().text,
+            "task exec_a finished: exit 0",
+            "the first-delivered text is kept"
+        );
+
+        // A distinct event_id appends a new message.
+        assert!(s.append_event_if_absent("ev-2", "task exec_b finished: exit 0", "t3"));
+        assert_eq!(s.conversation.len(), base + 2);
     }
 
     /// Each claim rotates the fencing token, so a stale prior owner can be told
