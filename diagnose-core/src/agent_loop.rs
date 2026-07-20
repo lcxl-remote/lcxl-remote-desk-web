@@ -106,6 +106,32 @@ pub async fn run_agent_turn(
     user_message: ChatMessage,
     sink: &mut dyn TurnSink,
 ) -> Result<LoopOutcome, AgentError> {
+    run_or_resume(deps, claim, Some(user_message), sink).await
+}
+
+/// Run one **automation** turn end to end: like [`run_agent_turn`] but with no
+/// message appended, because the completion the turn reacts to is already the tail
+/// of the conversation (delivered when the background command finished). The model
+/// runs against that existing tail. Everything else — claim, lease, loop, settle —
+/// is identical.
+pub async fn resume_agent_turn(
+    deps: &LoopDeps<'_>,
+    claim: ClaimTurnParams,
+    sink: &mut dyn TurnSink,
+) -> Result<LoopOutcome, AgentError> {
+    run_or_resume(deps, claim, None, sink).await
+}
+
+/// Shared body of [`run_agent_turn`] / [`resume_agent_turn`]: claim the turn, keep
+/// the lease alive, optionally append a message, run the loop, then settle and
+/// persist once. `to_append` is the user message for a control-end turn, or `None`
+/// for an automation resume that reacts to the conversation's existing tail.
+async fn run_or_resume(
+    deps: &LoopDeps<'_>,
+    claim: ClaimTurnParams,
+    to_append: Option<ChatMessage>,
+    sink: &mut dyn TurnSink,
+) -> Result<LoopOutcome, AgentError> {
     let turn_id = claim.turn_id.clone();
     let mut session = match deps.session_seam.claim_turn(claim).await {
         Ok(s) => s,
@@ -120,8 +146,11 @@ pub async fn run_agent_turn(
         .heartbeat
         .map(|h| h.start(session.conversation_id.clone(), session.lease_token));
 
-    // Append the user's message and persist before the first model call.
-    session.conversation.push(user_message);
+    // Append the control-end message (if any) and persist before the first model
+    // call. An automation resume appends nothing — it reacts to the existing tail.
+    if let Some(message) = to_append {
+        session.conversation.push(message);
+    }
     deps.session_seam.save(&mut session).await?;
 
     // Run the loop; whatever happens, settle the turn machine and persist once.
@@ -1575,6 +1604,65 @@ mod tests {
         // entry the model never saw survives.
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].event_id, "done-absent");
+    }
+
+    /// An automation resume appends no message: it runs against the completion
+    /// already at the tail of the conversation, the model sees it in the request,
+    /// and reacting drains its pending entry.
+    #[tokio::test]
+    async fn resume_runs_against_the_existing_tail_without_appending() {
+        use crate::session::{PendingAutoTrigger, TriggerOrigin};
+        let sess = MemSession::default();
+        let model = ScriptModel {
+            turns: RefCell::new([answer("looked at it")].into()),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let scripted = tools(vec![]);
+        let reg: Vec<RegisteredTool> = vec![];
+        let clock = || "t".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+
+        let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "t0");
+        seeded
+            .conversation
+            .push(ChatMessage::untrusted_output("done-1", "exit_code=0"));
+        seeded.add_pending_auto_trigger(PendingAutoTrigger {
+            work_id: 1,
+            execution_id: "e1".into(),
+            tool_call_id: "c1".into(),
+            event_id: "done-1".into(),
+            chain_id: "chain".into(),
+            resolution_org_id: None,
+            since: "t0".into(),
+        });
+        let convo_len = seeded.conversation.len();
+        *sess.inner.borrow_mut() = Some(seeded);
+
+        let mut claim = claim();
+        claim.trigger_origin = TriggerOrigin::ExecCompletion;
+        let outcome = resume_agent_turn(
+            &exec_deps(&sess, &model, &scripted, &reg, &clock),
+            claim,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, LoopOutcome::Answered("looked at it".into()));
+
+        // The model saw the completion in its request.
+        let reqs = model.requests.borrow();
+        assert!(
+            reqs[0].messages.iter().any(|m| m.message_id == "done-1"),
+            "the resumed turn puts the completion in the model request"
+        );
+
+        let s = sess.inner.borrow();
+        let s = s.as_ref().unwrap();
+        // No user message was appended — only the assistant answer grew the tail.
+        assert_eq!(s.conversation.len(), convo_len + 1);
+        assert_eq!(s.conversation.last().unwrap().text, "looked at it");
+        // The pending entry the model reacted to is drained.
+        assert!(s.pending_auto_triggers.is_empty());
     }
 
     /// An unknown-outcome execution closes the conversation with a placeholder tool
