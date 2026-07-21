@@ -1,0 +1,1 @@
+{"type":"string","enum":["remote_desktop","file_manager"],"x-readme-ref-name":"RemoteSessionPurpose"}

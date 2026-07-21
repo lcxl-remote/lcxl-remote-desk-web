@@ -74,7 +74,8 @@ with that code's capability ceiling and live approval.
 - `allow_private_screen` — private (privacy) screen mode.
 - `allow_whiteboard` — whiteboard overlay.
 - `allow_terminal` — remote terminal access.
-- `allow_file_browse` — file browsing.
+- `allow_file_browse` — directory listing and file metadata.
+- `allow_file_delete` — file deletion; a delete also requires `allow_file_browse`.
 - `allow_file_transfer` — file upload / download.
 - `approval_timeout` — how long an approval prompt waits, in seconds. **Default `30`** — after which the host **server authoritatively cancels (denies) the request** rather than leaving it pending forever, enforced server-side even if the approval UI is closed or unreachable. Set to `0` to never time out (the prompt waits indefinitely). "Never" is stored as the value `0`, so it survives a restart.
 

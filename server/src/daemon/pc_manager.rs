@@ -24,6 +24,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use desk_signal_facade::model::security_settings::SecuritySettings;
+#[cfg(test)]
+use desk_signal_facade::model::signal::RemoteSessionPurpose;
 use desk_signal_facade::model::signal::{
     LcxlRTCIceServer, OfferModel, RequestRemoteModel, SignalingModel, SignalingState,
     SignalingType, TurnTransport,
@@ -1798,9 +1800,10 @@ pub async fn handle_request_remote(
     // / DataChannel handlers below and before the Init reply, so the worker-side
     // `meet(ceiling, global)` gates and grant-directed teardown observe them from
     // the connection's very first frame.
-    if access_ceiling.is_some() || grant_session_id.is_some() {
+    {
         let ctx_guard = ctx.read().await;
         let mut st = ctx_guard.signaling_state.write().await;
+        st.purpose = request_remote.purpose;
         st.access_ceiling = access_ceiling;
         st.grant_session_id = grant_session_id.clone();
     }
@@ -3998,6 +4001,7 @@ mod tests {
     async fn any_with_accept_control_covers_empty_single_and_multi() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4051,6 +4055,7 @@ mod tests {
     async fn pc_registry_create_get_remove_cycle() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4079,6 +4084,7 @@ mod tests {
     async fn pc_registry_rejects_duplicate_connection_id() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4125,6 +4131,7 @@ mod tests {
     async fn record_start_media_marks_only_first_offer() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4163,6 +4170,7 @@ mod tests {
     async fn concurrent_offers_mark_first_once() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4246,6 +4254,7 @@ mod tests {
     async fn write_video_frame_no_track_yet_is_silent_noop() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4276,6 +4285,7 @@ mod tests {
     async fn pause_all_media_marks_every_pc() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4313,6 +4323,7 @@ mod tests {
     async fn write_video_frame_paused_p_frame_keeps_flag_set() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4350,6 +4361,7 @@ mod tests {
     async fn write_video_frame_paused_i_frame_clears_flag() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4418,6 +4430,7 @@ mod tests {
     async fn broadcast_media_settings_update_all_none_is_noop() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4470,6 +4483,7 @@ mod tests {
     async fn broadcast_media_settings_update_skips_pcs_without_cached_offer() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4503,6 +4517,7 @@ mod tests {
     async fn reset_media_for_pauses_pc_even_without_cached_offer() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4538,6 +4553,7 @@ mod tests {
     async fn resume_active_media_skips_pc_without_cached_offer() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4574,6 +4590,7 @@ mod tests {
 
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4624,6 +4641,7 @@ mod tests {
     async fn resume_active_media_tears_down_capped_when_ceiling_undeliverable() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4661,6 +4679,7 @@ mod tests {
     async fn write_video_frame_audio_kind_uses_audio_track_slot() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -4708,6 +4727,7 @@ mod tests {
             None,
             Some(
                 serde_json::to_value(RequestRemoteModel {
+                    purpose: RemoteSessionPurpose::RemoteDesktop,
                     ice_servers: vec![],
                     grant_session_id: None,
                 })
@@ -4765,6 +4785,7 @@ mod tests {
             None,
             Some(
                 serde_json::to_value(RequestRemoteModel {
+                    purpose: RemoteSessionPurpose::RemoteDesktop,
                     ice_servers: vec![],
                     grant_session_id: None,
                 })
@@ -4831,6 +4852,7 @@ mod tests {
             None,
             Some(
                 serde_json::to_value(RequestRemoteModel {
+                    purpose: RemoteSessionPurpose::RemoteDesktop,
                     ice_servers: vec![],
                     grant_session_id: Some("GS-1".to_string()),
                 })
@@ -4919,6 +4941,7 @@ mod tests {
             None,
             Some(
                 serde_json::to_value(RequestRemoteModel {
+                    purpose: RemoteSessionPurpose::RemoteDesktop,
                     ice_servers: vec![],
                     grant_session_id: Some("GS-2".to_string()),
                 })
@@ -4992,6 +5015,7 @@ mod tests {
             None,
             Some(
                 serde_json::to_value(RequestRemoteModel {
+                    purpose: RemoteSessionPurpose::RemoteDesktop,
                     ice_servers: vec![],
                     grant_session_id: None,
                 })
@@ -5125,6 +5149,7 @@ mod tests {
             None,
             Some(
                 serde_json::to_value(RequestRemoteModel {
+                    purpose: RemoteSessionPurpose::RemoteDesktop,
                     ice_servers: vec![],
                     grant_session_id: None,
                 })
@@ -5205,6 +5230,7 @@ mod tests {
 
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -5278,6 +5304,7 @@ mod tests {
     async fn cleanup_pc_removes_registry_entry_even_without_worker() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -5305,6 +5332,7 @@ mod tests {
     async fn handle_connection_removed_clears_registry_for_existing_pc() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -5373,6 +5401,7 @@ mod tests {
         use crate::daemon::virtual_display::VirtualDisplaySupervisor;
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -5415,6 +5444,7 @@ mod tests {
         use crate::daemon::virtual_display::VirtualDisplaySupervisor;
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -5460,6 +5490,7 @@ mod tests {
         use crate::daemon::virtual_display::VirtualDisplaySupervisor;
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -5508,6 +5539,7 @@ mod tests {
         use crate::daemon::virtual_display::VirtualDisplaySupervisor;
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -5568,6 +5600,7 @@ mod tests {
 
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -5658,6 +5691,7 @@ mod tests {
 
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -5708,6 +5742,7 @@ mod tests {
     async fn cleanup_pc_skips_supervisor_when_none() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -5973,6 +6008,7 @@ mod tests {
     async fn close_grant_session_tears_down_all_grant_connections() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -6014,6 +6050,7 @@ mod tests {
     async fn close_grants_up_to_generation_closes_only_superseded_grants() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -6055,6 +6092,7 @@ mod tests {
     async fn cleanup_pc_unindexes_grant_connection() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -6140,6 +6178,7 @@ mod tests {
     async fn admission_survives_close_control_but_cleared_on_connection_removed() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -6239,6 +6278,7 @@ mod tests {
     async fn write_cursor_data_no_dc_registered_is_silent_noop() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -6265,6 +6305,7 @@ mod tests {
     async fn write_cursor_data_invalid_utf8_is_silent_noop() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -6305,6 +6346,7 @@ mod tests {
     async fn write_clipboard_data_drops_when_permission_not_granted() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -6329,6 +6371,7 @@ mod tests {
     async fn write_clipboard_data_no_dc_is_silent_noop() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -6358,6 +6401,7 @@ mod tests {
     async fn write_clipboard_data_invalid_utf8_is_silent_noop() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -6416,6 +6460,7 @@ mod tests {
     async fn write_file_transfer_data_does_not_gate_on_accept_control() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -6446,6 +6491,7 @@ mod tests {
     async fn write_file_transfer_data_binary_no_dc_is_silent_noop() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -6481,6 +6527,7 @@ mod tests {
     async fn write_file_transfer_data_dispatch_returns_quickly_under_backlog() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -6524,6 +6571,7 @@ mod tests {
     async fn write_file_transfer_data_after_registry_remove_is_silent_noop() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -6608,6 +6656,7 @@ mod tests {
     async fn write_file_transfer_data_awaits_when_writer_queue_full() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -6936,6 +6985,7 @@ mod tests {
         let hub = Arc::new(HostControlHub::new_local());
 
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -6977,6 +7027,7 @@ mod tests {
         let hub = Arc::new(HostControlHub::new_local());
 
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -7020,6 +7071,7 @@ mod tests {
         let hub = Arc::new(HostControlHub::new_local());
 
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -7070,6 +7122,7 @@ mod tests {
         let hub = Arc::new(HostControlHub::new_local());
 
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -7123,6 +7176,7 @@ mod tests {
         let hub = Arc::new(HostControlHub::new_local());
 
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -7181,6 +7235,7 @@ mod tests {
         let hub = Arc::new(HostControlHub::new_local());
 
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -7235,6 +7290,7 @@ mod tests {
     async fn pc_registry_supports_multiple_independent_connections() {
         let registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };

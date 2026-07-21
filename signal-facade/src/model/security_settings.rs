@@ -34,8 +34,10 @@ pub struct SecuritySettings {
     pub allow_whiteboard: Option<bool>,
     /// Allow remote terminal access
     pub allow_terminal: Option<bool>,
-    /// Allow file browsing (list/delete files via signaling)
+    /// Allow file browsing (list files and inspect metadata via signaling)
     pub allow_file_browse: Option<bool>,
+    /// Allow deleting files via signaling
+    pub allow_file_delete: Option<bool>,
     /// Allow file transfer (upload/download via DataChannel)
     pub allow_file_transfer: Option<bool>,
     /// Timeout for security approval requests in seconds.
@@ -60,6 +62,7 @@ impl Default for SecuritySettings {
             allow_whiteboard: None,
             allow_terminal: None,
             allow_file_browse: None,
+            allow_file_delete: None,
             allow_file_transfer: None,
             approval_timeout: Some(DEFAULT_APPROVAL_TIMEOUT_SECS),
         }
@@ -82,6 +85,7 @@ impl SecuritySettings {
             allow_whiteboard: None,
             allow_terminal: None,
             allow_file_browse: None,
+            allow_file_delete: None,
             allow_file_transfer: None,
             approval_timeout: None,
         }
@@ -133,6 +137,7 @@ mod tests {
         assert_eq!(c.allow_whiteboard, None);
         assert_eq!(c.allow_terminal, None);
         assert_eq!(c.allow_file_browse, None);
+        assert_eq!(c.allow_file_delete, None);
         assert_eq!(c.allow_file_transfer, None);
         assert_eq!(c.approval_timeout, None);
     }

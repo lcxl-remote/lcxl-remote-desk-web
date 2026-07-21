@@ -644,14 +644,29 @@ pub async fn run_signaling_proxy(
                     ),
                 }
             }
-            // Batch 2 of the typed-IPC migration — manager plane
-            // responses. Each `Manager*Response` rebuilds the
-            // matching outbound `SignalingType::Manager*` response
-            // model and writes it to the connection's WS sink. The
-            // daemon owns the SignalingResponseState (always
-            // `success` here — the worker only ships responses for
-            // requests it handled successfully; failures still ride
-            // the `Error` enum).
+            WorkerToService::FileManagerOpened(payload) => {
+                log::info!(
+                    "[SignalingProxy] file manager opened for {}",
+                    payload.connection_id
+                );
+            }
+            WorkerToService::FileTransferStarted(payload) => {
+                log::info!(
+                    "[SignalingProxy] file transfer started for {}: {} {:?} {} bytes",
+                    payload.connection_id,
+                    payload.transfer_id,
+                    payload.direction,
+                    payload.total_bytes
+                );
+            }
+            WorkerToService::FileTransferFinished(payload) => {
+                log::info!(
+                    "[SignalingProxy] file transfer finished for {}: {} {:?}",
+                    payload.connection_id,
+                    payload.transfer_id,
+                    payload.outcome
+                );
+            }
             WorkerToService::ManagerSystemInfoResponse(payload) => {
                 send_manager_response(
                     &outbound_tx,

@@ -17,6 +17,7 @@ export const SECURITY_CAPABILITIES = [
     "allow_whiteboard",
     "allow_terminal",
     "allow_file_browse",
+    "allow_file_delete",
     "allow_file_transfer",
 ] as const
 

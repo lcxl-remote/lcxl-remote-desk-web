@@ -38,7 +38,7 @@ import { useAdaptiveResolution, isAdaptiveResolutionGateOpen } from "./use-adapt
 import { useResolutionToast } from "./use-resolution-toast"
 import { isWebRtcAvailable } from "./webrtc-support"
 import { useToast } from "@/hooks/use-toast"
-import type { DeskSettings } from "@/services/types"
+import type { DeskSettings, RequestRemoteModel } from "@/services/types"
 import { useRestrictedSession } from "@/features/desk/restricted-session"
 import {
     SIGNALING_TYPE_CODE_REQUEST_REMOTE,
@@ -75,6 +75,24 @@ export function shouldOpenConfigDialog(args: {
         return false
     }
     return !hasAttemptedConnect || rtcFailed
+}
+
+type DesktopRequestRemotePayload = Pick<
+    RequestRemoteModel,
+    'purpose' | 'grant_session_id'
+> & {
+    connection_id: string
+}
+
+export function buildDesktopRequestRemotePayload(
+    connectionId: string,
+    grantSessionId: string | null,
+): DesktopRequestRemotePayload {
+    return {
+        connection_id: connectionId,
+        purpose: 'remote_desktop',
+        ...(grantSessionId ? { grant_session_id: grantSessionId } : {}),
+    }
 }
 
 /** Container props. `orgId` is injected only by the manager console's org view
@@ -132,12 +150,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
             console.log("WebSocket opened, requesting remote connection directly:", deskId);
             // Carry the grant token so the trusted central looks up the grant and
             // stamps the code's ceiling; owner sessions have no grant and omit it.
-            const requestData: { connection_id: string; grant_session_id?: string } = {
-                connection_id: deskId,
-            };
-            if (grantSessionId) {
-                requestData.grant_session_id = grantSessionId;
-            }
+            const requestData = buildDesktopRequestRemotePayload(deskId, grantSessionId)
             sendMessage(SIGNALING_TYPE_CODE_REQUEST_REMOTE, requestData, deskId);
             hasRequestedRef.current = true;
             setHasRequested(true);

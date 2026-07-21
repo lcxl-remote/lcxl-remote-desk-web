@@ -9,13 +9,14 @@
 //! (`should_short_circuit_*`, `resolve_mdns_host`, `LocalNodeTokenValidator`)
 //! that are still consumed by daemon code.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use actix_web::web;
 use bytes::Bytes;
 use bytestring::ByteString;
+use desk_ipc_protocol::message::{FileManagerOpenedPayload, WorkerToService};
 use desk_server_user::model::CurrentUser;
 use desk_signal_facade::error::DeskSignalFacadeError;
 use desk_signal_facade::model::private_screen::{
@@ -224,7 +225,7 @@ pub struct DeskSession {
     /// System setting helper
     pub host_control_helper: Box<dyn HostControlHelper + Send + Sync>,
     /// Whiteboard command sender bridged onto the host control hub. Always
-    /// present after the Step 6 unification — the bridge thread silently drops
+    /// present because the host-control bridge is always configured — the bridge thread silently drops
     /// messages when no Tauri client is connected.
     pub whiteboard_cmd_sender: std::sync::mpsc::Sender<WhiteboardCommand>,
     /// Unified host-control hub for approval prompts and overlay commands.
@@ -237,6 +238,14 @@ pub struct DeskSession {
     /// owner sessions carry no ceiling and use the global verbatim. Shared (Arc)
     /// with the worker session loop that populates it on `SetConnectionCeiling`.
     pub connection_ceilings: ConnectionCeilingStore,
+    /// Cached file-browse decisions keyed by controller connection.
+    pub file_browse_permissions: HashMap<String, bool>,
+    /// Cached file-delete decisions keyed by controller connection.
+    pub file_delete_permissions: HashMap<String, bool>,
+    /// Connections for which FileManagerOpened was already emitted.
+    pub opened_file_managers: HashSet<String>,
+    /// Direct worker event lane used for authoritative file activity facts.
+    pub worker_event_sender: mpsc::UnboundedSender<WorkerToService>,
 }
 
 impl DeskSession {
@@ -246,6 +255,7 @@ impl DeskSession {
         user: CurrentUser,
         host_control_hub: Arc<HostControlHub>,
         connection_ceilings: ConnectionCeilingStore,
+        worker_event_sender: mpsc::UnboundedSender<WorkerToService>,
     ) -> Result<Self, DeskError> {
         let desk_settings = settings.read().await.clone().desk;
 
@@ -309,6 +319,10 @@ impl DeskSession {
             whiteboard_cmd_sender,
             host_control_hub,
             connection_ceilings,
+            file_browse_permissions: HashMap::new(),
+            file_delete_permissions: HashMap::new(),
+            opened_file_managers: HashSet::new(),
+            worker_event_sender,
         })
     }
 
@@ -325,6 +339,90 @@ impl DeskSession {
     ) -> Option<bool> {
         let ceiling = self.connection_ceilings.get(connection_id).await;
         crate::model::security_approval::effective_permission(ceiling.as_ref(), global, dim)
+    }
+
+    /// Resolve and cache FileBrowse for one controller connection.
+    pub async fn file_browse_permission(&mut self, connection_id: &str) -> bool {
+        let global = self.settings.read().await.security.allow_file_browse;
+        let ceiling = self.connection_ceilings.get(connection_id).await;
+        let effective = crate::model::security_approval::effective_permission(
+            ceiling.as_ref(),
+            global,
+            |settings| settings.allow_file_browse,
+        );
+        if effective == Some(false) {
+            self.file_browse_permissions.remove(connection_id);
+            return false;
+        }
+        if self.file_browse_permissions.get(connection_id) == Some(&true) {
+            return true;
+        }
+        let approved = check_security_permission(
+            &self.settings,
+            &self.host_control_hub,
+            effective,
+            SecurityPermissionType::FileBrowse,
+            Some(connection_id.to_string()),
+            ceiling.is_some(),
+        )
+        .await;
+        if approved {
+            self.file_browse_permissions
+                .insert(connection_id.to_string(), true);
+        }
+        approved
+    }
+
+    /// Resolve and cache FileDelete for one controller connection.
+    pub async fn file_delete_permission(&mut self, connection_id: &str) -> bool {
+        let global = self.settings.read().await.security.allow_file_delete;
+        let ceiling = self.connection_ceilings.get(connection_id).await;
+        let effective = crate::model::security_approval::effective_permission(
+            ceiling.as_ref(),
+            global,
+            |settings| settings.allow_file_delete,
+        );
+        if effective == Some(false) {
+            self.file_delete_permissions.remove(connection_id);
+            return false;
+        }
+        if self.file_delete_permissions.get(connection_id) == Some(&true) {
+            return true;
+        }
+        let approved = check_security_permission(
+            &self.settings,
+            &self.host_control_hub,
+            effective,
+            SecurityPermissionType::FileDelete,
+            Some(connection_id.to_string()),
+            ceiling.is_some(),
+        )
+        .await;
+        if approved {
+            self.file_delete_permissions
+                .insert(connection_id.to_string(), true);
+        }
+        approved
+    }
+
+    /// Emit the authoritative open fact once per controller connection.
+    pub fn mark_file_manager_opened(&mut self, connection_id: &str) {
+        if self.opened_file_managers.insert(connection_id.to_string()) {
+            let _ = self
+                .worker_event_sender
+                .send(WorkerToService::FileManagerOpened(
+                    FileManagerOpenedPayload {
+                        connection_id: connection_id.to_string(),
+                    },
+                ));
+        }
+    }
+
+    /// Clear all connection-scoped file permissions and lifecycle state.
+    pub fn clear_file_permissions(&mut self, connection_id: &str) {
+        self.file_browse_permissions.remove(connection_id);
+        self.file_delete_permissions.remove(connection_id);
+        self.opened_file_managers.remove(connection_id);
     }
 
     /// Shutdown the session. Only terminals are owned by the

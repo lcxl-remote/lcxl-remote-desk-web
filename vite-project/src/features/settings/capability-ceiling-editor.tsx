@@ -30,6 +30,7 @@ const DIMENSIONS: { key: CapabilityDimension; label: string; desc: string }[] = 
     { key: 'allow_whiteboard', label: 'security.permission.whiteboard', desc: 'pages.system.security.whiteboardDesc' },
     { key: 'allow_terminal', label: 'security.permission.terminal', desc: 'pages.system.security.terminalDesc' },
     { key: 'allow_file_browse', label: 'security.permission.fileBrowse', desc: 'pages.system.security.fileBrowseDesc' },
+    { key: 'allow_file_delete', label: 'security.permission.fileDelete', desc: 'pages.system.security.fileDeleteDesc' },
     { key: 'allow_file_transfer', label: 'security.permission.fileTransfer', desc: 'pages.system.security.fileTransferDesc' },
 ];
 
@@ -40,6 +41,7 @@ type CapabilityDimension =
     | 'allow_whiteboard'
     | 'allow_terminal'
     | 'allow_file_browse'
+    | 'allow_file_delete'
     | 'allow_file_transfer';
 
 export const toSelect = (v: boolean | null | undefined): string =>
@@ -59,6 +61,7 @@ export const CAPABILITY_PRESETS: Record<'viewOnly' | 'assist' | 'full', Security
         allow_whiteboard: false,
         allow_terminal: false,
         allow_file_browse: false,
+        allow_file_delete: false,
         allow_file_transfer: false,
     },
     assist: {
@@ -68,6 +71,7 @@ export const CAPABILITY_PRESETS: Record<'viewOnly' | 'assist' | 'full', Security
         allow_whiteboard: true,
         allow_terminal: false,
         allow_file_browse: true,
+        allow_file_delete: null,
         allow_file_transfer: true,
     },
     full: {
@@ -77,6 +81,7 @@ export const CAPABILITY_PRESETS: Record<'viewOnly' | 'assist' | 'full', Security
         allow_whiteboard: true,
         allow_terminal: true,
         allow_file_browse: true,
+        allow_file_delete: true,
         allow_file_transfer: true,
     },
 };

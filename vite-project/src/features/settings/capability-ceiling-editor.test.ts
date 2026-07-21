@@ -31,6 +31,7 @@ describe('capability presets', () => {
         'allow_whiteboard',
         'allow_terminal',
         'allow_file_browse',
+        'allow_file_delete',
         'allow_file_transfer',
     ] as const;
 
@@ -46,6 +47,7 @@ describe('capability presets', () => {
         expect(CAPABILITY_PRESETS.assist.allow_remote_control).toBe(true);
         expect(CAPABILITY_PRESETS.assist.allow_clipboard_sync).toBe(true);
         expect(CAPABILITY_PRESETS.assist.allow_file_browse).toBe(true);
+        expect(CAPABILITY_PRESETS.assist.allow_file_delete).toBeNull();
         expect(CAPABILITY_PRESETS.assist.allow_terminal).toBe(false);
         expect(CAPABILITY_PRESETS.assist.allow_private_screen).toBeNull();
     });

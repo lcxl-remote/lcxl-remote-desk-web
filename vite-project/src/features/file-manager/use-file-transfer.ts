@@ -6,6 +6,8 @@ import {
     SIGNALING_TYPE_CODE_OFFER,
     SIGNALING_TYPE_CODE_ANSWER,
     SIGNALING_TYPE_CODE_CANID,
+    SIGNALING_TYPE_CODE_MANAGER_FILE_LIST,
+    SIGNALING_TYPE_CODE_MANAGER_FILE_DELETE,
     SIGNALING_TYPE_CODE_CLOSE_CONTROL,
 } from '../desk/constants';
 import { createAcceptGate } from './upload-accept-gate';
@@ -201,11 +203,18 @@ export function useFileTransfer(deskId: string | undefined) {
         emaSpeed: number;
     }>>(new Map());
     const connectPromiseRef = useRef<{
+        promise: Promise<RTCDataChannel>;
         resolve: (dc: RTCDataChannel) => void;
         reject: (err: Error) => void;
+        timeout?: ReturnType<typeof setTimeout>;
     } | null>(null);
     // Store init data received from signaling
     const initDataRef = useRef<any>(null);
+    const pendingRequests = useRef(new Map<string, {
+        resolve: (value: any) => void;
+        reject: (error: Error) => void;
+        timeout: ReturnType<typeof setTimeout>;
+    }>());
 
     // Update a transfer in the list (simple merge, no computation)
     const updateTransfer = useCallback((transferId: string, updates: Partial<TransferProgress>) => {
@@ -468,10 +477,29 @@ export function useFileTransfer(deskId: string | undefined) {
 
         if (!deskId) throw new Error('No desk ID');
 
-        return new Promise<RTCDataChannel>((resolve, reject) => {
-            connectPromiseRef.current = { resolve, reject };
+        const existingAttempt = connectPromiseRef.current;
+        if (existingAttempt) return existingAttempt.promise;
 
-            // 1. Connect WebSocket
+        let resolveAttempt!: (dc: RTCDataChannel) => void;
+        let rejectAttempt!: (error: Error) => void;
+        const promise = new Promise<RTCDataChannel>((resolve, reject) => {
+            resolveAttempt = resolve;
+            rejectAttempt = reject;
+        });
+        const attempt: NonNullable<typeof connectPromiseRef.current> = {
+            promise,
+            resolve: resolveAttempt,
+            reject: rejectAttempt,
+        };
+        connectPromiseRef.current = attempt;
+        attempt.timeout = setTimeout(() => {
+            if (connectPromiseRef.current !== attempt) return;
+            connectPromiseRef.current = null;
+            attempt.reject(new Error('File manager connection timed out'));
+            wsRef.current?.close();
+        }, 20_000);
+
+        // 1. Connect WebSocket
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.host;
             const url = new URL(`${protocol}//${host}/api/desk/signaling`);
@@ -485,13 +513,13 @@ export function useFileTransfer(deskId: string | undefined) {
             wsRef.current = ws;
 
             ws.onopen = () => {
-                // Request remote session. The file transfer rides a second WebRTC
-                // connection to the same target, so it must carry the same grant token
-                // as the main session for the trusted central to stamp the code's
-                // ceiling on it; an owner session has no grant and omits it.
+                if (wsRef.current !== ws) return;
+                // Start the file page session with its restricted grant context when present.
+                // The trusted central validates the token and stamps the capability ceiling;
+                // owner sessions omit it.
                 const grant = readSessionGrant(deskId);
-                const signaling_data: { connection_id: string; grant_session_id?: string } = {
-                    connection_id: deskId,
+                const signaling_data: { purpose: "file_manager"; grant_session_id?: string } = {
+                    purpose: "file_manager",
                 };
                 if (grant?.grantSessionId) {
                     signaling_data.grant_session_id = grant.grantSessionId;
@@ -506,19 +534,56 @@ export function useFileTransfer(deskId: string | undefined) {
             };
 
             ws.onerror = (err) => {
-                console.error('File transfer WS error:', err);
-                reject(new Error('WebSocket connection failed'));
-                connectPromiseRef.current = null;
+                console.error("File transfer WS error:", err);
+                if (connectPromiseRef.current === attempt) {
+                    if (attempt.timeout) clearTimeout(attempt.timeout);
+                    connectPromiseRef.current = null;
+                    attempt.reject(new Error("WebSocket connection failed"));
+                    ws.close();
+                }
             };
 
             ws.onclose = () => {
-                console.log('File transfer WS closed');
+                if (wsRef.current !== ws) return;
+                wsRef.current = null;
+                console.log("File transfer WS closed");
+                if (connectPromiseRef.current === attempt) {
+                    if (attempt.timeout) clearTimeout(attempt.timeout);
+                    connectPromiseRef.current = null;
+                    attempt.reject(new Error("File manager connection closed"));
+                }
+                for (const pending of pendingRequests.current.values()) {
+                    clearTimeout(pending.timeout);
+                    pending.reject(new Error("File manager connection closed"));
+                }
+                pendingRequests.current.clear();
+                dcRef.current?.close();
+                dcRef.current = null;
+                pcRef.current?.close();
+                pcRef.current = null;
             };
 
             ws.onmessage = async (event) => {
+                if (wsRef.current !== ws) return;
                 try {
                     const signaling = JSON.parse(event.data);
                     const { signaling_type, signaling_data } = signaling;
+                    const pending = pendingRequests.current.get(signaling.request_id);
+                    if (pending && (
+                        signaling_type === SIGNALING_TYPE_CODE_MANAGER_FILE_LIST
+                        || signaling_type === SIGNALING_TYPE_CODE_MANAGER_FILE_DELETE
+                    )) {
+                        clearTimeout(pending.timeout);
+                        pendingRequests.current.delete(signaling.request_id);
+                        if (signaling.response_state?.error_code) {
+                            pending.reject(new Error(
+                                signaling.response_state.message || "File operation failed",
+                            ));
+                        } else {
+                            pending.resolve(signaling_data);
+                        }
+                        return;
+                    }
 
                     if (signaling_type === SIGNALING_TYPE_CODE_INIT) {
                         initDataRef.current = signaling_data;
@@ -535,10 +600,11 @@ export function useFileTransfer(deskId: string | undefined) {
                         setupDataChannelHandlers(dc);
 
                         dc.onopen = () => {
-                            console.log('File transfer data channel open');
-                            if (connectPromiseRef.current) {
-                                connectPromiseRef.current.resolve(dc);
+                            console.log("File transfer data channel open");
+                            if (connectPromiseRef.current === attempt) {
+                                if (attempt.timeout) clearTimeout(attempt.timeout);
                                 connectPromiseRef.current = null;
+                                attempt.resolve(dc);
                             }
                         };
 
@@ -581,16 +647,76 @@ export function useFileTransfer(deskId: string | undefined) {
                         }
                     }
                 } catch (e) {
-                    console.error('File transfer signaling error:', e);
+                    console.error("File transfer signaling error:", e);
+                    if (connectPromiseRef.current === attempt) {
+                        if (attempt.timeout) clearTimeout(attempt.timeout);
+                        connectPromiseRef.current = null;
+                        attempt.reject(e instanceof Error ? e : new Error("File manager signaling failed"));
+                        ws.close();
+                    }
                 }
             };
-        });
+        return promise;
     }, [deskId, setupDataChannelHandlers]);
+
+    const sendFileRequest = useCallback(async <T,>(
+        signalingType: number,
+        signalingData: unknown,
+    ): Promise<T> => {
+        await ensureConnection();
+        const ws = wsRef.current;
+        if (!deskId || !ws || ws.readyState !== WebSocket.OPEN) {
+            throw new Error("File manager connection is not open");
+        }
+        const requestId = uuidv4();
+        return new Promise<T>((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                pendingRequests.current.delete(requestId);
+                reject(new Error("File operation timed out"));
+            }, 30_000);
+            pendingRequests.current.set(requestId, {
+                resolve: value => resolve(value as T),
+                reject,
+                timeout,
+            });
+            try {
+                ws.send(JSON.stringify({
+                    request_id: requestId,
+                    signaling_type: signalingType,
+                    signaling_data: signalingData,
+                    to_connection_id: deskId,
+                }));
+            } catch (error) {
+                clearTimeout(timeout);
+                pendingRequests.current.delete(requestId);
+                reject(error instanceof Error ? error : new Error("File request send failed"));
+            }
+        });
+    }, [deskId, ensureConnection]);
+
+    const listFiles = useCallback((params: unknown) => (
+        sendFileRequest<any>(SIGNALING_TYPE_CODE_MANAGER_FILE_LIST, params)
+    ), [sendFileRequest]);
+
+    const deleteFile = useCallback((request: unknown) => (
+        sendFileRequest<void>(SIGNALING_TYPE_CODE_MANAGER_FILE_DELETE, request)
+    ), [sendFileRequest]);
 
     // Close WebRTC and WebSocket connections
     const closeConnection = useCallback(() => {
         // Wake every pending upload waiter before tearing down.
         acceptGate.current.rejectAll('Connection closed');
+        for (const pending of pendingRequests.current.values()) {
+            clearTimeout(pending.timeout);
+            pending.reject(new Error("File manager connection closed"));
+        }
+        pendingRequests.current.clear();
+        const attempt = connectPromiseRef.current;
+        if (attempt) {
+            if (attempt.timeout) clearTimeout(attempt.timeout);
+            connectPromiseRef.current = null;
+            attempt.reject(new Error("File manager connection closed"));
+        }
         if (dcRef.current) {
             dcRef.current.close();
             dcRef.current = null;
@@ -847,6 +973,8 @@ export function useFileTransfer(deskId: string | undefined) {
         uploadFile,
         cancelTransfer,
         removeTransfer,
+        listFiles,
+        deleteFile,
         closeConnection,
     };
 }

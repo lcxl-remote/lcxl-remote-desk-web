@@ -24,6 +24,7 @@ const securitySettingsSchema = z.object({
     allow_whiteboard: z.boolean().nullable(),
     allow_terminal: z.boolean().nullable(),
     allow_file_browse: z.boolean().nullable(),
+    allow_file_delete: z.boolean().nullable(),
     allow_file_transfer: z.boolean().nullable(),
     approval_timeout: z.number().nullable(),
 })
@@ -60,6 +61,7 @@ export function SecuritySettings() {
             allow_whiteboard: null,
             allow_terminal: null,
             allow_file_browse: null,
+            allow_file_delete: null,
             allow_file_transfer: null,
             approval_timeout: null,
         },
@@ -76,6 +78,7 @@ export function SecuritySettings() {
                 allow_whiteboard: data.allow_whiteboard ?? null,
                 allow_terminal: data.allow_terminal ?? null,
                 allow_file_browse: data.allow_file_browse ?? null,
+                allow_file_delete: data.allow_file_delete ?? null,
                 allow_file_transfer: data.allow_file_transfer ?? null,
                 approval_timeout: data.approval_timeout ?? null,
             })
@@ -115,6 +118,7 @@ export function SecuritySettings() {
         { name: "allow_whiteboard", label: t("security.permission.whiteboard"), desc: t("pages.system.security.whiteboardDesc") },
         { name: "allow_terminal", label: t("security.permission.terminal"), desc: t("pages.system.security.terminalDesc") },
         { name: "allow_file_browse", label: t("security.permission.fileBrowse"), desc: t("pages.system.security.fileBrowseDesc") },
+        { name: "allow_file_delete", label: t("security.permission.fileDelete"), desc: t("pages.system.security.fileDeleteDesc") },
         { name: "allow_file_transfer", label: t("security.permission.fileTransfer"), desc: t("pages.system.security.fileTransferDesc") },
     ]
 

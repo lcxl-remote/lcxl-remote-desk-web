@@ -1694,6 +1694,7 @@ mod tests {
 
         let pc_registry = PcRegistry::new();
         let request_remote = RequestRemoteModel {
+            purpose: desk_signal_facade::model::signal::RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };

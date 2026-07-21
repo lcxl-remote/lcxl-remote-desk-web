@@ -43,9 +43,12 @@ async fn integration_local_request_approval_resolved_via_submit() {
         }
     });
 
-    let resp = tokio::time::timeout(Duration::from_secs(2), hub.request_approval(req("r1"), None))
-        .await
-        .expect("must resolve");
+    let resp = tokio::time::timeout(
+        Duration::from_secs(2),
+        hub.request_approval(req("r1"), None),
+    )
+    .await
+    .expect("must resolve");
     assert!(resp.approved);
     assert!(!resp.remember);
 }

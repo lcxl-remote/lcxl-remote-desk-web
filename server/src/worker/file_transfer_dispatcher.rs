@@ -72,12 +72,13 @@ use std::time::{Duration, Instant};
 
 use desk_ipc_protocol::dual_transport::{EventSender, TransportError};
 use desk_ipc_protocol::message::{
-    FileTransferPayload, FileTransferSendErrorKind, FileTransferSendFailedPayload,
-    StartMediaPayload, StopMediaPayload,
+    FileTransferDirection, FileTransferFinishedPayload, FileTransferOutcome, FileTransferPayload,
+    FileTransferSendErrorKind, FileTransferSendFailedPayload, FileTransferStartedPayload,
+    StartMediaPayload, StopMediaPayload, WorkerToService,
 };
 use log::{debug, error, info, warn};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{Mutex as TokioMutex, mpsc};
 
 use crate::host_control::HostControlHub;
 use crate::model::file_transfer::*;
@@ -311,15 +312,32 @@ struct UploadState {
     file_path: PathBuf,
     total_chunks: u64,
     received_chunks: u64,
+    expected_bytes: u64,
+    received_bytes: u64,
     /// Per-transfer metrics window. Flushed every
     /// [`FT_METRICS_WINDOW_CHUNKS`] chunks and once more on completion
     /// so the final partial window does not get lost.
     metrics: UploadWindow,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TransferKey {
+    connection_id: String,
+    transfer_id: String,
+}
+
+impl TransferKey {
+    fn new(connection_id: &str, transfer_id: &str) -> Self {
+        Self {
+            connection_id: connection_id.to_string(),
+            transfer_id: transfer_id.to_string(),
+        }
+    }
+}
+
 struct DispatcherInner {
-    upload_states: HashMap<String, UploadState>,
-    cancelled_transfers: HashSet<String>,
+    upload_states: HashMap<TransferKey, UploadState>,
+    cancelled_transfers: HashSet<TransferKey>,
     active_connections: HashSet<String>,
     /// Per-connection cached `allow_file_transfer` decision. Mirrors the
     /// per-DC permission cache from the legacy
@@ -328,6 +346,7 @@ struct DispatcherInner {
     /// regardless of how many DownloadRequest / UploadRequest /
     /// chunk frames flow over its `file_transfer_event` DC.
     permission_cache: HashMap<String, bool>,
+    activities: HashSet<TransferKey>,
 }
 
 impl DispatcherInner {
@@ -337,6 +356,7 @@ impl DispatcherInner {
             cancelled_transfers: HashSet::new(),
             active_connections: HashSet::new(),
             permission_cache: HashMap::new(),
+            activities: HashSet::new(),
         }
     }
 }
@@ -367,6 +387,7 @@ pub struct FileTransferDispatcher {
     /// permission gate meets the connection's ceiling with the global so a grant
     /// can only tighten file-transfer; owner connections carry no ceiling.
     connection_ceilings: ConnectionCeilingStore,
+    activity_sender: mpsc::UnboundedSender<WorkerToService>,
 }
 
 impl FileTransferDispatcher {
@@ -375,6 +396,7 @@ impl FileTransferDispatcher {
         settings: Arc<SharedSettings>,
         hub: Arc<HostControlHub>,
         connection_ceilings: ConnectionCeilingStore,
+        activity_sender: mpsc::UnboundedSender<WorkerToService>,
     ) -> Self {
         Self {
             inner: Arc::new(TokioMutex::new(DispatcherInner::new())),
@@ -382,7 +404,64 @@ impl FileTransferDispatcher {
             settings,
             hub,
             connection_ceilings,
+            activity_sender,
         }
+    }
+
+    async fn start_activity(
+        &self,
+        connection_id: &str,
+        transfer_id: &str,
+        direction: FileTransferDirection,
+        file_name: &str,
+        total_bytes: u64,
+    ) -> bool {
+        let key = TransferKey::new(connection_id, transfer_id);
+        let inserted = {
+            let mut inner = self.inner.lock().await;
+            inner.activities.insert(key)
+        };
+        if !inserted {
+            return false;
+        }
+        let _ = self
+            .activity_sender
+            .send(WorkerToService::FileTransferStarted(
+                FileTransferStartedPayload {
+                    connection_id: connection_id.to_string(),
+                    transfer_id: transfer_id.to_string(),
+                    direction,
+                    file_name: sanitized_file_name(file_name),
+                    total_bytes,
+                },
+            ));
+        true
+    }
+
+    async fn finish_activity(
+        &self,
+        connection_id: &str,
+        transfer_id: &str,
+        outcome: FileTransferOutcome,
+    ) -> bool {
+        let key = TransferKey::new(connection_id, transfer_id);
+        let removed = {
+            let mut inner = self.inner.lock().await;
+            inner.activities.remove(&key)
+        };
+        if !removed {
+            return false;
+        }
+        let _ = self
+            .activity_sender
+            .send(WorkerToService::FileTransferFinished(
+                FileTransferFinishedPayload {
+                    connection_id: connection_id.to_string(),
+                    transfer_id: transfer_id.to_string(),
+                    outcome,
+                },
+            ));
+        true
     }
 
     /// Resolve the `allow_file_transfer` decision for a connection.
@@ -453,39 +532,82 @@ impl FileTransferDispatcher {
         );
     }
 
-    /// Remove a connection from the active set. Any in-flight uploads
-    /// for that connection are NOT immediately torn down — the upload
-    /// state is keyed by `transfer_id`, not `connection_id`, and we
-    /// have no map between them. Practically: when a connection
-    /// closes, the partial uploads finish on disk on their own
-    /// `TransferComplete` ack from the browser; orphaned states are
-    /// dropped on `shutdown`.
+    /// Remove a connection and terminate every transfer it owns.
     pub async fn stop_connection(&self, payload: &StopMediaPayload) {
-        let mut inner = self.inner.lock().await;
-        if inner.active_connections.remove(&payload.connection_id) {
-            info!(
-                "[FileTransferDispatcher] {}: unsubscribed (active_count={})",
-                payload.connection_id,
-                inner.active_connections.len()
-            );
+        let (paths, finished) = {
+            let mut inner = self.inner.lock().await;
+            inner.active_connections.remove(&payload.connection_id);
+            inner.permission_cache.remove(&payload.connection_id);
+            let transfer_keys: Vec<TransferKey> = inner
+                .activities
+                .iter()
+                .filter(|key| key.connection_id == payload.connection_id)
+                .cloned()
+                .collect();
+            let mut paths = Vec::new();
+            let mut finished = Vec::new();
+            for key in transfer_keys {
+                if let Some(state) = inner.upload_states.remove(&key) {
+                    paths.push(state.file_path);
+                } else {
+                    inner.cancelled_transfers.insert(key.clone());
+                }
+                if inner.activities.remove(&key) {
+                    finished.push(FileTransferFinishedPayload {
+                        connection_id: key.connection_id,
+                        transfer_id: key.transfer_id,
+                        outcome: FileTransferOutcome::Cancelled,
+                    });
+                }
+            }
+            (paths, finished)
+        };
+        for path in paths {
+            if let Err(error) = tokio::fs::remove_file(&path).await {
+                debug!(
+                    "[FileTransferDispatcher] failed to remove partial upload {}: {error}",
+                    path.display()
+                );
+            }
         }
-        // Drop the cached permission so a subsequent connection (which
-        // may be from a different browser session) re-prompts. The
-        // settings-level "allow_file_transfer = Some(true)" remembered
-        // choice still short-circuits the prompt without user
-        // interaction, so this is cheap correctness, not a UX cost.
-        inner.permission_cache.remove(&payload.connection_id);
+        for event in finished {
+            let _ = self
+                .activity_sender
+                .send(WorkerToService::FileTransferFinished(event));
+        }
     }
 
-    /// Drop every connection + every in-flight transfer state. Called
-    /// on worker shutdown so dangling file handles do not outlive the
-    /// process.
+    /// Drop every connection and terminate every in-flight transfer.
     pub async fn shutdown(&self) {
-        let mut inner = self.inner.lock().await;
-        inner.active_connections.clear();
-        inner.upload_states.clear();
-        inner.cancelled_transfers.clear();
-        inner.permission_cache.clear();
+        let (paths, finished) = {
+            let mut inner = self.inner.lock().await;
+            let paths = inner
+                .upload_states
+                .drain()
+                .map(|(_, state)| state.file_path)
+                .collect::<Vec<_>>();
+            let finished = inner
+                .activities
+                .drain()
+                .map(|key| FileTransferFinishedPayload {
+                    connection_id: key.connection_id,
+                    transfer_id: key.transfer_id,
+                    outcome: FileTransferOutcome::Cancelled,
+                })
+                .collect::<Vec<_>>();
+            inner.active_connections.clear();
+            inner.cancelled_transfers.clear();
+            inner.permission_cache.clear();
+            (paths, finished)
+        };
+        for path in paths {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        for event in finished {
+            let _ = self
+                .activity_sender
+                .send(WorkerToService::FileTransferFinished(event));
+        }
     }
 
     /// Apply an incoming file-transfer command. The bytes are either
@@ -575,22 +697,27 @@ impl FileTransferDispatcher {
         // Collect every transfer_id we need to abort. With a specific
         // transfer_id this is just `[id]`; with None we snapshot every
         // active upload + every active download for this connection.
-        let aborted_ids: Vec<String> = {
+        let aborted_keys: Vec<TransferKey> = {
             let mut inner = self.inner.lock().await;
-            let ids: Vec<String> = match transfer_id.as_deref() {
-                Some(tid) => vec![tid.to_string()],
-                None => inner.upload_states.keys().cloned().collect(),
+            let keys: Vec<TransferKey> = match transfer_id.as_deref() {
+                Some(tid) => vec![TransferKey::new(&connection_id, tid)],
+                None => inner
+                    .activities
+                    .iter()
+                    .filter(|key| key.connection_id == connection_id)
+                    .cloned()
+                    .collect(),
             };
-            for tid in &ids {
-                inner.cancelled_transfers.insert(tid.clone());
+            for key in &keys {
+                inner.cancelled_transfers.insert(key.clone());
             }
-            ids
+            keys
         };
         warn!(
             "[FileTransferDispatcher] {}: send failure [{kind_label}] — aborting \
              {} transfer(s); {}",
             connection_id,
-            aborted_ids.len(),
+            aborted_keys.len(),
             error
         );
         // For uploads: release the file handle and remove the partial
@@ -599,8 +726,8 @@ impl FileTransferDispatcher {
         let mut upload_paths_to_remove: Vec<std::path::PathBuf> = Vec::new();
         {
             let mut inner = self.inner.lock().await;
-            for tid in &aborted_ids {
-                if let Some(state) = inner.upload_states.remove(tid) {
+            for key in &aborted_keys {
+                if let Some(state) = inner.upload_states.remove(key) {
                     upload_paths_to_remove.push(state.file_path.clone());
                 }
             }
@@ -618,12 +745,12 @@ impl FileTransferDispatcher {
         // If the file lane itself is what's broken these emits may
         // fail too — that's expected; the browser's SCTP timeout will
         // eventually surface the disconnect on its own.
-        for tid in &aborted_ids {
+        for key in &aborted_keys {
             if let Err(e) = self
                 .emit_text(
                     &connection_id,
                     FileTransferMessage::TransferError(TransferError {
-                        transfer_id: tid.clone(),
+                        transfer_id: key.transfer_id.clone(),
                         message: message.clone(),
                     }),
                 )
@@ -632,9 +759,17 @@ impl FileTransferDispatcher {
                 debug!(
                     "[FileTransferDispatcher] {}: emit TransferError for {} after send \
                      failure also failed: {e}",
-                    connection_id, tid
+                    connection_id, key.transfer_id
                 );
             }
+        }
+        for key in &aborted_keys {
+            self.finish_activity(
+                &key.connection_id,
+                &key.transfer_id,
+                FileTransferOutcome::Failed,
+            )
+            .await;
         }
     }
 
@@ -663,9 +798,17 @@ impl FileTransferDispatcher {
             FileTransferMessage::DownloadRequest(req) => {
                 let dispatcher = self.clone();
                 let connection_id = payload.connection_id.clone();
+                let transfer_id = req.transfer_id.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = dispatcher.serve_download(connection_id, req).await {
+                    if let Err(e) = dispatcher.serve_download(connection_id.clone(), req).await {
                         error!("[FileTransferDispatcher] download error: {e}");
+                        dispatcher
+                            .finish_activity(
+                                &connection_id,
+                                &transfer_id,
+                                FileTransferOutcome::Failed,
+                            )
+                            .await;
                     }
                 });
             }
@@ -675,12 +818,58 @@ impl FileTransferDispatcher {
                 }
             }
             FileTransferMessage::TransferComplete(complete) => {
-                let mut inner = self.inner.lock().await;
-                if let Some(state) = inner.upload_states.remove(&complete.transfer_id) {
+                let key = TransferKey::new(&payload.connection_id, &complete.transfer_id);
+                let state = {
+                    let mut inner = self.inner.lock().await;
+                    inner.upload_states.remove(&key)
+                };
+                if let Some(mut state) = state {
+                    let received_chunks = state.received_chunks;
+                    let flush_error = state.file.flush().await.err();
+                    let is_complete = flush_error.is_none()
+                        && state.received_chunks == state.total_chunks
+                        && state.received_bytes == state.expected_bytes;
+                    let failure_message = match flush_error {
+                        Some(error) => format!("Failed to flush upload: {error}"),
+                        None => format!(
+                            "Upload size mismatch: expected {} bytes in {} chunks, received {} bytes in {} chunks",
+                            state.expected_bytes,
+                            state.total_chunks,
+                            state.received_bytes,
+                            state.received_chunks
+                        ),
+                    };
+                    let file_path = state.file_path.clone();
+                    drop(state);
                     info!(
                         "[FileTransferDispatcher] upload {} completed, received {} chunks",
-                        complete.transfer_id, state.received_chunks
+                        complete.transfer_id, received_chunks
                     );
+                    if is_complete {
+                        self.finish_activity(
+                            &payload.connection_id,
+                            &complete.transfer_id,
+                            FileTransferOutcome::Completed,
+                        )
+                        .await;
+                    } else {
+                        let _ = tokio::fs::remove_file(file_path).await;
+                        let _ = self
+                            .emit_text(
+                                &payload.connection_id,
+                                FileTransferMessage::TransferError(TransferError {
+                                    transfer_id: complete.transfer_id.clone(),
+                                    message: failure_message,
+                                }),
+                            )
+                            .await;
+                        self.finish_activity(
+                            &payload.connection_id,
+                            &complete.transfer_id,
+                            FileTransferOutcome::Failed,
+                        )
+                        .await;
+                    }
                 }
             }
             FileTransferMessage::TransferCancel(cancel) => {
@@ -688,10 +877,11 @@ impl FileTransferDispatcher {
                     "[FileTransferDispatcher] {}: cancel transfer_id={}",
                     payload.connection_id, cancel.transfer_id
                 );
+                let key = TransferKey::new(&payload.connection_id, &cancel.transfer_id);
                 let removed_upload = {
                     let mut inner = self.inner.lock().await;
-                    inner.cancelled_transfers.insert(cancel.transfer_id.clone());
-                    inner.upload_states.remove(&cancel.transfer_id)
+                    inner.cancelled_transfers.insert(key.clone());
+                    inner.upload_states.remove(&key)
                 };
                 if let Some(state) = removed_upload {
                     let path = state.file_path.clone();
@@ -703,6 +893,12 @@ impl FileTransferDispatcher {
                         );
                     }
                 }
+                self.finish_activity(
+                    &payload.connection_id,
+                    &cancel.transfer_id,
+                    FileTransferOutcome::Cancelled,
+                )
+                .await;
             }
             other => {
                 debug!(
@@ -716,7 +912,7 @@ impl FileTransferDispatcher {
     async fn handle_binary(&self, payload: FileTransferPayload) {
         let iter_start = Instant::now();
         let (transfer_id, chunk_index, chunk_data) = match parse_binary_chunk(&payload.data) {
-            Some(t) => t,
+            Some(value) => value,
             None => {
                 warn!(
                     "[FileTransferDispatcher] {}: binary chunk too short ({} bytes)",
@@ -727,76 +923,111 @@ impl FileTransferDispatcher {
             }
         };
         let transfer_id = transfer_id.to_string();
+        let connection_id = payload.connection_id.clone();
+        let key = TransferKey::new(&connection_id, &transfer_id);
         let chunk_data = chunk_data.to_vec();
         let chunk_len = chunk_data.len() as u64;
-        let connection_id = payload.connection_id.clone();
         let lock_start = Instant::now();
         let mut inner = self.inner.lock().await;
         let lock_elapsed = lock_start.elapsed();
-        let complete = match inner.upload_states.get_mut(&transfer_id) {
-            Some(state) => {
-                let write_start = Instant::now();
-                if let Err(e) = state.file.write_all(&chunk_data).await {
-                    error!(
-                        "[FileTransferDispatcher] {}: write chunk {} for {} failed: {e}",
-                        connection_id, chunk_index, transfer_id
-                    );
-                    return;
-                }
-                let write_elapsed = write_start.elapsed();
-                state.received_chunks += 1;
-                state
-                    .metrics
-                    .record(chunk_len, lock_elapsed, write_elapsed, iter_start.elapsed());
-                if state.metrics.is_full() {
-                    if let Some(line) = state.metrics.flush_line(&transfer_id, "ft-metrics") {
-                        info!("{line}");
-                    }
-                    state.metrics.reset();
-                }
-                state.received_chunks >= state.total_chunks
-            }
-            None => {
-                warn!(
-                    "[FileTransferDispatcher] {}: chunk for unknown transfer {}",
-                    connection_id, transfer_id
-                );
-                return;
-            }
+        let Some(state) = inner.upload_states.get_mut(&key) else {
+            warn!(
+                "[FileTransferDispatcher] {}: chunk for unknown transfer {}",
+                connection_id, transfer_id
+            );
+            return;
         };
-        if complete && let Some(mut state) = inner.upload_states.remove(&transfer_id) {
-            if let Err(e) = state.file.flush().await {
-                error!(
-                    "[FileTransferDispatcher] {}: flush of completed upload {} failed: {e}",
-                    connection_id, transfer_id
-                );
+        let write_start = Instant::now();
+        if let Err(error) = state.file.write_all(&chunk_data).await {
+            error!(
+                "[FileTransferDispatcher] {}: write chunk {} for {} failed: {error}",
+                connection_id, chunk_index, transfer_id
+            );
+            let failed = inner.upload_states.remove(&key);
+            drop(inner);
+            if let Some(failed) = failed {
+                let _ = tokio::fs::remove_file(failed.file_path).await;
             }
-            // Trailing partial-window flush mirrors the download path so
-            // the last <256 chunks of an upload do not vanish from the log.
+            self.finish_activity(&connection_id, &transfer_id, FileTransferOutcome::Failed)
+                .await;
+            return;
+        }
+        let write_elapsed = write_start.elapsed();
+        state.received_chunks += 1;
+        state.received_bytes += chunk_len;
+        state
+            .metrics
+            .record(chunk_len, lock_elapsed, write_elapsed, iter_start.elapsed());
+        if state.metrics.is_full() {
             if let Some(line) = state.metrics.flush_line(&transfer_id, "ft-metrics") {
                 info!("{line}");
             }
-            drop(state);
-            // Drop the lock before emitting IPC: emit_text awaits on the
-            // bounded file lane and must not hold inner across that wait.
-            drop(inner);
-            if let Err(e) = self
+            state.metrics.reset();
+        }
+        if state.received_chunks < state.total_chunks {
+            return;
+        }
+        let Some(mut state) = inner.upload_states.remove(&key) else {
+            return;
+        };
+        let flush_result = state.file.flush().await;
+        if let Some(line) = state.metrics.flush_line(&transfer_id, "ft-metrics") {
+            info!("{line}");
+        }
+        let file_path = state.file_path.clone();
+        let expected_bytes = state.expected_bytes;
+        let received_bytes = state.received_bytes;
+        drop(state);
+        drop(inner);
+        if let Err(error) = flush_result {
+            error!(
+                "[FileTransferDispatcher] {}: flush of completed upload {} failed: {error}",
+                connection_id, transfer_id
+            );
+            let _ = tokio::fs::remove_file(file_path).await;
+            self.finish_activity(&connection_id, &transfer_id, FileTransferOutcome::Failed)
+                .await;
+            return;
+        }
+        if received_bytes != expected_bytes {
+            let message = format!(
+                "Upload size mismatch: expected {expected_bytes} bytes, received {received_bytes} bytes"
+            );
+            warn!("[FileTransferDispatcher] {connection_id}: {message}");
+            let _ = tokio::fs::remove_file(file_path).await;
+            let _ = self
                 .emit_text(
                     &connection_id,
-                    FileTransferMessage::TransferComplete(TransferComplete {
+                    FileTransferMessage::TransferError(TransferError {
                         transfer_id: transfer_id.clone(),
+                        message,
                     }),
                 )
-                .await
-            {
-                warn!("[FileTransferDispatcher] upload {transfer_id} complete ack drop: {e}");
-                return;
-            }
-            info!(
-                "[FileTransferDispatcher] upload {} completed successfully",
-                transfer_id
-            );
+                .await;
+            self.finish_activity(&connection_id, &transfer_id, FileTransferOutcome::Failed)
+                .await;
+            return;
         }
+        if let Err(error) = self
+            .emit_text(
+                &connection_id,
+                FileTransferMessage::TransferComplete(TransferComplete {
+                    transfer_id: transfer_id.clone(),
+                }),
+            )
+            .await
+        {
+            warn!("[FileTransferDispatcher] upload {transfer_id} complete ack drop: {error}");
+            self.finish_activity(&connection_id, &transfer_id, FileTransferOutcome::Failed)
+                .await;
+            return;
+        }
+        self.finish_activity(&connection_id, &transfer_id, FileTransferOutcome::Completed)
+            .await;
+        info!(
+            "[FileTransferDispatcher] upload {} completed successfully",
+            transfer_id
+        );
     }
 
     async fn accept_upload(
@@ -806,10 +1037,7 @@ impl FileTransferDispatcher {
     ) -> std::io::Result<()> {
         let target_dir = PathBuf::from(&req.target_dir);
         if !target_dir.exists() || !target_dir.is_dir() {
-            // Best-effort error notification to the browser. If the
-            // file lane is closed there is nothing to clean up (no file
-            // opened yet) — just log and return.
-            if let Err(e) = self
+            if let Err(error) = self
                 .emit_text(
                     &connection_id,
                     FileTransferMessage::TransferError(TransferError {
@@ -820,34 +1048,72 @@ impl FileTransferDispatcher {
                 .await
             {
                 warn!(
-                    "[FileTransferDispatcher] {}: failed to emit TransferError for {}: {e}",
+                    "[FileTransferDispatcher] {}: failed to emit TransferError for {}: {error}",
                     connection_id, req.transfer_id
                 );
             }
             return Ok(());
         }
-        let file_path = target_dir.join(&req.file_name);
-        let file = tokio::fs::File::create(&file_path).await?;
-        info!(
-            "[FileTransferDispatcher] upload {} started: {} -> {} ({} bytes, {} chunks)",
-            req.transfer_id,
-            req.file_name,
-            file_path.display(),
-            req.file_size,
-            req.total_chunks
-        );
+        let file_name = sanitized_file_name(&req.file_name);
+        let file_path = target_dir.join(&file_name);
+        if !self
+            .start_activity(
+                &connection_id,
+                &req.transfer_id,
+                FileTransferDirection::Upload,
+                &file_name,
+                req.file_size,
+            )
+            .await
+        {
+            self.emit_text(
+                &connection_id,
+                FileTransferMessage::TransferError(TransferError {
+                    transfer_id: req.transfer_id.clone(),
+                    message: "Transfer id is already active on this connection".to_string(),
+                }),
+            )
+            .await
+            .ok();
+            return Ok(());
+        }
+        let file = match tokio::fs::File::create(&file_path).await {
+            Ok(file) => file,
+            Err(error) => {
+                self.finish_activity(
+                    &connection_id,
+                    &req.transfer_id,
+                    FileTransferOutcome::Failed,
+                )
+                .await;
+                return Err(error);
+            }
+        };
         let state = UploadState {
             file,
             file_path: file_path.clone(),
             total_chunks: req.total_chunks,
             received_chunks: 0,
+            expected_bytes: req.file_size,
+            received_bytes: 0,
             metrics: UploadWindow::default(),
         };
-        {
+        let key = TransferKey::new(&connection_id, &req.transfer_id);
+        let state_inserted = {
             let mut inner = self.inner.lock().await;
-            inner.upload_states.insert(req.transfer_id.clone(), state);
+            if inner.active_connections.contains(&connection_id) && inner.activities.contains(&key)
+            {
+                inner.upload_states.insert(key.clone(), state);
+                true
+            } else {
+                false
+            }
+        };
+        if !state_inserted {
+            let _ = tokio::fs::remove_file(&file_path).await;
+            return Ok(());
         }
-        if let Err(e) = self
+        if let Err(error) = self
             .emit_text(
                 &connection_id,
                 FileTransferMessage::UploadResponse(UploadResponse {
@@ -858,31 +1124,29 @@ impl FileTransferDispatcher {
             )
             .await
         {
-            // File lane closed before the browser could receive the
-            // accept ack — no chunks will arrive. Drop the in-flight
-            // state and remove the empty placeholder file we just
-            // created, otherwise it would orphan on disk.
             warn!(
-                "[FileTransferDispatcher] {}: UploadResponse emit failed for {}: {e} \
-                 — releasing in-flight state",
+                "[FileTransferDispatcher] {}: UploadResponse emit failed for {}: {error}",
                 connection_id, req.transfer_id
             );
             let removed = {
                 let mut inner = self.inner.lock().await;
-                inner.upload_states.remove(&req.transfer_id)
+                inner.upload_states.remove(&key)
             };
             if let Some(state) = removed {
-                let path = state.file_path.clone();
-                drop(state);
-                if let Err(rm_err) = tokio::fs::remove_file(&path).await {
-                    warn!(
-                        "[FileTransferDispatcher] failed to clean up {} after upload \
-                         abort: {rm_err}",
-                        path.display()
-                    );
-                }
+                let _ = tokio::fs::remove_file(state.file_path).await;
             }
+            self.finish_activity(
+                &connection_id,
+                &req.transfer_id,
+                FileTransferOutcome::Failed,
+            )
+            .await;
+            return Ok(());
         }
+        info!(
+            "[FileTransferDispatcher] upload {} started ({} bytes, {} chunks)",
+            req.transfer_id, req.file_size, req.total_chunks
+        );
         Ok(())
     }
 
@@ -919,6 +1183,29 @@ impl FileTransferDispatcher {
             .to_string();
         let chunk_size = FILE_TRANSFER_CHUNK_SIZE_TX;
         let total_chunks = file_size.div_ceil(chunk_size as u64);
+        let mut file = tokio::fs::File::open(&path).await?;
+
+        if !self
+            .start_activity(
+                &connection_id,
+                &req.transfer_id,
+                FileTransferDirection::Download,
+                &file_name,
+                file_size,
+            )
+            .await
+        {
+            self.emit_text(
+                &connection_id,
+                FileTransferMessage::TransferError(TransferError {
+                    transfer_id: req.transfer_id.clone(),
+                    message: "Transfer id is already active on this connection".to_string(),
+                }),
+            )
+            .await
+            .ok();
+            return Ok(());
+        }
 
         if let Err(e) = self
             .emit_text(
@@ -937,10 +1224,14 @@ impl FileTransferDispatcher {
                 "[FileTransferDispatcher] {}: download {} aborted before open: {e}",
                 connection_id, req.transfer_id
             );
+            self.finish_activity(
+                &connection_id,
+                &req.transfer_id,
+                FileTransferOutcome::Failed,
+            )
+            .await;
             return Ok(());
         }
-
-        let mut file = tokio::fs::File::open(&path).await?;
         let mut buf = vec![0u8; chunk_size];
         let mut chunk_index: u32 = 0;
         let mut window = DownloadWindow::default();
@@ -950,19 +1241,39 @@ impl FileTransferDispatcher {
         );
         loop {
             // Check cancel flag before doing more IO.
-            {
+            let cancelled = {
                 let mut inner = self.inner.lock().await;
-                if inner.cancelled_transfers.remove(&req.transfer_id) {
-                    info!(
-                        "[FileTransferDispatcher] download {} cancelled",
-                        req.transfer_id
-                    );
-                    return Ok(());
-                }
+                inner
+                    .cancelled_transfers
+                    .remove(&TransferKey::new(&connection_id, &req.transfer_id))
+            };
+            if cancelled {
+                info!(
+                    "[FileTransferDispatcher] download {} cancelled",
+                    req.transfer_id
+                );
+                self.finish_activity(
+                    &connection_id,
+                    &req.transfer_id,
+                    FileTransferOutcome::Cancelled,
+                )
+                .await;
+                return Ok(());
             }
             let iter_start = Instant::now();
             let read_start = Instant::now();
-            let n = file.read(&mut buf).await?;
+            let n = match file.read(&mut buf).await {
+                Ok(value) => value,
+                Err(error) => {
+                    self.finish_activity(
+                        &connection_id,
+                        &req.transfer_id,
+                        FileTransferOutcome::Failed,
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
             let read_elapsed = read_start.elapsed();
             if n == 0 {
                 break;
@@ -982,6 +1293,12 @@ impl FileTransferDispatcher {
                     "[FileTransferDispatcher] {}: download {} aborted at chunk {}: {e}",
                     connection_id, req.transfer_id, chunk_index
                 );
+                self.finish_activity(
+                    &connection_id,
+                    &req.transfer_id,
+                    FileTransferOutcome::Failed,
+                )
+                .await;
                 return Ok(());
             }
             let emit_elapsed = emit_start.elapsed();
@@ -1021,8 +1338,20 @@ impl FileTransferDispatcher {
                 "[FileTransferDispatcher] {}: TransferComplete emit failed for {}: {e}",
                 connection_id, req.transfer_id
             );
+            self.finish_activity(
+                &connection_id,
+                &req.transfer_id,
+                FileTransferOutcome::Failed,
+            )
+            .await;
             return Ok(());
         }
+        self.finish_activity(
+            &connection_id,
+            &req.transfer_id,
+            FileTransferOutcome::Completed,
+        )
+        .await;
         info!(
             "[FileTransferDispatcher] download {} completed: {} bytes, {} chunks",
             req.transfer_id, file_size, chunk_index
@@ -1099,6 +1428,20 @@ fn transfer_id_of(msg: &FileTransferMessage) -> Option<&str> {
         FileTransferMessage::TransferComplete(m) => Some(&m.transfer_id),
         FileTransferMessage::TransferError(m) => Some(&m.transfer_id),
         FileTransferMessage::TransferCancel(m) => Some(&m.transfer_id),
+    }
+}
+
+fn sanitized_file_name(value: &str) -> String {
+    let basename = value.rsplit(['/', '\\']).next().unwrap_or(value);
+    let cleaned: String = basename
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(255)
+        .collect();
+    if cleaned.is_empty() {
+        "unnamed".to_string()
+    } else {
+        cleaned
     }
 }
 
@@ -1344,9 +1687,197 @@ mod tests {
         let (file_tx, file_rx) =
             inprocess::make_event_inprocess_with_cap::<FileTransferPayload>(file_cap);
         (
-            FileTransferDispatcher::new(file_tx, shared, hub, ConnectionCeilingStore::new()),
+            FileTransferDispatcher::new(
+                file_tx,
+                shared,
+                hub,
+                ConnectionCeilingStore::new(),
+                mpsc::unbounded_channel().0,
+            ),
             file_rx,
         )
+    }
+
+    fn dispatcher_with_activity_sender() -> (
+        FileTransferDispatcher,
+        mpsc::UnboundedReceiver<WorkerToService>,
+    ) {
+        let mut settings = Settings::default();
+        settings.security.allow_file_transfer = Some(true);
+        let shared = Arc::new(SharedSettings::from(settings));
+        let hub = Arc::new(HostControlHub::new_local());
+        let (file_tx, _file_rx) =
+            inprocess::make_event_inprocess_with_cap::<FileTransferPayload>(16);
+        let (activity_tx, activity_rx) = mpsc::unbounded_channel();
+        (
+            FileTransferDispatcher::new(
+                file_tx,
+                shared,
+                hub,
+                ConnectionCeilingStore::new(),
+                activity_tx,
+            ),
+            activity_rx,
+        )
+    }
+
+    #[test]
+    fn activity_file_name_is_minimized() {
+        assert_eq!(
+            sanitized_file_name("/private/secret/report.txt"),
+            "report.txt"
+        );
+        assert_eq!(sanitized_file_name("C:\\private\\photo.png"), "photo.png");
+        assert_eq!(sanitized_file_name("bad\nname.txt"), "badname.txt");
+        assert_eq!(sanitized_file_name("\n"), "unnamed");
+        assert_eq!(sanitized_file_name(&"x".repeat(300)).chars().count(), 255);
+    }
+
+    #[tokio::test]
+    async fn activity_events_are_idempotent_and_ignore_unknown_finish() {
+        let (dispatcher, mut events) = dispatcher_with_activity_sender();
+        assert!(
+            !dispatcher
+                .finish_activity("conn", "unknown", FileTransferOutcome::Failed)
+                .await
+        );
+        assert!(events.try_recv().is_err());
+
+        assert!(
+            dispatcher
+                .start_activity(
+                    "conn",
+                    "transfer",
+                    FileTransferDirection::Download,
+                    "/secret/report.txt",
+                    42,
+                )
+                .await
+        );
+        assert!(
+            !dispatcher
+                .start_activity(
+                    "conn",
+                    "transfer",
+                    FileTransferDirection::Download,
+                    "ignored.txt",
+                    7,
+                )
+                .await
+        );
+        match events.recv().await.unwrap() {
+            WorkerToService::FileTransferStarted(payload) => {
+                assert_eq!(payload.file_name, "report.txt");
+                assert_eq!(payload.total_bytes, 42);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(events.try_recv().is_err());
+
+        assert!(
+            dispatcher
+                .finish_activity("conn", "transfer", FileTransferOutcome::Completed)
+                .await
+        );
+        assert!(
+            !dispatcher
+                .finish_activity("conn", "transfer", FileTransferOutcome::Failed)
+                .await
+        );
+        match events.recv().await.unwrap() {
+            WorkerToService::FileTransferFinished(payload) => {
+                assert_eq!(payload.outcome, FileTransferOutcome::Completed);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn identical_transfer_ids_are_isolated_by_connection() {
+        let (dispatcher, mut events) = dispatcher_with_activity_sender();
+        assert!(
+            dispatcher
+                .start_activity(
+                    "conn-a",
+                    "shared",
+                    FileTransferDirection::Upload,
+                    "a.bin",
+                    1,
+                )
+                .await
+        );
+        assert!(
+            dispatcher
+                .start_activity(
+                    "conn-b",
+                    "shared",
+                    FileTransferDirection::Download,
+                    "b.bin",
+                    2,
+                )
+                .await
+        );
+        let _ = events.recv().await.unwrap();
+        let _ = events.recv().await.unwrap();
+
+        assert!(
+            dispatcher
+                .finish_activity("conn-a", "shared", FileTransferOutcome::Completed)
+                .await
+        );
+        match events.recv().await.unwrap() {
+            WorkerToService::FileTransferFinished(payload) => {
+                assert_eq!(payload.connection_id, "conn-a");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(
+            dispatcher
+                .finish_activity("conn-b", "shared", FileTransferOutcome::Cancelled)
+                .await
+        );
+        match events.recv().await.unwrap() {
+            WorkerToService::FileTransferFinished(payload) => {
+                assert_eq!(payload.connection_id, "conn-b");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_connection_finishes_active_transfer_once() {
+        let (dispatcher, mut events) = dispatcher_with_activity_sender();
+        dispatcher.start_connection(&start_payload("conn")).await;
+        dispatcher
+            .start_activity(
+                "conn",
+                "transfer",
+                FileTransferDirection::Upload,
+                "photo.png",
+                5,
+            )
+            .await;
+        let _ = events.recv().await.unwrap();
+
+        dispatcher
+            .stop_connection(&StopMediaPayload {
+                connection_id: "conn".to_string(),
+            })
+            .await;
+        match events.recv().await.unwrap() {
+            WorkerToService::FileTransferFinished(payload) => {
+                assert_eq!(payload.transfer_id, "transfer");
+                assert_eq!(payload.outcome, FileTransferOutcome::Cancelled);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        dispatcher
+            .stop_connection(&StopMediaPayload {
+                connection_id: "conn".to_string(),
+            })
+            .await;
+        assert!(events.try_recv().is_err());
     }
 
     /// Helper: assert the file lane has no pending payload within a
@@ -1756,6 +2287,149 @@ mod tests {
         assert_eq!(written[chunk_size], b'B');
     }
 
+    #[tokio::test]
+    async fn upload_rejects_controller_declared_size_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let (d, mut rx) = dispatcher();
+        d.start_connection(&start_payload("c1")).await;
+        let transfer_id = "00000000-0000-0000-0000-0000000000f1".to_string();
+        let req = UploadRequest {
+            transfer_id: transfer_id.clone(),
+            target_dir: tmp.path().to_string_lossy().to_string(),
+            file_name: "mismatch.bin".to_string(),
+            file_size: 9,
+            chunk_size: 8,
+            total_chunks: 1,
+        };
+        d.handle_command(FileTransferPayload {
+            connection_id: "c1".into(),
+            data: serde_json::to_vec(&FileTransferMessage::UploadRequest(req)).unwrap(),
+            is_text: true,
+            transfer_id: None,
+        })
+        .await;
+        let response = rx.recv().await.unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<FileTransferMessage>(&response.data).unwrap(),
+            FileTransferMessage::UploadResponse(_)
+        ));
+
+        d.handle_command(FileTransferPayload {
+            connection_id: "c1".into(),
+            data: build_binary_chunk(&transfer_id, 0, b"12345678"),
+            is_text: false,
+            transfer_id: None,
+        })
+        .await;
+
+        let error = rx.recv().await.unwrap();
+        match serde_json::from_slice::<FileTransferMessage>(&error.data).unwrap() {
+            FileTransferMessage::TransferError(error) => {
+                assert_eq!(error.transfer_id, transfer_id);
+                assert!(error.message.contains("expected 9 bytes"));
+                assert!(error.message.contains("received 8 bytes"));
+            }
+            other => panic!("expected TransferError, got {other:?}"),
+        }
+        assert!(!tmp.path().join("mismatch.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn upload_states_with_identical_ids_are_isolated_by_connection() {
+        let tmp = TempDir::new().unwrap();
+        let (d, mut rx) = dispatcher();
+        let transfer_id = "00000000-0000-0000-0000-0000000000f2";
+        for (connection_id, file_name) in [("conn-a", "a.bin"), ("conn-b", "b.bin")] {
+            d.start_connection(&start_payload(connection_id)).await;
+            let req = UploadRequest {
+                transfer_id: transfer_id.to_string(),
+                target_dir: tmp.path().to_string_lossy().to_string(),
+                file_name: file_name.to_string(),
+                file_size: 4,
+                chunk_size: 4,
+                total_chunks: 1,
+            };
+            d.handle_command(FileTransferPayload {
+                connection_id: connection_id.to_string(),
+                data: serde_json::to_vec(&FileTransferMessage::UploadRequest(req)).unwrap(),
+                is_text: true,
+                transfer_id: None,
+            })
+            .await;
+            let _ = rx.recv().await.expect("UploadResponse");
+        }
+        {
+            let inner = d.inner.lock().await;
+            assert!(
+                inner
+                    .upload_states
+                    .contains_key(&TransferKey::new("conn-a", transfer_id))
+            );
+            assert!(
+                inner
+                    .upload_states
+                    .contains_key(&TransferKey::new("conn-b", transfer_id))
+            );
+        }
+
+        d.stop_connection(&StopMediaPayload {
+            connection_id: "conn-a".to_string(),
+        })
+        .await;
+        let inner = d.inner.lock().await;
+        assert!(
+            !inner
+                .upload_states
+                .contains_key(&TransferKey::new("conn-a", transfer_id))
+        );
+        assert!(
+            inner
+                .upload_states
+                .contains_key(&TransferKey::new("conn-b", transfer_id))
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_duplicate_id_within_one_connection() {
+        let tmp = TempDir::new().unwrap();
+        let (d, mut rx) = dispatcher();
+        d.start_connection(&start_payload("c1")).await;
+        let transfer_id = "00000000-0000-0000-0000-0000000000f3";
+        for file_name in ["first.bin", "second.bin"] {
+            let req = UploadRequest {
+                transfer_id: transfer_id.to_string(),
+                target_dir: tmp.path().to_string_lossy().to_string(),
+                file_name: file_name.to_string(),
+                file_size: 4,
+                chunk_size: 4,
+                total_chunks: 1,
+            };
+            d.handle_command(FileTransferPayload {
+                connection_id: "c1".into(),
+                data: serde_json::to_vec(&FileTransferMessage::UploadRequest(req)).unwrap(),
+                is_text: true,
+                transfer_id: None,
+            })
+            .await;
+        }
+
+        let accepted = rx.recv().await.unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<FileTransferMessage>(&accepted.data).unwrap(),
+            FileTransferMessage::UploadResponse(_)
+        ));
+        let rejected = rx.recv().await.unwrap();
+        match serde_json::from_slice::<FileTransferMessage>(&rejected.data).unwrap() {
+            FileTransferMessage::TransferError(error) => {
+                assert_eq!(error.transfer_id, transfer_id);
+                assert!(error.message.contains("already active"));
+            }
+            other => panic!("expected TransferError, got {other:?}"),
+        }
+        assert!(tmp.path().join("first.bin").exists());
+        assert!(!tmp.path().join("second.bin").exists());
+    }
+
     /// Cancelling a download mid-flight stops the loop and returns
     /// without emitting TransferComplete. We trigger by spawning the
     /// download then immediately marking the transfer cancelled.
@@ -1773,7 +2447,9 @@ mod tests {
         // cancel-check will fire on first iteration and return early.
         {
             let mut inner = d.inner.lock().await;
-            inner.cancelled_transfers.insert(transfer_id.clone());
+            inner
+                .cancelled_transfers
+                .insert(TransferKey::new("c1", &transfer_id));
         }
         let req = DownloadRequest {
             transfer_id: transfer_id.clone(),
@@ -1940,9 +2616,21 @@ mod tests {
         // Targeted abort: id_a is gone, id_b survives.
         {
             let inner = d.inner.lock().await;
-            assert!(!inner.upload_states.contains_key(&id_a));
-            assert!(inner.upload_states.contains_key(&id_b));
-            assert!(inner.cancelled_transfers.contains(&id_a));
+            assert!(
+                !inner
+                    .upload_states
+                    .contains_key(&TransferKey::new("c1", &id_a))
+            );
+            assert!(
+                inner
+                    .upload_states
+                    .contains_key(&TransferKey::new("c1", &id_b))
+            );
+            assert!(
+                inner
+                    .cancelled_transfers
+                    .contains(&TransferKey::new("c1", &id_a))
+            );
         }
         // TransferError emitted for id_a only.
         let p = rx.recv().await.expect("TransferError emit");
@@ -2010,8 +2698,16 @@ mod tests {
                 inner.upload_states.is_empty(),
                 "all uploads must be cleared"
             );
-            assert!(inner.cancelled_transfers.contains(&id_a));
-            assert!(inner.cancelled_transfers.contains(&id_b));
+            assert!(
+                inner
+                    .cancelled_transfers
+                    .contains(&TransferKey::new("c1", &id_a))
+            );
+            assert!(
+                inner
+                    .cancelled_transfers
+                    .contains(&TransferKey::new("c1", &id_b))
+            );
         }
         // Two TransferError messages, one per aborted transfer.
         // Order is HashMap-iteration-dependent so collect into a set.
@@ -2051,7 +2747,11 @@ mod tests {
         .await;
         {
             let inner = d.inner.lock().await;
-            assert!(inner.cancelled_transfers.contains(&tid));
+            assert!(
+                inner
+                    .cancelled_transfers
+                    .contains(&TransferKey::new("c1", &tid))
+            );
         }
         let p = rx.recv().await.expect("TransferError emit");
         let parsed: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();

@@ -761,10 +761,21 @@ impl From<&LcxlRTCIceServer> for RTCIceServer {
         }
     }
 }
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteSessionPurpose {
+    #[default]
+    RemoteDesktop,
+    FileManager,
+}
+
 /// RequestRemoteModel is used to request remote access.
 /// web browser -> signaling server -> desk server
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub struct RequestRemoteModel {
+    /// Required session purpose hint. It only controls resource preparation and
+    /// never grants a capability.
+    pub purpose: RemoteSessionPurpose,
     /// ICE servers, the value comes from signaling server
     #[serde(default)]
     pub ice_servers: Vec<LcxlRTCIceServer>,
@@ -929,6 +940,8 @@ pub struct SignalingState {
     pub accept_control: bool,
     /// accept clipboard sync from remote peer
     pub accept_clipboard_sync: bool,
+    /// Session purpose selected during RequestRemote. It is a resource hint only.
+    pub purpose: RemoteSessionPurpose,
     /// The validated capability ceiling for this connection, unwrapped from the
     /// `RequestRemoteAuthz` stamp by the host gate. `None` for a central-verified
     /// owner/full session (no ceiling) or a plain unrestricted connection;
@@ -1222,5 +1235,20 @@ mod init_signaling_data_tests {
         assert_eq!(p.debounce_ms, 5_000);
         assert_eq!(p.min_delta_px, 16);
         assert_eq!(p, AdaptiveResolutionParams::default());
+    }
+    #[test]
+    fn request_remote_requires_purpose_on_the_wire() {
+        let missing = serde_json::json!({"ice_servers": [], "grant_session_id": null});
+        assert!(serde_json::from_value::<RequestRemoteModel>(missing).is_err());
+
+        let model = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::FileManager,
+            ..RequestRemoteModel::default()
+        };
+        let encoded = serde_json::to_value(&model).expect("encode request remote");
+        assert_eq!(encoded["purpose"], "file_manager");
+        let decoded: RequestRemoteModel =
+            serde_json::from_value(encoded).expect("decode request remote");
+        assert_eq!(decoded.purpose, RemoteSessionPurpose::FileManager);
     }
 }

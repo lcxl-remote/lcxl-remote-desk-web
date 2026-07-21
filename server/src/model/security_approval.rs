@@ -57,6 +57,7 @@ pub enum SecurityPermissionType {
     Whiteboard,
     Terminal,
     FileBrowse,
+    FileDelete,
     FileTransfer,
 }
 
@@ -70,6 +71,7 @@ impl SecurityPermissionType {
             Self::Whiteboard => "security.permission.whiteboard",
             Self::Terminal => "security.permission.terminal",
             Self::FileBrowse => "security.permission.fileBrowse",
+            Self::FileDelete => "security.permission.fileDelete",
             Self::FileTransfer => "security.permission.fileTransfer",
         }
     }
@@ -194,6 +196,9 @@ pub async fn check_security_permission(
                     }
                     SecurityPermissionType::FileBrowse => {
                         settings_write.security.allow_file_browse = Some(response.approved);
+                    }
+                    SecurityPermissionType::FileDelete => {
+                        settings_write.security.allow_file_delete = Some(response.approved);
                     }
                     SecurityPermissionType::FileTransfer => {
                         settings_write.security.allow_file_transfer = Some(response.approved);
@@ -447,11 +452,11 @@ mod tests {
         assert_eq!(before, after);
     }
 
-    // U-6: parametric test that all 7 permission types route to the correct settings field.
+    // U-6: parametric test that every permission type routes to the correct settings field.
     #[tokio::test]
     async fn u6_remember_writes_correct_field_per_type() {
         type Getter = fn(&Settings) -> Option<bool>;
-        let cases: [(SecurityPermissionType, Getter); 7] = [
+        let cases: [(SecurityPermissionType, Getter); 8] = [
             (SecurityPermissionType::RemoteControl, |s| {
                 s.security.allow_remote_control
             }),
@@ -469,6 +474,9 @@ mod tests {
             }),
             (SecurityPermissionType::FileBrowse, |s| {
                 s.security.allow_file_browse
+            }),
+            (SecurityPermissionType::FileDelete, |s| {
+                s.security.allow_file_delete
             }),
             (SecurityPermissionType::FileTransfer, |s| {
                 s.security.allow_file_transfer

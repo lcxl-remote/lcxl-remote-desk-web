@@ -1,5 +1,4 @@
 use crate::error::DeskError;
-use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
 use crate::service::signaling::DeskSession;
 use desk_signal_facade::model::files::{
     DeleteFileRequest, FileInfo, FileListParams, FileListResponse,
@@ -158,59 +157,32 @@ pub async fn handle_manager_file_list(
     desk_session: &mut DeskSession,
     signaling_model: &SignalingModel,
 ) -> Result<(), DeskError> {
-    // ManagerFileList is a request from the http api, so it may not have a from_connection_id
-    let from_connection_id = signaling_model.from_connection_id.clone();
-    let global_file_browse = {
-        desk_session
-            .settings
-            .read()
-            .await
-            .security
-            .allow_file_browse
-    };
-    // Meet the connection's grant ceiling with the global so a redeemed-grant
-    // session is capped; connection-less (HTTP-API / owner) requests use the
-    // global verbatim.
-    let allow_file_browse = match from_connection_id.as_deref() {
-        Some(cid) => {
-            desk_session
-                .effective_permission(cid, global_file_browse, |c| c.allow_file_browse)
-                .await
+    let from_connection_id = match signaling_model.from_connection_id.clone() {
+        Some(connection_id) => connection_id,
+        None => {
+            log::warn!("ManagerFileList without a controller connection was dropped");
+            return Ok(());
         }
-        None => global_file_browse,
     };
-    // Capped grant / code-session: honor the prompt but never persist it to the
-    // owner's global allow_file_browse. Connection-less (HTTP-API / owner) requests
-    // carry no ceiling.
-    let suppress_remember = match from_connection_id.as_deref() {
-        Some(cid) => desk_session.connection_ceilings.get(cid).await.is_some(),
-        None => false,
-    };
-    let approved = check_security_permission(
-        &desk_session.settings,
-        &desk_session.host_control_hub,
-        allow_file_browse,
-        SecurityPermissionType::FileBrowse,
-        from_connection_id.clone(),
-        suppress_remember,
-    )
-    .await;
-
-    if !approved {
+    let params = signaling_model.get_data::<FileListParams>()?;
+    if !desk_session
+        .file_browse_permission(&from_connection_id)
+        .await
+    {
         desk_session
             .session
             .send_error(
                 &signaling_model.request_id,
-                signaling_model.signaling_type,
-                from_connection_id.clone(),
+                SignalingType::ManagerFileList,
+                Some(from_connection_id),
                 DeskErrorCode::PERMISSION_ERROR,
                 "File browse access denied",
             )
             .await?;
         return Ok(());
     }
+    desk_session.mark_file_manager_opened(&from_connection_id);
 
-    let params = signaling_model.get_data::<FileListParams>()?;
     match list_files(params).await {
         Ok(response) => {
             desk_session
@@ -218,7 +190,7 @@ pub async fn handle_manager_file_list(
                 .send_response(
                     &signaling_model.request_id,
                     SignalingType::ManagerFileList,
-                    from_connection_id.clone(),
+                    Some(from_connection_id),
                     &response,
                 )
                 .await?;
@@ -229,7 +201,7 @@ pub async fn handle_manager_file_list(
                 .send_error(
                     &signaling_model.request_id,
                     SignalingType::ManagerFileList,
-                    from_connection_id.clone(),
+                    Some(from_connection_id),
                     e.to_error_code(),
                     &e.to_string(),
                 )
@@ -243,68 +215,57 @@ pub async fn handle_manager_file_delete(
     desk_session: &mut DeskSession,
     signaling_model: &SignalingModel,
 ) -> Result<(), DeskError> {
-    // ManagerFileList is a request from the http api, so it may not have a from_connection_id
-    let from_connection_id = signaling_model.from_connection_id.clone();
-    let global_file_browse = {
-        desk_session
-            .settings
-            .read()
-            .await
-            .security
-            .allow_file_browse
-    };
-    // Meet the connection's grant ceiling with the global so a redeemed-grant
-    // session is capped; connection-less (HTTP-API / owner) requests use the
-    // global verbatim.
-    let allow_file_browse = match from_connection_id.as_deref() {
-        Some(cid) => {
-            desk_session
-                .effective_permission(cid, global_file_browse, |c| c.allow_file_browse)
-                .await
+    let from_connection_id = match signaling_model.from_connection_id.clone() {
+        Some(connection_id) => connection_id,
+        None => {
+            log::warn!("ManagerFileDelete without a controller connection was dropped");
+            return Ok(());
         }
-        None => global_file_browse,
     };
-    // Capped grant / code-session: honor the prompt but never persist it to the
-    // owner's global allow_file_browse. Connection-less (HTTP-API / owner) requests
-    // carry no ceiling.
-    let suppress_remember = match from_connection_id.as_deref() {
-        Some(cid) => desk_session.connection_ceilings.get(cid).await.is_some(),
-        None => false,
-    };
-    let approved = check_security_permission(
-        &desk_session.settings,
-        &desk_session.host_control_hub,
-        allow_file_browse,
-        SecurityPermissionType::FileBrowse,
-        from_connection_id.clone(),
-        suppress_remember,
-    )
-    .await;
+    let params = signaling_model.get_data::<DeleteFileRequest>()?;
 
-    if !approved {
+    if !desk_session
+        .file_browse_permission(&from_connection_id)
+        .await
+    {
         desk_session
             .session
             .send_error(
                 &signaling_model.request_id,
-                signaling_model.signaling_type,
-                from_connection_id.clone(),
+                SignalingType::ManagerFileDelete,
+                Some(from_connection_id),
+                DeskErrorCode::PERMISSION_ERROR,
+                "File browse access denied",
+            )
+            .await?;
+        return Ok(());
+    }
+    if !desk_session
+        .file_delete_permission(&from_connection_id)
+        .await
+    {
+        desk_session
+            .session
+            .send_error(
+                &signaling_model.request_id,
+                SignalingType::ManagerFileDelete,
+                Some(from_connection_id),
                 DeskErrorCode::PERMISSION_ERROR,
                 "File delete access denied",
             )
             .await?;
         return Ok(());
     }
-
-    let params = signaling_model.get_data::<DeleteFileRequest>()?;
+    desk_session.mark_file_manager_opened(&from_connection_id);
 
     match delete_file(params).await {
-        Ok(_) => {
+        Ok(()) => {
             desk_session
                 .session
                 .send_response(
                     &signaling_model.request_id,
                     SignalingType::ManagerFileDelete,
-                    from_connection_id,
+                    Some(from_connection_id),
                     &serde_json::json!({}),
                 )
                 .await?;
@@ -315,7 +276,7 @@ pub async fn handle_manager_file_delete(
                 .send_error(
                     &signaling_model.request_id,
                     SignalingType::ManagerFileDelete,
-                    from_connection_id,
+                    Some(from_connection_id),
                     e.to_error_code(),
                     &e.to_string(),
                 )

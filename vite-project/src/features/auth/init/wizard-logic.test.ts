@@ -18,6 +18,7 @@ const allOff: SecurityToggles = {
     allow_whiteboard: false,
     allow_terminal: false,
     allow_file_browse: false,
+    allow_file_delete: false,
     allow_file_transfer: false,
 }
 

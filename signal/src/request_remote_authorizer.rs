@@ -321,9 +321,11 @@ mod tests {
     use desk_signal_facade::model::security_settings::SecuritySettings;
 
     fn request_remote(request_id: &str, to: Option<&str>) -> SignalingModel {
-        let data =
-            serde_json::to_value(desk_signal_facade::model::signal::RequestRemoteModel::default())
-                .unwrap();
+        let data = serde_json::to_value(desk_signal_facade::model::signal::RequestRemoteModel {
+            purpose: desk_signal_facade::model::signal::RemoteSessionPurpose::RemoteDesktop,
+            ..Default::default()
+        })
+        .unwrap();
         SignalingModel::new(
             request_id,
             SignalingType::RequestRemote,
@@ -338,6 +340,7 @@ mod tests {
     /// selector.
     fn request_remote_with_grant(grant_session_id: Option<&str>) -> SignalingModel {
         let inner = RequestRemoteModel {
+            purpose: desk_signal_facade::model::signal::RemoteSessionPurpose::RemoteDesktop,
             grant_session_id: grant_session_id.map(str::to_string),
             ..Default::default()
         };

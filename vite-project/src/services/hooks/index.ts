@@ -20,9 +20,6 @@ export type { DeleteDeviceCodeMutationKey } from "./deviceCodeController/useDele
 export type { ListDeviceCodesQueryKey } from "./deviceCodeController/useListDeviceCodes.ts";
 export type { ListDeviceCodesSuspenseQueryKey } from "./deviceCodeController/useListDeviceCodesSuspense.ts";
 export type { UpdateDeviceCodeMutationKey } from "./deviceCodeController/useUpdateDeviceCode.ts";
-export type { DeleteFileMutationKey } from "./fileController/useDeleteFile.ts";
-export type { ListFilesQueryKey } from "./fileController/useListFiles.ts";
-export type { ListFilesSuspenseQueryKey } from "./fileController/useListFilesSuspense.ts";
 export type { QueryLogSettingsQueryKey } from "./logController/useQueryLogSettings.ts";
 export type { QueryLogSettingsSuspenseQueryKey } from "./logController/useQueryLogSettingsSuspense.ts";
 export type { UpdateLogSettingsMutationKey } from "./logController/useUpdateLogSettings.ts";
@@ -163,15 +160,6 @@ export { useListDeviceCodesSuspense } from "./deviceCodeController/useListDevice
 export { updateDeviceCodeMutationKey } from "./deviceCodeController/useUpdateDeviceCode.ts";
 export { updateDeviceCodeMutationOptions } from "./deviceCodeController/useUpdateDeviceCode.ts";
 export { useUpdateDeviceCode } from "./deviceCodeController/useUpdateDeviceCode.ts";
-export { deleteFileMutationKey } from "./fileController/useDeleteFile.ts";
-export { deleteFileMutationOptions } from "./fileController/useDeleteFile.ts";
-export { useDeleteFile } from "./fileController/useDeleteFile.ts";
-export { listFilesQueryKey } from "./fileController/useListFiles.ts";
-export { listFilesQueryOptions } from "./fileController/useListFiles.ts";
-export { useListFiles } from "./fileController/useListFiles.ts";
-export { listFilesSuspenseQueryKey } from "./fileController/useListFilesSuspense.ts";
-export { listFilesSuspenseQueryOptions } from "./fileController/useListFilesSuspense.ts";
-export { useListFilesSuspense } from "./fileController/useListFilesSuspense.ts";
 export { queryLogSettingsQueryKey } from "./logController/useQueryLogSettings.ts";
 export { queryLogSettingsQueryOptions } from "./logController/useQueryLogSettings.ts";
 export { useQueryLogSettings } from "./logController/useQueryLogSettings.ts";

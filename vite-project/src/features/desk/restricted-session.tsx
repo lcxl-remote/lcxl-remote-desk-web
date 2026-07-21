@@ -31,6 +31,7 @@ export type CapabilityKey =
     | 'allow_whiteboard'
     | 'allow_terminal'
     | 'allow_file_browse'
+    | 'allow_file_delete'
     | 'allow_file_transfer';
 
 export interface RestrictedSession {

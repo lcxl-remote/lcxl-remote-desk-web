@@ -52,8 +52,8 @@ pub struct RedeemCodeParams {
 pub struct RedeemCodeResult {
     /// The resolved target device connection to control.
     pub target_connection_id: String,
-    /// The reusable grant-session token the control end must attach to each
-    /// RequestRemote (main + file-transfer connections) for this target.
+    /// The reusable grant-session token the control end must attach to every
+    /// RequestRemote for this target, including desktop and file-manager sessions.
     pub grant_session_id: String,
     /// The redeemed code's capability ceiling, so the control end can hide the
     /// entries a dimension explicitly denies. This is a UX hint only — the host

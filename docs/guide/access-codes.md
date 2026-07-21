@@ -19,7 +19,9 @@ The owner configures, per device code, a **capability ceiling** that bounds what
 - **Ask** — the host's local user is prompted at the moment the action is attempted.
 - **Deny** — hard-denied.
 
-Presets make this quick — **View only** (everything denied: screen view and read-only diagnosis), **Assist** (a middle ground), **Full** (everything allowed) — or set each capability individually: remote control, clipboard, private screen, whiteboard, terminal, file browse, file transfer.
+Presets make this quick — **View only** (everything denied: screen view and read-only diagnosis), **Assist** (a middle ground), **Full** (everything allowed) — or set each capability individually: remote control, clipboard, private screen, whiteboard, terminal, file browse, file delete, file transfer.
+
+File deletion is an independent destructive capability. Listing files and reading metadata requires **File browse**; deleting an entry requires both **File browse** and **File delete**. **File transfer** remains separate and controls uploads and downloads.
 
 A code with **no** configured ceiling defaults to the restrictive **all-ask** posture (every capability prompts), never to full control.
 

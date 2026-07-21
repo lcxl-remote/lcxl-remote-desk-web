@@ -121,15 +121,10 @@ async fn dispatch_typed_signaling<T>(
 /// (`ManagerSystemInfoRequest` / `ManagerQuerySettingsRequest`) can
 /// share this helper without serialising a synthetic placeholder.
 ///
-/// `connection_id` is `Option<String>` because manager-plane and
-/// `ListTerminal` requests can be dispatched from a HTTP REST
-/// controller (no originating browser PC). The synthetic
-/// `SignalingModel` we hand to `DeskSession::handle_message` simply
-/// carries a `None` `from_connection_id` in that case; the
-/// downstream worker handlers (`handle_manager_file_list`,
-/// `handle_list_terminals`, ...) already tolerate `None`, and
-/// `send_response` echoes it back into the response model's
-/// `to_connection_id`.
+/// `connection_id` is `Option<String>` because retained non-file manager
+/// requests and `ListTerminal` can originate from an HTTP controller without
+/// a browser PC. Interactive file list and delete requests always provide a
+/// trusted controller connection and fail closed before reaching this helper.
 async fn dispatch_typed_signaling_with_request_id<T>(
     desk_session: &mut DeskSession,
     signaling_type: SignalingType,
@@ -253,7 +248,7 @@ fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerToService> {
                 },
             ))
         }
-        // Batch 2: manager-plane responses. `send_response` echoes
+        // Manager-plane responses. `send_response` echoes
         // `from_connection_id` of the inbound request as
         // `to_connection_id` of the outbound response; HTTP-API-
         // triggered manager requests carry `None`, so the typed
@@ -298,8 +293,8 @@ fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerToService> {
         // ManagerFileDelete / ManagerUpdateSettings responses carry
         // an empty body (`&()`), so a successful round-trip omits
         // signaling_data; `request_id` alone is enough to correlate
-        // back to the originating HTTP REST controller (or browser
-        // PC, when `to_connection_id` is `Some`).
+        // back to either an originating internal request or the browser PC named by
+        // `to_connection_id`.
         SignalingType::ManagerFileDelete => Some(WorkerToService::ManagerFileDeleteResponse(
             ManagerResponseRefPayload {
                 request_id: model.request_id.clone(),
@@ -312,7 +307,7 @@ fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerToService> {
                 connection_id: model.to_connection_id.clone(),
             }),
         ),
-        // Batch 3: terminal-plane responses + notifications. The
+        // Terminal-plane responses and notifications. The
         // worker's terminal handlers always set the target browser in
         // `to_connection_id` (either via `success_response` for
         // `TerminalStarted` / `ListTerminal`, or via `new_request` for
@@ -858,6 +853,7 @@ impl WorkerSession {
             shared_settings.clone(),
             Arc::clone(&host_control_hub),
             connection_ceilings.clone(),
+            writer_tx.clone(),
         );
         // Whiteboard dispatcher. Spawns a bridge thread to
         // the host_control_hub on construction; reuses the same hub
@@ -882,6 +878,7 @@ impl WorkerSession {
             CurrentUser::new_admin("worker_node"),
             host_control_hub,
             connection_ceilings.clone(),
+            writer_tx.clone(),
         )
         .await
         .map_err(|e| format!("Failed to create DeskSession: {}", e))?;
@@ -1114,6 +1111,7 @@ impl WorkerSession {
                                     }
                                     file_transfer_dispatcher.stop_connection(&payload).await;
                                     whiteboard_dispatcher.stop_connection(&payload).await;
+                                    desk_session.clear_file_permissions(&payload.connection_id);
                                     connection_ceilings.clear(&payload.connection_id).await;
                                 }
                                 ServiceToWorker::ForceKeyframe(payload) => {
@@ -1231,7 +1229,7 @@ impl WorkerSession {
                                         &mut desk_session,
                                         SignalingType::ManagerFileList,
                                         payload.request_id,
-                                        payload.connection_id,
+                                        Some(payload.connection_id),
                                         Some(&payload.params),
                                     )
                                     .await;
@@ -1241,7 +1239,7 @@ impl WorkerSession {
                                         &mut desk_session,
                                         SignalingType::ManagerFileDelete,
                                         payload.request_id,
-                                        payload.connection_id,
+                                        Some(payload.connection_id),
                                         Some(&payload.request),
                                     )
                                     .await;
@@ -2377,7 +2375,7 @@ mod tests {
         }
     }
 
-    /// Batch 4: error responses (any SignalingType, response_state
+    /// Error responses (any SignalingType, response_state
     /// with non-zero error_code) all flow through the typed
     /// `WorkerToService::SignalingError` catch-all. The daemon
     /// rebuilds a `SignalingModel::error(...)` from this payload so
@@ -2407,7 +2405,7 @@ mod tests {
         }
     }
 
-    /// Batch 4: malformed JSON (a `service::signaling` bug or a wire
+    /// Malformed JSON (a `service::signaling` bug or a wire
     /// corruption) is logged + dropped now — there is no
     /// SignalingMessage bridge to ferry it through. Returns `None`.
     #[test]
@@ -2419,7 +2417,7 @@ mod tests {
         );
     }
 
-    /// Batch 4: an unrecognised `SignalingType` (e.g. `Error`,
+    /// An unrecognised `SignalingType` (e.g. `Error`,
     /// `Unknown`, or a brand-new variant the worker emitted before
     /// the daemon learned about) is logged + dropped. Returns `None`.
     /// This is a tightening of the previous SignalingMessage fallback.
@@ -2437,7 +2435,7 @@ mod tests {
         assert!(build_outbound_payload_from_desk_text(text).is_none());
     }
 
-    /// Batch 2: `ManagerSystemInfo` response (built by the worker's
+    /// A `ManagerSystemInfo` response (built by the worker's
     /// `send_response`) gets routed onto
     /// `WorkerToService::ManagerSystemInfoResponse` carrying the
     /// `request_id`, `connection_id`, and the `SystemInfo` body
@@ -2470,7 +2468,7 @@ mod tests {
         }
     }
 
-    /// Batch 2: empty-body responses (`ManagerFileDelete`,
+    /// Empty-body responses (`ManagerFileDelete`,
     /// `ManagerUpdateSettings`) ride
     /// `WorkerToService::ManagerResponseRefPayload` — only the
     /// `request_id` + `connection_id` matter. Verify both variants
@@ -2513,7 +2511,7 @@ mod tests {
         }
     }
 
-    /// Batch 3: a `TerminalStarted` blob built by the worker's
+    /// A `TerminalStarted` blob built by the worker's
     /// `handle_manager_terminal_start` (success_response with the
     /// original request_id) gets routed onto
     /// `WorkerToService::TerminalStarted` carrying the request_id +
@@ -2540,7 +2538,7 @@ mod tests {
         }
     }
 
-    /// Batch 3: `TerminalClosed` is a server-initiated notification
+    /// `TerminalClosed` is a server-initiated notification
     /// (`new_request`) — `request_id` is auto-minted, no correlation
     /// needed; the typed payload carries only `connection_id`.
     #[test]
@@ -2560,7 +2558,7 @@ mod tests {
         }
     }
 
-    /// Batch 3: `ReplyFromTerminal` is the high-frequency PTY-output
+    /// `ReplyFromTerminal` is the high-frequency PTY-output
     /// path. The PTY reader thread builds it via `new_request` with a
     /// `TerminalOutputData` body; verify the body survives the typed
     /// route + the connection_id is read from `to_connection_id`
@@ -2586,7 +2584,7 @@ mod tests {
         }
     }
 
-    /// Batch 3: `ListTerminal` response carries the `TerminalList` in
+    /// `ListTerminal` response carries the `TerminalList` in
     /// the body. `handle_list_terminals` uses `send_response` which
     /// writes `to_connection_id` + the original request_id.
     #[test]
@@ -2615,15 +2613,12 @@ mod tests {
         }
     }
 
-    /// Batch B (HTTP-API correlation): a `ManagerSystemInfo` response
-    /// produced by `handle_manager_system_info` for a HTTP-REST-
-    /// triggered request carries `to_connection_id == None` because
+    /// A `ManagerSystemInfo` response
+    /// produced by `handle_manager_system_info` for an internal HTTP request carries `to_connection_id == None` because
     /// the original request from `signal-facade::request_peer_with_callback`
     /// had no `from_connection_id`. The typed dispatcher must still
     /// route it (the daemon's signal/manager bus correlates the
-    /// response by `request_id` alone in that case); a previous
-    /// `model.to_connection_id.clone()?` short-circuit silently
-    /// dropped these and broke `GET /api/desk/files/...`.
+    /// response by `request_id` alone in that case); the classifier must not require a browser connection id.
     #[test]
     fn outbound_dispatch_manager_response_without_to_connection_routes_with_none() {
         let info = SystemInfo::default();

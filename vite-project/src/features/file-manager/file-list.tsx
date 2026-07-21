@@ -1,5 +1,5 @@
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useCallback } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
 import { FileIcon, FolderIcon, ArrowUp, RefreshCw, Home, ArrowLeft, Download, Upload, Loader2, CheckCircle2, XCircle, X, ChevronLeft, ChevronRight, Trash2, Info } from "lucide-react"
@@ -33,13 +33,11 @@ import {
     BreadcrumbPage,
 } from "@/components/ui/breadcrumb"
 import { Progress } from "@/components/ui/progress"
-import { useListFiles } from "@/services/hooks/fileController/useListFiles"
-import { useDeleteFile } from "@/services/hooks/fileController/useDeleteFile"
-import { useDeviceId } from "@/hooks/use-device-id"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { Skeleton } from "@/components/ui/skeleton"
 import { formatBytes } from "@/lib/utils"
 import { useFileTransfer, type TransferProgress } from "./use-file-transfer"
+import { useRestrictedSession } from "@/features/desk/restricted-session"
 import { useToast } from "@/hooks/use-toast"
 
 function formatRemainingTime(seconds: number): string {
@@ -64,25 +62,6 @@ export default function FileList() {
     const fileInputRef = useRef<HTMLInputElement>(null)
     const { toast } = useToast()
 
-    const deviceId = useDeviceId(connectionId)
-
-    const { data, isLoading, refetch, isError, error } = useListFiles({
-        connection_id: connectionId,
-        device_id: deviceId,
-        path: currentPath,
-        page_no: page as any,
-        page_count: pageSize as any
-    })
-
-    // Daemon-mode (Windows service) workers run on the user's elevated linked
-    // token so that `SendInput` can cross UIPI into admin windows during remote
-    // control. The trade-off is that the elevated token lives in a different
-    // logon session from the filtered token Explorer uses to map network
-    // drives, so `GetLogicalDriveStringsW` will not surface mapped drives
-    // unless the OS-wide `EnableLinkedConnections` policy is on. We surface a
-    // hint at the drive-list root so users do not assume the feature is
-    // broken — see `worker_manager::launch_worker_as_user` for the token-
-    // selection rationale on the backend side.
     const { data: serverInfoResp } = useQueryServerInfo()
     const showDaemonMappedDriveHint =
         currentPath === "" && serverInfoResp?.data?.startup_mode === "service-daemon"
@@ -91,24 +70,58 @@ export default function FileList() {
     const [deleteDoubleConfirmOpen, setDeleteDoubleConfirmOpen] = useState(false)
     const [fileToDelete, setFileToDelete] = useState<any>(null)
     const [isPermanentDelete, setIsPermanentDelete] = useState(false)
+    const {
+        transfers,
+        downloadFile,
+        uploadFile,
+        cancelTransfer,
+        removeTransfer,
+        listFiles,
+        deleteFile,
+        closeConnection,
+    } = useFileTransfer(connectionId)
+    const restricted = useRestrictedSession(connectionId)
+    const canDelete = restricted.capabilityVisible("allow_file_delete")
+    const [data, setData] = useState<any>(null)
+    const [isLoading, setIsLoading] = useState(true)
+    const [isDeleting, setIsDeleting] = useState(false)
+    const listGeneration = useRef(0)
 
-    const deleteMutation = useDeleteFile()
+    const loadFiles = useCallback(async () => {
+        if (!connectionId) return
+        const generation = ++listGeneration.current
+        setIsLoading(true)
+        try {
+            const response = await listFiles({
+                path: currentPath,
+                page_no: page,
+                page_count: pageSize,
+            })
+            if (generation === listGeneration.current) {
+                setData(response)
+            }
+        } catch (error) {
+            if (generation === listGeneration.current) {
+                toast({
+                    title: t("pages.fileManager.error"),
+                    description: error instanceof Error ? error.message : t("common.unknownError"),
+                    variant: "destructive",
+                })
+            }
+        } finally {
+            if (generation === listGeneration.current) {
+                setIsLoading(false)
+            }
+        }
+    }, [connectionId, currentPath, page, listFiles, toast, t])
 
     useEffect(() => {
-        if (isError) {
-            toast({
-                title: t('pages.fileManager.error'),
-                description: error instanceof Error ? error.message : t('common.unknownError'),
-                variant: 'destructive',
-            })
-        }
-    }, [isError, error, toast, t])
+        void loadFiles()
+    }, [loadFiles])
 
-    const { transfers, downloadFile, uploadFile, cancelTransfer, removeTransfer, closeConnection } = useFileTransfer(connectionId)
-
-    // Cleanup WebRTC connection when leaving the page
     useEffect(() => {
         return () => {
+            listGeneration.current++
             closeConnection()
         }
     }, [closeConnection])
@@ -116,6 +129,7 @@ export default function FileList() {
     const files = data?.file_info_list || []
     const totalCount = Number(data?.total_count || 0)
     const totalPages = Math.max(1, Math.ceil(totalCount / pageSize))
+
 
     const handleNavigate = (path: string) => {
         setCurrentPath(path)
@@ -180,35 +194,31 @@ export default function FileList() {
         }
     }
 
-    const executeDelete = () => {
-        if (!fileToDelete || !connectionId) return
-
-        deleteMutation.mutate({
-            data: {
-                connection_id: connectionId,
-                device_id: deviceId,
+    const executeDelete = async () => {
+        if (!fileToDelete || !connectionId || isDeleting) return
+        setIsDeleting(true)
+        try {
+            await deleteFile({
                 file_path: fileToDelete.path,
-                delete_permanently: isPermanentDelete
-            }
-        }, {
-            onSuccess: () => {
-                toast({
-                    title: t('pages.fileManager.deleteSuccess'),
-                    variant: 'default',
-                })
-                refetch()
-                setDeleteConfirmOpen(false)
-                setDeleteDoubleConfirmOpen(false)
-                setFileToDelete(null)
-            },
-            onError: (err: any) => {
-                toast({
-                    title: t('pages.fileManager.deleteFailed'),
-                    description: err?.message || t('common.unknownError'),
-                    variant: 'destructive',
-                })
-            }
-        })
+                delete_permanently: isPermanentDelete,
+            })
+            toast({
+                title: t("pages.fileManager.deleteSuccess"),
+                variant: "default",
+            })
+            await loadFiles()
+            setDeleteConfirmOpen(false)
+            setDeleteDoubleConfirmOpen(false)
+            setFileToDelete(null)
+        } catch (error) {
+            toast({
+                title: t("pages.fileManager.deleteFailed"),
+                description: error instanceof Error ? error.message : t("common.unknownError"),
+                variant: "destructive",
+            })
+        } finally {
+            setIsDeleting(false)
+        }
     }
 
     const handleUploadClick = () => {
@@ -266,7 +276,7 @@ export default function FileList() {
                     <Button variant="outline" size="icon" onClick={handleGoUp} disabled={currentPath === ""}>
                         <ArrowUp className="h-4 w-4" />
                     </Button>
-                    <Button variant="outline" size="icon" onClick={() => refetch()}>
+                    <Button variant="outline" size="icon" onClick={() => void loadFiles()}>
                         <RefreshCw className="h-4 w-4" />
                     </Button>
                     <Button variant="outline" size="sm" onClick={handleUploadClick}>
@@ -403,16 +413,16 @@ export default function FileList() {
                                                 <Download className="h-3.5 w-3.5" />
                                             </Button>
                                         )}
-                                        {file.name !== ".." && (
+                                        {file.name !== ".." && canDelete && (
                                             <Button
                                                 variant="ghost"
                                                 size="icon"
                                                 className="h-7 w-7 text-red-500 hover:text-red-700 hover:bg-red-50"
                                                 onClick={(e) => handleDeleteClick(e, file)}
                                                 title={t('pages.fileManager.delete')}
-                                                disabled={deleteMutation.isPending}
+                                                disabled={isDeleting}
                                             >
-                                                {deleteMutation.isPending && fileToDelete?.path === file.path ? (
+                                                {isDeleting && fileToDelete?.path === file.path ? (
                                                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                                 ) : (
                                                     <Trash2 className="h-3.5 w-3.5" />

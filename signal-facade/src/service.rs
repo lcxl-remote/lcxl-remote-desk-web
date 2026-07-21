@@ -1745,6 +1745,7 @@ mod tests {
             StartTerminal,
             ListTerminal,
             ManagerFileList,
+            ManagerFileDelete,
             EnablePrivateScreen,
             UpdateDeskSettings,
         ] {

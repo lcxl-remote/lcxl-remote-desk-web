@@ -308,6 +308,7 @@ mod tests {
                 allow_whiteboard: None,
                 allow_terminal: None,
                 allow_file_browse: None,
+                allow_file_delete: None,
                 allow_file_transfer: None,
                 approval_timeout: None,
             }

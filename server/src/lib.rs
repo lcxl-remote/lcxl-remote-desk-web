@@ -82,7 +82,6 @@ use desk_signal::{
             batch_delete_device_codes, create_device_code, delete_device_code, list_device_codes,
             update_device_code,
         },
-        files::{delete_file, list_files},
         model_provider::{get_model_provider, test_model_provider, update_model_provider},
         signaling::open_signaling_handle,
         terminal::{list_terminal, open_terminal_session},
@@ -131,7 +130,7 @@ pub struct ApiSurfaceOpts {
     /// Register the signaling WS handle (top level, bypasses `enforce_device_scope`).
     pub include_signaling: bool,
     /// Register file management + device-code admin under `/api/desk`.
-    pub include_file_device_code: bool,
+    pub include_device_code: bool,
     /// Register the `/api/turn/*` management scope.
     pub include_turn: bool,
     /// Register the `/api/model/*` scope (the collect-only token-usage view plus
@@ -235,10 +234,8 @@ pub fn configure_api_surface(
                     .service(query_virtual_display_settings)
                     .service(update_virtual_display_settings)
                     .configure(move |cfg| {
-                        if opts.include_file_device_code {
-                            cfg.service(delete_file)
-                                .service(list_files)
-                                .service(create_device_code)
+                        if opts.include_device_code {
+                            cfg.service(create_device_code)
                                 .service(list_device_codes)
                                 .service(update_device_code)
                                 .service(delete_device_code)
@@ -335,7 +332,7 @@ pub fn build_openapi() -> utoipa::openapi::OpenApi {
                 cfg,
                 ApiSurfaceOpts {
                     include_signaling: true,
-                    include_file_device_code: true,
+                    include_device_code: true,
                     include_turn: true,
                     include_model_usage: true,
                 },
@@ -702,7 +699,7 @@ pub async fn run_with_hub(
                 startup_mode,
                 StartupMode::Default | StartupMode::Signaling
             ),
-            include_file_device_code: matches!(
+            include_device_code: matches!(
                 startup_mode,
                 StartupMode::Default | StartupMode::Signaling
             ),
@@ -1012,7 +1009,7 @@ mod tests {
                         cfg,
                         ApiSurfaceOpts {
                             include_signaling: true,
-                            include_file_device_code: true,
+                            include_device_code: true,
                             include_turn: false,
                             include_model_usage: true,
                         },
@@ -1056,15 +1053,12 @@ mod tests {
         }
     }
 
-    /// Regression: remote terminal + file management endpoints must be exposed
-    /// on the daemon's 8082 surface (once dropped in ServiceDaemon mode → 404).
+    /// Regression: remote terminal endpoints must be exposed on the daemon surface.
     #[actix_web::test]
-    async fn daemon_surface_registers_terminal_and_file_endpoints() {
+    async fn daemon_surface_registers_terminal_endpoints() {
         assert_daemon_routes_registered(&[
-            ("GET", "/api/desk/file/list?connection_id=test"),
             ("GET", "/api/desk/terminals/test"),
             ("GET", "/api/desk/terminal/test?command=cmd"),
-            ("DELETE", "/api/desk/file"),
         ])
         .await;
     }
@@ -1121,7 +1115,7 @@ mod tests {
                     cfg,
                     ApiSurfaceOpts {
                         include_signaling: true,
-                        include_file_device_code: true,
+                        include_device_code: true,
                         include_turn: false,
                         include_model_usage: true,
                     },
@@ -1207,7 +1201,7 @@ mod tests {
                         cfg,
                         ApiSurfaceOpts {
                             include_signaling: true,
-                            include_file_device_code: true,
+                            include_device_code: true,
                             include_turn: false,
                             include_model_usage: true,
                         },

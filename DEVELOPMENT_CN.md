@@ -274,10 +274,11 @@ cargo run -p lcxl-remote-desk-server -- dump-openapi --out openapi.json
 - `GET /api/desk/settings`: 获取设置
 - `POST /api/desk/settings`: 更新设置
 
-#### 文件传输
+#### 文件管理与传输
 
-- `GET /api/desk/files`: 列出文件
-- `DELETE /api/desk/files`: 删除文件
+- 文件页面建立 `purpose=file_manager` 的持续 signaling 会话。
+- 目录浏览和删除分别发送 `ManagerFileList`、`ManagerFileDelete`，并以 `request_id` 关联响应。
+- 上传与下载复用同一会话的 WebRTC `file_transfer_event` DataChannel；不存在文件 REST API。
 
 #### 终端控制
 

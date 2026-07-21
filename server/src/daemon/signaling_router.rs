@@ -58,7 +58,9 @@ use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams};
 use desk_signal_facade::model::private_screen::EnablePrivateScreenData;
 use desk_signal_facade::model::security_settings::SecuritySettings;
-use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
+use desk_signal_facade::model::signal::{
+    OfferModel, RemoteSessionPurpose, RequestRemoteModel, SignalingModel, SignalingType,
+};
 use desk_signal_facade::model::system_settings::RemoteSystemSettings;
 use desk_signal_facade::model::terminal::{
     StartTerminalSession, TerminalInputData, TerminalResizeData,
@@ -653,8 +655,10 @@ fn capped_session_permits(t: SignalingType, ceiling: &SecuritySettings) -> bool 
         StartTerminal | SendDataToTerminal | ResizeTerminal | CloseTerminal | ListTerminal => {
             ceiling.allow_terminal != Some(false)
         }
-        // File-browse family (list / delete share the capability).
-        ManagerFileList | ManagerFileDelete => ceiling.allow_file_browse != Some(false),
+        ManagerFileList => ceiling.allow_file_browse != Some(false),
+        ManagerFileDelete => {
+            ceiling.allow_file_browse != Some(false) && ceiling.allow_file_delete != Some(false)
+        }
         EnablePrivateScreen => ceiling.allow_private_screen != Some(false),
         _ => false,
     }
@@ -669,12 +673,12 @@ enum ConnectionGate {
     KnownOwnerFull,
     /// Admitted as a redeemed-grant / legacy-support session, capped by a ceiling.
     KnownCapped(SecuritySettings),
-    /// A server-internal frame with no originating WS connection id
-    /// (`from_connection_id == None`): a REST-initiated `ManagerFileList` /
-    /// `ListTerminal` emitted by `signal-facade`'s file/terminal controllers,
-    /// already authorized by the REST `enforce_device_scope` layer before it was
-    /// emitted. A WS client cannot produce this — the server stamps a real id on
-    /// every client frame — so it is trusted and passes door1 unchanged.
+    /// A server-internal frame has no originating WebSocket connection id.
+    /// Its producing service already performed the applicable authorization.
+    /// File-manager operations are never server-internal because their REST
+    /// entry points were removed; they require an admitted controller connection.
+    /// Client frames always receive a server-stamped id, so a client cannot
+    /// manufacture this classification.
     ServerInternal,
     /// A WS connection carrying a real stamped id but no admission record: it
     /// never did an authorized `RequestRemote` on this instance (a management-only
@@ -682,7 +686,7 @@ enum ConnectionGate {
     /// door1 is fail-closed for connection-scoped capability frames here (see
     /// [`door1_permits`]) — a capped session that has not yet been admitted must
     /// not slip a capability frame through the pre-admission window where the
-    /// worker has no ceiling and would fall back to the host global (F1 / N1).
+    /// worker has no ceiling and would fall back to the host global.
     UnadmittedConnection,
 }
 
@@ -706,22 +710,23 @@ async fn classify_connection(registry: &PcRegistry, connection_id: Option<&str>)
 /// session) runs the capability matrix (still capped after a `CloseControl` PC
 /// teardown, since the admission outlives the PC).
 ///
-/// A server-internal (REST-initiated) frame passes — it was already authorized by
-/// the REST `enforce_device_scope` layer. An un-admitted WS connection (a real
-/// stamped id with no `RequestRemote` recorded) is fail-closed for connection-
-/// scoped capability frames: those are only legitimate after an admission has
-/// provisioned the worker ceiling, so one arriving here would otherwise fall
-/// through to the worker with no ceiling and be evaluated against the host global
-/// (fail-open — the pre-`RequestRemote` window of F1/N1). Owner-plane management
-/// frames (`Manager*` settings / system-info, display) are authorized at the
-/// central — a capability-scoped code-session cannot originate them — so they pass
-/// here; frames carrying their own authz gate (AI / exec via the control
-/// authorizer) pass and are gated there.
+/// A server-internal frame passes because its producing service already ran
+/// the applicable authorization checks, except file-manager frames, which must
+/// carry an admitted controller connection. An un-admitted WebSocket connection
+/// is fail-closed for connection-scoped capability frames: those frames are
+/// only legitimate after admission provisions the worker ceiling. Otherwise
+/// the worker would evaluate the request against the host global setting in
+/// the pre-admission window. Owner-plane management frames are authorized by
+/// the central service, while AI and exec frames keep their dedicated
+/// authorization gates.
 fn door1_permits(gate: &ConnectionGate, t: SignalingType) -> bool {
     match gate {
         ConnectionGate::KnownOwnerFull => true,
         ConnectionGate::KnownCapped(ceiling) => capped_session_permits(t, ceiling),
-        ConnectionGate::ServerInternal => true,
+        ConnectionGate::ServerInternal => !matches!(
+            t,
+            SignalingType::ManagerFileList | SignalingType::ManagerFileDelete
+        ),
         ConnectionGate::UnadmittedConnection => !is_connection_scoped_capability_frame(t),
     }
 }
@@ -765,6 +770,41 @@ fn risk_str(risk: desk_agent_protocol::RiskLevel) -> &'static str {
 /// and dead-enum variants (`Answer`, `Init`, `Heartbeat`, `Error`,
 /// `Unknown`, ...) are trace-logged + dropped. There is no fallback
 /// path — the typed-IPC migration removed the `SignalingMessage` bridge.
+async fn promote_desktop_resources(
+    model: &SignalingModel,
+    ctx: &RouterContext,
+    reason: &str,
+) -> Result<(), RouterError> {
+    let connection_id = model
+        .check_and_get_from_connection_id()
+        .map_err(DeskError::from)?;
+    if let Some(pc) = ctx.pc_registry.get(connection_id).await {
+        let pc = pc.read().await;
+        let mut state = pc.signaling_state.write().await;
+        if state.purpose == RemoteSessionPurpose::FileManager {
+            state.purpose = RemoteSessionPurpose::RemoteDesktop;
+            log::info!("[router] promoted {connection_id} to remote_desktop for {reason}");
+        }
+    }
+
+    let virtual_display_enabled = ctx.settings.read().await.virtual_display.enabled;
+    if virtual_display_enabled && let Some(supervisor) = ctx.virtual_display.as_ref() {
+        match supervisor
+            .ensure_attached(VIRTUAL_DISPLAY_ATTACH_TIMEOUT)
+            .await
+        {
+            EnsureAttachedOutcome::Attached => {}
+            EnsureAttachedOutcome::TimedOut => {
+                log::warn!("[router] virtual display attach timed out during {reason}");
+            }
+            EnsureAttachedOutcome::Unavailable(e) => {
+                log::warn!("[router] virtual display unavailable during {reason}: {e}");
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), RouterError> {
     // First fail-closed door: capability-capped sessions (a redeemed grant or a
     // legacy support session — both carry an `access_ceiling`) may only use the
@@ -788,7 +828,10 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
     }
     match model.signaling_type {
         SignalingType::RequestRemote => {
-            // v5 lazy lifecycle: hold a pending guard for the lifetime
+            let request_remote = model
+                .get_data::<RequestRemoteModel>()
+                .map_err(DeskError::from)?;
+            // Hold a pending guard for the lifetime
             // of this handler so cleanup_pc on a concurrently-closing
             // old PC cannot N→0 detach the IDD out from under us.
             let pending_guard = ctx.pc_registry.enter_pending();
@@ -798,11 +841,12 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             // Init reply so the daemon's capabilities cache reflects
             // the IDD and the dropdown shows it on the first dialog
             // open. Timeout falls through to a capabilities-without-IDD
-            // reply; the next dialog open recovers via v4's
+            // reply; the next dialog open recovers via the existing
             // RefreshCapabilities round-trip if attach eventually
             // completes in the background.
             if let Some(supervisor) = ctx.virtual_display.as_ref()
                 && s.virtual_display.enabled
+                && request_remote.purpose == RemoteSessionPurpose::RemoteDesktop
             {
                 match supervisor
                     .ensure_attached(VIRTUAL_DISPLAY_ATTACH_TIMEOUT)
@@ -885,6 +929,10 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             Ok(())
         }
         SignalingType::Offer => {
+            let offer = model.get_data::<OfferModel>().map_err(DeskError::from)?;
+            if offer.offer.sdp.contains("m=video") {
+                promote_desktop_resources(model, ctx, "video offer").await?;
+            }
             pc_manager::handle_offer(&ctx.pc_registry, &ctx.outbound_tx, &ctx.worker_mgr, model)
                 .await?;
             Ok(())
@@ -919,6 +967,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             Ok(())
         }
         SignalingType::RequireControl => {
+            promote_desktop_resources(model, ctx, "control request").await?;
             let settings: &SharedSettings = &ctx.settings;
             let outcome = pc_manager::handle_require_control(
                 &ctx.pc_registry,
@@ -1997,15 +2046,8 @@ fn require_from_connection_id<'a>(
     }
 }
 
-/// Helper: clone `from_connection_id` from an inbound model where
-/// `None` is a legitimate state — used by manager-plane and
-/// `ListTerminal` routing because those `SignalingType`s can be
-/// dispatched from a HTTP REST controller (e.g.
-/// `signal-facade::controller::sysinfo::list_files`) via
-/// `connection.request_peer_with_callback`, which does not populate
-/// `from_connection_id`. The response is correlated by `request_id`
-/// alone in that case, so the typed IPC payload simply carries
-/// `Option<String>` through to the worker.
+/// Clone `from_connection_id` for non-interactive manager requests that still
+/// support request-id-only REST correlation.
 fn optional_from_connection_id(model: &SignalingModel) -> Option<String> {
     model.from_connection_id.clone()
 }
@@ -2050,7 +2092,9 @@ async fn handle_manager_file_list_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    let connection_id = optional_from_connection_id(model);
+    let Some(connection_id) = require_from_connection_id(model, "ManagerFileList") else {
+        return Ok(());
+    };
     let params = match model.get_data::<FileListParams>() {
         Ok(p) => p,
         Err(e) => {
@@ -2064,7 +2108,7 @@ async fn handle_manager_file_list_inbound(
     };
     let payload = ManagerFileListRequestPayload {
         request_id: model.request_id.clone(),
-        connection_id,
+        connection_id: connection_id.to_string(),
         params,
     };
     if let Err(e) = ctx
@@ -2081,7 +2125,9 @@ async fn handle_manager_file_delete_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    let connection_id = optional_from_connection_id(model);
+    let Some(connection_id) = require_from_connection_id(model, "ManagerFileDelete") else {
+        return Ok(());
+    };
     let request = match model.get_data::<DeleteFileRequest>() {
         Ok(r) => r,
         Err(e) => {
@@ -2095,7 +2141,7 @@ async fn handle_manager_file_delete_inbound(
     };
     let payload = ManagerFileDeleteRequestPayload {
         request_id: model.request_id.clone(),
-        connection_id,
+        connection_id: connection_id.to_string(),
         request,
     };
     if let Err(e) = ctx
@@ -4114,7 +4160,7 @@ async fn handle_agent_request_inbound(
         return Ok(());
     };
 
-    // Phase 1 + 2: reject unknown kinds gracefully before typed parse.
+    // Reject unknown kinds gracefully before typed parsing.
     if let Err(e) = validate_agent_request_kinds(raw) {
         emit_agent_error(ctx, model, e);
         return Ok(());
@@ -4292,7 +4338,6 @@ mod tests {
             SignalingType::UpdateDeskSettings,
             SignalingType::ManagerSystemInfo,
             SignalingType::ManagerFileList,
-            SignalingType::ManagerFileDelete,
             SignalingType::StartTerminal,
             SignalingType::SendDataToTerminal,
             SignalingType::ResizeTerminal,
@@ -4463,11 +4508,42 @@ mod tests {
         assert!(capped_session_permits(EnablePrivateScreen, &ceiling));
     }
 
+    #[test]
+    fn capped_session_requires_browse_and_delete_for_file_delete() {
+        use SignalingType::*;
+
+        let browse_only = SecuritySettings {
+            allow_file_browse: Some(true),
+            allow_file_delete: Some(false),
+            ..Default::default()
+        };
+        assert!(capped_session_permits(ManagerFileList, &browse_only));
+        assert!(!capped_session_permits(ManagerFileDelete, &browse_only));
+
+        let delete_only = SecuritySettings {
+            allow_file_browse: Some(false),
+            allow_file_delete: Some(true),
+            ..Default::default()
+        };
+        assert!(!capped_session_permits(ManagerFileList, &delete_only));
+        assert!(!capped_session_permits(ManagerFileDelete, &delete_only));
+
+        let browse_and_delete = SecuritySettings {
+            allow_file_browse: Some(true),
+            allow_file_delete: Some(true),
+            ..Default::default()
+        };
+        assert!(capped_session_permits(
+            ManagerFileDelete,
+            &browse_and_delete
+        ));
+    }
+
     /// The admission-based door1 gate: a session admitted as owner passes
     /// everything; a capped session (a redeemed grant, including a temporary-support
     /// session) runs the capability matrix; an un-admitted connection is fail-closed
     /// for connection-scoped capability frames (the pre-`RequestRemote` window
-    /// where the worker has no ceiling — F1/N1), while owner-plane frames pass here
+    /// where the worker has no ceiling — pre-admission), while owner-plane frames pass here
     /// and are authorized at the central.
     #[test]
     fn door1_permits_gates_capped_sessions_and_fails_closed_unadmitted_capability() {
@@ -4493,7 +4569,7 @@ mod tests {
         ));
         // Un-admitted WS connection: a connection-scoped capability frame is
         // denied — it would otherwise reach the worker before any ceiling was
-        // provisioned and be evaluated against the host global (F1/N1
+        // provisioned and be evaluated against the host global
         // pre-RequestRemote window). `StartTerminal` is deliberately NOT in this
         // list: like `RequestRemote` it is the admission-establishing frame for the
         // terminal WS, gated by its own source-gate + handler, so it must reach the
@@ -4528,12 +4604,16 @@ mod tests {
             door1_permits(&ConnectionGate::UnadmittedConnection, StartTerminal),
             "StartTerminal is admission-establishing and must pass door1 un-admitted"
         );
-        // Server-internal (REST-initiated, `from_connection_id == None`) frames —
-        // already authorized at the REST layer — pass, including the capability
-        // frames a REST file/terminal listing legitimately emits.
-        assert!(door1_permits(
+        // Server-internal frames may still serve explicitly authorized internal
+        // terminal operations, but file-manager frames require a controller
+        // connection now that their REST entry points no longer exist.
+        assert!(!door1_permits(
             &ConnectionGate::ServerInternal,
             ManagerFileList
+        ));
+        assert!(!door1_permits(
+            &ConnectionGate::ServerInternal,
+            ManagerFileDelete
         ));
         assert!(door1_permits(&ConnectionGate::ServerInternal, ListTerminal));
     }
@@ -4544,7 +4624,7 @@ mod tests {
     async fn classify_connection_reads_admission_map() {
         let registry = PcRegistry::new();
 
-        // A missing connection id is a server-internal (REST-initiated) frame.
+        // A missing connection id is a server-internal (service-generated) frame.
         assert!(matches!(
             classify_connection(&registry, None).await,
             ConnectionGate::ServerInternal
@@ -4918,8 +4998,6 @@ mod tests {
                 serde_json::to_value(desk_signal_facade::model::files::DeleteFileRequest {
                     file_path: "C:\\old.txt".to_string(),
                     delete_permanently: Some(false),
-                    connection_id: Some("conn-mgr".to_string()),
-                    device_id: None,
                 })
                 .unwrap(),
             ),
@@ -4948,33 +5026,16 @@ mod tests {
         }
     }
 
-    /// HTTP-API-triggered manager requests (e.g.
-    /// `signal-facade::controller::sysinfo` →
-    /// `connection.request_peer_with_callback`) carry no
-    /// `from_connection_id`; the router must still forward the typed
-    /// request to the worker so the response can flow back via
-    /// `request_id` correlation. Previously the router dropped these
-    /// — that broke `GET /api/desk/files/...` and `GET
-    /// /api/desk/terminals/...` in portable mode.
+    /// Internal non-file manager requests still allow request-id-only correlation.
     #[tokio::test]
-    async fn route_manager_request_without_connection_id_forwards() {
+    async fn route_non_file_manager_request_without_connection_id_forwards() {
         let ctx = make_ctx().await;
         for t in [
             SignalingType::ManagerSystemInfo,
             SignalingType::ManagerQuerySettings,
-            SignalingType::ManagerFileDelete,
             SignalingType::ManagerUpdateSettings,
         ] {
             let body = match t {
-                SignalingType::ManagerFileDelete => Some(
-                    serde_json::to_value(desk_signal_facade::model::files::DeleteFileRequest {
-                        file_path: "C:\\old.txt".to_string(),
-                        delete_permanently: Some(false),
-                        connection_id: None,
-                        device_id: None,
-                    })
-                    .unwrap(),
-                ),
                 SignalingType::ManagerUpdateSettings => Some(
                     serde_json::to_value(
                         desk_signal_facade::model::system_settings::RemoteSystemSettings::default(),
@@ -4986,17 +5047,14 @@ mod tests {
             let model = SignalingModel::new("req-no-conn", t, None, None, body, None);
             assert!(
                 route(&model, &ctx).await.is_ok(),
-                "{t:?} with None from_connection_id must be forwarded, not dropped",
+                "{t:?} must retain request-id-only routing",
             );
         }
     }
 
-    /// `ManagerFileList` specifically — same regression as the umbrella
-    /// test above, but pinned with a real `FileListParams` body so a
-    /// future split that re-introduces a `require_from_connection_id`
-    /// guard on the file-list path lights up here.
+    /// Interactive file requests without a trusted controller identity are dropped.
     #[tokio::test]
-    async fn route_manager_file_list_without_connection_id_forwards() {
+    async fn route_manager_file_list_without_connection_id_is_dropped() {
         let ctx = make_ctx().await;
         let params = desk_signal_facade::model::files::FileListParams {
             path: "C:\\".to_string(),
@@ -5109,6 +5167,7 @@ mod tests {
         let ctx = make_ctx().await;
         let s = crate::model::settings::Settings::default();
         let rr = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: Some("GS-supp".to_string()),
         };
@@ -5189,6 +5248,7 @@ mod tests {
 
         let ctx = make_ctx().await;
         let request_remote = desk_signal_facade::model::signal::RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
         };
@@ -5556,9 +5616,16 @@ mod tests {
         }
     }
 
-    // ===== v5 lazy lifecycle: router RequestRemote ensure_attached =====
+    // ===== RequestRemote virtual-display lifecycle =====
 
     fn make_request_remote_model(connection_id: &str) -> SignalingModel {
+        make_request_remote_model_with_purpose(connection_id, RemoteSessionPurpose::RemoteDesktop)
+    }
+
+    fn make_request_remote_model_with_purpose(
+        connection_id: &str,
+        purpose: RemoteSessionPurpose,
+    ) -> SignalingModel {
         use desk_signal_facade::model::signal::RequestRemoteModel;
         SignalingModel::new(
             "req-vd-lazy",
@@ -5567,6 +5634,7 @@ mod tests {
             None,
             Some(
                 serde_json::to_value(RequestRemoteModel {
+                    purpose,
                     ice_servers: vec![],
                     grant_session_id: None,
                 })
@@ -5576,8 +5644,45 @@ mod tests {
         )
     }
 
-    /// `virtual_display.enabled = false`: ensure_attached must NOT be
-    /// called. We can't easily mock the supervisor through a trait
+    #[tokio::test]
+    async fn file_manager_purpose_is_stored_and_only_promotes_to_desktop() {
+        let (ctx, _rx) = make_ctx_with_rx().await;
+        ctx.settings.write().await.virtual_display.enabled = false;
+        let model = make_request_remote_model_with_purpose(
+            "conn-file-purpose",
+            RemoteSessionPurpose::FileManager,
+        );
+        route(&model, &ctx).await.expect("file manager request");
+
+        let pc = ctx
+            .pc_registry
+            .get("conn-file-purpose")
+            .await
+            .expect("registered pc");
+        let state = pc.read().await.signaling_state.clone();
+        assert_eq!(
+            state.read().await.purpose,
+            RemoteSessionPurpose::FileManager
+        );
+
+        promote_desktop_resources(&model, &ctx, "test")
+            .await
+            .expect("promotion");
+        assert_eq!(
+            state.read().await.purpose,
+            RemoteSessionPurpose::RemoteDesktop
+        );
+        promote_desktop_resources(&model, &ctx, "repeat")
+            .await
+            .expect("idempotent promotion");
+        assert_eq!(
+            state.read().await.purpose,
+            RemoteSessionPurpose::RemoteDesktop
+        );
+    }
+    /// With virtual display disabled, ensure_attached must not be called.
+    /// The attached test supervisor keeps this path observable without external IO.
+    /// With virtual display disabled, ensure_attached must not be called. We can't easily mock the supervisor through a trait
     /// here, but we can install a `new_attached_for_test` supervisor
     /// and verify that the route succeeds without changing state —
     /// the ensure_attached fast-path would also produce Attached, but
@@ -6377,7 +6482,7 @@ mod tests {
             .expect("AgentResponse must carry an AgentOutcome")
     }
 
-    /// Phase 1 + 2 accept a fully-known read request.
+    /// A fully-known read request is accepted.
     #[test]
     fn two_phase_parse_accepts_known_read_kind() {
         let raw = serde_json::json!({

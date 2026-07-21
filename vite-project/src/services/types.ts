@@ -612,31 +612,6 @@ export type CurrentUser = {
 };
 
 /**
- * @description Request body for deleting a file.
-*/
-export type DeleteFileRequest = {
-    /**
-     * @type string,null
-    */
-    connection_id?: string | null;
-    /**
-     * @description Whether to delete permanently or move to trash
-     * @type boolean,null
-    */
-    delete_permanently?: boolean | null;
-    /**
-     * @description Target device handle (UUID; manager multi-instance addressing). See\n[`FileListParams::device_id`] for the dual-target rationale.
-     * @type string,null
-    */
-    device_id?: string | null;
-    /**
-     * @description The path of file to be deleted
-     * @type string
-    */
-    file_path: string;
-};
-
-/**
  * @description Selected Audio Device Model
 */
 export type SelectedAudioDevice = {
@@ -926,10 +901,15 @@ export type SecuritySettings = {
     */
     allow_clipboard_sync?: boolean | null;
     /**
-     * @description Allow file browsing (list/delete files via signaling)
+     * @description Allow file browsing (list files and inspect metadata via signaling)
      * @type boolean,null
     */
     allow_file_browse?: boolean | null;
+    /**
+     * @description Allow deleting files via signaling
+     * @type boolean,null
+    */
+    allow_file_delete?: boolean | null;
     /**
      * @description Allow file transfer (upload/download via DataChannel)
      * @type boolean,null
@@ -1158,66 +1138,6 @@ export type FakeCaptchaParams = {
      * @type string,null
     */
     phone?: string | null;
-};
-
-export type FileInfo = {
-    /**
-     * @type string, date-time
-    */
-    accessed: string;
-    /**
-     * @type string, date-time
-    */
-    created: string;
-    /**
-     * @type string,null
-    */
-    err_msg?: string | null;
-    /**
-     * @type boolean
-    */
-    is_dir: boolean;
-    /**
-     * @type boolean
-    */
-    is_file: boolean;
-    /**
-     * @type boolean
-    */
-    is_symlink: boolean;
-    /**
-     * @type string, date-time
-    */
-    modified: string;
-    /**
-     * @type string
-    */
-    name: string;
-    /**
-     * @type string
-    */
-    path: string;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    permissions: number;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    size: number;
-};
-
-export type FileListResponse = {
-    /**
-     * @type array
-    */
-    file_info_list: FileInfo[];
-    /**
-     * @type integer, int64
-    */
-    total_count: number;
 };
 
 export type UploadRequest = {
@@ -2021,7 +1941,7 @@ export type RedeemCodeParams = {
 export type RedeemCodeResult = {
     access_ceiling?: (null | SecuritySettings);
     /**
-     * @description The reusable grant-session token the control end must attach to each\nRequestRemote (main + file-transfer connections) for this target.
+     * @description The reusable grant-session token the control end must attach to every\nRequestRemote for this target, including desktop and file-manager sessions.
      * @type string
     */
     grant_session_id: string;
@@ -2031,6 +1951,15 @@ export type RedeemCodeResult = {
     */
     target_connection_id: string;
 };
+
+export const remoteSessionPurposeEnum = {
+    remote_desktop: "remote_desktop",
+    file_manager: "file_manager"
+} as const;
+
+export type RemoteSessionPurposeEnumKey = (typeof remoteSessionPurposeEnum)[keyof typeof remoteSessionPurposeEnum];
+
+export type RemoteSessionPurpose = RemoteSessionPurposeEnumKey;
 
 /**
  * @description RequestRemoteModel is used to request remote access.\nweb browser -> signaling server -> desk server
@@ -2046,6 +1975,11 @@ export type RequestRemoteModel = {
      * @type array | undefined
     */
     ice_servers?: LcxlRTCIceServer[];
+    /**
+     * @description Required session purpose hint. It only controls resource preparation and\nnever grants a capability.
+     * @type string
+    */
+    purpose: RemoteSessionPurpose;
 };
 
 export type RestResponseAiExecutionPolicyPublic = {
@@ -2554,7 +2488,7 @@ export type RestResponseRedeemCodeResult = {
     data?: {
         access_ceiling?: (null | SecuritySettings);
         /**
-         * @description The reusable grant-session token the control end must attach to each\nRequestRemote (main + file-transfer connections) for this target.
+         * @description The reusable grant-session token the control end must attach to every\nRequestRemote for this target, including desktop and file-manager sessions.
          * @type string
         */
         grant_session_id: string;
@@ -2590,10 +2524,15 @@ export type RestResponseSecuritySettings = {
         */
         allow_clipboard_sync?: boolean | null;
         /**
-         * @description Allow file browsing (list/delete files via signaling)
+         * @description Allow file browsing (list files and inspect metadata via signaling)
          * @type boolean,null
         */
         allow_file_browse?: boolean | null;
+        /**
+         * @description Allow deleting files via signaling
+         * @type boolean,null
+        */
+        allow_file_delete?: boolean | null;
         /**
          * @description Allow file transfer (upload/download via DataChannel)
          * @type boolean,null
@@ -4311,107 +4250,6 @@ export type DeleteDeviceCodeMutationResponse = DeleteDeviceCode200;
 export type DeleteDeviceCodeMutation = {
     Response: DeleteDeviceCode200;
     PathParams: DeleteDeviceCodePathParams;
-    Errors: any;
-};
-
-/**
- * @description Delete file successfully
-*/
-export type DeleteFile200 = any;
-
-/**
- * @description Bad request
-*/
-export type DeleteFile400 = any;
-
-export type DeleteFileMutationRequest = DeleteFileRequest;
-
-export type DeleteFileMutationResponse = DeleteFile200;
-
-export type DeleteFileMutation = {
-    Response: DeleteFile200;
-    Request: DeleteFileMutationRequest;
-    Errors: DeleteFile400;
-};
-
-export type ListFilesQueryParams = {
-    /**
-     * @type string
-    */
-    path: string;
-    /**
-     * @type integer, int64
-    */
-    page_no: number;
-    /**
-     * @type integer, int64
-    */
-    page_count: number;
-    /**
-     * @description Minimum file size
-     * @type integer,null, int64
-    */
-    min_file_size?: number | null;
-    /**
-     * @description Max file size
-     * @type integer,null, int64
-    */
-    max_file_size?: number | null;
-    /**
-     * @description File name filtering
-     * @type string,null
-    */
-    file_name?: string | null;
-    /**
-     * @description New field for file extension filtering
-     * @type string,null
-    */
-    file_extension?: string | null;
-    /**
-     * @description Optional file extension list filtering, comma(,) separated values.
-     * @type string,null
-    */
-    file_extension_list?: string | null;
-    /**
-     * @description Optional time range filter for file creation.
-     * @type string,null, date-time
-    */
-    start_created_time?: string | null;
-    /**
-     * @type string,null, date-time
-    */
-    end_created_time?: string | null;
-    /**
-     * @description Optional time range filter for file modification.
-     * @type string,null, date-time
-    */
-    start_modified_time?: string | null;
-    /**
-     * @type string,null, date-time
-    */
-    end_modified_time?: string | null;
-    /**
-     * @description Connection ID for remote desk
-     * @type string,null
-    */
-    connection_id?: string | null;
-    /**
-     * @description Target device handle (UUID; manager multi-instance addressing). The manager\nroutes by this; the OSS single-instance signal leaves it `None` and routes\nby `connection_id` (dual-target wire model).
-     * @type string,null
-    */
-    device_id?: string | null;
-};
-
-/**
- * @description The list of file info
-*/
-export type ListFiles200 = FileListResponse;
-
-export type ListFilesQueryResponse = ListFiles200;
-
-export type ListFilesQuery = {
-    Response: ListFiles200;
-    QueryParams: ListFilesQueryParams;
     Errors: any;
 };
 

@@ -143,7 +143,7 @@ pub async fn run_local_api(
                     cfg,
                     ApiSurfaceOpts {
                         include_signaling: true,
-                        include_file_device_code: true,
+                        include_device_code: true,
                         include_turn: false,
                         include_model_usage: true,
                     },

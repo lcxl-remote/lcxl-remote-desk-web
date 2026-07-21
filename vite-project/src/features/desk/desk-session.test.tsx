@@ -3,7 +3,10 @@ import '@testing-library/jest-dom';
 import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import DeskSession, { shouldOpenConfigDialog } from './desk-session';
+import DeskSession, {
+  buildDesktopRequestRemotePayload,
+  shouldOpenConfigDialog,
+} from './desk-session';
 import React from 'react';
 
 // Mock routing
@@ -230,6 +233,20 @@ describe('shouldOpenConfigDialog', () => {
         rtcFailed: true,
       }),
     ).toBe(true);
+  });
+});
+
+describe('buildDesktopRequestRemotePayload', () => {
+  it('always identifies desktop sessions explicitly', () => {
+    expect(buildDesktopRequestRemotePayload('desk-1', null)).toEqual({
+      connection_id: 'desk-1',
+      purpose: 'remote_desktop',
+    });
+    expect(buildDesktopRequestRemotePayload('desk-1', 'grant-1')).toEqual({
+      connection_id: 'desk-1',
+      purpose: 'remote_desktop',
+      grant_session_id: 'grant-1',
+    });
   });
 });
 

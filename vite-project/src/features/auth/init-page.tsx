@@ -94,6 +94,7 @@ export default function InitPage() {
         allow_whiteboard: true,
         allow_terminal: true,
         allow_file_browse: true,
+        allow_file_delete: true,
         allow_file_transfer: true,
     })
     const [telemetryConsent, setTelemetryConsent] = useState(true)

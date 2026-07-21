@@ -308,6 +308,12 @@ pub enum WorkerToService {
     /// Cursor shape / position update for the cursor-sync DataChannel.
     /// Routed by daemon to the per-connection `cursor_sync` DC.
     CursorData(CursorDataPayload),
+    /// File browsing or deletion was authorised and the first operation can execute.
+    FileManagerOpened(FileManagerOpenedPayload),
+    /// The worker accepted a file-transfer operation for processing.
+    FileTransferStarted(FileTransferStartedPayload),
+    /// A known file transfer reached one terminal outcome.
+    FileTransferFinished(FileTransferFinishedPayload),
 
     // (File-transfer responses moved to a dedicated file lane; see
     // `dual_transport::FILE_QUEUE_CAP` and `WorkerInitPayload::file_pipe_name`.)
@@ -922,6 +928,45 @@ pub struct PrivateScreenStateChangedPayload {
     pub data: PrivateScreenStateChangedData,
 }
 
+/// Worker-confirmed file-manager activity for one controller connection.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct FileManagerOpenedPayload {
+    pub connection_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+#[serde(rename_all = "snake_case")]
+pub enum FileTransferDirection {
+    Upload,
+    Download,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+#[serde(rename_all = "snake_case")]
+pub enum FileTransferOutcome {
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct FileTransferStartedPayload {
+    pub connection_id: String,
+    pub transfer_id: String,
+    pub direction: FileTransferDirection,
+    pub file_name: String,
+    /// Expected transfer size. Downloads use host filesystem metadata; uploads
+    /// use the controller-declared size and validate it before completion.
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct FileTransferFinishedPayload {
+    pub connection_id: String,
+    pub transfer_id: String,
+    pub outcome: FileTransferOutcome,
+}
+
 // ---------- Manager plane (typed) ----------
 
 /// Shared envelope for body-less manager *requests*
@@ -953,15 +998,12 @@ pub struct ManagerResponseRefPayload {
     pub connection_id: Option<String>,
 }
 
-/// Payload for [`ServiceToWorker::ManagerFileListRequest`]. Carries
-/// `FileListParams` (filtering knobs, paging) verbatim from the
-/// browser-issued signaling envelope. `connection_id` is `Option`
-/// because manager-plane queries can be HTTP-API-triggered (no
-/// originating browser PC) — see [`ManagerRequestRefPayload`].
+/// Payload for [`ServiceToWorker::ManagerFileListRequest`]. Carries the
+/// trusted controller connection and the browser-issued list parameters.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ManagerFileListRequestPayload {
     pub request_id: String,
-    pub connection_id: Option<String>,
+    pub connection_id: String,
     pub params: FileListParams,
 }
 
@@ -969,7 +1011,7 @@ pub struct ManagerFileListRequestPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ManagerFileDeleteRequestPayload {
     pub request_id: String,
-    pub connection_id: Option<String>,
+    pub connection_id: String,
     pub request: DeleteFileRequest,
 }
 
@@ -2080,13 +2122,13 @@ mod tests {
         };
         let msg = ServiceToWorker::ManagerFileListRequest(ManagerFileListRequestPayload {
             request_id: "req-fl".to_string(),
-            connection_id: Some("conn-fl".to_string()),
+            connection_id: "conn-fl".to_string(),
             params,
         });
         match wincode_round_trip(&msg) {
             ServiceToWorker::ManagerFileListRequest(p) => {
                 assert_eq!(p.request_id, "req-fl");
-                assert_eq!(p.connection_id.as_deref(), Some("conn-fl"));
+                assert_eq!(p.connection_id, "conn-fl");
                 assert_eq!(p.params.path, "C:\\Users");
                 assert_eq!(p.params.page_no, 2);
                 assert_eq!(p.params.page_count, 50);
@@ -2515,12 +2557,12 @@ mod tests {
             }),
             ServiceToWorker::ManagerFileListRequest(ManagerFileListRequestPayload {
                 request_id: "r2".to_string(),
-                connection_id: Some("c".to_string()),
+                connection_id: "c".to_string(),
                 params: FileListParams::default(),
             }),
             ServiceToWorker::ManagerFileDeleteRequest(ManagerFileDeleteRequestPayload {
                 request_id: "r3".to_string(),
-                connection_id: Some("c".to_string()),
+                connection_id: "c".to_string(),
                 request: DeleteFileRequest::default(),
             }),
             ServiceToWorker::ManagerQuerySettingsRequest(ManagerRequestRefPayload {
@@ -2601,8 +2643,43 @@ mod tests {
         }
     }
 
-    /// Exhaustive `WorkerToService` round-trip. See
-    /// [`service_to_worker_all_variants_round_trip`] for the rationale.
+    /// File activity payload fields survive the event-lane codec.
+    #[test]
+    fn file_activity_events_round_trip() {
+        let started = WorkerToService::FileTransferStarted(FileTransferStartedPayload {
+            connection_id: "conn-file".to_string(),
+            transfer_id: "transfer-1".to_string(),
+            direction: FileTransferDirection::Upload,
+            file_name: "photo.png".to_string(),
+            total_bytes: 4096,
+        });
+        match wincode_round_trip(&started) {
+            WorkerToService::FileTransferStarted(payload) => {
+                assert_eq!(payload.connection_id, "conn-file");
+                assert_eq!(payload.transfer_id, "transfer-1");
+                assert_eq!(payload.direction, FileTransferDirection::Upload);
+                assert_eq!(payload.file_name, "photo.png");
+                assert_eq!(payload.total_bytes, 4096);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let finished = WorkerToService::FileTransferFinished(FileTransferFinishedPayload {
+            connection_id: "conn-file".to_string(),
+            transfer_id: "transfer-1".to_string(),
+            outcome: FileTransferOutcome::Failed,
+        });
+        match wincode_round_trip(&finished) {
+            WorkerToService::FileTransferFinished(payload) => {
+                assert_eq!(payload.connection_id, "conn-file");
+                assert_eq!(payload.transfer_id, "transfer-1");
+                assert_eq!(payload.outcome, FileTransferOutcome::Failed);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// Every worker event keeps its enum discriminant across wincode.
     #[test]
     fn worker_to_service_all_variants_round_trip() {
         let cases: Vec<WorkerToService> = vec![
@@ -2637,6 +2714,21 @@ mod tests {
             WorkerToService::CursorData(CursorDataPayload {
                 connection_id: "c".to_string(),
                 data: vec![0xBE, 0xEF],
+            }),
+            WorkerToService::FileManagerOpened(FileManagerOpenedPayload {
+                connection_id: "c".to_string(),
+            }),
+            WorkerToService::FileTransferStarted(FileTransferStartedPayload {
+                connection_id: "c".to_string(),
+                transfer_id: "t".to_string(),
+                direction: FileTransferDirection::Download,
+                file_name: "report.txt".to_string(),
+                total_bytes: 42,
+            }),
+            WorkerToService::FileTransferFinished(FileTransferFinishedPayload {
+                connection_id: "c".to_string(),
+                transfer_id: "t".to_string(),
+                outcome: FileTransferOutcome::Completed,
             }),
             WorkerToService::PrivateScreenStateChanged(PrivateScreenStateChangedPayload {
                 connection_id: "c".to_string(),
