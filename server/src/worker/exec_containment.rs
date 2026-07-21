@@ -32,10 +32,9 @@
 //! # Verification status
 //!
 //! The Unix backend is covered by tests that spawn a real descendant and assert
-//! it dies with the command. The Windows backend has been checked against the
-//! bound `windows` crate's actual signatures but has **not been compiled or run**
-//! — it was written on a host with no Windows target installed. Treat its first
-//! Windows build as unverified.
+//! it dies with the command. The Windows backend compiles against the bound
+//! `windows` crate's signatures but its process-tree reclamation has not yet been
+//! exercised by an equivalent test, so treat its runtime behaviour as unverified.
 
 use tokio::process::{Child, Command};
 
@@ -201,6 +200,15 @@ mod imp {
         job: Option<HANDLE>,
     }
 
+    // SAFETY: `job` is a handle to a job object, a process-wide kernel object with
+    // no thread affinity (unlike GDI or window handles). The Tokio runtime may
+    // move, poll, and drop this containment on any worker thread, so the handle
+    // must cross threads. The calls we make on it — `AssignProcessToJobObject`,
+    // `TerminateJobObject`, `CloseHandle` — are all thread-agnostic kernel calls,
+    // and ownership is only ever moved, never shared, so `Send` is sound and
+    // `Sync` is neither needed nor claimed.
+    unsafe impl Send for Platform {}
+
     impl Platform {
         pub fn prepare(generation: &str) -> Result<(Self, Option<String>), ContainmentError> {
             // Named so a leaked job is identifiable in a diagnostic tool; the name
@@ -297,3 +305,19 @@ mod imp {
 }
 
 use imp::Platform;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The containment is moved into a `tokio::spawn`ed future that drives the
+    /// execution, so it must be `Send` on every platform — including Windows,
+    /// where it wraps a raw job-object handle that is not `Send` on its own. This
+    /// pins the invariant at compile time, so a change that reintroduces a
+    /// `!Send` field fails here rather than at a distant spawn site.
+    #[test]
+    fn containment_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<Containment>();
+    }
+}

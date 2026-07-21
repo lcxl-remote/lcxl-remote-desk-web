@@ -414,10 +414,14 @@ impl GdiImageCapture {
 
         if width == 0 || height == 0 {
             if !icon_info.hbmMask.is_invalid() {
-                unsafe { DeleteObject(icon_info.hbmMask.into()) };
+                unsafe {
+                    let _ = DeleteObject(icon_info.hbmMask.into());
+                }
             }
             if !icon_info.hbmColor.is_invalid() {
-                unsafe { DeleteObject(icon_info.hbmColor.into()) };
+                unsafe {
+                    let _ = DeleteObject(icon_info.hbmColor.into());
+                }
             }
             return Ok(None);
         }

@@ -511,7 +511,7 @@ mod tests {
         };
         let mut writer = hound::WavWriter::create("sample/sine.wav", spec).unwrap();
         let dur = time::Duration::from_millis(
-            (audio_record.hns_actual_duration / REFTIMES_PER_MILLISEC / 2),
+            audio_record.hns_actual_duration / REFTIMES_PER_MILLISEC / 2,
         );
         log::info!("sleep for {:?} every time", dur);
         for i in 0..30 {
