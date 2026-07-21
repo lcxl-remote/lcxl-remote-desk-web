@@ -278,9 +278,19 @@ impl SystemSettings {
     /// replace from `POST /settings` resets them to `None`, which drops the
     /// persisted `client_id` (silently breaking the manager signaling proxy, as
     /// it returns early before even attempting to connect), the local signaling
-    /// token, the Tauri IPC token and the session signing key. Each field is
-    /// only restored when the incoming value is absent, so an explicit override
-    /// (should the payload ever carry one) still wins.
+    /// token, the Tauri IPC token and the session signing key.
+    ///
+    /// `client_id` and `local_signaling_token` are restored only when the
+    /// incoming value is absent, so a payload that legitimately carries them
+    /// (they are present in the settings response) still takes effect.
+    ///
+    /// `tauri_ipc_token` and `session_secret_key` are restored
+    /// **unconditionally**, overriding any incoming value. These two are dropped
+    /// from the settings response ([`Self::without_internal_secrets`]), so the
+    /// console never holds them to send back — an incoming value can only be a
+    /// spurious or malicious one. Letting an explicit value win would let an
+    /// authenticated settings write pin an attacker-known cookie signing key or
+    /// IPC identity, which survives a restart and enables session forgery.
     pub fn preserve_internal_fields(&mut self, previous: &SystemSettings) {
         if self.client_id.is_none() {
             self.client_id = previous.client_id.clone();
@@ -288,12 +298,8 @@ impl SystemSettings {
         if self.local_signaling_token.is_none() {
             self.local_signaling_token = previous.local_signaling_token.clone();
         }
-        if self.tauri_ipc_token.is_none() {
-            self.tauri_ipc_token = previous.tauri_ipc_token.clone();
-        }
-        if self.session_secret_key.is_none() {
-            self.session_secret_key = previous.session_secret_key.clone();
-        }
+        self.tauri_ipc_token = previous.tauri_ipc_token.clone();
+        self.session_secret_key = previous.session_secret_key.clone();
     }
 
     /// A copy safe to serialize into an HTTP response: the secrets the console
@@ -389,19 +395,51 @@ mod tests {
     }
 
     #[test]
-    fn preserve_internal_fields_respects_explicit_incoming_values() {
+    fn preserve_internal_fields_respects_explicit_response_visible_values() {
+        // `client_id` and `local_signaling_token` are returned in the settings
+        // response, so a payload may legitimately carry them; an explicit value
+        // still wins.
         let previous = SystemSettings {
             client_id: Some("old".to_string()),
+            local_signaling_token: Some("old-lst".to_string()),
             ..SystemSettings::default()
         };
         let mut incoming = SystemSettings {
             client_id: Some("new".to_string()),
+            local_signaling_token: Some("new-lst".to_string()),
             ..SystemSettings::default()
         };
 
         incoming.preserve_internal_fields(&previous);
 
         assert_eq!(incoming.client_id.as_deref(), Some("new"));
+        assert_eq!(incoming.local_signaling_token.as_deref(), Some("new-lst"));
+    }
+
+    #[test]
+    fn preserve_internal_fields_rejects_explicit_internal_secret_overrides() {
+        // The two purely-internal secrets are redacted from the response, so an
+        // incoming value is spurious/malicious. An explicit override must NOT win
+        // — otherwise an authenticated settings write could pin an attacker-known
+        // session signing key / IPC token that survives a restart.
+        let previous = SystemSettings {
+            tauri_ipc_token: Some("real-ipc".to_string()),
+            session_secret_key: Some("real-session-key".to_string()),
+            ..SystemSettings::default()
+        };
+        let mut incoming = SystemSettings {
+            tauri_ipc_token: Some("attacker-ipc".to_string()),
+            session_secret_key: Some("attacker-key".to_string()),
+            ..SystemSettings::default()
+        };
+
+        incoming.preserve_internal_fields(&previous);
+
+        assert_eq!(incoming.tauri_ipc_token.as_deref(), Some("real-ipc"));
+        assert_eq!(
+            incoming.session_secret_key.as_deref(),
+            Some("real-session-key")
+        );
     }
 
     #[test]
