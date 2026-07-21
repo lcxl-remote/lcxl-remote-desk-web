@@ -43,7 +43,7 @@ async fn integration_local_request_approval_resolved_via_submit() {
         }
     });
 
-    let resp = tokio::time::timeout(Duration::from_secs(2), hub.request_approval(req("r1")))
+    let resp = tokio::time::timeout(Duration::from_secs(2), hub.request_approval(req("r1"), None))
         .await
         .expect("must resolve");
     assert!(resp.approved);
@@ -62,7 +62,7 @@ async fn integration_concurrent_local_approvals_out_of_order_submit() {
     for i in 0u32..5 {
         let hub_c = Arc::clone(&hub);
         tasks.push(tokio::spawn(async move {
-            (i, hub_c.request_approval(req(&format!("r{i}"))).await)
+            (i, hub_c.request_approval(req(&format!("r{i}")), None).await)
         }));
     }
     // Wait for all to enter pending.
@@ -99,7 +99,7 @@ async fn integration_forwarder_offline_fails_fast() {
     let hub = HostControlHub::new_forwarder(upstream);
 
     let started = std::time::Instant::now();
-    let resp = hub.request_approval(req("r1")).await;
+    let resp = hub.request_approval(req("r1"), None).await;
     assert!(!resp.approved);
     assert!(started.elapsed() < Duration::from_millis(100));
 
@@ -174,7 +174,7 @@ async fn integration_forwarder_inbound_resolves_request() {
     let hub = HostControlHub::new_forwarder(upstream);
 
     let hub_clone = hub.clone();
-    let task = tokio::spawn(async move { hub_clone.request_approval(req("u1")).await });
+    let task = tokio::spawn(async move { hub_clone.request_approval(req("u1"), None).await });
     // Wait for the request to enter pending.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -201,8 +201,8 @@ async fn integration_forwarder_disconnect_denies_all_pending() {
 
     let hub_a = hub.clone();
     let hub_b = hub.clone();
-    let t_a = tokio::spawn(async move { hub_a.request_approval(req("a")).await });
-    let t_b = tokio::spawn(async move { hub_b.request_approval(req("b")).await });
+    let t_a = tokio::spawn(async move { hub_a.request_approval(req("a"), None).await });
+    let t_b = tokio::spawn(async move { hub_b.request_approval(req("b"), None).await });
     // Give both requests time to park.
     tokio::time::sleep(Duration::from_millis(50)).await;
 

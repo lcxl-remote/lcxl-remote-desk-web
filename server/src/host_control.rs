@@ -48,6 +48,8 @@ use log::{debug, info, warn};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
+use desk_signal_facade::model::security_settings::DEFAULT_APPROVAL_TIMEOUT_SECS;
+
 use crate::model::security_approval::SecurityPermissionType;
 
 pub use protocol::{
@@ -61,11 +63,37 @@ const STATE_BROADCAST_CAPACITY: usize = 64;
 
 /// How long `request_approval` waits for at least one approval UI to acknowledge
 /// it is mounted and able to talk to the backend before denying. This is a pure
-/// readiness probe (loopback-local), not a user-decision timeout: if any UI acks
-/// in time the request proceeds to an unbounded wait for the user's decision,
-/// preserving the "wait forever while a working dialog exists" semantics. Only
-/// applies to Local / Aggregator (daemon-self) requests; Forwarder is exempt.
+/// readiness probe (loopback-local), not the user-decision timeout: once any UI
+/// acks in time the request proceeds to the user-decision wait, which is bounded
+/// by the host's configured `approval_timeout` (see [`server_approval_timeout`];
+/// unbounded only when configured to "never"). Only applies to Local / Aggregator
+/// (daemon-self) requests; Forwarder is exempt.
 const APPROVAL_UI_READY_PROBE: Duration = Duration::from_secs(10);
+
+/// Server-side grace added on top of the host-configured `approval_timeout` for
+/// the authoritative decision wait. The approval dialog front-end runs the same
+/// countdown and denies at the configured value; the server's timer trails by
+/// this window so the front-end's explicit deny normally lands first, leaving the
+/// server as a fail-closed backstop for when the front-end is gone (window closed
+/// or a non-browser controller). This is a best-effort bias — front-end and
+/// server timers start from different points — not a hard ordering guarantee.
+const APPROVAL_SERVER_GRACE: Duration = Duration::from_secs(3);
+
+/// Translate the host's configured `approval_timeout` (seconds) into the server's
+/// authoritative decision wait.
+///
+/// - `Some(0)` — never time out (no timer arm; the dialog waits indefinitely).
+/// - `Some(n>0)` — `n` seconds plus [`APPROVAL_SERVER_GRACE`].
+/// - `None` — collapses to [`DEFAULT_APPROVAL_TIMEOUT_SECS`] (plus grace), NOT an
+///   unbounded wait. A `None` should already have been normalized upstream, but
+///   treating it as the finite default here keeps the server from ever failing
+///   open to "wait forever" if some path skipped normalization.
+pub(crate) fn server_approval_timeout(configured: Option<u32>) -> Option<Duration> {
+    match configured.unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS) {
+        0 => None,
+        n => Some(Duration::from_secs(n as u64) + APPROVAL_SERVER_GRACE),
+    }
+}
 
 /// Identifier for an aggregator-side worker forwarder connection.
 pub type UpstreamSessionId = u64;
@@ -301,28 +329,39 @@ impl HostControlHub {
     /// The two sources share the same broadcast → Tauri path and are disambiguated
     /// at submit time: routes registered via `register_upstream_request` win the
     /// directional dispatch, otherwise the local oneshot is resolved.
-    pub async fn request_approval(&self, req: ApprovalRequest) -> ApprovalResponse {
-        self.request_approval_inner(req, APPROVAL_UI_READY_PROBE)
+    pub async fn request_approval(
+        &self,
+        req: ApprovalRequest,
+        approval_timeout: Option<Duration>,
+    ) -> ApprovalResponse {
+        self.request_approval_inner(req, APPROVAL_UI_READY_PROBE, approval_timeout)
             .await
     }
 
     /// Core of [`request_approval`] with an injectable readiness-probe duration so
     /// tests do not have to wait the real [`APPROVAL_UI_READY_PROBE`].
     ///
+    /// `approval_timeout` is the authoritative bound on the user-decision wait
+    /// (see [`server_approval_timeout`]): `Some(dur)` fires a fail-closed deny on
+    /// expiry, `None` waits indefinitely (the configured "never").
+    ///
     /// Local / Aggregator (daemon-self) is two-phase:
     ///   * Phase 1 (readiness probe): wait for any approval UI to ack, while also
     ///     racing a possible direct submit and the probe timeout.
-    ///   * Phase 2 (user decision): once ready, await the user's response with no
-    ///     timeout, preserving the "wait forever while a working dialog exists"
-    ///     semantics.
+    ///   * Phase 2 (user decision): once ready, await the user's response bounded
+    ///     by `approval_timeout`. On expiry the entry is claimed atomically against
+    ///     a concurrent submit before denying (see below).
     ///
     /// Forwarder is exempt from the probe: the worker is authoritative and the
     /// daemon drives the dialog, so it awaits the upstream-delivered response
     /// directly (registering a local ack would wait for an ack that never comes).
+    /// Its `approval_timeout` expiry additionally tells the aggregator to tear
+    /// down its routing/replay tables and dialog via `SecurityApprovalResolved`.
     async fn request_approval_inner(
         &self,
         req: ApprovalRequest,
         probe: Duration,
+        approval_timeout: Option<Duration>,
     ) -> ApprovalResponse {
         // Phase 0: fail-fast when no UI can serve the request.
         match self.inner.mode {
@@ -392,11 +431,55 @@ impl HostControlHub {
         };
         let _ = self.send_command(outbound);
 
-        // Forwarder: no local readiness probe (see method docs).
+        // Forwarder: no local readiness probe (see method docs). The worker holds
+        // the authoritative timer for its own request here. On expiry it claims
+        // its local pending, tells the aggregator to tear down the routing/replay
+        // tables and Tauri dialog via `SecurityApprovalResolved`, and denies
+        // fail-closed. `None` waits indefinitely (configured "never").
         if self.inner.mode == HubMode::Forwarder {
-            return match rx.await {
-                Ok(response) => response,
-                Err(_) => ApprovalResponse::deny(),
+            return match approval_timeout {
+                None => rx.await.unwrap_or_else(|_| ApprovalResponse::deny()),
+                Some(dur) => {
+                    let decided = tokio::select! {
+                        // Bias toward the response: if a submit already resolved
+                        // `rx`, that arm is polled first and the timer never fires.
+                        biased;
+                        resp = &mut rx => {
+                            Some(resp.unwrap_or_else(|_| ApprovalResponse::deny()))
+                        }
+                        _ = tokio::time::sleep(dur) => {
+                            // Claim to arbitrate against a concurrent submit_approval.
+                            if self
+                                .inner
+                                .pending_approvals
+                                .lock()
+                                .unwrap()
+                                .remove(&req.req_id)
+                                .is_some()
+                            {
+                                // We won: no submit in flight. Ask the aggregator to
+                                // clean up its routing/replay/dialog for this req_id.
+                                let _ = self.send_command(
+                                    HostControlMessage::SecurityApprovalResolved {
+                                        req_id: req.req_id.clone(),
+                                    },
+                                );
+                                Some(ApprovalResponse::deny())
+                            } else {
+                                // submit_approval already claimed the entry; it will
+                                // (or already did) send on the oneshot. Fall through
+                                // to await it below, rather than reading a possibly
+                                // still-empty channel and denying a real approve.
+                                None
+                            }
+                        }
+                    };
+                    match decided {
+                        Some(r) => r,
+                        // The submit that beat the timer will deliver here.
+                        None => rx.await.unwrap_or_else(|_| ApprovalResponse::deny()),
+                    }
+                }
             };
         }
 
@@ -441,11 +524,54 @@ impl HostControlHub {
             }
         }
 
-        // Phase 2: await the user's decision (no timeout).
-        let response = match rx.await {
-            Ok(response) => response,
-            Err(_) => ApprovalResponse::deny(),
+        // Phase 2: await the user's decision, bounded by the authoritative timeout.
+        let response = match approval_timeout {
+            None => match rx.await {
+                Ok(response) => response,
+                Err(_) => ApprovalResponse::deny(),
+            },
+            Some(dur) => {
+                let decided = tokio::select! {
+                    // Bias toward the response: if submit_approval already resolved
+                    // `rx`, that arm wins and the timer arm is never taken, so a
+                    // user's approve is never overridden by an equal-instant timeout.
+                    biased;
+                    resp = &mut rx => Some(resp.unwrap_or_else(|_| ApprovalResponse::deny())),
+                    _ = tokio::time::sleep(dur) => {
+                        // Timed out. Claim the pending entry to arbitrate against a
+                        // concurrent submit_approval. Removing it means no submit is
+                        // in flight: fail closed and emit exactly one Finished.
+                        if self
+                            .inner
+                            .pending_approvals
+                            .lock()
+                            .unwrap()
+                            .remove(&req.req_id)
+                            .is_some()
+                        {
+                            self.inner.pending_replay.lock().unwrap().remove(&req.req_id);
+                            self.inner.pending_acks.lock().unwrap().remove(&req.req_id);
+                            self.notify_tauri_finished(&req.req_id);
+                            Some(ApprovalResponse::deny())
+                        } else {
+                            // submit_approval already claimed the entry between its
+                            // remove and its send; it emits the Finished. Fall
+                            // through to await its decision instead of reading a
+                            // possibly still-empty channel and denying a real
+                            // approve (exactly-once: no second Finished here).
+                            None
+                        }
+                    }
+                };
+                match decided {
+                    Some(r) => r,
+                    // The submit that beat the timer will deliver here.
+                    None => rx.await.unwrap_or_else(|_| ApprovalResponse::deny()),
+                }
+            }
         };
+        // Normal-exit cleanup. On the timeout-claim path the tables are already
+        // cleared above, so these removes are idempotent no-ops there.
         self.inner
             .pending_replay
             .lock()
@@ -622,6 +748,37 @@ impl HostControlHub {
         Some(id)
     }
 
+    /// Aggregator-only: a worker forwarder reports that it resolved `req_id`
+    /// locally (e.g. its authoritative timeout fired), so the aggregator should
+    /// tear down the routing/replay tables and close the Tauri dialog.
+    ///
+    /// Ownership is enforced: only the forwarder session that registered `req_id`
+    /// may resolve it. A `SecurityApprovalResolved` naming a req_id owned by a
+    /// different session (or none) is ignored — this prevents one forwarder from
+    /// cancelling another forwarder's pending approval. Returns `true` when a
+    /// matching request was cleaned up.
+    pub fn resolve_upstream_request(&self, req_id: &str, session_id: UpstreamSessionId) -> bool {
+        {
+            let mut routes = self.inner.pending_routes.lock().unwrap();
+            match routes.get(req_id) {
+                Some(owner) if *owner == session_id => {
+                    routes.remove(req_id);
+                }
+                Some(_) => {
+                    warn!(
+                        "[Hub/Aggregator] SecurityApprovalResolved req_id={req_id} from \
+                         session_id={session_id} that does not own it; ignoring"
+                    );
+                    return false;
+                }
+                None => return false,
+            }
+        }
+        self.inner.pending_replay.lock().unwrap().remove(req_id);
+        self.notify_tauri_finished(req_id);
+        true
+    }
+
     /// Aggregator-only: register a new approval request originated from
     /// `upstream_id`.
     ///
@@ -708,9 +865,11 @@ impl HostControlHub {
     }
 
     /// Aggregator-only: drain all pending approvals belonging to `upstream_id`,
-    /// and drop the forwarder session's outbound mpsc registration. Returns the
-    /// list of req_ids that were drained, so the caller can notify the Tauri
-    /// shell to close those dialogs.
+    /// drop the forwarder session's outbound mpsc registration, and close each
+    /// drained request's Tauri dialog. Called when a forwarder disconnects: the
+    /// originating worker is gone, so its authoritative `SecurityApprovalResolved`
+    /// may never arrive and the aggregator must broadcast `Finished` itself.
+    /// Returns the list of req_ids that were drained.
     pub fn drain_upstream_pending(&self, upstream_id: UpstreamSessionId) -> Vec<String> {
         let mut out = Vec::new();
         {
@@ -731,6 +890,10 @@ impl HostControlHub {
             .lock()
             .unwrap()
             .remove(&upstream_id);
+        // Close the dialogs whose originating worker just vanished.
+        for req_id in &out {
+            self.notify_tauri_finished(req_id);
+        }
         out
     }
 
@@ -971,7 +1134,7 @@ mod tests {
         let started = std::time::Instant::now();
         let resp = tokio::time::timeout(
             Duration::from_millis(200),
-            hub.request_approval(approval_req("r1")),
+            hub.request_approval(approval_req("r1"), None),
         )
         .await
         .expect("must not block");
@@ -989,7 +1152,7 @@ mod tests {
         let hub = HostControlHub::new_forwarder(upstream);
         let resp = tokio::time::timeout(
             Duration::from_millis(200),
-            hub.request_approval(approval_req("r1")),
+            hub.request_approval(approval_req("r1"), None),
         )
         .await
         .expect("must not block");
@@ -1006,7 +1169,7 @@ mod tests {
 
         let hub_clone = hub.clone();
         let task =
-            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1")).await });
+            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1"), None).await });
 
         // Give the task time to enter pending state.
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1040,7 +1203,7 @@ mod tests {
 
         let hub_clone = hub.clone();
         let task =
-            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1")).await });
+            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1"), None).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         // Drain the original Request so the next recv() observes Finished cleanly.
@@ -1149,7 +1312,7 @@ mod tests {
 
         let hub_clone = hub.clone();
         let task =
-            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1")).await });
+            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1"), None).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         // Wrong id — should not resolve r1.
@@ -1183,7 +1346,9 @@ mod tests {
             let hub_clone = hub.clone();
             tasks.push(tokio::spawn(async move {
                 let id_inner = id.clone();
-                let resp = hub_clone.request_approval(approval_req(&id_inner)).await;
+                let resp = hub_clone
+                    .request_approval(approval_req(&id_inner), None)
+                    .await;
                 (id, resp)
             }));
         }
@@ -1306,7 +1471,7 @@ mod tests {
 
         let hub_clone = hub.clone();
         let task =
-            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1")).await });
+            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1"), None).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         upstream_clone.test_inject_inbound(HostControlMessage::SecurityApprovalSubmit {
@@ -1331,7 +1496,7 @@ mod tests {
 
         let hub_clone = hub.clone();
         let task =
-            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1")).await });
+            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1"), None).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         upstream_clone.test_inject_inbound(HostControlMessage::SecurityApprovalCancel {
@@ -1419,7 +1584,7 @@ mod tests {
         let started = std::time::Instant::now();
         let resp = tokio::time::timeout(
             Duration::from_millis(200),
-            hub.request_approval(approval_req("r1")),
+            hub.request_approval(approval_req("r1"), None),
         )
         .await
         .expect("must not block");
@@ -1441,7 +1606,7 @@ mod tests {
 
         let hub_clone = hub.clone();
         let task =
-            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1")).await });
+            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1"), None).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         // Replay snapshot recorded so a reconnecting Tauri can resume the dialog.
@@ -1512,8 +1677,11 @@ mod tests {
 
         // Daemon-self request via request_approval.
         let hub_clone = hub.clone();
-        let task =
-            tokio::spawn(async move { hub_clone.request_approval(approval_req("r-daemon")).await });
+        let task = tokio::spawn(async move {
+            hub_clone
+                .request_approval(approval_req("r-daemon"), None)
+                .await
+        });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(hub.pending_replay_count(), 2);
 
@@ -1580,7 +1748,8 @@ mod tests {
             None,
         );
         let h = hub.clone();
-        let task = tokio::spawn(async move { h.request_approval(approval_req("r-daemon")).await });
+        let task =
+            tokio::spawn(async move { h.request_approval(approval_req("r-daemon"), None).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(hub.pending_replay_count(), 2);
 
@@ -1839,8 +2008,8 @@ mod tests {
 
         let h1 = hub.clone();
         let h2 = hub.clone();
-        let t1 = tokio::spawn(async move { h1.request_approval(approval_req("a")).await });
-        let t2 = tokio::spawn(async move { h2.request_approval(approval_req("b")).await });
+        let t1 = tokio::spawn(async move { h1.request_approval(approval_req("a"), None).await });
+        let t2 = tokio::spawn(async move { h2.request_approval(approval_req("b"), None).await });
         // Wait until both requests parked in pending_approvals.
         for _ in 0..50 {
             if hub.inner.pending_approvals.lock().unwrap().len() == 2 {
@@ -1941,8 +2110,8 @@ mod tests {
 
         let h1 = hub.clone();
         let h2 = hub.clone();
-        let t1 = tokio::spawn(async move { h1.request_approval(approval_req("a")).await });
-        let t2 = tokio::spawn(async move { h2.request_approval(approval_req("b")).await });
+        let t1 = tokio::spawn(async move { h1.request_approval(approval_req("a"), None).await });
+        let t2 = tokio::spawn(async move { h2.request_approval(approval_req("b"), None).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         hub.deny_all_pending();
@@ -1980,7 +2149,7 @@ mod tests {
         let hub_clone = hub.clone();
         let task = tokio::spawn(async move {
             hub_clone
-                .request_approval_inner(approval_req("r1"), Duration::from_secs(2))
+                .request_approval_inner(approval_req("r1"), Duration::from_secs(2), None)
                 .await
         });
         wait_for_pending_ack(&hub, "r1").await;
@@ -2015,7 +2184,7 @@ mod tests {
         let hub_clone = hub.clone();
         let task = tokio::spawn(async move {
             hub_clone
-                .request_approval_inner(approval_req("r1"), Duration::from_millis(50))
+                .request_approval_inner(approval_req("r1"), Duration::from_millis(50), None)
                 .await
         });
 
@@ -2062,7 +2231,7 @@ mod tests {
         let hub_clone = hub.clone();
         let task = tokio::spawn(async move {
             hub_clone
-                .request_approval_inner(approval_req("r1"), Duration::from_secs(2))
+                .request_approval_inner(approval_req("r1"), Duration::from_secs(2), None)
                 .await
         });
         wait_for_pending_ack(&hub, "r1").await;
@@ -2123,7 +2292,7 @@ mod tests {
             let hub_clone = hub.clone();
             let task = tokio::spawn(async move {
                 hub_clone
-                    .request_approval_inner(approval_req("r1"), Duration::from_secs(2))
+                    .request_approval_inner(approval_req("r1"), Duration::from_secs(2), None)
                     .await
             });
             wait_for_pending_ack(&hub, "r1").await;
@@ -2158,7 +2327,7 @@ mod tests {
 
         let hub_clone = hub.clone();
         let task =
-            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1")).await });
+            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1"), None).await });
         for _ in 0..50 {
             if hub
                 .inner
@@ -2198,7 +2367,7 @@ mod tests {
         let hub_clone = hub.clone();
         let task = tokio::spawn(async move {
             hub_clone
-                .request_approval_inner(approval_req("r1"), Duration::from_secs(5))
+                .request_approval_inner(approval_req("r1"), Duration::from_secs(5), None)
                 .await
         });
         wait_for_pending_ack(&hub, "r1").await;
@@ -2210,5 +2379,271 @@ mod tests {
             .unwrap();
         assert!(!resp.approved);
         assert!(hub.inner.pending_acks.lock().unwrap().is_empty());
+    }
+
+    // Timeout translation: Some(0) = never; Some(n) = n + grace; None must
+    // collapse to the finite default, NEVER fail open to an unbounded wait.
+    #[test]
+    fn server_approval_timeout_translation() {
+        assert_eq!(server_approval_timeout(Some(0)), None, "0 = never");
+        assert_eq!(
+            server_approval_timeout(Some(5)),
+            Some(Duration::from_secs(5) + APPROVAL_SERVER_GRACE),
+            "n>0 = n + grace"
+        );
+        assert_eq!(
+            server_approval_timeout(None),
+            Some(Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS as u64) + APPROVAL_SERVER_GRACE),
+            "None = default + grace"
+        );
+        assert!(
+            server_approval_timeout(None).is_some(),
+            "None must never fail open to an unbounded wait"
+        );
+    }
+
+    // Daemon-self Phase 2 authoritative timeout: no user response → fail-closed
+    // deny, all bookkeeping cleared, exactly one Finished broadcast.
+    #[tokio::test]
+    async fn daemon_self_phase2_timeout_denies_cleans_and_finishes() {
+        let hub = HostControlHub::new_local();
+        let mut outbound_rx = hub.subscribe_outbound();
+        hub.mark_tauri_connected();
+
+        let hub_clone = hub.clone();
+        let task = tokio::spawn(async move {
+            hub_clone
+                .request_approval_inner(
+                    approval_req("r1"),
+                    Duration::from_secs(2),
+                    Some(Duration::from_millis(60)),
+                )
+                .await
+        });
+        wait_for_pending_ack(&hub, "r1").await;
+        assert!(hub.notify_approval_ack("r1"), "ack advances to phase 2");
+
+        // No submit → the authoritative timeout must fire.
+        let resp = tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .expect("must resolve")
+            .unwrap();
+        assert!(!resp.approved, "phase 2 timeout must deny");
+
+        let mut finished = 0;
+        while let Ok(Ok(msg)) =
+            tokio::time::timeout(Duration::from_millis(50), outbound_rx.recv()).await
+        {
+            if let HostControlMessage::SecurityApprovalFinished { req_id } = msg {
+                assert_eq!(req_id, "r1");
+                finished += 1;
+            }
+        }
+        assert_eq!(finished, 1, "exactly one Finished on timeout");
+        assert_eq!(hub.pending_replay_count(), 0);
+        assert!(hub.inner.pending_approvals.lock().unwrap().is_empty());
+        assert!(hub.inner.pending_acks.lock().unwrap().is_empty());
+    }
+
+    // Timeout/submit arbitration: a submit before the timeout wins (biased
+    // select), and the timer arm must NOT also fire a second Finished.
+    #[tokio::test]
+    async fn daemon_self_submit_before_timeout_wins_single_finished() {
+        let hub = HostControlHub::new_local();
+        let mut outbound_rx = hub.subscribe_outbound();
+        hub.mark_tauri_connected();
+
+        let hub_clone = hub.clone();
+        let task = tokio::spawn(async move {
+            hub_clone
+                .request_approval_inner(
+                    approval_req("r1"),
+                    Duration::from_secs(2),
+                    Some(Duration::from_millis(300)),
+                )
+                .await
+        });
+        wait_for_pending_ack(&hub, "r1").await;
+        assert!(hub.notify_approval_ack("r1"));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(hub.submit_approval(
+            "r1",
+            ApprovalResponse {
+                approved: true,
+                remember: false,
+            }
+        ));
+        let resp = tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .expect("must resolve")
+            .unwrap();
+        assert!(
+            resp.approved,
+            "submit before timeout must win over a later deny"
+        );
+
+        // Wait past the configured timeout to prove the timer arm stayed dormant.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let mut finished = 0;
+        while let Ok(Ok(msg)) =
+            tokio::time::timeout(Duration::from_millis(50), outbound_rx.recv()).await
+        {
+            if matches!(msg, HostControlMessage::SecurityApprovalFinished { .. }) {
+                finished += 1;
+            }
+        }
+        assert_eq!(
+            finished, 1,
+            "submit emits one Finished; the timer must not double it"
+        );
+        assert!(hub.inner.pending_approvals.lock().unwrap().is_empty());
+    }
+
+    // Aggregator worker-originated cleanup: a forwarder's SecurityApprovalResolved
+    // tears down routing/replay + closes the dialog, but only when the sending
+    // session owns the req_id.
+    #[test]
+    fn resolve_upstream_request_enforces_ownership_and_finishes() {
+        let hub = HostControlHub::new_aggregator();
+        let mut outbound_rx = hub.subscribe_outbound();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        hub.register_forwarder_session(9, tx);
+        hub.register_upstream_request("r-w".to_string(), 9, SecurityPermissionType::Terminal, None);
+        assert_eq!(hub.pending_replay_count(), 1);
+
+        // A non-owning session must not resolve it.
+        assert!(
+            !hub.resolve_upstream_request("r-w", 8),
+            "non-owner must not resolve another session's request"
+        );
+        assert_eq!(hub.pending_replay_count(), 1, "route/replay preserved");
+
+        // The owning session resolves: routes/replay cleared + Finished broadcast.
+        assert!(hub.resolve_upstream_request("r-w", 9));
+        assert_eq!(hub.pending_replay_count(), 0);
+        assert!(hub.pop_upstream_for_req("r-w").is_none(), "route removed");
+        let mut saw_finished = false;
+        while let Ok(msg) = outbound_rx.try_recv() {
+            if let HostControlMessage::SecurityApprovalFinished { req_id } = msg {
+                assert_eq!(req_id, "r-w");
+                saw_finished = true;
+            }
+        }
+        assert!(
+            saw_finished,
+            "owner-resolve must broadcast Finished to close the dialog"
+        );
+    }
+
+    // Forwarder (worker) authoritative timeout: denies fail-closed and tells the
+    // aggregator to clean up via SecurityApprovalResolved.
+    #[tokio::test]
+    async fn forwarder_timeout_denies_and_notifies_aggregator() {
+        let upstream = UpstreamForwarder::new_for_test(true);
+        let mut outbound_rx = upstream.test_outbound_rx();
+        let hub = HostControlHub::new_forwarder(upstream);
+
+        let hub_clone = hub.clone();
+        let task = tokio::spawn(async move {
+            hub_clone
+                .request_approval(approval_req("r1"), Some(Duration::from_millis(40)))
+                .await
+        });
+        // No inbound submit → the worker's own timeout must fire.
+        let resp = tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .expect("must resolve")
+            .unwrap();
+        assert!(!resp.approved, "forwarder timeout must deny");
+
+        // Worker sent the Request upstream, then SecurityApprovalResolved on timeout.
+        let mut saw_resolved = false;
+        while let Ok(msg) = outbound_rx.try_recv() {
+            if let HostControlMessage::SecurityApprovalResolved { req_id } = msg {
+                assert_eq!(req_id, "r1");
+                saw_resolved = true;
+            }
+        }
+        assert!(
+            saw_resolved,
+            "worker must tell the aggregator to clean up on timeout"
+        );
+        assert!(
+            hub.inner.pending_approvals.lock().unwrap().is_empty(),
+            "worker-local pending must be cleared"
+        );
+    }
+
+    // A forwarder disconnect must close the Tauri dialogs for its drained
+    // requests: the originating worker is gone and its SecurityApprovalResolved
+    // may never arrive, so the aggregator broadcasts Finished itself.
+    #[test]
+    fn drain_upstream_pending_broadcasts_finished() {
+        let hub = HostControlHub::new_aggregator();
+        let mut outbound_rx = hub.subscribe_outbound();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        hub.register_forwarder_session(7, tx);
+        hub.register_upstream_request("r-w".to_string(), 7, SecurityPermissionType::Terminal, None);
+        assert_eq!(hub.pending_replay_count(), 1);
+
+        let drained = hub.drain_upstream_pending(7);
+        assert_eq!(drained, vec!["r-w".to_string()]);
+        assert_eq!(hub.pending_replay_count(), 0, "routes/replay cleared");
+
+        let mut saw_finished = false;
+        while let Ok(msg) = outbound_rx.try_recv() {
+            if let HostControlMessage::SecurityApprovalFinished { req_id } = msg {
+                assert_eq!(req_id, "r-w");
+                saw_finished = true;
+            }
+        }
+        assert!(saw_finished, "disconnect drain must close the Tauri dialog");
+    }
+
+    // Exactly-once decision invariant: a submit that reports success must never be
+    // silently downgraded to a timeout deny (the remove→send window). The timeout
+    // arm, on finding the entry already claimed, awaits the submit's decision
+    // instead of reading a still-empty channel. Loops to exercise both orderings.
+    #[tokio::test]
+    async fn daemon_self_successful_submit_is_never_downgraded_by_timeout() {
+        for _ in 0..40 {
+            let hub = HostControlHub::new_local();
+            let _outbound_rx = hub.subscribe_outbound();
+            hub.mark_tauri_connected();
+
+            let hub_clone = hub.clone();
+            let task = tokio::spawn(async move {
+                hub_clone
+                    .request_approval_inner(
+                        approval_req("r1"),
+                        Duration::from_secs(2),
+                        Some(Duration::from_millis(15)),
+                    )
+                    .await
+            });
+            wait_for_pending_ack(&hub, "r1").await;
+            assert!(hub.notify_approval_ack("r1"));
+            // Submit right around the timeout to race the claim and the timer.
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            let submitted = hub.submit_approval(
+                "r1",
+                ApprovalResponse {
+                    approved: true,
+                    remember: false,
+                },
+            );
+            let resp = tokio::time::timeout(Duration::from_millis(500), task)
+                .await
+                .expect("must resolve")
+                .unwrap();
+            // If the submit was accepted, the decision must be the user's approve —
+            // never a spurious timeout deny.
+            if submitted {
+                assert!(
+                    resp.approved,
+                    "an accepted submit must not be downgraded to deny by the timeout"
+                );
+            }
+        }
     }
 }

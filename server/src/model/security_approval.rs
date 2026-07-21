@@ -161,7 +161,12 @@ pub async fn check_security_permission(
                 permission_type: permission_type.clone(),
                 from_connection_id,
             };
-            let response = hub.request_approval(req).await;
+            // Bound the wait by the host's configured approval timeout (0 = never,
+            // None = the finite default; never fail open to an unbounded wait).
+            let approval_timeout = crate::host_control::server_approval_timeout(
+                settings.read().await.security.approval_timeout,
+            );
+            let response = hub.request_approval(req, approval_timeout).await;
 
             if response.remember && suppress_remember {
                 log::info!(

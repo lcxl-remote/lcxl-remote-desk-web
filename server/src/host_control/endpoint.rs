@@ -342,9 +342,12 @@ async fn handle_client_message(
                 });
         }
         HostControlMessage::SecurityApprovalResolved { req_id } => {
-            // Forwarder-only path on Aggregator: clean up routing tables.
+            // Forwarder → Aggregator: the originating worker resolved this request
+            // locally (e.g. its authoritative timeout fired). Clean up routing /
+            // replay and close the Tauri dialog, but only if this session owns the
+            // req_id (ownership checked inside).
             if state.hub.mode() == HubMode::Aggregator {
-                let _ = state.hub.pop_upstream_for_req(&req_id);
+                state.hub.resolve_upstream_request(&req_id, session_id);
             }
         }
         // Forwarder → Aggregator upstream messages (only valid on aggregator).
