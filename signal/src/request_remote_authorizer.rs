@@ -24,7 +24,8 @@ use desk_signal_facade::grant::{AccessGrantStore, GrantPrincipal};
 use desk_signal_facade::model::auth_context::{AuthContext, AuthKind};
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::request_remote_authz::{
-    AuthorizedRequestRemote, REQUEST_REMOTE_AUTHZ_VERSION, RequestRemoteAuthz,
+    ActorAccessSource, ActorSummary, AuthorizedRequestRemote, REQUEST_REMOTE_AUTHZ_VERSION,
+    RequestRemoteAuthz,
 };
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_signal_facade::model::signal::{RemoteDeskTypeEnum, RequestRemoteModel, SignalingModel};
@@ -86,6 +87,22 @@ pub(crate) fn owner_actor_user_id(ctx: &AuthContext) -> Option<i32> {
     }
 }
 
+/// Build the host-visible identity from a server-adjudicated source. Temporary
+/// grants intentionally suppress names even if an upstream caller accidentally
+/// supplies one.
+pub(crate) fn signal_actor_summary(
+    access_source: ActorAccessSource,
+    trusted_display_name: Option<String>,
+) -> ActorSummary {
+    ActorSummary {
+        display_name: match access_source {
+            ActorAccessSource::AuthenticatedAccount => trusted_display_name,
+            ActorAccessSource::TemporaryGrant | ActorAccessSource::Unknown => None,
+        },
+        access_source,
+    }
+}
+
 /// Resolve the capability ceiling to stamp for a code-session actor against the
 /// resolved target `audience`, keyed by the browser-supplied (untrusted)
 /// `grant_session_id` selector. The authorization fact is the server-side lookup:
@@ -139,6 +156,7 @@ fn build_stamped_outcome(
     access_ceiling: Option<desk_signal_facade::model::security_settings::SecuritySettings>,
     grant_session_id: Option<String>,
     generation: i64,
+    actor: ActorSummary,
     audience: String,
     expires_at_rfc3339: String,
 ) -> RequestRemoteOutcome {
@@ -153,6 +171,7 @@ fn build_stamped_outcome(
         access_ceiling,
         grant_session_id,
         generation,
+        actor,
         request_id: model.request_id.clone(),
         audience,
         expires_at: Some(expires_at_rfc3339),
@@ -276,7 +295,18 @@ impl RequestRemoteAuthorizer for SignalRequestRemoteAuthorizer {
             if owner_actor_user_id(&actor.auth_context).is_some() {
                 // Owner session: no ceiling, no grant → never indexed / revoked on
                 // the host, so a `0` generation placeholder is never consulted.
-                return build_stamped_outcome(model, None, None, 0, audience, expires_at);
+                return build_stamped_outcome(
+                    model,
+                    None,
+                    None,
+                    0,
+                    signal_actor_summary(
+                        ActorAccessSource::AuthenticatedAccount,
+                        actor.model.version_info.display_name.clone(),
+                    ),
+                    audience,
+                    expires_at,
+                );
             }
 
             // A code-session authorizes solely through the grant it redeemed: stamp
@@ -293,6 +323,10 @@ impl RequestRemoteAuthorizer for SignalRequestRemoteAuthorizer {
                         ceiling,
                         grant_session_id,
                         generation,
+                        signal_actor_summary(
+                            ActorAccessSource::TemporaryGrant,
+                            actor.model.version_info.display_name.clone(),
+                        ),
                         audience,
                         expires_at,
                     ),
@@ -363,6 +397,7 @@ mod tests {
             allow_private_screen: None,
             allow_whiteboard: None,
             allow_file_browse: None,
+            allow_file_delete: None,
             allow_file_transfer: None,
             approval_timeout: None,
         }
@@ -512,6 +547,16 @@ mod tests {
     }
 
     #[test]
+    fn temporary_grant_suppresses_any_supplied_display_name() {
+        let actor = signal_actor_summary(
+            ActorAccessSource::TemporaryGrant,
+            Some("spoofed-owner".to_string()),
+        );
+        assert_eq!(actor.display_name, None);
+        assert_eq!(actor.access_source, ActorAccessSource::TemporaryGrant);
+    }
+
+    #[test]
     fn target_resolves_only_for_token_server_with_client_id() {
         assert_eq!(
             resolve_target_audience(
@@ -545,6 +590,7 @@ mod tests {
             None,
             None,
             0,
+            ActorSummary::unknown(),
             "client-abc".to_string(),
             "2999-01-01T00:00:00Z".to_string(),
         );
@@ -591,6 +637,7 @@ mod tests {
             None,
             None,
             0,
+            ActorSummary::unknown(),
             "client-abc".to_string(),
             "2999-01-01T00:00:00Z".to_string(),
         );

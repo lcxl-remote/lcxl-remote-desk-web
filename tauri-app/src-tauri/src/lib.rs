@@ -1,5 +1,6 @@
 mod error;
 mod external_link;
+mod host_access_status;
 mod ipc_client;
 #[cfg(target_os = "macos")]
 mod macos_relocate;
@@ -15,6 +16,7 @@ use std::sync::{
 };
 
 static IS_EXITING: AtomicBool = AtomicBool::new(false);
+pub(crate) static HOST_ACCESS_BLOCKS_EXIT: AtomicBool = AtomicBool::new(false);
 
 use clap::Parser as _;
 use lcxl_remote_desk_server::model::settings::{Args, Settings};
@@ -30,6 +32,7 @@ use crate::error::DeskTauriError;
 rust_i18n::i18n!("locales");
 
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
+pub(crate) const MAIN_TRAY_ID: &str = "main-tray";
 
 /// Windows service name registered by the install flow.
 const SERVICE_NAME: &str = "LcxlDeskService";
@@ -123,6 +126,8 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
     >();
     let (svc_op_tx, svc_op_rx) =
         std::sync::mpsc::sync_channel::<lcxl_remote_desk_server::ServiceOp>(8);
+    let (host_access_tx, host_access_rx) =
+        std::sync::mpsc::channel::<host_access_status::HostAccessStatusCommand>();
 
     // Shared token holder: IPC client writes the first token; window thread reads it.
     let token_holder: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -141,6 +146,7 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                 wb_cmd_tx,
                 sa_tx,
                 svc_op_tx,
+                host_access_tx,
                 Some(state_rx),
                 token_holder_ipc,
             )
@@ -176,6 +182,8 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                 daemon_url.clone(),
             );
             sa_manager.start(sa_rx);
+            host_access_status::HostAccessStatusManager::new(handle.clone(), daemon_url.clone())
+                .start(host_access_rx);
 
             // Tray: show + quit only (no elevate in service-shell mode).
             {
@@ -185,16 +193,31 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                 let quit_i = MenuItem::with_id(app, "quit", "Exit", true, None::<&str>).unwrap();
                 let show_i =
                     MenuItem::with_id(app, "show", "Open Window", true, None::<&str>).unwrap();
-                let tray_menu = Menu::with_items(app, &[&show_i, &quit_i]).unwrap();
+                let status_i = MenuItem::with_id(
+                    app,
+                    "host_access_status",
+                    "View Remote Access Status",
+                    true,
+                    None::<&str>,
+                )
+                .unwrap();
+                let tray_menu = Menu::with_items(app, &[&show_i, &status_i, &quit_i]).unwrap();
                 let default_icon = app.default_window_icon().unwrap().clone();
-                let _tray = TrayIconBuilder::new()
+                let _tray = TrayIconBuilder::with_id(MAIN_TRAY_ID)
                     .menu(&tray_menu)
                     .icon(default_icon)
                     .tooltip("LCXL Remote Desktop")
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "quit" => {
+                            if HOST_ACCESS_BLOCKS_EXIT.load(Ordering::SeqCst) {
+                                log::warn!("Exit ignored while remote access is active");
+                                return;
+                            }
                             IS_EXITING.store(true, Ordering::SeqCst);
                             app.exit(0);
+                        }
+                        "host_access_status" => {
+                            host_access_status::show_status_windows(app);
                         }
                         "show" => {
                             if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
@@ -570,10 +593,8 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
         .setup(move |app| {
             let handle = app.handle().clone();
 
-            // Channels for GUI managers — same pattern as service-shell mode.
-            // Senders are cloned: one set for the embedded server (legacy direct
-            // mpsc path; will be removed in Step 6) and one set for ipc_client
-            // which receives broadcast commands from the host control hub.
+            // Channels connect the embedded server's host-control stream to the
+            // GUI managers through the loopback IPC client.
             let (ps_cmd_tx, ps_cmd_rx) = std::sync::mpsc::channel::<
                 desk_input_injection::model::host_control::PrivateScreenCommand,
             >();
@@ -588,6 +609,8 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
             >();
             let (svc_op_tx, svc_op_rx) =
                 std::sync::mpsc::sync_channel::<lcxl_remote_desk_server::ServiceOp>(8);
+            let (host_access_tx, host_access_rx) =
+                std::sync::mpsc::channel::<host_access_status::HostAccessStatusCommand>();
 
             // Read server port from settings before starting server thread
             let server_port = settings.system.port;
@@ -620,6 +643,11 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                 frontend_url.clone(),
             );
             sa_manager.start(sa_rx);
+            host_access_status::HostAccessStatusManager::new(
+                handle.clone(),
+                frontend_url.clone(),
+            )
+            .start(host_access_rx);
 
             // Spawn handler for Install / Uninstall operations.
             std::thread::spawn(move || {
@@ -667,8 +695,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
             let token_holder: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
             // ipc_client connects to the embedded server's `/ws/tauri_ipc` over
-            // loopback. In Step 2 the hub only emits the TauriToken first frame;
-            // Step 3 will route business commands here as well.
+            // loopback and routes business commands to the GUI managers.
             let ipc_token = settings.system.tauri_ipc_token.clone().unwrap_or_default();
             let ipc_host = if enable_ipv6 { "[::1]" } else { "127.0.0.1" };
             let daemon_ws_url = format!("ws://{}:{}/ws/tauri_ipc", ipc_host, server_port);
@@ -683,10 +710,9 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                         wb_cmd_tx,
                         sa_tx,
                         svc_op_tx,
-                        // After Step 6 the hub is the single source of truth for
-                        // private-screen state changes, so the manager-owned
-                        // state_rx is plumbed through ipc_client which forwards
-                        // each event back into the hub via ws.
+                        host_access_tx,
+                        // The hub is the single source of truth for private-screen
+                        // state, so GUI events are forwarded back over the socket.
                         Some(state_rx),
                         token_holder_ipc,
                     )
@@ -700,8 +726,17 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
 
             let quit_i = MenuItem::with_id(app, "quit", "Exit", true, None::<&str>).unwrap();
             let show_i = MenuItem::with_id(app, "show", "Open Window", true, None::<&str>).unwrap();
+            let status_i = MenuItem::with_id(
+                app,
+                "host_access_status",
+                "View Remote Access Status",
+                true,
+                None::<&str>,
+            )
+            .unwrap();
 
-            let mut menu_items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![&show_i];
+            let mut menu_items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+                vec![&show_i, &status_i];
 
             // macOS has no UAC / integrity-level model: capabilities are gated by
             // TCC (per-app/per-user, orthogonal to uid — even root can't bypass
@@ -723,16 +758,23 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
             let tray_menu = Menu::with_items(app, &menu_items).unwrap();
             let default_icon = app.default_window_icon().unwrap().clone();
 
-            let _tray = TrayIconBuilder::new()
+            let _tray = TrayIconBuilder::with_id(MAIN_TRAY_ID)
                 .menu(&tray_menu)
                 .icon(default_icon)
                 .tooltip("LCXL Remote Desktop")
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
                         "quit" => {
+                            if HOST_ACCESS_BLOCKS_EXIT.load(Ordering::SeqCst) {
+                                log::warn!("Exit ignored while remote access is active");
+                                return;
+                            }
                             IS_EXITING.store(true, Ordering::SeqCst);
                             app.exit(0);
                         },
+                        "host_access_status" => {
+                            host_access_status::show_status_windows(app);
+                        }
                         "show" => {
                             if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                                 let _ = window.show();

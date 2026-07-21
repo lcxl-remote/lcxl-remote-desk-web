@@ -18,6 +18,10 @@
 > 当 manager 致命拒绝本机注册（设备数量已达上限，或本机缺少设备身份）时，desk-server 会暂停自动重连，**出站连接**设置页会显示横幅说明原因，并提供**重试注册**按钮。请先从任一控制端清理出一个设备名额，再重试。
 - `local_signaling_token`——自动生成并持久化的令牌，供本地 desk server（及其他被控端）与同机信令服务器鉴权。请勿手动设置；它是凭据，日志中已脱敏。
 
+### 本机远程访问展示
+
+<code>host_access_indicator_enabled</code> 控制 Tauri 被控端是否显示持续远程访问状态卡、托盘活动徽标和首次会话通知，默认 <code>true</code>。关闭只隐藏这些提示，不改变审批、权限或已经建立的会话；该本机偏好不能由 manager 远程修改。见[被控端远程访问状态指示器](/zh/features/host-access-indicator)。
+
 ## 日志 `[log]`
 
 - `log_level`——日志级别（`error`、`warn`、`info`、`debug`、`trace`）。

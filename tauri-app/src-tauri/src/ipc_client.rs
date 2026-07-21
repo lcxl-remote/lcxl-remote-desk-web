@@ -1,3 +1,4 @@
+use crate::host_access_status::HostAccessStatusCommand;
 use awc::Client;
 use desk_input_injection::model::host_control::{
     HostControlEventType, PrivateScreenCommand, WhiteboardCommand,
@@ -26,6 +27,7 @@ pub async fn run_ipc_loop(
     wb_cmd_tx: std::sync::mpsc::Sender<WhiteboardCommand>,
     sa_tx: std::sync::mpsc::Sender<SecurityApprovalCommand>,
     svc_op_tx: std::sync::mpsc::SyncSender<ServiceOp>,
+    host_access_tx: std::sync::mpsc::Sender<HostAccessStatusCommand>,
     mut state_rx: Option<UnboundedReceiver<HostControlEventType>>,
     token_holder: Arc<Mutex<Option<String>>>,
 ) {
@@ -77,6 +79,7 @@ pub async fn run_ipc_loop(
                                             &wb_cmd_tx,
                                             &sa_tx,
                                             &svc_op_tx,
+                                            &host_access_tx,
                                             &token_holder,
                                         ),
                                         Err(e) => {
@@ -121,6 +124,7 @@ pub async fn run_ipc_loop(
                 // Telling it to reset releases always-on-top instead of
                 // leaving the window pinned until the next live dialog.
                 let _ = sa_tx.send(SecurityApprovalCommand::Reset);
+                let _ = host_access_tx.send(HostAccessStatusCommand::Reset);
             }
             Err(e) => {
                 log::warn!("[IpcClient] Connection failed: {e:?}, retrying in 3 s...");
@@ -147,6 +151,7 @@ fn handle_server_msg(
     wb_cmd_tx: &std::sync::mpsc::Sender<WhiteboardCommand>,
     sa_tx: &std::sync::mpsc::Sender<SecurityApprovalCommand>,
     svc_op_tx: &std::sync::mpsc::SyncSender<ServiceOp>,
+    host_access_tx: &std::sync::mpsc::Sender<HostAccessStatusCommand>,
     token_holder: &Arc<Mutex<Option<String>>>,
 ) {
     match msg {
@@ -203,6 +208,9 @@ fn handle_server_msg(
                 log::warn!("[IpcClient] ServiceOp channel full: {e}");
             }
         }
+        HostControlMessage::HostAccessSnapshot { snapshot } => {
+            let _ = host_access_tx.send(HostAccessStatusCommand::Snapshot(snapshot));
+        }
         // Aggregator → forwarder messages: ignored on Tauri client.
         HostControlMessage::SecurityApprovalSubmit { .. }
         | HostControlMessage::SecurityApprovalCancel { .. }
@@ -238,6 +246,7 @@ mod tests {
         let (wb_tx, _wb_rx) = std::sync::mpsc::channel::<WhiteboardCommand>();
         let (sa_tx, _sa_rx) = std::sync::mpsc::channel::<SecurityApprovalCommand>();
         let (svc_tx, _svc_rx) = std::sync::mpsc::sync_channel::<ServiceOp>(1);
+        let (status_tx, _status_rx) = std::sync::mpsc::channel();
         let token_holder = Arc::new(Mutex::new(None));
 
         handle_server_msg(
@@ -248,6 +257,7 @@ mod tests {
             &wb_tx,
             &sa_tx,
             &svc_tx,
+            &status_tx,
             &token_holder,
         );
         match ps_rx
@@ -265,6 +275,7 @@ mod tests {
         let (wb_tx, _) = std::sync::mpsc::channel();
         let (sa_tx, _) = std::sync::mpsc::channel();
         let (svc_tx, _) = std::sync::mpsc::sync_channel::<ServiceOp>(1);
+        let (status_tx, _) = std::sync::mpsc::channel();
         let token_holder = Arc::new(Mutex::new(None));
 
         handle_server_msg(
@@ -275,9 +286,47 @@ mod tests {
             &wb_tx,
             &sa_tx,
             &svc_tx,
+            &status_tx,
             &token_holder,
         );
         assert_eq!(token_holder.lock().unwrap().as_deref(), Some("tok-xyz"));
+    }
+
+    #[test]
+    fn handle_server_msg_dispatches_host_access_snapshot() {
+        let (ps_tx, _) = std::sync::mpsc::channel();
+        let (wb_tx, _) = std::sync::mpsc::channel();
+        let (sa_tx, _) = std::sync::mpsc::channel();
+        let (svc_tx, _) = std::sync::mpsc::sync_channel::<ServiceOp>(1);
+        let (status_tx, status_rx) = std::sync::mpsc::channel();
+        let token_holder = Arc::new(Mutex::new(None));
+        let snapshot = lcxl_remote_desk_server::host_control::HostAccessSnapshot {
+            epoch: "epoch-1".to_string(),
+            revision: 4,
+            indicator_enabled: false,
+            total_session_count: 0,
+            sessions: Vec::new(),
+        };
+
+        handle_server_msg(
+            HostControlMessage::HostAccessSnapshot {
+                snapshot: snapshot.clone(),
+            },
+            &ps_tx,
+            &wb_tx,
+            &sa_tx,
+            &svc_tx,
+            &status_tx,
+            &token_holder,
+        );
+
+        match status_rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .expect("status command")
+        {
+            HostAccessStatusCommand::Snapshot(received) => assert_eq!(received, snapshot),
+            other => panic!("expected snapshot, got {other:?}"),
+        }
     }
 
     #[test]
@@ -286,6 +335,7 @@ mod tests {
         let (wb_tx, _) = std::sync::mpsc::channel();
         let (sa_tx, _) = std::sync::mpsc::channel();
         let (svc_tx, svc_rx) = std::sync::mpsc::sync_channel::<ServiceOp>(1);
+        let (status_tx, _) = std::sync::mpsc::channel();
         let token_holder = Arc::new(Mutex::new(None));
 
         handle_server_msg(
@@ -298,6 +348,7 @@ mod tests {
             &wb_tx,
             &sa_tx,
             &svc_tx,
+            &status_tx,
             &token_holder,
         );
         match svc_rx

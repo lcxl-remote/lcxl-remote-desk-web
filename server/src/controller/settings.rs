@@ -71,6 +71,7 @@ pub async fn update_settings(
     requst_json: web::Json<SystemSettings>,
     settings: web::Data<SharedSettings>,
     manager_link_gate: web::Data<Arc<ManagerLinkGate>>,
+    host_control_hub: Option<web::Data<Option<Arc<HostControlHub>>>>,
 ) -> Result<HttpResponse, AWError> {
     let mut params = requst_json.into_inner();
     let mut settings = settings.write().await;
@@ -100,6 +101,13 @@ pub async fn update_settings(
     settings.system = params;
     // save new settings to file
     settings.save()?;
+    if let Some(hub) = host_control_hub
+        .as_ref()
+        .and_then(|data| data.get_ref().as_ref())
+    {
+        hub.host_activity()
+            .set_indicator_enabled(settings.system.host_access_indicator_enabled);
+    }
     // Re-sync the shared manager-link gate to the freshly persisted config while
     // still holding the settings write lock, so the proxy's reconnect loop cannot
     // observe the new settings before the gate value catches up. Disabling the

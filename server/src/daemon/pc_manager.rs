@@ -547,6 +547,7 @@ struct GrantSessionEntry {
 pub struct PcRegistry {
     inner: Arc<RwLock<HashMap<String, Arc<RwLock<PeerConnectionContext>>>>>,
     worker_mgr: Arc<tokio::sync::OnceCell<WorkerManager>>,
+    host_activity: Arc<tokio::sync::OnceCell<crate::host_activity::HostActivityRegistry>>,
     /// Counts in-flight `RequestRemote` handlers that have not yet
     /// registered a [`PeerConnectionContext`]. Used by
     /// [`crate::daemon::pc_manager::cleanup_pc`] to suppress N→0
@@ -649,6 +650,22 @@ impl PcRegistry {
             log::debug!(
                 "[pc_manager] PcRegistry::set_worker_manager called more than once; ignoring"
             );
+        }
+    }
+
+    pub fn set_host_activity(&self, registry: crate::host_activity::HostActivityRegistry) {
+        if self.host_activity.set(registry).is_err() {
+            log::debug!("[pc_manager] host activity registry already installed; ignoring");
+        }
+    }
+
+    fn host_activity(&self) -> Option<crate::host_activity::HostActivityRegistry> {
+        self.host_activity.get().cloned()
+    }
+
+    pub(crate) fn clear_worker_activity(&self) {
+        if let Some(activity) = self.host_activity() {
+            activity.clear_worker_owned();
         }
     }
 
@@ -2234,6 +2251,9 @@ pub async fn handle_offer(
         .record_start_media_was_first(start_media_payload.clone())
         .await;
     drop(ctx_guard);
+    if has_video && let Some(activity) = registry.host_activity() {
+        activity.mark_video_negotiated(from_connection_id);
+    }
     // Only the first offer starts the worker's per-connection capture +
     // encode pipeline. A renegotiation (ICE-restart re-offer) finished
     // the SDP exchange above but must not re-issue StartMedia.
@@ -2923,6 +2943,9 @@ async fn cleanup_pc(
     reason: &str,
 ) {
     let removed = registry.remove(connection_id).await;
+    if let Some(activity) = registry.host_activity() {
+        activity.remove_connection(connection_id);
+    }
     // Prune the grant reverse-index on every teardown path (idempotent for
     // connections that carry no grant) so a directed teardown can never reach a
     // stale connection id.
@@ -3103,6 +3126,11 @@ fn register_peer_connection_state_cleanup(
         let connection_id = connection_id.clone();
         Box::pin(async move {
             match state {
+                RTCPeerConnectionState::Connected => {
+                    if let Some(activity) = registry.host_activity() {
+                        activity.set_pc_connected(&connection_id, true);
+                    }
+                }
                 RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
                     log::info!(
                         "[pc_manager] PC for {connection_id} reached terminal state {state:?}; \

@@ -106,6 +106,8 @@ pub struct SystemSettings {
     /// `Some(false)` = explicitly disabled. Not part of the shared
     /// `RemoteSystemSettings` — the manager cannot flip its own link off.
     pub manager_enabled: Option<bool>,
+    /// Whether the local shell shows ongoing remote-access status.
+    pub host_access_indicator_enabled: bool,
     /// Client ID for telemetry
     client_id: Option<String>,
     /// Telemetry consent status
@@ -205,6 +207,10 @@ impl std::fmt::Debug for SystemSettings {
             )
             .field("manager_url", &self.manager_url)
             .field("manager_enabled", &self.manager_enabled)
+            .field(
+                "host_access_indicator_enabled",
+                &self.host_access_indicator_enabled,
+            )
             .field("client_id", &self.client_id)
             .field("telemetry_consent", &self.telemetry_consent)
             .field("auto_start", &self.auto_start)
@@ -343,6 +349,7 @@ impl Default for SystemSettings {
             signaling_token: None,
             manager_url: None,
             manager_enabled: None,
+            host_access_indicator_enabled: true,
             client_id: None,
             telemetry_consent: None,
             auto_start: None,
@@ -363,6 +370,13 @@ impl Default for SystemSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_access_indicator_defaults_to_enabled() {
+        assert!(SystemSettings::default().host_access_indicator_enabled);
+        let decoded: SystemSettings = toml::from_str("").expect("decode defaults");
+        assert!(decoded.host_access_indicator_enabled);
+    }
 
     #[test]
     fn preserve_internal_fields_keeps_secrets_when_update_omits_them() {

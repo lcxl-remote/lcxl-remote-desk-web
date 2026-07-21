@@ -87,6 +87,29 @@ fn adjudicate_role(token: TokenOutcome, reported_type: RemoteDeskTypeEnum) -> Ro
     }
 }
 
+/// Resolve the only browser display name that may enter a host authorization
+/// stamp. Account names come from the authenticated session; capability-scoped
+/// code sessions intentionally remain unnamed.
+pub(crate) fn trusted_browser_display_name(
+    authenticated_user_name: &str,
+    is_code_session: bool,
+) -> Option<String> {
+    (!is_code_session).then(|| authenticated_user_name.to_string())
+}
+
+fn apply_server_adjudicated_identity(
+    version_info: &mut VersionInfo,
+    adjudicated_type: RemoteDeskTypeEnum,
+    authenticated_user_name: &str,
+    is_code_session: bool,
+) {
+    version_info.remote_desk_type = adjudicated_type;
+    if adjudicated_type == RemoteDeskTypeEnum::Browser {
+        version_info.display_name =
+            trusted_browser_display_name(authenticated_user_name, is_code_session);
+    }
+}
+
 #[utoipa::path(
     tag = TAG,
     summary = "Open Signaling Handle, return websocket stream. NOTE: The OpenAPI generated typescript service is not right.",
@@ -216,9 +239,16 @@ pub async fn open_signaling_handle(
         debug_build: false,
         repository_url: None,
     });
-    // Overwrite any self-reported role with the server-adjudicated one so the
-    // downstream handler (device registration, presence) trusts only this.
-    version_info.remote_desk_type = adjudicated_type;
+    // Overwrite browser identity fields with server-adjudicated values before
+    // the connection enters the shared map. Node display names remain device
+    // metadata, but browser names may later enter a host authorization stamp and
+    // therefore must never come from the signaling query.
+    apply_server_adjudicated_identity(
+        &mut version_info,
+        adjudicated_type,
+        &user.name,
+        code_session.is_some(),
+    );
 
     let ip = req
         .connection_info()
@@ -446,5 +476,62 @@ mod tests {
             adjudicate_role(TokenOutcome::Absent, RemoteDeskTypeEnum::Browser),
             RoleDecision::Cookie
         );
+    }
+
+    #[test]
+    fn authenticated_browser_name_overrides_self_report() {
+        let mut version_info = VersionInfo::new(
+            1,
+            1,
+            "test".to_string(),
+            RemoteDeskTypeEnum::Browser,
+            Some("spoofed-owner".to_string()),
+            None,
+        );
+        apply_server_adjudicated_identity(
+            &mut version_info,
+            RemoteDeskTypeEnum::Browser,
+            "real-owner",
+            false,
+        );
+        assert_eq!(version_info.display_name.as_deref(), Some("real-owner"));
+    }
+
+    #[test]
+    fn code_session_browser_has_no_display_name() {
+        let mut version_info = VersionInfo::new(
+            1,
+            1,
+            "test".to_string(),
+            RemoteDeskTypeEnum::Browser,
+            Some("spoofed-owner".to_string()),
+            None,
+        );
+        apply_server_adjudicated_identity(
+            &mut version_info,
+            RemoteDeskTypeEnum::Browser,
+            "code_session",
+            true,
+        );
+        assert_eq!(version_info.display_name, None);
+    }
+
+    #[test]
+    fn authenticated_node_keeps_device_metadata_name() {
+        let mut version_info = VersionInfo::new(
+            1,
+            1,
+            "test".to_string(),
+            RemoteDeskTypeEnum::Server,
+            Some("device-name".to_string()),
+            Some("client-1".to_string()),
+        );
+        apply_server_adjudicated_identity(
+            &mut version_info,
+            RemoteDeskTypeEnum::Server,
+            "server_node",
+            false,
+        );
+        assert_eq!(version_info.display_name.as_deref(), Some("device-name"));
     }
 }

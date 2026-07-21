@@ -80,6 +80,7 @@ pub async fn run_signaling_proxy(
     exec_ledger: Arc<crate::daemon::exec_ledger::ExecLedger>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Signaling proxy starting");
+    let host_activity = host_control_hub.host_activity();
 
     let (outbound_tx, _seed_rx) = broadcast::channel::<String>(128);
 
@@ -613,9 +614,7 @@ pub async fn run_signaling_proxy(
             WorkerToService::ClipboardRead(payload) => {
                 crate::daemon::pc_manager::write_clipboard_data(&pc_registry, payload).await;
             }
-            // Typed-IPC migration batch 1: replaces the legacy
-            // `WorkerToService::SignalingMessage` reverse path for
-            // private-screen state changes. Daemon constructs the
+            // Daemon constructs the outbound private-screen state
             // outbound `SignalingType::PrivateScreenStateChanged`
             // model (matching the wire shape the browser already
             // expects) and broadcasts it through the same outbound
@@ -645,12 +644,20 @@ pub async fn run_signaling_proxy(
                 }
             }
             WorkerToService::FileManagerOpened(payload) => {
+                host_activity.file_manager_opened(&payload.connection_id);
                 log::info!(
                     "[SignalingProxy] file manager opened for {}",
                     payload.connection_id
                 );
             }
             WorkerToService::FileTransferStarted(payload) => {
+                host_activity.file_transfer_started(
+                    &payload.connection_id,
+                    &payload.transfer_id,
+                    payload.direction,
+                    &payload.file_name,
+                    payload.total_bytes,
+                );
                 log::info!(
                     "[SignalingProxy] file transfer started for {}: {} {:?} {} bytes",
                     payload.connection_id,
@@ -660,6 +667,7 @@ pub async fn run_signaling_proxy(
                 );
             }
             WorkerToService::FileTransferFinished(payload) => {
+                host_activity.file_transfer_finished(&payload.connection_id, &payload.transfer_id);
                 log::info!(
                     "[SignalingProxy] file transfer finished for {}: {} {:?}",
                     payload.connection_id,
@@ -717,7 +725,7 @@ pub async fn run_signaling_proxy(
                     Option::<&()>::None,
                 );
             }
-            // Batch 3 of the typed-IPC migration — terminal plane.
+            // Route typed terminal events back to the matching browser connection.
             // Each `Terminal*` variant rebuilds the matching outbound
             // `SignalingType::*` model and writes it onto the
             // outbound channel for the WS sinks to ship to the
@@ -728,6 +736,7 @@ pub async fn run_signaling_proxy(
             // `ListTerminalResponse` is a `success_response` for
             // `ListTerminal`.
             WorkerToService::TerminalStarted(payload) => {
+                host_activity.terminal_started(&payload.connection_id);
                 // Terminal session traffic always carries a
                 // `from_connection_id` (open_terminal_session mints
                 // one per terminal WS); wrap it in `Some` so the
@@ -744,6 +753,7 @@ pub async fn run_signaling_proxy(
                 );
             }
             WorkerToService::TerminalClosed(payload) => {
+                host_activity.terminal_closed(&payload.connection_id);
                 send_terminal_notification(
                     &outbound_tx,
                     "TerminalClosed",
@@ -1119,8 +1129,7 @@ fn build_virtual_display_response(
     }
 }
 
-/// Helper for batch 2 of the typed-IPC migration: rebuild the
-/// outbound `Manager*` response `SignalingModel` (with the
+/// Rebuild the outbound `Manager*` response `SignalingModel` (with the
 /// `request_id` echoed for correlation) and broadcast it to the
 /// browser via `outbound_tx`. Build / serialise failures are
 /// non-fatal — log + drop, no panic on the bus.
@@ -1164,8 +1173,7 @@ fn send_manager_response<T>(
     }
 }
 
-/// Helper for batch 3 of the typed-IPC migration: build a
-/// server-initiated `new_request` `SignalingModel` (no `request_id`
+/// Build a server-initiated `new_request` `SignalingModel` (no `request_id`
 /// correlation — the daemon mints a fresh one inside `new_request`)
 /// for terminal-plane notifications (`ReplyFromTerminal`,
 /// `TerminalClosed`) and broadcast it to the browser via
@@ -2511,6 +2519,7 @@ mod tests {
             access_ceiling: ceiling,
             grant_session_id: None,
             generation: 0,
+            actor: desk_signal_facade::model::request_remote_authz::ActorSummary::unknown(),
             request_id: "req-1".to_string(),
             audience: RR_AUDIENCE.to_string(),
             expires_at: Some("2999-01-01T00:00:00Z".to_string()),

@@ -1,4 +1,10 @@
 _version: 2
+host_access_title:
+  en: Remote access active
+  zh-CN: 正在远程访问
+host_access_started:
+  en: This device is currently being accessed remotely.
+  zh-CN: 当前设备正在被远程访问。
 security_approval_title:
   en: "Security Approval Required"
   zh-CN: "需要安全授权"
@@ -24,6 +30,9 @@ permission:
   file_browse:
     en: "File Browse"
     zh-CN: "文件浏览"
+  file_delete:
+    en: "File Delete"
+    zh-CN: "文件删除"
   file_transfer:
     en: "File Transfer"
     zh-CN: "文件传输"

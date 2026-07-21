@@ -8,6 +8,54 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::security_approval::SecurityPermissionType;
+use desk_signal_facade::model::request_remote_authz::ActorSummary;
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostFileTransferDirection {
+    Upload,
+    Download,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct HostFileTransferSummary {
+    pub transfer_id: String,
+    pub direction: HostFileTransferDirection,
+    pub file_name: String,
+    pub transferred_bytes: u64,
+    pub total_bytes: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct HostAccessSession {
+    pub connection_id: String,
+    pub actor: ActorSummary,
+    pub started_at: String,
+    pub desktop_view: bool,
+    pub remote_control: bool,
+    pub terminal_count: u32,
+    pub file_manager: bool,
+    pub transfers: Vec<HostFileTransferSummary>,
+}
+
+impl HostAccessSession {
+    pub fn is_active(&self) -> bool {
+        self.desktop_view
+            || self.remote_control
+            || self.terminal_count > 0
+            || self.file_manager
+            || !self.transfers.is_empty()
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct HostAccessSnapshot {
+    pub epoch: String,
+    pub revision: u64,
+    pub indicator_enabled: bool,
+    pub total_session_count: u32,
+    pub sessions: Vec<HostAccessSession>,
+}
 
 /// Identifies the role of a client connecting to the hub's WS endpoint.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +155,9 @@ pub enum HostControlMessage {
         #[serde(default)]
         install_idd_driver: bool,
     },
+
+    /// Complete daemon-authoritative remote-access state for the local shell.
+    HostAccessSnapshot { snapshot: HostAccessSnapshot },
 
     // ====================== Aggregator → Forwarder ======================
     /// Deliver the user's approval response back to the worker.
@@ -226,6 +277,24 @@ mod tests {
                 op: ServiceOpKind::Install,
                 install_path: Some("C:\\Program Files\\app".to_string()),
                 install_idd_driver: true,
+            },
+            HostControlMessage::HostAccessSnapshot {
+                snapshot: HostAccessSnapshot {
+                    epoch: "epoch-1".to_string(),
+                    revision: 7,
+                    indicator_enabled: true,
+                    total_session_count: 1,
+                    sessions: vec![HostAccessSession {
+                        connection_id: "c1".to_string(),
+                        actor: ActorSummary::unknown(),
+                        started_at: "2026-07-21T00:00:00Z".to_string(),
+                        desktop_view: true,
+                        remote_control: false,
+                        terminal_count: 0,
+                        file_manager: false,
+                        transfers: Vec::new(),
+                    }],
+                },
             },
             HostControlMessage::ServiceOp {
                 op: ServiceOpKind::Install,

@@ -3,6 +3,7 @@ pub mod daemon;
 pub mod diagnose;
 pub mod error;
 pub mod exec;
+pub mod host_activity;
 pub mod host_control;
 #[cfg(target_os = "macos")]
 pub mod macos_agent;

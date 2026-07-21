@@ -11,6 +11,7 @@ const fullSettings: SystemSettings = {
     listen_addr_ipv6: "::",
     telemetry_consent: true,
     auto_start: true,
+    host_access_indicator_enabled: true,
     signaling_url: "ws://remote/api/desk/signaling",
     signaling_token: "sig-token",
     manager_url: "ws://manager/api/desk/signaling",
@@ -39,6 +40,7 @@ describe("mergeSystemSettings", () => {
         expect(payload.port).toBe(8081)
         expect(payload.listen_addr_ipv4).toBe("0.0.0.0")
         expect(payload.enable_ipv6).toBe(true)
+        expect(payload.host_access_indicator_enabled).toBe(true)
         // Config-only and internal fields survive too.
         expect(payload.worker_heartbeat_timeout_secs).toBe(30)
         expect(payload.local_signaling_token).toBe("local-token")
@@ -53,12 +55,14 @@ describe("mergeSystemSettings", () => {
             listen_addr_ipv6: "::1",
             telemetry_consent: false,
             auto_start: false,
+            host_access_indicator_enabled: false,
         }
 
         const payload = mergeSystemSettings(fullSettings, edits)
 
         expect(payload.port).toBe(9000)
         expect(payload.enable_ipv6).toBe(false)
+        expect(payload.host_access_indicator_enabled).toBe(false)
         // Outbound fields owned by the Desk-connection page are not wiped.
         expect(payload.signaling_url).toBe("ws://remote/api/desk/signaling")
         expect(payload.manager_api_token).toBe("mgr-token")

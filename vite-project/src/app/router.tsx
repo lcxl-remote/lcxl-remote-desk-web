@@ -5,6 +5,7 @@ import InitPage from '@/features/auth/init-page';
 import PrivateScreenPage from '@/features/desk/private-screen-page';
 import WhiteboardPage from '@/features/desk/whiteboard-page';
 import SecurityApprovalPage from '@/features/desk/security-approval-page';
+import HostAccessStatusPage from '@/features/desk/host-access-status-page';
 import Layout from '@/features/layout/layout';
 import DeskList from '@/features/desk/desk-list';
 import DeskDashboard from '@/features/desk/desk-dashboard';
@@ -52,6 +53,10 @@ export const router = createBrowserRouter([
     {
         path: '/security-approval',
         element: <SecurityApprovalPage />,
+    },
+    {
+        path: '/host-access-status',
+        element: <HostAccessStatusPage />,
     },
     {
         path: '/',

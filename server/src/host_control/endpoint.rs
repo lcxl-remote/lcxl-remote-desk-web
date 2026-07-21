@@ -279,7 +279,8 @@ fn is_outbound_for_role(msg: &HostControlMessage, role: Option<ClientRole>) -> b
             | HostControlMessage::WhiteboardHide { .. }
             | HostControlMessage::SecurityApprovalRequest { .. }
             | HostControlMessage::SecurityApprovalFinished { .. }
-            | HostControlMessage::ServiceOp { .. },
+            | HostControlMessage::ServiceOp { .. }
+            | HostControlMessage::HostAccessSnapshot { .. },
         ) => true,
         // Forwarder-bound broadcast: only Cancel + state changes.
         // SecurityApprovalSubmit is dispatched via per-session mpsc (directional)
@@ -320,6 +321,9 @@ async fn handle_client_message(
                             let _ = state.hub.send_command(replay);
                         }
                     }
+                    let _ = session_tx.send(HostControlMessage::HostAccessSnapshot {
+                        snapshot: state.hub.host_activity().snapshot(),
+                    });
                 }
                 ClientRole::Forwarder => {
                     if state.hub.mode() == HubMode::Aggregator {
@@ -551,6 +555,52 @@ mod tests {
             },
             role
         ));
+        assert!(!is_outbound_for_role(
+            &HostControlMessage::HostAccessSnapshot {
+                snapshot: crate::host_control::HostAccessSnapshot {
+                    epoch: "epoch-1".into(),
+                    revision: 1,
+                    indicator_enabled: true,
+                    total_session_count: 0,
+                    sessions: Vec::new(),
+                },
+            },
+            role
+        ));
+    }
+
+    #[tokio::test]
+    async fn tauri_ready_receives_current_host_access_snapshot_directly() {
+        let hub = Arc::new(HostControlHub::new_local());
+        hub.host_activity().set_indicator_enabled(false);
+        let state = Arc::new(EndpointState::new(
+            hub,
+            "secret".to_string(),
+            TauriLoginToken::empty(),
+        ));
+        let (session_tx, mut session_rx) = mpsc::unbounded_channel();
+        let mut role = None;
+
+        handle_client_message(
+            &state,
+            &mut role,
+            1,
+            &session_tx,
+            HostControlMessage::Ready {
+                role: ClientRole::Tauri,
+                is_admin: Some(false),
+            },
+        )
+        .await;
+
+        let message = session_rx.recv().await.expect("snapshot");
+        match message {
+            HostControlMessage::HostAccessSnapshot { snapshot } => {
+                assert!(!snapshot.indicator_enabled);
+                assert!(snapshot.sessions.is_empty());
+            }
+            other => panic!("expected host snapshot, got {other:?}"),
+        }
     }
 
     #[test]

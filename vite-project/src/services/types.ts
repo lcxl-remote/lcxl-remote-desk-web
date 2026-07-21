@@ -1294,6 +1294,10 @@ export type FileTransferMessage = ((DownloadRequest & {
 
 export type InitParams = {
     /**
+     * @type boolean
+    */
+    host_access_indicator_enabled: boolean;
+    /**
      * @description Optional manager API token paired with `manager_url`.
      * @type string,null
     */
@@ -2789,6 +2793,12 @@ export type RestResponseSystemSettings = {
         */
         enable_ipv6?: boolean;
         /**
+         * @description Whether the local shell shows ongoing remote-access status.
+         * @default true
+         * @type boolean | undefined
+        */
+        host_access_indicator_enabled?: boolean;
+        /**
          * @description listen ipv4 address for the server to bind to
          * @default "0.0.0.0"
          * @type string | undefined
@@ -3540,6 +3550,12 @@ export type SystemSettings = {
      * @type boolean | undefined
     */
     enable_ipv6?: boolean;
+    /**
+     * @description Whether the local shell shows ongoing remote-access status.
+     * @default true
+     * @type boolean | undefined
+    */
+    host_access_indicator_enabled?: boolean;
     /**
      * @description listen ipv4 address for the server to bind to
      * @default "0.0.0.0"

@@ -83,7 +83,13 @@ mod wincode_tests {
     #[test]
     fn remote_system_settings_excludes_model_config() {
         let json = serde_json::to_string(&RemoteSystemSettings::default()).expect("serialize");
-        for forbidden in ["api_key", "ai_model", "base_url", "model_provider"] {
+        for forbidden in [
+            "api_key",
+            "ai_model",
+            "base_url",
+            "model_provider",
+            "host_access_indicator_enabled",
+        ] {
             assert!(
                 !json.contains(forbidden),
                 "RemoteSystemSettings must not carry `{forbidden}`: {json}"

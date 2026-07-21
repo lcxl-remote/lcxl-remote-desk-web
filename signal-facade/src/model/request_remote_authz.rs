@@ -21,6 +21,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::security_settings::SecuritySettings;
 
+/// Minimal server-authenticated identity shown on the controlled host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActorSummary {
+    pub display_name: Option<String>,
+    pub access_source: ActorAccessSource,
+}
+
+impl ActorSummary {
+    pub fn unknown() -> Self {
+        Self {
+            display_name: None,
+            access_source: ActorAccessSource::Unknown,
+        }
+    }
+}
+
+/// How the central service authenticated a remote-access actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActorAccessSource {
+    AuthenticatedAccount,
+    TemporaryGrant,
+    Unknown,
+}
+
 /// Wire version of the stamp, so an incompatible host rejects rather than
 /// misinterprets an unknown-shaped block.
 pub const REQUEST_REMOTE_AUTHZ_VERSION: u16 = 1;
@@ -79,6 +104,8 @@ pub struct RequestRemoteAuthz {
     /// un-revocable generation) rather than failing to deserialize the whole wrapper.
     #[serde(default)]
     pub generation: i64,
+    /// Server-authenticated identity for local host transparency.
+    pub actor: ActorSummary,
     /// The `request_id` of the frame this stamp authorizes; must match, so a
     /// stamp cannot be lifted onto a different frame.
     pub request_id: String,
@@ -156,6 +183,7 @@ mod tests {
             access_ceiling: None,
             grant_session_id: None,
             generation: 0,
+            actor: ActorSummary::unknown(),
             request_id: "req-1".to_string(),
             audience: "host-client-abc".to_string(),
             expires_at: Some("2999-01-01T00:00:00Z".to_string()),
@@ -218,19 +246,31 @@ mod tests {
 
     #[test]
     fn stamp_without_generation_decodes_to_zero() {
-        // A stamp serialized before `generation` existed (an older central during a
-        // rolling deploy) must still decode — to a `0` placeholder — rather than
-        // failing the whole wrapper.
         let json = r#"{
             "version": 1,
             "access_ceiling": null,
             "grant_session_id": null,
+            "actor": {"display_name": null, "access_source": "unknown"},
             "request_id": "req-1",
             "audience": "host-client-abc",
             "expires_at": null
         }"#;
         let decoded: RequestRemoteAuthz = serde_json::from_str(json).expect("decode");
         assert_eq!(decoded.generation, 0);
+    }
+
+    #[test]
+    fn stamp_without_actor_is_rejected() {
+        let json = r#"{
+            "version": 1,
+            "access_ceiling": null,
+            "grant_session_id": null,
+            "generation": 0,
+            "request_id": "req-1",
+            "audience": "host-client-abc",
+            "expires_at": null
+        }"#;
+        assert!(serde_json::from_str::<RequestRemoteAuthz>(json).is_err());
     }
 
     #[test]

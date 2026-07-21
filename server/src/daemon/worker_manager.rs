@@ -734,10 +734,12 @@ impl WorkerManager {
     /// `SignalingState` lives next to the PC in the daemon and is never
     /// torn down on a worker swap.
     pub async fn notify_desktop_switch(&self) {
+        self.pc_registry.clear_worker_activity();
         self.pc_registry.pause_all_media().await;
     }
 
     pub fn handle_crash_recovery(&self, session_id: u32, desktop_name: Option<String>) {
+        self.pc_registry.clear_worker_activity();
         // Portable / Default mode: there is no external process to
         // crash-recover. The "worker" is an in-process task — if it
         // unwound the whole runtime is going down anyway, and even if

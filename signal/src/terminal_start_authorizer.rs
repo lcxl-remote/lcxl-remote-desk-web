@@ -24,7 +24,8 @@ use async_trait::async_trait;
 use desk_signal_facade::grant::AccessGrantStore;
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::request_remote_authz::{
-    AuthorizedTerminalStart, REQUEST_REMOTE_AUTHZ_VERSION, RequestRemoteAuthz,
+    ActorAccessSource, ActorSummary, AuthorizedTerminalStart, REQUEST_REMOTE_AUTHZ_VERSION,
+    RequestRemoteAuthz,
 };
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_signal_facade::model::signal::SignalingModel;
@@ -35,7 +36,7 @@ use std::sync::Arc;
 
 use crate::request_remote_authorizer::{
     DeviceGenerationLookup, REQUEST_REMOTE_AUTHZ_TTL_SECS, owner_actor_user_id,
-    resolve_grant_ceiling, resolve_target_audience,
+    resolve_grant_ceiling, resolve_target_audience, signal_actor_summary,
 };
 
 /// Build the `Forward` outcome wrapping a `StartTerminal` frame's data in an
@@ -47,6 +48,7 @@ fn build_stamped_terminal_outcome(
     access_ceiling: Option<SecuritySettings>,
     grant_session_id: Option<String>,
     generation: i64,
+    actor: ActorSummary,
     audience: String,
     expires_at_rfc3339: String,
 ) -> RequestRemoteOutcome {
@@ -61,6 +63,7 @@ fn build_stamped_terminal_outcome(
         access_ceiling,
         grant_session_id,
         generation,
+        actor,
         request_id: model.request_id.clone(),
         audience,
         expires_at: Some(expires_at_rfc3339),
@@ -148,7 +151,18 @@ impl TerminalStartAuthorizer for SignalTerminalStartAuthorizer {
             // → no ceiling (full control). Resolved from the session, so a control
             // end cannot fake it.
             if owner_actor_user_id(&actor.auth_context).is_some() {
-                return build_stamped_terminal_outcome(model, None, None, 0, audience, expires_at);
+                return build_stamped_terminal_outcome(
+                    model,
+                    None,
+                    None,
+                    0,
+                    signal_actor_summary(
+                        ActorAccessSource::AuthenticatedAccount,
+                        actor.model.version_info.display_name.clone(),
+                    ),
+                    audience,
+                    expires_at,
+                );
             }
 
             // A code-session authorizes solely through the grant it redeemed: stamp
@@ -169,7 +183,16 @@ impl TerminalStartAuthorizer for SignalTerminalStartAuthorizer {
                 .await
                 {
                     Some((ceiling, gsid, generation)) => build_stamped_terminal_outcome(
-                        model, ceiling, gsid, generation, audience, expires_at,
+                        model,
+                        ceiling,
+                        gsid,
+                        generation,
+                        signal_actor_summary(
+                            ActorAccessSource::TemporaryGrant,
+                            actor.model.version_info.display_name.clone(),
+                        ),
+                        audience,
+                        expires_at,
                     ),
                     None => RequestRemoteOutcome::Reject {
                         code: DeskErrorCode::PERMISSION_ERROR,
@@ -221,6 +244,7 @@ mod tests {
             allow_private_screen: None,
             allow_whiteboard: None,
             allow_file_browse: None,
+            allow_file_delete: None,
             allow_file_transfer: None,
             approval_timeout: None,
         }
@@ -323,6 +347,7 @@ mod tests {
             None,
             None,
             0,
+            ActorSummary::unknown(),
             "client-abc".to_string(),
             "2999-01-01T00:00:00Z".to_string(),
         );

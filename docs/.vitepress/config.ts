@@ -33,6 +33,7 @@ const enSidebar = [
     text: 'Features',
     items: [
       { text: 'Remote Control & Streaming', link: '/features/streaming' },
+      { text: 'Remote Access Indicator', link: '/features/host-access-indicator' },
       { text: 'AI Diagnostics', link: '/features/ai-diagnostics' },
       { text: 'MCP Server', link: '/features/mcp-server' },
       { text: 'Terminal, Files & Clipboard', link: '/features/terminal-files-clipboard' },
@@ -92,6 +93,7 @@ const zhSidebar = [
     text: '功能',
     items: [
       { text: '远程控制与串流', link: '/zh/features/streaming' },
+      { text: '被控端远程访问状态', link: '/zh/features/host-access-indicator' },
       { text: 'AI 诊断', link: '/zh/features/ai-diagnostics' },
       { text: 'MCP 服务', link: '/zh/features/mcp-server' },
       { text: '终端 / 文件 / 剪贴板', link: '/zh/features/terminal-files-clipboard' },

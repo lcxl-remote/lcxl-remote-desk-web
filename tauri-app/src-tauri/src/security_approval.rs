@@ -216,6 +216,7 @@ fn show_tray_notification(app_handle: &AppHandle, permission_type: &SecurityPerm
         SecurityPermissionType::Whiteboard => "permission.whiteboard",
         SecurityPermissionType::Terminal => "permission.terminal",
         SecurityPermissionType::FileBrowse => "permission.file_browse",
+        SecurityPermissionType::FileDelete => "permission.file_delete",
         SecurityPermissionType::FileTransfer => "permission.file_transfer",
     };
     let permission_name = rust_i18n::t!(permission_key);

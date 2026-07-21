@@ -26,3 +26,15 @@ pub fn is_private_screen_supported() -> bool {
     }
     true
 }
+
+/// Resolve the attached LCXL virtual display to the OS monitor name.
+pub fn virtual_display_name() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows::virtual_display_name();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}

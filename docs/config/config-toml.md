@@ -19,6 +19,15 @@ Server settings are managed via `conf/config.toml`. The config file path can be 
 
 - `local_signaling_token` — auto-generated, persisted token used by the local desk server (and other hosts) to authenticate with the co-located signaling server. Do not set by hand; it is a credential and is masked in logs.
 
+### Local remote-access presentation
+
+<code>host_access_indicator_enabled</code> controls whether the Tauri host shows
+its persistent remote-access card, activity tray badge and first-session
+notification. It defaults to <code>true</code>. Turning it off only hides these
+indicators; it does not change approvals, permissions or established sessions.
+This host-local preference is not remotely configurable by manager. See
+[Remote Access Indicator](/features/host-access-indicator).
+
 ## Log `[log]`
 
 - `log_level` — logging level (`error`, `warn`, `info`, `debug`, `trace`).

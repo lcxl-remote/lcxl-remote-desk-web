@@ -9,6 +9,7 @@ use utoipa::ToSchema;
 use crate::{
     daemon::{manager_link_gate::ManagerLinkGate, signaling_proxy::manager_link_should_connect},
     error::DeskError,
+    host_control::HostControlHub,
     model::settings::SharedSettings,
 };
 
@@ -19,6 +20,7 @@ pub struct InitParams {
     pub username: String,
     pub password: String,
     pub telemetry_consent: bool,
+    pub host_access_indicator_enabled: bool,
     /// Optional manager signaling URL to connect on first run (the wizard's
     /// resolved `ws(s)://.../signaling` URL). Skipping the manager step leaves it
     /// `None`.
@@ -47,6 +49,7 @@ pub async fn init_system(
     request_json: web::Json<InitParams>,
     settings: web::Data<SharedSettings>,
     manager_link_gate: web::Data<Arc<ManagerLinkGate>>,
+    host_control_hub: Option<web::Data<Option<Arc<HostControlHub>>>>,
 ) -> Result<HttpResponse, DeskError> {
     let mut settings = settings.write().await;
 
@@ -62,6 +65,7 @@ pub async fn init_system(
     settings.user.login_user_name = params.username;
     settings.user.login_password = params.password;
     settings.system.telemetry_consent = Some(params.telemetry_consent);
+    settings.system.host_access_indicator_enabled = params.host_access_indicator_enabled;
 
     // Persist an optional manager target in one shot (skipping the manager step
     // leaves these untouched). Empty strings are treated as "not provided".
@@ -81,6 +85,13 @@ pub async fn init_system(
     }
 
     settings.save()?;
+    if let Some(hub) = host_control_hub
+        .as_ref()
+        .and_then(|data| data.get_ref().as_ref())
+    {
+        hub.host_activity()
+            .set_indicator_enabled(settings.system.host_access_indicator_enabled);
+    }
 
     // Sync the shared manager-link gate to the freshly persisted config while
     // still holding the settings write lock, so the proxy's reconnect loop brings
@@ -124,10 +135,10 @@ mod tests {
 
     #[actix_web::test]
     async fn test_init_system_success() {
-        let settings = create_test_settings().await;
+        let settings = web::Data::new(create_test_settings().await);
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(settings))
+                .app_data(settings.clone())
                 .app_data(test_gate())
                 .service(init_system),
         )
@@ -137,6 +148,7 @@ mod tests {
             username: "admin".to_string(),
             password: "new_password".to_string(),
             telemetry_consent: true,
+            host_access_indicator_enabled: true,
             manager_url: None,
             manager_api_token: None,
             security: None,
@@ -174,6 +186,7 @@ mod tests {
             username: "admin".to_string(),
             password: "new_password".to_string(),
             telemetry_consent: false,
+            host_access_indicator_enabled: true,
             manager_url: None,
             manager_api_token: None,
             security: None,
@@ -193,11 +206,11 @@ mod tests {
 
     #[actix_web::test]
     async fn test_init_system_persists_manager_and_security_and_gate() {
-        let settings = create_test_settings().await;
+        let settings = web::Data::new(create_test_settings().await);
         let gate = Arc::new(ManagerLinkGate::new(false));
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(settings))
+                .app_data(settings.clone())
                 .app_data(web::Data::new(gate.clone()))
                 .service(init_system),
         )
@@ -213,6 +226,7 @@ mod tests {
             username: "admin".to_string(),
             password: "pw".to_string(),
             telemetry_consent: true,
+            host_access_indicator_enabled: false,
             manager_url: Some("wss://manager.example/api/desk/signaling".to_string()),
             manager_api_token: Some("tok".to_string()),
             security: Some(security),
@@ -225,5 +239,6 @@ mod tests {
         assert!(resp.status().is_success());
         // Configuring a manager on init drives the gate to "should connect".
         assert!(gate.should_connect());
+        assert!(!settings.read().await.system.host_access_indicator_enabled);
     }
 }

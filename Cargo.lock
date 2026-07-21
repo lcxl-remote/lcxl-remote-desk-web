@@ -4985,6 +4985,7 @@ dependencies = [
  "desk-input-injection",
  "desk-signal-facade",
  "desk-utils",
+ "desk-virtual-display",
  "evdev",
  "futures-util",
  "lcxl-remote-desk-server",

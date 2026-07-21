@@ -886,6 +886,15 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                     ),
                     None => (None, None, 0),
                 };
+            ctx.host_control_hub.host_activity().ensure_session(
+                model.check_and_get_from_connection_id().map_err(DeskError::from)?,
+                ctx.inbound_request_remote_authz
+                    .as_ref()
+                    .map(|authz| authz.actor.clone())
+                    .unwrap_or_else(
+                        desk_signal_facade::model::request_remote_authz::ActorSummary::unknown,
+                    ),
+            );
             let result = pc_manager::handle_request_remote(
                 &ctx.pc_registry,
                 &ctx.outbound_tx,
@@ -977,6 +986,9 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                 model,
             )
             .await?;
+            ctx.host_control_hub
+                .host_activity()
+                .set_remote_control(&outcome.connection_id, outcome.accept_control);
             update_exclusive_after_control_change(ctx, &outcome).await;
             Ok(())
         }
@@ -2222,6 +2234,13 @@ async fn handle_start_terminal_inbound(
     if !register_terminal_admission(ctx, connection_id).await {
         return Ok(());
     }
+    ctx.host_control_hub.host_activity().ensure_session(
+        connection_id,
+        ctx.inbound_start_terminal_authz
+            .as_ref()
+            .map(|authz| authz.actor.clone())
+            .unwrap_or_else(desk_signal_facade::model::request_remote_authz::ActorSummary::unknown),
+    );
 
     let payload = StartTerminalRequestPayload {
         request_id: model.request_id.clone(),
@@ -4860,6 +4879,7 @@ mod tests {
                 access_ceiling: None,
                 grant_session_id: None,
                 generation: 0,
+                actor: desk_signal_facade::model::request_remote_authz::ActorSummary::unknown(),
                 request_id: "rt".to_string(),
                 audience: "aud".to_string(),
                 expires_at: None,

@@ -29,6 +29,7 @@ const systemSettingsSchema = z.object({
     enable_ipv6: z.boolean(),
     telemetry_consent: z.boolean().nullable(),
     auto_start: z.boolean().nullable(),
+    host_access_indicator_enabled: z.boolean(),
     listen_addr_ipv4: z.string().min(1, "IPv4 address is required"),
     listen_addr_ipv6: z.string(),
     port: z.number().min(1).max(65535),
@@ -60,6 +61,7 @@ export function SystemSettings() {
             enable_ipv6: true,
             telemetry_consent: null,
             auto_start: null,
+            host_access_indicator_enabled: true,
             listen_addr_ipv4: "0.0.0.0",
             listen_addr_ipv6: "::",
             port: 8081,
@@ -74,6 +76,7 @@ export function SystemSettings() {
                 enable_ipv6: data.enable_ipv6 ?? true,
                 telemetry_consent: data.telemetry_consent ?? null,
                 auto_start: data.auto_start ?? null,
+                host_access_indicator_enabled: data.host_access_indicator_enabled ?? true,
                 listen_addr_ipv4: data.listen_addr_ipv4 || "0.0.0.0",
                 listen_addr_ipv6: data.listen_addr_ipv6 || "::",
                 port: data.port || 8081,
@@ -92,6 +95,13 @@ export function SystemSettings() {
             // sibling settings page saved concurrently.
             const fresh = await refetchSettings()
             const base = fresh.data?.data ?? settingsResponse?.data ?? {}
+            if (
+                base.host_access_indicator_enabled !== false
+                && !values.host_access_indicator_enabled
+                && !window.confirm(t('pages.system.settings.hostAccessIndicator.confirm'))
+            ) {
+                return
+            }
             await updateSettings({ data: mergeSystemSettings(base, values) })
             toast({
                 title: t('pages.system.settings.success'),
@@ -193,6 +203,22 @@ export function SystemSettings() {
                                         <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
                                             <div className="space-y-0.5">
                                                 <FormLabel>{t("pages.system.settings.enableIpv6")}</FormLabel>
+                                            </div>
+                                            <FormControl>
+                                                <Switch checked={field.value} onCheckedChange={field.onChange} />
+                                            </FormControl>
+                                        </FormItem>
+                                    )}
+                                />
+
+                                <FormField
+                                    control={form.control}
+                                    name="host_access_indicator_enabled"
+                                    render={({ field }) => (
+                                        <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
+                                            <div className="space-y-0.5">
+                                                <FormLabel>{t("pages.system.settings.hostAccessIndicator")}</FormLabel>
+                                                <FormDescription>{t("pages.system.settings.hostAccessIndicator.description")}</FormDescription>
                                             </div>
                                             <FormControl>
                                                 <Switch checked={field.value} onCheckedChange={field.onChange} />

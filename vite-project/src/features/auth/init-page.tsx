@@ -98,6 +98,7 @@ export default function InitPage() {
         allow_file_transfer: true,
     })
     const [telemetryConsent, setTelemetryConsent] = useState(true)
+    const [hostAccessIndicatorEnabled, setHostAccessIndicatorEnabled] = useState(true)
     const [submitting, setSubmitting] = useState(false)
 
     const accountValid =
@@ -290,6 +291,7 @@ export default function InitPage() {
                     username: username.trim(),
                     password,
                     telemetry_consent: telemetryConsent,
+                    host_access_indicator_enabled: hostAccessIndicatorEnabled,
                     manager_url: url || undefined,
                     manager_api_token: token || undefined,
                     security: buildSecurityPayload(security),
@@ -455,6 +457,30 @@ export default function InitPage() {
                                             <TelemetryDisclosure />
                                         </div>
                                     </div>
+                                </div>
+
+                                <div className="flex items-center justify-between gap-4 rounded-xl border p-4">
+                                    <div className="space-y-1">
+                                        <Label htmlFor="host-access-indicator" className="text-sm font-semibold cursor-pointer">
+                                            {t('pages.init.hostAccessIndicator.label')}
+                                        </Label>
+                                        <p className="text-xs text-muted-foreground leading-relaxed">
+                                            {t('pages.init.hostAccessIndicator.description')}
+                                        </p>
+                                    </div>
+                                    <Switch
+                                        id="host-access-indicator"
+                                        checked={hostAccessIndicatorEnabled}
+                                        onCheckedChange={value => {
+                                            if (
+                                                !value
+                                                && !window.confirm(t('pages.init.hostAccessIndicator.confirm'))
+                                            ) {
+                                                return
+                                            }
+                                            setHostAccessIndicatorEnabled(value)
+                                        }}
+                                    />
                                 </div>
 
                                 <div className="flex items-center justify-between gap-2 pt-2">

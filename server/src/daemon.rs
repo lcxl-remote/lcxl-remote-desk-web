@@ -115,6 +115,9 @@ pub async fn run_service_daemon_inner(
 
     // Aggregator hub: routes between worker forwarders and the Tauri shell.
     let host_control_hub = Arc::new(HostControlHub::new_aggregator());
+    host_control_hub
+        .host_activity()
+        .set_indicator_enabled(settings.system.host_access_indicator_enabled);
 
     // Host→manager link status, shared between the signaling proxy (records a fatal
     // device-quota rejection, parks until manual retry) and the local API (surfaces
@@ -191,6 +194,7 @@ pub async fn run_service_daemon_inner(
     // `RouterContext` referenced by every signaling endpoint sees the
     // same PCs).
     let pc_registry = PcRegistry::new();
+    pc_registry.set_host_activity(host_control_hub.host_activity());
 
     let (worker_mgr, worker_rx) =
         worker_manager::WorkerManager::new(shared_settings_data.clone(), pc_registry.clone());
@@ -431,6 +435,9 @@ pub async fn start_inprocess_daemon(
     manager_link_gate: Arc<crate::daemon::manager_link_gate::ManagerLinkGate>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Starting in-process daemon (portable mode)");
+    host_control_hub
+        .host_activity()
+        .set_indicator_enabled(settings.read().await.system.host_access_indicator_enabled);
 
     let exec_ledger = open_exec_ledger(&args.config_file_path).await?;
 
@@ -438,6 +445,7 @@ pub async fn start_inprocess_daemon(
     // running `TurnApiState`; empty when no embedded TURN runs) so the PC
     // manager never relays through itself.
     let pc_registry = PcRegistry::new().with_own_turn_endpoints(own_turn_endpoints);
+    pc_registry.set_host_activity(host_control_hub.host_activity());
     let (worker_mgr, worker_rx) =
         worker_manager::WorkerManager::new(settings.clone(), pc_registry.clone());
 

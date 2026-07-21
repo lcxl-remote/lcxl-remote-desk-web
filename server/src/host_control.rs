@@ -53,7 +53,8 @@ use desk_signal_facade::model::security_settings::DEFAULT_APPROVAL_TIMEOUT_SECS;
 use crate::model::security_approval::SecurityPermissionType;
 
 pub use protocol::{
-    ApprovalRequest, ApprovalResponse, ClientRole, HostControlMessage, ServiceOpKind,
+    ApprovalRequest, ApprovalResponse, ClientRole, HostAccessSession, HostAccessSnapshot,
+    HostControlMessage, HostFileTransferDirection, HostFileTransferSummary, ServiceOpKind,
 };
 pub use upstream::UpstreamForwarder;
 
@@ -176,6 +177,7 @@ struct HubInner {
     /// increments, each `mark_tauri_disconnected` decrements). Used by Local /
     /// Aggregator hubs to fail-fast or trigger Tauri-loss cleanup precisely.
     tauri_client_count: AtomicUsize,
+    host_activity: crate::host_activity::HostActivityRegistry,
 }
 
 /// The unified host control hub.
@@ -207,6 +209,7 @@ impl HostControlHub {
     fn new_with_mode(mode: HubMode, upstream: Option<Arc<UpstreamForwarder>>) -> Self {
         let (cmd_tx, _) = broadcast::channel(CMD_BROADCAST_CAPACITY);
         let (state_tx, _) = broadcast::channel(STATE_BROADCAST_CAPACITY);
+        let host_activity = crate::host_activity::HostActivityRegistry::new(cmd_tx.clone());
         let inner = HubInner {
             mode,
             cmd_tx,
@@ -218,6 +221,7 @@ impl HostControlHub {
             forwarder_sessions: Mutex::new(HashMap::new()),
             upstream,
             tauri_client_count: AtomicUsize::new(0),
+            host_activity,
         };
         let hub = Self {
             inner: Arc::new(inner),
@@ -233,6 +237,10 @@ impl HostControlHub {
 
     pub fn mode(&self) -> HubMode {
         self.inner.mode
+    }
+
+    pub fn host_activity(&self) -> crate::host_activity::HostActivityRegistry {
+        self.inner.host_activity.clone()
     }
 
     /// Subscribe to outgoing host-control commands. Used by the ws endpoint to
