@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useDeskDiagnose, extractStreamingSummary } from './use-desk-diagnose';
-import type { DiagnoseEvent } from './use-desk-diagnose';
+import {
+    useDeskDiagnose,
+    extractStreamingSummary,
+    buildSnapshotTranscript,
+    snapshotConversationKey,
+} from './use-desk-diagnose';
+import type { DiagnoseEvent, SnapshotMessage } from './use-desk-diagnose';
 import type { SignalingMessage } from './use-desk-signaling';
 import {
     SIGNALING_TYPE_CODE_DIAGNOSE,
@@ -454,5 +459,80 @@ describe('useDeskDiagnose', () => {
         act(() => result.current.start('q3', {}));
         // q1, q2, q3 are the three Diagnose requests; q3 must open a new conversation.
         expect(conversationIdOfCall(2)).not.toBe(conversationIdOfCall(0));
+    });
+});
+
+describe('snapshotConversationKey', () => {
+    it('namespaces the persisted conversation intent by desk', () => {
+        expect(snapshotConversationKey('desk-1')).toBe('lrd:diagnose-conv:desk-1');
+        expect(snapshotConversationKey('desk-1')).not.toBe(snapshotConversationKey('desk-2'));
+    });
+});
+
+describe('buildSnapshotTranscript', () => {
+    it('is empty for no messages', () => {
+        expect(buildSnapshotTranscript([])).toEqual([]);
+    });
+
+    it('groups messages into turns at each user message', () => {
+        const messages: SnapshotMessage[] = [
+            { id: 'u1', role: 'user', text: 'why is cpu high?' },
+            { id: 'a1', role: 'assistant', text: 'A runaway process.' },
+            { id: 'u2', role: 'user', text: 'and memory?' },
+            { id: 'a2', role: 'assistant', text: 'Memory is fine.' },
+        ];
+        const turns = buildSnapshotTranscript(messages);
+        expect(turns).toHaveLength(2);
+        expect(turns[0].question).toBe('why is cpu high?');
+        expect(turns[0].answer).toBe('A runaway process.');
+        expect(turns[0].requestId).toBe('u1');
+        expect(turns[0].phase).toBe('done');
+        expect(turns[1].question).toBe('and memory?');
+        expect(turns[1].answer).toBe('Memory is fine.');
+    });
+
+    it('joins several assistant answers in one turn — an automation follow-up appears appended', () => {
+        // A user turn, its original answer, the command output the automation turn
+        // reacted to (untrusted_output, skipped from the visible text), then the
+        // automation answer — all before any new user message, so one turn.
+        const messages: SnapshotMessage[] = [
+            { id: 'u1', role: 'user', text: 'restart the service' },
+            { id: 'a1', role: 'assistant', text: 'Dispatched; it is restarting.' },
+            { id: 'out1', role: 'untrusted_output', text: 'exit_code=0' },
+            { id: 'a2', role: 'assistant', text: 'The restart succeeded (exit 0).' },
+        ];
+        const turns = buildSnapshotTranscript(messages);
+        expect(turns).toHaveLength(1);
+        expect(turns[0].answer).toBe(
+            'Dispatched; it is restarting.\n\nThe restart succeeded (exit 0).',
+        );
+    });
+
+    it('captures assistant tool calls as tool activity and skips internal messages', () => {
+        const messages: SnapshotMessage[] = [
+            { id: 'u1', role: 'user', text: 'check disk' },
+            {
+                id: 'a1',
+                role: 'assistant',
+                text: '',
+                toolCalls: [{ id: 'c1', name: 'read_disk', argumentsJson: '{}' }],
+            },
+            { id: 't1', role: 'tool', text: '90% full', toolCallId: 'c1' },
+            { id: 'a2', role: 'assistant', text: 'The disk is 90% full.' },
+        ];
+        const turns = buildSnapshotTranscript(messages);
+        expect(turns).toHaveLength(1);
+        expect(turns[0].tools).toEqual([{ callId: 'c1', name: 'read_disk', status: 'ok' }]);
+        expect(turns[0].answer).toBe('The disk is 90% full.');
+    });
+
+    it('tolerates a leading assistant message with no preceding user turn', () => {
+        const messages: SnapshotMessage[] = [
+            { id: 'a0', role: 'assistant', text: 'orphan answer' },
+        ];
+        const turns = buildSnapshotTranscript(messages);
+        expect(turns).toHaveLength(1);
+        expect(turns[0].question).toBe('');
+        expect(turns[0].answer).toBe('orphan answer');
     });
 });

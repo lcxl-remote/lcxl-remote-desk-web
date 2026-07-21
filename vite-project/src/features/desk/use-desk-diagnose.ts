@@ -317,6 +317,81 @@ function snapshotLiveTurn(prev: DiagnoseState): DiagnoseHistoryTurn[] {
     ];
 }
 
+// --- Session snapshot (the "tmux view") -------------------------------------
+//
+// The full conversation is authoritative in the manager's shared `agent_session`
+// row. The panel fetches this snapshot to rehydrate its transcript, which keeps
+// history across a reload and — the reason it exists — surfaces an automation
+// turn's answer (fired server-side after a background command completes) that the
+// request-scoped live stream never delivers. The open-source signal server has no
+// such endpoint; a 404 disables the feature so the flow stays identical there.
+
+/** One message in a diagnose-session snapshot (mirrors the manager REST DTO). */
+export type SnapshotMessage = {
+    id: string;
+    role: 'user' | 'assistant' | 'tool' | 'system_event' | 'untrusted_output' | 'system';
+    text: string;
+    toolCalls?: { id: string; name: string; argumentsJson: string }[];
+    toolCallId?: string | null;
+};
+
+/** A settled snapshot: the persisted transcript plus a monotonic sequence. */
+export type SessionSnapshot = {
+    seq: number;
+    messages: SnapshotMessage[];
+};
+
+/** Poll cadence for the snapshot while the tab is visible (a staleness floor; a
+ *  server push would only make it faster). */
+export const SNAPSHOT_POLL_MS = 20000;
+
+/** localStorage key persisting a desk's conversation intent, so a reload rejoins
+ *  the same server-side session instead of opening a fresh one. */
+export function snapshotConversationKey(deskId: string): string {
+    return `lrd:diagnose-conv:${deskId}`;
+}
+
+/**
+ * Rebuild the settled transcript from a snapshot: group the flat message list into
+ * turns at each `user` message. Assistant text becomes the turn's answer (several
+ * assistant answers in one turn — e.g. an automation follow-up appended after the
+ * original — are joined), and assistant tool calls become the turn's tool activity.
+ * Internal `tool` / `system_event` / `untrusted_output` messages carry no
+ * user-facing turn text and are skipped. Pure, so it is unit-tested directly.
+ */
+export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHistoryTurn[] {
+    const turns: DiagnoseHistoryTurn[] = [];
+    const open = (id: string, question: string): DiagnoseHistoryTurn => ({
+        requestId: id,
+        question,
+        result: null,
+        answer: null,
+        summary: '',
+        tools: [],
+        phase: 'done',
+        error: null,
+        provenance: null,
+    });
+    let current: DiagnoseHistoryTurn | null = null;
+    for (const m of messages) {
+        if (m.role === 'user') {
+            if (current) turns.push(current);
+            current = open(m.id, m.text);
+        } else if (m.role === 'assistant') {
+            if (!current) current = open(m.id, '');
+            if (m.text) {
+                current.answer = current.answer ? `${current.answer}\n\n${m.text}` : m.text;
+            }
+            for (const tc of m.toolCalls ?? []) {
+                current.tools.push({ callId: tc.id, name: tc.name, status: 'ok' });
+            }
+        }
+        // `tool` / `system_event` / `untrusted_output`: internal, no visible turn text.
+    }
+    if (current) turns.push(current);
+    return turns;
+}
+
 type UseDeskDiagnoseProps = {
     deskId: string | null;
     subscribe: (handler: SignalingSubscriber) => () => void;
@@ -344,28 +419,116 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
     // Highest applied seq, so duplicate / out-of-order frames cannot corrupt
     // the accumulated summary. Reset to -1 per run (frames start at seq 0).
     const lastSeqRef = useRef<number>(-1);
+    // Highest snapshot seq applied to the transcript, so a poll never regresses to
+    // an older view of the shared session.
+    const lastAppliedSeqRef = useRef<number>(-1);
+    // Set once the snapshot endpoint is found absent (open-source signal → 404), so
+    // the panel stops polling and behaves exactly as it did before this feature.
+    const snapshotUnsupportedRef = useRef(false);
 
-    // A desk change rebinds the subject (a different device/operator). Abandon
-    // the conversation id and clear the transcript so the new desk starts fresh
-    // rather than continuing — or colliding with — the previous desk's session.
-    const firstDeskRef = useRef(true);
-    useEffect(() => {
-        if (firstDeskRef.current) {
-            firstDeskRef.current = false;
+    // Fetch the shared session snapshot and, when it advances and no live turn owns
+    // the view, rebuild the transcript from it — rehydrating history and surfacing
+    // an automation answer the request-scoped stream never delivered. Best-effort: a
+    // network blip retries next tick; a 404 disables the feature (open-source
+    // signal); a uniform not-accessible (`code !== 0`) is left for a later tick, when
+    // the device may have reconnected or the session may have appeared.
+    const fetchSnapshot = useCallback(async () => {
+        if (!deskId || snapshotUnsupportedRef.current) return;
+        const conversationId = conversationIdRef.current;
+        if (!conversationId) return;
+        let res: Response;
+        try {
+            res = await fetch(
+                `/api/my/diagnose-session?connection=${encodeURIComponent(deskId)}` +
+                    `&conversation=${encodeURIComponent(conversationId)}`,
+                { credentials: 'include', headers: { Accept: 'application/json' } },
+            );
+        } catch {
+            return; // transient: keep polling
+        }
+        if (res.status === 404) {
+            snapshotUnsupportedRef.current = true; // no such endpoint (open-source signal)
             return;
         }
-        conversationIdRef.current = null;
+        if (!res.ok) return;
+        let body: { success?: boolean; code?: number; data?: SessionSnapshot } | null = null;
+        try {
+            body = await res.json();
+        } catch {
+            return;
+        }
+        if (!body || body.success === false || body.code !== 0 || !body.data) return;
+        const snapshot = body.data;
+        // Never regress to an older snapshot; never overwrite a live turn (reconcile
+        // once it settles and the next poll advances).
+        if (snapshot.seq <= lastAppliedSeqRef.current) return;
+        if (activeRequestRef.current !== null) return;
+        lastAppliedSeqRef.current = snapshot.seq;
+        const history = buildSnapshotTranscript(snapshot.messages);
+        // The snapshot is the whole settled transcript, so collapse any settled
+        // current-turn display into it and return to idle (no duplicated turn).
+        setState({ ...INITIAL_STATE, conversationId, history });
+    }, [deskId]);
+
+    // A desk change rebinds the subject: restore that desk's persisted conversation
+    // (so a reload / return continues it and rehydrates history from the shared
+    // session) or start fresh when the desk has none.
+    useEffect(() => {
         activeRequestRef.current = null;
         lastSeqRef.current = -1;
+        lastAppliedSeqRef.current = -1;
+        let restored: string | null = null;
+        try {
+            restored = deskId ? localStorage.getItem(snapshotConversationKey(deskId)) : null;
+        } catch {
+            restored = null;
+        }
+        conversationIdRef.current = restored;
         setState(INITIAL_STATE);
-    }, [deskId]);
+        if (deskId && restored) void fetchSnapshot();
+    }, [deskId, fetchSnapshot]);
+
+    // Poll the snapshot while the tab is visible (a staleness floor), and fetch
+    // promptly on regaining visibility; paused when hidden, disabled once absent.
+    useEffect(() => {
+        if (!deskId) return;
+        const tick = () => {
+            if (
+                document.visibilityState === 'visible' &&
+                conversationIdRef.current &&
+                !snapshotUnsupportedRef.current
+            ) {
+                void fetchSnapshot();
+            }
+        };
+        const interval = window.setInterval(tick, SNAPSHOT_POLL_MS);
+        const onVisibility = () => {
+            if (document.visibilityState === 'visible') tick();
+        };
+        document.addEventListener('visibilitychange', onVisibility);
+        return () => {
+            window.clearInterval(interval);
+            document.removeEventListener('visibilitychange', onVisibility);
+        };
+    }, [deskId, fetchSnapshot]);
 
     const start = useCallback(
         (question: string, options?: DiagnoseStartOptions) => {
             if (!deskId) return;
             // Reuse the conversation across follow-ups; mint one on the first turn.
-            if (!conversationIdRef.current) conversationIdRef.current = v4();
+            if (!conversationIdRef.current) {
+                conversationIdRef.current = v4();
+                lastAppliedSeqRef.current = -1;
+            }
             const conversationId = conversationIdRef.current;
+            // Persist it so a reload rejoins this same server-side session and can
+            // rehydrate its transcript (including any automation follow-up).
+            try {
+                localStorage.setItem(snapshotConversationKey(deskId), conversationId);
+            } catch {
+                // Storage unavailable (private mode): the session still works; it
+                // just will not rehydrate after a reload.
+            }
             const data = {
                 question,
                 include_screen: options?.includeScreen ?? false,
@@ -405,8 +568,15 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         }
         activeRequestRef.current = null;
         // A handed-off turn leaves an orphaned session behind; any follow-up must
-        // open a new conversation rather than re-claim it.
+        // open a new conversation rather than re-claim it — so drop the persisted
+        // intent too, and stop applying its snapshot.
         conversationIdRef.current = null;
+        lastAppliedSeqRef.current = -1;
+        try {
+            if (deskId) localStorage.removeItem(snapshotConversationKey(deskId));
+        } catch {
+            /* storage unavailable: nothing to clear */
+        }
         setState((prev) => ({ ...prev, phase: 'done', pendingExec: null }));
     }, [deskId, sendMessage]);
 
@@ -422,6 +592,12 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         activeRequestRef.current = null;
         conversationIdRef.current = null;
         lastSeqRef.current = -1;
+        lastAppliedSeqRef.current = -1;
+        try {
+            if (deskId) localStorage.removeItem(snapshotConversationKey(deskId));
+        } catch {
+            /* storage unavailable: nothing to clear */
+        }
         setState(INITIAL_STATE);
     }, [deskId, sendMessage]);
 
