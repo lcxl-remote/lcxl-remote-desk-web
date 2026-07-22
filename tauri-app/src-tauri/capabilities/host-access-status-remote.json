@@ -1,0 +1,17 @@
+{
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "host-access-status-remote",
+    "description": "Allow loopback-hosted access status windows to start native window dragging",
+    "windows": [
+        "host-access-status-*"
+    ],
+    "remote": {
+        "urls": [
+            "http://127.0.0.1:*",
+            "http://[\\:\\:1]:*"
+        ]
+    },
+    "permissions": [
+        "core:window:allow-start-dragging"
+    ]
+}

@@ -428,6 +428,27 @@ mod tests {
     }
 
     #[test]
+    fn remote_capability_only_grants_dragging_to_loopback_status_windows() {
+        let capability: serde_json::Value = serde_json::from_str(include_str!(
+            "../capabilities/host-access-status-remote.json"
+        ))
+        .expect("host access status capability must be valid JSON");
+
+        assert_eq!(
+            capability["windows"],
+            serde_json::json!(["host-access-status-*"])
+        );
+        assert_eq!(
+            capability["remote"]["urls"],
+            serde_json::json!(["http://127.0.0.1:*", "http://[\\:\\:1]:*"])
+        );
+        assert_eq!(
+            capability["permissions"],
+            serde_json::json!(["core:window:allow-start-dragging"])
+        );
+    }
+
+    #[test]
     fn activity_badge_changes_lower_right_pixels() {
         let base = tauri::image::Image::new_owned(vec![0; 16 * 16 * 4], 16, 16);
         let badged = add_activity_badge(&base);
