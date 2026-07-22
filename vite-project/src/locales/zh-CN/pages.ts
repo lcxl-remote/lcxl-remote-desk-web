@@ -1026,6 +1026,7 @@ export default {
   'hostAccess.title': '远程访问正在进行',
   'hostAccess.sessionSummary': '{{count}} 个远程会话正在访问此设备',
   'hostAccess.toggleDetails': '展开或收起远程访问详情',
+  'hostAccess.drag': '拖动以移动远程访问状态窗口',
   'hostAccess.desktop': '查看屏幕',
   'hostAccess.control': '远程控制',
   'hostAccess.terminal': '远程终端',

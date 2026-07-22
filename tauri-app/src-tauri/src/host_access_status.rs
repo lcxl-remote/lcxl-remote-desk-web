@@ -159,7 +159,7 @@ fn reconcile_windows(
         let label = format!("{STATUS_LABEL_PREFIX}{index}");
         if let Some(window) = app_handle.get_webview_window(&label) {
             dispatch_snapshot(&window, snapshot);
-            position_window(&window, monitors.get(index));
+            constrain_window_to_monitor(&window, monitors.get(index));
             let _ = window.show();
             continue;
         }
@@ -193,6 +193,8 @@ fn build_status_window(
         .title("Remote Access Status")
         .inner_size(STATUS_WINDOW_WIDTH, STATUS_WINDOW_COLLAPSED_HEIGHT)
         .decorations(false)
+        .transparent(true)
+        .shadow(false)
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(false)
@@ -225,6 +227,72 @@ fn build_status_window(
     position_window(&window, monitor);
     let _ = window.set_always_on_top(true);
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PhysicalRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+impl PhysicalRect {
+    fn from_origin_size(x: i32, y: i32, width: u32, height: u32) -> Self {
+        let width = i32::try_from(width).unwrap_or(i32::MAX);
+        let height = i32::try_from(height).unwrap_or(i32::MAX);
+        Self {
+            left: x,
+            top: y,
+            right: x.saturating_add(width),
+            bottom: y.saturating_add(height),
+        }
+    }
+
+    fn width(self) -> i32 {
+        self.right.saturating_sub(self.left)
+    }
+
+    fn height(self) -> i32 {
+        self.bottom.saturating_sub(self.top)
+    }
+}
+
+fn constrain_origin_to_monitor(window: PhysicalRect, monitor: PhysicalRect) -> (i32, i32) {
+    let max_x = monitor
+        .right
+        .saturating_sub(window.width())
+        .max(monitor.left);
+    let max_y = monitor
+        .bottom
+        .saturating_sub(window.height())
+        .max(monitor.top);
+    (
+        window.left.clamp(monitor.left, max_x),
+        window.top.clamp(monitor.top, max_y),
+    )
+}
+
+fn constrain_window_to_monitor(window: &WebviewWindow, monitor: Option<&Monitor>) {
+    let Some(monitor) = monitor else {
+        return;
+    };
+    let (Ok(position), Ok(size)) = (window.outer_position(), window.outer_size()) else {
+        position_window(window, Some(monitor));
+        return;
+    };
+    let window_rect =
+        PhysicalRect::from_origin_size(position.x, position.y, size.width, size.height);
+    let monitor = PhysicalRect::from_origin_size(
+        monitor.position().x,
+        monitor.position().y,
+        monitor.size().width,
+        monitor.size().height,
+    );
+    let (x, y) = constrain_origin_to_monitor(window_rect, monitor);
+    if (x, y) != (position.x, position.y) {
+        let _ = window.set_position(PhysicalPosition::new(x, y));
+    }
 }
 
 fn position_window(window: &WebviewWindow, monitor: Option<&Monitor>) {
@@ -369,6 +437,33 @@ mod tests {
                 .rgba()
                 .chunks_exact(4)
                 .any(|pixel| pixel == [245, 158, 11, 255])
+        );
+    }
+
+    #[test]
+    fn position_constraint_preserves_a_position_inside_the_assigned_monitor() {
+        let monitor = PhysicalRect::from_origin_size(0, 0, 1920, 1080);
+        let moved_window = PhysicalRect::from_origin_size(500, 400, 460, 154);
+
+        assert_eq!(
+            constrain_origin_to_monitor(moved_window, monitor),
+            (500, 400)
+        );
+    }
+
+    #[test]
+    fn position_constraint_keeps_each_window_on_its_assigned_monitor() {
+        let left_monitor = PhysicalRect::from_origin_size(0, 0, 1920, 1080);
+        let dragged_to_right_monitor = PhysicalRect::from_origin_size(2200, 400, 460, 154);
+        let dragged_above_monitor = PhysicalRect::from_origin_size(300, -140, 460, 154);
+
+        assert_eq!(
+            constrain_origin_to_monitor(dragged_to_right_monitor, left_monitor),
+            (1460, 400)
+        );
+        assert_eq!(
+            constrain_origin_to_monitor(dragged_above_monitor, left_monitor),
+            (300, 0)
         );
     }
 }

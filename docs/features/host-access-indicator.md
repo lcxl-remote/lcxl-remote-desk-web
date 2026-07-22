@@ -15,6 +15,12 @@ always-on-top card in its upper-right corner. The collapsed card distinguishes:
 - file-manager activity;
 - uploads and downloads.
 
+The transparent margin follows the card's rounded outline instead of drawing an
+opaque rectangular window. Drag the handle at the top of the card to move it
+away from content underneath. Each card remains bound to its physical display:
+the shell preserves positions within that display and clamps a card to the
+nearest edge instead of allowing it to move onto another display.
+
 Select the card to expand per-connection details. Details include the
 server-authenticated display name when available, whether the source is a
 signed-in account or temporary grant, a short connection suffix, and file

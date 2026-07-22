@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
     activeKinds,
     formatTransferBytes,
+    makePageBackgroundTransparent,
     type HostAccessSession,
 } from '@/features/desk/host-access-status-page';
 
@@ -32,5 +33,26 @@ describe('host access status helpers', () => {
         expect(formatTransferBytes(512)).toBe('512 B');
         expect(formatTransferBytes(2048)).toBe('2.0 KiB');
         expect(formatTransferBytes(3 * 1024 * 1024)).toBe('3.0 MiB');
+    });
+
+    it('makes the status window transparent and restores prior page styles', () => {
+        const originalHtmlBackground = document.documentElement.style.background;
+        const originalBodyBackground = document.body.style.background;
+        document.documentElement.style.background = 'rgb(1, 2, 3)';
+        document.body.style.background = 'rgb(4, 5, 6)';
+
+        const restore = makePageBackgroundTransparent(document);
+
+        expect(document.documentElement.style.getPropertyValue('background')).toBe('transparent');
+        expect(document.body.style.getPropertyValue('background')).toBe('transparent');
+        expect(document.body.style.getPropertyPriority('background')).toBe('important');
+
+        restore();
+
+        expect(document.documentElement.style.background).toBe('rgb(1, 2, 3)');
+        expect(document.body.style.background).toBe('rgb(4, 5, 6)');
+
+        document.documentElement.style.background = originalHtmlBackground;
+        document.body.style.background = originalBodyBackground;
     });
 });

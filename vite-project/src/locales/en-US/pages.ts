@@ -1035,6 +1035,7 @@ export default {
   'hostAccess.sessionSummary_one': '{{count}} remote session is accessing this device',
   'hostAccess.sessionSummary_other': '{{count}} remote sessions are accessing this device',
   'hostAccess.toggleDetails': 'Show or hide remote access details',
+  'hostAccess.drag': 'Drag to move the remote access status',
   'hostAccess.desktop': 'Viewing screen',
   'hostAccess.control': 'Remote control',
   'hostAccess.terminal': 'Terminal',

@@ -5,6 +5,7 @@ import {
     Download,
     Eye,
     Files,
+    GripHorizontal,
     Keyboard,
     TerminalSquare,
     Upload,
@@ -65,12 +66,41 @@ export function formatTransferBytes(value: number): string {
     return `${(value / 1024 / 1024 / 1024).toFixed(1)} GiB`;
 }
 
+export function makePageBackgroundTransparent(documentRef: Document): () => void {
+    const elements = [
+        documentRef.documentElement,
+        documentRef.body,
+        documentRef.getElementById('root'),
+    ].filter((element): element is HTMLElement => element !== null);
+    const previous = elements.map((element) => ({
+        element,
+        value: element.style.getPropertyValue('background'),
+        priority: element.style.getPropertyPriority('background'),
+    }));
+
+    for (const element of elements) {
+        element.style.setProperty('background', 'transparent', 'important');
+    }
+
+    return () => {
+        for (const { element, value, priority } of previous) {
+            if (value) {
+                element.style.setProperty('background', value, priority);
+            } else {
+                element.style.removeProperty('background');
+            }
+        }
+    };
+}
+
 export default function HostAccessStatusPage() {
     const { t } = useTranslation();
     const [snapshot, setSnapshot] = useState<HostAccessSnapshot | null>(
         () => (window as SnapshotWindow).__lcxlHostAccessSnapshot ?? null,
     );
     const [open, setOpen] = useState(false);
+
+    useEffect(() => makePageBackgroundTransparent(document), []);
 
     useEffect(() => {
         document.title = open
@@ -97,14 +127,22 @@ export default function HostAccessStatusPage() {
     }, [snapshot]);
 
     if (!snapshot || snapshot.sessions.length === 0) {
-        return <div className="h-screen w-full bg-background" />;
+        return <div className="h-screen w-full bg-transparent" />;
     }
 
     return (
-        <main className="h-screen w-full overflow-hidden bg-background p-3 select-none">
-            <Card className="border-amber-500/50 shadow-xl">
+        <main className="h-screen w-full overflow-hidden bg-transparent p-3 select-none">
+            <Card className="relative overflow-hidden border-amber-500/50 bg-card/95 shadow-xl">
+                <div
+                    data-tauri-drag-region
+                    className="absolute inset-x-0 top-0 z-10 flex h-7 cursor-grab items-center justify-center text-muted-foreground/70 active:cursor-grabbing"
+                    title={t('hostAccess.drag')}
+                    aria-label={t('hostAccess.drag')}
+                >
+                    <GripHorizontal className="pointer-events-none h-4 w-4" aria-hidden="true" />
+                </div>
                 <Collapsible open={open} onOpenChange={setOpen}>
-                    <CardHeader className="p-4">
+                    <CardHeader className="px-4 pb-4 pt-7">
                         <CollapsibleTrigger
                             className="flex w-full items-center gap-3 text-left"
                             aria-label={t('hostAccess.toggleDetails')}
