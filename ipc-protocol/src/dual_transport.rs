@@ -37,7 +37,7 @@
 //! ## Design notes
 //!
 //! - The trait surface is intentionally minimal. Concrete implementations
-//!   ([`InProcess`] and [`framed`]) live alongside; the strict-ACL
+//!   ([`inprocess`] and [`framed`]) live alongside; the strict-ACL
 //!   named-pipe constructor lives in `server`.
 //! - `MediaSender` distinguishes I-frame vs P-frame at send time so the
 //!   transport applies different policies. The default

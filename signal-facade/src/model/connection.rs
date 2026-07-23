@@ -87,7 +87,7 @@ pub struct ConnectionState {
     /// When a browser connection is closed, signal server should notify
     /// the desk server to close related terminal processes.
     pub terminal_connection_ids: Arc<RwLock<HashSet<String>>>,
-    /// request_id -> oneshot::Sender<SignalingModel>
+    /// `request_id -> oneshot::Sender<SignalingModel>`
     /// For request-response pattern over signaling
     pub request_callback_map: Arc<RwLock<HashMap<String, oneshot::Sender<SignalingModel>>>>,
     /// Device code assigned to this connection (if it's a Server type connection)
