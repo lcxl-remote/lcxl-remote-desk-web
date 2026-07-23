@@ -1,27 +1,13 @@
-import i18n from './i18n'
+import i18n, {
+    canonicalizeLocale,
+    ensureLocaleLoaded,
+    type SupportedLocale,
+} from './i18n'
 
 export const TAURI_SHELL_SESSION_KEY = 'lcxl.tauriShell'
 const NATIVE_BRIDGE_TOKEN_KEY = 'lcxl.nativeBridgeToken'
 const BRIDGE_READY_EVENT = 'lcxl-native-bridge-ready'
 const GLOBAL_LOCALE_EVENT = 'lcxl-global-locale-changed'
-
-type SupportedLocale = 'en-US' | 'zh-CN'
-
-function canonicalizeLocale(locale: string): SupportedLocale | null {
-    switch (locale.trim().toLowerCase()) {
-        case 'en':
-        case 'en-us':
-        case 'en_us':
-            return 'en-US'
-        case 'zh':
-        case 'zh-cn':
-        case 'zh_cn':
-        case 'zh-hans':
-            return 'zh-CN'
-        default:
-            return null
-    }
-}
 
 function rememberShellMarker(): void {
     try {
@@ -45,6 +31,7 @@ export function isTauriShell(): boolean {
 async function applyAuthoritativeLocale(locale: string): Promise<void> {
     const canonical = canonicalizeLocale(locale)
     if (!canonical) return
+    await ensureLocaleLoaded(canonical)
     localStorage.setItem('i18nextLng', canonical)
     await i18n.changeLanguage(canonical)
 }

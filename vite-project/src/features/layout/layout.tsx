@@ -15,11 +15,11 @@ import { AppSidebar } from "./app-sidebar"
 import { ModeToggle } from "@/components/mode-toggle"
 import { LanguageToggle } from "@/components/language-toggle"
 import { Outlet } from "react-router-dom"
-import { Toaster } from "@/components/ui/toaster"
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { useTranslation } from "react-i18next"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
+import RequireAuth from "@/features/auth/require-auth"
 import { ServiceInstallDialog } from "./service-install-dialog"
 
 function ServiceInstallBanner() {
@@ -80,7 +80,7 @@ function ServiceInstallBanner() {
     )
 }
 
-export default function Layout() {
+function Layout() {
     return (
         <SidebarProvider>
             <AppSidebar />
@@ -109,7 +109,14 @@ export default function Layout() {
                     </div>
                 </div>
             </SidebarInset>
-            <Toaster />
         </SidebarProvider>
+    )
+}
+
+export function AuthenticatedLayout() {
+    return (
+        <RequireAuth>
+            <Layout />
+        </RequireAuth>
     )
 }

@@ -1,14 +1,31 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { changeLanguage } = vi.hoisted(() => ({
+const { changeLanguage, ensureLocaleLoaded } = vi.hoisted(() => ({
     changeLanguage: vi.fn().mockResolvedValue(undefined),
+    ensureLocaleLoaded: vi.fn().mockResolvedValue(undefined),
 }))
 vi.mock('./i18n', () => ({
+    canonicalizeLocale: (locale: string) => {
+        switch (locale.trim().toLowerCase()) {
+            case 'en':
+            case 'en-us':
+            case 'en_us':
+                return 'en-US'
+            case 'zh':
+            case 'zh-cn':
+            case 'zh_cn':
+            case 'zh-hans':
+                return 'zh-CN'
+            default:
+                return null
+        }
+    },
     default: {
         changeLanguage,
         language: 'en-US',
         resolvedLanguage: 'en-US',
     },
+    ensureLocaleLoaded,
 }))
 
 import {
@@ -21,6 +38,7 @@ beforeEach(() => {
     localStorage.clear()
     sessionStorage.clear()
     changeLanguage.mockClear()
+    ensureLocaleLoaded.mockClear()
     vi.unstubAllGlobals()
 })
 
@@ -33,6 +51,7 @@ describe('changeApplicationLanguage', () => {
 
         expect(fetchMock).not.toHaveBeenCalled()
         expect(localStorage.getItem('i18nextLng')).toBe('en-US')
+        expect(ensureLocaleLoaded).toHaveBeenCalledWith('en-US')
         expect(changeLanguage).toHaveBeenCalledWith('en-US')
     })
 

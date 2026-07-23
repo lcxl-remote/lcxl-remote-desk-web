@@ -1,8 +1,4 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom';
-import Layout from '@/features/layout/layout';
-import RequireAuth from '@/features/auth/require-auth';
-import { UsageLayout } from '@/features/usage/usage-layout';
-import { SettingsLayout } from '@/features/settings/settings-layout';
 
 export const router = createBrowserRouter([
     {
@@ -43,11 +39,9 @@ export const router = createBrowserRouter([
     },
     {
         path: '/',
-        element: (
-            <RequireAuth>
-                <Layout />
-            </RequireAuth>
-        ),
+        lazy: async () => ({
+            Component: (await import('@/features/layout/layout')).AuthenticatedLayout,
+        }),
         children: [
             {
                 index: true,
@@ -97,7 +91,9 @@ export const router = createBrowserRouter([
             },
             {
                 path: 'system',
-                element: <SettingsLayout />,
+                lazy: async () => ({
+                    Component: (await import('@/features/settings/settings-layout')).SettingsLayout,
+                }),
                 children: [
                     {
                         index: true,
@@ -169,7 +165,9 @@ export const router = createBrowserRouter([
             },
             {
                 path: 'usage',
-                element: <UsageLayout />,
+                lazy: async () => ({
+                    Component: (await import('@/features/usage/usage-layout')).UsageLayout,
+                }),
                 children: [
                     {
                         index: true,

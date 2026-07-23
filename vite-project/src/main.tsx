@@ -1,18 +1,29 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
+import { bootstrapApplication } from './app/bootstrap'
 import { AppProviders } from './app/providers'
-import './locales/i18n'
+import { initializeI18n } from './locales/i18n'
 import { initializeNativeLocaleBridge } from './locales/native-locale'
 import './index.css'
 
-initializeNativeLocaleBridge()
+const root = ReactDOM.createRoot(document.getElementById('root')!)
 
-if (/Mobile|Android|iP(ad|hone)/.test(navigator.userAgent)) {
-    void import('eruda').then(({ default: eruda }) => eruda.init())
-}
+void bootstrapApplication({
+    root,
+    initialize: async () => {
+        await initializeI18n()
+        initializeNativeLocaleBridge()
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-    <React.StrictMode>
-        <AppProviders />
-    </React.StrictMode>,
-)
+        if (
+            import.meta.env.DEV &&
+            /Mobile|Android|iP(ad|hone)/.test(navigator.userAgent)
+        ) {
+            void import('eruda').then(({ default: eruda }) => eruda.init())
+        }
+    },
+    application: (
+        <React.StrictMode>
+            <AppProviders />
+        </React.StrictMode>
+    ),
+})
