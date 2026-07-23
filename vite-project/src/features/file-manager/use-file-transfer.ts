@@ -15,84 +15,26 @@ import { readSessionGrant } from '@/features/desk/session-grant';
 import {
     BufferedDownloadSink,
     StreamingDownloadSink,
-    type BlobSaver,
     type DownloadSink,
     type WritableFileStreamLike,
 } from './download-sink';
-
-// Per-chunk DC payload size for uploads (browser → host). Must stay in
-// sync with `FILE_TRANSFER_CHUNK_SIZE_TX` in the Rust dispatcher
-// (`worker/file_transfer_dispatcher.rs`). Raised to 240 KiB on
-// 2026-05-11 after metrics showed `dc.send` per-message overhead
-// dominating throughput at the previous 60 KB. NOT 256 KiB because
-// the wire-level SCTP message is `payload + 40-byte header`, and a
-// 256 KiB payload yields a 262184-byte message that just barely
-// exceeds Chrome's typical `a=max-message-size:262144` SDP advertise
-// (host-side webrtc-sctp rejects with ErrOutboundPacketTooLarge).
-// 240 KiB leaves ~16 KiB of headroom for the header plus any future
-// protocol expansion.
-const FILE_TRANSFER_CHUNK_SIZE = 240 * 1024;
-
-const BINARY_HEADER_SIZE = 36 + 4; // UUID (36) + chunk_index (4)
-
-// --- Protocol types ---
-
-interface DownloadRequest {
-    type: 'download_request';
-    transfer_id: string;
-    file_path: string;
-}
-
-interface DownloadResponse {
-    type: 'download_response';
-    transfer_id: string;
-    file_name: string;
-    file_size: number;
-    chunk_size: number;
-    total_chunks: number;
-}
-
-interface UploadRequest {
-    type: 'upload_request';
-    transfer_id: string;
-    target_dir: string;
-    file_name: string;
-    file_size: number;
-    chunk_size: number;
-    total_chunks: number;
-}
-
-interface UploadResponse {
-    type: 'upload_response';
-    transfer_id: string;
-    accepted: boolean;
-    message?: string;
-}
-
-interface TransferComplete {
-    type: 'transfer_complete';
-    transfer_id: string;
-}
-
-interface TransferError {
-    type: 'transfer_error';
-    transfer_id: string;
-    message: string;
-}
-
-interface TransferCancel {
-    type: 'transfer_cancel';
-    transfer_id: string;
-}
-
-type FileTransferMessage =
-    | DownloadRequest
-    | DownloadResponse
-    | UploadRequest
-    | UploadResponse
-    | TransferComplete
-    | TransferError
-    | TransferCancel;
+import {
+    buildBinaryChunk,
+    FILE_TRANSFER_CHUNK_SIZE,
+    parseBinaryChunk,
+    type DownloadRequest,
+    type DownloadResponse,
+    type FileTransferMessage,
+    type TransferComplete,
+    type TransferError,
+    type UploadRequest,
+    type UploadResponse,
+} from './file-transfer-protocol';
+import {
+    canStreamToDisk,
+    fallbackBlobSaver,
+    openStreamingWritable,
+} from './file-save';
 
 // --- Transfer state ---
 
@@ -121,65 +63,6 @@ interface DownloadMeta {
     transferredBytes: number;
 }
 
-
-// --- File save utilities ---
-
-/** Try to save a file using File System Access API (user picks location). Returns true if saved. */
-async function saveFileWithPicker(blob: Blob, fileName: string): Promise<boolean> {
-    if (!('showSaveFilePicker' in window)) return false;
-    try {
-        const handle = await (window as any).showSaveFilePicker({
-            suggestedName: fileName,
-        });
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-        return true;
-    } catch {
-        // User cancelled the dialog or API error
-        return false;
-    }
-}
-
-/** Fallback: trigger a browser download to the default download directory. */
-function triggerBrowserDownload(blob: Blob, fileName: string) {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-}
-
-/** Whether the browser can stream a download straight to disk. */
-function canStreamToDisk(): boolean {
-    return typeof window !== 'undefined' && 'showSaveFilePicker' in window;
-}
-
-/**
- * Open a streaming writable for `fileName` inside a user gesture.
- * Returns the writable, or `null` if the user cancelled the picker or
- * the API is unavailable. Must be the first await in the click handler
- * so the transient user activation is still valid.
- */
-async function openStreamingWritable(fileName: string): Promise<WritableFileStreamLike | null> {
-    if (!canStreamToDisk()) return null;
-    try {
-        const handle = await (window as any).showSaveFilePicker({ suggestedName: fileName });
-        return (await handle.createWritable()) as WritableFileStreamLike;
-    } catch {
-        // User cancelled the dialog or the API errored.
-        return null;
-    }
-}
-
-/** Saver used by the in-memory fallback sink (no File System Access API). */
-const fallbackBlobSaver: BlobSaver = async (blob, fileName) => {
-    const saved = await saveFileWithPicker(blob, fileName);
-    if (!saved) triggerBrowserDownload(blob, fileName);
-};
 
 export function useFileTransfer(deskId: string | undefined) {
     const wsRef = useRef<WebSocket | null>(null);
@@ -253,29 +136,6 @@ export function useFileTransfer(deskId: string | undefined) {
         setTimeout(() => {
             setTransfers(prev => prev.filter(t => t.transferId !== transferId));
         }, delayMs);
-    }, []);
-
-    // Parse binary chunk: transfer_id (36 bytes) + chunk_index (4 bytes BE) + data
-    const parseBinaryChunk = useCallback((data: ArrayBuffer): { transferId: string; chunkIndex: number; chunkData: Uint8Array } | null => {
-        if (data.byteLength < BINARY_HEADER_SIZE) return null;
-        const view = new DataView(data);
-        const decoder = new TextDecoder('utf-8');
-        const transferId = decoder.decode(new Uint8Array(data, 0, 36));
-        const chunkIndex = view.getUint32(36, false); // big-endian
-        const chunkData = new Uint8Array(data, BINARY_HEADER_SIZE);
-        return { transferId, chunkIndex, chunkData };
-    }, []);
-
-    // Build binary chunk with header
-    const buildBinaryChunk = useCallback((transferId: string, chunkIndex: number, data: Uint8Array): ArrayBuffer => {
-        const encoder = new TextEncoder();
-        const idBytes = encoder.encode(transferId); // should be 36 bytes
-        const buf = new ArrayBuffer(BINARY_HEADER_SIZE + data.length);
-        const view = new DataView(buf);
-        new Uint8Array(buf).set(idBytes, 0);
-        view.setUint32(36, chunkIndex, false); // big-endian
-        new Uint8Array(buf, BINARY_HEADER_SIZE).set(data);
-        return buf;
     }, []);
 
     // Best-effort send of a control message to the host. Swallows any
@@ -466,7 +326,7 @@ export function useFileTransfer(deskId: string | undefined) {
             // hang the UI in "connecting" forever.
             acceptGate.current.rejectAll('Data channel error');
         };
-    }, [parseBinaryChunk, updateTransfer, computeSpeedInfo, handleControlMessage, failDownload]);
+    }, [updateTransfer, computeSpeedInfo, handleControlMessage, failDownload]);
 
     // Establish WebRTC connection via signaling, return data channel
     const ensureConnection = useCallback(async (): Promise<RTCDataChannel> => {
@@ -935,7 +795,7 @@ export function useFileTransfer(deskId: string | undefined) {
             });
             removeTransferAfterDelay(transferId);
         }
-    }, [ensureConnection, buildBinaryChunk, updateTransfer, computeSpeedInfo, removeTransferAfterDelay]);
+    }, [ensureConnection, updateTransfer, computeSpeedInfo, removeTransferAfterDelay]);
 
     // Cancel an active transfer (download or upload)
     const cancelTransfer = useCallback((transferId: string) => {
