@@ -1,20 +1,9 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react"
-import type { MouseEvent as ReactMouseEvent } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Menu, Loader2, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle, AlertTriangle, Sparkles, SignalHigh, SignalMedium, SignalLow, Lock } from "lucide-react"
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { connectionQuality } from "./connection-quality"
-import {
-    DropdownMenu,
-    DropdownMenuContent,
-    DropdownMenuItem,
-    DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { Slider } from "@/components/ui/slider"
+import { AlertTriangle, Loader2 } from "lucide-react"
+import { TooltipProvider } from "@/components/ui/tooltip"
 
-import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import "./desk-session.css"
 import { useDeskSignaling } from "./use-desk-signaling"
@@ -24,7 +13,6 @@ import { useDeskDiagnose } from "./use-desk-diagnose"
 import { DiagnosePanel } from "./diagnose-panel"
 import { useConfirmExec } from "../exec/use-confirm-exec"
 import { useDeskInput } from "./use-desk-input"
-import { getKeyboardShortcuts } from "./keyboard-shortcuts"
 import { lockEscapeKey, unlockKeyboard, isKeyboardLockSupported } from "./fullscreen-keyboard"
 import { useBeforeUnloadConfirm } from "./use-before-unload-confirm"
 import { useDeskClipboard } from "./use-desk-clipboard"
@@ -38,8 +26,20 @@ import { useAdaptiveResolution, isAdaptiveResolutionGateOpen } from "./use-adapt
 import { useResolutionToast } from "./use-resolution-toast"
 import { isWebRtcAvailable } from "./webrtc-support"
 import { useToast } from "@/hooks/use-toast"
-import type { DeskSettings, RequestRemoteModel } from "@/services/types"
+import type { DeskSettings } from "@/services/types"
 import { useRestrictedSession } from "@/features/desk/restricted-session"
+import {
+    buildDesktopRequestRemotePayload,
+    shouldOpenConfigDialog,
+} from "./desk-session-model"
+import {
+    ClipboardFallbackToast,
+    ConnectionQualityBadge,
+    DeskSessionStats,
+    ResolutionStatusToast,
+} from "./desk-session-panels"
+import { DeskControlBar } from "./desk-control-bar"
+import { useDraggableControlBar } from "./use-draggable-control-bar"
 import {
     SIGNALING_TYPE_CODE_REQUEST_REMOTE,
     SIGNALING_TYPE_CODE_REQUIRE_CONTROL,
@@ -53,78 +53,11 @@ import {
     SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
 } from "./constants"
 
-/**
- * Whether the desk config dialog should be (re)opened automatically.
- *
- * It opens for the initial settings pick (INIT arrived, no connect attempt yet)
- * and after a terminal ICE failure so the user can retry. It must NOT reopen on
- * a transient `disconnected` — that flips `isRTCConnected` to false but leaves
- * `rtcFailed` false, and ICE typically recovers on its own; reopening there
- * leaves the recovered video sitting behind a spurious dialog (the reported
- * "dialog pops back up, then the screen appears behind it" flapping). Pure so
- * the unit test can pin every branch without rendering the component.
- */
-export function shouldOpenConfigDialog(args: {
-    hasInitData: boolean
-    isRTCConnected: boolean
-    hasAttemptedConnect: boolean
-    rtcFailed: boolean
-}): boolean {
-    const { hasInitData, isRTCConnected, hasAttemptedConnect, rtcFailed } = args
-    if (!hasInitData || isRTCConnected) {
-        return false
-    }
-    return !hasAttemptedConnect || rtcFailed
-}
-
-type DesktopRequestRemotePayload = Pick<
-    RequestRemoteModel,
-    'purpose' | 'grant_session_id'
-> & {
-    connection_id: string
-}
-
-export function buildDesktopRequestRemotePayload(
-    connectionId: string,
-    grantSessionId: string | null,
-): DesktopRequestRemotePayload {
-    return {
-        connection_id: connectionId,
-        purpose: 'remote_desktop',
-        ...(grantSessionId ? { grant_session_id: grantSessionId } : {}),
-    }
-}
-
 /** Container props. `orgId` is injected only by the manager console's org view
  *  (via a static wrapper); the open-source standalone app renders `<DeskSession/>`
  *  with no props, keeping the AI model selection personal-scoped. */
 type DeskSessionProps = {
     orgId?: number
-}
-
-/**
- * A compact live connection-quality badge (good / fair / poor) derived from the
- * WebRTC stats. Backend-agnostic — identical against the open-source signal and
- * the manager — so it needs no signal-server capability detection.
- */
-function ConnectionQualityBadge({ packetLoss, rtt }: { packetLoss: number; rtt: number }) {
-    const { t } = useTranslation()
-    const quality = connectionQuality(packetLoss, rtt)
-    const config = {
-        good: { Icon: SignalHigh, cls: "text-green-500", label: t("pages.desk.quality.good") },
-        fair: { Icon: SignalMedium, cls: "text-amber-500", label: t("pages.desk.quality.fair") },
-        poor: { Icon: SignalLow, cls: "text-red-500", label: t("pages.desk.quality.poor") },
-    }[quality]
-    const Icon = config.Icon
-    return (
-        <span
-            className={`flex items-center gap-1 text-sm ${config.cls}`}
-            title={t("pages.desk.quality.detail", { rtt: Math.round(rtt), loss: packetLoss })}
-        >
-            <Icon className="h-4 w-4" />
-            <span className="hidden sm:inline">{config.label}</span>
-        </span>
-    )
 }
 
 export default function DeskSession({ orgId }: DeskSessionProps = {}) {
@@ -183,17 +116,13 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     const keyboardLockSupported = useMemo(() => isKeyboardLockSupported(), []);
     const [showEscHint, setShowEscHint] = useState(false);
 
-    // Drag UI state
-    const [isDragging, setIsDragging] = useState(false);
-    const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+    const { handleDragStart, isDragging } = useDraggableControlBar({
+        controlBarRef,
+        wrapperRef: videoWrapperRef,
+    })
 
     const [showStats, setShowStats] = useState(false);
     const [showDiagnose, setShowDiagnose] = useState(false);
-    const [isDiagnoseHovered, setIsDiagnoseHovered] = useState(false);
-
-    const [isControlBarHovered, setIsControlBarHovered] = useState(false);
-    const [isControlBarMenuOpen, setIsControlBarMenuOpen] = useState(false);
-    const isControlBarExpanded = isControlBarHovered || isControlBarMenuOpen || isDragging;
 
     // Adaptive-quality opt-in (client-only, persisted in localStorage so
     // the user's preference survives reloads). When `false` the
@@ -799,103 +728,6 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         setIsMuted(value === 0);
     };
 
-    // Drag handlers for control bar
-    const handleDragStart = (e: ReactMouseEvent) => {
-        if (!controlBarRef.current || !videoWrapperRef.current) return;
-
-        setIsDragging(true);
-        const controlBar = controlBarRef.current;
-        const wrapperRect = videoWrapperRef.current.getBoundingClientRect();
-        const controlBarRect = controlBar.getBoundingClientRect();
-
-        setDragOffset({
-            x: e.clientX - controlBarRect.left,
-            y: e.clientY - controlBarRect.top
-        });
-
-        // Disable transition while dragging
-        controlBar.style.transition = 'none';
-        controlBar.style.transform = 'none';
-        controlBar.style.bottom = 'auto';
-
-        controlBar.style.left = `${controlBarRect.left - wrapperRect.left}px`;
-        controlBar.style.top = `${controlBarRect.top - wrapperRect.top}px`;
-    };
-
-    const handleDrag = useCallback((e: MouseEvent) => {
-        if (!isDragging || !controlBarRef.current || !videoWrapperRef.current) return;
-        e.preventDefault();
-
-        const controlBar = controlBarRef.current;
-        const wrapperRect = videoWrapperRef.current.getBoundingClientRect();
-
-        const screenX = e.clientX - dragOffset.x;
-        const screenY = e.clientY - dragOffset.y;
-
-        let newX = screenX - wrapperRect.left;
-        let newY = screenY - wrapperRect.top;
-
-        const maxX = wrapperRect.width - controlBar.offsetWidth;
-        const maxY = wrapperRect.height - controlBar.offsetHeight;
-
-        newX = Math.max(0, Math.min(newX, maxX));
-        newY = Math.max(0, Math.min(newY, maxY));
-
-        controlBar.style.left = `${newX}px`;
-        controlBar.style.top = `${newY}px`;
-    }, [isDragging, dragOffset]);
-
-    const handleDragEnd = useCallback(() => {
-        setIsDragging(false);
-        if (controlBarRef.current) {
-            controlBarRef.current.style.transition = '';
-        }
-    }, []);
-
-    useEffect(() => {
-        if (isDragging) {
-            document.addEventListener('mousemove', handleDrag);
-            document.addEventListener('mouseup', handleDragEnd);
-        } else {
-            document.removeEventListener('mousemove', handleDrag);
-            document.removeEventListener('mouseup', handleDragEnd);
-        }
-        return () => {
-            document.removeEventListener('mousemove', handleDrag);
-            document.removeEventListener('mouseup', handleDragEnd);
-        };
-    }, [isDragging, handleDrag, handleDragEnd]);
-
-    // Handle generic window resizing to clamp control bar position
-    useEffect(() => {
-        const wrapper = videoWrapperRef.current;
-        if (!wrapper) return;
-
-        const resizeObserver = new ResizeObserver(() => {
-            const controlBar = controlBarRef.current;
-            if (!controlBar || controlBar.style.transform !== 'none') return; // Only process if previously dragged
-
-            const wrapperRect = wrapper.getBoundingClientRect();
-
-            // Current set inline style properties (numeric limits)
-            const currentLeft = parseFloat(controlBar.style.left) || 0;
-            const currentTop = parseFloat(controlBar.style.top) || 0;
-
-            const maxX = wrapperRect.width - controlBar.offsetWidth;
-            const maxY = wrapperRect.height - controlBar.offsetHeight;
-
-            // Clamp and adjust
-            const newX = Math.max(0, Math.min(currentLeft, maxX));
-            const newY = Math.max(0, Math.min(currentTop, maxY));
-
-            controlBar.style.left = `${newX}px`;
-            controlBar.style.top = `${newY}px`;
-        });
-
-        resizeObserver.observe(wrapper);
-        return () => resizeObserver.disconnect();
-    }, []);
-
     return (
         <div className="flex h-full flex-col">
             <DeskConfigDialog
@@ -1048,208 +880,14 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                         </div>
 
                         {showStats && isConnected && (
-                            <div className="absolute top-4 left-4 z-50 bg-black/60 text-white p-3 rounded-lg text-xs font-mono backdrop-blur-md border border-white/20 select-none min-w-[260px] max-h-[80vh] overflow-y-auto">
-                                <div className="flex justify-between items-center mb-2 pb-1 border-b border-white/15">
-                                    <div className="text-sm font-bold text-white/90">
-                                        {t('pages.desk.statsPanel.title')}
-                                    </div>
-                                    <button 
-                                        onClick={() => setShowStats(false)} 
-                                        className="text-gray-400 hover:text-white transition-colors"
-                                        aria-label={t('pages.desk.closeStats')}
-                                    >
-                                        <XSquare className="w-4 h-4" />
-                                    </button>
-                                </div>
-
-                                {/* Network section — what was the original "Network Stats" panel. */}
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.fps')}:</span>
-                                    <span className="font-bold text-green-400">{rtcStats.fps}</span>
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.resolution')}:</span>
-                                    <span className="font-bold text-white">{rtcStats.width}x{rtcStats.height}</span>
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.bitrate')}:</span>
-                                    <span className="font-bold text-blue-400">{rtcStats.bitrate} kbps</span>
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.videoCodec')}:</span>
-                                    <span className="font-bold text-purple-400">{rtcStats.videoCodec || 'Unknown'}</span>
-                                </div>
-                                {rtcStats.audioCodec && (
-                                    <div className="flex justify-between gap-4 mb-1">
-                                        <span className="text-gray-400">{t('pages.desk.statsPanel.audioCodec')}:</span>
-                                        <span className="font-bold text-purple-400">{rtcStats.audioCodec}</span>
-                                    </div>
-                                )}
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.latency')}:</span>
-                                    <span className={`font-bold ${rtcStats.rtt > 150 ? 'text-red-400' : rtcStats.rtt > 80 ? 'text-yellow-400' : 'text-green-400'}`}>
-                                        {rtcStats.rtt} ms
-                                    </span>
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.packetLoss')}:</span>
-                                    <span className={`font-bold ${rtcStats.packetLoss > 5 ? 'text-red-400' : rtcStats.packetLoss > 1 ? 'text-yellow-400' : 'text-green-400'}`}>
-                                        {rtcStats.packetLoss}%
-                                    </span>
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.network')}:</span>
-                                    <span className="font-bold text-orange-400 uppercase">
-                                        {rtcStats.networkType || 'Unknown'}
-                                    </span>
-                                </div>
-
-                                {/* Video frame section — derived from RTCInboundRtpStreamStats. */}
-                                <div className="text-xs font-bold text-white/80 mt-3 mb-1 pt-2 border-t border-white/15">
-                                    {t('pages.desk.statsPanel.frameSection')}
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.framesDecoded')}:</span>
-                                    <span className="font-bold text-white">{rtcStats.framesDecoded} (+{rtcStats.framesDecodedDelta})</span>
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.keyFrames')}:</span>
-                                    {/* High keyframe rate = encoder churn / frequent PLI / wasted bandwidth.
-                                        Highlight when more than ~1 IDR/s (the symptom we just hunted in the broadcast-lag bug). */}
-                                    <span className={`font-bold ${rtcStats.keyFramesDelta > 1 ? 'text-red-400' : 'text-yellow-300'}`}>
-                                        {rtcStats.keyFramesDecoded} (+{rtcStats.keyFramesDelta})
-                                    </span>
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.pFrames')}:</span>
-                                    <span className="font-bold text-white">{rtcStats.pFramesDecoded}</span>
-                                </div>
-                                {/* webrtc-rs 0.17.x's VP9 RTP packetizer hard-codes the
-                                    payload-header byte to 0x90 and never sets the P bit
-                                    (`rtp-0.17.1/src/codecs/vp9/mod.rs:110`). The browser
-                                    therefore reads every VP9 packet as a keyframe, so
-                                    `keyFramesDecoded ≈ framesDecoded` regardless of the
-                                    encoder's actual GOP. The encoder side (server logs,
-                                    `MediaFrameKind::VideoI` counters) is unaffected, and
-                                    bytes/bitrate stats reflect real payload size. Surface
-                                    this only when VP9 is actually negotiated to avoid
-                                    confusing operators on other codecs. */}
-                                {rtcStats.videoCodec === 'VP9' && (
-                                    <div className="text-[10px] italic text-gray-500 mt-0.5 leading-tight">
-                                        {t('pages.desk.statsPanel.vp9FrameTypeHint')}
-                                    </div>
-                                )}
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.framesDropped')}:</span>
-                                    <span className={`font-bold ${rtcStats.framesDropped > 0 ? 'text-yellow-300' : 'text-white'}`}>{rtcStats.framesDropped}</span>
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.avgQp')}:</span>
-                                    {/* `null` means the browser doesn't report `qpSum` for this
-                                        codec/decoder path. Common on Chromium with H.264
-                                        hardware decoding (NVDEC / QuickSync) — not a bug, just
-                                        a metric that isn't available. */}
-                                    <span className={`font-bold ${rtcStats.avgQp === null ? 'text-gray-500 italic' : 'text-white'}`}>
-                                        {rtcStats.avgQp === null
-                                            ? t('pages.desk.statsPanel.avgQpUnavailable')
-                                            : rtcStats.avgQp}
-                                    </span>
-                                </div>
-
-                                {/* RTCP feedback — receiver-initiated requests for keyframes / NACK / FIR. */}
-                                <div className="text-xs font-bold text-white/80 mt-3 mb-1 pt-2 border-t border-white/15">
-                                    {t('pages.desk.statsPanel.feedbackSection')}
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.pliCount')}:</span>
-                                    {/* PLI rate > 0 every sample window means the browser is repeatedly
-                                        asking for keyframes — e.g. heavy packet loss or decoder reset. */}
-                                    <span className={`font-bold ${rtcStats.pliDelta > 0 ? 'text-red-400' : 'text-white'}`}>
-                                        {rtcStats.pliCount} (+{rtcStats.pliDelta})
-                                    </span>
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.nackCount')}:</span>
-                                    <span className="font-bold text-white">{rtcStats.nackCount}</span>
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.firCount')}:</span>
-                                    <span className="font-bold text-white">{rtcStats.firCount}</span>
-                                </div>
-
-                                {/* Encoder quality — sender-side knob the adaptive loop drives.
-                                    The headline question this section answers is "is adaptive
-                                    quality oscillating?" Read straight off the refs because the
-                                    enclosing component already re-renders every second when
-                                    `rtcStats` updates, so the values are fresh without an
-                                    extra setState. */}
-                                <div className="text-xs font-bold text-white/80 mt-3 mb-1 pt-2 border-t border-white/15">
-                                    {t('pages.desk.statsPanel.encoderSection')}
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.currentQuality')}:</span>
-                                    {/* video_quality is QP-style: 0-63, lower is sharper.
-                                        Mirror the same colour buckets as Avg QP so the two are visually comparable. */}
-                                    <span className={`font-bold ${
-                                        (lastSettingsRef.current?.video_quality ?? 22) > 40
-                                            ? 'text-red-400'
-                                            : (lastSettingsRef.current?.video_quality ?? 22) > 30
-                                                ? 'text-yellow-300'
-                                                : 'text-green-400'
-                                    }`}>
-                                        {lastSettingsRef.current?.video_quality ?? '-'}
-                                    </span>
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.qualityAdjustments')}:</span>
-                                    {/* If the count grows by more than ~1/min the controller is
-                                        thrashing. Highlight when adaptive is even on so the user
-                                        can tell at a glance whether the toggle has any effect. */}
-                                    <span className={`font-bold ${
-                                        adaptiveQualityEnabled
-                                            ? qualityAdjustmentCountRef.current > 5 ? 'text-yellow-300' : 'text-white'
-                                            : 'text-gray-500'
-                                    }`}>
-                                        {qualityAdjustmentCountRef.current}
-                                        {!adaptiveQualityEnabled && ' (off)'}
-                                    </span>
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.lastAdjustedAgo')}:</span>
-                                    <span className="font-bold text-white">
-                                        {qualityAdjustmentCountRef.current === 0
-                                            ? '-'
-                                            : `${Math.max(0, Math.round((Date.now() - lastQualityAdjustRef.current) / 1000))} s`}
-                                    </span>
-                                </div>
-
-                                {/* Playback quality — perceived smoothness signals. */}
-                                <div className="text-xs font-bold text-white/80 mt-3 mb-1 pt-2 border-t border-white/15">
-                                    {t('pages.desk.statsPanel.qualitySection')}
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.freezeCount')}:</span>
-                                    <span className={`font-bold ${rtcStats.freezeCount > 0 ? 'text-yellow-300' : 'text-white'}`}>{rtcStats.freezeCount}</span>
-                                </div>
-                                <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.totalFreezeDuration')}:</span>
-                                    <span className="font-bold text-white">{rtcStats.totalFreezesDurationMs} ms</span>
-                                </div>
-                                <div className="flex justify-between gap-4">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.jitter')}:</span>
-                                    <span className={`font-bold ${rtcStats.jitterMs > 50 ? 'text-yellow-300' : 'text-white'}`}>{rtcStats.jitterMs} ms</span>
-                                </div>
-                                {/* RFC 3550 interarrival jitter is an EWMA over packet interarrival
-                                    deltas. Worker drops to ~1 fps on a static desktop, and at that
-                                    packet rate any single OS scheduling blip dominates the EWMA, so
-                                    the value drifts up to hundreds of ms. Once the screen moves and
-                                    fps recovers, the EWMA snaps back within a couple of seconds.
-                                    Surface this so operators don't mistake it for a real network
-                                    fault. */}
-                                <div className="text-[10px] italic text-gray-500 mt-0.5 leading-tight">
-                                    {t('pages.desk.statsPanel.jitterHint')}
-                                </div>
-                            </div>
+                            <DeskSessionStats
+                                adaptiveQualityEnabled={adaptiveQualityEnabled}
+                                currentVideoQuality={lastSettingsRef.current?.video_quality ?? null}
+                                lastQualityAdjustedAt={lastQualityAdjustRef.current}
+                                onClose={() => setShowStats(false)}
+                                qualityAdjustmentCount={qualityAdjustmentCountRef.current}
+                                rtcStats={rtcStats}
+                            />
                         )}
 
                         {/* The desktop-switching / reconnecting /
@@ -1294,357 +932,48 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                         )}
 
                         {fallbackToast.show && (
-                            <div className="absolute bottom-24 right-4 z-[60] bg-amber-500/90 text-white p-4 rounded-lg shadow-xl flex flex-col gap-3 min-w-[300px] animate-in slide-in-from-bottom-4 pointer-events-auto">
-                                <div className="flex justify-between items-start">
-                                    <span className="font-semibold text-sm">Action Required</span>
-                                    <button onClick={closeFallbackToast} className="text-white/80 hover:text-white"><XSquare className="w-4 h-4" /></button>
-                                </div>
-                                <p className="text-xs text-amber-100">{fallbackToast.text || 'Clipboard update received, please click to sync.'}</p>
-                                <Button variant="secondary" size="sm" className="w-full bg-white text-amber-900 hover:bg-amber-100" onClick={execFallbackToastAction}>
-                                    Sync Now
-                                </Button>
-                            </div>
+                            <ClipboardFallbackToast
+                                onClose={closeFallbackToast}
+                                onSync={execFallbackToastAction}
+                                text={fallbackToast.text}
+                            />
                         )}
 
                         {resolutionToast && (
-                            <div
-                                data-testid="resolution-toast"
-                                data-phase={resolutionToast.phase}
-                                className={`absolute bottom-40 right-4 z-[60] px-3 py-2 rounded-lg shadow-lg text-xs font-medium backdrop-blur-md border flex items-center gap-2 animate-in slide-in-from-bottom-4 pointer-events-none ${
-                                    resolutionToast.phase === "success"
-                                        ? "bg-emerald-500/90 text-white border-emerald-300/40"
-                                        : resolutionToast.phase === "failed"
-                                            ? "bg-red-500/90 text-white border-red-300/40"
-                                            : "bg-black/80 text-white border-white/10"
-                                }`}
-                            >
-                                {resolutionToast.phase === "updating" && (
-                                    <>
-                                        <Loader2 className="w-4 h-4 animate-spin text-blue-300" />
-                                        <span>
-                                            {t(
-                                                "pages.desk.resolutionUpdating",
-                                                {
-                                                    w: resolutionToast.targetW,
-                                                    h: resolutionToast.targetH,
-                                                },
-                                            )}
-                                        </span>
-                                    </>
-                                )}
-                                {resolutionToast.phase === "success" && (
-                                    <>
-                                        <CheckCircle2 className="w-4 h-4" />
-                                        <span>
-                                            {t(
-                                                "pages.desk.resolutionApplied",
-                                                {
-                                                    w: resolutionToast.appliedW,
-                                                    h: resolutionToast.appliedH,
-                                                },
-                                            )}
-                                        </span>
-                                    </>
-                                )}
-                                {resolutionToast.phase === "failed" && (
-                                    <>
-                                        <AlertCircle className="w-4 h-4" />
-                                        <span>
-                                            {t(
-                                                "pages.desk.resolutionFailed",
-                                                { reason: resolutionToast.reason },
-                                            )}
-                                        </span>
-                                    </>
-                                )}
-                            </div>
+                            <ResolutionStatusToast toast={resolutionToast} />
                         )}
 
                         {isConnected && (
-                            <div
-                                ref={controlBarRef}
-                                className="controlBar"
-                                onMouseEnter={() => setIsControlBarHovered(true)}
-                                onMouseLeave={() => setIsControlBarHovered(false)}
-                            >
-                                <div
-                                    className="controlBarDragHandle"
-                                    onMouseDown={handleDragStart}
-                                    onTouchStart={() => setIsControlBarHovered(!isControlBarHovered)}
-                                >
-                                    <Menu className="w-5 h-5" />
-                                </div>
-                                <div
-                                    className={`controlBarContent ${isControlBarExpanded ? 'expanded' : 'collapsed'}`}
-                                    onFocus={() => setIsControlBarHovered(true)}
-                                    onBlur={(e) => {
-                                        if (!controlBarRef.current?.contains(e.relatedTarget as Node)) {
-                                            setIsControlBarHovered(false);
-                                        }
-                                    }}
-                                    inert={!isControlBarExpanded ? true : undefined}
-                                >
-                                    <div className="controlButtons">
-                                    {restricted.isRestricted && (
-                                        <Tooltip>
-                                            <TooltipTrigger asChild>
-                                                <span className="controlButton flex items-center justify-center text-amber-400 cursor-default" aria-label={t('pages.desk.restricted.indicator')}>
-                                                    <Lock />
-                                                </span>
-                                            </TooltipTrigger>
-                                            <TooltipContent>
-                                                <p>{t('pages.desk.restricted.indicator')}</p>
-                                            </TooltipContent>
-                                        </Tooltip>
-                                    )}
-                                    {restricted.capabilityVisible('allow_remote_control') && (
-                                        <Tooltip>
-                                            <TooltipTrigger asChild>
-                                                <Button
-                                                    variant="ghost"
-                                                    className="controlButton"
-                                                    onClick={handleRequestControl}
-                                                    disabled={isWaitingApproval}
-                                                >
-                                                    {isWaitingApproval ? <Loader2 className="animate-spin" /> : hasControl ? <XSquare /> : <MousePointer2 />}
-                                                </Button>
-                                            </TooltipTrigger>
-                                            <TooltipContent>
-                                                <p>{isWaitingApproval ? t('pages.desk.waitingPermission') : hasControl ? t('pages.desk.exitControl') : t('pages.desk.requestControl')}</p>
-                                            </TooltipContent>
-                                        </Tooltip>
-                                    )}
-
-                                    <Tooltip>
-                                        <TooltipTrigger asChild>
-                                            <Button
-                                                variant="ghost"
-                                                className="controlButton"
-                                                onClick={handleFullscreen}
-                                            >
-                                                {isFullscreen ? <Minimize /> : <Maximize />}
-                                            </Button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>
-                                            <p>{isFullscreen ? t('pages.desk.exitFullscreen') : t('pages.desk.fullscreen')}</p>
-                                        </TooltipContent>
-                                    </Tooltip>
-
-                                    {restricted.ownerPlaneVisible && (
-                                        <Tooltip>
-                                            <TooltipTrigger asChild>
-                                                <Button
-                                                    variant="ghost"
-                                                    className="controlButton"
-                                                    onClick={() => setIsConfigOpen(true)}
-                                                >
-                                                    <Settings />
-                                                </Button>
-                                            </TooltipTrigger>
-                                            <TooltipContent>
-                                                <p>{t('pages.desk.settings')}</p>
-                                            </TooltipContent>
-                                        </Tooltip>
-                                    )}
-
-                                    <Tooltip>
-                                        <TooltipTrigger asChild>
-                                            <Button
-                                                variant="ghost"
-                                                className={`controlButton ${showStats ? "bg-white/20" : ""}`}
-                                                onClick={() => setShowStats(!showStats)}
-                                            >
-                                                <Activity />
-                                            </Button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>
-                                            <p>{showStats ? t('pages.desk.hideStats') : t('pages.desk.showStats')}</p>
-                                        </TooltipContent>
-                                    </Tooltip>
-
-                                    {/* Rainbow gradient definition for the AI Diagnose icon,
-                                        referenced by `stroke="url(#ai-rainbow-gradient)"`. */}
-                                    <svg width="0" height="0" className="absolute h-0 w-0" aria-hidden="true">
-                                        <defs>
-                                            <linearGradient id="ai-rainbow-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                                                <stop offset="0%" stopColor="#3b82f6">
-                                                    <animate attributeName="stop-color" values="#3b82f6; #8b5cf6; #d946ef; #f43f5e; #3b82f6" dur={isDiagnoseHovered ? "0.8s" : "4s"} repeatCount="indefinite" />
-                                                </stop>
-                                                <stop offset="33%" stopColor="#8b5cf6">
-                                                    <animate attributeName="stop-color" values="#8b5cf6; #d946ef; #f43f5e; #3b82f6; #8b5cf6" dur={isDiagnoseHovered ? "0.8s" : "4s"} repeatCount="indefinite" />
-                                                </stop>
-                                                <stop offset="66%" stopColor="#d946ef">
-                                                    <animate attributeName="stop-color" values="#d946ef; #f43f5e; #3b82f6; #8b5cf6; #d946ef" dur={isDiagnoseHovered ? "0.8s" : "4s"} repeatCount="indefinite" />
-                                                </stop>
-                                                <stop offset="100%" stopColor="#f43f5e">
-                                                    <animate attributeName="stop-color" values="#f43f5e; #3b82f6; #8b5cf6; #d946ef; #f43f5e" dur={isDiagnoseHovered ? "0.8s" : "4s"} repeatCount="indefinite" />
-                                                </stop>
-                                            </linearGradient>
-                                        </defs>
-                                    </svg>
-
-                                    {restricted.ownerPlaneVisible && (
-                                        <Tooltip>
-                                            <TooltipTrigger asChild>
-                                                <Button
-                                                    variant="ghost"
-                                                    className={`controlButton ${showDiagnose ? "bg-white/20" : ""}`}
-                                                    onClick={() => setShowDiagnose(!showDiagnose)}
-                                                    onMouseEnter={() => setIsDiagnoseHovered(true)}
-                                                    onMouseLeave={() => setIsDiagnoseHovered(false)}
-                                                >
-                                                    <Sparkles style={{ stroke: "url(#ai-rainbow-gradient)" }} />
-                                                </Button>
-                                            </TooltipTrigger>
-                                            <TooltipContent>
-                                                <p>{showDiagnose ? t('pages.desk.diagnose.hidePanel') : t('pages.desk.diagnose.showPanel')}</p>
-                                            </TooltipContent>
-                                        </Tooltip>
-                                    )}
-
-                                    {hasControl && isPrivateScreenSupported && restricted.capabilityVisible('allow_private_screen') && (
-                                        <Tooltip>
-                                            <TooltipTrigger asChild>
-                                                <Button
-                                                    variant="ghost"
-                                                    className={`controlButton ${isPrivateScreen ? "bg-white/20 text-green-400" : ""}`}
-                                                    onClick={handleTogglePrivateScreen}
-                                                >
-                                                    {isPrivateScreen ? <ShieldCheck /> : <ShieldOff />}
-                                                </Button>
-                                            </TooltipTrigger>
-                                            <TooltipContent>
-                                                <p>{isPrivateScreen ? t('pages.desk.disablePrivateScreen') : t('pages.desk.enablePrivateScreen')}</p>
-                                            </TooltipContent>
-                                        </Tooltip>
-                                    )}
-
-                                    {hasControl && restricted.capabilityVisible('allow_clipboard_sync') && (
-                                        <Tooltip>
-                                            <TooltipTrigger asChild>
-                                                <Button
-                                                    variant="ghost"
-                                                    className={`controlButton ${clipboardEnabled ? "bg-white/20 text-blue-400" : "text-white/50"}`}
-                                                    onClick={(e) => {
-                                                        e.preventDefault();
-                                                        console.log("Clipboard Toggle Button Hit");
-                                                        if (typeof toggleClipboard === 'function') {
-                                                            toggleClipboard();
-                                                        } else {
-                                                            console.error("toggleClipboard is not a function!");
-                                                        }
-                                                    }}
-                                                >
-                                                    {clipboardEnabled ? <Clipboard /> : <ClipboardX />}
-                                                </Button>
-                                            </TooltipTrigger>
-                                            <TooltipContent>
-                                                <p>{clipboardEnabled ? t('pages.desk.disableClipboardSync') : t('pages.desk.enableClipboardSync')} {!window.isSecureContext ? t('pages.desk.clipboardHttpsRequired') : ''}</p>
-                                            </TooltipContent>
-                                        </Tooltip>
-                                    )}
-
-                                    {hasControl && (
-                                        <DropdownMenu>
-                                            <DropdownMenuTrigger asChild>
-                                                <Button variant="ghost" className="controlButton">
-                                                    <Keyboard />
-                                                </Button>
-                                            </DropdownMenuTrigger>
-                                            <DropdownMenuContent align="end" className="w-56 bg-background/90 backdrop-blur-md border-white/10">
-                                                {getKeyboardShortcuts(initData?.operation_system, { includeEscape: !keyboardLockSupported }).map(shortcut => (
-                                                    <DropdownMenuItem
-                                                        key={shortcut.id}
-                                                        onClick={() => sendKeyboardEvents(shortcut.events)}
-                                                    >
-                                                        {t(shortcut.labelKey)}
-                                                    </DropdownMenuItem>
-                                                ))}
-                                            </DropdownMenuContent>
-                                        </DropdownMenu>
-                                    )}
-
-                                    {/* Whiteboard button */}
-                                    {restricted.capabilityVisible('allow_whiteboard') && (
-                                        <Tooltip>
-                                            <TooltipTrigger asChild>
-                                                <Button
-                                                    variant="ghost"
-                                                    className={`controlButton ${whiteboard.isActive ? 'text-yellow-400' : ''}`}
-                                                    onClick={whiteboard.toggleWhiteboard}
-                                                    disabled={!whiteboard.canActivate}
-                                                >
-                                                    <PenTool />
-                                                </Button>
-                                            </TooltipTrigger>
-                                            <TooltipContent>
-                                                <p>{whiteboard.canActivate
-                                                    ? (whiteboard.isActive ? t('pages.desk.closeWhiteboard') : t('pages.desk.openWhiteboard'))
-                                                    : t('pages.desk.whiteboardUnavailable')}
-                                                </p>
-                                            </TooltipContent>
-                                        </Tooltip>
-                                    )}
-
-                                    {/* Microphone button */}
-                                    <Tooltip>
-                                        <TooltipTrigger asChild>
-                                            <Button
-                                                variant="ghost"
-                                                className={`controlButton ${microphone.isMicActive ? 'text-green-400' : ''} ${microphone.micError ? 'text-red-400' : ''}`}
-                                                onClick={microphone.toggleMicrophone}
-                                            >
-                                                {microphone.isMicActive ? <Mic /> : <MicOff />}
-                                            </Button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>
-                                            <p>{microphone.micError
-                                                ? microphone.micError
-                                                : (microphone.isMicActive ? t('pages.desk.stopMic') : t('pages.desk.startMic'))
-                                            }</p>
-                                        </TooltipContent>
-                                    </Tooltip>
-
-                                    <Popover onOpenChange={setIsControlBarMenuOpen}>
-                                        <PopoverTrigger asChild>
-                                            <Button
-                                                variant="ghost"
-                                                className="controlButton"
-                                            >
-                                                {isMuted || audioVolume === 0 ? <VolumeX /> : <Volume2 />}
-                                            </Button>
-                                        </PopoverTrigger>
-                                        <PopoverContent side="top" className="w-32 px-3 py-4 flex flex-col items-center gap-2 bg-background/90 backdrop-blur-md border-white/10" align="center" sideOffset={16} onOpenAutoFocus={(e) => e.preventDefault()}>
-                                            <Slider
-                                                min={0}
-                                                max={100}
-                                                step={1}
-                                                value={[audioVolume]}
-                                                onValueChange={(vals) => handleVolumeChange(vals[0])}
-                                                className="w-full"
-                                            />
-                                        </PopoverContent>
-                                    </Popover>
-
-                                    <div className="w-px h-6 bg-white/20 mx-1" />
-
-                                    <Tooltip>
-                                        <TooltipTrigger asChild>
-                                            <Button
-                                                variant="ghost"
-                                                className="controlButton text-red-500 hover:text-red-400 hover:bg-red-500/20"
-                                                onClick={handleDisconnect}
-                                            >
-                                                <Power />
-                                            </Button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>
-                                            <p>{t('pages.desk.disconnect')}</p>
-                                        </TooltipContent>
-                                    </Tooltip>
-                                    </div>
-                                </div>
-                            </div>
+                            <DeskControlBar
+                                audioVolume={audioVolume}
+                                clipboardEnabled={clipboardEnabled}
+                                controlBarRef={controlBarRef}
+                                hasControl={hasControl}
+                                isDragging={isDragging}
+                                isFullscreen={isFullscreen}
+                                isMuted={isMuted}
+                                isPrivateScreen={isPrivateScreen}
+                                isPrivateScreenSupported={isPrivateScreenSupported}
+                                isWaitingApproval={isWaitingApproval}
+                                keyboardLockSupported={keyboardLockSupported}
+                                microphone={microphone}
+                                onChangeVolume={handleVolumeChange}
+                                onDisconnect={handleDisconnect}
+                                onDragStart={handleDragStart}
+                                onOpenSettings={() => setIsConfigOpen(true)}
+                                onRequestControl={handleRequestControl}
+                                onSendKeyboardEvents={sendKeyboardEvents}
+                                onToggleClipboard={toggleClipboard}
+                                onToggleFullscreen={handleFullscreen}
+                                onTogglePrivateScreen={handleTogglePrivateScreen}
+                                operationSystem={initData?.operation_system}
+                                restricted={restricted}
+                                setShowDiagnose={setShowDiagnose}
+                                setShowStats={setShowStats}
+                                showDiagnose={showDiagnose}
+                                showStats={showStats}
+                                whiteboard={whiteboard}
+                            />
                         )}
                     </div>
                 </TooltipProvider>

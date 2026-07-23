@@ -1,9 +1,13 @@
 import { describe, it, expect } from "vitest"
 import {
     canEnableAdaptiveResolution,
+    DESK_CONFIG_DEFAULTS,
     formatDisplayLabel,
     hasNoDisplaysForMode,
-} from "./desk-config-dialog"
+    orderCaptureModes,
+    pickDefaultDeviceName,
+    toDeskSettings,
+} from "./desk-config-model"
 import type { DisplayInfo } from "@/services/types"
 
 function makeDisplayInfo(
@@ -138,5 +142,56 @@ describe("hasNoDisplaysForMode", () => {
         expect(hasNoDisplaysForMode("", [])).toBe(false)
         expect(hasNoDisplaysForMode(undefined, [])).toBe(false)
         expect(hasNoDisplaysForMode(null, undefined)).toBe(false)
+    })
+})
+
+describe("desk config normalization", () => {
+    it("orders preferred capture modes before other backends", () => {
+        expect(orderCaptureModes(["GDI", "Custom", "WGC", "DXGI"])).toEqual([
+            "WGC",
+            "DXGI",
+            "GDI",
+            "Custom",
+        ])
+    })
+
+    it("prefers the display at the virtual-desktop origin", () => {
+        const secondary = makeDisplayInfo({
+            desktop_coordinates: {
+                bottom: 1080,
+                left: 1920,
+                right: 3840,
+                top: 0,
+            },
+            device_name: "secondary",
+        })
+        const primary = makeDisplayInfo({
+            desktop_coordinates: {
+                bottom: 1080,
+                left: 0,
+                right: 1920,
+                top: 0,
+            },
+            device_name: "primary",
+        })
+
+        expect(pickDefaultDeviceName([secondary, primary])).toBe("primary")
+        expect(pickDefaultDeviceName([])).toBe("")
+    })
+
+    it("removes form-only fields and normalizes disabled audio", () => {
+        const settings = toDeskSettings({
+            ...DESK_CONFIG_DEFAULTS,
+            audio_device: {
+                audio_data_flow: "Render",
+                audio_device_id: "speaker",
+            },
+            enable_audio: false,
+            video_fps: 0,
+        })
+
+        expect(settings.audio_device).toBeNull()
+        expect(settings.video_fps).toBeUndefined()
+        expect(settings).not.toHaveProperty("enable_audio")
     })
 })

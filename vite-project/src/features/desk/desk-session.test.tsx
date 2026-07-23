@@ -3,10 +3,11 @@ import '@testing-library/jest-dom';
 import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import DeskSession, {
+import DeskSession from './desk-session';
+import {
   buildDesktopRequestRemotePayload,
   shouldOpenConfigDialog,
-} from './desk-session';
+} from './desk-session-model';
 import React from 'react';
 
 // Mock routing

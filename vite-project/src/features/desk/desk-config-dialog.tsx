@@ -31,69 +31,22 @@ import {
     TabsTrigger,
 } from "@/components/ui/tabs"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Label } from "@/components/ui/label"
 import { Slider } from "@/components/ui/slider"
-import { Input } from "@/components/ui/input"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { AlertTriangle } from "lucide-react"
 import type { InitSignalingData, DeskSettings, DisplayInfo } from "@/services/types"
-
-/**
- * Compose the human-readable label shown for a `DisplayInfo` in the
- * display-picker dropdown.
- *
- * The size suffix has to be computed as `right - left` and
- * `bottom - top`: `desktop_coordinates` is a rectangle in virtual
- * desktop space, not a `(width, height)` pair. Off-origin monitors
- * (an IDD attached to the right of the primary, or any second
- * monitor) have `left > 0`, so reading `right` / `bottom` directly
- * adds the offset into the displayed resolution. Exported so the
- * unit test can guard against this regression without touching the
- * Radix Select internals.
- */
-export function formatDisplayLabel(device: DisplayInfo): string {
-    const name = device.display_device_name ?? device.device_name
-    const r = device.desktop_coordinates
-    const width = r.right - r.left
-    const height = r.bottom - r.top
-    return `${name} (${width}x${height})`
-}
-
-/**
- * Whether the user can enable adaptive web-page resolution given the
- * currently selected display and the daemon's reported IDD device
- * name. Adaptive auto-resize targets the IDD; if the captured display
- * is anything else the request would silently change the IDD
- * resolution while WGC keeps capturing a physical screen — visually a
- * no-op for the operator. Pure function so the unit test can pin
- * every branch without instantiating Radix or react-hook-form.
- */
-export function canEnableAdaptiveResolution(
-    selectedDeviceName: string | undefined | null,
-    virtualDisplayDeviceName: string | undefined | null,
-): boolean {
-    return (
-        !!virtualDisplayDeviceName && selectedDeviceName === virtualDisplayDeviceName
-    )
-}
-
-/**
- * Whether the chosen capture mode offers no display to capture. A backend key
- * (WGC / DXGI / GDI) can be present in `video_device_list` while its display
- * array is empty — e.g. a headless or disconnected host session where
- * `EnumDisplayMonitors` returns zero monitors. The display picker only renders
- * for a non-empty list, so its `required` rule never registers and a submit
- * would slip through with an empty `video_device_name` into a doomed media
- * pipeline. The dialog uses this to block Connect and explain why. Returns
- * `false` before any mode is chosen (nothing to gate yet). Pure so the unit
- * test can pin it without Radix / react-hook-form.
- */
-export function hasNoDisplaysForMode(
-    selectedImageCapture: string | undefined | null,
-    videoDeviceList: ReadonlyArray<DisplayInfo> | undefined | null,
-): boolean {
-    return !!selectedImageCapture && (!videoDeviceList || videoDeviceList.length === 0)
-}
+import { DeskConfigAdvancedTab } from "./desk-config-advanced-tab"
+import { DeskConfigAudioTab } from "./desk-config-audio-tab"
+import {
+    canEnableAdaptiveResolution,
+    DESK_CONFIG_DEFAULTS,
+    formatDisplayLabel,
+    hasNoDisplaysForMode,
+    orderCaptureModes,
+    pickDefaultDeviceName,
+    toDeskSettings,
+} from "./desk-config-model"
+import type { DeskConfigFormSettings } from "./desk-config-model"
 
 interface DeskConfigDialogProps {
     open: boolean
@@ -137,24 +90,8 @@ export function DeskConfigDialog({
 }: DeskConfigDialogProps) {
     const { t } = useTranslation()
 
-    // Extend DeskSettings for form state
-    type FormSettings = DeskSettings & { enable_audio: boolean }
-
-    const form = useForm<FormSettings>({
-        defaultValues: {
-            image_capture: "",
-            video_device_name: "",
-            show_mouse: true,
-            adaptive_web_page_resolution: true,
-            video_zoom_ratio: 100,
-            video_quality: 22,
-            enable_audio: false,
-            video_encoder: null,
-            audio_encoder: null,
-            wayland_control_mode: "auto",
-            video_fps: undefined,
-            enable_dirty_rect: true,
-        },
+    const form = useForm<DeskConfigFormSettings>({
+        defaultValues: DESK_CONFIG_DEFAULTS,
     })
 
     /**
@@ -186,26 +123,6 @@ export function DeskConfigDialog({
             form.setValue("adaptive_web_page_resolution", false)
         }
     }, [watchedDeviceName, watchedAdaptive, virtualDisplayName, form])
-
-    /**
-     * Pick a default `device_name` from a backend's
-     * `video_device_list`. Prefers the primary monitor when the
-     * backend surfaces one (DisplayInfo whose `desktop_coordinates`
-     * include the origin point 0,0 — the standard GDI primary-monitor
-     * convention), otherwise falls back to the first entry. Returns
-     * the empty string when the list is empty so the form gates submit
-     * (an empty list is the headless / capture-unsupported state).
-     */
-    const pickDefaultDeviceName = (list: ReadonlyArray<DisplayInfo>): string => {
-        if (list.length === 0) {
-            return ""
-        }
-        const primary = list.find((d) => {
-            const r = d.desktop_coordinates
-            return r && r.left === 0 && r.top === 0
-        })
-        return (primary ?? list[0]).device_name ?? ""
-    }
 
     useEffect(() => {
         if (!initData?.desk_settings) {
@@ -242,61 +159,21 @@ export function DeskConfigDialog({
         })
     }, [initData, form])
 
-    // Backend returns `video_device_list` as a JSON-serialized
-    // BTreeMap, which sorts alphabetically (D < G < W). Pin a preferred
-    // order so WGC — the only backend that correctly captures hardware
-    // overlay surfaces like browser-decoded video — appears first.
-    const CAPTURE_PREFERRED_ORDER = ["WGC", "DXGI", "GDI"] as const
     const rawCaptureKeys = initData && initData.video_device_list ? Object.keys(initData.video_device_list) : []
-    const imageCaptureList = [
-        ...CAPTURE_PREFERRED_ORDER.filter((k) => rawCaptureKeys.includes(k)),
-        ...rawCaptureKeys
-            .filter((k) => !(CAPTURE_PREFERRED_ORDER as readonly string[]).includes(k))
-            .sort(),
-    ]
+    const imageCaptureList = orderCaptureModes(rawCaptureKeys)
     const selectedImageCapture = form.watch("image_capture")
     const videoDeviceList = initData && selectedImageCapture && initData.video_device_list
         ? initData.video_device_list[selectedImageCapture]
         : []
     const noDisplaysForMode = hasNoDisplaysForMode(selectedImageCapture, videoDeviceList)
 
-    // Audio states
-    const enableAudio = form.watch("enable_audio")
-    const audioCaptureList = initData && initData.audio_device_list ? Object.keys(initData.audio_device_list) : []
-    const selectedAudioCapture = form.watch("audio_capture")
-    const audioDeviceList = initData && selectedAudioCapture && initData.audio_device_list
-        ? initData.audio_device_list[selectedAudioCapture]
-        : []
-
-    const handleSubmit = (values: FormSettings) => {
+    const handleSubmit = (values: DeskConfigFormSettings) => {
         // Defence in depth: never start a session without a display, even if the
         // disabled submit button is bypassed (e.g. implicit Enter-key submit).
         if (noDisplaysForMode || !values.video_device_name) {
             return
         }
-        // Ensure numbers are properly typed
-        const submitData: DeskSettings = {
-            ...values,
-            video_device_name: values.video_device_name ?? "",
-            video_zoom_ratio: Number(values.video_zoom_ratio),
-            video_quality: Number(values.video_quality),
-            wayland_control_mode: values.wayland_control_mode ?? "auto",
-        }
-
-        if (values.video_fps !== undefined && values.video_fps !== null) {
-            const fps = Number(values.video_fps);
-            submitData.video_fps = isNaN(fps) || fps <= 0 ? undefined : fps;
-        } else {
-            submitData.video_fps = undefined;
-        }
-
-        // Strip out non-schema data
-        if (!values.enable_audio) {
-            submitData.audio_device = null
-        }
-        delete (submitData as any).enable_audio;
-
-        onSubmit(submitData)
+        onSubmit(toDeskSettings(values))
     }
 
     const handleInteractOutside = (e: Event) => {
@@ -600,369 +477,17 @@ export function DeskConfigDialog({
                             </TabsContent>
 
                             {/* --- AUDIO TAB --- */}
-                            <TabsContent value="audio" className="space-y-4 pt-4">
-                                <FormField
-                                    control={form.control}
-                                    name="enable_audio"
-                                    render={({ field }) => (
-                                        <FormItem className="flex flex-row items-start space-x-3 space-y-0 p-2 rounded-md border">
-                                            <FormControl>
-                                                <Checkbox
-                                                    checked={!!field.value}
-                                                    onCheckedChange={field.onChange}
-                                                />
-                                            </FormControl>
-                                            <div className="space-y-1 leading-none">
-                                                <FormLabel>
-                                                    {t('pages.desk.captureAudio')}
-                                                </FormLabel>
-                                            </div>
-                                        </FormItem>
-                                    )}
-                                />
-
-                                {enableAudio && (
-                                    <>
-                                        <FormField
-                                            control={form.control}
-                                            name="audio_capture"
-                                            render={({ field }) => (
-                                                <FormItem>
-                                                    <FormLabel>{t('pages.desk.audioCaptureMode')}</FormLabel>
-                                                    {(() => {
-                                                        const currentValue = field.value || ""
-                                                        return (
-                                                    <Select
-                                                        onValueChange={field.onChange}
-                                                        key={`audio-capture-${currentValue || "empty"}`}
-                                                        defaultValue={currentValue}
-                                                    >
-                                                        <FormControl>
-                                                            <SelectTrigger>
-                                                                <SelectValue placeholder={t('pages.desk.audioCaptureModePlaceholder')} />
-                                                            </SelectTrigger>
-                                                        </FormControl>
-                                                        <SelectContent>
-                                                            {audioCaptureList.map((mode) => (
-                                                                <SelectItem key={mode} value={mode}>
-                                                                    {mode}
-                                                                </SelectItem>
-                                                            ))}
-                                                        </SelectContent>
-                                                    </Select>
-                                                        )
-                                                    })()}
-                                                    <FormMessage />
-                                                </FormItem>
-                                            )}
-                                        />
-
-                                        {selectedAudioCapture && audioDeviceList && audioDeviceList.length > 0 && (
-                                            <FormField
-                                                control={form.control}
-                                                name="audio_device"
-                                                render={({ field }) => {
-                                                    const stringValue = field.value ? JSON.stringify(field.value) : "";
-                                                    return (
-                                                        <FormItem>
-                                                            <FormLabel>{t('pages.desk.audioDevice')}</FormLabel>
-                                                            {(() => (
-                                                            <Select
-                                                                onValueChange={(val) => {
-                                                                    try {
-                                                                        field.onChange(JSON.parse(val));
-                                                                    } catch (e) { /* ignore parse error */ }
-                                                                }}
-                                                                key={`audio-device-${stringValue || "empty"}`}
-                                                                defaultValue={stringValue}
-                                                            >
-                                                                <FormControl>
-                                                                    <SelectTrigger>
-                                                                        <SelectValue placeholder={t('pages.desk.audioDevicePlaceholder')} />
-                                                                    </SelectTrigger>
-                                                                </FormControl>
-                                                                <SelectContent>
-                                                                    {Array.from(new Set(audioDeviceList.map(item => item.data_flow))).map(dataFlow => {
-                                                                        const defaultDevice = { audio_data_flow: dataFlow, audio_device_id: null };
-                                                                        const valStr = JSON.stringify(defaultDevice);
-                                                                        return (
-                                                                            <SelectItem key={`default-${dataFlow}`} value={valStr}>
-                                                                                [{dataFlow}] Default Device
-                                                                            </SelectItem>
-                                                                        )
-                                                                    })}
-
-                                                                    {audioDeviceList.map((device) => {
-                                                                        const optValue = { audio_data_flow: device.data_flow, audio_device_id: device.id };
-                                                                        const valStr = JSON.stringify(optValue);
-                                                                        const defaultLabel = device.default ? ' (Default)' : '';
-                                                                        return (
-                                                                            <SelectItem key={device.id || valStr} value={valStr}>
-                                                                                [{device.data_flow}] {device.firendly_name} {defaultLabel}
-                                                                            </SelectItem>
-                                                                        )
-                                                                    })}
-                                                                </SelectContent>
-                                                            </Select>
-                                                            ))()}
-                                                            <FormMessage />
-                                                        </FormItem>
-                                                    )
-                                                }}
-                                            />
-                                        )}
-
-                                        <FormField
-                                            control={form.control}
-                                            name="audio_encoder"
-                                            render={({ field }) => (
-                                                <FormItem>
-                                                    <FormLabel>{t('pages.desk.audioEncoder')}</FormLabel>
-                                                    {(() => {
-                                                        const currentValue = field.value || "auto"
-                                                        return (
-                                                    <Select
-                                                        onValueChange={(val) => field.onChange(val === "auto" ? null : val)}
-                                                        key={`audio-encoder-${currentValue}`}
-                                                        defaultValue={currentValue}
-                                                    >
-                                                        <FormControl>
-                                                            <SelectTrigger>
-                                                                <SelectValue placeholder={t('pages.desk.autoBackendControl')} />
-                                                            </SelectTrigger>
-                                                        </FormControl>
-                                                        <SelectContent>
-                                                            <SelectItem value="auto">{t('pages.desk.autoBackendControl')}</SelectItem>
-                                                            {initData?.audio_encoder_list?.map((encoder) => (
-                                                                <SelectItem key={encoder} value={encoder}>
-                                                                    {encoder}
-                                                                </SelectItem>
-                                                                ))}
-                                                            </SelectContent>
-                                                        </Select>
-                                                        )
-                                                    })()}
-                                                    <FormMessage />
-                                                </FormItem>
-                                            )}
-                                        />
-                                    </>
-                                )}
-                            </TabsContent>
+                            <DeskConfigAudioTab form={form} initData={initData} />
 
                             {/* --- ADVANCED TAB --- */}
-                            <TabsContent value="advanced" className="space-y-4 pt-4">
-                                <FormField
-                                    control={form.control}
-                                    name="video_encoder"
-                                    render={({ field }) => (
-                                        <FormItem>
-                                            <FormLabel>{t('pages.desk.videoEncoder')}</FormLabel>
-                                            {(() => {
-                                                const currentValue = field.value || "auto"
-                                                return (
-                                            <Select
-                                                onValueChange={(val) => field.onChange(val === "auto" ? null : val)}
-                                                key={`video-encoder-${currentValue}`}
-                                                defaultValue={currentValue}
-                                            >
-                                                <FormControl>
-                                                    <SelectTrigger>
-                                                        <SelectValue placeholder={t('pages.desk.autoBackendControl')} />
-                                                    </SelectTrigger>
-                                                </FormControl>
-                                                <SelectContent>
-                                                    <SelectItem value="auto">{t('pages.desk.autoBackendControl')}</SelectItem>
-                                                    {initData?.video_encoder_list?.map((encoder) => (
-                                                        <SelectItem key={encoder} value={encoder}>
-                                                            {encoder}
-                                                        </SelectItem>
-                                                    ))}
-                                                </SelectContent>
-                                            </Select>
-                                                )
-                                            })()}
-                                            <FormMessage />
-                                        </FormItem>
-                                    )}
-                                />
-
-                                <FormField
-                                    control={form.control}
-                                    name="wayland_control_mode"
-                                    render={({ field }) => (
-                                        <FormItem>
-                                            <FormLabel>{t('pages.desk.waylandControlMode')}</FormLabel>
-                                            {(() => {
-                                                const currentValue = field.value || "auto"
-                                                return (
-                                            <Select
-                                                onValueChange={(val) => field.onChange(val)}
-                                                key={`wayland-control-${currentValue}`}
-                                                defaultValue={currentValue}
-                                            >
-                                                <FormControl>
-                                                    <SelectTrigger>
-                                                        <SelectValue placeholder={t('pages.desk.autoBackendControl')} />
-                                                    </SelectTrigger>
-                                                </FormControl>
-                                                <SelectContent>
-                                                    <SelectItem value="auto">{t('pages.desk.autoBackendControl')}</SelectItem>
-                                                    <SelectItem value="portal">portal</SelectItem>
-                                                    <SelectItem value="uinput">uinput</SelectItem>
-                                                    <SelectItem value="none">none</SelectItem>
-                                                </SelectContent>
-                                            </Select>
-                                                )
-                                            })()}
-                                            <FormMessage />
-                                        </FormItem>
-                                    )}
-                                />
-
-                                <FormField
-                                    control={form.control}
-                                    name="video_quality"
-                                    render={({ field }) => (
-                                        <FormItem className="pt-2">
-                                            <FormLabel className="flex justify-between">
-                                                <span>{t('pages.desk.videoQuality')} ({t('pages.desk.videoQualityDescription')})</span>
-                                                <span className="text-muted-foreground">{field.value}</span>
-                                            </FormLabel>
-                                            <FormControl>
-                                                <Slider
-                                                    min={0}
-                                                    max={63}
-                                                    step={1}
-                                                    value={[field.value ?? 22]}
-                                                    onValueChange={(vals: number[]) => field.onChange(vals[0])}
-                                                    className="py-2"
-                                                />
-                                            </FormControl>
-                                            <FormMessage />
-                                        </FormItem>
-                                    )}
-                                />
-
-                                {/* Client-only adaptive video quality
-                                    toggle. Lives outside the form
-                                    because the value never crosses
-                                    the signaling boundary — it only
-                                    gates whether the browser-side
-                                    stats observer issues
-                                    UpdateDeskSettings(video_quality)
-                                    based on packet loss / RTT. Default
-                                    on. Plain div + Label here (NOT
-                                    FormItem/FormControl/FormLabel),
-                                    because those primitives call
-                                    useFormField() and require an
-                                    enclosing <FormField>. */}
-                                <div className="flex flex-row items-start space-x-3 p-2 rounded-md border">
-                                    <Checkbox
-                                        id="adaptive-quality-toggle"
-                                        checked={adaptiveQualityEnabled}
-                                        onCheckedChange={(checked) =>
-                                            onAdaptiveQualityChange(checked === true)
-                                        }
-                                    />
-                                    <div className="space-y-1 leading-none">
-                                        <Label htmlFor="adaptive-quality-toggle">
-                                            {t('pages.desk.adaptiveQuality')}
-                                        </Label>
-                                        <p className="text-xs text-muted-foreground">
-                                            {t(
-                                                'pages.desk.adaptiveQualityDescription'
-                                            )}
-                                        </p>
-                                    </div>
-                                </div>
-
-                                {/* Server-side adaptive bitrate cap
-                                    toggle. Also parent-owned (see the
-                                    adaptive-quality toggle above); the
-                                    parent injects the value into
-                                    DeskSettings.adaptive_bitrate so it
-                                    rides the offer / UpdateDeskSettings
-                                    and the daemon's REMB controller
-                                    caps bitrate spikes for this
-                                    connection. Distinct from the
-                                    quality loop: the cap never lowers
-                                    visual quality, it only bounds rate
-                                    bursts under motion. */}
-                                <div className="flex flex-row items-start space-x-3 p-2 rounded-md border">
-                                    <Checkbox
-                                        id="adaptive-bitrate-toggle"
-                                        checked={adaptiveBitrateEnabled}
-                                        onCheckedChange={(checked) =>
-                                            onAdaptiveBitrateChange(checked === true)
-                                        }
-                                    />
-                                    <div className="space-y-1 leading-none">
-                                        <Label htmlFor="adaptive-bitrate-toggle">
-                                            {t('pages.desk.adaptiveBitrateCap')}
-                                        </Label>
-                                        <p className="text-xs text-muted-foreground">
-                                            {t(
-                                                'pages.desk.adaptiveBitrateCapDescription'
-                                            )}
-                                        </p>
-                                    </div>
-                                </div>
-
-                                <FormField
-                                    control={form.control}
-                                    name="video_fps"
-                                    render={({ field }) => (
-                                        <FormItem>
-                                            <FormLabel>{t('pages.desk.maxFps')}</FormLabel>
-                                            <FormControl>
-                                                <Input
-                                                    type="number"
-                                                    min={1}
-                                                    placeholder={t('pages.desk.autoBackendControl')}
-                                                    {...field}
-                                                    value={field.value ?? ""}
-                                                    onChange={(e) => {
-                                                        const val = e.target.value;
-                                                        if (val === "") {
-                                                            field.onChange(undefined);
-                                                        } else {
-                                                            const num = Number(val);
-                                                            field.onChange(num <= 0 ? undefined : num);
-                                                        }
-                                                    }}
-                                                />
-                                            </FormControl>
-                                            <FormMessage />
-                                        </FormItem>
-                                    )}
-                                />
-
-                                <FormField
-                                    control={form.control}
-                                    name="enable_dirty_rect"
-                                    render={({ field }) => (
-                                        <FormItem className="flex flex-row items-start space-x-3 space-y-0 p-2 rounded-md border">
-                                            <FormControl>
-                                                <Checkbox
-                                                    checked={field.value ?? true}
-                                                    onCheckedChange={field.onChange}
-                                                />
-                                            </FormControl>
-                                            <div className="space-y-1 leading-none">
-                                                <FormLabel>
-                                                    {t('pages.desk.enableDirtyRect')}
-                                                </FormLabel>
-                                                <p className="text-xs text-muted-foreground">
-                                                    {t(
-                                                        'pages.desk.enableDirtyRectDescription'
-                                                    )}
-                                                </p>
-                                            </div>
-                                        </FormItem>
-                                    )}
-                                />
-                            </TabsContent>
+                            <DeskConfigAdvancedTab
+                                adaptiveBitrateEnabled={adaptiveBitrateEnabled}
+                                adaptiveQualityEnabled={adaptiveQualityEnabled}
+                                form={form}
+                                initData={initData}
+                                onAdaptiveBitrateChange={onAdaptiveBitrateChange}
+                                onAdaptiveQualityChange={onAdaptiveQualityChange}
+                            />
                         </Tabs>
 
                         <DialogFooter className="pt-4">
