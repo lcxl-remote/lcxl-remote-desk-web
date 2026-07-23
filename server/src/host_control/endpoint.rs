@@ -563,6 +563,7 @@ mod tests {
                     indicator_enabled: true,
                     total_session_count: 0,
                     sessions: Vec::new(),
+                    remote_access: crate::host_control::HostRemoteAccessStatus::default(),
                 },
             },
             role

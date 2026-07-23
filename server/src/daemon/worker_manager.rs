@@ -10,10 +10,11 @@ use desk_ipc_protocol::{
     transport::{read_message, write_message},
 };
 use log::{debug, error, info, warn};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock, mpsc, watch};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot, watch};
 
 /// Default heartbeat-watchdog grace period when settings don't override
 /// it. Worker heartbeats every 5s, so 30s ≈ 6 missed beats — wide
@@ -65,6 +66,15 @@ pub struct WorkerManager {
     /// this flag and skip the swap, leaving the existing in-process
     /// worker in place.
     is_inprocess: Arc<AtomicBool>,
+    remote_access_gate: Arc<StdRwLock<crate::daemon::remote_access::RemoteAccessGate>>,
+    remote_access_acks: Arc<
+        StdMutex<
+            HashMap<
+                String,
+                oneshot::Sender<desk_ipc_protocol::message::RemoteAccessStateAppliedPayload>,
+            >,
+        >,
+    >,
 }
 
 struct WorkerManagerInner {
@@ -100,6 +110,14 @@ struct WorkerHandle {
     /// across that wait would block worker-recovery /
     /// heartbeat / `send_to_worker` for the duration of the stall.
     file_sender_tx: Arc<RwLock<Option<Arc<dyn EventSender<FileTransferPayload>>>>>,
+    inprocess_task: Option<tokio::task::JoinHandle<()>>,
+    inprocess_restart: Option<InprocessRestart>,
+}
+
+#[derive(Clone)]
+struct InprocessRestart {
+    args: Args,
+    host_control_hub: Arc<HostControlHub>,
 }
 
 enum ProcessHandle {
@@ -209,6 +227,10 @@ impl WorkerManager {
             capabilities_version: Arc::new(AtomicU64::new(0)),
             capabilities_version_tx: Arc::new(cap_version_tx),
             is_inprocess: Arc::new(AtomicBool::new(false)),
+            remote_access_gate: Arc::new(StdRwLock::new(
+                crate::daemon::remote_access::RemoteAccessGate::startup_locked(),
+            )),
+            remote_access_acks: Arc::new(StdMutex::new(HashMap::new())),
         };
         (mgr, rx)
     }
@@ -219,6 +241,14 @@ impl WorkerManager {
     /// only meaningful in the daemon-spawned (named-pipe) topology.
     pub fn is_inprocess(&self) -> bool {
         self.is_inprocess.load(Ordering::Relaxed)
+    }
+
+    pub fn bind_remote_access_gate(&self, gate: crate::daemon::remote_access::RemoteAccessGate) {
+        *self.remote_access_gate.write().unwrap() = gate;
+    }
+
+    fn remote_access_state(&self) -> crate::daemon::remote_access::RemoteAccessState {
+        self.remote_access_gate.read().unwrap().snapshot()
     }
 
     pub async fn start_worker(
@@ -245,6 +275,9 @@ impl WorkerManager {
                         let _ = proc.kill().await;
                     }
                 }
+            }
+            if let Some(task) = worker.inprocess_task.take() {
+                task.abort();
             }
         }
 
@@ -322,6 +355,8 @@ impl WorkerManager {
             session_id,
             desktop_name: desktop_name.clone(),
             file_sender_tx: file_sender_slot,
+            inprocess_task: None,
+            inprocess_restart: None,
         });
 
         info!("Worker started for session {session_id}");
@@ -363,15 +398,12 @@ impl WorkerManager {
 
         let mut inner = self.inner.lock().await;
 
-        if let Some(worker) = inner.active_worker.take() {
+        if let Some(mut worker) = inner.active_worker.take() {
             info!("Shutting down existing in-process worker before starting a new one");
             let _ = worker.ipc_tx.send(ServiceToWorker::Shutdown);
-            // No process_handle in in-process mode — the worker task
-            // observes Shutdown on its event channel and unwinds on its
-            // own; we cannot `wait()` on it without storing the
-            // JoinHandle, which the rest of WorkerHandle isn't shaped
-            // for. The loose-end is acceptable in portable mode where
-            // restarts are rare (only on explicit caller request).
+            if let Some(task) = worker.inprocess_task.take() {
+                task.abort();
+            }
         }
 
         let pipe_name = format!("inprocess-{session_id}-{}", uuid::Uuid::new_v4());
@@ -385,6 +417,7 @@ impl WorkerManager {
             (json, path)
         };
 
+        let remote_access_state = self.remote_access_state();
         let init_payload = WorkerInitPayload {
             session_id: format!("session-{session_id}"),
             os_session_id: session_id,
@@ -413,6 +446,8 @@ impl WorkerManager {
             } else {
                 Some(config_file_path)
             },
+            remote_access_locked: remote_access_state.is_locked(),
+            remote_access_state_version: remote_access_state.state_version,
         };
 
         // Build the four in-process transports:
@@ -479,10 +514,13 @@ impl WorkerManager {
         // signaling handlers) which all require a `LocalSet` context.
         // `tokio::spawn` would fail with "spawn_local called from
         // outside of a `task::LocalSet`".
-        let worker_args = args;
+        let restart = InprocessRestart {
+            args: args.clone(),
+            host_control_hub: host_control_hub.clone(),
+        };
         let init_for_worker = init_payload;
         let hub = host_control_hub;
-        actix_web::rt::spawn(async move {
+        let inprocess_task = actix_web::rt::spawn(async move {
             let session = crate::worker::session::WorkerSession::new();
             if let Err(e) = session
                 .run_with_transports(
@@ -499,7 +537,6 @@ impl WorkerManager {
                 error!("In-process worker exited with error: {e}");
             }
             info!("In-process worker task exited");
-            let _ = worker_args; // reserved for future per-mode toggles
         });
 
         // Pre-populate the file_sender slot for in-process mode: there
@@ -521,6 +558,8 @@ impl WorkerManager {
             session_id,
             desktop_name,
             file_sender_tx: file_sender_slot,
+            inprocess_task: Some(inprocess_task),
+            inprocess_restart: Some(restart),
         });
 
         info!("In-process worker started for session {session_id}");
@@ -606,7 +645,104 @@ impl WorkerManager {
             session_id: 0,
             desktop_name: None,
             file_sender_tx: Arc::new(RwLock::new(None)),
+            inprocess_task: None,
+            inprocess_restart: None,
         });
+    }
+
+    pub fn complete_remote_access_ack(
+        &self,
+        payload: desk_ipc_protocol::message::RemoteAccessStateAppliedPayload,
+    ) {
+        if let Some(waiter) = self
+            .remote_access_acks
+            .lock()
+            .unwrap()
+            .remove(&payload.operation_id)
+        {
+            let _ = waiter.send(payload);
+        }
+    }
+
+    pub async fn apply_remote_access_state(
+        &self,
+        payload: desk_ipc_protocol::message::RemoteAccessStatePayload,
+        timeout: Duration,
+    ) -> Result<bool, String> {
+        let has_worker = self.inner.lock().await.active_worker.is_some();
+        if !has_worker {
+            return Ok(false);
+        }
+        let operation_id = payload.operation_id.clone();
+        let state_version = payload.state_version;
+        let (tx, rx) = oneshot::channel();
+        self.remote_access_acks
+            .lock()
+            .unwrap()
+            .insert(operation_id.clone(), tx);
+        if let Err(error) = self
+            .send_to_worker(ServiceToWorker::SetRemoteAccessState(payload))
+            .await
+        {
+            self.remote_access_acks
+                .lock()
+                .unwrap()
+                .remove(&operation_id);
+            return Err(error);
+        }
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(ack)) if ack.state_version == state_version => Ok(true),
+            Ok(Ok(_)) => Err("worker acknowledged a different remote-access version".into()),
+            Ok(Err(_)) => Err("worker remote-access acknowledgement channel closed".into()),
+            Err(_) => {
+                self.remote_access_acks
+                    .lock()
+                    .unwrap()
+                    .remove(&operation_id);
+                Err(format!(
+                    "worker did not acknowledge remote-access version {state_version} within {timeout:?}"
+                ))
+            }
+        }
+    }
+
+    pub async fn recycle_for_remote_access_timeout(&self) -> Result<(), String> {
+        let (session_id, desktop_name, inprocess_restart, mut process, task) = {
+            let mut inner = self.inner.lock().await;
+            let Some(mut worker) = inner.active_worker.take() else {
+                return Ok(());
+            };
+            let _ = worker.ipc_tx.send(ServiceToWorker::Shutdown);
+            (
+                worker.session_id,
+                worker.desktop_name.clone(),
+                worker.inprocess_restart.take(),
+                worker.process_handle.take(),
+                worker.inprocess_task.take(),
+            )
+        };
+        if let Some(task) = task {
+            task.abort();
+        }
+        if let Some(process) = process.as_mut() {
+            let _ = process.kill().await;
+            process.wait().await;
+        }
+        self.pc_registry.clear_worker_activity();
+        if let Some(restart) = inprocess_restart {
+            self.start_inprocess_worker(
+                restart.args,
+                session_id,
+                desktop_name,
+                restart.host_control_hub,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        } else {
+            self.start_worker(session_id, desktop_name)
+                .await
+                .map_err(|error| error.to_string())
+        }
     }
 
     pub async fn send_to_worker(&self, msg: ServiceToWorker) -> Result<(), String> {
@@ -780,6 +916,9 @@ impl WorkerManager {
                         let _ = proc.kill().await;
                     }
                 }
+            }
+            if let Some(task) = worker.inprocess_task.take() {
+                task.abort();
             }
         }
     }
@@ -1153,6 +1292,7 @@ async fn run_pipe_server(
         other => warn!("Expected Ready, got: {other:?}"),
     }
 
+    let remote_access_state = worker_mgr.remote_access_state();
     write_message(
         &mut writer,
         &ServiceToWorker::Init(WorkerInitPayload {
@@ -1169,6 +1309,8 @@ async fn run_pipe_server(
             // `Settings::save()` (e.g. for "remember" auth approvals)
             // writes back to the same on-disk file the daemon loaded.
             config_file_path,
+            remote_access_locked: remote_access_state.is_locked(),
+            remote_access_state_version: remote_access_state.state_version,
         }),
     )
     .await?;
@@ -1434,6 +1576,7 @@ async fn run_pipe_server(
         other => warn!("Expected Ready, got: {other:?}"),
     }
 
+    let remote_access_state = worker_mgr.remote_access_state();
     write_message(
         &mut writer,
         &ServiceToWorker::Init(WorkerInitPayload {
@@ -1452,6 +1595,8 @@ async fn run_pipe_server(
             // Carry the daemon's settings file path so worker-side
             // `Settings::save()` writes back to the same file.
             config_file_path,
+            remote_access_locked: remote_access_state.is_locked(),
+            remote_access_state_version: remote_access_state.state_version,
         }),
     )
     .await?;
@@ -1683,6 +1828,60 @@ mod tests {
             crate::model::settings::Settings::default(),
         )));
         WorkerManager::new(settings, PcRegistry::new())
+    }
+
+    #[tokio::test]
+    async fn remote_access_transition_waits_for_matching_worker_ack() {
+        let (manager, _worker_rx) = test_manager();
+        let (ipc_tx, mut ipc_rx) = mpsc::unbounded_channel();
+        manager.install_active_for_test(ipc_tx).await;
+        let payload = desk_ipc_protocol::message::RemoteAccessStatePayload {
+            operation_id: "lock-op".into(),
+            state_version: 8,
+            locked: true,
+        };
+        let waiter = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .apply_remote_access_state(payload, Duration::from_secs(1))
+                    .await
+            })
+        };
+        assert!(matches!(
+            ipc_rx.recv().await,
+            Some(ServiceToWorker::SetRemoteAccessState(_))
+        ));
+        manager.complete_remote_access_ack(
+            desk_ipc_protocol::message::RemoteAccessStateAppliedPayload {
+                operation_id: "lock-op".into(),
+                state_version: 8,
+                cancelled_terminals: 0,
+                cancelled_transfers: 0,
+                cancelled_execs: 0,
+            },
+        );
+        assert_eq!(waiter.await.unwrap().unwrap(), true);
+    }
+
+    #[tokio::test]
+    async fn remote_access_transition_times_out_without_ack() {
+        let (manager, _worker_rx) = test_manager();
+        let (ipc_tx, mut ipc_rx) = mpsc::unbounded_channel();
+        manager.install_active_for_test(ipc_tx).await;
+        let payload = desk_ipc_protocol::message::RemoteAccessStatePayload {
+            operation_id: "no-ack".into(),
+            state_version: 9,
+            locked: true,
+        };
+        let result = manager
+            .apply_remote_access_state(payload, Duration::from_millis(10))
+            .await;
+        assert!(matches!(
+            ipc_rx.recv().await,
+            Some(ServiceToWorker::SetRemoteAccessState(_))
+        ));
+        assert!(result.unwrap_err().contains("did not acknowledge"));
     }
 
     /// Keep-PC contract: `notify_desktop_switch` pauses every PC in the

@@ -7,11 +7,16 @@ import {
     Files,
     GripHorizontal,
     Keyboard,
+    LockKeyhole,
+    LogOut,
+    ShieldOff,
     TerminalSquare,
     Upload,
 } from 'lucide-react';
+import { emit } from '@tauri-apps/api/event';
 
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 
@@ -43,11 +48,27 @@ export type HostAccessSnapshot = {
     indicator_enabled: boolean;
     total_session_count: number;
     sessions: HostAccessSession[];
+    remote_access: {
+        mode: 'unlocked' | 'locked' | 'recovery_locked';
+        state_version: number;
+        locked_at: string | null;
+        durable: boolean;
+        central_sync: 'not_required' | 'pending' | 'synced';
+    };
 };
 
 type SnapshotWindow = Window & {
     __lcxlHostAccessSnapshot?: HostAccessSnapshot;
 };
+
+type ControlResult = {
+    request_id: string;
+    ok: boolean;
+    error: string | null;
+};
+
+const CONTROL_EVENT = 'lcxl-host-access-control';
+const CONTROL_RESULT_EVENT = 'lcxl-host-access-control-result';
 
 export function activeKinds(session: HostAccessSession): string[] {
     const kinds: string[] = [];
@@ -99,14 +120,19 @@ export default function HostAccessStatusPage() {
         () => (window as SnapshotWindow).__lcxlHostAccessSnapshot ?? null,
     );
     const [open, setOpen] = useState(false);
+    const [pendingRequest, setPendingRequest] = useState<string | null>(null);
+    const [controlError, setControlError] = useState<string | null>(null);
+    const remoteAccessLocked = snapshot?.remote_access.mode !== 'unlocked';
 
     useEffect(() => makePageBackgroundTransparent(document), []);
 
     useEffect(() => {
-        document.title = open
-            ? 'lcxl-host-access:expanded'
-            : 'lcxl-host-access:collapsed';
-    }, [open]);
+        document.title = remoteAccessLocked
+            ? 'lcxl-host-access:locked'
+            : open
+                ? 'lcxl-host-access:expanded'
+                : 'lcxl-host-access:collapsed';
+    }, [open, remoteAccessLocked]);
 
     useEffect(() => {
         const receive = (event: Event) => {
@@ -118,6 +144,29 @@ export default function HostAccessStatusPage() {
         return () => window.removeEventListener('lcxl-host-access-snapshot', receive);
     }, []);
 
+    useEffect(() => {
+        const receive = (event: Event) => {
+            const result = (event as CustomEvent<ControlResult>).detail;
+            if (result.request_id !== pendingRequest) return;
+            setPendingRequest(null);
+            setControlError(result.ok ? null : result.error ?? t('hostAccess.controlFailed'));
+        };
+        window.addEventListener(CONTROL_RESULT_EVENT, receive);
+        return () => window.removeEventListener(CONTROL_RESULT_EVENT, receive);
+    }, [pendingRequest, t]);
+
+    const requestControl = async (payload: Record<string, unknown>) => {
+        const request_id = crypto.randomUUID();
+        setPendingRequest(request_id);
+        setControlError(null);
+        try {
+            await emit(CONTROL_EVENT, { request_id, ...payload });
+        } catch (error) {
+            setPendingRequest(null);
+            setControlError(error instanceof Error ? error.message : String(error));
+        }
+    };
+
     const counts = useMemo(() => {
         const result = { desktop: 0, control: 0, terminal: 0, files: 0, transfer: 0 };
         for (const session of snapshot?.sessions ?? []) {
@@ -126,8 +175,86 @@ export default function HostAccessStatusPage() {
         return result;
     }, [snapshot]);
 
-    if (!snapshot || snapshot.sessions.length === 0) {
+    if (!snapshot || (snapshot.sessions.length === 0 && !remoteAccessLocked)) {
         return <div className="h-screen w-full bg-transparent" />;
+    }
+
+    if (remoteAccessLocked) {
+        const recovery = snapshot.remote_access.mode === 'recovery_locked';
+        const retryPersistence = !snapshot.remote_access.durable && !recovery;
+        return (
+            <main className="h-screen w-full overflow-hidden bg-transparent p-3 select-none">
+                <Card className="relative overflow-hidden border-red-500/60 bg-card/95 shadow-xl">
+                    <div
+                        data-tauri-drag-region
+                        className="absolute inset-x-0 top-0 z-10 flex h-7 cursor-grab items-center justify-center text-muted-foreground/70 active:cursor-grabbing"
+                        title={t('hostAccess.drag')}
+                        aria-label={t('hostAccess.drag')}
+                    >
+                        <GripHorizontal className="pointer-events-none h-4 w-4" aria-hidden="true" />
+                    </div>
+                    <CardHeader className="px-4 pb-4 pt-7">
+                        <div className="flex items-center gap-3">
+                            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-500/15 text-red-600">
+                                <LockKeyhole className="h-5 w-5" aria-hidden="true" />
+                            </span>
+                            <span className="min-w-0 flex-1">
+                                <CardTitle className="text-base">{t('hostAccess.lockedTitle')}</CardTitle>
+                                <span className="mt-1 block text-sm text-muted-foreground" aria-live="polite">
+                                    {t(recovery ? 'hostAccess.recoveryLockedDescription' : 'hostAccess.lockedDescription')}
+                                </span>
+                            </span>
+                        </div>
+                        {snapshot.remote_access.central_sync === 'pending' && (
+                            <Badge variant="secondary" className="mt-3 w-fit">
+                                {t('hostAccess.centralSyncPending')}
+                            </Badge>
+                        )}
+                        {retryPersistence && (
+                            <p className="mt-3 rounded-md border border-red-500/40 bg-red-500/10 p-2 text-xs text-red-700" role="alert">
+                                {t('hostAccess.notDurable')}
+                            </p>
+                        )}
+                        <div className="mt-3 rounded-md bg-muted/60 p-3 text-xs text-muted-foreground">
+                            <p className="font-medium text-foreground">{t('hostAccess.followUpTitle')}</p>
+                            <ul className="mt-1 list-disc space-y-1 pl-4">
+                                <li>{t('hostAccess.followUpAccount')}</li>
+                                <li>{t('hostAccess.followUpToken')}</li>
+                                <li>{t('hostAccess.followUpCode')}</li>
+                            </ul>
+                        </div>
+                        {retryPersistence ? (
+                            <Button
+                                variant="destructive"
+                                className="mt-3 w-full"
+                                disabled={pendingRequest !== null}
+                                onClick={() => void requestControl({ action: 'lock' })}
+                            >
+                                <LockKeyhole className="mr-2 h-4 w-4" aria-hidden="true" />
+                                {pendingRequest ? t('hostAccess.applying') : t('hostAccess.retryLock')}
+                            </Button>
+                        ) : (
+                            <Button
+                                className="mt-3 w-full"
+                                disabled={pendingRequest !== null}
+                                onClick={() => void requestControl({
+                                    action: 'unlock',
+                                    expected_version: snapshot.remote_access.state_version,
+                                })}
+                            >
+                                <ShieldOff className="mr-2 h-4 w-4" aria-hidden="true" />
+                                {pendingRequest
+                                    ? t('hostAccess.applying')
+                                    : t('hostAccess.unlock')}
+                            </Button>
+                        )}
+                        {controlError && (
+                            <p className="mt-2 text-xs text-destructive" role="alert">{controlError}</p>
+                        )}
+                    </CardHeader>
+                </Card>
+            </main>
+        );
     }
 
     return (
@@ -169,11 +296,32 @@ export default function HostAccessStatusPage() {
                             {counts.files > 0 && <ActivityBadge icon={Files} label={t('hostAccess.files')} />}
                             {counts.transfer > 0 && <ActivityBadge icon={Upload} label={t('hostAccess.transfer')} />}
                         </div>
+                        <Button
+                            variant="destructive"
+                            size="sm"
+                            className="mt-3 w-full"
+                            disabled={pendingRequest !== null}
+                            onClick={() => void requestControl({ action: 'lock' })}
+                        >
+                            <LockKeyhole className="mr-2 h-4 w-4" aria-hidden="true" />
+                            {pendingRequest ? t('hostAccess.applying') : t('hostAccess.lockAll')}
+                        </Button>
+                        {controlError && (
+                            <p className="mt-2 text-xs text-destructive" role="alert">{controlError}</p>
+                        )}
                     </CardHeader>
                     <CollapsibleContent>
                         <CardContent className="max-h-[285px] space-y-3 overflow-y-auto border-t p-4">
                             {snapshot.sessions.map((session) => (
-                                <SessionDetails key={session.connection_id} session={session} />
+                                <SessionDetails
+                                    key={session.connection_id}
+                                    session={session}
+                                    disabled={pendingRequest !== null}
+                                    onDisconnect={(connectionId) => void requestControl({
+                                        action: 'disconnect',
+                                        connection_id: connectionId,
+                                    })}
+                                />
                             ))}
                         </CardContent>
                     </CollapsibleContent>
@@ -198,7 +346,15 @@ function ActivityBadge({
     );
 }
 
-function SessionDetails({ session }: { session: HostAccessSession }) {
+function SessionDetails({
+    session,
+    disabled,
+    onDisconnect,
+}: {
+    session: HostAccessSession;
+    disabled: boolean;
+    onDisconnect: (connectionId: string) => void;
+}) {
     const { t } = useTranslation();
     const actor = session.actor.display_name?.trim() || t('hostAccess.unknownActor');
     const source = t(`hostAccess.source.${session.actor.access_source}`);
@@ -240,6 +396,16 @@ function SessionDetails({ session }: { session: HostAccessSession }) {
                     })}
                 </div>
             )}
+            <Button
+                variant="outline"
+                size="sm"
+                className="mt-3 w-full"
+                disabled={disabled}
+                onClick={() => onDisconnect(session.connection_id)}
+            >
+                <LogOut className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
+                {t('hostAccess.disconnect')}
+            </Button>
         </section>
     );
 }

@@ -610,6 +610,15 @@ impl FileTransferDispatcher {
         }
     }
 
+    pub async fn active_transfer_count(&self) -> u32 {
+        self.inner
+            .lock()
+            .await
+            .activities
+            .len()
+            .min(u32::MAX as usize) as u32
+    }
+
     /// Apply an incoming file-transfer command. The bytes are either
     /// a JSON `FileTransferMessage` (control frame, `is_text=true`)
     /// or a binary chunk header + payload (`is_text=false`).

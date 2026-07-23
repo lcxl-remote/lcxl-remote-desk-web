@@ -4939,6 +4939,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "sha1",
+ "sha2",
  "strum",
  "strum_macros",
  "sysinfo",
@@ -4977,6 +4978,7 @@ name = "lcxl-remote-desk-tauri"
 version = "0.1.0"
 dependencies = [
  "actix-rt",
+ "anyhow",
  "awc",
  "clap",
  "config",

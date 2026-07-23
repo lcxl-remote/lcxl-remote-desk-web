@@ -34,6 +34,7 @@ const enSidebar = [
     items: [
       { text: 'Remote Control & Streaming', link: '/features/streaming' },
       { text: 'Remote Access Indicator', link: '/features/host-access-indicator' },
+      { text: 'Disconnect & Remote Access Lock', link: '/features/remote-access-lock' },
       { text: 'AI Diagnostics', link: '/features/ai-diagnostics' },
       { text: 'MCP Server', link: '/features/mcp-server' },
       { text: 'Terminal, Files & Clipboard', link: '/features/terminal-files-clipboard' },
@@ -94,6 +95,7 @@ const zhSidebar = [
     items: [
       { text: '远程控制与串流', link: '/zh/features/streaming' },
       { text: '被控端远程访问状态', link: '/zh/features/host-access-indicator' },
+      { text: '主动断开与远程访问锁定', link: '/zh/features/remote-access-lock' },
       { text: 'AI 诊断', link: '/zh/features/ai-diagnostics' },
       { text: 'MCP 服务', link: '/zh/features/mcp-server' },
       { text: '终端 / 文件 / 剪贴板', link: '/zh/features/terminal-files-clipboard' },

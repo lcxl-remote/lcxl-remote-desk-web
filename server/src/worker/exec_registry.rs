@@ -98,6 +98,20 @@ impl ExecRegistry {
     pub fn running(&self) -> usize {
         self.running.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
+
+    pub fn cancel_all(&self) -> u32 {
+        let entries = self
+            .running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for cancel in &entries {
+            cancel.cancel();
+        }
+        entries.len().min(u32::MAX as usize) as u32
+    }
 }
 
 #[cfg(test)]
@@ -148,5 +162,16 @@ mod tests {
             !*b.subscribe().borrow(),
             "an unrelated execution was stopped"
         );
+    }
+
+    #[test]
+    fn cancel_all_stops_every_running_execution() {
+        let registry = ExecRegistry::new();
+        let (first, _first_guard) = registry.register("gen-a");
+        let (second, _second_guard) = registry.register("gen-b");
+
+        assert_eq!(registry.cancel_all(), 2);
+        assert!(*first.subscribe().borrow());
+        assert!(*second.subscribe().borrow());
     }
 }

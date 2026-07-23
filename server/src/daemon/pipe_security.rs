@@ -116,6 +116,68 @@ pub fn query_session_user_sid(session_id: u32) -> std::io::Result<Option<String>
     }
 }
 
+/// Return the SID of the account running the daemon process.
+///
+/// `WTSQueryUserToken` requires privileges normally held by a Windows service.
+/// A portable daemon runs as the interactive user and therefore cannot always
+/// query the active-session token. In that mode its own token is the narrow,
+/// correct fallback for a local-control pipe: it grants access to the same
+/// account without widening the ACL to Authenticated Users or Everyone.
+#[cfg(target_os = "windows")]
+pub fn query_current_process_user_sid() -> std::io::Result<String> {
+    use std::ffi::c_void;
+    use std::io::{Error, ErrorKind};
+    use std::ptr::null_mut;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_core::PWSTR;
+
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).map_err(|error| {
+            Error::other(format!("OpenProcessToken(current process) failed: {error}"))
+        })?;
+
+        let result = (|| -> std::io::Result<String> {
+            let mut needed = 0u32;
+            let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed);
+            if needed == 0 {
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "GetTokenInformation(TokenUser) returned needed=0",
+                ));
+            }
+
+            let mut buffer = vec![0u8; needed as usize];
+            GetTokenInformation(
+                token,
+                TokenUser,
+                Some(buffer.as_mut_ptr() as *mut c_void),
+                needed,
+                &mut needed,
+            )
+            .map_err(|error| {
+                Error::other(format!("GetTokenInformation(TokenUser) failed: {error}"))
+            })?;
+
+            let token_user = &*(buffer.as_ptr() as *const TOKEN_USER);
+            let mut sid = PWSTR(null_mut());
+            ConvertSidToStringSidW(token_user.User.Sid, &mut sid)
+                .map_err(|error| Error::other(format!("ConvertSidToStringSidW failed: {error}")))?;
+            let user_id = sid
+                .to_string()
+                .map_err(|error| Error::other(format!("invalid UTF-16 in SID: {error}")))?;
+            let _ = LocalFree(Some(HLOCAL(sid.0 as *mut _)));
+            Ok(user_id)
+        })();
+
+        let _ = CloseHandle(token);
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +222,15 @@ mod tests {
     #[test]
     fn sddl_with_empty_user_sid_treated_as_none() {
         assert_eq!(build_pipe_sddl(Some("")), build_pipe_sddl(None));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn current_process_user_sid_can_secure_portable_pipe() {
+        let sid = query_current_process_user_sid().unwrap();
+        assert!(sid.starts_with("S-1-"));
+        let sddl = build_pipe_sddl(Some(&sid));
+        assert!(sddl.contains(&format!("(A;;GA;;;{sid})")));
+        assert!(!sddl.contains(";;;WD"));
     }
 }

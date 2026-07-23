@@ -241,6 +241,7 @@ pub async fn run_signaling_proxy(
                     false,
                     None,
                     None,
+                    RemoteAccessCentralLink::Local,
                 )
                 .await;
 
@@ -280,6 +281,7 @@ pub async fn run_signaling_proxy(
                         false,
                         None,
                         None,
+                        RemoteAccessCentralLink::RemoteSignal,
                     )
                     .await;
                 }
@@ -325,6 +327,7 @@ pub async fn run_signaling_proxy(
                         true,
                         Some(manager_link_state.clone()),
                         Some(manager_link_gate.subscribe()),
+                        RemoteAccessCentralLink::Manager,
                     )
                     .await;
 
@@ -1034,6 +1037,17 @@ pub async fn run_signaling_proxy(
                     ),
                 }
             }
+            WorkerToService::RemoteAccessStateApplied(payload) => {
+                worker_mgr.complete_remote_access_ack(payload.clone());
+                info!(
+                    "[SignalingProxy] Worker applied remote-access state: operation_id={}, version={}, cancelled_terminals={}, cancelled_transfers={}, cancelled_execs={}",
+                    payload.operation_id,
+                    payload.state_version,
+                    payload.cancelled_terminals,
+                    payload.cancelled_transfers,
+                    payload.cancelled_execs,
+                );
+            }
         }
     }
 
@@ -1334,6 +1348,69 @@ fn redact_token_in_url(raw: &str) -> String {
     url.to_string()
 }
 
+fn pending_remote_access_frame(hub: &HostControlHub) -> Option<String> {
+    let coordinator = hub.remote_access_coordinator()?;
+    let request = coordinator.pending_central_request()?;
+    let data = serde_json::to_value(&request).ok()?;
+    serde_json::to_string(&SignalingModel::new(
+        &request.request_id,
+        SignalingType::HostRemoteAccessLockRequest,
+        None,
+        None,
+        Some(data),
+        None,
+    ))
+    .ok()
+}
+
+async fn consume_remote_access_ack(text: &str, hub: &HostControlHub) -> bool {
+    let Ok(model) = serde_json::from_str::<SignalingModel>(text) else {
+        return false;
+    };
+    match model.signaling_type {
+        SignalingType::HostRemoteAccessLockAck => {
+            let Ok(ack) = model
+                .get_data::<desk_signal_facade::model::remote_access::HostRemoteAccessLockAck>()
+            else {
+                warn!("[remote-access] malformed central lock ack dropped");
+                return true;
+            };
+            if ack.request_id != model.request_id {
+                warn!("[remote-access] central lock ack request id mismatch");
+                return true;
+            }
+            if let Some(coordinator) = hub.remote_access_coordinator() {
+                match coordinator.acknowledge_central(&ack).await {
+                    Ok(true) => info!(
+                        "[remote-access] central mirror acknowledged version {}",
+                        ack.state_version
+                    ),
+                    Ok(false) => warn!(
+                        "[remote-access] stale or mismatched central ack ignored (version {})",
+                        ack.state_version
+                    ),
+                    Err(error) => {
+                        error!("[remote-access] could not persist central ack: {error:#}")
+                    }
+                }
+            }
+            true
+        }
+        SignalingType::TerminateRemotePeerAck => {
+            if let Ok(ack) =
+                model.get_data::<desk_signal_facade::model::remote_access::TerminateRemotePeerAck>()
+            {
+                info!(
+                    "[remote-access] peer eviction {} for {}: {:?}",
+                    ack.operation_id, ack.target_connection_id, ack.outcome
+                );
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 async fn maintain_proxy_connection(
     settings: web::Data<SharedSettings>,
     router_ctx: &RouterContext,
@@ -1353,6 +1430,9 @@ async fn maintain_proxy_connection(
     // the local loopback and bare remote-signaling relays, which the manager
     // toggle does not govern.
     mut manager_link_enabled_rx: Option<watch::Receiver<bool>>,
+    // Candidate kind used to elect exactly one authoritative mirror dynamically:
+    // manager > configured remote signal > embedded local signal.
+    remote_access_central_link: RemoteAccessCentralLink,
 ) -> Result<ProxyConnectionOutcome, Box<dyn std::error::Error>> {
     let display_name = {
         let s = settings.read().await;
@@ -1460,6 +1540,17 @@ async fn maintain_proxy_connection(
     }
 
     let (mut sink, mut stream) = framed.split();
+    let mut remote_access_reconcile = tokio::time::interval(Duration::from_secs(2));
+    remote_access_reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut remote_access_commands = if remote_access_central_link != RemoteAccessCentralLink::None
+    {
+        router_ctx
+            .host_control_hub
+            .remote_access_coordinator()
+            .map(|coordinator| coordinator.subscribe_central_commands())
+    } else {
+        None
+    };
 
     // Close a race where the manager link is disabled after `connect()` but
     // before this read loop parks on the gate: read the current value first and
@@ -1489,6 +1580,19 @@ async fn maintain_proxy_connection(
                                         continue;
                                     }
                                 };
+                                if remote_access_link_is_primary(
+                                    &settings,
+                                    remote_access_central_link,
+                                )
+                                .await
+                                    && consume_remote_access_ack(
+                                        &text_str,
+                                        &router_ctx.host_control_hub,
+                                    )
+                                    .await
+                                {
+                                    continue;
+                                }
                                 match handle_inbound_signaling_text(
                                     text_str,
                                     router_ctx,
@@ -1553,6 +1657,26 @@ async fn maintain_proxy_connection(
                 }
             }
 
+            _ = remote_access_reconcile.tick(), if remote_access_central_link != RemoteAccessCentralLink::None => {
+                if remote_access_link_is_primary(&settings, remote_access_central_link).await
+                    && let Some(frame) = pending_remote_access_frame(&router_ctx.host_control_hub)
+                    && let Err(error) = sink.send(awc::ws::Message::Text(frame.into())).await
+                {
+                    error!("[remote-access] central mirror send failed: {error}");
+                    break;
+                }
+            }
+
+            command = receive_remote_access_command(&mut remote_access_commands), if remote_access_central_link != RemoteAccessCentralLink::None => {
+                if remote_access_link_is_primary(&settings, remote_access_central_link).await
+                    && let Some(command) = command
+                    && let Err(error) = sink.send(awc::ws::Message::Text(command.into())).await
+                {
+                    error!("[remote-access] peer eviction send failed: {error}");
+                    break;
+                }
+            }
+
             // Manager / support upstreams only: tear the connection down when the
             // host disables the manager link at runtime. `None` links resolve a
             // never-completing future, so this branch is inert for them.
@@ -1585,6 +1709,79 @@ async fn wait_manager_link_disabled(rx: &mut Option<watch::Receiver<bool>>) {
             let _ = rx.wait_for(|enabled| !*enabled).await;
         }
         None => std::future::pending::<()>().await,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteAccessCentralLink {
+    None,
+    Local,
+    RemoteSignal,
+    Manager,
+}
+
+async fn remote_access_link_is_primary(
+    settings: &web::Data<SharedSettings>,
+    candidate: RemoteAccessCentralLink,
+) -> bool {
+    let settings = settings.read().await;
+    let manager = manager_link_should_connect(
+        &settings.system.manager_url,
+        &settings.system.manager_api_token,
+        settings.system.manager_enabled,
+    );
+    let remote_signal = settings
+        .system
+        .signaling_url
+        .as_ref()
+        .is_some_and(|value| !value.is_empty())
+        && settings
+            .system
+            .signaling_token
+            .as_ref()
+            .is_some_and(|value| !value.is_empty());
+    let primary =
+        select_remote_access_central_link(manager, remote_signal, &settings.args.startup_mode);
+    candidate == primary
+}
+
+fn select_remote_access_central_link(
+    manager: bool,
+    remote_signal: bool,
+    startup_mode: &StartupMode,
+) -> RemoteAccessCentralLink {
+    if manager {
+        RemoteAccessCentralLink::Manager
+    } else if remote_signal {
+        RemoteAccessCentralLink::RemoteSignal
+    } else if matches!(
+        startup_mode,
+        StartupMode::Default | StartupMode::ServiceDaemon
+    ) {
+        // Both modes run an embedded signal endpoint and maintain a loopback
+        // Server connection to it. ServiceDaemon must elect that connection as
+        // the durable mirror when no external central is configured; otherwise
+        // a successful local LockAll remains pending forever.
+        RemoteAccessCentralLink::Local
+    } else {
+        RemoteAccessCentralLink::None
+    }
+}
+
+async fn receive_remote_access_command(
+    rx: &mut Option<broadcast::Receiver<String>>,
+) -> Option<String> {
+    let Some(rx) = rx else {
+        return std::future::pending::<Option<String>>().await;
+    };
+    loop {
+        match rx.recv().await {
+            Ok(command) => return Some(command),
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                warn!("[remote-access] skipped {skipped} stale peer eviction commands");
+            }
+            Err(broadcast::error::RecvError::Closed) => return None,
+        }
     }
 }
 
@@ -2803,6 +3000,30 @@ mod tests {
             &Some(String::new()),
             None
         ));
+    }
+
+    #[test]
+    fn remote_access_central_link_uses_service_daemon_loopback() {
+        assert_eq!(
+            select_remote_access_central_link(false, false, &StartupMode::Default),
+            RemoteAccessCentralLink::Local
+        );
+        assert_eq!(
+            select_remote_access_central_link(false, false, &StartupMode::ServiceDaemon),
+            RemoteAccessCentralLink::Local
+        );
+        assert_eq!(
+            select_remote_access_central_link(false, false, &StartupMode::DeskServer),
+            RemoteAccessCentralLink::None
+        );
+        assert_eq!(
+            select_remote_access_central_link(false, true, &StartupMode::ServiceDaemon),
+            RemoteAccessCentralLink::RemoteSignal
+        );
+        assert_eq!(
+            select_remote_access_central_link(true, true, &StartupMode::ServiceDaemon),
+            RemoteAccessCentralLink::Manager
+        );
     }
 
     #[test]

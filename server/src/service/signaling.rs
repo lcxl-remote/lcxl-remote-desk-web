@@ -444,6 +444,27 @@ impl DeskSession {
         Ok(())
     }
 
+    /// Cancel all worker-owned remote activity while keeping the session object
+    /// reusable for a later authenticated unlock.
+    pub async fn cancel_all_remote_activity(&mut self) -> u32 {
+        let terminals = std::mem::take(&mut self.terminal_map);
+        let cancelled = terminals.len().min(u32::MAX as usize) as u32;
+        for terminal in terminals.into_values() {
+            let child_arc = terminal.child.clone();
+            drop(terminal);
+            if let Ok(mut child) = child_arc.lock() {
+                if let Some(pid) = child.process_id() {
+                    force_kill_terminal_process(pid);
+                }
+                let _ = child.kill();
+            }
+        }
+        self.file_browse_permissions.clear();
+        self.file_delete_permissions.clear();
+        self.opened_file_managers.clear();
+        cancelled
+    }
+
     /// Dispatch a worker-owned signaling message produced by the daemon's
     /// typed-IPC fan-out. Daemon-owned types (`RequestRemote`, `Offer`,
     /// `Answer`, `Canid`, `RequireControl`, `CloseControl`,

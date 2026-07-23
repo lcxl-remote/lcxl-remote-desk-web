@@ -147,6 +147,22 @@ pub enum SignalingType {
     #[wincode(tag = 212)]
     RevokeAccessGrant = 212,
 
+    /// Host → central durable mirror update for emergency remote-access lock.
+    #[wincode(tag = 213)]
+    HostRemoteAccessLockRequest = 213,
+
+    /// Central → host acknowledgement of a committed lock-mirror update.
+    #[wincode(tag = 214)]
+    HostRemoteAccessLockAck = 214,
+
+    /// Host → central request to close one browser peer after local teardown.
+    #[wincode(tag = 215)]
+    TerminateRemotePeerRequest = 215,
+
+    /// Central → host delivery outcome for a peer termination request.
+    #[wincode(tag = 216)]
+    TerminateRemotePeerAck = 216,
+
     #[wincode(tag = 301)]
     UpdateDeskSettings = 301,
 
@@ -1031,8 +1047,8 @@ pub trait TurnProvider: Send + Sync {
 
 #[cfg(test)]
 mod wincode_tests {
-    //! Wincode `SignalingType` coverage. The enum has 38 variants with
-    //! explicit `#[repr(i32)]` discriminants, and the wincode tag is
+    //! Wincode `SignalingType` coverage. Every variant has an explicit
+    //! `#[repr(i32)]` discriminant, and the wincode tag is
     //! locked to `i32` via `#[wincode(tag_encoding = "i32")]` so the
     //! daemon ↔ worker wire bytes use the same number the JSON wire
     //! emits (via `Serialize_repr`).
@@ -1053,88 +1069,20 @@ mod wincode_tests {
     //!     with the `repr(i32)` discriminant for a single variant
     //!     (e.g. typo `tag = 101` on a `= 102` variant) would still
     //!     pass round-trip — encode + decode would both use the same
-    //!     wrong tag. Only by asserting against the *expected*
-    //!     discriminant separately do we catch tag drift.
+    //!     wrong tag. Comparing the encoded tag directly with the
+    //!     variant's `repr(i32)` discriminant catches that drift.
     use super::*;
+    use strum::IntoEnumIterator as _;
     use wincode::config::{Configuration, PREALLOCATION_SIZE_LIMIT_DISABLED};
 
     fn unbounded_config() -> Configuration<true, PREALLOCATION_SIZE_LIMIT_DISABLED> {
         Configuration::new()
     }
 
-    /// Table of every `SignalingType` variant paired with the explicit
-    /// `i32` discriminant it carries. When a new variant is added to
-    /// the enum, this table must be extended — leaving it incomplete
-    /// is precisely the regression `signaling_type_wire_tag_matches_…`
-    /// is built to catch.
-    fn all_variants_with_tag() -> [(SignalingType, i32); 59] {
-        [
-            (SignalingType::Heartbeat, 1),
-            (SignalingType::FetchConnections, 21),
-            (SignalingType::ConnectionList, 22),
-            (SignalingType::ConnectionRemoved, 23),
-            (SignalingType::RequestRemote, 100),
-            (SignalingType::Init, 101),
-            (SignalingType::Offer, 102),
-            (SignalingType::Answer, 103),
-            (SignalingType::Canid, 104),
-            (SignalingType::RequireControl, 201),
-            (SignalingType::AcceptControl, 202),
-            (SignalingType::DenyControl, 203),
-            (SignalingType::CloseControl, 204),
-            (SignalingType::ChangeDisplaySettings, 205),
-            (SignalingType::EnablePrivateScreen, 206),
-            (SignalingType::PrivateScreenStateChanged, 207),
-            (SignalingType::AudioPlaybackError, 208),
-            (SignalingType::UpdateDeskSettings, 301),
-            (SignalingType::DesktopSwitching, 500),
-            (SignalingType::DesktopReady, 501),
-            (SignalingType::AgentRequest, 600),
-            (SignalingType::AgentResponse, 601),
-            (SignalingType::Diagnose, 602),
-            (SignalingType::DiagnoseEvent, 603),
-            (SignalingType::DiagnoseCancel, 604),
-            (SignalingType::ConfirmExec, 605),
-            (SignalingType::ExecPreview, 606),
-            (SignalingType::ResolveExec, 607),
-            (SignalingType::ExecResult, 609),
-            (SignalingType::AiAuditEvent, 608),
-            (SignalingType::CommandTemplateSync, 610),
-            (SignalingType::CollectRequest, 611),
-            (SignalingType::CollectResponse, 612),
-            (SignalingType::EdgeExecRequest, 613),
-            (SignalingType::EdgeExecResult, 614),
-            (SignalingType::RemoteToolRequest, 615),
-            (SignalingType::RemoteToolResponse, 616),
-            (SignalingType::TerminalCopilotAsk, 617),
-            (SignalingType::TerminalCopilotEvent, 618),
-            (SignalingType::TerminalCopilotCancel, 619),
-            (SignalingType::TerminalCompleteAsk, 620),
-            (SignalingType::TerminalCompleteResult, 621),
-            (SignalingType::CommandBlocklistSync, 622),
-            (SignalingType::ManagerSystemInfo, 10003),
-            (SignalingType::ManagerSystemStatue, 10004),
-            (SignalingType::ManagerFileList, 10005),
-            (SignalingType::ManagerFileDelete, 10006),
-            (SignalingType::StartTerminal, 10007),
-            (SignalingType::SendDataToTerminal, 10008),
-            (SignalingType::ResizeTerminal, 10009),
-            (SignalingType::CloseTerminal, 10010),
-            (SignalingType::ReplyFromTerminal, 10011),
-            (SignalingType::ListTerminal, 10012),
-            (SignalingType::TerminalStarted, 10013),
-            (SignalingType::TerminalClosed, 10014),
-            (SignalingType::ManagerQuerySettings, 10015),
-            (SignalingType::ManagerUpdateSettings, 10016),
-            (SignalingType::Error, -1),
-            (SignalingType::Unknown, -100),
-        ]
-    }
-
     #[test]
     fn signaling_type_round_trips_wincode() {
         let config = unbounded_config();
-        for (variant, _expected) in all_variants_with_tag() {
+        for variant in SignalingType::iter() {
             let bytes = wincode::config::serialize(&variant, config)
                 .unwrap_or_else(|err| panic!("encode {variant:?}: {err}"));
             let back: SignalingType = wincode::config::deserialize(&bytes, config)
@@ -1149,13 +1097,13 @@ mod wincode_tests {
     #[test]
     fn signaling_type_wire_tag_matches_discriminant_for_all_variants() {
         let config = unbounded_config();
-        for (variant, expected_tag) in all_variants_with_tag() {
+        for variant in SignalingType::iter() {
             let bytes = wincode::config::serialize(&variant, config)
                 .unwrap_or_else(|err| panic!("encode {variant:?}: {err}"));
             assert!(bytes.len() >= 4, "{variant:?} produced fewer than 4 bytes",);
             let tag = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             assert_eq!(
-                tag, expected_tag,
+                tag, variant as i32,
                 "wincode wire tag for {variant:?} does not match its repr(i32) discriminant",
             );
         }

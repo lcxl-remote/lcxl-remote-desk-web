@@ -48,6 +48,45 @@ impl HostAccessSession {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostRemoteAccessMode {
+    Unlocked,
+    Locked,
+    RecoveryLocked,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CentralSyncState {
+    NotRequired,
+    Pending,
+    Synced,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct HostRemoteAccessStatus {
+    pub mode: HostRemoteAccessMode,
+    pub state_version: u64,
+    pub locked_at: Option<String>,
+    /// False means the running process is fail-closed but the latest transition
+    /// could not be committed and may not survive a restart.
+    pub durable: bool,
+    pub central_sync: CentralSyncState,
+}
+
+impl Default for HostRemoteAccessStatus {
+    fn default() -> Self {
+        Self {
+            mode: HostRemoteAccessMode::Unlocked,
+            state_version: 0,
+            locked_at: None,
+            durable: true,
+            central_sync: CentralSyncState::NotRequired,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct HostAccessSnapshot {
     pub epoch: String,
@@ -55,6 +94,7 @@ pub struct HostAccessSnapshot {
     pub indicator_enabled: bool,
     pub total_session_count: u32,
     pub sessions: Vec<HostAccessSession>,
+    pub remote_access: HostRemoteAccessStatus,
 }
 
 /// Identifies the role of a client connecting to the hub's WS endpoint.
@@ -294,6 +334,7 @@ mod tests {
                         file_manager: false,
                         transfers: Vec::new(),
                     }],
+                    remote_access: HostRemoteAccessStatus::default(),
                 },
             },
             HostControlMessage::ServiceOp {

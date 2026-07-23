@@ -306,6 +306,7 @@ mod tests {
             indicator_enabled: false,
             total_session_count: 0,
             sessions: Vec::new(),
+            remote_access: lcxl_remote_desk_server::host_control::HostRemoteAccessStatus::default(),
         };
 
         handle_server_msg(

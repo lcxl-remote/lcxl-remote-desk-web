@@ -214,6 +214,11 @@ pub async fn handle_signaling(
             ),
         ),
     );
+    let remote_access_control =
+        std::sync::Arc::new(crate::remote_access::SignalRemoteAccessControl::new(
+            crate::db::get_db().clone(),
+            connection_map.clone().into_inner(),
+        ));
 
     let mut handler = SignalingHandler::init(
         connection_id,
@@ -230,7 +235,9 @@ pub async fn handle_signaling(
     .await?
     .with_control_authorizer(control_authorizer)
     .with_request_remote_authorizer(request_remote_authorizer)
-    .with_collect_observer(collect_observer);
+    .with_collect_observer(collect_observer)
+    .with_remote_access_admission_authorizer(remote_access_control.clone())
+    .with_host_remote_access_controller(remote_access_control);
 
     handler.do_handle_signaling(stream).await?;
     Ok(())

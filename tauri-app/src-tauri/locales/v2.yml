@@ -5,6 +5,21 @@ host_access_title:
 host_access_started:
   en: This device is currently being accessed remotely.
   zh-CN: 当前设备正在被远程访问。
+host_access_lock_confirm:
+  en: Disconnect every remote session and lock new remote access until local authentication?
+  zh-CN: 立即断开所有远程会话并拒绝新的远程访问，直到在本机完成身份认证后解锁？
+host_access_disconnect_confirm:
+  en: Disconnect this remote session now?
+  zh-CN: 立即断开这个远程会话？
+host_access_connection:
+  en: Connection
+  zh-CN: 连接
+host_access_exit_confirm:
+  en: Remote access is active or locked. Exiting only closes this UI; a safety lock remains locked. Exit anyway?
+  zh-CN: 远程访问仍在进行或已锁定。退出只会关闭界面，安全锁仍会保持。仍要退出吗？
+host_access_dialog_title:
+  en: LCXL Remote Desktop
+  zh-CN: LCXL 远程桌面
 security_approval_title:
   en: "Security Approval Required"
   zh-CN: "需要安全授权"

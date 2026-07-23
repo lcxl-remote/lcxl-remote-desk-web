@@ -106,6 +106,7 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
 
     log::info!("[ServiceShell] starting; daemon ws endpoint = ws://127.0.0.1:8082/ws/tauri_ipc");
     let ipc_token = settings.system.tauri_ipc_token.clone().unwrap_or_default();
+    let remote_access_config_path = settings.args.config_file_path.clone();
     log::info!(
         "[ServiceShell] ipc_token len={} (empty={})",
         ipc_token.len(),
@@ -182,8 +183,12 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                 daemon_url.clone(),
             );
             sa_manager.start(sa_rx);
-            host_access_status::HostAccessStatusManager::new(handle.clone(), daemon_url.clone())
-                .start(host_access_rx);
+            host_access_status::HostAccessStatusManager::new(
+                handle.clone(),
+                daemon_url.clone(),
+                &remote_access_config_path,
+            )
+            .start(host_access_rx);
 
             // Tray: show + quit only (no elevate in service-shell mode).
             {
@@ -209,8 +214,9 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                     .tooltip("LCXL Remote Desktop")
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "quit" => {
-                            if HOST_ACCESS_BLOCKS_EXIT.load(Ordering::SeqCst) {
-                                log::warn!("Exit ignored while remote access is active");
+                            if HOST_ACCESS_BLOCKS_EXIT.load(Ordering::SeqCst)
+                                && !confirm_exit_with_remote_access()
+                            {
                                 return;
                             }
                             IS_EXITING.store(true, Ordering::SeqCst);
@@ -646,6 +652,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
             host_access_status::HostAccessStatusManager::new(
                 handle.clone(),
                 frontend_url.clone(),
+                &settings.args.config_file_path,
             )
             .start(host_access_rx);
 
@@ -765,8 +772,9 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
                         "quit" => {
-                            if HOST_ACCESS_BLOCKS_EXIT.load(Ordering::SeqCst) {
-                                log::warn!("Exit ignored while remote access is active");
+                            if HOST_ACCESS_BLOCKS_EXIT.load(Ordering::SeqCst)
+                                && !confirm_exit_with_remote_access()
+                            {
                                 return;
                             }
                             IS_EXITING.store(true, Ordering::SeqCst);
@@ -994,4 +1002,73 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
         }
     });
     Ok(())
+}
+
+/// Exiting the UI must never imply unlocking the daemon. This confirmation is
+/// intentionally native because the status window itself may be the last
+/// remaining webview and must not be trusted to reinterpret the choice.
+#[cfg(target_os = "windows")]
+fn confirm_exit_with_remote_access() -> bool {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IDYES, MB_ICONWARNING, MB_SETFOREGROUND, MB_YESNO, MessageBoxW,
+    };
+    use windows::core::PCWSTR;
+
+    let text_value = rust_i18n::t!("host_access_exit_confirm");
+    let text: Vec<u16> = std::ffi::OsStr::new(text_value.as_ref())
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let title_value = rust_i18n::t!("host_access_dialog_title");
+    let title: Vec<u16> = std::ffi::OsStr::new(title_value.as_ref())
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND,
+        ) == IDYES
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn confirm_exit_with_remote_access() -> bool {
+    std::process::Command::new("zenity")
+        .arg("--question")
+        .arg(format!(
+            "--title={}",
+            rust_i18n::t!("host_access_dialog_title")
+        ))
+        .arg(format!(
+            "--text={}",
+            rust_i18n::t!("host_access_exit_confirm")
+        ))
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(target_os = "macos")]
+fn confirm_exit_with_remote_access() -> bool {
+    let message = serde_json::to_string(rust_i18n::t!("host_access_exit_confirm").as_ref())
+        .unwrap_or_else(|_| "\"Exit?\"".to_string());
+    let title = serde_json::to_string(rust_i18n::t!("host_access_dialog_title").as_ref())
+        .unwrap_or_else(|_| "\"LCXL Remote Desktop\"".to_string());
+    let script = format!(
+        "display dialog {message} with title {title} buttons {{\"Cancel\", \"Exit\"}} default button \"Cancel\" with icon caution"
+    );
+    std::process::Command::new("osascript")
+        .args([
+            "-e",
+            &script,
+            "-e",
+            "if button returned of result is \"Exit\" then return \"yes\"",
+        ])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("yes")
+        })
 }

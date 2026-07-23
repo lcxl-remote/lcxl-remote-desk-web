@@ -1,15 +1,24 @@
-use lcxl_remote_desk_server::host_control::HostAccessSnapshot;
+use lcxl_remote_desk_server::{
+    daemon::{
+        local_access_control::HostAccessControlAction,
+        local_access_control_transport::{endpoint_for_config, execute_native},
+    },
+    host_control::{HostAccessSnapshot, HostRemoteAccessMode},
+};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use tauri::{
-    AppHandle, LogicalSize, Manager, Monitor, PhysicalPosition, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder,
+    AppHandle, Listener, LogicalSize, Manager, Monitor, PhysicalPosition, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder,
 };
 use tauri_plugin_notification::NotificationExt;
 use url::Url;
 
 const STATUS_WINDOW_WIDTH: f64 = 460.0;
-const STATUS_WINDOW_COLLAPSED_HEIGHT: f64 = 154.0;
-const STATUS_WINDOW_EXPANDED_HEIGHT: f64 = 420.0;
+const STATUS_WINDOW_COLLAPSED_HEIGHT: f64 = 250.0;
+const STATUS_WINDOW_LOCKED_HEIGHT: f64 = 390.0;
+const STATUS_WINDOW_EXPANDED_HEIGHT: f64 = 620.0;
 const STATUS_WINDOW_MARGIN: i32 = 16;
 const MONITOR_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 pub(crate) const STATUS_LABEL_PREFIX: &str = "host-access-status-";
@@ -23,6 +32,33 @@ pub enum HostAccessStatusCommand {
 pub struct HostAccessStatusManager {
     app_handle: AppHandle,
     frontend_url: String,
+    control_endpoint: PathBuf,
+    control_config: String,
+}
+
+const CONTROL_EVENT: &str = "lcxl-host-access-control";
+const CONTROL_RESULT_EVENT: &str = "lcxl-host-access-control-result";
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum UiControlAction {
+    Lock,
+    Unlock { expected_version: u64 },
+    Disconnect { connection_id: String },
+}
+
+#[derive(Debug, Deserialize)]
+struct UiControlRequest {
+    request_id: String,
+    #[serde(flatten)]
+    action: UiControlAction,
+}
+
+#[derive(Debug, Serialize)]
+struct UiControlResult {
+    request_id: String,
+    ok: bool,
+    error: Option<String>,
 }
 
 #[derive(Default)]
@@ -35,14 +71,21 @@ struct StatusState {
 }
 
 impl HostAccessStatusManager {
-    pub fn new(app_handle: AppHandle, frontend_url: String) -> Self {
+    pub fn new(app_handle: AppHandle, frontend_url: String, config_file_path: &str) -> Self {
         Self {
             app_handle,
             frontend_url,
+            control_endpoint: endpoint_for_config(config_file_path),
+            control_config: config_file_path.to_string(),
         }
     }
 
     pub fn start(&self, receiver: std::sync::mpsc::Receiver<HostAccessStatusCommand>) {
+        install_control_listener(
+            &self.app_handle,
+            self.control_endpoint.clone(),
+            self.control_config.clone(),
+        );
         let app_handle = self.app_handle.clone();
         let frontend_url = self.frontend_url.clone();
         std::thread::spawn(move || {
@@ -57,8 +100,7 @@ impl HostAccessStatusManager {
                             let was_active = state.active;
                             state.epoch = Some(snapshot.epoch.clone());
                             state.revision = snapshot.revision;
-                            state.active =
-                                snapshot.indicator_enabled && snapshot.total_session_count > 0;
+                            state.active = snapshot_should_display(&snapshot);
                             state.snapshot = Some(snapshot.clone());
                             crate::HOST_ACCESS_BLOCKS_EXIT
                                 .store(state.active, std::sync::atomic::Ordering::SeqCst);
@@ -77,7 +119,9 @@ impl HostAccessStatusManager {
                                 &mut state.labels,
                             );
                             update_tray(&app_handle, true, snapshot.total_session_count as usize);
-                            if !was_active {
+                            if !was_active
+                                && snapshot.remote_access.mode == HostRemoteAccessMode::Unlocked
+                            {
                                 show_started_notification(&app_handle);
                             }
                         }
@@ -117,11 +161,289 @@ impl HostAccessStatusManager {
     }
 }
 
+fn install_control_listener(app_handle: &AppHandle, endpoint: PathBuf, config_file_path: String) {
+    let handle = app_handle.clone();
+    app_handle.listen(CONTROL_EVENT, move |event| {
+        let request = match serde_json::from_str::<UiControlRequest>(event.payload()) {
+            Ok(request) => request,
+            Err(error) => {
+                log::warn!("Rejected malformed host-access control event: {error}");
+                return;
+            }
+        };
+        if request.request_id.len() > 128
+            || request.request_id.is_empty()
+            || matches!(
+                &request.action,
+                UiControlAction::Disconnect { connection_id } if connection_id.is_empty() || connection_id.len() > 256
+            )
+        {
+            dispatch_control_result(
+                &handle,
+                &UiControlResult {
+                    request_id: request.request_id,
+                    ok: false,
+                    error: Some("invalid local control request".to_string()),
+                },
+            );
+            return;
+        }
+
+        let endpoint = endpoint.clone();
+        let config_file_path = config_file_path.clone();
+        let handle = handle.clone();
+        std::thread::spawn(move || {
+            let request_id = request.request_id.clone();
+            let result = execute_ui_control(&endpoint, &config_file_path, request);
+            dispatch_control_result(
+                &handle,
+                &UiControlResult {
+                    request_id,
+                    ok: result.is_ok(),
+                    error: result.err().map(|error| format!("{error:#}")),
+                },
+            );
+        });
+    });
+}
+
+fn execute_ui_control(
+    endpoint: &std::path::Path,
+    config_file_path: &str,
+    request: UiControlRequest,
+) -> anyhow::Result<()> {
+    let action = match request.action {
+        UiControlAction::Lock => {
+            if !confirm_safety_action(&rust_i18n::t!("host_access_lock_confirm")) {
+                anyhow::bail!("lock cancelled");
+            }
+            HostAccessControlAction::LockAll
+        }
+        UiControlAction::Disconnect { connection_id } => {
+            let suffix = connection_id
+                .chars()
+                .rev()
+                .take(8)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>();
+            let message = format!(
+                "{}\n\n{}: …{suffix}",
+                rust_i18n::t!("host_access_disconnect_confirm"),
+                rust_i18n::t!("host_access_connection")
+            );
+            if !confirm_safety_action(&message) {
+                anyhow::bail!("disconnect cancelled");
+            }
+            HostAccessControlAction::DisconnectConnection { connection_id }
+        }
+        UiControlAction::Unlock { expected_version } => {
+            if !desk_utils::permission::is_admin() {
+                return execute_elevated_unlock(config_file_path, expected_version);
+            }
+            HostAccessControlAction::Unlock { expected_version }
+        }
+    };
+    actix_rt::System::new().block_on(async move {
+        execute_native(endpoint, request.request_id, action)
+            .await
+            .map(|_| ())
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn confirm_safety_action(message: &str) -> bool {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IDYES, MB_ICONWARNING, MB_SETFOREGROUND, MB_YESNO, MessageBoxW,
+    };
+    use windows::core::PCWSTR;
+
+    let text: Vec<u16> = std::ffi::OsStr::new(message)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let title_text = rust_i18n::t!("host_access_dialog_title");
+    let title: Vec<u16> = std::ffi::OsStr::new(title_text.as_ref())
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND,
+        ) == IDYES
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn confirm_safety_action(message: &str) -> bool {
+    std::process::Command::new("zenity")
+        .arg("--question")
+        .arg(format!(
+            "--title={}",
+            rust_i18n::t!("host_access_dialog_title")
+        ))
+        .arg(format!("--text={message}"))
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(target_os = "macos")]
+fn confirm_safety_action(message: &str) -> bool {
+    let script = format!(
+        "display dialog {} with title {} buttons {{\"Cancel\", \"Continue\"}} default button \"Cancel\" with icon caution",
+        serde_json::to_string(message).unwrap_or_else(|_| "\"Confirm action?\"".into()),
+        serde_json::to_string(rust_i18n::t!("host_access_dialog_title").as_ref()).unwrap()
+    );
+    std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn dispatch_control_result(app_handle: &AppHandle, result: &UiControlResult) {
+    let Ok(json) = serde_json::to_string(result) else {
+        return;
+    };
+    let script = format!(
+        "window.dispatchEvent(new CustomEvent('{CONTROL_RESULT_EVENT}', {{ detail: {json} }}));"
+    );
+    for (label, window) in app_handle.webview_windows() {
+        if label.starts_with(STATUS_LABEL_PREFIX)
+            && let Err(error) = window.eval(&script)
+        {
+            log::warn!("Failed to deliver host-access control result: {error}");
+        }
+    }
+}
+
+fn sidecar_path() -> PathBuf {
+    let name = if cfg!(target_os = "windows") {
+        "lcxl-remote-desk-server.exe"
+    } else {
+        "lcxl-remote-desk-server"
+    };
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(name)))
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+fn absolute_config_path(config_file_path: &str) -> PathBuf {
+    std::path::absolute(config_file_path).unwrap_or_else(|_| PathBuf::from(config_file_path))
+}
+
+#[cfg(target_os = "windows")]
+fn execute_elevated_unlock(config_file_path: &str, expected_version: u64) -> anyhow::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::Win32::{
+        Foundation::{CloseHandle, WAIT_OBJECT_0},
+        System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject},
+        UI::{
+            Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW},
+            WindowsAndMessaging::SW_HIDE,
+        },
+    };
+    use windows::core::PCWSTR;
+
+    let sidecar = sidecar_path();
+    let config = crate::quote_cmd_arg(&absolute_config_path(config_file_path).to_string_lossy());
+    let params =
+        format!("access --config-file-path {config} unlock --expected-version {expected_version}");
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    let file: Vec<u16> = sidecar.as_os_str().encode_wide().chain(Some(0)).collect();
+    let parameters: Vec<u16> = params.encode_utf16().chain(Some(0)).collect();
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(parameters.as_ptr()),
+        nShow: SW_HIDE.0,
+        ..Default::default()
+    };
+    unsafe { ShellExecuteExW(&mut info)? };
+    if info.hProcess.is_invalid() {
+        anyhow::bail!("elevated unlock helper did not start");
+    }
+    let wait = unsafe { WaitForSingleObject(info.hProcess, INFINITE) };
+    if wait != WAIT_OBJECT_0 {
+        unsafe {
+            let _ = CloseHandle(info.hProcess);
+        }
+        anyhow::bail!("failed waiting for elevated unlock helper");
+    }
+    let mut exit_code = 1u32;
+    unsafe {
+        GetExitCodeProcess(info.hProcess, &mut exit_code)?;
+        let _ = CloseHandle(info.hProcess);
+    }
+    if exit_code != 0 {
+        anyhow::bail!("elevated unlock was cancelled or failed (exit code {exit_code})");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn execute_elevated_unlock(config_file_path: &str, expected_version: u64) -> anyhow::Result<()> {
+    let status = std::process::Command::new("pkexec")
+        .arg(sidecar_path())
+        .arg("access")
+        .arg("--config-file-path")
+        .arg(absolute_config_path(config_file_path))
+        .arg("unlock")
+        .arg("--expected-version")
+        .arg(expected_version.to_string())
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("elevated unlock was cancelled or failed");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn execute_elevated_unlock(config_file_path: &str, expected_version: u64) -> anyhow::Result<()> {
+    // `quoted form of` is implemented here without invoking a shell before the
+    // OS authentication dialog. The resulting shell command contains only
+    // single-quoted literal arguments.
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+    let command = format!(
+        "{} access --config-file-path {} unlock --expected-version {}",
+        shell_quote(&sidecar_path().to_string_lossy()),
+        shell_quote(&absolute_config_path(config_file_path).to_string_lossy()),
+        expected_version
+    );
+    let script = format!(
+        "do shell script {} with administrator privileges",
+        serde_json::to_string(&command)?
+    );
+    let status = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("elevated unlock was cancelled or failed");
+    }
+    Ok(())
+}
+
 fn accept_snapshot(state: &StatusState, snapshot: &HostAccessSnapshot) -> bool {
     match state.epoch.as_deref() {
         Some(epoch) if epoch == snapshot.epoch => snapshot.revision >= state.revision,
         _ => true,
     }
+}
+
+fn snapshot_should_display(snapshot: &HostAccessSnapshot) -> bool {
+    snapshot.remote_access.mode != HostRemoteAccessMode::Unlocked
+        || (snapshot.indicator_enabled && snapshot.total_session_count > 0)
 }
 
 fn resolve_physical_monitors(app_handle: &AppHandle) -> Vec<Monitor> {
@@ -205,6 +527,7 @@ fn build_status_window(
             let height = match title.as_str() {
                 "lcxl-host-access:expanded" => STATUS_WINDOW_EXPANDED_HEIGHT,
                 "lcxl-host-access:collapsed" => STATUS_WINDOW_COLLAPSED_HEIGHT,
+                "lcxl-host-access:locked" => STATUS_WINDOW_LOCKED_HEIGHT,
                 _ => return,
             };
             let _ = window.set_size(LogicalSize::new(STATUS_WINDOW_WIDTH, height));
@@ -403,7 +726,17 @@ mod tests {
             indicator_enabled: true,
             total_session_count: 0,
             sessions: Vec::new(),
+            remote_access: lcxl_remote_desk_server::host_control::HostRemoteAccessStatus::default(),
         }
+    }
+
+    #[test]
+    fn locked_status_is_visible_even_when_indicator_is_disabled() {
+        let mut value = snapshot("epoch", 1);
+        value.indicator_enabled = false;
+        value.remote_access.mode = HostRemoteAccessMode::Locked;
+
+        assert!(snapshot_should_display(&value));
     }
 
     #[test]
@@ -444,7 +777,7 @@ mod tests {
         );
         assert_eq!(
             capability["permissions"],
-            serde_json::json!(["core:window:allow-start-dragging"])
+            serde_json::json!(["core:window:allow-start-dragging", "core:event:allow-emit"])
         );
     }
 

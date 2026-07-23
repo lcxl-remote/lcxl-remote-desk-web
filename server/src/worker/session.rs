@@ -27,9 +27,10 @@ use desk_ipc_protocol::{
         ListTerminalResponsePayload, ManagerFileListResponsePayload,
         ManagerQuerySettingsResponsePayload, ManagerResponseRefPayload,
         ManagerSystemInfoResponsePayload, PrivateScreenStateChangedPayload,
-        ReplyFromTerminalPayload, ServiceToWorker, SignalingErrorPayload, StopMediaPayload,
-        TerminalClosedPayload, TerminalStartedPayload, VirtualDisplayAttachOutcome,
-        VirtualDisplayAttachResultPayload, WorkerInitPayload, WorkerToService,
+        RemoteAccessStateAppliedPayload, ReplyFromTerminalPayload, ServiceToWorker,
+        SignalingErrorPayload, StopMediaPayload, TerminalClosedPayload, TerminalStartedPayload,
+        VirtualDisplayAttachOutcome, VirtualDisplayAttachResultPayload, WorkerInitPayload,
+        WorkerToService,
     },
     transport::{read_message, write_message},
 };
@@ -53,7 +54,10 @@ const EXEC_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_s
 use log::{error, info, warn};
 use std::collections::HashSet;
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -713,6 +717,9 @@ impl WorkerSession {
 
         let shared_settings = Arc::new(SharedSettings::from(settings));
         let shared_settings_data = web::Data::from(shared_settings.clone());
+        let remote_access_locked = Arc::new(AtomicBool::new(init_payload.remote_access_locked));
+        let remote_access_state_version =
+            Arc::new(AtomicU64::new(init_payload.remote_access_state_version));
 
         // Telemetry init policy:
         //
@@ -951,8 +958,13 @@ impl WorkerSession {
         // task is allowed to terminate quietly.
         {
             let dispatcher = file_transfer_dispatcher.clone();
+            let remote_access_locked = Arc::clone(&remote_access_locked);
             tokio::spawn(async move {
                 while let Some(payload) = file_receiver.recv().await {
+                    if remote_access_locked.load(Ordering::Acquire) {
+                        warn!("Dropping file-lane command while remote access is locked");
+                        continue;
+                    }
                     dispatcher.handle_command(payload).await;
                 }
                 info!("File-lane drain task exiting (peer closed)");
@@ -1022,6 +1034,17 @@ impl WorkerSession {
                 msg_result = service_msg_rx.recv() => {
                     match msg_result {
                         Some(Some(msg)) => {
+                            if remote_access_locked.load(Ordering::Acquire)
+                                && !matches!(
+                                    &msg,
+                                    ServiceToWorker::Shutdown
+                                        | ServiceToWorker::Init(_)
+                                        | ServiceToWorker::SetRemoteAccessState(_)
+                                )
+                            {
+                                warn!("Dropping worker command while remote access is locked");
+                                continue;
+                            }
                             match msg {
                                 ServiceToWorker::Shutdown => {
                                     info!("Received Shutdown command");
@@ -1032,6 +1055,67 @@ impl WorkerSession {
                                 }
                                 ServiceToWorker::Init(_) => {
                                     warn!("Received duplicate Init, ignoring");
+                                }
+                                ServiceToWorker::SetRemoteAccessState(payload) => {
+                                    let current_version =
+                                        remote_access_state_version.load(Ordering::Acquire);
+                                    let was_locked =
+                                        remote_access_locked.load(Ordering::Acquire);
+                                    if payload.state_version > current_version {
+                                        remote_access_locked.store(payload.locked, Ordering::Release);
+                                        remote_access_state_version
+                                            .store(payload.state_version, Ordering::Release);
+                                    } else if payload.state_version == current_version
+                                        && payload.locked
+                                            != remote_access_locked.load(Ordering::Acquire)
+                                    {
+                                        error!(
+                                            "Conflicting remote-access state at version {}; failing closed",
+                                            payload.state_version
+                                        );
+                                        remote_access_locked.store(true, Ordering::Release);
+                                    }
+                                    let now_locked =
+                                        remote_access_locked.load(Ordering::Acquire);
+                                    let (cancelled_terminals, cancelled_transfers, cancelled_execs) =
+                                        if now_locked && !was_locked {
+                                            let cancelled_terminals = desk_session
+                                                .cancel_all_remote_activity()
+                                                .await;
+                                            let cancelled_transfers = file_transfer_dispatcher
+                                                .active_transfer_count()
+                                                .await;
+                                            file_transfer_dispatcher.shutdown().await;
+                                            let cancelled_execs = exec_registry.cancel_all();
+                                            input_dispatcher.shutdown();
+                                            if let Some(dispatcher) = clipboard_dispatcher.as_ref() {
+                                                dispatcher.shutdown().await;
+                                            }
+                                            whiteboard_dispatcher.shutdown().await;
+                                            connection_ceilings.clear_all().await;
+                                            if let Some(producer) = media_producer.as_ref() {
+                                                producer.shutdown();
+                                            }
+                                            (
+                                                cancelled_terminals,
+                                                cancelled_transfers,
+                                                cancelled_execs,
+                                            )
+                                        } else {
+                                            (0, 0, 0)
+                                        };
+                                    let _ = writer_tx.send(
+                                        WorkerToService::RemoteAccessStateApplied(
+                                            RemoteAccessStateAppliedPayload {
+                                                operation_id: payload.operation_id,
+                                                state_version: remote_access_state_version
+                                                    .load(Ordering::Acquire),
+                                                cancelled_terminals,
+                                                cancelled_transfers,
+                                                cancelled_execs,
+                                            },
+                                        ),
+                                    );
                                 }
                                 // Media-control IPC. Routed
                                 // straight to the producer; the producer
@@ -2222,6 +2306,8 @@ mod tests {
             media_pipe_name: None,
             file_pipe_name: None,
             config_file_path: None,
+            remote_access_locked: false,
+            remote_access_state_version: 1,
         }
     }
 

@@ -111,6 +111,8 @@ mod tests {
             media_pipe_name: None,
             file_pipe_name: None,
             config_file_path: None,
+            remote_access_locked: false,
+            remote_access_state_version: 1,
         });
 
         let mut buf = Vec::new();
@@ -170,6 +172,8 @@ mod tests {
             media_pipe_name: None,
             file_pipe_name: None,
             config_file_path: None,
+            remote_access_locked: false,
+            remote_access_state_version: 1,
         });
         let mut buf = Vec::new();
         let err = write_message(&mut buf, &msg).await.unwrap_err();

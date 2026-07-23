@@ -52,6 +52,10 @@ impl ConnectionCeilingStore {
         self.inner.write().await.remove(connection_id);
     }
 
+    pub async fn clear_all(&self) {
+        self.inner.write().await.clear();
+    }
+
     /// The validated ceiling for `connection_id`, if it was admitted under a
     /// grant. `None` means owner / unrestricted (global-only gating).
     pub async fn get(&self, connection_id: &str) -> Option<SecuritySettings> {

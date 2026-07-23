@@ -53,8 +53,9 @@ use desk_signal_facade::model::security_settings::DEFAULT_APPROVAL_TIMEOUT_SECS;
 use crate::model::security_approval::SecurityPermissionType;
 
 pub use protocol::{
-    ApprovalRequest, ApprovalResponse, ClientRole, HostAccessSession, HostAccessSnapshot,
-    HostControlMessage, HostFileTransferDirection, HostFileTransferSummary, ServiceOpKind,
+    ApprovalRequest, ApprovalResponse, CentralSyncState, ClientRole, HostAccessSession,
+    HostAccessSnapshot, HostControlMessage, HostFileTransferDirection, HostFileTransferSummary,
+    HostRemoteAccessMode, HostRemoteAccessStatus, ServiceOpKind,
 };
 pub use upstream::UpstreamForwarder;
 
@@ -123,6 +124,7 @@ pub enum HubMode {
 struct PendingEntry {
     response_tx: oneshot::Sender<ApprovalResponse>,
     permission_type: SecurityPermissionType,
+    from_connection_id: Option<String>,
     created_at: Instant,
 }
 
@@ -178,6 +180,9 @@ struct HubInner {
     /// Aggregator hubs to fail-fast or trigger Tauri-loss cleanup precisely.
     tauri_client_count: AtomicUsize,
     host_activity: crate::host_activity::HostActivityRegistry,
+    remote_access_gate: crate::daemon::remote_access::RemoteAccessGate,
+    remote_access_coordinator:
+        std::sync::OnceLock<Arc<crate::daemon::remote_access::RemoteAccessCoordinator>>,
 }
 
 /// The unified host control hub.
@@ -222,6 +227,8 @@ impl HostControlHub {
             upstream,
             tauri_client_count: AtomicUsize::new(0),
             host_activity,
+            remote_access_gate: crate::daemon::remote_access::RemoteAccessGate::startup_locked(),
+            remote_access_coordinator: std::sync::OnceLock::new(),
         };
         let hub = Self {
             inner: Arc::new(inner),
@@ -241,6 +248,23 @@ impl HostControlHub {
 
     pub fn host_activity(&self) -> crate::host_activity::HostActivityRegistry {
         self.inner.host_activity.clone()
+    }
+
+    pub fn remote_access_gate(&self) -> crate::daemon::remote_access::RemoteAccessGate {
+        self.inner.remote_access_gate.clone()
+    }
+
+    pub fn install_remote_access_coordinator(
+        &self,
+        coordinator: Arc<crate::daemon::remote_access::RemoteAccessCoordinator>,
+    ) -> Result<(), Arc<crate::daemon::remote_access::RemoteAccessCoordinator>> {
+        self.inner.remote_access_coordinator.set(coordinator)
+    }
+
+    pub fn remote_access_coordinator(
+        &self,
+    ) -> Option<Arc<crate::daemon::remote_access::RemoteAccessCoordinator>> {
+        self.inner.remote_access_coordinator.get().cloned()
     }
 
     /// Subscribe to outgoing host-control commands. Used by the ws endpoint to
@@ -415,6 +439,7 @@ impl HostControlHub {
                 PendingEntry {
                     response_tx: tx,
                     permission_type: permission_type.clone(),
+                    from_connection_id: req.from_connection_id.clone(),
                     created_at: Instant::now(),
                 },
             );
@@ -687,6 +712,121 @@ impl HostControlHub {
                 false
             }
         }
+    }
+
+    /// Deny every pending approval owned by a host-terminated connection.
+    ///
+    /// This covers both daemon-local requests and worker-originated requests
+    /// routed by an aggregator. Entries are removed before messages are sent so
+    /// a concurrent user response cannot approve work after disconnection.
+    pub fn cancel_pending_for_connection(&self, connection_id: &str) -> Vec<String> {
+        let local_ids = {
+            let pending = self.inner.pending_approvals.lock().unwrap();
+            pending
+                .iter()
+                .filter(|(_, entry)| entry.from_connection_id.as_deref() == Some(connection_id))
+                .map(|(req_id, _)| req_id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let mut cancelled = Vec::new();
+        for req_id in local_ids {
+            if self.cancel_local_request(&req_id) {
+                cancelled.push(req_id);
+            }
+        }
+
+        if self.inner.mode == HubMode::Aggregator {
+            let routed_ids = {
+                let replay = self.inner.pending_replay.lock().unwrap();
+                replay
+                    .iter()
+                    .filter(|(_, snapshot)| {
+                        snapshot.from_connection_id.as_deref() == Some(connection_id)
+                    })
+                    .map(|(req_id, _)| req_id.clone())
+                    .collect::<Vec<_>>()
+            };
+            for req_id in routed_ids {
+                if self.cancel_routed_request(&req_id) {
+                    cancelled.push(req_id);
+                }
+            }
+        }
+
+        cancelled
+    }
+
+    /// Fail-closed cleanup used by LockAll. Unlike the connection-specific path,
+    /// this also catches requests that have no connection id yet.
+    pub fn cancel_all_pending_for_security_lock(&self) -> Vec<String> {
+        let local_ids = self
+            .inner
+            .pending_approvals
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let routed_ids = if self.inner.mode == HubMode::Aggregator {
+            self.inner
+                .pending_routes
+                .lock()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        let mut cancelled = Vec::with_capacity(local_ids.len() + routed_ids.len());
+        for req_id in local_ids {
+            if self.cancel_local_request(&req_id) {
+                cancelled.push(req_id);
+            }
+        }
+        for req_id in routed_ids {
+            if self.cancel_routed_request(&req_id) {
+                cancelled.push(req_id);
+            }
+        }
+        cancelled
+    }
+
+    fn cancel_local_request(&self, req_id: &str) -> bool {
+        let entry = self.inner.pending_approvals.lock().unwrap().remove(req_id);
+        let Some(entry) = entry else {
+            return false;
+        };
+        let _ = entry.response_tx.send(ApprovalResponse::deny());
+        self.inner.pending_replay.lock().unwrap().remove(req_id);
+        self.inner.pending_acks.lock().unwrap().remove(req_id);
+        if self.inner.mode == HubMode::Forwarder {
+            let _ = self.send_command(HostControlMessage::SecurityApprovalResolved {
+                req_id: req_id.to_string(),
+            });
+        } else {
+            self.notify_tauri_finished(req_id);
+        }
+        true
+    }
+
+    fn cancel_routed_request(&self, req_id: &str) -> bool {
+        let session_id = self.inner.pending_routes.lock().unwrap().remove(req_id);
+        let Some(session_id) = session_id else {
+            return false;
+        };
+        self.inner.pending_replay.lock().unwrap().remove(req_id);
+        self.inner.pending_acks.lock().unwrap().remove(req_id);
+        let _ = self.route_to_forwarder(
+            session_id,
+            HostControlMessage::SecurityApprovalCancel {
+                req_id: req_id.to_string(),
+            },
+        );
+        self.notify_tauri_finished(req_id);
+        true
     }
 
     /// Local / Aggregator helper: tell every Tauri shell that an approval has
@@ -1971,6 +2111,137 @@ mod tests {
             },
         );
         assert!(!routed, "drained session must be unregistered");
+    }
+
+    #[tokio::test]
+    async fn cancel_pending_for_connection_denies_only_matching_local_requests() {
+        let hub = HostControlHub::new_local();
+        let _outbound_rx = hub.subscribe_outbound();
+        hub.mark_tauri_connected();
+
+        let matching_hub = hub.clone();
+        let matching = tokio::spawn(async move {
+            matching_hub
+                .request_approval(approval_req("matching"), None)
+                .await
+        });
+        let other_hub = hub.clone();
+        let mut other_request = approval_req("other");
+        other_request.from_connection_id = Some("conn-2".to_string());
+        let other =
+            tokio::spawn(async move { other_hub.request_approval(other_request, None).await });
+
+        for _ in 0..50 {
+            if hub.inner.pending_approvals.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(hub.inner.pending_approvals.lock().unwrap().len(), 2);
+
+        assert_eq!(
+            hub.cancel_pending_for_connection("conn-1"),
+            vec!["matching".to_string()]
+        );
+        let response = matching.await.expect("matching request task");
+        assert!(!response.approved);
+        assert!(
+            hub.inner
+                .pending_approvals
+                .lock()
+                .unwrap()
+                .contains_key("other")
+        );
+
+        hub.cancel_pending_for_connection("conn-2");
+        assert!(!other.await.expect("other request task").approved);
+    }
+
+    #[tokio::test]
+    async fn cancel_pending_for_connection_routes_worker_cancel_directionally() {
+        let hub = HostControlHub::new_aggregator();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        hub.register_forwarder_session(42, tx);
+        hub.register_upstream_request(
+            "matching".to_string(),
+            42,
+            SecurityPermissionType::RemoteControl,
+            Some("conn-1".to_string()),
+        );
+        hub.register_upstream_request(
+            "other".to_string(),
+            42,
+            SecurityPermissionType::RemoteControl,
+            Some("conn-2".to_string()),
+        );
+
+        assert_eq!(
+            hub.cancel_pending_for_connection("conn-1"),
+            vec!["matching".to_string()]
+        );
+        assert_eq!(hub.pending_replay_count(), 1);
+        assert!(
+            hub.inner
+                .pending_routes
+                .lock()
+                .unwrap()
+                .contains_key("other")
+        );
+        assert_eq!(
+            rx.recv().await,
+            Some(HostControlMessage::SecurityApprovalCancel {
+                req_id: "matching".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn security_lock_cancels_pending_request_without_connection_id() {
+        let hub = HostControlHub::new_local();
+        let _outbound_rx = hub.subscribe_outbound();
+        hub.mark_tauri_connected();
+        let mut request = approval_req("unbound");
+        request.from_connection_id = None;
+        let request_hub = hub.clone();
+        let task = tokio::spawn(async move { request_hub.request_approval(request, None).await });
+        for _ in 0..50 {
+            if hub.inner.pending_approvals.lock().unwrap().len() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(
+            hub.cancel_all_pending_for_security_lock(),
+            vec!["unbound".to_string()]
+        );
+        assert!(!task.await.expect("approval task").approved);
+        assert_eq!(hub.pending_replay_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn security_lock_routes_unbound_worker_approval_cancel() {
+        let hub = HostControlHub::new_aggregator();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        hub.register_forwarder_session(9, tx);
+        hub.register_upstream_request(
+            "worker-unbound".to_string(),
+            9,
+            SecurityPermissionType::RemoteControl,
+            None,
+        );
+
+        assert_eq!(
+            hub.cancel_all_pending_for_security_lock(),
+            vec!["worker-unbound".to_string()]
+        );
+        assert_eq!(
+            rx.recv().await,
+            Some(HostControlMessage::SecurityApprovalCancel {
+                req_id: "worker-unbound".to_string(),
+            })
+        );
+        assert_eq!(hub.pending_replay_count(), 0);
     }
 
     // route_to_forwarder fails silently when the receiver was already dropped.

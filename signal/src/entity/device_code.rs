@@ -16,7 +16,9 @@ pub struct Model {
     /// shareable code), never a wide-open owner session.
     pub capabilities: Option<String>,
     /// Code generation. Regenerating a code bumps this so a superseded code (and
-    /// any grant session minted from it) is refused at redeem/stamp time.
+    /// any grant session minted from it) is refused at redeem/stamp time. A new
+    /// emergency remote-access lock round also bumps this authorization epoch
+    /// without changing the persistent device-code string.
     #[sea_orm(default_value = 0)]
     pub generation: i32,
     pub created_at: DateTimeUtc,

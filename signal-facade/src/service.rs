@@ -422,6 +422,77 @@ pub trait SupportCodeMinter: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 }
 
+/// Frames that may create, extend, or exercise remote access. The central lock
+/// gate resolves the target host and rejects these while its durable mirror is
+/// locked. Cleanup, heartbeat, and host→central lock maintenance remain allowed.
+pub(crate) fn remote_access_frame_requires_unlocked(t: SignalingType) -> bool {
+    !matches!(
+        t,
+        SignalingType::Heartbeat
+            | SignalingType::FetchConnections
+            | SignalingType::ConnectionList
+            | SignalingType::ConnectionRemoved
+            | SignalingType::CloseControl
+            | SignalingType::CloseTerminal
+            | SignalingType::RequestSupportCode
+            | SignalingType::SupportCodeIssued
+            | SignalingType::RevokeSupportCode
+            | SignalingType::RevokeAccessGrant
+            | SignalingType::HostRemoteAccessLockRequest
+            | SignalingType::HostRemoteAccessLockAck
+            | SignalingType::TerminateRemotePeerRequest
+            | SignalingType::TerminateRemotePeerAck
+            | SignalingType::AiAuditEvent
+            | SignalingType::CollectResponse
+            | SignalingType::EdgeExecResult
+            | SignalingType::ExecStateReply
+            | SignalingType::RemoteToolResponse
+            | SignalingType::CommandTemplateSync
+            | SignalingType::CommandBlocklistSync
+            | SignalingType::Error
+            | SignalingType::Unknown
+    )
+}
+
+// ====== Host remote-access lock traits ======
+
+pub enum RemoteAccessAdmissionOutcome {
+    Allow,
+    Reject {
+        code: DeskErrorCode,
+        message: String,
+    },
+}
+
+/// Central durable-lock gate evaluated before any control-end request can reach
+/// a host or central orchestration path. Both OSS signal and manager install it.
+pub trait RemoteAccessAdmissionAuthorizer: Send + Sync {
+    fn authorize<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        connections: &'a SharedConnectionMap,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = RemoteAccessAdmissionOutcome> + Send + 'a>,
+    >;
+}
+
+/// Consumes authenticated host requests that update the durable central lock
+/// mirror or terminate one remote peer, then writes the matching ack to `source`.
+pub trait HostRemoteAccessController: Send + Sync {
+    fn on_lock_request<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+
+    fn on_terminate_peer_request<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
 // ====== FetchConnectionsResolver trait ======
 
 /// Resolves a `FetchConnections` request into the connection list to return.
@@ -767,6 +838,8 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// the manager (which mints a code for the requesting host's device and pushes
     /// it back); `None` elsewhere, where the frame is ignored.
     pub support_code_minter: Option<Arc<dyn SupportCodeMinter>>,
+    pub remote_access_admission_authorizer: Option<Arc<dyn RemoteAccessAdmissionAuthorizer>>,
+    pub host_remote_access_controller: Option<Arc<dyn HostRemoteAccessController>>,
     /// Resolver for `FetchConnections` requests. `Some` only in the manager
     /// (which returns a cluster-wide, scope-authorized list from presence);
     /// `None` in the signal server, where the handler falls back to the local
@@ -949,6 +1022,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
             exec_state_reply_observer: None,
             remote_tool_observer: None,
             support_code_minter: None,
+            remote_access_admission_authorizer: None,
+            host_remote_access_controller: None,
             fetch_connections_resolver: None,
             peer_relay: None,
         })
@@ -1029,6 +1104,22 @@ impl<U: SignalingUser> SignalingHandler<U> {
     /// this, so inbound `RequestSupportCode` frames are ignored there.
     pub fn with_support_code_minter(mut self, minter: Arc<dyn SupportCodeMinter>) -> Self {
         self.support_code_minter = Some(minter);
+        self
+    }
+
+    pub fn with_remote_access_admission_authorizer(
+        mut self,
+        authorizer: Arc<dyn RemoteAccessAdmissionAuthorizer>,
+    ) -> Self {
+        self.remote_access_admission_authorizer = Some(authorizer);
+        self
+    }
+
+    pub fn with_host_remote_access_controller(
+        mut self,
+        controller: Arc<dyn HostRemoteAccessController>,
+    ) -> Self {
+        self.host_remote_access_controller = Some(controller);
         self
     }
 
@@ -1163,6 +1254,24 @@ impl<U: SignalingUser> SignalingHandler<U> {
     pub async fn handle_message(&mut self, text: ByteString) -> Result<(), DeskSignalFacadeError> {
         log::debug!("Received text message: {}", text);
         let signaling_model = serde_json::from_str::<SignalingModel>(&text)?;
+        if signaling_model.is_request()
+            && remote_access_frame_requires_unlocked(signaling_model.signaling_type)
+            && let Some(authorizer) = self.remote_access_admission_authorizer.clone()
+        {
+            match authorizer
+                .authorize(
+                    &self.connection_state,
+                    &self.connection_map,
+                    &signaling_model,
+                )
+                .await
+            {
+                RemoteAccessAdmissionOutcome::Allow => {}
+                RemoteAccessAdmissionOutcome::Reject { code, message } => {
+                    return DeskSignalFacadeError::custom_error(code, &message);
+                }
+            }
+        }
         match signaling_model.signaling_type {
             SignalingType::Heartbeat => {
                 // Respond to heartbeat immediately to keep connection alive
@@ -1634,6 +1743,27 @@ impl<U: SignalingUser> SignalingHandler<U> {
                         .on_revoke_support_code(&self.connection_state, &signaling_model)
                         .await;
                 }
+            }
+            SignalingType::HostRemoteAccessLockRequest => {
+                if let Some(controller) = self.host_remote_access_controller.clone() {
+                    controller
+                        .on_lock_request(&self.connection_state, &signaling_model)
+                        .await;
+                }
+            }
+            SignalingType::TerminateRemotePeerRequest => {
+                if let Some(controller) = self.host_remote_access_controller.clone() {
+                    controller
+                        .on_terminate_peer_request(&self.connection_state, &signaling_model)
+                        .await;
+                }
+            }
+            SignalingType::HostRemoteAccessLockAck
+            | SignalingType::TerminateRemotePeerAck => {
+                log::warn!(
+                    "Received server-originated remote-access ack from client {}; dropping",
+                    self.connection_state.model.connection_id
+                );
             }
             SignalingType::SupportCodeIssued => {
                 // Manager → host only (the issued support code, pushed over the

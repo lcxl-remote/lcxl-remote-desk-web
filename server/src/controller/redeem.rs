@@ -139,6 +139,26 @@ pub async fn redeem_code(
         )));
     };
 
+    // Do not mint a grant while the durable central mirror is locked. Without
+    // this check a code holder could redeem after the generation bump and keep
+    // that newly minted grant for use immediately after the host unlocks.
+    match target_is_remote_access_locked(&target_client_id).await {
+        Ok(false) => {}
+        Ok(true) => {
+            return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+                DeskErrorCode::REMOTE_ACCESS_LOCKED,
+                "Remote access is locked by the host".to_string(),
+            )));
+        }
+        Err(error) => {
+            log::error!("Failed to read remote-access lock state during redeem: {error}");
+            return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+                DeskErrorCode::REMOTE_ACCESS_LOCKED,
+                "Remote access lock state is unavailable".to_string(),
+            )));
+        }
+    }
+
     // Load the owner-configured ceiling and live generation for the target's code.
     let (ceiling, generation) = load_code_ceiling(&target_client_id).await;
 
@@ -191,6 +211,23 @@ pub async fn redeem_code(
             grant_session_id: minted.grant_session_id,
             access_ceiling: Some(ceiling),
         })),
+    )
+}
+
+async fn target_is_remote_access_locked(client_id: &str) -> Result<bool, sea_orm::DbErr> {
+    target_is_remote_access_locked_in(desk_signal::db::get_db(), client_id).await
+}
+
+async fn target_is_remote_access_locked_in(
+    db: &sea_orm::DatabaseConnection,
+    client_id: &str,
+) -> Result<bool, sea_orm::DbErr> {
+    use sea_orm::EntityTrait as _;
+    Ok(
+        desk_signal::entity::host_remote_access_state::Entity::find_by_id(client_id)
+            .one(db)
+            .await?
+            .is_some_and(|state| state.locked),
     )
 }
 
@@ -325,6 +362,40 @@ mod tests {
         assert_eq!(
             json["access_ceiling"]["allow_clipboard_sync"],
             serde_json::Value::Null
+        );
+    }
+
+    #[actix_web::test]
+    async fn redeem_lock_lookup_reads_the_durable_oss_mirror() {
+        use sea_orm::{ActiveModelTrait as _, ConnectionTrait as _, Database, Schema, Set};
+
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let schema = Schema::new(db.get_database_backend());
+        db.execute(
+            &schema.create_table_from_entity(desk_signal::entity::host_remote_access_state::Entity),
+        )
+        .await
+        .unwrap();
+        desk_signal::entity::host_remote_access_state::ActiveModel {
+            client_id: Set("host-locked".into()),
+            locked: Set(true),
+            state_version: Set(4),
+            lock_id: Set(Some("lock-a".into())),
+            updated_at: Set(chrono::Utc::now()),
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        assert!(
+            target_is_remote_access_locked_in(&db, "host-locked")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !target_is_remote_access_locked_in(&db, "host-unseen")
+                .await
+                .unwrap()
         );
     }
 }

@@ -6,12 +6,15 @@ pub mod command_templates;
 pub mod exec_approval;
 pub mod exec_capacity;
 pub mod exec_ledger;
+pub mod local_access_control;
+pub mod local_access_control_transport;
 pub mod local_api;
 pub mod manager_link_gate;
 pub mod manager_link_state;
 pub mod pc_manager;
 #[cfg(target_os = "windows")]
 pub mod pipe_security;
+pub mod remote_access;
 pub mod session_approval;
 pub mod session_monitor;
 pub mod signaling_proxy;
@@ -118,6 +121,7 @@ pub async fn run_service_daemon_inner(
     host_control_hub
         .host_activity()
         .set_indicator_enabled(settings.system.host_access_indicator_enabled);
+    initialize_remote_access(&settings.args.config_file_path, &host_control_hub);
 
     // Host→manager link status, shared between the signaling proxy (records a fatal
     // device-quota rejection, parks until manual retry) and the local API (surfaces
@@ -198,6 +202,7 @@ pub async fn run_service_daemon_inner(
 
     let (worker_mgr, worker_rx) =
         worker_manager::WorkerManager::new(shared_settings_data.clone(), pc_registry.clone());
+    worker_mgr.bind_remote_access_gate(host_control_hub.remote_access_gate());
 
     // Allow the per-connection file-transfer writer task to push a
     // `FileTransferSendFailed` back to the worker on a daemon-side
@@ -259,6 +264,14 @@ pub async fn run_service_daemon_inner(
         }
         Some(supervisor)
     };
+    if let Some(coordinator) = host_control_hub.remote_access_coordinator() {
+        coordinator.attach_runtime(
+            pc_registry.clone(),
+            worker_mgr.clone(),
+            virtual_display_supervisor.clone(),
+            Arc::downgrade(&host_control_hub),
+        );
+    }
 
     let proxy_handle = {
         let settings = shared_settings_data.clone();
@@ -438,6 +451,7 @@ pub async fn start_inprocess_daemon(
     host_control_hub
         .host_activity()
         .set_indicator_enabled(settings.read().await.system.host_access_indicator_enabled);
+    initialize_remote_access(&args.config_file_path, &host_control_hub);
 
     let exec_ledger = open_exec_ledger(&args.config_file_path).await?;
 
@@ -448,6 +462,15 @@ pub async fn start_inprocess_daemon(
     pc_registry.set_host_activity(host_control_hub.host_activity());
     let (worker_mgr, worker_rx) =
         worker_manager::WorkerManager::new(settings.clone(), pc_registry.clone());
+    worker_mgr.bind_remote_access_gate(host_control_hub.remote_access_gate());
+    if let Some(coordinator) = host_control_hub.remote_access_coordinator() {
+        coordinator.attach_runtime(
+            pc_registry.clone(),
+            worker_mgr.clone(),
+            None,
+            Arc::downgrade(&host_control_hub),
+        );
+    }
 
     // See ServiceDaemon entry above: install the WorkerManager handle
     // so the file-transfer writer task can report `dc.send` failures
@@ -498,6 +521,47 @@ pub async fn start_inprocess_daemon(
     });
 
     Ok(())
+}
+
+fn initialize_remote_access(config_file_path: &str, host_control_hub: &HostControlHub) {
+    let store = remote_access::RemoteAccessStateStore::for_config_file(config_file_path);
+    let state = store.load_or_initialize();
+    host_control_hub
+        .remote_access_gate()
+        .initialize_from_store(state.clone());
+    host_control_hub
+        .host_activity()
+        .set_remote_access_status((&state).into());
+    let coordinator = Arc::new(remote_access::RemoteAccessCoordinator::new(
+        store.clone(),
+        host_control_hub.remote_access_gate(),
+        host_control_hub.host_activity(),
+    ));
+    let local_access_service = Arc::new(local_access_control::LocalAccessControlService::new(
+        coordinator.clone(),
+        Arc::new(local_access_control::ElevatedPeerAuthenticator),
+    ));
+    let local_access_endpoint =
+        local_access_control_transport::endpoint_for_config(config_file_path);
+    actix_web::rt::spawn(async move {
+        if let Err(error) =
+            local_access_control_transport::serve(local_access_endpoint, local_access_service).await
+        {
+            error!("LocalAccessControl transport stopped: {error:#}");
+        }
+    });
+    if host_control_hub
+        .install_remote_access_coordinator(coordinator)
+        .is_err()
+    {
+        warn!("Remote-access coordinator was already initialized");
+    }
+    info!(
+        "Remote access state loaded: mode={:?}, version={}, path={}",
+        state.mode,
+        state.state_version,
+        store.path().display()
+    );
 }
 
 /// Returns the actual active input desktop name at startup so the initial

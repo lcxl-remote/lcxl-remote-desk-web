@@ -30,8 +30,9 @@ IDs and IP addresses are never shown.
 The first active session also produces one system notification. While access is
 active, the tray icon carries an amber badge, its tooltip reports the active
 session count, and **View Remote Access Status** restores hidden status windows.
-The normal tray **Exit** action is blocked so a system-service session cannot
-continue after its local indicator has been accidentally closed.
+The normal tray **Exit** action requires a native confirmation while access is
+active or the host is locked. Exiting closes only the UI and never unlocks the
+daemon. See [Disconnect and Lock Remote Access](./remote-access-lock.md).
 
 ## Accuracy and Cleanup
 

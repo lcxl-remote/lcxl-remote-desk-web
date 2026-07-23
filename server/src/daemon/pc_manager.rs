@@ -78,7 +78,7 @@ use desk_ipc_protocol::message::{
 };
 use desk_signal_facade::model::signal::InitSignalingData;
 use desk_turn::model::TurnSettings;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use webrtc::media::Sample;
 
 /// Bounded capacity of the per-connection file-transfer writer queue.
@@ -596,6 +596,10 @@ pub struct PcRegistry {
     /// which the PC-focused cleanup path would otherwise skip (no PC to close, no
     /// media to stop). Shared via `Arc` so registry clones stay consistent.
     terminal_connections: Arc<RwLock<HashSet<String>>>,
+    /// Host-terminated signaling connection ids. A tombstone is installed before
+    /// teardown so a concurrent half-built request cannot publish a new PC after
+    /// the host has declared the connection dead.
+    tombstones: Arc<RwLock<HashMap<String, Instant>>>,
     /// Test-only phantom PC counter added to `len()`. See
     /// [`Self::set_test_len_extra`] — it lets the signaling router unit
     /// tests simulate multi-PC topologies without building real
@@ -687,6 +691,42 @@ impl PcRegistry {
 
     pub async fn remove(&self, connection_id: &str) -> Option<Arc<RwLock<PeerConnectionContext>>> {
         self.inner.write().await.remove(connection_id)
+    }
+
+    pub async fn connection_ids(&self) -> Vec<String> {
+        self.inner.read().await.keys().cloned().collect()
+    }
+
+    pub async fn all_connection_ids(&self) -> Vec<String> {
+        let mut ids = std::collections::BTreeSet::new();
+        ids.extend(self.inner.read().await.keys().cloned());
+        ids.extend(self.admissions.read().await.keys().cloned());
+        ids.extend(self.terminal_connections.read().await.iter().cloned());
+        if let Some(activity) = self.host_activity() {
+            ids.extend(
+                activity
+                    .snapshot()
+                    .sessions
+                    .into_iter()
+                    .map(|session| session.connection_id),
+            );
+        }
+        ids.into_iter().collect()
+    }
+
+    pub async fn tombstone_connection(&self, connection_id: &str) {
+        const TOMBSTONE_TTL: Duration = Duration::from_secs(5 * 60);
+        self.tombstones
+            .write()
+            .await
+            .insert(connection_id.to_string(), Instant::now() + TOMBSTONE_TTL);
+    }
+
+    pub async fn is_tombstoned(&self, connection_id: &str) -> bool {
+        let now = Instant::now();
+        let mut tombstones = self.tombstones.write().await;
+        tombstones.retain(|_, expires_at| *expires_at > now);
+        tombstones.contains_key(connection_id)
     }
 
     /// Record that `connection_id` was admitted under grant `grant_session_id`.
@@ -892,6 +932,12 @@ impl PcRegistry {
         request_remote: &RequestRemoteModel,
         local_settings: &Settings,
     ) -> RegistryResult<Arc<RwLock<PeerConnectionContext>>> {
+        if self.is_tombstoned(connection_id).await {
+            return Err(DeskError::CustomError(CustomDeskError::new(
+                DeskErrorCode::INVALID_STATE,
+                "Connection was terminated by the host",
+            )));
+        }
         if self.contains(connection_id).await {
             return Err(DeskError::CustomError(CustomDeskError::new(
                 DeskErrorCode::SYSTEM_ERROR,
@@ -941,10 +987,24 @@ impl PcRegistry {
             ),
         }));
 
+        // Keep the tombstone read guard through publication. A force-disconnect
+        // takes the write side before cleanup, so either this insert happens
+        // first and cleanup removes it, or publication observes the tombstone.
+        let tombstones = self.tombstones.read().await;
+        if tombstones
+            .get(connection_id)
+            .is_some_and(|expires_at| *expires_at > Instant::now())
+        {
+            return Err(DeskError::CustomError(CustomDeskError::new(
+                DeskErrorCode::INVALID_STATE,
+                "Connection was terminated by the host",
+            )));
+        }
         self.inner
             .write()
             .await
             .insert(connection_id.to_string(), Arc::clone(&ctx));
+        drop(tombstones);
 
         Ok(ctx)
     }
@@ -2935,7 +2995,7 @@ fn log_sdp_max_message_size(connection_id: &str, sdp: &str) {
 ///
 /// All errors swallowed: a dead worker / already-closed PC are normal
 /// teardown paths, not failure modes the caller can recover from.
-async fn cleanup_pc(
+pub(crate) async fn cleanup_pc(
     registry: &PcRegistry,
     worker_mgr: &WorkerManager,
     virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
@@ -3048,6 +3108,41 @@ async fn cleanup_pc(
             log::warn!("[pc_manager] N->0 virtual display detach failed: {e}");
         }
     }
+}
+
+/// Host-initiated teardown has stronger semantics than browser `CloseControl`:
+/// it tombstones the signaling id and clears the whole admission footprint.
+pub async fn force_disconnect_connection(
+    registry: &PcRegistry,
+    worker_mgr: &WorkerManager,
+    virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
+    connection_id: &str,
+    reason: &str,
+) -> bool {
+    let existed = registry
+        .all_connection_ids()
+        .await
+        .iter()
+        .any(|candidate| candidate == connection_id);
+    registry.tombstone_connection(connection_id).await;
+    cleanup_pc(registry, worker_mgr, virtual_display, connection_id, reason).await;
+    if let Err(error) = worker_mgr
+        .send_to_worker(ServiceToWorker::SetConnectionCeiling(
+            desk_ipc_protocol::message::SetConnectionCeilingPayload {
+                connection_id: connection_id.to_string(),
+                ceiling: None,
+            },
+        ))
+        .await
+    {
+        log::debug!(
+            "[pc_manager] force-disconnect ceiling clear for {connection_id} could not reach worker: {error}"
+        );
+    }
+    registry.clear_admission(connection_id).await;
+    registry.unindex_grant_connection(connection_id).await;
+    registry.unmark_terminal_connection(connection_id).await;
+    existed
 }
 
 /// Tear down every connection admitted under grant `grant_session_id` — a
@@ -6194,6 +6289,88 @@ mod tests {
         assert!(registry.admission("term-1").await.is_none());
         assert!(!registry.is_terminal_connection("term-1").await);
         assert!(registry.connections_for_grant("GS-T").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn force_disconnect_tombstones_and_clears_admission_only_connection() {
+        use desk_ipc_protocol::message::ServiceToWorker;
+
+        let registry = PcRegistry::new();
+        let settings = actix_web::web::Data::new(SharedSettings::from(settings_with_startup(
+            StartupMode::ServiceDaemon,
+        )));
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+        registry
+            .record_admission("conn-admitted", Admission::OwnerFull)
+            .await;
+
+        assert_eq!(registry.all_connection_ids().await, ["conn-admitted"]);
+        assert!(
+            force_disconnect_connection(
+                &registry,
+                &worker_mgr,
+                None,
+                "conn-admitted",
+                "test-host-disconnect",
+            )
+            .await
+        );
+
+        assert!(registry.admission("conn-admitted").await.is_none());
+        assert!(registry.is_tombstoned("conn-admitted").await);
+        assert!(registry.all_connection_ids().await.is_empty());
+        let mut saw_ceiling_clear = false;
+        while let Ok(message) = ipc_rx.try_recv() {
+            if matches!(
+                message,
+                ServiceToWorker::SetConnectionCeiling(payload)
+                    if payload.connection_id == "conn-admitted" && payload.ceiling.is_none()
+            ) {
+                saw_ceiling_clear = true;
+            }
+        }
+        assert!(saw_ceiling_clear);
+    }
+
+    #[tokio::test]
+    async fn force_disconnect_closes_terminal_without_peer_connection() {
+        use desk_ipc_protocol::message::ServiceToWorker;
+
+        let registry = PcRegistry::new();
+        let settings = actix_web::web::Data::new(SharedSettings::from(settings_with_startup(
+            StartupMode::ServiceDaemon,
+        )));
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+        registry.mark_terminal_connection("term-host").await;
+
+        assert!(
+            force_disconnect_connection(
+                &registry,
+                &worker_mgr,
+                None,
+                "term-host",
+                "test-host-disconnect",
+            )
+            .await
+        );
+
+        assert!(!registry.is_terminal_connection("term-host").await);
+        assert!(registry.is_tombstoned("term-host").await);
+        let mut saw_close_terminal = false;
+        while let Ok(message) = ipc_rx.try_recv() {
+            if matches!(
+                message,
+                ServiceToWorker::CloseTerminalRequest(payload)
+                    if payload.connection_id == "term-host"
+            ) {
+                saw_close_terminal = true;
+            }
+        }
+        assert!(saw_close_terminal);
     }
 
     /// A capped connection's admission record survives a `CloseControl` PC teardown

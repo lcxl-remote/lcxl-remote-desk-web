@@ -312,6 +312,10 @@ impl DeskErrorCode {
     /// user to use TLS (`wss://`) or, deliberately, disable the switch — rather
     /// than showing an opaque "blocked".
     pub const CONNECTION_INSECURE_TRANSPORT: DeskErrorCode = DeskErrorCode(68);
+    /// The host is explicitly refusing all remote access until a locally
+    /// authenticated user unlocks it. This is a security state, not an offline
+    /// or retryable transport failure.
+    pub const REMOTE_ACCESS_LOCKED: DeskErrorCode = DeskErrorCode(69);
 
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
@@ -566,5 +570,14 @@ mod tests {
         // Distinct from the adjacent org block and the next contract value.
         assert!(!codes.contains(&DeskErrorCode::INVITE_ALREADY_PENDING.code()));
         assert!(!codes.contains(&DeskErrorCode::ACTION_NEED_RETRY.code()));
+    }
+
+    #[test]
+    fn remote_access_locked_code_is_stable() {
+        assert_eq!(DeskErrorCode::REMOTE_ACCESS_LOCKED.code(), 69);
+        assert_ne!(
+            DeskErrorCode::REMOTE_ACCESS_LOCKED.code(),
+            DeskErrorCode::REMOTE_DESK_OFFLINE.code()
+        );
     }
 }

@@ -38,7 +38,7 @@ use desk_agent_protocol::exec::{
     ConfirmExecData, ExecDecision, ExecEffect, ExecPlan, ExecPreview, ExecResultPayload,
     ResolveExecData,
 };
-use desk_agent_protocol::exec_policy::{DEFAULT_OUTPUT_BYTES, ExecLimits, build_exact_argv_draft};
+use desk_agent_protocol::exec_policy::{DEFAULT_OUTPUT_BYTES, build_exact_argv_draft};
 
 use crate::diagnose::terminal_copilot::copilot_signaling_sink;
 use desk_agent_protocol::exec_lifecycle::{ExecControlAction, ExecControlPayload};
@@ -236,7 +236,11 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // daemon-side.
         SignalingType::SupportCodeIssued
         | SignalingType::RequestSupportCode
-        | SignalingType::RevokeSupportCode => RouteOwnership::Daemon,
+        | SignalingType::RevokeSupportCode
+        | SignalingType::HostRemoteAccessLockRequest
+        | SignalingType::HostRemoteAccessLockAck
+        | SignalingType::TerminateRemotePeerRequest
+        | SignalingType::TerminateRemotePeerAck => RouteOwnership::Daemon,
 
         // Grant-session revocation: manager → daemon, pushed after a dial-code
         // regeneration. The daemon direct-closes the affected grant connections
@@ -806,6 +810,39 @@ async fn promote_desktop_resources(
 }
 
 pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), RouterError> {
+    if let Some(connection_id) = model.from_connection_id.as_deref()
+        && ctx.pc_registry.is_tombstoned(connection_id).await
+        && !allowed_for_tombstoned_connection(model.signaling_type)
+    {
+        log::warn!(
+            "[router] host-terminated connection {connection_id}: rejecting {:?} frame",
+            model.signaling_type
+        );
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::INVALID_STATE,
+            "Connection was terminated by the host",
+        );
+        return Ok(());
+    }
+
+    if ctx.host_control_hub.remote_access_gate().is_locked()
+        && !allowed_while_remote_access_locked(model.signaling_type)
+    {
+        log::warn!(
+            "[router] remote access is locked: rejecting {:?} frame",
+            model.signaling_type
+        );
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::REMOTE_ACCESS_LOCKED,
+            "Remote access is locked on the host",
+        );
+        return Ok(());
+    }
+
     // First fail-closed door: capability-capped sessions (a redeemed grant or a
     // legacy support session — both carry an `access_ceiling`) may only use the
     // baseline session/control frames plus the connection-scoped capability frames
@@ -1031,6 +1068,10 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         | SignalingType::ExecResult
         | SignalingType::ExecLifecycle
         | SignalingType::ExecStateReply
+        | SignalingType::HostRemoteAccessLockRequest
+        | SignalingType::HostRemoteAccessLockAck
+        | SignalingType::TerminateRemotePeerRequest
+        | SignalingType::TerminateRemotePeerAck
         | SignalingType::Error
         | SignalingType::Unknown => {
             log::trace!(
@@ -1151,6 +1192,30 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // inbound frame is swallowed (the daemon never consumes its own stream).
         SignalingType::RemoteToolResponse => Ok(()),
     }
+}
+
+fn allowed_for_tombstoned_connection(signaling_type: SignalingType) -> bool {
+    matches!(
+        signaling_type,
+        SignalingType::CloseControl
+            | SignalingType::ConnectionRemoved
+            | SignalingType::CloseTerminal
+    )
+}
+
+fn allowed_while_remote_access_locked(signaling_type: SignalingType) -> bool {
+    matches!(
+        signaling_type,
+        SignalingType::CloseControl
+            | SignalingType::ConnectionRemoved
+            | SignalingType::CloseTerminal
+            | SignalingType::CommandTemplateSync
+            | SignalingType::CommandBlocklistSync
+            | SignalingType::SupportCodeIssued
+            | SignalingType::RevokeAccessGrant
+            | SignalingType::HostRemoteAccessLockAck
+            | SignalingType::TerminateRemotePeerAck
+    )
 }
 
 /// Handle an inbound remote-collect request from the manager. Runs the
@@ -4383,6 +4448,10 @@ mod tests {
         let settings = web::Data::new(shared);
         let pc_registry = PcRegistry::new();
         let (worker_mgr, _) = WorkerManager::new(settings.clone(), pc_registry.clone());
+        let host_control_hub = Arc::new(HostControlHub::new_local());
+        host_control_hub
+            .remote_access_gate()
+            .initialize_from_store(crate::daemon::remote_access::RemoteAccessState::unlocked(1));
         RouterContext {
             exec_capacity: Arc::new(crate::daemon::exec_capacity::ExecCapacity::new()),
             exec_ledger: Arc::new(
@@ -4393,7 +4462,7 @@ mod tests {
             pc_registry,
             outbound_tx,
             settings,
-            host_control_hub: Arc::new(HostControlHub::new_local()),
+            host_control_hub,
             worker_mgr,
             virtual_display: None,
             diagnose_orchestrator: None,
@@ -5662,6 +5731,55 @@ mod tests {
             ),
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn locked_gate_rejects_request_before_pc_or_session_creation() {
+        let (ctx, mut rx) = make_ctx_with_rx().await;
+        ctx.host_control_hub
+            .remote_access_gate()
+            .initialize_from_store(crate::daemon::remote_access::RemoteAccessState::locked(
+                2,
+                "lock-2".to_string(),
+                "2026-07-22T12:00:00Z".to_string(),
+                true,
+            ));
+        let model = make_request_remote_model("conn-locked");
+
+        route(&model, &ctx)
+            .await
+            .expect("locked request is handled");
+
+        let response = read_response(&mut rx);
+        let state = response.response_state.expect("missing locked response");
+        assert_eq!(state.error_code, DeskErrorCode::REMOTE_ACCESS_LOCKED.code());
+        assert!(ctx.pc_registry.get("conn-locked").await.is_none());
+        assert!(
+            ctx.host_control_hub
+                .host_activity()
+                .snapshot()
+                .sessions
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn tombstone_rejects_late_request_after_host_disconnect() {
+        let (ctx, mut rx) = make_ctx_with_rx().await;
+        ctx.pc_registry
+            .tombstone_connection("conn-terminated")
+            .await;
+        let model = make_request_remote_model("conn-terminated");
+
+        route(&model, &ctx)
+            .await
+            .expect("tombstoned request is handled");
+
+        let response = read_response(&mut rx);
+        let state = response.response_state.expect("missing tombstone response");
+        assert_eq!(state.error_code, DeskErrorCode::INVALID_STATE.code());
+        assert!(ctx.pc_registry.get("conn-terminated").await.is_none());
+        assert!(ctx.pc_registry.admission("conn-terminated").await.is_none());
     }
 
     #[tokio::test]
@@ -7673,7 +7791,7 @@ mod tests {
             &plan.program,
             &plan.argv,
             injected.as_deref(),
-            &ExecLimits::defaults(),
+            &desk_agent_protocol::exec_policy::ExecLimits::defaults(),
             &plan.containment,
         );
         let reason = validate_fleet_edge_exec(

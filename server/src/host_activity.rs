@@ -7,7 +7,7 @@ use tokio::sync::broadcast;
 
 use crate::host_control::{
     HostAccessSession, HostAccessSnapshot, HostControlMessage, HostFileTransferDirection,
-    HostFileTransferSummary,
+    HostFileTransferSummary, HostRemoteAccessStatus,
 };
 
 const MAX_VISIBLE_SESSIONS: usize = 64;
@@ -23,6 +23,7 @@ struct HostActivityState {
     epoch: String,
     revision: u64,
     indicator_enabled: bool,
+    remote_access: HostRemoteAccessStatus,
     sessions: BTreeMap<String, SessionState>,
 }
 
@@ -81,6 +82,7 @@ impl HostActivityRegistry {
                 epoch: uuid::Uuid::new_v4().to_string(),
                 revision: 0,
                 indicator_enabled: true,
+                remote_access: HostRemoteAccessStatus::default(),
                 sessions: BTreeMap::new(),
             })),
             publisher,
@@ -97,6 +99,16 @@ impl HostActivityRegistry {
                 return false;
             }
             state.indicator_enabled = enabled;
+            true
+        });
+    }
+
+    pub fn set_remote_access_status(&self, status: HostRemoteAccessStatus) {
+        self.mutate(|state| {
+            if state.remote_access == status {
+                return false;
+            }
+            state.remote_access = status;
             true
         });
     }
@@ -267,6 +279,7 @@ impl HostActivityRegistry {
             }
             let after_without_revision = snapshot_from(&state);
             if before.indicator_enabled == after_without_revision.indicator_enabled
+                && before.remote_access == after_without_revision.remote_access
                 && before.sessions == after_without_revision.sessions
             {
                 return;
@@ -295,6 +308,7 @@ fn snapshot_from(state: &HostActivityState) -> HostAccessSnapshot {
         indicator_enabled: state.indicator_enabled,
         total_session_count,
         sessions,
+        remote_access: state.remote_access.clone(),
     }
 }
 
@@ -363,6 +377,32 @@ mod tests {
         assert!(!after.indicator_enabled);
         assert_eq!(after.sessions, before.sessions);
         assert!(after.revision > before.revision);
+    }
+
+    #[test]
+    fn remote_access_change_publishes_and_increments_revision() {
+        let registry = registry();
+        let mut receiver = registry.publisher.subscribe();
+        let before = registry.snapshot();
+        let status = HostRemoteAccessStatus {
+            mode: crate::host_control::HostRemoteAccessMode::Locked,
+            state_version: 2,
+            locked_at: Some("2026-07-22T12:00:00Z".to_string()),
+            durable: true,
+            central_sync: crate::host_control::CentralSyncState::Pending,
+        };
+
+        registry.set_remote_access_status(status.clone());
+
+        let after = registry.snapshot();
+        assert!(after.revision > before.revision);
+        assert_eq!(after.remote_access, status);
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            HostControlMessage::HostAccessSnapshot { snapshot }
+                if snapshot.remote_access.mode
+                    == crate::host_control::HostRemoteAccessMode::Locked
+        ));
     }
 
     #[test]

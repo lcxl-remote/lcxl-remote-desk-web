@@ -31,6 +31,10 @@ pub enum ServiceToWorker {
     /// Force the worker to shut down immediately.
     Shutdown,
 
+    /// Apply the daemon-authoritative remote-access gate and cancel worker-owned
+    /// activity when transitioning to locked.
+    SetRemoteAccessState(RemoteAccessStatePayload),
+
     // ---------- Media control (event pipe) ----------
     /// Start a per-connection media pipeline (capture + per-connection
     /// video/audio encoder). Capture is shared across connections; the
@@ -448,6 +452,10 @@ pub enum WorkerToService {
     /// upstream would act on, and the authoritative answer is always a state
     /// query against the daemon's ledger.
     ExecHeartbeat(ExecHeartbeatPayload),
+
+    /// Confirms that the worker applied a remote-access state transition and
+    /// reports the worker-owned activity cancelled by it.
+    RemoteAccessStateApplied(RemoteAccessStateAppliedPayload),
 }
 
 // ==================== Payload Types ====================
@@ -515,6 +523,27 @@ pub struct WorkerInitPayload {
     /// field.
     #[serde(default)]
     pub config_file_path: Option<String>,
+
+    /// Daemon-authoritative admission state. The worker starts fail-closed and
+    /// only opens its own dispatch gate after receiving this payload.
+    pub remote_access_locked: bool,
+    pub remote_access_state_version: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+pub struct RemoteAccessStatePayload {
+    pub operation_id: String,
+    pub state_version: u64,
+    pub locked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+pub struct RemoteAccessStateAppliedPayload {
+    pub operation_id: String,
+    pub state_version: u64,
+    pub cancelled_terminals: u32,
+    pub cancelled_transfers: u32,
+    pub cancelled_execs: u32,
 }
 
 /// Payload for [`WorkerToService::SignalingError`]. Carries the
@@ -1455,6 +1484,8 @@ mod tests {
             media_pipe_name: Some(r"\\.\pipe\lcxl-desk-ipc-7-uuid-media".to_string()),
             file_pipe_name: Some(r"\\.\pipe\lcxl-desk-file-ipc-7-uuid".to_string()),
             config_file_path: Some(r"C:\ProgramData\lcxl\settings.toml".to_string()),
+            remote_access_locked: true,
+            remote_access_state_version: 8,
         };
         let json = serde_json::to_string(&original).unwrap();
         let decoded: WorkerInitPayload = serde_json::from_str(&json).unwrap();
@@ -1465,6 +1496,8 @@ mod tests {
         assert_eq!(decoded.media_pipe_name, original.media_pipe_name);
         assert_eq!(decoded.file_pipe_name, original.file_pipe_name);
         assert_eq!(decoded.config_file_path, original.config_file_path);
+        assert!(decoded.remote_access_locked);
+        assert_eq!(decoded.remote_access_state_version, 8);
     }
 
     /// `DesktopChanged` round-trips with the same JSON shape the IPC reader
@@ -1482,10 +1515,8 @@ mod tests {
         }
     }
 
-    /// Older daemons that don't yet emit `host_upstream_url` /
-    /// `media_pipe_name` / `file_pipe_name` / `config_file_path` must
-    /// still be accepted by newer workers (all four fields carry
-    /// `#[serde(default)]`).
+    /// Optional transport paths may be omitted, but the security gate is a
+    /// required part of every worker initialization payload.
     #[test]
     fn worker_init_payload_accepts_missing_optional_fields() {
         let legacy = serde_json::json!({
@@ -1495,6 +1526,8 @@ mod tests {
             "config_json": "{}",
             "signaling_url": null,
             "auth_token": null,
+            "remote_access_locked": false,
+            "remote_access_state_version": 1,
         });
         let decoded: WorkerInitPayload = serde_json::from_value(legacy).unwrap();
         assert!(decoded.host_upstream_url.is_none());
@@ -2491,8 +2524,15 @@ mod tests {
                 media_pipe_name: None,
                 file_pipe_name: None,
                 config_file_path: None,
+                remote_access_locked: false,
+                remote_access_state_version: 1,
             }),
             ServiceToWorker::Shutdown,
+            ServiceToWorker::SetRemoteAccessState(RemoteAccessStatePayload {
+                operation_id: "lock-op".to_string(),
+                state_version: 2,
+                locked: true,
+            }),
             ServiceToWorker::StartMedia(StartMediaPayload {
                 connection_id: "c".to_string(),
                 video_codec: MediaCodec::H264,
@@ -2825,6 +2865,13 @@ mod tests {
                     ),
                 },
                 audit_source_request_id: Some("frame-req".to_string()),
+            }),
+            WorkerToService::RemoteAccessStateApplied(RemoteAccessStateAppliedPayload {
+                operation_id: "lock-op".to_string(),
+                state_version: 2,
+                cancelled_terminals: 1,
+                cancelled_transfers: 2,
+                cancelled_execs: 3,
             }),
         ];
         for case in &cases {
