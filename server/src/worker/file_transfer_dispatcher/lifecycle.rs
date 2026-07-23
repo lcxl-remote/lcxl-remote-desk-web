@@ -1,0 +1,394 @@
+use super::*;
+
+impl FileTransferDispatcher {
+    pub fn new(
+        file_sender: Arc<dyn EventSender<FileTransferPayload>>,
+        settings: Arc<SharedSettings>,
+        hub: Arc<HostControlHub>,
+        connection_ceilings: ConnectionCeilingStore,
+        activity_sender: mpsc::UnboundedSender<WorkerToService>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(TokioMutex::new(DispatcherInner::new())),
+            file_sender,
+            settings,
+            hub,
+            connection_ceilings,
+            activity_sender,
+        }
+    }
+
+    pub(super) async fn start_activity(
+        &self,
+        connection_id: &str,
+        transfer_id: &str,
+        direction: FileTransferDirection,
+        file_name: &str,
+        total_bytes: u64,
+    ) -> bool {
+        let key = TransferKey::new(connection_id, transfer_id);
+        let inserted = {
+            let mut inner = self.inner.lock().await;
+            inner.activities.insert(key)
+        };
+        if !inserted {
+            return false;
+        }
+        let _ = self
+            .activity_sender
+            .send(WorkerToService::FileTransferStarted(
+                FileTransferStartedPayload {
+                    connection_id: connection_id.to_string(),
+                    transfer_id: transfer_id.to_string(),
+                    direction,
+                    file_name: sanitized_file_name(file_name),
+                    total_bytes,
+                },
+            ));
+        true
+    }
+
+    pub(super) async fn finish_activity(
+        &self,
+        connection_id: &str,
+        transfer_id: &str,
+        outcome: FileTransferOutcome,
+    ) -> bool {
+        let key = TransferKey::new(connection_id, transfer_id);
+        let removed = {
+            let mut inner = self.inner.lock().await;
+            inner.activities.remove(&key)
+        };
+        if !removed {
+            return false;
+        }
+        let _ = self
+            .activity_sender
+            .send(WorkerToService::FileTransferFinished(
+                FileTransferFinishedPayload {
+                    connection_id: connection_id.to_string(),
+                    transfer_id: transfer_id.to_string(),
+                    outcome,
+                },
+            ));
+        true
+    }
+
+    /// Resolve the `allow_file_transfer` decision for a connection.
+    ///
+    /// Returns the cached value if a previous command on the same
+    /// connection already established one. Otherwise calls
+    /// [`check_security_permission`] (which prompts the user via Tauri
+    /// when the saved preference is `None`) and stores the result.
+    ///
+    /// Race tolerance: two concurrent commands on a fresh connection
+    /// can both miss the cache and call into `check_security_permission`.
+    /// Tauri dedups identical pending requests by req-id, so the user
+    /// sees one prompt; the two callers receive the same answer and
+    /// race to write the same value into the cache. Either ordering
+    /// is correct.
+    async fn permission_for(&self, connection_id: &str) -> bool {
+        {
+            let inner = self.inner.lock().await;
+            if let Some(&v) = inner.permission_cache.get(connection_id) {
+                return v;
+            }
+        }
+        let global_transfer = self.settings.read().await.security.allow_file_transfer;
+        // Meet the connection's grant ceiling with the global so a redeemed-grant
+        // session is capped; owner connections carry no ceiling.
+        let ceiling = self.connection_ceilings.get(connection_id).await;
+        let allow_transfer = crate::model::security_approval::effective_permission(
+            ceiling.as_ref(),
+            global_transfer,
+            |c| c.allow_file_transfer,
+        );
+        let approved = check_security_permission(
+            &self.settings,
+            &self.hub,
+            allow_transfer,
+            SecurityPermissionType::FileTransfer,
+            Some(connection_id.to_string()),
+            // Capped grant / code-session: honor the prompt but never persist it to
+            // the owner's global allow_file_transfer.
+            ceiling.is_some(),
+        )
+        .await;
+        let mut inner = self.inner.lock().await;
+        inner
+            .permission_cache
+            .insert(connection_id.to_string(), approved);
+        approved
+    }
+
+    /// Add a connection to the active set. Subsequent file-lane
+    /// commands for this `connection_id` will be processed; commands
+    /// for inactive connections are dropped.
+    pub async fn start_connection(&self, payload: &StartMediaPayload) {
+        let mut inner = self.inner.lock().await;
+        let inserted = inner
+            .active_connections
+            .insert(payload.connection_id.clone());
+        if !inserted {
+            debug!(
+                "[FileTransferDispatcher] {}: duplicate StartMedia",
+                payload.connection_id
+            );
+        }
+        info!(
+            "[FileTransferDispatcher] {}: subscribed (active_count={})",
+            payload.connection_id,
+            inner.active_connections.len()
+        );
+    }
+
+    /// Remove a connection and terminate every transfer it owns.
+    pub async fn stop_connection(&self, payload: &StopMediaPayload) {
+        let (paths, finished) = {
+            let mut inner = self.inner.lock().await;
+            inner.active_connections.remove(&payload.connection_id);
+            inner.permission_cache.remove(&payload.connection_id);
+            let transfer_keys: Vec<TransferKey> = inner
+                .activities
+                .iter()
+                .filter(|key| key.connection_id == payload.connection_id)
+                .cloned()
+                .collect();
+            let mut paths = Vec::new();
+            let mut finished = Vec::new();
+            for key in transfer_keys {
+                if let Some(state) = inner.upload_states.remove(&key) {
+                    paths.push(state.file_path);
+                } else {
+                    inner.cancelled_transfers.insert(key.clone());
+                }
+                if inner.activities.remove(&key) {
+                    finished.push(FileTransferFinishedPayload {
+                        connection_id: key.connection_id,
+                        transfer_id: key.transfer_id,
+                        outcome: FileTransferOutcome::Cancelled,
+                    });
+                }
+            }
+            (paths, finished)
+        };
+        for path in paths {
+            if let Err(error) = tokio::fs::remove_file(&path).await {
+                debug!(
+                    "[FileTransferDispatcher] failed to remove partial upload {}: {error}",
+                    path.display()
+                );
+            }
+        }
+        for event in finished {
+            let _ = self
+                .activity_sender
+                .send(WorkerToService::FileTransferFinished(event));
+        }
+    }
+
+    /// Drop every connection and terminate every in-flight transfer.
+    pub async fn shutdown(&self) {
+        let (paths, finished) = {
+            let mut inner = self.inner.lock().await;
+            let paths = inner
+                .upload_states
+                .drain()
+                .map(|(_, state)| state.file_path)
+                .collect::<Vec<_>>();
+            let finished = inner
+                .activities
+                .drain()
+                .map(|key| FileTransferFinishedPayload {
+                    connection_id: key.connection_id,
+                    transfer_id: key.transfer_id,
+                    outcome: FileTransferOutcome::Cancelled,
+                })
+                .collect::<Vec<_>>();
+            inner.active_connections.clear();
+            inner.cancelled_transfers.clear();
+            inner.permission_cache.clear();
+            (paths, finished)
+        };
+        for path in paths {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        for event in finished {
+            let _ = self
+                .activity_sender
+                .send(WorkerToService::FileTransferFinished(event));
+        }
+    }
+
+    pub async fn active_transfer_count(&self) -> u32 {
+        self.inner
+            .lock()
+            .await
+            .activities
+            .len()
+            .min(u32::MAX as usize) as u32
+    }
+
+    /// Apply an incoming file-transfer command. The bytes are either
+    /// a JSON `FileTransferMessage` (control frame, `is_text=true`)
+    /// or a binary chunk header + payload (`is_text=false`).
+    pub async fn handle_command(&self, payload: FileTransferPayload) {
+        // Liveness gate: ignore commands for connections we have not
+        // been told about. The daemon DC router can race a stop, and
+        // we do not want a stray packet to allocate state on a
+        // closed-out connection.
+        {
+            let inner = self.inner.lock().await;
+            if !inner.active_connections.contains(&payload.connection_id) {
+                debug!(
+                    "[FileTransferDispatcher] {}: command for inactive connection — dropping",
+                    payload.connection_id
+                );
+                return;
+            }
+        }
+        // Permission gate: file transfer is on its own access category
+        // (`allow_file_transfer`), independent of `accept_control` which
+        // governs mouse/keyboard. The daemon's DC router used to gate
+        // `file_transfer_event` on `accept_control`; that was wrong —
+        // the file management UI in the browser opens a fresh WebRTC
+        // connection that has never requested control, so every
+        // download/upload would be silently dropped at the daemon.
+        // The daemon now passes file_transfer through unconditionally
+        // and we do the actual permission check here, mirroring Arch
+        // III's behavior in `service::file_transfer::handle_file_transfer_event`.
+        if !self.permission_for(&payload.connection_id).await {
+            warn!(
+                "[FileTransferDispatcher] {}: permission denied — dropping command",
+                payload.connection_id
+            );
+            return;
+        }
+        if payload.is_text {
+            self.handle_text(payload).await;
+        } else {
+            self.handle_binary(payload).await;
+        }
+    }
+
+    /// React to a daemon-side `dc.send` failure
+    /// ([`ServiceToWorker::FileTransferSendFailed`]). The daemon has
+    /// already logged the wire error at an appropriate severity; here
+    /// we tear down the matching transfer state and tell the browser
+    /// what happened. The browser listens for `TransferError` and
+    /// surfaces it as a toast / cancels its progress bar.
+    ///
+    /// Abort scope:
+    ///
+    /// - `Some(transfer_id)` — abort just that transfer. Downloads
+    ///   stop emitting chunks on the next loop iteration via
+    ///   `cancelled_transfers`; uploads release any in-flight file
+    ///   handle and remove the partial file from disk so it doesn't
+    ///   orphan.
+    /// - `None` — fall back to aborting every in-flight upload + every
+    ///   download for `connection_id`. Used when the daemon could not
+    ///   attribute the failure to a specific transfer (legacy payload
+    ///   without `transfer_id`).
+    ///
+    /// The browser-facing `TransferError` message intentionally
+    /// includes the daemon's `kind` + `error` string so a user-visible
+    /// toast can distinguish "PacketTooLarge — please update the
+    /// server" from "TransportClosed — connection dropped". The
+    /// `chunk_index` (when present) goes into the message body for
+    /// easier log correlation against the worker's `ft-metrics` line.
+    pub async fn handle_send_failed(&self, payload: FileTransferSendFailedPayload) {
+        let FileTransferSendFailedPayload {
+            connection_id,
+            transfer_id,
+            chunk_index,
+            kind,
+            error,
+        } = payload;
+        let kind_label = match kind {
+            FileTransferSendErrorKind::PacketTooLarge => "PacketTooLarge",
+            FileTransferSendErrorKind::TransportClosed => "TransportClosed",
+            FileTransferSendErrorKind::Other => "Other",
+        };
+        let message = match chunk_index {
+            Some(idx) => format!("daemon dc.send failed [{kind_label}] at chunk {idx}: {error}"),
+            None => format!("daemon dc.send failed [{kind_label}]: {error}"),
+        };
+        // Collect every transfer_id we need to abort. With a specific
+        // transfer_id this is just `[id]`; with None we snapshot every
+        // active upload + every active download for this connection.
+        let aborted_keys: Vec<TransferKey> = {
+            let mut inner = self.inner.lock().await;
+            let keys: Vec<TransferKey> = match transfer_id.as_deref() {
+                Some(tid) => vec![TransferKey::new(&connection_id, tid)],
+                None => inner
+                    .activities
+                    .iter()
+                    .filter(|key| key.connection_id == connection_id)
+                    .cloned()
+                    .collect(),
+            };
+            for key in &keys {
+                inner.cancelled_transfers.insert(key.clone());
+            }
+            keys
+        };
+        warn!(
+            "[FileTransferDispatcher] {}: send failure [{kind_label}] — aborting \
+             {} transfer(s); {}",
+            connection_id,
+            aborted_keys.len(),
+            error
+        );
+        // For uploads: release the file handle and remove the partial
+        // file so it doesn't orphan on disk. Mirrors the cleanup the
+        // TransferCancel arm already does.
+        let mut upload_paths_to_remove: Vec<std::path::PathBuf> = Vec::new();
+        {
+            let mut inner = self.inner.lock().await;
+            for key in &aborted_keys {
+                if let Some(state) = inner.upload_states.remove(key) {
+                    upload_paths_to_remove.push(state.file_path.clone());
+                }
+            }
+        }
+        for path in upload_paths_to_remove {
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                debug!(
+                    "[FileTransferDispatcher] failed to remove partial upload {} after \
+                     send failure: {e}",
+                    path.display()
+                );
+            }
+        }
+        // Surface the failure back to the browser for each transfer.
+        // If the file lane itself is what's broken these emits may
+        // fail too — that's expected; the browser's SCTP timeout will
+        // eventually surface the disconnect on its own.
+        for key in &aborted_keys {
+            if let Err(e) = self
+                .emit_text(
+                    &connection_id,
+                    FileTransferMessage::TransferError(TransferError {
+                        transfer_id: key.transfer_id.clone(),
+                        message: message.clone(),
+                    }),
+                )
+                .await
+            {
+                debug!(
+                    "[FileTransferDispatcher] {}: emit TransferError for {} after send \
+                     failure also failed: {e}",
+                    connection_id, key.transfer_id
+                );
+            }
+        }
+        for key in &aborted_keys {
+            self.finish_activity(
+                &key.connection_id,
+                &key.transfer_id,
+                FileTransferOutcome::Failed,
+            )
+            .await;
+        }
+    }
+}
