@@ -197,7 +197,7 @@ export function useDeskClipboard({ clipboardChannel, hasControl, isActive }: Use
                 let clipboardItems;
                 try {
                     clipboardItems = await navigator.clipboard.read();
-                } catch (e) {
+                } catch {
                     // console.warn("Could not read clipboard. Maybe no permission?", e);
                     return;
                 }
@@ -306,7 +306,7 @@ export function useDeskClipboard({ clipboardChannel, hasControl, isActive }: Use
             }
         };
 
-        const handleCopyCut = (e: ClipboardEvent) => {
+        const handleCopyCut = () => {
             if (syncTimer) clearTimeout(syncTimer);
             syncTimer = setTimeout(syncLocalToRemote, 50); // Small delay to let system clip register
         };
@@ -349,7 +349,7 @@ export function useDeskClipboard({ clipboardChannel, hasControl, isActive }: Use
             // update hash
             lastWrittenHash.current = Date.now();
             setFallbackToast({ show: false });
-        } catch (e) {
+        } catch {
             showErr("Still failed to write clipboard manually.");
         }
     };

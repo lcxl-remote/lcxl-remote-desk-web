@@ -665,7 +665,6 @@ mod tests {
             MockHandles {
                 text: Arc::clone(&self.text),
                 image: Arc::clone(&self.image),
-                writes: Arc::clone(&self.writes),
             }
         }
     }
@@ -673,11 +672,6 @@ mod tests {
     struct MockHandles {
         text: Arc<StdMutex<Option<String>>>,
         image: Arc<StdMutex<Option<ClipboardImage>>>,
-        // Useful for diagnostics when a test fails — kept as an
-        // observation handle even though the current tests assert on
-        // `text` / `image` directly.
-        #[allow(dead_code)]
-        writes: Arc<StdMutex<Vec<MockWrite>>>,
     }
 
     impl HostControlHelper for MockHelper {

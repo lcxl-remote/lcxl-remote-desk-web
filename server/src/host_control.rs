@@ -42,7 +42,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use log::{debug, info, warn};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -118,14 +118,10 @@ pub enum HubMode {
     Forwarder,
 }
 
-/// One in-flight approval awaiting user response. The non-`response_tx` fields
-/// are kept for future audit-log / timeout-tracking features.
-#[allow(dead_code)]
+/// One in-flight approval awaiting user response.
 struct PendingEntry {
     response_tx: oneshot::Sender<ApprovalResponse>,
-    permission_type: SecurityPermissionType,
     from_connection_id: Option<String>,
-    created_at: Instant,
 }
 
 /// Snapshot of an approval request, kept for ws-Ready replay.
@@ -445,18 +441,13 @@ impl HostControlHub {
             from_connection_id: req.from_connection_id.clone(),
         };
 
-        {
-            let mut pending = self.inner.pending_approvals.lock().unwrap();
-            pending.insert(
-                req.req_id.clone(),
-                PendingEntry {
-                    response_tx: tx,
-                    permission_type: permission_type.clone(),
-                    from_connection_id: req.from_connection_id.clone(),
-                    created_at: Instant::now(),
-                },
-            );
-        }
+        self.inner.pending_approvals.lock().unwrap().insert(
+            req.req_id.clone(),
+            PendingEntry {
+                response_tx: tx,
+                from_connection_id: req.from_connection_id.clone(),
+            },
+        );
 
         // Local & Aggregator (daemon-self) hubs cache the request so a Tauri shell
         // reconnecting mid-flight can resume the dialog. Forwarder does not cache

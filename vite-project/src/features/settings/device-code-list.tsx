@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next"
 import { Loader2, Plus, RefreshCw, Trash2, Edit2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { useToast } from "@/hooks/use-toast"
 import { Input } from "@/components/ui/input"
@@ -52,7 +52,7 @@ export function DeviceCodeList() {
     const { t } = useTranslation()
     const { toast } = useToast()
 
-    const [page, setPage] = useState(1)
+    const page = 1
     const pageSize = 20
 
     const { data: listResp, isLoading, refetch } = useListDeviceCodes({

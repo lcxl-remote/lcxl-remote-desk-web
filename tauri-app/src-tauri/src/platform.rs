@@ -15,18 +15,6 @@ pub fn block_input(block: bool) -> Result<(), String> {
     return linux::block_input(block);
 }
 
-/// Check if the current platform supports the private screen feature
-pub fn is_private_screen_supported() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        // Check if running on Wayland
-        if std::env::var("WAYLAND_DISPLAY").is_ok() {
-            return false; // Wayland is not supported
-        }
-    }
-    true
-}
-
 /// Resolve the attached LCXL virtual display to the OS monitor name.
 pub fn virtual_display_name() -> Option<String> {
     #[cfg(target_os = "windows")]

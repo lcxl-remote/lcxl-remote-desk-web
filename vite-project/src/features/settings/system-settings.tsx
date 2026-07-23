@@ -9,7 +9,6 @@ import { useQuerySettings } from "@/services/hooks/settingsController/useQuerySe
 import { useUpdateSettings } from "@/services/hooks/settingsController/useUpdateSettings"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { useQueryBackendInfo } from "@/services/hooks/systemController/useQueryBackendInfo"
-import { useQueryMacosAutologin } from "@/services/hooks/systemController/useQueryMacosAutologin"
 import { mergeSystemSettings } from "@/features/settings/settings-payload"
 
 import { Button } from "@/components/ui/button"

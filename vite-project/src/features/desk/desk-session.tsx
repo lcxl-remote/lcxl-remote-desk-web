@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react"
 import type { MouseEvent as ReactMouseEvent } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle, AlertTriangle, Sparkles, SignalHigh, SignalMedium, SignalLow, Lock } from "lucide-react"
+import { Menu, Loader2, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle, AlertTriangle, Sparkles, SignalHigh, SignalMedium, SignalLow, Lock } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { connectionQuality } from "./connection-quality"
 import {
@@ -135,11 +135,10 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
 
     // Control state
     const [hasControl, setHasControl] = useState(false);
-    const [hasRequested, setHasRequested] = useState(false);
     const [isWaitingApproval, setIsWaitingApproval] = useState(false);
     const hasRequestedRef = useRef(false);
 
-    const { isConnected, subscribe, sendMessage, sendTracked, cancelQueued } = useDeskSignaling(deskId || null)
+    const { isConnected, subscribe, sendMessage, sendTracked, cancelQueued } = useDeskSignaling()
 
     // Restriction state derived from the redeemed grant (if any) for this target.
     const restricted = useRestrictedSession(deskId);
@@ -153,7 +152,6 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
             const requestData = buildDesktopRequestRemotePayload(deskId, grantSessionId)
             sendMessage(SIGNALING_TYPE_CODE_REQUEST_REMOTE, requestData, deskId);
             hasRequestedRef.current = true;
-            setHasRequested(true);
         }
     }, [deskId, sendMessage, grantSessionId]);
 
@@ -429,7 +427,6 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     useEffect(() => {
         if (!isConnected) {
             hasRequestedRef.current = false;
-            setHasRequested(false);
         }
     }, [isConnected]);
 
@@ -800,14 +797,6 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         setAudioVolume(value);
         videoRef.current.volume = value / 100;
         setIsMuted(value === 0);
-    };
-
-    const toggleMute = () => {
-        if (videoRef.current) {
-            const newMuted = !isMuted;
-            videoRef.current.muted = newMuted;
-            setIsMuted(newMuted);
-        }
     };
 
     // Drag handlers for control bar

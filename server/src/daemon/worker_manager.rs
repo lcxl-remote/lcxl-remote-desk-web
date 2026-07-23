@@ -151,7 +151,6 @@ impl ProcessHandle {
 #[cfg(target_os = "windows")]
 struct NativeWindowsChild {
     handle: usize,
-    #[allow(dead_code)]
     pid: u32,
 }
 

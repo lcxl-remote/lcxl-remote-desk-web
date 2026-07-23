@@ -1,5 +1,6 @@
 use crate::{
     error::InputError,
+    host_control::send_private_screen_command,
     model::host_control::{DisplaySettings, HostControlHelper, PrivateScreenCommand},
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
@@ -36,20 +37,7 @@ impl HostControlHelper for MacHostControlHelper {
         from_connection_id: &str,
         enable: bool,
     ) -> Result<(), InputError> {
-        if let Some(sender) = &self.cmd_sender {
-            let cmd = if enable {
-                PrivateScreenCommand::Show(from_connection_id.to_string())
-            } else {
-                PrivateScreenCommand::Hide(from_connection_id.to_string())
-            };
-            if let Err(e) = sender.send(cmd) {
-                log::error!("Failed to send private screen command: {}", e);
-            }
-        } else {
-            log::warn!(
-                "Private screen command sender is not configured (maybe starting as standalone server)"
-            );
-        }
+        send_private_screen_command(self.cmd_sender.as_ref(), from_connection_id, enable);
         Ok(())
     }
 

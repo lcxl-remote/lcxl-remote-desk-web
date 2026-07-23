@@ -1,6 +1,6 @@
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Monitor, Terminal as TerminalIcon, Folder, ArrowLeft, Cpu, Globe, Server, Clock, Lock } from "lucide-react"
+import { Monitor, Terminal as TerminalIcon, Folder, ArrowLeft, Globe, Server, Lock } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card"

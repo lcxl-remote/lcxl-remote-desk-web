@@ -410,7 +410,6 @@ mod windows_impl {
             DRIVER_CAT_BASENAME, DRIVER_DLL_BASENAME, DRIVER_HW_ID, DRIVER_INF_BASENAME,
             DRIVER_WUDFRD_BASENAME, DriverFiles, InstallerError,
         };
-        use std::path::PathBuf;
         use std::sync::Mutex;
         use tempfile::TempDir;
 

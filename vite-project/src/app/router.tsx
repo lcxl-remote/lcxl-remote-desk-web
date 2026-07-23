@@ -1,62 +1,45 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom';
-import App from '@/App';
-import LoginPage from '@/features/auth/login-page';
-import InitPage from '@/features/auth/init-page';
-import PrivateScreenPage from '@/features/desk/private-screen-page';
-import WhiteboardPage from '@/features/desk/whiteboard-page';
-import SecurityApprovalPage from '@/features/desk/security-approval-page';
-import HostAccessStatusPage from '@/features/desk/host-access-status-page';
 import Layout from '@/features/layout/layout';
-import DeskList from '@/features/desk/desk-list';
-import DeskDashboard from '@/features/desk/desk-dashboard';
-import DeskSession from '@/features/desk/desk-session';
-import FileManager from '@/features/file-manager/file-list';
-import TerminalSession from '@/features/terminal/terminal-session';
 import RequireAuth from '@/features/auth/require-auth';
-import { SystemSettings } from '@/features/settings/system-settings';
-import { TurnSettings } from '@/features/settings/turn-settings';
-import { TurnUsagePage } from '@/features/usage/turn-usage';
-import { ModelUsagePage } from '@/features/usage/model-usage';
-import { UsageRetentionPage } from '@/features/usage/usage-retention';
 import { UsageLayout } from '@/features/usage/usage-layout';
-import { UsageOverview } from '@/features/usage/usage-overview';
-import { TurnClientSettingsPage } from '@/features/settings/turn-client-settings';
-import { LogSettings } from '@/features/settings/log-settings';
-import { SecuritySettings } from '@/features/settings/security-settings';
-import { UserSettings } from '@/features/settings/user-settings';
-import { DeviceCodeList } from '@/features/settings/device-code-list';
 import { SettingsLayout } from '@/features/settings/settings-layout';
-import { SettingsOverview } from '@/features/settings/settings-overview';
-import { VirtualDisplaySettings } from '@/features/settings/virtual-display-settings';
-import { AiModelSettings } from '@/features/settings/ai-model-settings';
-import { DeskConnectionSettings } from '@/features/settings/desk-connection-settings';
-import { SignalTokenSettings } from '@/features/settings/signal-token-settings';
-import { SupportPage } from '@/features/support/support-page';
 
 export const router = createBrowserRouter([
     {
         path: '/user/login',
-        element: <LoginPage />,
+        lazy: async () => ({
+            Component: (await import('@/features/auth/login-page')).default,
+        }),
     },
     {
         path: '/init',
-        element: <InitPage />,
+        lazy: async () => ({
+            Component: (await import('@/features/auth/init-page')).default,
+        }),
     },
     {
         path: '/private-screen',
-        element: <PrivateScreenPage />,
+        lazy: async () => ({
+            Component: (await import('@/features/desk/private-screen-page')).default,
+        }),
     },
     {
         path: '/whiteboard',
-        element: <WhiteboardPage />,
+        lazy: async () => ({
+            Component: (await import('@/features/desk/whiteboard-page')).default,
+        }),
     },
     {
         path: '/security-approval',
-        element: <SecurityApprovalPage />,
+        lazy: async () => ({
+            Component: (await import('@/features/desk/security-approval-page')).default,
+        }),
     },
     {
         path: '/host-access-status',
-        element: <HostAccessStatusPage />,
+        lazy: async () => ({
+            Component: (await import('@/features/desk/host-access-status-page')).default,
+        }),
     },
     {
         path: '/',
@@ -72,31 +55,45 @@ export const router = createBrowserRouter([
             },
             {
                 path: 'app',
-                element: <App />,
+                lazy: async () => ({
+                    Component: (await import('@/App')).default,
+                }),
             },
             {
                 path: 'desk/list',
-                element: <DeskList />,
+                lazy: async () => ({
+                    Component: (await import('@/features/desk/desk-list')).default,
+                }),
             },
             {
                 path: 'desk/:id',
-                element: <DeskDashboard />,
+                lazy: async () => ({
+                    Component: (await import('@/features/desk/desk-dashboard')).default,
+                }),
             },
             {
                 path: 'desk/:id/control',
-                element: <DeskSession />,
+                lazy: async () => ({
+                    Component: (await import('@/features/desk/desk-session')).default,
+                }),
             },
             {
                 path: 'desk/:id/files',
-                element: <FileManager />,
+                lazy: async () => ({
+                    Component: (await import('@/features/file-manager/file-list')).default,
+                }),
             },
             {
                 path: 'desk/:id/terminal',
-                element: <TerminalSession />,
+                lazy: async () => ({
+                    Component: (await import('@/features/terminal/terminal-session')).default,
+                }),
             },
             {
                 path: 'support',
-                element: <SupportPage />,
+                lazy: async () => ({
+                    Component: (await import('@/features/support/support-page')).SupportPage,
+                }),
             },
             {
                 path: 'system',
@@ -104,47 +101,69 @@ export const router = createBrowserRouter([
                 children: [
                     {
                         index: true,
-                        element: <SettingsOverview />,
+                        lazy: async () => ({
+                            Component: (await import('@/features/settings/settings-overview')).SettingsOverview,
+                        }),
                     },
                     {
                         path: 'settings',
-                        element: <SystemSettings />,
+                        lazy: async () => ({
+                            Component: (await import('@/features/settings/system-settings')).SystemSettings,
+                        }),
                     },
                     {
                         path: 'turn',
-                        element: <TurnSettings />,
+                        lazy: async () => ({
+                            Component: (await import('@/features/settings/turn-settings')).TurnSettings,
+                        }),
                     },
                     {
                         path: 'turn-client',
-                        element: <TurnClientSettingsPage />,
+                        lazy: async () => ({
+                            Component: (await import('@/features/settings/turn-client-settings')).TurnClientSettingsPage,
+                        }),
                     },
                     {
                         path: 'desk-connection',
-                        element: <DeskConnectionSettings />,
+                        lazy: async () => ({
+                            Component: (await import('@/features/settings/desk-connection-settings')).DeskConnectionSettings,
+                        }),
                     },
                     {
                         path: 'signal-token',
-                        element: <SignalTokenSettings />,
+                        lazy: async () => ({
+                            Component: (await import('@/features/settings/signal-token-settings')).SignalTokenSettings,
+                        }),
                     },
                     {
                         path: 'log',
-                        element: <LogSettings />,
+                        lazy: async () => ({
+                            Component: (await import('@/features/settings/log-settings')).LogSettings,
+                        }),
                     },
                     {
                         path: 'security',
-                        element: <SecuritySettings />,
+                        lazy: async () => ({
+                            Component: (await import('@/features/settings/security-settings')).SecuritySettings,
+                        }),
                     },
                     {
                         path: 'device-codes',
-                        element: <DeviceCodeList />,
+                        lazy: async () => ({
+                            Component: (await import('@/features/settings/device-code-list')).DeviceCodeList,
+                        }),
                     },
                     {
                         path: 'virtual-display',
-                        element: <VirtualDisplaySettings />,
+                        lazy: async () => ({
+                            Component: (await import('@/features/settings/virtual-display-settings')).VirtualDisplaySettings,
+                        }),
                     },
                     {
                         path: 'ai-model',
-                        element: <AiModelSettings />,
+                        lazy: async () => ({
+                            Component: (await import('@/features/settings/ai-model-settings')).AiModelSettings,
+                        }),
                     },
                 ]
             },
@@ -154,25 +173,35 @@ export const router = createBrowserRouter([
                 children: [
                     {
                         index: true,
-                        element: <UsageOverview />,
+                        lazy: async () => ({
+                            Component: (await import('@/features/usage/usage-overview')).UsageOverview,
+                        }),
                     },
                     {
                         path: 'turn',
-                        element: <TurnUsagePage />,
+                        lazy: async () => ({
+                            Component: (await import('@/features/usage/turn-usage')).TurnUsagePage,
+                        }),
                     },
                     {
                         path: 'model',
-                        element: <ModelUsagePage />,
+                        lazy: async () => ({
+                            Component: (await import('@/features/usage/model-usage')).ModelUsagePage,
+                        }),
                     },
                     {
                         path: 'retention',
-                        element: <UsageRetentionPage />,
+                        lazy: async () => ({
+                            Component: (await import('@/features/usage/usage-retention')).UsageRetentionPage,
+                        }),
                     },
                 ]
             },
             {
                 path: 'user/settings',
-                element: <UserSettings />,
+                lazy: async () => ({
+                    Component: (await import('@/features/settings/user-settings')).UserSettings,
+                }),
             },
         ]
     },

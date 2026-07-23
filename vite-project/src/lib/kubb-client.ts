@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AxiosRequestConfig, AxiosResponse, AxiosError, AxiosInstance } from "axios";
+import type { AxiosRequestConfig, AxiosResponse, AxiosError } from "axios";
 
 export const axiosInstance = axios.create({});
 
@@ -31,6 +31,6 @@ export default client;
 export type RequestConfig<TData = unknown> = AxiosRequestConfig<TData>;
 export type Response<TData = unknown> = AxiosResponse<TData>;
 export type ResponseErrorConfig<TError = unknown> = AxiosError<TError>;
-export type Client = <TData = unknown, TError = unknown, TVariables = unknown>(
+export type Client = <TData = unknown, _TError = unknown, TVariables = unknown>(
     config: RequestConfig<TVariables>
 ) => Promise<Response<TData>>;

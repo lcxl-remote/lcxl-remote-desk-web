@@ -68,8 +68,7 @@ pub struct SwDeviceHandle {
     // Held only for Drop side effect: dropping Owned<HSWDEVICE> invokes
     // SwDeviceClose, which tears the virtual monitor back down. Reading
     // the raw handle anywhere in production code is wrong.
-    #[allow(dead_code)]
-    handle: Owned<HSWDEVICE>,
+    _handle: Owned<HSWDEVICE>,
     instance_id: String,
 }
 
@@ -285,7 +284,7 @@ pub fn create_virtual_display_with_timeout(
     let instance_id = final_state.device_instance_id.clone();
     Ok((
         SwDeviceHandle {
-            handle: owned,
+            _handle: owned,
             instance_id: final_state.device_instance_id,
         },
         instance_id,

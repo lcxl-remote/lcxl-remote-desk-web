@@ -458,12 +458,10 @@ mod tests {
         ctrl.cancel();
     }
 
-    /// Borrow contract: the controller is borrowed immutably (`&self`)
-    /// while the waiter is borrowed mutably (`&mut self`), so both
-    /// arms can sit in the same `tokio::select!` without rustc
-    /// complaining. Compile-only assertion.
-    #[allow(dead_code)]
-    async fn _compile_select_combines_cancel_and_wait_arms() {
+    /// The controller and waiter can be selected concurrently without
+    /// consuming either handle or leaving the zero-duration waiter pending.
+    #[tokio::test]
+    async fn select_combines_cancel_and_wait_arms() {
         let (ctrl, mut waiter) = show_pre_detach_prompt(Duration::from_secs(0));
         let (_tx, mut rx) = oneshot::channel::<()>();
         tokio::select! {

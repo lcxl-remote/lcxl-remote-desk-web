@@ -13,7 +13,7 @@ use crate::keyboard_event::windows;
 use crate::keyboard_event::mac;
 
 pub fn create_keyboard_event_handler(
-    wayland_control_mode: Option<&str>,
+    _wayland_control_mode: Option<&str>,
 ) -> Result<Box<dyn KeyboardEventHandler + Send + Sync>, InputError> {
     #[cfg(target_os = "windows")]
     {
@@ -32,7 +32,7 @@ pub fn create_keyboard_event_handler(
             }
         }
 
-        let mode = wayland_control_mode.unwrap_or("auto");
+        let mode = _wayland_control_mode.unwrap_or("auto");
         log::info!(
             "Keyboard handler: selecting linux backend, mode={}, WAYLAND_DISPLAY={}",
             mode,

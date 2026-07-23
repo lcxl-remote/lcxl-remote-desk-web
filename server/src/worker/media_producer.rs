@@ -1641,7 +1641,7 @@ fn h264_walk_nals(nal_bytes: &[u8]) -> Vec<(u8, usize)> {
         }
         i += 1;
     }
-    for (idx, (off, prefix)) in starts.iter().enumerate() {
+    for (idx, (off, _)) in starts.iter().enumerate() {
         if *off >= nal_bytes.len() {
             continue;
         }

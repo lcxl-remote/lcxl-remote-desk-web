@@ -2,14 +2,10 @@
 import * as React from "react"
 import {
     Monitor,
-    FolderOpen,
-    Terminal,
     Settings,
-    User,
     LogOut,
     ChevronRight,
     ChevronDown,
-    Key,
     BarChart3,
     LifeBuoy,
 } from "lucide-react"
@@ -33,7 +29,6 @@ import {
     SidebarMenuSubButton,
     SidebarMenuSubItem,
     SidebarRail,
-    useSidebar,
 } from "@/components/ui/sidebar"
 import {
     Collapsible,
@@ -54,10 +49,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     const { t } = useTranslation()
     const location = useLocation()
     const navigate = useNavigate()
-    const { state } = useSidebar()
-
     const { data: serverInfoResp } = useQueryServerInfo()
-    const { data: userResp, refetch: refetchUser } = useGetCurrentUser()
+    const { data: userResp } = useGetCurrentUser()
     const { mutateAsync: logout } = useLogoutAccount()
 
     const serverInfo = serverInfoResp?.data

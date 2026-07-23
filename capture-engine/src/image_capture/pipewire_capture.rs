@@ -35,20 +35,19 @@ use crate::{
     model::image_capture::{ImageInfo, ImageOutputEnumerator, ImageType},
 };
 
-#[allow(dead_code)]
 #[derive(DeserializeDict, Type, Debug)]
 #[zvariant(signature = "dict")]
 pub struct ScreenCastCreateSessionResponse {
     session_handle: String,
 }
 
-#[allow(dead_code)]
 #[derive(DeserializeDict, Type, Debug)]
 #[zvariant(signature = "dict")]
 pub struct ScreenCastStartStream {
     pub id: Option<String>,
     pub position: Option<(i32, i32)>,
     pub size: Option<(i32, i32)>,
+    #[allow(dead_code)]
     pub source_type: Option<u32>,
     pub mapping_id: Option<String>,
 }
@@ -180,7 +179,6 @@ impl ScreenCast<'_> {
         wait_zbus_response(&portal_request, response_stream)
     }
 
-    #[allow(dead_code)]
     pub fn open_pipe_wire_remote(
         &self,
         session: &OwnedObjectPath,

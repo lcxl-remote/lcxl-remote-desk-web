@@ -16,14 +16,6 @@ pub struct UinputMouseEventHandler {
     pub virtual_device: VirtualDevice,
     pub wheel_acc_x: f64,
     pub wheel_acc_y: f64,
-    /// Held for interface symmetry with the Windows / macOS / Wayland
-    /// backends — uinput's absolute axis range is a fixed `0..32767`
-    /// that the compositor maps to its own screen, so this geometry is
-    /// never consulted by `handle_mouse_*`. Kept on the struct so that
-    /// future per-output virtual devices can read it without re-doing
-    /// the factory signature.
-    #[allow(dead_code)]
-    geometry: SharedMonitorGeometry,
 }
 
 impl UinputMouseEventHandler {
@@ -32,11 +24,11 @@ impl UinputMouseEventHandler {
     /// `0..32767` that the X / Wayland compositor maps to its own
     /// screen / output. Applying a virtual-desktop offset here would
     /// push the cursor outside the reachable range, so the parameter
-    /// is intentionally stored without being read. Multi-monitor
-    /// cursor targeting on uinput would require either a separate
+    /// is intentionally ignored. Multi-monitor cursor targeting on
+    /// uinput would require either a separate
     /// virtual device per output or relative-mode emulation, neither
     /// of which is in scope today.
-    pub fn new(geometry: SharedMonitorGeometry) -> Result<Self, InputError> {
+    pub fn new(_geometry: SharedMonitorGeometry) -> Result<Self, InputError> {
         // https://www.kernel.org/doc/html/v4.12/input/uinput.html
         let mut keys = AttributeSet::<KeyCode>::new();
         keys.insert(evdev::KeyCode::BTN_LEFT);
@@ -69,7 +61,6 @@ impl UinputMouseEventHandler {
             virtual_device,
             wheel_acc_x: 0.0,
             wheel_acc_y: 0.0,
-            geometry,
         })
     }
 }

@@ -65,8 +65,7 @@ pub enum InputDesktopProbe {
 
 fn run_loop(bound: &str, tx: UnboundedSender<String>) {
     log::info!("[DesktopMonitor] watching for input-desktop drift from '{bound}'");
-    let mut last_reported: Option<String> = None;
-    let mut last_logged_other_err: Option<String> = None;
+    let mut state = DesktopMonitorState::default();
 
     loop {
         std::thread::sleep(POLL_INTERVAL);
@@ -74,50 +73,54 @@ fn run_loop(bound: &str, tx: UnboundedSender<String>) {
             return;
         }
 
-        let observed = match probe_input_desktop() {
-            InputDesktopProbe::Name(name) => name,
-            InputDesktopProbe::Restricted => RESTRICTED_DESKTOP_NAME.to_string(),
-            InputDesktopProbe::OtherError(msg) => {
-                // Log only on *transitions* between distinct error
-                // messages to avoid 1-Hz spam when the API is broken.
-                if last_logged_other_err.as_deref() != Some(msg.as_str()) {
-                    log::warn!("[DesktopMonitor] OpenInputDesktop error: {msg}");
-                    last_logged_other_err = Some(msg);
-                }
-                continue;
+        if let Some(observed) = state.observe(bound, probe_input_desktop()) {
+            if tx.send(observed).is_err() {
+                return;
             }
-        };
-        // Successful read clears any sticky error log dedupe state.
-        last_logged_other_err = None;
-
-        if observed == bound {
-            if let Some(prev) = last_reported.take() {
-                log::info!(
-                    "[DesktopMonitor] input desktop returned to bound '{bound}' from '{prev}'"
-                );
-            }
-            continue;
         }
-
-        // Suppress repeats of the same drifted state — daemon already
-        // received the notification, no value in spamming.
-        if last_reported.as_deref() == Some(observed.as_str()) {
-            continue;
-        }
-
-        log::info!("[DesktopMonitor] desktop drift detected: '{bound}' -> '{observed}'");
-        if tx.send(observed.clone()).is_err() {
-            return;
-        }
-        last_reported = Some(observed);
     }
 }
 
-/// Case-sensitive comparison. Windows desktop names are case-sensitive in
-/// theory; in practice every well-known name (`Default`, `Winlogon`,
-/// `Screen-saver`) has a fixed casing, so we keep the strict comparison.
-pub(crate) fn names_equal(a: &str, b: &str) -> bool {
-    a == b
+#[derive(Default)]
+struct DesktopMonitorState {
+    last_reported: Option<String>,
+    last_logged_other_err: Option<String>,
+}
+
+impl DesktopMonitorState {
+    fn observe(&mut self, bound: &str, probe: InputDesktopProbe) -> Option<String> {
+        let observed = match probe {
+            InputDesktopProbe::Name(name) => name,
+            InputDesktopProbe::Restricted => RESTRICTED_DESKTOP_NAME.to_string(),
+            InputDesktopProbe::OtherError(msg) => {
+                // Log only on transitions between distinct errors to avoid
+                // one warning per poll when the platform API is unavailable.
+                if self.last_logged_other_err.as_deref() != Some(msg.as_str()) {
+                    log::warn!("[DesktopMonitor] OpenInputDesktop error: {msg}");
+                    self.last_logged_other_err = Some(msg);
+                }
+                return None;
+            }
+        };
+        self.last_logged_other_err = None;
+
+        if observed == bound {
+            if let Some(previous) = self.last_reported.take() {
+                log::info!(
+                    "[DesktopMonitor] input desktop returned to bound '{bound}' from '{previous}'"
+                );
+            }
+            return None;
+        }
+
+        if self.last_reported.as_deref() == Some(observed.as_str()) {
+            return None;
+        }
+
+        log::info!("[DesktopMonitor] desktop drift detected: '{bound}' -> '{observed}'");
+        self.last_reported = Some(observed.clone());
+        Some(observed)
+    }
 }
 
 /// Probe the current input desktop. Returns one of [`InputDesktopProbe`]'s
@@ -183,18 +186,7 @@ pub fn probe_input_desktop() -> InputDesktopProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tokio::sync::mpsc;
-
-    /// `names_equal` is a strict comparison; deliberate so a future hot
-    /// fix that lowercases one side breaks loudly rather than silently
-    /// suppressing detection.
-    #[test]
-    fn names_equal_is_case_sensitive() {
-        assert!(names_equal("Default", "Default"));
-        assert!(!names_equal("default", "Default"));
-        assert!(!names_equal("Default", "Winlogon"));
-    }
 
     /// `RESTRICTED_DESKTOP_NAME` is the wire name shipped to the daemon
     /// for the access-denied case. Locked down with a test so a rename
@@ -225,72 +217,46 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// Exercise the dedupe logic with a fake probe: the watcher emits one
-    /// notification per transition into a drifted state, and a return to
-    /// the bound desktop re-arms it for the next drift.
-    ///
-    /// We model the probe via a thread-local-style override so we can
-    /// drive it without touching Win32. Done as a small free function
-    /// `run_loop_with_probe` to keep the production hot path lean.
+    /// The production state machine emits once per drift transition and
+    /// returning to the bound desktop re-arms the same drift for later.
     #[test]
     fn dedupes_drift_state_across_polls() {
-        let probes: Mutex<Vec<InputDesktopProbe>> = Mutex::new(vec![
+        let probes = vec![
             InputDesktopProbe::Name("Default".to_string()), // matches bound
             InputDesktopProbe::Restricted,                  // first drift -> emit
             InputDesktopProbe::Restricted,                  // dedup -> no emit
             InputDesktopProbe::Name("Default".to_string()), // returned
             InputDesktopProbe::Restricted,                  // re-armed -> emit
-        ]);
+        ];
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-        run_loop_with_probe("Default", tx, |_| {
-            let mut q = probes.lock().unwrap();
-            if q.is_empty() {
-                InputDesktopProbe::OtherError("exhausted".to_string())
-            } else {
-                q.remove(0)
-            }
-        });
+        let mut state = DesktopMonitorState::default();
+        let observed = probes
+            .into_iter()
+            .filter_map(|probe| state.observe("Default", probe))
+            .collect::<Vec<_>>();
 
-        // Drain the channel: should have exactly two `Winlogon` entries.
-        let mut got = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            got.push(msg);
-        }
-        assert_eq!(got, vec!["Winlogon".to_string(), "Winlogon".to_string()]);
+        assert_eq!(
+            observed,
+            vec!["Winlogon".to_string(), "Winlogon".to_string()]
+        );
     }
 
-    /// Drives the same dedupe state machine as `run_loop` but accepts an
-    /// injected probe function and runs synchronously without sleeping
-    /// — used by the dedupe test above.
-    fn run_loop_with_probe(
-        bound: &str,
-        tx: mpsc::UnboundedSender<String>,
-        mut probe: impl FnMut(usize) -> InputDesktopProbe,
-    ) {
-        let mut last_reported: Option<String> = None;
-        let mut iter = 0;
-        loop {
-            iter += 1;
-            if iter > 32 {
-                break;
-            }
-            let observed = match probe(iter) {
-                InputDesktopProbe::Name(name) => name,
-                InputDesktopProbe::Restricted => RESTRICTED_DESKTOP_NAME.to_string(),
-                InputDesktopProbe::OtherError(_) => break,
-            };
-            if observed == bound {
-                last_reported = None;
-                continue;
-            }
-            if last_reported.as_deref() == Some(observed.as_str()) {
-                continue;
-            }
-            if tx.send(observed.clone()).is_err() {
-                return;
-            }
-            last_reported = Some(observed);
-        }
+    #[test]
+    fn distinct_errors_are_deduplicated_until_a_successful_probe() {
+        let mut state = DesktopMonitorState::default();
+
+        assert_eq!(
+            state.observe("Default", InputDesktopProbe::OtherError("failure".into())),
+            None
+        );
+        assert_eq!(
+            state.observe("Default", InputDesktopProbe::OtherError("failure".into())),
+            None
+        );
+        assert_eq!(
+            state.observe("Default", InputDesktopProbe::Name("Default".to_string())),
+            None
+        );
+        assert_eq!(state.last_logged_other_err, None);
     }
 }

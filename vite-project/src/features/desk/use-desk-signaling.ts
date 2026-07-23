@@ -51,7 +51,7 @@ const HEARTBEAT_TIMEOUT_MS = 60_000; // 2 missed heartbeats = dead
 const RECONNECT_BASE_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
 
-export function useDeskSignaling(deskId: string | null) {
+export function useDeskSignaling() {
     const socketRef = useRef<WebSocket | null>(null);
     const [isConnected, setIsConnected] = useState(false);
     const messageQueue = useRef<QueuedMessage[]>([]);

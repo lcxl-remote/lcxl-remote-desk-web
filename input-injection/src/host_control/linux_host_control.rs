@@ -7,7 +7,10 @@ use desk_utils::error::DeskErrorCode;
 
 use crate::{
     error::InputError,
-    host_control::input_grab::{EvdevGrabber, LocalInputBlocker},
+    host_control::{
+        input_grab::{EvdevGrabber, LocalInputBlocker},
+        send_private_screen_command,
+    },
     linux_display::{self, Backend},
     model::host_control::{DisplaySettings, HostControlHelper, PrivateScreenCommand},
 };
@@ -106,20 +109,7 @@ impl HostControlHelper for LinuxHostControlHelper {
         from_connection_id: &str,
         enable: bool,
     ) -> Result<(), InputError> {
-        if let Some(sender) = &self.cmd_sender {
-            let cmd = if enable {
-                PrivateScreenCommand::Show(from_connection_id.to_string())
-            } else {
-                PrivateScreenCommand::Hide(from_connection_id.to_string())
-            };
-            if let Err(e) = sender.send(cmd) {
-                log::error!("Failed to send private screen command: {}", e);
-            }
-        } else {
-            log::warn!(
-                "Private screen command sender is not configured (maybe starting as standalone server)"
-            );
-        }
+        send_private_screen_command(self.cmd_sender.as_ref(), from_connection_id, enable);
         Ok(())
     }
 

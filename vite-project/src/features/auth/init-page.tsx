@@ -78,7 +78,6 @@ export default function InitPage() {
     const [showAdvanced, setShowAdvanced] = useState(false)
     const [schemeStatus, setSchemeStatus] = useState<SchemeStatus>({ kind: "idle" })
     const [managerNextError, setManagerNextError] = useState<string | null>(null)
-    const [resolvingScheme, setResolvingScheme] = useState(false)
     const [verifyingToken, setVerifyingToken] = useState(false)
     const [advancingManager, setAdvancingManager] = useState(false)
 
@@ -121,7 +120,6 @@ export default function InitPage() {
             setSchemeStatus({ kind: "error", message: t("pages.init.manager.domainInvalid") })
             return
         }
-        setResolvingScheme(true)
         setSchemeStatus({ kind: "checking" })
         try {
             const res = await verifyConnection({ data: { target: "manager", input: value } })
@@ -141,8 +139,6 @@ export default function InitPage() {
             }
         } catch {
             setSchemeStatus({ kind: "error", message: t("pages.init.manager.unreachable") })
-        } finally {
-            setResolvingScheme(false)
         }
     }
 
@@ -153,7 +149,6 @@ export default function InitPage() {
             setSchemeStatus({ kind: "idle" })
             return
         }
-        setResolvingScheme(true)
         setSchemeStatus({ kind: "checking" })
         try {
             const res = await verifyConnection({ data: { target: "manager", input: value } })
@@ -172,8 +167,6 @@ export default function InitPage() {
             }
         } catch {
             setSchemeStatus({ kind: "error", message: t("pages.init.manager.unreachable") })
-        } finally {
-            setResolvingScheme(false)
         }
     }
 

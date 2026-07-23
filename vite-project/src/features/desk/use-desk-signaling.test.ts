@@ -55,7 +55,7 @@ describe("useDeskSignaling.sendMessage", () => {
      * having to peek inside the JSON.
      */
     it("returns the generated request_id when none is provided", async () => {
-        const { result } = renderHook(() => useDeskSignaling("desk-A"));
+        const { result } = renderHook(() => useDeskSignaling());
         // Wait for the open callback to flush queued messages.
         await act(async () => {
             await new Promise((r) => setTimeout(r, 1));
@@ -85,7 +85,7 @@ describe("useDeskSignaling.sendMessage", () => {
      * via a pending-id set.
      */
     it("returns the provided request_id and uses it on the wire", async () => {
-        const { result } = renderHook(() => useDeskSignaling("desk-B"));
+        const { result } = renderHook(() => useDeskSignaling());
         await act(async () => {
             await new Promise((r) => setTimeout(r, 1));
         });
@@ -173,7 +173,7 @@ describe("useDeskSignaling.sendTracked / cancelQueued", () => {
      * callback is dropped).
      */
     it("replaceKey keeps only the latest queued message; onSent fires on flush", () => {
-        const { result } = renderHook(() => useDeskSignaling("desk-R"));
+        const { result } = renderHook(() => useDeskSignaling());
         const sentCbs: string[] = [];
         let r1!: { requestId: string; disposition: string };
         let r2!: { requestId: string; disposition: string };
@@ -210,7 +210,7 @@ describe("useDeskSignaling.sendTracked / cancelQueued", () => {
     /** `cancelQueued` purges a pending OFFER: it is never sent and its
      *  `onSent` never fires, even after a reconnect-flush. */
     it("cancelQueued drops the message; not sent and onSent not fired on flush", () => {
-        const { result } = renderHook(() => useDeskSignaling("desk-C"));
+        const { result } = renderHook(() => useDeskSignaling());
         const sentCbs: string[] = [];
         act(() => {
             result.current.sendTracked({
@@ -233,7 +233,7 @@ describe("useDeskSignaling.sendTracked / cancelQueued", () => {
      *  fires `onSent` synchronously with disposition `sent`. */
     it("sends immediately when open and fires onSent synchronously", async () => {
         ControllableWebSocket.autoOpen = true;
-        const { result } = renderHook(() => useDeskSignaling("desk-O"));
+        const { result } = renderHook(() => useDeskSignaling());
         await act(async () => {
             await new Promise((r) => setTimeout(r, 1));
         });
@@ -260,7 +260,7 @@ describe("useDeskSignaling.sendTracked / cancelQueued", () => {
      *  flush. */
     it("retains the message and defers onSent when ws.send throws", async () => {
         ControllableWebSocket.autoOpen = true;
-        const { result } = renderHook(() => useDeskSignaling("desk-F"));
+        const { result } = renderHook(() => useDeskSignaling());
         await act(async () => {
             await new Promise((r) => setTimeout(r, 1));
         });
@@ -310,7 +310,7 @@ describe("useDeskSignaling.subscribe (lossless delivery)", () => {
      * tends to land.
      */
     it("delivers every message of a same-tick burst to subscribers, in order", async () => {
-        const { result } = renderHook(() => useDeskSignaling("desk-S"));
+        const { result } = renderHook(() => useDeskSignaling());
         await act(async () => {
             await new Promise((r) => setTimeout(r, 1));
         });
@@ -339,7 +339,7 @@ describe("useDeskSignaling.subscribe (lossless delivery)", () => {
     /** Heartbeat responses are consumed internally and never fan out to
      *  subscribers. */
     it("does not deliver heartbeat messages to subscribers", async () => {
-        const { result } = renderHook(() => useDeskSignaling("desk-H"));
+        const { result } = renderHook(() => useDeskSignaling());
         await act(async () => {
             await new Promise((r) => setTimeout(r, 1));
         });
@@ -366,7 +366,7 @@ describe("useDeskSignaling.subscribe (lossless delivery)", () => {
 
     /** Unsubscribing removes the handler; later messages are not delivered. */
     it("stops delivering to a handler after it unsubscribes", async () => {
-        const { result } = renderHook(() => useDeskSignaling("desk-U"));
+        const { result } = renderHook(() => useDeskSignaling());
         await act(async () => {
             await new Promise((r) => setTimeout(r, 1));
         });

@@ -58,15 +58,17 @@ pub trait VirtualDisplayHandleInner: Send + Sync {}
 /// `ChangeDisplaySettingsExW`.
 pub struct VirtualDisplayHandle {
     pub instance_id: String,
-    #[allow(dead_code)]
-    inner: Box<dyn VirtualDisplayHandleInner>,
+    _inner: Box<dyn VirtualDisplayHandleInner>,
 }
 
 impl VirtualDisplayHandle {
     /// Public constructor so platform implementations (including future
     /// out-of-crate impls) can build a handle.
     pub fn new(instance_id: String, inner: Box<dyn VirtualDisplayHandleInner>) -> Self {
-        Self { instance_id, inner }
+        Self {
+            instance_id,
+            _inner: inner,
+        }
     }
 }
 
@@ -315,6 +317,33 @@ pub fn resolve_display_name(instance_id: &str) -> Result<String, VirtualDisplayE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    struct DropSpy(Arc<AtomicBool>);
+
+    impl VirtualDisplayHandleInner for DropSpy {}
+
+    impl Drop for DropSpy {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn handle_owns_inner_resource_until_drop() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let handle = VirtualDisplayHandle::new(
+            "instance".to_string(),
+            Box::new(DropSpy(Arc::clone(&dropped))),
+        );
+
+        assert!(!dropped.load(Ordering::SeqCst));
+        drop(handle);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn validate_mode_accepts_common_resolutions() {

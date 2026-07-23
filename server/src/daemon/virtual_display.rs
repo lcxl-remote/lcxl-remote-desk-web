@@ -214,8 +214,7 @@ enum SupervisorState {
     Disabled,
     Attaching {
         instance_id: String,
-        #[allow(dead_code)]
-        handle: VirtualDisplayHandle,
+        _handle: VirtualDisplayHandle,
     },
     Attached {
         instance_id: String,
@@ -228,8 +227,7 @@ enum SupervisorState {
         // `handle` keeps the OS resource alive — dropped only on
         // `apply(false)` / `shutdown`. The struct is held for its
         // Drop, never read.
-        #[allow(dead_code)]
-        handle: VirtualDisplayHandle,
+        _handle: VirtualDisplayHandle,
     },
     Detaching,
 }
@@ -563,7 +561,7 @@ impl VirtualDisplaySupervisor {
                         self.reset_known_dimensions();
                         *state = SupervisorState::Attaching {
                             instance_id: instance_id.clone(),
-                            handle,
+                            _handle: handle,
                         };
                         drop(state); // Don't hold the write lock across the IPC await.
                         // Proactively kick the worker so attach does not
@@ -759,7 +757,7 @@ impl VirtualDisplaySupervisor {
                 *state = match prev {
                     SupervisorState::Attaching {
                         instance_id,
-                        handle,
+                        _handle,
                     } => {
                         info!(
                             virtual_display.instance_id = %instance_id,
@@ -770,13 +768,13 @@ impl VirtualDisplaySupervisor {
                         SupervisorState::Attached {
                             instance_id,
                             display_name: display_name.clone(),
-                            handle,
+                            _handle,
                         }
                     }
                     SupervisorState::Attached {
                         instance_id,
                         display_name: existing_name,
-                        handle,
+                        _handle,
                     } => {
                         debug!(
                             virtual_display.instance_id = %instance_id,
@@ -787,7 +785,7 @@ impl VirtualDisplaySupervisor {
                         SupervisorState::Attached {
                             instance_id,
                             display_name: existing_name,
-                            handle,
+                            _handle,
                         }
                     }
                     // We pulled current_id above only on Attaching/Attached, so
@@ -1147,7 +1145,7 @@ impl VirtualDisplaySupervisor {
         let mut inner = self.exclusive_inner.write().await;
         inner.state = ExclusiveState::Idle;
         inner.current_op_id = inner.current_op_id.wrapping_add(1);
-        // Codex follow-up P1: reset the leave-retry bookkeeping too —
+        // Reset the leave-retry bookkeeping too —
         // a fresh apply(true) / apply(false) / shutdown must not
         // inherit a stale retry-budget counter from the previous
         // generation. E2E fix 2026-05-27: same applies to the enter
@@ -1176,7 +1174,7 @@ impl VirtualDisplaySupervisor {
             return;
         }
         let mut new_state = apply_result_transition(inner.state, &payload);
-        // Codex follow-up P1 (2026-05-26): bounded backoff retry on
+        // Use bounded backoff retry on
         // `LeftWithErrors`. The pure `apply_result_transition` puts
         // us into `Active` so the reconciler can drive another leave;
         // the retry budget + delayed `reconcile_notify` live here
@@ -1306,7 +1304,7 @@ impl VirtualDisplaySupervisor {
             (ExclusiveState::Active, false) => (false, ExclusiveState::Leaving),
             _ => return ExclusiveAction::None,
         };
-        // Codex follow-up P1 (2026-05-26): gate the
+        // Gate the
         // (Active, desired=false) retry path on `next_leave_at`. Any
         // earlier wake-up just re-arms the timer and returns None;
         // `on_exclusive_result` already scheduled the matching delayed
@@ -1432,7 +1430,7 @@ impl VirtualDisplaySupervisor {
 /// `Entered` should never reach here thanks to the op_id gate, but
 /// keeping the row guards against a wire regression).
 ///
-/// Codex follow-up P1 (2026-05-26): `(Leaving, LeftWithErrors)` now
+/// `(Leaving, LeftWithErrors)` now
 /// transitions to `Active` instead of `Idle` so the worker-side
 /// retained layout has a daemon-side counterpart that can drive a
 /// bounded backoff retry. The actual "give up after N retries →
@@ -1572,7 +1570,7 @@ impl VirtualDisplaySupervisor {
             state: RwLock::new(SupervisorState::Attached {
                 instance_id: instance_id.to_string(),
                 display_name,
-                handle,
+                _handle: handle,
             }),
             provider: Box::new(UnreachableProvider),
             worker_mgr,
@@ -2208,7 +2206,7 @@ mod tests {
         assert!(matches!(outcome, EnsureAttachedOutcome::Attached));
     }
 
-    /// Codex round 3 #13: even if target is satisfied by cap_version,
+    /// Even if target is satisfied by cap_version,
     /// the cache must actually contain the attached display name for
     /// the ensure_attached completion to fire.
     #[tokio::test]
@@ -2338,7 +2336,7 @@ mod tests {
         );
     }
 
-    /// Codex round 2 #9 / round 3 #9: when a previous ensure_attached
+    /// When a previous ensure_attached
     /// timed out with the supervisor stuck in Attaching (e.g. the first
     /// Attach IPC was lost before the worker channel was installed), a
     /// subsequent ensure_attached must re-send the AttachVirtualDisplay
@@ -2397,7 +2395,7 @@ mod tests {
         }
     }
 
-    /// Codex round 4 #15: lifecycle_lock must serialise the entire
+    /// The lifecycle_lock must serialise the entire
     /// apply flow including IPC sends so concurrent calls cannot
     /// interleave. Specifically: an apply(false) running between an
     /// in-flight apply(true)'s state set and IPC send would let the
@@ -2587,7 +2585,7 @@ mod tests {
         assert_eq!(attaching.attached_display_name().await, None);
     }
 
-    /// Codex round 1 #1: `apply(false)` ending an attach generation
+    /// `apply(false)` ending an attach generation
     /// must clear cached width/height (so a stale 2560x1440 cannot
     /// fake-short-circuit the next request) while preserving the
     /// refresh hint.
@@ -2617,7 +2615,7 @@ mod tests {
         );
     }
 
-    /// Codex round 1 #1: `apply(true)` starting an attach generation
+    /// `apply(true)` starting an attach generation
     /// also clears stale dimensions, regardless of what the previous
     /// detach left behind.
     #[tokio::test]
@@ -2637,7 +2635,7 @@ mod tests {
         assert_eq!(s.last_refresh_hz(), 144);
     }
 
-    /// Codex round 2 #2: every `Attached` outcome — including the
+    /// Every `Attached` outcome — including the
     /// already-Attached re-entry path that worker restart takes —
     /// must clear cached dimensions. The Attaching→Attached promotion
     /// edge is exercised implicitly by the apply(true) chain in other
@@ -2885,7 +2883,7 @@ mod tests {
             ),
             ExclusiveState::Idle
         );
-        // Codex follow-up P1 (2026-05-26):
+        // A failed leave must retain the retryable state:
         // Leaving + LeftWithErrors -> Active (was Idle). The bounded
         // retry budget + force-Idle on exhaustion lives in
         // `on_exclusive_result`, not in this pure transition function.
@@ -2916,7 +2914,7 @@ mod tests {
         );
     }
 
-    /// Codex follow-up P1 (2026-05-26): a first `LeftWithErrors`
+    /// A first `LeftWithErrors`
     /// must transition the supervisor to `Active` (not `Idle`) so
     /// the reconciler can drive a retry, bump `leave_retry_count`,
     /// and set `next_leave_at` to the doubling schedule entry.
@@ -2975,27 +2973,26 @@ mod tests {
         s.shutdown_driver_loop().await;
     }
 
-    /// Codex follow-up P1: after [`MAX_LEAVE_RETRIES`] consecutive
+    /// After [`MAX_LEAVE_RETRIES`] consecutive
     /// `LeftWithErrors`, the supervisor must force-Idle and reset
     /// `leave_retry_count` so a fresh enter cycle can proceed without
     /// inheriting stale budget.
     #[tokio::test]
     async fn on_exclusive_result_left_with_errors_exhausts_after_max_retries() {
         let s = fresh_supervisor();
-        let mut op_id = {
+        {
             let mut inner = s.exclusive_inner.write().await;
             inner.state = ExclusiveState::Leaving;
             inner.current_op_id = 100;
-            inner.current_op_id
-        };
+        }
 
         for attempt in 1..=MAX_LEAVE_RETRIES {
             // Each result must match the current op_id.
-            {
+            let op_id = {
                 let inner = s.exclusive_inner.read().await;
-                op_id = inner.current_op_id;
                 assert_eq!(inner.state, ExclusiveState::Leaving);
-            }
+                inner.current_op_id
+            };
             s.on_exclusive_result(ExclusiveResultPayload {
                 op_id,
                 direction: ExclusiveDirection::Leaving,
@@ -3026,7 +3023,7 @@ mod tests {
         s.shutdown_driver_loop().await;
     }
 
-    /// Codex follow-up P1: a successful `Left` (after one or more
+    /// A successful `Left` (after one or more
     /// failed retries) must reset both `leave_retry_count` and
     /// `next_leave_at` — otherwise the *next* leave cycle inherits
     /// the stale backoff timer.
@@ -3231,7 +3228,7 @@ mod tests {
         s.shutdown_driver_loop().await;
     }
 
-    /// Codex follow-up P1: `prepare_next_action` only honours the
+    /// `prepare_next_action` only honours the
     /// `next_leave_at` gate for the `(Active, desired=false)` retry
     /// row. Other rows ignore the gate entirely.
     #[tokio::test]

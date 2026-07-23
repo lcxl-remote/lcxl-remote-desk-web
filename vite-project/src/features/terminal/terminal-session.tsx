@@ -56,7 +56,7 @@ function TerminalView({ connectionId, deviceId, command, onClose, orgId }: { con
     // Copilot: a control-plane signaling connection (separate from the terminal
     // I/O WS above) plus a bounded ring buffer of recent output and the last
     // submitted command line, all fed to the copilot as non-authoritative hints.
-    const { subscribe, sendMessage } = useDeskSignaling(connectionId)
+    const { subscribe, sendMessage } = useDeskSignaling()
     const copilot = useTerminalCopilot({ connectionId, subscribe, sendMessage })
     // Confirmed execution of an operator-promoted copilot suggestion: ConfirmExec
     // -> ExecPreview -> ResolveExec -> ExecResult, keyed by suggestion index. The

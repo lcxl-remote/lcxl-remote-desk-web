@@ -6,7 +6,6 @@ import {
     SIGNALING_TYPE_CODE_OFFER,
     SIGNALING_TYPE_CODE_ANSWER,
     SIGNALING_TYPE_CODE_CANID,
-    SIGNALING_TYPE_CODE_ERROR,
 } from './constants';
 import type {
     SignalingMessage,
