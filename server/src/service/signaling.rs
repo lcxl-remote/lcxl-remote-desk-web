@@ -611,11 +611,7 @@ impl DeskSession {
             SignalingType::ManagerUpdateSettings => {
                 let remote_settings = signaling_model
                     .get_data::<desk_signal_facade::model::system_settings::RemoteSystemSettings>()?;
-                {
-                    let mut settings = self.settings.write().await;
-                    apply_remote_system_settings(&mut settings.system, remote_settings);
-                    settings.save()?;
-                }
+                apply_manager_system_settings(&self.settings, remote_settings).await?;
                 self.session
                     .send_response(
                         &signaling_model.request_id,
@@ -686,6 +682,31 @@ fn apply_remote_system_settings(
     system.manager_api_token = remote.manager_api_token;
 }
 
+async fn apply_manager_system_settings(
+    settings: &web::Data<SharedSettings>,
+    mut remote: desk_signal_facade::model::system_settings::RemoteSystemSettings,
+) -> Result<(), DeskError> {
+    remote.locale = match remote.locale.as_deref() {
+        Some(locale) => {
+            let Some(locale) = crate::locale::canonicalize(locale) else {
+                return DeskError::custom_error(
+                    DeskErrorCode::INVALID_PARAMS,
+                    "unsupported locale",
+                );
+            };
+            Some(locale.to_string())
+        }
+        None => None,
+    };
+    let mut settings = settings.write().await;
+    let previous_locale = settings.system.locale.clone();
+    apply_remote_system_settings(&mut settings.system, remote);
+    let requested_locale = settings.system.locale.clone();
+    settings.system.locale = previous_locale;
+    crate::locale::LocaleCoordinator::commit(&mut settings, requested_locale.as_deref())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod apply_remote_settings_tests {
     // SystemSettings has a private field, so cross-module struct-literal init is
@@ -725,6 +746,34 @@ mod apply_remote_settings_tests {
             // ...but auto_start untouched.
             assert_eq!(system.auto_start, local);
         }
+    }
+
+    #[tokio::test]
+    async fn manager_locale_push_persists_and_converges_live_worker_locale() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = crate::model::settings::Settings::default();
+        settings.args.config_file_path = dir.path().join("config").to_string_lossy().into_owned();
+        settings.system.locale = Some("zh-CN".to_string());
+        settings.save_with_locale_change().unwrap();
+        let args = settings.args.clone();
+        let shared = web::Data::new(SharedSettings::from(settings));
+        let mut remote = RemoteSystemSettings::default();
+        remote.locale = Some("en-US".to_string());
+
+        apply_manager_system_settings(&shared, remote)
+            .await
+            .unwrap();
+
+        assert_eq!(shared.read().await.system.locale.as_deref(), Some("en-US"));
+        assert_eq!(crate::locale::current_locale(), "en-US");
+        assert_eq!(
+            crate::model::settings::Settings::load_readonly(&args)
+                .unwrap()
+                .system
+                .locale
+                .as_deref(),
+            Some("en-US")
+        );
     }
 }
 

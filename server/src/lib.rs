@@ -5,6 +5,7 @@ pub mod error;
 pub mod exec;
 pub mod host_activity;
 pub mod host_control;
+pub mod locale;
 #[cfg(target_os = "macos")]
 pub mod macos_agent;
 #[cfg(target_os = "macos")]
@@ -524,11 +525,14 @@ pub async fn run_with_hub(
             if ipc_token.is_empty() {
                 warn!("tauri_ipc_token is empty; /ws/tauri_ipc will reject all connections");
             }
-            Some(Arc::new(host_control::endpoint::EndpointState::new(
-                hub,
-                ipc_token,
-                shared_tauri_login_token.clone(),
-            )))
+            Some(Arc::new(
+                host_control::endpoint::EndpointState::new(
+                    hub,
+                    ipc_token,
+                    shared_tauri_login_token.clone(),
+                )
+                .with_settings(shared_settings.clone().into()),
+            ))
         } else {
             None
         };

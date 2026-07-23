@@ -24,7 +24,7 @@ use desk_ipc_protocol::{
     message::{
         AgentResponsePayload, DesktopChangedPayload, ExecCancelPayload, ExecHeartbeatPayload,
         ExecResultIpcPayload, ExecSpawnReportPayload, FileTransferPayload, HeartbeatPayload,
-        ListTerminalResponsePayload, ManagerFileListResponsePayload,
+        ListTerminalResponsePayload, LocaleAppliedPayload, ManagerFileListResponsePayload,
         ManagerQuerySettingsResponsePayload, ManagerResponseRefPayload,
         ManagerSystemInfoResponsePayload, PrivateScreenStateChangedPayload,
         RemoteAccessStateAppliedPayload, ReplyFromTerminalPayload, ServiceToWorker,
@@ -715,6 +715,18 @@ impl WorkerSession {
             }
         };
 
+        let worker_locale = settings
+            .system
+            .locale
+            .as_deref()
+            .unwrap_or(crate::locale::DEFAULT_LOCALE);
+        if let Err(error) = crate::locale::set_global_locale(worker_locale) {
+            warn!(
+                "Worker Init contained invalid locale {worker_locale:?}: {error}; using {}",
+                crate::locale::DEFAULT_LOCALE
+            );
+            let _ = crate::locale::set_global_locale(crate::locale::DEFAULT_LOCALE);
+        }
         let shared_settings = Arc::new(SharedSettings::from(settings));
         let shared_settings_data = web::Data::from(shared_settings.clone());
         let remote_access_locked = Arc::new(AtomicBool::new(init_payload.remote_access_locked));
@@ -880,7 +892,7 @@ impl WorkerSession {
         }
 
         let mut desk_session = DeskSession::new(
-            shared_settings_data,
+            shared_settings_data.clone(),
             session_sender,
             CurrentUser::new_admin("worker_node"),
             host_control_hub,
@@ -1329,6 +1341,7 @@ impl WorkerSession {
                                     .await;
                                 }
                                 ServiceToWorker::ManagerUpdateSettingsRequest(payload) => {
+                                    let requested_locale = payload.settings.locale.clone();
                                     dispatch_typed_signaling_with_request_id(
                                         &mut desk_session,
                                         SignalingType::ManagerUpdateSettings,
@@ -1337,6 +1350,66 @@ impl WorkerSession {
                                         Some(&payload.settings),
                                     )
                                     .await;
+                                    if let Some(locale) = requested_locale
+                                        && let Some(locale) = crate::locale::canonicalize(&locale)
+                                    {
+                                        let converged = {
+                                            let settings = shared_settings_data.read().await;
+                                            settings.system.locale.as_deref() == Some(locale)
+                                                && Settings::load_readonly(&settings.args)
+                                                    .ok()
+                                                    .and_then(|saved| saved.system.locale)
+                                                    .as_deref()
+                                                    == Some(locale)
+                                        };
+                                        if converged {
+                                            let _ = event_tx
+                                                .send(WorkerToService::LocaleApplied(
+                                                    LocaleAppliedPayload {
+                                                        locale: locale.to_string(),
+                                                    },
+                                                ))
+                                                .await;
+                                        } else {
+                                            warn!(
+                                                "Manager locale update did not converge durably; \
+                                                 suppressing LocaleApplied({locale})"
+                                            );
+                                        }
+                                    }
+                                }
+                                ServiceToWorker::SetLocale(payload) => {
+                                    let result = async {
+                                        let locale = crate::locale::canonicalize(&payload.locale)
+                                            .ok_or_else(|| {
+                                                format!(
+                                                    "unsupported locale {:?}",
+                                                    payload.locale
+                                                )
+                                            })?;
+                                        {
+                                            let mut settings = shared_settings_data.write().await;
+                                            settings.system.locale = Some(locale.to_string());
+                                            settings
+                                                .save_with_locale_change()
+                                                .map_err(|error| error.to_string())?;
+                                        }
+                                        crate::locale::set_global_locale(locale)?;
+                                        Ok::<_, String>(locale.to_string())
+                                    }
+                                    .await;
+                                    match result {
+                                        Ok(locale) => {
+                                            let _ = event_tx
+                                                .send(WorkerToService::LocaleApplied(
+                                                    LocaleAppliedPayload { locale },
+                                                ))
+                                                .await;
+                                        }
+                                        Err(error) => {
+                                            warn!("Worker failed to apply locale: {error}");
+                                        }
+                                    }
                                 }
                                 // Typed-IPC migration batch 3: terminal
                                 // plane requests. Worker rebuilds a

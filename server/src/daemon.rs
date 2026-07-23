@@ -203,6 +203,7 @@ pub async fn run_service_daemon_inner(
     let (worker_mgr, worker_rx) =
         worker_manager::WorkerManager::new(shared_settings_data.clone(), pc_registry.clone());
     worker_mgr.bind_remote_access_gate(host_control_hub.remote_access_gate());
+    let _ = host_control_hub.install_locale_worker_manager(worker_mgr.clone());
 
     // Allow the per-connection file-transfer writer task to push a
     // `FileTransferSendFailed` back to the worker on a daemon-side
@@ -463,6 +464,7 @@ pub async fn start_inprocess_daemon(
     let (worker_mgr, worker_rx) =
         worker_manager::WorkerManager::new(settings.clone(), pc_registry.clone());
     worker_mgr.bind_remote_access_gate(host_control_hub.remote_access_gate());
+    let _ = host_control_hub.install_locale_worker_manager(worker_mgr.clone());
     if let Some(coordinator) = host_control_hub.remote_access_coordinator() {
         coordinator.attach_runtime(
             pc_registry.clone(),

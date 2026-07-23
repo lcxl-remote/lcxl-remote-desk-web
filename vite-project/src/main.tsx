@@ -2,9 +2,12 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { AppProviders } from './app/providers'
 import './locales/i18n'
+import { initializeNativeLocaleBridge } from './locales/native-locale'
 import './index.css'
 
 import eruda from 'eruda';
+
+initializeNativeLocaleBridge()
 
 if (/Mobile|Android|iP(ad|hone)/.test(navigator.userAgent)) {
     eruda.init();

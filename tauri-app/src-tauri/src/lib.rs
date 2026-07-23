@@ -11,7 +11,7 @@ mod webview_webrtc;
 mod whiteboard;
 
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -33,6 +33,142 @@ rust_i18n::i18n!("locales");
 
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 pub(crate) const MAIN_TRAY_ID: &str = "main-tray";
+static NATIVE_BRIDGE_STATE: OnceLock<Mutex<Option<(String, String, bool)>>> = OnceLock::new();
+
+fn native_bridge_state() -> &'static Mutex<Option<(String, String, bool)>> {
+    NATIVE_BRIDGE_STATE.get_or_init(|| Mutex::new(None))
+}
+
+fn native_bridge_script(token: &str, locale: &str, locale_persisted: bool) -> String {
+    let detail = serde_json::json!({
+        "token": token,
+        "locale": locale,
+        "localePersisted": locale_persisted,
+    })
+    .to_string();
+    format!(
+        "sessionStorage.setItem('lcxl.tauriShell','1');\
+         sessionStorage.setItem('lcxl.nativeBridgeToken',{});\
+         window.dispatchEvent(new CustomEvent('lcxl-native-bridge-ready',{{detail:{detail}}}));",
+        serde_json::to_string(token).expect("serialize bridge token")
+    )
+}
+
+pub(crate) fn inject_native_bridge_state(window: &tauri::WebviewWindow) {
+    if let Some((token, locale, locale_persisted)) = native_bridge_state().lock().unwrap().clone() {
+        let _ = window.eval(native_bridge_script(&token, &locale, locale_persisted));
+    }
+}
+
+fn refresh_native_ui(app: &tauri::AppHandle, include_elevate: bool) {
+    use tauri::menu::{Menu, MenuItem};
+
+    let show = MenuItem::with_id(app, "show", rust_i18n::t!("tray.open"), true, None::<&str>)
+        .expect("create localized show menu item");
+    let status = MenuItem::with_id(
+        app,
+        "host_access_status",
+        rust_i18n::t!("tray.remote_access_status"),
+        true,
+        None::<&str>,
+    )
+    .expect("create localized status menu item");
+    let quit = MenuItem::with_id(app, "quit", rust_i18n::t!("tray.exit"), true, None::<&str>)
+        .expect("create localized quit menu item");
+    let elevate = MenuItem::with_id(
+        app,
+        "elevate",
+        rust_i18n::t!("tray.elevate"),
+        true,
+        None::<&str>,
+    )
+    .expect("create localized elevate menu item");
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![&show, &status];
+    if include_elevate {
+        items.push(&elevate);
+    }
+    items.push(&quit);
+    if let Some(tray) = app.tray_by_id(MAIN_TRAY_ID)
+        && let Ok(menu) = Menu::with_items(app, &items)
+    {
+        let _ = tray.set_menu(Some(menu));
+    }
+    host_access_status::refresh_tray_locale(app);
+    for (label, window) in app.webview_windows() {
+        let title = if label == MAIN_WINDOW_LABEL {
+            Some(rust_i18n::t!("app_title"))
+        } else if label.starts_with("host-access-status") {
+            Some(rust_i18n::t!("remote_access_status_title"))
+        } else if label == "private-screen" {
+            Some(rust_i18n::t!("private_screen_title"))
+        } else if label.starts_with("security-approval") {
+            Some(rust_i18n::t!("security_approval_title"))
+        } else if label == "whiteboard" {
+            Some(rust_i18n::t!("whiteboard_title"))
+        } else {
+            None
+        };
+        if let Some(title) = title {
+            let _ = window.set_title(title.as_ref());
+        }
+    }
+}
+
+fn start_native_bridge_event_loop(
+    app: tauri::AppHandle,
+    rx: std::sync::mpsc::Receiver<ipc_client::NativeBridgeEvent>,
+    include_elevate: bool,
+) {
+    std::thread::spawn(move || {
+        while let Ok(event) = rx.recv() {
+            let (token, locale, locale_persisted, ready) = match event {
+                ipc_client::NativeBridgeEvent::Ready {
+                    token,
+                    locale,
+                    locale_persisted,
+                } => (Some(token), locale, locale_persisted, true),
+                ipc_client::NativeBridgeEvent::LocaleChanged { locale } => {
+                    (None, locale, true, false)
+                }
+            };
+            let Some(locale) = lcxl_remote_desk_server::locale::canonicalize(&locale) else {
+                log::warn!("[NativeI18n] ignored unsupported locale {locale:?}");
+                continue;
+            };
+            let _ = lcxl_remote_desk_server::locale::set_global_locale(locale);
+            {
+                let mut state = native_bridge_state().lock().unwrap();
+                match (token, state.as_mut()) {
+                    (Some(token), _) => {
+                        *state = Some((token, locale.to_string(), locale_persisted))
+                    }
+                    (None, Some((_, current_locale, persisted))) => {
+                        *current_locale = locale.to_string();
+                        *persisted = true;
+                    }
+                    (None, None) => {}
+                }
+            }
+
+            let app_for_main = app.clone();
+            let locale = locale.to_string();
+            let _ = app.run_on_main_thread(move || {
+                refresh_native_ui(&app_for_main, include_elevate);
+                for (_, window) in app_for_main.webview_windows() {
+                    if ready {
+                        inject_native_bridge_state(&window);
+                    } else {
+                        let detail = serde_json::json!({ "locale": locale }).to_string();
+                        let _ = window.eval(format!(
+                            "window.dispatchEvent(new CustomEvent('lcxl-global-locale-changed',\
+                             {{detail:{detail}}}));"
+                        ));
+                    }
+                }
+            });
+        }
+    });
+}
 
 /// Windows service name registered by the install flow.
 const SERVICE_NAME: &str = "LcxlDeskService";
@@ -129,6 +265,8 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
         std::sync::mpsc::sync_channel::<lcxl_remote_desk_server::ServiceOp>(8);
     let (host_access_tx, host_access_rx) =
         std::sync::mpsc::channel::<host_access_status::HostAccessStatusCommand>();
+    let (native_bridge_tx, native_bridge_rx) =
+        std::sync::mpsc::channel::<ipc_client::NativeBridgeEvent>();
 
     // Shared token holder: IPC client writes the first token; window thread reads it.
     let token_holder: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -150,6 +288,7 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                 host_access_tx,
                 Some(state_rx),
                 token_holder_ipc,
+                native_bridge_tx,
             )
             .await;
         });
@@ -195,13 +334,16 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                 use tauri::menu::{Menu, MenuItem};
                 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 
-                let quit_i = MenuItem::with_id(app, "quit", "Exit", true, None::<&str>).unwrap();
+                let quit_i =
+                    MenuItem::with_id(app, "quit", rust_i18n::t!("tray.exit"), true, None::<&str>)
+                        .unwrap();
                 let show_i =
-                    MenuItem::with_id(app, "show", "Open Window", true, None::<&str>).unwrap();
+                    MenuItem::with_id(app, "show", rust_i18n::t!("tray.open"), true, None::<&str>)
+                        .unwrap();
                 let status_i = MenuItem::with_id(
                     app,
                     "host_access_status",
-                    "View Remote Access Status",
+                    rust_i18n::t!("tray.remote_access_status"),
                     true,
                     None::<&str>,
                 )
@@ -211,7 +353,7 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                 let _tray = TrayIconBuilder::with_id(MAIN_TRAY_ID)
                     .menu(&tray_menu)
                     .icon(default_icon)
-                    .tooltip("LCXL Remote Desktop")
+                    .tooltip(rust_i18n::t!("app_title"))
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "quit" => {
                             if HOST_ACCESS_BLOCKS_EXIT.load(Ordering::SeqCst)
@@ -245,6 +387,7 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                     .build(app)
                     .expect("Failed to create tray icon");
             }
+            start_native_bridge_event_loop(handle.clone(), native_bridge_rx, false);
 
             // Spawn a thread to wait for the IPC token then open the webview.
             let handle_for_window = handle.clone();
@@ -261,7 +404,7 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
 
                     let token = token_holder_win.lock().unwrap().clone();
                     if let Some(token) = token {
-                        let window_url = format!("http://127.0.0.1:8082?token={}", token);
+                        let window_url = format!("http://127.0.0.1:8082?token={token}&tauri=1");
                         log::info!("[ServiceShell] Opening window at: {}", window_url);
 
                         let handle_inner = handle_for_window.clone();
@@ -279,12 +422,13 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                                 handle_inner.clone(),
                                 frontend_origin,
                             ))
-                            .title("LCXL Remote Desktop")
+                            .title(rust_i18n::t!("app_title"))
                             .inner_size(1200.0, 800.0)
                             .center()
                             .visible(false)
                             .on_page_load(|window, event| {
                                 if let tauri::webview::PageLoadEvent::Finished = event.event() {
+                                    inject_native_bridge_state(&window);
                                     let _ = window.show();
                                     let _ = window.set_focus();
                                 }
@@ -617,6 +761,8 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                 std::sync::mpsc::sync_channel::<lcxl_remote_desk_server::ServiceOp>(8);
             let (host_access_tx, host_access_rx) =
                 std::sync::mpsc::channel::<host_access_status::HostAccessStatusCommand>();
+            let (native_bridge_tx, native_bridge_rx) =
+                std::sync::mpsc::channel::<ipc_client::NativeBridgeEvent>();
 
             // Read server port from settings before starting server thread
             let server_port = settings.system.port;
@@ -722,6 +868,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                         // state, so GUI events are forwarded back over the socket.
                         Some(state_rx),
                         token_holder_ipc,
+                        native_bridge_tx,
                     )
                     .await;
                 });
@@ -731,12 +878,26 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
             use tauri::menu::{Menu, MenuItem};
             use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 
-            let quit_i = MenuItem::with_id(app, "quit", "Exit", true, None::<&str>).unwrap();
-            let show_i = MenuItem::with_id(app, "show", "Open Window", true, None::<&str>).unwrap();
+            let quit_i = MenuItem::with_id(
+                app,
+                "quit",
+                rust_i18n::t!("tray.exit"),
+                true,
+                None::<&str>,
+            )
+            .unwrap();
+            let show_i = MenuItem::with_id(
+                app,
+                "show",
+                rust_i18n::t!("tray.open"),
+                true,
+                None::<&str>,
+            )
+            .unwrap();
             let status_i = MenuItem::with_id(
                 app,
                 "host_access_status",
-                "View Remote Access Status",
+                rust_i18n::t!("tray.remote_access_status"),
                 true,
                 None::<&str>,
             )
@@ -751,12 +912,25 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
             // Relaunching as root via osascript would actually DROP the app's TCC
             // grants. So there is no "Elevate Privileges" item on macOS.
             #[cfg(not(target_os = "macos"))]
-            let elevate_i = MenuItem::with_id(app, "elevate", "Elevate Privileges (提升权限)", true, None::<&str>).unwrap();
+            let elevate_i = MenuItem::with_id(
+                app,
+                "elevate",
+                rust_i18n::t!("tray.elevate"),
+                true,
+                None::<&str>,
+            )
+            .unwrap();
             #[cfg(not(target_os = "macos"))]
-            {
+            let include_elevate = {
                 let is_admin = desk_utils::permission::is_admin();
                 let is_signaling = startup_mode == StartupMode::Signaling;
-                if !is_admin && !is_signaling {
+                !is_admin && !is_signaling
+            };
+            #[cfg(target_os = "macos")]
+            let include_elevate = false;
+            #[cfg(not(target_os = "macos"))]
+            {
+                if include_elevate {
                     menu_items.push(&elevate_i);
                 }
             }
@@ -768,7 +942,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
             let _tray = TrayIconBuilder::with_id(MAIN_TRAY_ID)
                 .menu(&tray_menu)
                 .icon(default_icon)
-                .tooltip("LCXL Remote Desktop")
+                .tooltip(rust_i18n::t!("app_title"))
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
                         "quit" => {
@@ -845,6 +1019,11 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                 })
                 .build(app)
                 .expect("Failed to create tray icon");
+            start_native_bridge_event_loop(
+                handle.clone(),
+                native_bridge_rx,
+                include_elevate,
+            );
 
             // Spawn a thread to wait for server readiness + an auto-login token
             // (delivered via the ws Ready first frame), then open the main window.
@@ -913,9 +1092,9 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                 let window_url = if !system_initialized {
                     format!("http://{}/init?tauri=1", frontend_host_port)
                 } else if let Some(token) = auto_token {
-                    format!("http://{}?token={}", frontend_host_port, token)
+                    format!("http://{}?token={}&tauri=1", frontend_host_port, token)
                 } else {
-                    format!("http://{}", frontend_host_port)
+                    format!("http://{}?tauri=1", frontend_host_port)
                 };
 
                 log::info!("Opening main window at: {}", window_url);
@@ -937,12 +1116,13 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                         handle.clone(),
                         frontend_origin,
                     ))
-                    .title("LCXL Remote Desktop")
+                    .title(rust_i18n::t!("app_title"))
                     .inner_size(1200.0, 800.0)
                     .center()
                     .visible(false) // hide window first to avoid long white screen
                     .on_page_load(move |window, event| {
                         if let tauri::webview::PageLoadEvent::Finished = event.event() {
+                            inject_native_bridge_state(&window);
                             if !hidden_mode {
                                 // show window after page load
                                 let _ = window.show();
@@ -1057,16 +1237,14 @@ fn confirm_exit_with_remote_access() -> bool {
         .unwrap_or_else(|_| "\"Exit?\"".to_string());
     let title = serde_json::to_string(rust_i18n::t!("host_access_dialog_title").as_ref())
         .unwrap_or_else(|_| "\"LCXL Remote Desktop\"".to_string());
+    let cancel = serde_json::to_string(rust_i18n::t!("button_cancel").as_ref()).unwrap();
+    let exit = serde_json::to_string(rust_i18n::t!("button_exit").as_ref()).unwrap();
     let script = format!(
-        "display dialog {message} with title {title} buttons {{\"Cancel\", \"Exit\"}} default button \"Cancel\" with icon caution"
+        "display dialog {message} with title {title} buttons {{{cancel}, {exit}}} default button {cancel} with icon caution"
     );
+    let check_exit = format!("if button returned of result is {exit} then return \"yes\"");
     std::process::Command::new("osascript")
-        .args([
-            "-e",
-            &script,
-            "-e",
-            "if button returned of result is \"Exit\" then return \"yes\"",
-        ])
+        .args(["-e", &script, "-e", &check_exit])
         .output()
         .is_ok_and(|output| {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains("yes")

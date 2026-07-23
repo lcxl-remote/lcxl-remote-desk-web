@@ -118,10 +118,32 @@ impl Settings {
             settings.save()?;
         }
 
-        if let Some(ref locale) = settings.system.locale {
-            rust_i18n::set_locale(locale);
-            info!("Locale set to: {}", locale);
+        let configured_locale = settings.system.locale.take();
+        settings.system.locale = configured_locale
+            .as_deref()
+            .and_then(crate::locale::canonicalize)
+            .map(str::to_string);
+        if configured_locale.is_some() && settings.system.locale.is_none() {
+            log::warn!(
+                "Unsupported configured locale {:?}; falling back to {}",
+                configured_locale,
+                crate::locale::DEFAULT_LOCALE
+            );
         }
+        if configured_locale.as_deref() != settings.system.locale.as_deref()
+            && settings.system.locale.is_some()
+        {
+            settings.save_with_locale_change()?;
+        }
+        let locale = crate::locale::set_global_locale(
+            settings
+                .system
+                .locale
+                .as_deref()
+                .unwrap_or(crate::locale::DEFAULT_LOCALE),
+        )
+        .expect("Settings locale was normalized");
+        info!("Locale set to: {locale}");
 
         // Clamp hand-edited adaptive-resolution knobs to a safe range
         // (warn-log per clamped field). Must happen before any caller
@@ -147,10 +169,22 @@ impl Settings {
     }
 
     pub fn save(&self) -> Result<(), DeskError> {
+        self.save_inner(false)
+    }
+
+    /// Persist an intentional locale change.
+    ///
+    /// All ordinary saves preserve the locale already committed on disk. This
+    /// prevents a stale `Settings` clone in another process (notably a session
+    /// worker) from rolling back a newer shell/manager locale while saving an
+    /// unrelated field.
+    pub(crate) fn save_with_locale_change(&self) -> Result<(), DeskError> {
+        self.save_inner(true)
+    }
+
+    fn save_inner(&self, allow_locale_change: bool) -> Result<(), DeskError> {
         let mut config_file_path = PathBuf::from(self.args.config_file_path.as_str());
         config_file_path.set_extension("toml");
-        // Save settings to config file
-        let toml_str = toml::to_string(self)?;
         let parent_path = if let Some(parent_path) = config_file_path.parent() {
             parent_path
         } else {
@@ -167,14 +201,30 @@ impl Settings {
             fs::create_dir_all(parent_path)?;
         }
 
+        // Coordinate the locale read/modify/write across daemon and worker
+        // processes. The lock file is intentionally stable and retained.
+        let mut lock_path = config_file_path.clone();
+        lock_path.set_extension("locale.lock");
+        let lock_file = std::fs::File::options()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(lock_path)?;
+        lock_file.lock()?;
+
+        let mut persisted = self.clone();
+        if !allow_locale_change
+            && let Ok(contents) = fs::read_to_string(&config_file_path)
+            && let Ok(on_disk) = toml::from_str::<Settings>(&contents)
+        {
+            persisted.system.locale = on_disk.system.locale;
+        }
+        let toml_str = toml::to_string(&persisted)?;
+
         // Only the path is logged: the serialized TOML carries secrets
         // (api_key, signaling/manager tokens, session key) and would bypass the
         // per-field `Debug` redaction if printed in full.
         debug!("Saving config to: {}", config_file_path.display());
-        if let Some(ref locale) = self.system.locale {
-            rust_i18n::set_locale(locale);
-            info!("Locale set to: {}", locale);
-        }
         fs::write(&config_file_path, toml_str)?;
         Ok(())
     }
@@ -193,5 +243,58 @@ impl Deref for SharedSettings {
     type Target = RwLock<Settings>;
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings_at(path: &std::path::Path, locale: &str) -> Settings {
+        let mut settings = Settings::default();
+        settings.args.config_file_path = path.to_string_lossy().into_owned();
+        settings.system.locale = Some(locale.to_string());
+        settings
+    }
+
+    #[test]
+    fn ordinary_save_cannot_roll_back_committed_locale() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        let committed = settings_at(&path, "en-US");
+        committed.save_with_locale_change().unwrap();
+
+        let mut stale = settings_at(&path, "zh-CN");
+        stale.log.log_level = "debug".to_string();
+        stale.save().unwrap();
+
+        let loaded = Settings::load_readonly(&stale.args).unwrap();
+        assert_eq!(loaded.system.locale.as_deref(), Some("en-US"));
+        assert_eq!(loaded.log.log_level, "debug");
+    }
+
+    #[test]
+    fn explicit_locale_save_updates_persisted_locale() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        let settings = settings_at(&path, "en-US");
+        settings.save_with_locale_change().unwrap();
+
+        let loaded = Settings::load_readonly(&settings.args).unwrap();
+        assert_eq!(loaded.system.locale.as_deref(), Some("en-US"));
+    }
+
+    #[test]
+    fn ordinary_save_does_not_change_the_process_locale() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        let committed = settings_at(&path, "en-US");
+        committed.save_with_locale_change().unwrap();
+        crate::locale::set_global_locale("en-US").unwrap();
+
+        let stale = settings_at(&path, "zh-CN");
+        stale.save().unwrap();
+
+        assert_eq!(crate::locale::current_locale(), "en-US");
     }
 }

@@ -10,8 +10,8 @@
 //! same query-string token authentication.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use log::{debug, info, warn};
@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::protocol::{ClientRole, HostControlMessage};
 use super::{HostControlEvent, HostControlHub, HubMode, UpstreamSessionId};
-use crate::{TauriIsAdminOverride, TauriLoginToken};
+use crate::{TauriIsAdminOverride, TauriLoginToken, model::settings::SharedSettings};
 
 /// Constant-time byte comparison for query-string tokens. Returns `false` on
 /// length mismatch and never short-circuits on the first differing byte.
@@ -76,6 +76,12 @@ pub struct EndpointState {
     /// handlers can report the elevation status of the Tauri process. Only
     /// wired by the daemon (Aggregator); portable / DeskServer leave it None.
     pub tauri_is_admin: Option<TauriIsAdminOverride>,
+    /// Shared settings is installed by production servers. Keeping it optional
+    /// lets protocol-only endpoint tests construct minimal state.
+    pub settings: Option<web::Data<SharedSettings>>,
+    /// Native REST bearer token → owning WS session. Tokens are never
+    /// broadcast and are revoked when that exact session disconnects.
+    native_bridge_sessions: Arc<Mutex<HashMap<String, UpstreamSessionId>>>,
 }
 
 impl EndpointState {
@@ -90,11 +96,18 @@ impl EndpointState {
             tauri_login_token,
             next_session_id: Arc::new(AtomicU64::new(1)),
             tauri_is_admin: None,
+            settings: None,
+            native_bridge_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn with_tauri_is_admin(mut self, override_data: TauriIsAdminOverride) -> Self {
         self.tauri_is_admin = Some(override_data);
+        self
+    }
+
+    pub fn with_settings(mut self, settings: web::Data<SharedSettings>) -> Self {
+        self.settings = Some(settings);
         self
     }
 
@@ -112,7 +125,101 @@ impl EndpointState {
 pub fn register_routes(cfg: &mut web::ServiceConfig, state: Arc<EndpointState>) {
     cfg.app_data(web::Data::from(state))
         .route("/ws/tauri_ipc", web::get().to(ws_handler))
-        .route("/ws/host_upstream", web::get().to(ws_upstream_handler));
+        .route("/ws/host_upstream", web::get().to(ws_upstream_handler))
+        .route("/api/native/locale", web::get().to(get_native_locale))
+        .route("/api/native/locale", web::put().to(put_native_locale));
+}
+
+#[derive(serde::Serialize)]
+struct NativeLocaleResponse {
+    locale: String,
+}
+
+#[derive(serde::Deserialize)]
+struct NativeLocaleRequest {
+    locale: String,
+}
+
+fn native_bridge_authorized(state: &EndpointState, req: &HttpRequest) -> bool {
+    let Some(value) = req
+        .headers()
+        .get(actix_web::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(token) = value.strip_prefix("Bearer ") else {
+        return false;
+    };
+    state
+        .native_bridge_sessions
+        .lock()
+        .unwrap()
+        .contains_key(token)
+}
+
+async fn get_native_locale(state: web::Data<EndpointState>, req: HttpRequest) -> HttpResponse {
+    if !native_bridge_authorized(&state, &req) {
+        return HttpResponse::Unauthorized().finish();
+    }
+    let Some(settings) = state.settings.as_ref() else {
+        return HttpResponse::ServiceUnavailable().finish();
+    };
+    let locale = settings
+        .read()
+        .await
+        .system
+        .locale
+        .clone()
+        .unwrap_or_else(|| crate::locale::DEFAULT_LOCALE.to_string());
+    HttpResponse::Ok().json(NativeLocaleResponse { locale })
+}
+
+async fn put_native_locale(
+    state: web::Data<EndpointState>,
+    req: HttpRequest,
+    payload: web::Json<NativeLocaleRequest>,
+) -> HttpResponse {
+    if !native_bridge_authorized(&state, &req) {
+        return HttpResponse::Unauthorized().finish();
+    }
+    let Some(locale) = crate::locale::canonicalize(&payload.locale) else {
+        return HttpResponse::BadRequest().body("unsupported locale");
+    };
+    let Some(settings) = state.settings.as_ref() else {
+        return HttpResponse::ServiceUnavailable().finish();
+    };
+
+    let locale = {
+        let mut settings = settings.write().await;
+        match crate::locale::LocaleCoordinator::commit(&mut settings, Some(locale)) {
+            Ok(locale) => locale,
+            Err(error) => {
+                warn!("[NativeLocale] failed to persist locale: {error}");
+                return HttpResponse::InternalServerError().finish();
+            }
+        }
+    };
+
+    if let Some(worker_manager) = state.hub.locale_worker_manager() {
+        let result = worker_manager
+            .send_to_worker(desk_ipc_protocol::message::ServiceToWorker::SetLocale(
+                desk_ipc_protocol::message::SetLocalePayload {
+                    locale: locale.to_string(),
+                },
+            ))
+            .await;
+        if let Err(error) = result {
+            debug!("[NativeLocale] no live worker to notify: {error}");
+        }
+    }
+    let _ = state
+        .hub
+        .send_command(HostControlMessage::GlobalLocaleChanged {
+            locale: locale.to_string(),
+        });
+
+    HttpResponse::Ok().json(NativeLocaleResponse { locale })
 }
 
 /// Actix handler for `/ws/tauri_ipc`.
@@ -179,6 +286,7 @@ async fn run_ws_session(
     // a specific forwarder (e.g. SecurityApprovalSubmit routed via pending_routes).
     // For Tauri sessions the receiver is created but never written to.
     let (session_tx, mut session_rx) = mpsc::unbounded_channel::<HostControlMessage>();
+    let mut native_bridge_token: Option<String> = None;
 
     loop {
         tokio::select! {
@@ -232,6 +340,7 @@ async fn run_ws_session(
                                     &mut role,
                                     session_id,
                                     &session_tx,
+                                    &mut native_bridge_token,
                                     parsed,
                                 )
                                 .await;
@@ -257,7 +366,7 @@ async fn run_ws_session(
         }
     }
 
-    on_disconnect(&state, role, session_id);
+    on_disconnect(&state, role, session_id, native_bridge_token.as_deref());
 }
 
 /// Filter: only deliver to a session if the message is meant for its role.
@@ -280,7 +389,8 @@ fn is_outbound_for_role(msg: &HostControlMessage, role: Option<ClientRole>) -> b
             | HostControlMessage::SecurityApprovalRequest { .. }
             | HostControlMessage::SecurityApprovalFinished { .. }
             | HostControlMessage::ServiceOp { .. }
-            | HostControlMessage::HostAccessSnapshot { .. },
+            | HostControlMessage::HostAccessSnapshot { .. }
+            | HostControlMessage::GlobalLocaleChanged { .. },
         ) => true,
         // Forwarder-bound broadcast: only Cancel + state changes.
         // SecurityApprovalSubmit is dispatched via per-session mpsc (directional)
@@ -299,6 +409,7 @@ async fn handle_client_message(
     role: &mut Option<ClientRole>,
     session_id: UpstreamSessionId,
     session_tx: &mpsc::UnboundedSender<HostControlMessage>,
+    native_bridge_token: &mut Option<String>,
     msg: HostControlMessage,
 ) {
     match msg {
@@ -324,6 +435,32 @@ async fn handle_client_message(
                     let _ = session_tx.send(HostControlMessage::HostAccessSnapshot {
                         snapshot: state.hub.host_activity().snapshot(),
                     });
+                    if native_bridge_token.is_none() {
+                        let token = uuid::Uuid::new_v4().to_string();
+                        state
+                            .native_bridge_sessions
+                            .lock()
+                            .unwrap()
+                            .insert(token.clone(), session_id);
+                        let (locale, locale_persisted) =
+                            if let Some(settings) = state.settings.as_ref() {
+                                let settings = settings.read().await;
+                                (
+                                    settings.system.locale.clone().unwrap_or_else(|| {
+                                        crate::locale::DEFAULT_LOCALE.to_string()
+                                    }),
+                                    settings.system.locale.is_some(),
+                                )
+                            } else {
+                                (crate::locale::current_locale(), false)
+                            };
+                        let _ = session_tx.send(HostControlMessage::NativeBridgeReady {
+                            token: token.clone(),
+                            locale,
+                            locale_persisted,
+                        });
+                        *native_bridge_token = Some(token);
+                    }
                 }
                 ClientRole::Forwarder => {
                     if state.hub.mode() == HubMode::Aggregator {
@@ -388,7 +525,11 @@ fn on_disconnect(
     state: &Arc<EndpointState>,
     role: Option<ClientRole>,
     session_id: UpstreamSessionId,
+    native_bridge_token: Option<&str>,
 ) {
+    if let Some(token) = native_bridge_token {
+        state.native_bridge_sessions.lock().unwrap().remove(token);
+    }
     info!("[HostCtrl/WS] client disconnected (role={role:?} session_id={session_id})");
     match (role, state.hub.mode()) {
         (Some(ClientRole::Tauri), HubMode::Local) => {
@@ -581,12 +722,14 @@ mod tests {
         ));
         let (session_tx, mut session_rx) = mpsc::unbounded_channel();
         let mut role = None;
+        let mut bridge_token = None;
 
         handle_client_message(
             &state,
             &mut role,
             1,
             &session_tx,
+            &mut bridge_token,
             HostControlMessage::Ready {
                 role: ClientRole::Tauri,
                 is_admin: Some(false),
@@ -602,6 +745,93 @@ mod tests {
             }
             other => panic!("expected host snapshot, got {other:?}"),
         }
+        assert!(matches!(
+            session_rx.recv().await,
+            Some(HostControlMessage::NativeBridgeReady { .. })
+        ));
+        assert!(bridge_token.is_some());
+    }
+
+    #[tokio::test]
+    async fn native_bridge_tokens_are_unique_per_ws_session_and_never_broadcast() {
+        let state = Arc::new(EndpointState::new(
+            Arc::new(HostControlHub::new_local()),
+            "secret".to_string(),
+            TauriLoginToken::empty(),
+        ));
+        let (first_tx, mut first_rx) = mpsc::unbounded_channel();
+        let (second_tx, mut second_rx) = mpsc::unbounded_channel();
+        let mut first_role = None;
+        let mut second_role = None;
+        let mut first_token = None;
+        let mut second_token = None;
+
+        for (session_id, role, token, tx) in [
+            (1, &mut first_role, &mut first_token, &first_tx),
+            (2, &mut second_role, &mut second_token, &second_tx),
+        ] {
+            handle_client_message(
+                &state,
+                role,
+                session_id,
+                tx,
+                token,
+                HostControlMessage::Ready {
+                    role: ClientRole::Tauri,
+                    is_admin: None,
+                },
+            )
+            .await;
+        }
+
+        let _ = first_rx.recv().await.expect("first snapshot");
+        let first_ready = first_rx.recv().await.expect("first bridge token");
+        let _ = second_rx.recv().await.expect("second snapshot");
+        let second_ready = second_rx.recv().await.expect("second bridge token");
+        let (first, second) = match (first_ready, second_ready) {
+            (
+                HostControlMessage::NativeBridgeReady { token: first, .. },
+                HostControlMessage::NativeBridgeReady { token: second, .. },
+            ) => (first, second),
+            other => panic!("expected two direct bridge-ready messages, got {other:?}"),
+        };
+        assert_ne!(first, second);
+        assert!(!is_outbound_for_role(
+            &HostControlMessage::NativeBridgeReady {
+                token: "must-not-broadcast".into(),
+                locale: "en-US".into(),
+                locale_persisted: true,
+            },
+            Some(ClientRole::Tauri),
+        ));
+    }
+
+    #[test]
+    fn native_locale_rest_accepts_only_a_registered_ws_session_token() {
+        let state = Arc::new(EndpointState::new(
+            Arc::new(HostControlHub::new_local()),
+            "secret".to_string(),
+            TauriLoginToken::empty(),
+        ));
+        state
+            .native_bridge_sessions
+            .lock()
+            .unwrap()
+            .insert("registered".to_string(), 7);
+
+        let valid = actix_web::test::TestRequest::default()
+            .insert_header(("Authorization", "Bearer registered"))
+            .to_http_request();
+        let invalid = actix_web::test::TestRequest::default()
+            .insert_header(("Authorization", "Bearer other-session"))
+            .to_http_request();
+        let absent = actix_web::test::TestRequest::default().to_http_request();
+
+        assert!(native_bridge_authorized(&state, &valid));
+        assert!(!native_bridge_authorized(&state, &invalid));
+        assert!(!native_bridge_authorized(&state, &absent));
+        on_disconnect(&state, None, 7, Some("registered"));
+        assert!(!native_bridge_authorized(&state, &valid));
     }
 
     #[test]

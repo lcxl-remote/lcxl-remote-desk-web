@@ -91,6 +91,7 @@ pub async fn run_local_api(
             ipc_token,
             tauri_bridge.tauri_login_token.clone(),
         )
+        .with_settings(settings_data.clone())
         .with_tauri_is_admin(Arc::clone(&tauri_bridge.tauri_is_admin)),
     );
 

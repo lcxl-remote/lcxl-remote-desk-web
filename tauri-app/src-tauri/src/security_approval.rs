@@ -126,6 +126,7 @@ fn build_approval_url(frontend_url: &str, req: &SecurityApprovalRequest) -> Resu
     {
         let mut q = url.query_pairs_mut();
         q.append_pair("req_id", &req.req_id);
+        q.append_pair("tauri", "1");
         q.append_pair("permission_type", &format!("{:?}", req.permission_type));
         if let Some(ref from) = req.from_connection_id {
             q.append_pair("from_connection_id", from);
@@ -146,7 +147,7 @@ fn build_approval_window(
 ) -> Result<(), String> {
     let url = build_approval_url(frontend_url, req)?;
     let mut builder = WebviewWindowBuilder::new(app_handle, label, WebviewUrl::External(url))
-        .title("Security Approval")
+        .title(rust_i18n::t!("security_approval_title"))
         .inner_size(APPROVAL_WINDOW_INNER_W, APPROVAL_WINDOW_INNER_H)
         .decorations(true)
         .always_on_top(true)
@@ -156,7 +157,12 @@ fn build_approval_window(
         // Build hidden so we can position it before its first paint — otherwise
         // the window flashes at the default top-left spot, then jumps to center.
         .visible(false)
-        .focused(true);
+        .focused(true)
+        .on_page_load(|window, event| {
+            if let tauri::webview::PageLoadEvent::Finished = event.event() {
+                crate::inject_native_bridge_state(&window);
+            }
+        });
     // Without a known monitor, let Tauri center the window on the active display.
     if monitor.is_none() {
         builder = builder.center();

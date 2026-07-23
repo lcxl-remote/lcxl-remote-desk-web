@@ -54,6 +54,26 @@ pub fn manager_link_should_connect(
     url_ok && token_ok && manager_enabled != Some(false)
 }
 
+async fn apply_worker_locale_ack(
+    settings: &web::Data<SharedSettings>,
+    host_control_hub: &HostControlHub,
+    locale: &str,
+) -> Result<(), String> {
+    let locale = crate::locale::canonicalize(locale)
+        .ok_or_else(|| format!("worker acknowledged unsupported locale {locale:?}"))?;
+    {
+        let mut settings = settings.write().await;
+        settings.system.locale = Some(locale.to_string());
+    }
+    crate::locale::set_global_locale(locale)?;
+    let _ = host_control_hub.send_command(
+        crate::host_control::HostControlMessage::GlobalLocaleChanged {
+            locale: locale.to_string(),
+        },
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_signaling_proxy(
     settings: web::Data<SharedSettings>,
@@ -727,6 +747,13 @@ pub async fn run_signaling_proxy(
                     SignalingType::ManagerUpdateSettings,
                     Option::<&()>::None,
                 );
+            }
+            WorkerToService::LocaleApplied(payload) => {
+                if let Err(error) =
+                    apply_worker_locale_ack(&settings, &host_control_hub, &payload.locale).await
+                {
+                    warn!("[SignalingProxy] failed to apply worker locale: {error}");
+                }
             }
             // Route typed terminal events back to the matching browser connection.
             // Each `Terminal*` variant rebuilds the matching outbound
@@ -2524,6 +2551,28 @@ mod tests {
 
     const RR_AUDIENCE: &str = "host-client-abc";
     const RR_NOW: &str = "2026-01-01T00:00:00Z";
+
+    #[tokio::test]
+    async fn worker_locale_ack_converges_daemon_and_broadcasts_to_tauri_shells() {
+        let settings = web::Data::new(SharedSettings::from(Settings::default()));
+        let hub = HostControlHub::new_local();
+        let mut outbound = hub.subscribe_outbound();
+
+        apply_worker_locale_ack(&settings, &hub, "en-US")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            settings.read().await.system.locale.as_deref(),
+            Some("en-US")
+        );
+        assert_eq!(crate::locale::current_locale(), "en-US");
+        assert!(matches!(
+            outbound.try_recv(),
+            Ok(crate::host_control::HostControlMessage::GlobalLocaleChanged { locale })
+                if locale == "en-US"
+        ));
+    }
 
     /// Read the one lifecycle frame that was emitted.
     fn expect_lifecycle(rx: &mut tokio::sync::broadcast::Receiver<String>) -> ExecLifecyclePayload {

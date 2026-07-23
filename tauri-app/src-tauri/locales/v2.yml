@@ -1,4 +1,41 @@
 _version: 2
+app_title:
+  en: LCXL Remote Desktop
+  zh-CN: LCXL 远程桌面
+tray_active_sessions:
+  en: "LCXL Remote Desktop — %{count} remote session(s) active"
+  zh-CN: "LCXL 远程桌面 — %{count} 个远程会话正在进行"
+button_cancel:
+  en: Cancel
+  zh-CN: 取消
+button_continue:
+  en: Continue
+  zh-CN: 继续
+button_exit:
+  en: Exit
+  zh-CN: 退出
+remote_access_status_title:
+  en: Remote Access Status
+  zh-CN: 远程访问状态
+private_screen_title:
+  en: Private Screen
+  zh-CN: 隐私屏
+whiteboard_title:
+  en: Whiteboard
+  zh-CN: 白板
+tray:
+  open:
+    en: Open Window
+    zh-CN: 打开窗口
+  remote_access_status:
+    en: View Remote Access Status
+    zh-CN: 查看远程访问状态
+  elevate:
+    en: Elevate Privileges
+    zh-CN: 提升权限
+  exit:
+    en: Exit
+    zh-CN: 退出
 host_access_title:
   en: Remote access active
   zh-CN: 正在远程访问

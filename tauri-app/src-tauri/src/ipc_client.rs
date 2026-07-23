@@ -12,6 +12,18 @@ use lcxl_remote_desk_server::{
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeBridgeEvent {
+    Ready {
+        token: String,
+        locale: String,
+        locale_persisted: bool,
+    },
+    LocaleChanged {
+        locale: String,
+    },
+}
+
 /// Runs the IPC WebSocket client loop, reconnecting indefinitely on disconnect.
 ///
 /// The same loop serves both portable (connect to embedded server's
@@ -30,6 +42,7 @@ pub async fn run_ipc_loop(
     host_access_tx: std::sync::mpsc::Sender<HostAccessStatusCommand>,
     mut state_rx: Option<UnboundedReceiver<HostControlEventType>>,
     token_holder: Arc<Mutex<Option<String>>>,
+    native_bridge_tx: std::sync::mpsc::Sender<NativeBridgeEvent>,
 ) {
     let ws_url = format!("{daemon_ws_url}?token={ipc_token}");
 
@@ -81,6 +94,7 @@ pub async fn run_ipc_loop(
                                             &svc_op_tx,
                                             &host_access_tx,
                                             &token_holder,
+                                            Some(&native_bridge_tx),
                                         ),
                                         Err(e) => {
                                             log::warn!("[IpcClient] Parse error: {e} — raw: {text}");
@@ -153,11 +167,30 @@ fn handle_server_msg(
     svc_op_tx: &std::sync::mpsc::SyncSender<ServiceOp>,
     host_access_tx: &std::sync::mpsc::Sender<HostAccessStatusCommand>,
     token_holder: &Arc<Mutex<Option<String>>>,
+    native_bridge_tx: Option<&std::sync::mpsc::Sender<NativeBridgeEvent>>,
 ) {
     match msg {
         HostControlMessage::TauriToken { token } => {
             log::info!("[IpcClient] Received TauriToken from server");
             *token_holder.lock().unwrap() = Some(token);
+        }
+        HostControlMessage::NativeBridgeReady {
+            token,
+            locale,
+            locale_persisted,
+        } => {
+            if let Some(tx) = native_bridge_tx {
+                let _ = tx.send(NativeBridgeEvent::Ready {
+                    token,
+                    locale,
+                    locale_persisted,
+                });
+            }
+        }
+        HostControlMessage::GlobalLocaleChanged { locale } => {
+            if let Some(tx) = native_bridge_tx {
+                let _ = tx.send(NativeBridgeEvent::LocaleChanged { locale });
+            }
         }
         HostControlMessage::PrivateScreenShow { connection_id } => {
             let _ = ps_cmd_tx.send(PrivateScreenCommand::Show(connection_id));
@@ -259,6 +292,7 @@ mod tests {
             &svc_tx,
             &status_tx,
             &token_holder,
+            None,
         );
         match ps_rx
             .recv_timeout(std::time::Duration::from_millis(50))
@@ -288,6 +322,7 @@ mod tests {
             &svc_tx,
             &status_tx,
             &token_holder,
+            None,
         );
         assert_eq!(token_holder.lock().unwrap().as_deref(), Some("tok-xyz"));
     }
@@ -319,6 +354,7 @@ mod tests {
             &svc_tx,
             &status_tx,
             &token_holder,
+            None,
         );
 
         match status_rx
@@ -328,6 +364,41 @@ mod tests {
             HostAccessStatusCommand::Snapshot(received) => assert_eq!(received, snapshot),
             other => panic!("expected snapshot, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn native_bridge_messages_are_forwarded_to_the_shell_event_loop() {
+        let (ps_tx, _) = std::sync::mpsc::channel();
+        let (wb_tx, _) = std::sync::mpsc::channel();
+        let (sa_tx, _) = std::sync::mpsc::channel();
+        let (svc_tx, _) = std::sync::mpsc::sync_channel::<ServiceOp>(1);
+        let (status_tx, _) = std::sync::mpsc::channel();
+        let token_holder = Arc::new(Mutex::new(None));
+        let (native_tx, native_rx) = std::sync::mpsc::channel();
+
+        handle_server_msg(
+            HostControlMessage::NativeBridgeReady {
+                token: "session-token".to_string(),
+                locale: "en-US".to_string(),
+                locale_persisted: true,
+            },
+            &ps_tx,
+            &wb_tx,
+            &sa_tx,
+            &svc_tx,
+            &status_tx,
+            &token_holder,
+            Some(&native_tx),
+        );
+
+        assert_eq!(
+            native_rx.recv().unwrap(),
+            NativeBridgeEvent::Ready {
+                token: "session-token".to_string(),
+                locale: "en-US".to_string(),
+                locale_persisted: true,
+            }
+        );
     }
 
     #[test]
@@ -351,6 +422,7 @@ mod tests {
             &svc_tx,
             &status_tx,
             &token_holder,
+            None,
         );
         match svc_rx
             .recv_timeout(std::time::Duration::from_millis(50))

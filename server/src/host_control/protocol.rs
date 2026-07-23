@@ -154,6 +154,18 @@ pub enum HostControlMessage {
     /// One-time auto-login token, pushed immediately after the handshake.
     TauriToken { token: String },
 
+    /// Per-WebSocket-session credential for the native locale REST bridge.
+    /// This message is sent only through that session's direct channel.
+    NativeBridgeReady {
+        token: String,
+        locale: String,
+        locale_persisted: bool,
+    },
+
+    /// Authoritative locale changed. Broadcast to every connected Tauri shell
+    /// so multiple windows converge.
+    GlobalLocaleChanged { locale: String },
+
     /// Show private-screen overlay.
     PrivateScreenShow { connection_id: String },
 
@@ -276,6 +288,14 @@ mod tests {
         let cases = vec![
             HostControlMessage::TauriToken {
                 token: "tok-123".to_string(),
+            },
+            HostControlMessage::NativeBridgeReady {
+                token: "bridge-123".to_string(),
+                locale: "en-US".to_string(),
+                locale_persisted: true,
+            },
+            HostControlMessage::GlobalLocaleChanged {
+                locale: "zh-CN".to_string(),
             },
             HostControlMessage::PrivateScreenShow {
                 connection_id: "c1".to_string(),

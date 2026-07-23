@@ -110,14 +110,23 @@ impl WhiteboardManager {
             WebviewWindowBuilder::new(
                 handle,
                 WHITEBOARD_WINDOW_LABEL,
-                WebviewUrl::External(format!("{}/whiteboard", self.frontend_url).parse().unwrap()),
+                WebviewUrl::External(
+                    format!("{}/whiteboard?tauri=1", self.frontend_url)
+                        .parse()
+                        .unwrap(),
+                ),
             )
-            .title("Whiteboard")
+            .title(rust_i18n::t!("whiteboard_title"))
             .transparent(true)
             .always_on_top(true)
             .decorations(false)
             .skip_taskbar(true)
             .resizable(false)
+            .on_page_load(|window, event| {
+                if let tauri::webview::PageLoadEvent::Finished = event.event() {
+                    crate::inject_native_bridge_state(&window);
+                }
+            })
             .build()
             .map_err(|e| e.to_string())?
         };

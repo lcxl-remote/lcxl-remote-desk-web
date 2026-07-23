@@ -20,6 +20,8 @@ const STATUS_WINDOW_COLLAPSED_HEIGHT: f64 = 250.0;
 const STATUS_WINDOW_LOCKED_HEIGHT: f64 = 390.0;
 const STATUS_WINDOW_EXPANDED_HEIGHT: f64 = 620.0;
 const STATUS_WINDOW_MARGIN: i32 = 16;
+static ACTIVE_SESSION_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 const MONITOR_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 pub(crate) const STATUS_LABEL_PREFIX: &str = "host-access-status-";
 
@@ -294,8 +296,10 @@ fn confirm_safety_action(message: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 fn confirm_safety_action(message: &str) -> bool {
+    let cancel = serde_json::to_string(rust_i18n::t!("button_cancel").as_ref()).unwrap();
+    let continue_text = serde_json::to_string(rust_i18n::t!("button_continue").as_ref()).unwrap();
     let script = format!(
-        "display dialog {} with title {} buttons {{\"Cancel\", \"Continue\"}} default button \"Cancel\" with icon caution",
+        "display dialog {} with title {} buttons {{{cancel}, {continue_text}}} default button {cancel} with icon caution",
         serde_json::to_string(message).unwrap_or_else(|_| "\"Confirm action?\"".into()),
         serde_json::to_string(rust_i18n::t!("host_access_dialog_title").as_ref()).unwrap()
     );
@@ -507,12 +511,13 @@ fn build_status_window(
     snapshot: &HostAccessSnapshot,
     monitor: Option<&Monitor>,
 ) -> Result<(), String> {
-    let url = Url::parse(frontend_url)
+    let mut url = Url::parse(frontend_url)
         .and_then(|base| base.join("host-access-status"))
         .map_err(|error| error.to_string())?;
+    url.query_pairs_mut().append_pair("tauri", "1");
     let initial = snapshot.clone();
     let window = WebviewWindowBuilder::new(app_handle, label, WebviewUrl::External(url))
-        .title("Remote Access Status")
+        .title(rust_i18n::t!("remote_access_status_title"))
         .inner_size(STATUS_WINDOW_WIDTH, STATUS_WINDOW_COLLAPSED_HEIGHT)
         .decorations(false)
         .transparent(true)
@@ -534,6 +539,7 @@ fn build_status_window(
         })
         .on_page_load(move |window, event| {
             if let tauri::webview::PageLoadEvent::Finished = event.event() {
+                crate::inject_native_bridge_state(&window);
                 dispatch_snapshot(&window, &initial);
                 let _ = window.show();
             }
@@ -660,11 +666,15 @@ fn destroy_window(app_handle: &AppHandle, label: &str) {
 }
 
 fn update_tray(app_handle: &AppHandle, active: bool, session_count: usize) {
+    ACTIVE_SESSION_COUNT.store(
+        if active { session_count } else { 0 },
+        std::sync::atomic::Ordering::SeqCst,
+    );
     if let Some(tray) = app_handle.tray_by_id(crate::MAIN_TRAY_ID) {
         let tooltip = if active {
-            format!("LCXL Remote Desktop — {session_count} remote session(s) active")
+            rust_i18n::t!("tray_active_sessions", count = session_count).to_string()
         } else {
-            "LCXL Remote Desktop".to_string()
+            rust_i18n::t!("app_title").to_string()
         };
         let _ = tray.set_tooltip(Some(tooltip));
         if let Some(base) = app_handle.default_window_icon() {
@@ -676,6 +686,11 @@ fn update_tray(app_handle: &AppHandle, active: bool, session_count: usize) {
             }
         }
     }
+}
+
+pub(crate) fn refresh_tray_locale(app_handle: &AppHandle) {
+    let count = ACTIVE_SESSION_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+    update_tray(app_handle, count > 0, count);
 }
 
 fn add_activity_badge(base: &tauri::image::Image<'_>) -> tauri::image::Image<'static> {

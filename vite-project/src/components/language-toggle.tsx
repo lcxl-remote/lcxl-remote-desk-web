@@ -1,5 +1,6 @@
 
 import { Languages } from "lucide-react"
+import { useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import { Button } from "@/components/ui/button"
@@ -9,9 +10,23 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { changeApplicationLanguage } from "@/locales/native-locale"
 
 export function LanguageToggle() {
-    const { i18n } = useTranslation()
+    useTranslation()
+    const [pending, setPending] = useState(false)
+
+    const changeLanguage = async (locale: string) => {
+        setPending(true)
+        try {
+            await changeApplicationLanguage(locale)
+        } catch (error) {
+            console.error(error)
+            window.alert('Language change failed. Please retry after the desktop shell is connected.')
+        } finally {
+            setPending(false)
+        }
+    }
 
     return (
         <DropdownMenu>
@@ -22,10 +37,10 @@ export function LanguageToggle() {
                 </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => { localStorage.setItem('i18nextLng', 'en-US'); i18n.changeLanguage("en-US"); }}>
+                <DropdownMenuItem disabled={pending} onClick={() => void changeLanguage("en-US")}>
                     English
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => { localStorage.setItem('i18nextLng', 'zh-CN'); i18n.changeLanguage("zh-CN"); }}>
+                <DropdownMenuItem disabled={pending} onClick={() => void changeLanguage("zh-CN")}>
                     中文
                 </DropdownMenuItem>
             </DropdownMenuContent>

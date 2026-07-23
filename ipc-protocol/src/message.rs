@@ -256,6 +256,11 @@ pub enum ServiceToWorker {
     /// daemon answers "what state is it in now?" from its durable ledger, and
     /// naming a generation the worker is not running is not an error there.
     ExecCancel(ExecCancelPayload),
+
+    /// Daemon → worker notification that the host-wide locale changed.
+    /// The worker applies and persists it, then acknowledges with
+    /// [`WorkerToService::LocaleApplied`].
+    SetLocale(SetLocalePayload),
 }
 
 /// Messages sent from Worker process to Service Core (daemon) over the
@@ -456,6 +461,10 @@ pub enum WorkerToService {
     /// Confirms that the worker applied a remote-access state transition and
     /// reports the worker-owned activity cancelled by it.
     RemoteAccessStateApplied(RemoteAccessStateAppliedPayload),
+
+    /// Worker confirms that its live process locale and settings snapshot have
+    /// converged to the host-wide locale.
+    LocaleApplied(LocaleAppliedPayload),
 }
 
 // ==================== Payload Types ====================
@@ -1050,6 +1059,16 @@ pub struct ManagerUpdateSettingsRequestPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
     pub settings: RemoteSystemSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct SetLocalePayload {
+    pub locale: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct LocaleAppliedPayload {
+    pub locale: String,
 }
 
 /// Payload for [`WorkerToService::ManagerSystemInfoResponse`].
@@ -2614,6 +2633,9 @@ mod tests {
                 connection_id: Some("c".to_string()),
                 settings: RemoteSystemSettings::default(),
             }),
+            ServiceToWorker::SetLocale(SetLocalePayload {
+                locale: "en-US".to_string(),
+            }),
             ServiceToWorker::StartTerminalRequest(StartTerminalRequestPayload {
                 request_id: "r6".to_string(),
                 connection_id: "c".to_string(),
@@ -2803,6 +2825,9 @@ mod tests {
             WorkerToService::ManagerUpdateSettingsResponse(ManagerResponseRefPayload {
                 request_id: "r".to_string(),
                 connection_id: Some("c".to_string()),
+            }),
+            WorkerToService::LocaleApplied(LocaleAppliedPayload {
+                locale: "en-US".to_string(),
             }),
             WorkerToService::TerminalStarted(TerminalStartedPayload {
                 request_id: "r".to_string(),

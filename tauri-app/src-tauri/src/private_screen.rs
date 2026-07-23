@@ -127,18 +127,23 @@ impl PrivateScreenManager {
                         handle,
                         PRIVATE_SCREEN_WINDOW_LABEL,
                         WebviewUrl::External(
-                            format!("{}/private-screen", self.frontend_url)
+                            format!("{}/private-screen?tauri=1", self.frontend_url)
                                 .parse()
                                 .unwrap(),
                         ),
                     )
-                    .title("Private Screen")
+                    .title(rust_i18n::t!("private_screen_title"))
                     .always_on_top(true)
                     .decorations(false)
                     .skip_taskbar(true)
                     .resizable(false)
                     .content_protected(true) // Prevent screen capture
                     .minimizable(false)
+                    .on_page_load(|window, event| {
+                        if let tauri::webview::PageLoadEvent::Finished = event.event() {
+                            crate::inject_native_bridge_state(&window);
+                        }
+                    })
                     .build()
                     .map_err(|e| e.to_string())?
                 };

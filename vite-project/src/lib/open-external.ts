@@ -11,11 +11,15 @@
  * navigation, which `on_navigation` intercepts: it opens the URL in the OS
  * default browser and cancels the in-webview load, so the current page stays put.
  *
- * The Tauri shell is detected via the `tauri=1` query it adds to the window URL.
+ * The first shell URL carries `tauri=1`; the marker is copied to sessionStorage
+ * so SPA navigation cannot accidentally turn a shell page into browser mode.
  */
 export function isTauriShell(): boolean {
     try {
-        return new URLSearchParams(window.location.search).get("tauri") === "1"
+        if (new URLSearchParams(window.location.search).get("tauri") === "1") {
+            sessionStorage.setItem("lcxl.tauriShell", "1")
+        }
+        return sessionStorage.getItem("lcxl.tauriShell") === "1"
     } catch {
         return false
     }

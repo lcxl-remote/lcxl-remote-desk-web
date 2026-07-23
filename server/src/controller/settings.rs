@@ -75,6 +75,13 @@ pub async fn update_settings(
 ) -> Result<HttpResponse, AWError> {
     let mut params = requst_json.into_inner();
     let mut settings = settings.write().await;
+    let previous_locale = settings.system.locale.clone();
+    if let Some(locale) = params.locale.as_deref() {
+        let Some(locale) = crate::locale::canonicalize(locale) else {
+            return Ok(HttpResponse::BadRequest().body("unsupported locale"));
+        };
+        params.locale = Some(locale.to_string());
+    }
 
     // Apply the auto-start change to the OS first. On macOS the LaunchAgent is
     // the single source of truth, so a failure must surface as a business error
@@ -100,7 +107,18 @@ pub async fn update_settings(
     params.preserve_internal_fields(&settings.system);
     settings.system = params;
     // save new settings to file
-    settings.save()?;
+    let locale_changed = settings.system.locale != previous_locale;
+    let applied_locale = if locale_changed {
+        let requested_locale = settings.system.locale.clone();
+        settings.system.locale = previous_locale;
+        Some(crate::locale::LocaleCoordinator::commit(
+            &mut settings,
+            requested_locale.as_deref(),
+        )?)
+    } else {
+        settings.save()?;
+        None
+    };
     if let Some(hub) = host_control_hub
         .as_ref()
         .and_then(|data| data.get_ref().as_ref())
@@ -119,6 +137,24 @@ pub async fn update_settings(
         settings.system.manager_enabled,
     ));
     info!("Update system settings successfully, {:?}", settings.system);
+    drop(settings);
+    if let Some(locale) = applied_locale
+        && let Some(hub) = host_control_hub
+            .as_ref()
+            .and_then(|data| data.get_ref().as_ref())
+    {
+        if let Some(worker_manager) = hub.locale_worker_manager() {
+            let _ = worker_manager
+                .send_to_worker(desk_ipc_protocol::message::ServiceToWorker::SetLocale(
+                    desk_ipc_protocol::message::SetLocalePayload {
+                        locale: locale.clone(),
+                    },
+                ))
+                .await;
+        }
+        let _ = hub
+            .send_command(crate::host_control::HostControlMessage::GlobalLocaleChanged { locale });
+    }
     Ok(HttpResponse::Ok().finish())
 }
 

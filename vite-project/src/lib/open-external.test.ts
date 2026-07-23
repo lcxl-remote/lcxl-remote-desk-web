@@ -18,6 +18,7 @@ function stubLocation(search: string): ReturnType<typeof vi.fn> {
 
 afterEach(() => {
     vi.restoreAllMocks()
+    sessionStorage.clear()
     Object.defineProperty(window, "location", {
         configurable: true,
         value: originalLocation,
@@ -25,11 +26,12 @@ afterEach(() => {
 })
 
 describe("isTauriShell", () => {
-    it("is true only when the tauri=1 query is present", () => {
+    it("persists the first-frame marker across SPA query changes", () => {
         stubLocation("?tauri=1")
         expect(isTauriShell()).toBe(true)
         stubLocation("?foo=bar")
-        expect(isTauriShell()).toBe(false)
+        expect(isTauriShell()).toBe(true)
+        sessionStorage.clear()
         stubLocation("")
         expect(isTauriShell()).toBe(false)
     })

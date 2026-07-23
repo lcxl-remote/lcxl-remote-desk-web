@@ -183,6 +183,7 @@ struct HubInner {
     remote_access_gate: crate::daemon::remote_access::RemoteAccessGate,
     remote_access_coordinator:
         std::sync::OnceLock<Arc<crate::daemon::remote_access::RemoteAccessCoordinator>>,
+    locale_worker_manager: std::sync::OnceLock<crate::daemon::worker_manager::WorkerManager>,
 }
 
 /// The unified host control hub.
@@ -229,6 +230,7 @@ impl HostControlHub {
             host_activity,
             remote_access_gate: crate::daemon::remote_access::RemoteAccessGate::startup_locked(),
             remote_access_coordinator: std::sync::OnceLock::new(),
+            locale_worker_manager: std::sync::OnceLock::new(),
         };
         let hub = Self {
             inner: Arc::new(inner),
@@ -265,6 +267,17 @@ impl HostControlHub {
         &self,
     ) -> Option<Arc<crate::daemon::remote_access::RemoteAccessCoordinator>> {
         self.inner.remote_access_coordinator.get().cloned()
+    }
+
+    pub fn install_locale_worker_manager(
+        &self,
+        worker_manager: crate::daemon::worker_manager::WorkerManager,
+    ) -> Result<(), crate::daemon::worker_manager::WorkerManager> {
+        self.inner.locale_worker_manager.set(worker_manager)
+    }
+
+    pub fn locale_worker_manager(&self) -> Option<crate::daemon::worker_manager::WorkerManager> {
+        self.inner.locale_worker_manager.get().cloned()
     }
 
     /// Subscribe to outgoing host-control commands. Used by the ws endpoint to
