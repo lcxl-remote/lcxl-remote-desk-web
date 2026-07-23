@@ -9,8 +9,6 @@
 //! named acceptance failure. It is pure and offline (no network, no worker
 //! process).
 
-#![cfg(test)]
-
 use desk_agent_protocol::exec::{ExecDecision, ExecEffect};
 use desk_agent_protocol::{Capability, ExecInput, ExecTarget, OperationInput, RiskLevel};
 

@@ -30,8 +30,6 @@
 //!
 //! It is pure and offline (scripted seams; no network, no device, no model).
 
-#![cfg(test)]
-
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
