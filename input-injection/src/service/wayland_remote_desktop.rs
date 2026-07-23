@@ -21,6 +21,7 @@ struct RemoteDesktopCreateSessionResponse {
 #[derive(DeserializeDict, Type, Debug)]
 #[zvariant(signature = "dict")]
 struct RemoteDesktopStartStream {
+    // Portal wire field: retained so the response dictionary stays schema-complete.
     #[allow(dead_code)]
     id: Option<String>,
 }

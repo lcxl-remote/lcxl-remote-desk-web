@@ -47,6 +47,7 @@ pub struct ScreenCastStartStream {
     pub id: Option<String>,
     pub position: Option<(i32, i32)>,
     pub size: Option<(i32, i32)>,
+    // Portal wire field: deserialized for schema compatibility, not needed for capture.
     #[allow(dead_code)]
     pub source_type: Option<u32>,
     pub mapping_id: Option<String>,
@@ -56,6 +57,7 @@ pub struct ScreenCastStartStream {
 #[zvariant(signature = "dict")]
 pub struct ScreenCastStartResponse {
     pub streams: Option<Vec<(u32, ScreenCastStartStream)>>,
+    // Portal wire field: the token is returned even when session restore is not requested.
     #[allow(dead_code)]
     pub restore_token: Option<String>,
 }

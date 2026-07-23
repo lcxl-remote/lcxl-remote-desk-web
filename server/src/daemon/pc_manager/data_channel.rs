@@ -77,12 +77,6 @@ pub(super) fn route_to_service_msg(
     route: DcRoute,
     connection_id: &str,
     data: Vec<u8>,
-    // Retained on the signature so call sites keep parity with the
-    // browser-side wire shape (text vs binary). Currently unused
-    // because the only route that cared — FileTransfer — was carved
-    // out onto its own dedicated lane; kept here for future routes
-    // (e.g. whiteboard binary blobs) without churning every call site.
-    _is_text: bool,
 ) -> ServiceToWorker {
     match route {
         DcRoute::Mouse => ServiceToWorker::MouseInput(InputPayload {
@@ -313,7 +307,7 @@ fn install_browser_dc_message_forwarder(
                     }
                     return;
                 }
-                let svc_msg = route_to_service_msg(route, &connection_id, bytes, is_text);
+                let svc_msg = route_to_service_msg(route, &connection_id, bytes);
                 if let Err(e) = worker_mgr.send_to_worker(svc_msg).await {
                     log::warn!(
                         "[DcRouter] {connection_id}: failed to forward {route:?} to worker: {e}"

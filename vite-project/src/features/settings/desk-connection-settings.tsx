@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
@@ -90,22 +90,25 @@ export function DeskConnectionSettings() {
     }, [settingsResponse?.data, isLoading, form])
 
     // Run one verify probe; returns the result or null on transport failure.
-    const runVerify = async (
-        target: "signaling" | "manager",
-        input: string,
-        token: string | null,
-    ): Promise<ConnectionVerifyResult | null> => {
-        try {
-            const res = await verifyConnection({
-                data: { target, input, token: token || undefined },
-            })
-            return res.data ?? null
-        } catch {
-            return null
-        }
-    }
+    const runVerify = useCallback(
+        async (
+            target: "signaling" | "manager",
+            input: string,
+            token: string | null,
+        ): Promise<ConnectionVerifyResult | null> => {
+            try {
+                const res = await verifyConnection({
+                    data: { target, input, token: token || undefined },
+                })
+                return res.data ?? null
+            } catch {
+                return null
+            }
+        },
+        [verifyConnection],
+    )
 
-    const verifySignaling = async () => {
+    const verifySignaling = useCallback(async () => {
         const url = form.getValues("signaling_url")
         if (!url) {
             setSignalingState({ kind: "unconfigured" })
@@ -130,9 +133,9 @@ export function DeskConnectionSettings() {
                       },
                   },
         )
-    }
+    }, [form, runVerify, t])
 
-    const verifyManager = async () => {
+    const verifyManager = useCallback(async () => {
         const url = form.getValues("manager_url")
         if (!url) {
             setManagerState({ kind: "unconfigured" })
@@ -161,7 +164,7 @@ export function DeskConnectionSettings() {
                       },
                   },
         )
-    }
+    }, [form, runVerify, t])
 
     // Auto-run a status check once settings load, for any configured + enabled
     // target. Runs only on the initial load (guarded by the idle state).
@@ -184,8 +187,14 @@ export function DeskConnectionSettings() {
                 void verifyManager()
             }
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isLoading, settingsResponse?.data])
+    }, [
+        isLoading,
+        settingsResponse?.data,
+        signalingState.kind,
+        managerState.kind,
+        verifySignaling,
+        verifyManager,
+    ])
 
     const onSubmit = async (values: DeskConnectionFormValues) => {
         try {

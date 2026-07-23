@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { ShieldAlert } from "lucide-react";
@@ -119,7 +119,7 @@ export default function SecurityApprovalPage() {
         };
     }, [reqId]);
 
-    const submit = (approved: boolean) => {
+    const submit = useCallback((approved: boolean) => {
         if (ackState !== "ready" || submittingRef.current || submittedOkRef.current) {
             return;
         }
@@ -148,7 +148,7 @@ export default function SecurityApprovalPage() {
                 setSubmitError(true);
             }
         })();
-    };
+    }, [ackState, reqId, remember]);
 
     // Start the countdown only once the dialog is ready and a positive timeout
     // is configured. approval_timeout null/0 means "wait forever".
@@ -170,8 +170,7 @@ export default function SecurityApprovalPage() {
             setTimeLeft((prev) => (prev !== null ? prev - 1 : null));
         }, 1000);
         return () => clearInterval(timer);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [timeLeft]);
+    }, [timeLeft, submit]);
 
     const notReady = ackState !== "ready";
 

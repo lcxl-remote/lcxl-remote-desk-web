@@ -2445,26 +2445,26 @@ fn route_to_service_msg_preserves_payload_and_connection_id() {
     let cid = "conn-test";
     let data = vec![1u8, 2, 3, 4];
 
-    match route_to_service_msg(DcRoute::Mouse, cid, data.clone(), true) {
+    match route_to_service_msg(DcRoute::Mouse, cid, data.clone()) {
         ServiceToWorker::MouseInput(p) => {
             assert_eq!(p.connection_id, cid);
             assert_eq!(p.data, data);
         }
         other => panic!("expected MouseInput, got {other:?}"),
     }
-    match route_to_service_msg(DcRoute::MouseMove, cid, data.clone(), true) {
+    match route_to_service_msg(DcRoute::MouseMove, cid, data.clone()) {
         ServiceToWorker::MouseMoveInput(p) => assert_eq!(p.data, data),
         other => panic!("expected MouseMoveInput, got {other:?}"),
     }
-    match route_to_service_msg(DcRoute::Keyboard, cid, data.clone(), true) {
+    match route_to_service_msg(DcRoute::Keyboard, cid, data.clone()) {
         ServiceToWorker::KeyboardInput(p) => assert_eq!(p.data, data),
         other => panic!("expected KeyboardInput, got {other:?}"),
     }
-    match route_to_service_msg(DcRoute::Clipboard, cid, data.clone(), true) {
+    match route_to_service_msg(DcRoute::Clipboard, cid, data.clone()) {
         ServiceToWorker::ClipboardWrite(p) => assert_eq!(p.data, data),
         other => panic!("expected ClipboardWrite, got {other:?}"),
     }
-    match route_to_service_msg(DcRoute::Whiteboard, cid, data.clone(), true) {
+    match route_to_service_msg(DcRoute::Whiteboard, cid, data.clone()) {
         ServiceToWorker::WhiteboardCommand(p) => assert_eq!(p.data, data),
         other => panic!("expected WhiteboardCommand, got {other:?}"),
     }
@@ -2477,7 +2477,7 @@ fn route_to_service_msg_preserves_payload_and_connection_id() {
 #[test]
 #[should_panic(expected = "CursorSync DC has no upstream message variant")]
 fn route_to_service_msg_cursor_sync_panics() {
-    let _ = route_to_service_msg(DcRoute::CursorSync, "c", vec![], true);
+    let _ = route_to_service_msg(DcRoute::CursorSync, "c", vec![]);
 }
 
 /// FileTransfer rides the dedicated file lane (see
@@ -2491,7 +2491,7 @@ fn route_to_service_msg_cursor_sync_panics() {
 #[test]
 #[should_panic(expected = "FileTransfer is routed through")]
 fn route_to_service_msg_file_transfer_panics() {
-    let _ = route_to_service_msg(DcRoute::FileTransfer, "c", vec![], true);
+    let _ = route_to_service_msg(DcRoute::FileTransfer, "c", vec![]);
 }
 
 /// `accept_control = false` blocks Mouse / MouseMove / Keyboard

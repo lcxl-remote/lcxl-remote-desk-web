@@ -91,8 +91,7 @@ impl WorkerSession {
         WorkerSession
     }
 
-    pub async fn run(args: Args, pipe_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let _ = args; // Reserved for future per-mode toggles; not used today.
+    pub async fn run(_args: Args, pipe_name: &str) -> Result<(), Box<dyn std::error::Error>> {
         let session = WorkerSession;
         session.connect_and_serve(pipe_name).await
     }

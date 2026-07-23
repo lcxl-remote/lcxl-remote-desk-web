@@ -187,7 +187,6 @@ pub fn spawn_upstream_ws_task(
                     {
                         warn!("[Upstream] failed to send Ready");
                         forwarder.mark_disconnected();
-                        forwarder_drain_pending_inbound(&forwarder);
                         tokio::time::sleep(backoff).await;
                         backoff = next_backoff(backoff);
                         continue;
@@ -234,7 +233,6 @@ pub fn spawn_upstream_ws_task(
 
                     info!("[Upstream] disconnected");
                     forwarder.mark_disconnected();
-                    forwarder_drain_pending_inbound(&forwarder);
                 }
                 Err(e) => {
                     warn!("[Upstream] connect failed: {e:?} (next retry in {backoff:?})");
@@ -244,16 +242,6 @@ pub fn spawn_upstream_ws_task(
             backoff = next_backoff(backoff);
         }
     });
-}
-
-/// Notify any local hub subscribers that the link dropped — they should treat
-/// in-flight approvals as cancelled. The hub's inbound dispatcher receives a
-/// synthetic `SecurityApprovalCancel` for nothing in particular; deny_all_pending
-/// is the more direct path, but it lives on the Hub, not the forwarder. Callers
-/// that want full deny-all semantics on disconnect should observe `is_connected()`
-/// transitioning to false and call `Hub::deny_all_pending` themselves.
-fn forwarder_drain_pending_inbound(_forwarder: &UpstreamForwarder) {
-    // Reserved for future use. Currently a no-op — see doc comment above.
 }
 
 #[cfg(test)]

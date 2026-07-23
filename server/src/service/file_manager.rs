@@ -59,13 +59,11 @@ pub async fn list_files(query_list: FileListParams) -> Result<FileListResponse, 
         });
     }
 
-    // path_str need to be mut in linux/macos platform
-    #[allow(unused_mut)]
-    let mut path_str = query_list.path.clone();
-    #[cfg(not(target_os = "windows"))]
-    if query_list.path.is_empty() {
-        path_str = "/".to_string();
-    }
+    let path_str = if cfg!(not(target_os = "windows")) && query_list.path.is_empty() {
+        "/".to_string()
+    } else {
+        query_list.path.clone()
+    };
     let path = PathBuf::from(&path_str);
 
     let mut file_info_list = vec![];

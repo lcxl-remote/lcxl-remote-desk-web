@@ -461,8 +461,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
             statsWindowRef.current = [];
             qualityAdjustmentCountRef.current += 1;
         }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [rtcStats, adaptiveQualityEnabled]);
+    }, [rtcStats, adaptiveQualityEnabled, sendMessage, deskId]);
 
     // Adaptive resolution dispatcher: wraps sendMessage so the hook
     // gets the real wire request_id back (sendMessage returns it).
@@ -618,8 +617,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         };
         lastSettingsRef.current = updated;
         sendMessage(SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, updated, deskId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [adaptiveBitrateEnabled]);
+    }, [adaptiveBitrateEnabled, isRTCConnected, deskId, sendMessage]);
 
     const handleConfigCancel = () => {
         setIsConfigOpen(false);
