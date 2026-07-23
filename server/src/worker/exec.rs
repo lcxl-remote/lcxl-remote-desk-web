@@ -609,7 +609,9 @@ mod tests {
         );
         ExecPlan {
             exec_request_id: desk_agent_protocol::exec::ExecRequestId("exec_t".into()),
-            execution_generation: "gen_t".into(),
+            // Windows containment uses this value as the job-object name. Keep
+            // concurrently running test commands isolated from one another.
+            execution_generation: format!("gen_t_{}", uuid::Uuid::new_v4()),
             program,
             argv,
             cwd: None,
@@ -713,7 +715,7 @@ mod tests {
     #[tokio::test]
     async fn times_out_and_kills_long_command() {
         #[cfg(windows)]
-        let snippet = "ping -n 6 127.0.0.1";
+        let snippet = "for /L %i in (1,1,2147483647) do @rem";
         #[cfg(not(windows))]
         let snippet = "sleep 5";
         let outcome = execute_plan(&plan(snippet, 300, 65_536)).await;

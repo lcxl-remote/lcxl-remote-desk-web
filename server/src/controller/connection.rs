@@ -212,11 +212,7 @@ fn build_probe_client(scheme_is_tls: bool, require_secure_signaling: bool) -> aw
 }
 
 /// Pick the right per-scheme probe client for a `ws(s)`/`http(s)` URL.
-fn client_for_url<'a>(
-    url: &str,
-    secure: &'a awc::Client,
-    plain: &'a awc::Client,
-) -> &'a awc::Client {
+fn client_for_url<'a, T>(url: &str, secure: &'a T, plain: &'a T) -> &'a T {
     let lower = url.trim().to_ascii_lowercase();
     if lower.starts_with("wss://") || lower.starts_with("https://") {
         secure
@@ -802,9 +798,10 @@ mod tests {
 
     #[test]
     fn client_for_url_picks_scheme() {
-        // A throwaway pair of clients; only their identity is compared.
-        let secure = build_probe_client(true, true);
-        let plain = build_probe_client(false, true);
+        // The selector is transport-agnostic; sentinels keep this unit test from
+        // initializing TLS merely to compare references.
+        let secure = "secure";
+        let plain = "plain";
         let s_ptr = std::ptr::from_ref(client_for_url("wss://h/x", &secure, &plain));
         assert_eq!(s_ptr, std::ptr::from_ref(&secure));
         let s_ptr = std::ptr::from_ref(client_for_url("https://h", &secure, &plain));
