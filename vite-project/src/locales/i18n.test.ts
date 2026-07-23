@@ -4,6 +4,7 @@ import i18n, {
     canonicalizeLocale,
     ensureLocaleLoaded,
     initializeI18n,
+    registerLocaleExtension,
 } from './i18n';
 
 beforeEach(() => {
@@ -23,15 +24,13 @@ describe('locale loading', () => {
 
     it('loads another base locale without overwriting extensions', async () => {
         await initializeI18n();
-        i18n.addResourceBundle(
-            'zh-CN',
-            'translation',
-            { extension: { label: '扩展文案' } },
-            true,
-            true,
-        );
+        const extensionLoader = vi.fn().mockResolvedValue({
+            extension: { label: '扩展文案' },
+        });
+        const unregister = registerLocaleExtension(extensionLoader);
         await ensureLocaleLoaded('zh-CN');
 
+        expect(extensionLoader).toHaveBeenCalledWith('zh-CN');
         expect(i18n.hasResourceBundle('zh-CN', 'translation')).toBe(true);
         expect(i18n.getResource('zh-CN', 'translation', 'navBar.lang')).toBe(
             '语言',
@@ -39,6 +38,7 @@ describe('locale loading', () => {
         expect(i18n.getResource('zh-CN', 'translation', 'extension.label')).toBe(
             '扩展文案',
         );
+        unregister();
     });
 });
 

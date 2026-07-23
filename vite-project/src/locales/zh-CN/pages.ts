@@ -1011,7 +1011,12 @@ export default {
   'pages.desk.waylandControlMode': 'Wayland 控制模式',
   // Remote terminal session.
   'pages.deskTerminal.connect': '连接',
+  'pages.deskTerminal.connecting': '正在连接...',
+  'pages.deskTerminal.dashboard': '仪表盘',
   'pages.deskTerminal.selectShell': '选择一个 shell 以开始会话',
+  'pages.deskTerminal.shellCommand': 'Shell 命令',
+  'pages.deskTerminal.shellPlaceholder': '请选择 shell...',
+  'pages.deskTerminal.switchShell': '切换 Shell',
   'pages.deskTerminal.title': '终端会话',
   // Backend capture/control diagnostics panel.
   'pages.system.settings.backendDiagnostics': '后端诊断',

@@ -1,19 +1,14 @@
 
 import { useEffect, useRef, useState, useCallback } from "react"
-import { useParams, useNavigate } from "react-router-dom"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import { WebLinksAddon } from "@xterm/addon-web-links"
 import "@xterm/xterm/css/xterm.css"
 import { useTranslation } from "react-i18next"
-import { Loader2, TerminalSquare, ArrowLeft } from "lucide-react"
+import { Loader2, TerminalSquare } from "lucide-react"
 import { Sparkles, WandSparkles } from "lucide-react"
-import { useListTerminal } from "@/services/hooks/terminalController/useListTerminal"
 import { readSessionGrant } from "@/features/desk/session-grant"
-import { useDeviceId } from "@/hooks/use-device-id"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Label } from "@/components/ui/label"
 import { v4 } from "uuid"
 import { useDeskSignaling } from "../desk/use-desk-signaling"
 import { useTerminalCopilot, type TerminalCopilotMode, type TerminalContext } from "./use-terminal-copilot"
@@ -42,7 +37,7 @@ const SIGNALING_TYPE_CODE_TERMINAL_CLOSED = 10014
 const SIGNALING_TYPE_CODE_HEARTBEAT = 1
 const TERMINAL_HEARTBEAT_INTERVAL_MS = 30_000
 
-function TerminalView({ connectionId, deviceId, command, onClose, orgId }: { connectionId: string; deviceId?: string; command: string; onClose: () => void; orgId?: number }) {
+export function TerminalView({ connectionId, deviceId, command, onClose, orgId }: { connectionId: string; deviceId?: string; command: string; onClose: () => void; orgId?: number }) {
     const { t } = useTranslation()
     const terminalRef = useRef<HTMLDivElement>(null)
     const [isConnected, setIsConnected] = useState(false)
@@ -488,7 +483,7 @@ function TerminalView({ connectionId, deviceId, command, onClose, orgId }: { con
                         }}
                     >
                         <TerminalSquare className="h-4 w-4 mr-2" />
-                        Switch Shell
+                        {t('pages.deskTerminal.switchShell')}
                     </Button>
                 </div>
                 {/* Manager-only completion-model picker; renders nothing against an
@@ -512,7 +507,7 @@ function TerminalView({ connectionId, deviceId, command, onClose, orgId }: { con
                 {!isConnected && (
                     <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-white flex items-center gap-2 pointer-events-none">
                         <Loader2 className="h-6 w-6 animate-spin" />
-                        <span>Connecting...</span>
+                        <span>{t('pages.deskTerminal.connecting')}</span>
                     </div>
                 )}
                 {completionEnabled && ghost && (
@@ -548,105 +543,6 @@ function TerminalView({ connectionId, deviceId, command, onClose, orgId }: { con
                     orgId={orgId}
                 />
             )}
-        </div>
-    )
-}
-
-/** Container props. `orgId` is injected only by the manager console's org view
- *  (via a static wrapper); the open-source standalone app renders
- *  `<TerminalSession/>` with no props, keeping AI model selection personal-scoped. */
-type TerminalSessionProps = {
-    orgId?: number
-}
-
-export default function TerminalSession({ orgId }: TerminalSessionProps = {}) {
-    const { id: connectionId } = useParams<{ id: string }>()
-    const navigate = useNavigate()
-    const { t } = useTranslation()
-    const deviceId = useDeviceId(connectionId)
-    const { data: terminalList, isLoading } = useListTerminal(
-        connectionId || '',
-        deviceId ? { device_id: deviceId } : undefined,
-    )
-    const [selectedCommand, setSelectedCommand] = useState<string>("")
-
-    const handleTerminalClose = useCallback(() => {
-        setSelectedCommand("");
-    }, []);
-
-    if (isLoading) {
-        return (
-            <div className="flex h-full items-center justify-center">
-                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            </div>
-        )
-    }
-
-    if (selectedCommand && connectionId) {
-        return <TerminalView
-            connectionId={connectionId}
-            deviceId={deviceId}
-            command={selectedCommand}
-            onClose={handleTerminalClose}
-            orgId={orgId}
-        />
-    }
-
-    const commands = terminalList?.commands || []
-
-    return (
-        <div className="flex h-full items-center justify-center bg-muted/40 p-4 relative">
-            <div className="absolute top-4 left-4">
-                <Button variant="outline" size="sm" onClick={() => navigate(`/desk/${connectionId}`)}>
-                    <ArrowLeft className="mr-2 h-4 w-4" />
-                    Dashboard
-                </Button>
-            </div>
-            <Card className="w-full max-w-md">
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                        <TerminalSquare className="h-6 w-6" />
-                        {t('pages.deskTerminal.title')}
-                    </CardTitle>
-                    <CardDescription>
-                        {t('pages.deskTerminal.selectShell')}
-                    </CardDescription>
-                </CardHeader>
-                <CardContent className="grid gap-4">
-                    <div className="grid gap-2">
-                        <Label htmlFor="shell">Shell Command</Label>
-                        <select
-                            id="shell"
-                            className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                            value={selectedCommand}
-                            onChange={(e) => setSelectedCommand(e.target.value)}
-                        >
-                            <option value="" disabled>Select a shell...</option>
-                            {commands.map((cmd: string[], i: number) => {
-                                // cmd is string[], join with comma for display and usage
-                                // Legacy used JSON.stringify for value, but why?
-                                // "command" param in URL is comma-separated string.
-                                // So we can just join it here.
-                                const value = cmd.join(',')
-                                return (
-                                    <option key={i} value={value}>
-                                        {cmd[0]}
-                                    </option>
-                                )
-                            })}
-                        </select>
-                    </div>
-                    <Button
-                        disabled={!selectedCommand}
-                        onClick={() => {
-                            // Trigger re-render with selected command
-                            // State update handles it
-                        }}
-                    >
-                        {t('pages.deskTerminal.connect')}
-                    </Button>
-                </CardContent>
-            </Card>
         </div>
     )
 }

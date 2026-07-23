@@ -1018,7 +1018,12 @@ export default {
   'pages.desk.waylandControlMode': 'Wayland Control Mode',
   // Remote terminal session.
   'pages.deskTerminal.connect': 'Connect',
+  'pages.deskTerminal.connecting': 'Connecting...',
+  'pages.deskTerminal.dashboard': 'Dashboard',
   'pages.deskTerminal.selectShell': 'Select a shell to start the session',
+  'pages.deskTerminal.shellCommand': 'Shell Command',
+  'pages.deskTerminal.shellPlaceholder': 'Select a shell...',
+  'pages.deskTerminal.switchShell': 'Switch Shell',
   'pages.deskTerminal.title': 'Terminal Session',
   // Backend capture/control diagnostics panel.
   'pages.system.settings.backendDiagnostics': 'Backend Diagnostics',

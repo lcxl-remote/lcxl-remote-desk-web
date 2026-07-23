@@ -80,7 +80,7 @@ export const router = createBrowserRouter([
             {
                 path: 'desk/:id/terminal',
                 lazy: async () => ({
-                    Component: (await import('@/features/terminal/terminal-session')).default,
+                    Component: (await import('@/features/terminal/terminal-session-launcher')).default,
                 }),
             },
             {
