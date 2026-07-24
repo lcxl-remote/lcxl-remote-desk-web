@@ -1,7 +1,6 @@
 import i18n, {
     canonicalizeLocale,
     ensureLocaleLoaded,
-    type SupportedLocale,
 } from './i18n'
 
 export const TAURI_SHELL_SESSION_KEY = 'lcxl.tauriShell'

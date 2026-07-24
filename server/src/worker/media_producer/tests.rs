@@ -2,6 +2,14 @@ use super::*;
 use desk_ipc_protocol::dual_transport::inprocess;
 use desk_signal_facade::model::desk_settings::DeskSettings;
 
+impl MediaProducer {
+    fn connection_pipeline_state(&self, connection_id: &str) -> Option<(bool, bool)> {
+        let map = self.inner.lock().expect("media producer lock poisoned");
+        map.get(connection_id)
+            .map(|task| (task.video_handle.is_some(), task.audio_handle.is_some()))
+    }
+}
+
 /// Walk a typical IDR access unit (SPS + PPS + IDR slice) and verify
 /// each NAL's header + payload length is reported. This is the
 /// shape we expect on a healthy initial frame, and the diff between

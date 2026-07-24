@@ -5,6 +5,7 @@ use crate::model::{os::OperationSystemEnum, signal::RemoteDeskTypeEnum};
 
 /// Version information for the API.
 #[derive(Serialize, Deserialize, Clone, Debug, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
 pub struct VersionInfo {
     /// The version of the API. This is a simple integer that increments when API is changed.
     pub api_version: i32,
@@ -97,5 +98,19 @@ mod tests {
 
         assert!(!decoded.debug_build);
         assert_eq!(decoded.repository_url, None);
+    }
+
+    #[test]
+    fn openapi_parameters_are_query_parameters() {
+        use utoipa::openapi::path::ParameterIn;
+
+        let parameters = VersionInfo::into_params(|| None);
+
+        assert!(!parameters.is_empty());
+        assert!(
+            parameters
+                .iter()
+                .all(|parameter| parameter.parameter_in == ParameterIn::Query)
+        );
     }
 }

@@ -1161,6 +1161,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn signaling_openapi_parameters_are_queries() {
+        use utoipa::openapi::path::ParameterIn;
+
+        let api = build_openapi();
+        let operation = api.paths.paths["/api/desk/signaling"]
+            .get
+            .as_ref()
+            .expect("signaling GET operation");
+        let parameters = operation.parameters.as_ref().expect("signaling parameters");
+
+        assert!(!parameters.is_empty());
+        assert!(
+            parameters
+                .iter()
+                .all(|parameter| parameter.parameter_in == ParameterIn::Query)
+        );
+    }
+
     /// Auth-order guard: signaling is registered at the top level, *before* the
     /// `/api` scope's `enforce_device_scope`. With a valid node token (and no
     /// session) the handler must pass its own auth and reach the WebSocket

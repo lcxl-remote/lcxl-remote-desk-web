@@ -112,7 +112,7 @@ fn apply_server_adjudicated_identity(
 
 #[utoipa::path(
     tag = TAG,
-    summary = "Open Signaling Handle, return websocket stream. NOTE: The OpenAPI generated typescript service is not right.",
+    summary = "Open signaling handle and return a WebSocket stream",
     params(VersionInfo),
     responses(
         (status = 200, description = "return websocket stream"),

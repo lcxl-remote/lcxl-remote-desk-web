@@ -1344,7 +1344,7 @@ export type LcxlRTCIceServer = {
 };
 
 /**
- * @description InitSignalingData is used to initialize signaling data.\ndesk server -> signaling server -> web browser\nsee https://github.com/webrtc-rs/webrtc/blob/254bdd5d970933e847dc000de9545040ce16f19f/webrtc/src/peer_connection/configuration.rs
+ * @description InitSignalingData is used to initialize signaling data.\ndesk server -> signaling server -> web browser\nSee <https://github.com/webrtc-rs/webrtc/blob/254bdd5d970933e847dc000de9545040ce16f19f/webrtc/src/peer_connection/configuration.rs>.
 */
 export type InitSignalingData = {
     /**
@@ -1970,7 +1970,7 @@ export type RemoteSessionPurpose = RemoteSessionPurposeEnumKey;
 */
 export type RequestRemoteModel = {
     /**
-     * @description Browser-writable, **untrusted** selector naming which grant session this\nrequest redeems (set after redeeming a device / support code). It only\n*selects* a grant; the authorization fact — whether it is honored and what\ncapability ceiling it carries — is decided server-side by looking the grant\nup and checking the caller\'s server-resolved principal, and is stamped into\nthe trusted [`super::request_remote_authz::RequestRemoteAuthz`]. A browser\npresenting someone else\'s `grant_session_id` is rejected at that principal\ncheck. `None` on a normal owner/org request.
+     * @description Browser-writable, **untrusted** selector naming which grant session this\nrequest redeems (set after redeeming a device / support code). It only\n*selects* a grant; the authorization fact — whether it is honored and what\ncapability ceiling it carries — is decided server-side by looking the grant\nup and checking the caller\'s server-resolved principal, and is stamped into\nthe trusted [`crate::model::request_remote_authz::RequestRemoteAuthz`]. A browser\npresenting someone else\'s `grant_session_id` is rejected at that principal\ncheck. `None` on a normal owner/org request.
      * @type string,null
     */
     grant_session_id?: string | null;
@@ -4578,7 +4578,7 @@ export type UpdateVirtualDisplaySettingsMutation = {
     Errors: any;
 };
 
-export type OpenSignalingHandlePathParams = {
+export type OpenSignalingHandleQueryParams = {
     /**
      * @description The version of the API. This is a simple integer that increments when API is changed.
      * @type integer, int32
@@ -4606,29 +4606,29 @@ export type OpenSignalingHandlePathParams = {
     operation_system: OperationSystemEnum;
     /**
      * @description Display name of the remote desk.
-     * @type string,null
+     * @type string | undefined
     */
-    display_name: string | null;
+    display_name?: string;
     /**
      * @description Client ID of the server.
-     * @type string,null
+     * @type string | undefined
     */
-    client_id: string | null;
+    client_id?: string;
     /**
      * @description Authentication token for server nodes or API clients.
-     * @type string,null
+     * @type string | undefined
     */
-    token: string | null;
+    token?: string;
     /**
      * @description Whether this binary was compiled with debug assertions (a debug build).\nDefaults to `false` for peers that do not report it.
-     * @type boolean
+     * @type boolean | undefined
     */
-    debug_build: boolean;
+    debug_build?: boolean;
     /**
      * @description Source repository URL this binary was built from, when known.\nDefaults to `None` for peers that do not report it.
-     * @type string,null
+     * @type string | undefined
     */
-    repository_url: string | null;
+    repository_url?: string;
 };
 
 /**
@@ -4640,7 +4640,7 @@ export type OpenSignalingHandleQueryResponse = OpenSignalingHandle200;
 
 export type OpenSignalingHandleQuery = {
     Response: OpenSignalingHandle200;
-    PathParams: OpenSignalingHandlePathParams;
+    QueryParams: OpenSignalingHandleQueryParams;
     Errors: any;
 };
 
