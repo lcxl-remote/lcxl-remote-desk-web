@@ -588,7 +588,7 @@ mod tests {
     #[actix_web::test]
     async fn enable_with_driver_not_installed_returns_precondition_failed_8() {
         // We *cannot* assume the driver is uninstalled on the host
-        // running this test (the dev box may keep a POC IDD around).
+        // running this test (the dev box may keep a test IDD around).
         // So instead we directly assert the pure precondition path
         // above (`precondition_rejects_enable_when_driver_not_installed_or_unknown`)
         // and treat this integration test as covering the actix

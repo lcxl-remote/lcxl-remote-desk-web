@@ -137,7 +137,7 @@ impl ScreenOutput {
         // both composition surfaces to opaque black so the first few
         // frames — before driver-reported dirty + move regions cover
         // the screen — present deterministic darkness rather than
-        // garbage pixels (see plan §1 trade-off note).
+        // garbage pixels outside the valid region.
         let clear_black = [0.0_f32, 0.0_f32, 0.0_f32, 1.0_f32];
         unsafe {
             if let Some(rtv0) = rtv[0].as_ref() {

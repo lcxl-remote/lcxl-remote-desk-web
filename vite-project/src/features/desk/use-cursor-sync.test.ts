@@ -4,9 +4,8 @@ import { computeCursorScale, useCursorSync } from './use-cursor-sync';
 
 // Mock toast and translations: this test file focuses on the
 // computeCursorScale pure function and a narrow embed-toast
-// observation. We do not exercise the canvas / Image pipeline (per
-// the codex review the jsdom-canvas surface is too brittle to lean
-// on).
+// observation. We do not exercise the canvas / Image pipeline because
+// the jsdom-canvas surface is too brittle to use as a stable test seam.
 const toastMock = vi.fn();
 vi.mock('@/hooks/use-toast', () => ({
     useToast: () => ({ toast: toastMock, dismiss: vi.fn(), toasts: [] }),

@@ -13,13 +13,10 @@
 //! `IDXGIAdapter`), but DXGI hands back `IDXGIOutput`, not
 //! `HMONITOR`, so WGC needs its own enumerator regardless.
 //!
-//! PoC spike B confirmed end-to-end that `EnumDisplayMonitors` + WGC
-//! `CreateForMonitor(HMONITOR)` captures the IDD's independent
-//! desktop. The original spike's "DXGI cannot see IDD" claim was
-//! later corrected: DXGI does enumerate IDD outputs, but hands back
-//! `IDXGIOutput` rather than `HMONITOR`, so WGC still needs its own
-//! GDI-layer enumerator. This module is the production version of
-//! spike A.
+//! `EnumDisplayMonitors` + WGC `CreateForMonitor(HMONITOR)` captures
+//! the IDD's independent desktop. DXGI also enumerates IDD outputs,
+//! but hands back `IDXGIOutput` rather than `HMONITOR`, so WGC still
+//! needs its own GDI-layer enumerator.
 //!
 //! ## Layering
 //!
@@ -255,9 +252,9 @@ mod tests {
 
     /// `enum_monitors` must never panic, including on headless CI
     /// where it may legitimately return zero entries. The
-    /// structural-assertion smoke (one physical + one IDD attached)
-    /// is run manually via the `poc-indirect-display enum-monitors`
-    /// CLI subcommand — see the spike archive.
+    /// structural assertion (one physical + one IDD attached) is run
+    /// manually via the `poc-indirect-display enum-monitors` CLI
+    /// subcommand.
     #[test]
     fn enum_monitors_does_not_panic() {
         let _ = enum_monitors();

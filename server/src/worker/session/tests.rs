@@ -141,7 +141,7 @@ async fn event_forwarder_drains_queue_and_exits_when_senders_dropped() {
         .expect("task panicked");
 }
 
-/// Typed-IPC migration batch 1: a `PrivateScreenStateChanged`
+/// A `PrivateScreenStateChanged`
 /// blob produced by `DeskSession`'s host-control-hub bridge is
 /// classified into the typed `WorkerToService::PrivateScreenStateChanged`
 /// variant, carrying the inner `PrivateScreenStateChangedData`

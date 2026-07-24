@@ -7,7 +7,7 @@
 //! [`AgentEnvelope`]; the worker dispatches it here and replies via
 //! `WorkerToService::AgentResponse`.
 //!
-//! Each P0 read kind dispatches to a collector in [`collectors`]. A collector
+//! Each supported read kind dispatches to a collector in [`collectors`]. A collector
 //! that cannot run on the host (no Docker, no session context, unsupported
 //! platform) returns a structured `AgentError` so the path degrades gracefully
 //! instead of failing the transport.
@@ -86,8 +86,9 @@ impl DeviceAgent for LocalDeviceAgent {
             ))
             .await;
 
-        // `exec` is reserved until M2; the daemon already rejects it, but
-        // defend in depth here too. The input is cloned so the envelope stays
+        // Raw `exec` requests use a separate confirmed-execution path; the
+        // daemon already rejects them here, but defend in depth in the worker
+        // too. The input is cloned so the envelope stays
         // available for the post-dispatch audit events.
         let result = match envelope.operation.input.clone() {
             OperationInput::ReadContext(rc) => {
@@ -323,8 +324,8 @@ mod tests {
         assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
     }
 
-    /// `exec` is rejected in the worker too (defence in depth; the daemon
-    /// already blocks it before M2).
+    /// Raw `exec` is rejected in the worker too; the daemon already blocks it
+    /// on this path.
     #[tokio::test]
     async fn exec_is_unsupported() {
         let agent = LocalDeviceAgent::new();

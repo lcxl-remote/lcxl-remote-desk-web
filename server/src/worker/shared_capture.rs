@@ -631,7 +631,7 @@ mod tests {
         assert_ne!(kw, kg);
     }
 
-    /// Codex review #4: the registry must key on the device_name the
+    /// The registry must key on the device_name the
     /// capture instance actually realised (`get_current_output().
     /// device_name`), not on whatever was in `settings.video_device_name`.
     /// Today no backend re-resolves 鈥?`select_display_info_by_name`

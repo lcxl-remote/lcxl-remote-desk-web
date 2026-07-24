@@ -172,8 +172,8 @@ pub fn snapshot_layout(virtual_display_name: &str) -> Result<ExclusiveLayout, Vi
 /// Enumerate every currently-active display, returning its full
 /// `PhysicalDisplaySnapshot` (device name, devmode, primary flag).
 ///
-/// Exposed publicly (e2e diagnostic helper 2026-05-27) so callers
-/// outside the exclusive-mode pipeline can use it to log the GDI
+/// Exposed publicly so callers outside the exclusive-mode pipeline
+/// can use it to log the GDI
 /// layout at arbitrary points (e.g. right after `AttachVirtualDisplay`
 /// completes, before `DetachVirtualDisplay`, etc.). Returns an
 /// `Err(VirtualDisplayError::Cds)` if any per-display devmode read
@@ -346,11 +346,8 @@ pub fn enter_exclusive(layout: &ExclusiveLayout) -> Result<(), VirtualDisplayErr
     // Step 1: set virtual display primary at (0,0). Queued; only
     // committed once every step has succeeded.
     //
-    // E2E fix 2026-05-27: `CDS_SET_PRIMARY` MUST be paired with
-    // `CDS_UPDATEREGISTRY` — without it Windows returns
-    // `DISP_CHANGE_BADFLAGS` (-4). This was the root cause of the
-    // "5 s prompt, fail, repeat" loop observed at 2026-05-27 14:57:
-    // every enter attempt failed at this exact call. NirCmd /
+    // `CDS_SET_PRIMARY` must be paired with `CDS_UPDATEREGISTRY`;
+    // otherwise Windows returns `DISP_CHANGE_BADFLAGS` (-4). NirCmd /
     // Chromium / MultiMonitorTool all pair the two flags. The
     // crash-recovery story is degraded slightly (primary flag is now
     // persisted in registry), but the detach calls below still skip
@@ -417,8 +414,8 @@ pub fn enter_exclusive(layout: &ExclusiveLayout) -> Result<(), VirtualDisplayErr
          virtual={virtual_name} is now primary",
         n = layout.physical_snapshots.len()
     );
-    // E2E diagnostic 2026-05-27: re-enumerate immediately so the log
-    // captures what the OS actually thinks the layout is after the
+    // Re-enumerate immediately so the log captures what the OS
+    // actually reports after the
     // commit, not just what we asked for. WM_DISPLAYCHANGE is async
     // and may fire slightly later, so the value Windows reports back
     // *right now* is the ground truth most useful for debugging.
@@ -437,8 +434,8 @@ fn rollback_enter(
     // transient nature of the CDS calls means a logoff is the ultimate
     // recovery.
     //
-    // E2E fix 2026-05-27: any rollback step that uses
-    // `CDS_SET_PRIMARY` must also include `CDS_UPDATEREGISTRY` —
+    // Any rollback step that uses `CDS_SET_PRIMARY` must also include
+    // `CDS_UPDATEREGISTRY`;
     // Windows returns `DISP_CHANGE_BADFLAGS` otherwise (same
     // constraint as `enter_exclusive`'s set-primary call). Plain
     // restore (no SET_PRIMARY) sticks with `CDS_NORESET` only.
@@ -548,13 +545,9 @@ pub fn leave_exclusive(layout: &ExclusiveLayout) -> Result<(), VirtualDisplayErr
 
     if errors.is_empty() {
         log::info!("[virtual-display] leave_exclusive: completed cleanly");
-        // E2E diagnostic 2026-05-27: log the OS-reported layout right
-        // after the commit so we can verify the snapshot really
-        // restored DISPLAY1=primary and the virtual went back to its
-        // pre-exclusive position. This was the question raised when
-        // the user reported "after reconnect, virtual shows up first
-        // in the picker" — was leave incomplete, or did the next
-        // attach mark the new IDD primary on its own?
+        // Log the OS-reported layout after the commit so diagnostics
+        // can verify that the snapshot restored the physical primary
+        // display and returned the virtual display to its prior position.
         log_active_displays_for_diagnostics("post-leave_exclusive");
         Ok(())
     } else {
@@ -687,8 +680,7 @@ mod tests {
     /// `ExclusiveLayout` and its constituent types are `Send + Sync`
     /// so the daemon-to-worker IPC layer and the worker's
     /// `spawn_blocking` can pass them across thread boundaries
-    /// without an intermediate POD wrapper. Spike (a) verified this
-    /// at 2026-05-26 against windows-rs 0.61.
+    /// without an intermediate POD wrapper.
     #[test]
     fn exclusive_layout_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}

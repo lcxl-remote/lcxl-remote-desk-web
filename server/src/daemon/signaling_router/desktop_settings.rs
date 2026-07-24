@@ -9,7 +9,7 @@ use super::*;
 /// `active` is the supervisor's `is_active()` snapshot the caller has
 /// already taken (the helper does **not** call back into the
 /// supervisor — that would risk a lock cycle and re-introduce the
-/// self-reference path codex round 7 #1 closed).
+/// self-reference path).
 pub async fn compute_desired_with_active(
     settings: &crate::model::settings::SharedSettings,
     pc_registry: &PcRegistry,

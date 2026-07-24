@@ -1117,7 +1117,7 @@ async fn download_blocks_when_file_lane_full() {
     );
 }
 
-// ============== F1: handle_send_failed ==============
+// ============== handle_send_failed ==============
 
 /// Targeted abort: with `transfer_id = Some(...)`, only that
 /// upload's state is removed; an unrelated upload on the same

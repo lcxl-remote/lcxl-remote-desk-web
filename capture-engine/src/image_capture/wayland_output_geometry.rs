@@ -207,7 +207,7 @@ pub fn enumerate_wayland_outputs() -> Result<Vec<WaylandOutputGeometry>, Capture
         outputs: HashMap::new(),
     };
 
-    // Round 1: discover the output globals and the xdg-output manager.
+    // First dispatch: discover the output globals and the xdg-output manager.
     queue
         .roundtrip(&mut state)
         .map_err(|e| map_err("wayland registry roundtrip", e))?;
@@ -226,7 +226,7 @@ pub fn enumerate_wayland_outputs() -> Result<Vec<WaylandOutputGeometry>, Capture
         .map(|&name| manager.get_xdg_output(&state.outputs[&name].wl_output, &qh, name))
         .collect();
 
-    // Round 2: receive logical_position / logical_size / name.
+    // Second dispatch: receive logical_position / logical_size / name.
     queue
         .roundtrip(&mut state)
         .map_err(|e| map_err("wayland xdg-output roundtrip", e))?;

@@ -129,7 +129,7 @@ pub enum ExclusiveDirection {
 }
 
 /// Outcome reported by the worker's exclusive runner. Four variants
-/// only — `EnterCancelled` was removed in design review round 6
+/// only — `EnterCancelled` was removed from the wire contract
 /// because the new pipeline never emits one: a cancelled enter
 /// returns silently and the next runner publishes the actual final
 /// state (Entered / Left).

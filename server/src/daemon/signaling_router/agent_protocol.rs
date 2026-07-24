@@ -71,11 +71,10 @@ pub(super) fn validate_agent_request_kinds(raw: &serde_json::Value) -> Result<()
     Ok(())
 }
 
-/// Server-computed grant for the single-machine read path. There is no
-/// policy engine yet (that lands in M4), so the daemon grants the full
-/// P0 read set in `ReadOnly` mode. The authorization *mechanism*
-/// ([`authorize`]) is exercised regardless, so a future policy engine
-/// only has to narrow `granted`.
+/// Server-computed grant for the single-machine read path. This deployment
+/// grants the full supported read set in `ReadOnly` mode. The authorization
+/// mechanism ([`authorize`]) is still exercised so configured scopes can
+/// narrow `granted`.
 pub(super) fn default_read_scope() -> AgentScope {
     AgentScope {
         granted: vec![

@@ -88,8 +88,8 @@ pub async fn cleanup_pc(
         log::info!("[pc_manager] terminal connection {connection_id} torn down (reason: {reason})");
     }
 
-    // Codex P1 #1: re-derive the exclusive-mode desired flag on
-    // every actual removal — not just the N → 0 case. If the
+    // Re-derive the exclusive-mode desired flag on every actual
+    // removal, not just the N → 0 case. If the
     // departing PC was the sole `accept_control=true` holder but
     // other view-only PCs remain (registry.len() stays > 0), the
     // old code never recomputed and the supervisor stayed pinned

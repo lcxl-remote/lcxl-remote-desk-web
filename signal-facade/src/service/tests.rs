@@ -1,6 +1,6 @@
 use super::*;
 
-/// F1: the owner-plane host-management frames the central refuses to forward
+/// The owner-plane host-management frames the central refuses to forward
 /// from a capability-scoped code-session (`device_user`). Session-scoped media
 /// tuning (`UpdateDeskSettings`) and the session/capability frames must NOT be
 /// classified owner-plane, or a legitimate support session would break.

@@ -43,8 +43,8 @@
 //! }
 //! ```
 //!
-//! The `Option<DateTimeLocalWincode>` syntax is validated by the spike
-//! in `pocs/poc-ipc-bench` — wincode-derive resolves it against the
+//! The `Option<DateTimeLocalWincode>` syntax is validated by the
+//! `pocs/poc-ipc-bench` fixture — wincode-derive resolves it against the
 //! `SchemaWrite` / `SchemaRead` impls below whose `Src` / `Dst` is
 //! `DateTime<Local>`, so a single adapter type suffices for both bare and
 //! `Option`-wrapped fields.

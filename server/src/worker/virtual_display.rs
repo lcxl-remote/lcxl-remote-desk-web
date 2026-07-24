@@ -39,10 +39,8 @@ use tokio::task::JoinHandle;
 /// main message loop, so no synchronisation is needed beyond
 /// `&mut self` — except for `exclusive_layout` which is owned by a
 /// dedicated `std::sync::Mutex` so the Drop guard can take the lock
-/// from a sync context (codex round 9 #3). The design notes called
-/// for `parking_lot::Mutex` to avoid poisoning; we use `std::sync`
-/// to skip the extra dependency and treat poisoning as a
-/// **recoverable** condition (codex follow-up P2, 2026-05-26):
+/// from a sync context. We use `std::sync` to avoid an extra
+/// dependency and treat poisoning as a **recoverable** condition:
 /// every path that locks this slot uses `PoisonError::into_inner()`
 /// to read or write the inner `Option<ExclusiveLayout>` instead of
 /// bailing out. That preserves the invariant "the slot is the
@@ -71,7 +69,7 @@ pub struct VirtualDisplayState {
     /// the virtual one. Wrapped in a sync `std::sync::Mutex` so the
     /// Drop guard can take the lock from a sync context; the rest
     /// of the session loop accesses it via `lock()` which never
-    /// holds across an await (codex round 9 #3). All critical
+    /// holds across an await. All critical
     /// sections are trivial set/take/clone so mutex poisoning is not
     /// a concern in practice.
     pub exclusive_layout: Arc<std::sync::Mutex<Option<ExclusiveLayout>>>,
@@ -323,11 +321,10 @@ impl Drop for ExclusiveGuard {
     fn drop(&mut self) {
         // Blocking lock; the critical sections that hold this mutex
         // are trivial set/take/clone calls that cannot deadlock.
-        // codex round 9 #3: explicit error logging — silent swallow
-        // would let a stuck partial detach disappear from the log.
+        // Log explicitly because silently swallowing an error could hide
+        // a stuck partial detach.
         //
-        // codex follow-up P2 (2026-05-26): poison MUST NOT skip the
-        // recovery attempt. This guard is the last chance to restore
+        // Poisoning must not skip the recovery attempt. This guard is the last chance to restore
         // physical displays before the session terminates; if we
         // bail on poison we lose the layout that
         // `PoisonError::into_inner()` could still hand us. Recover
@@ -359,9 +356,9 @@ impl Drop for ExclusiveGuard {
 /// HMONITOR mapping. Specifically: WGC capture sessions bound via
 /// `CreateForMonitor(HMONITOR)` survive the CDS commit at the API
 /// level but stop emitting fresh frames because the IDD's
-/// framebuffer mapping moves underneath them — observed in e2e on
-/// 2026-05-27 as a 26 s blackout that only cleared after the user
-/// triggered `SetVirtualDisplayMode` by resizing the browser.
+/// framebuffer mapping moves underneath them. This can cause a long
+/// blackout that only clears after `SetVirtualDisplayMode` recreates
+/// the capture item.
 ///
 /// This event drives the same eviction + Stop/Start media cycle
 /// `SetVirtualDisplayMode` already performs for the same reason.
@@ -380,8 +377,7 @@ pub enum ExclusiveCommitEvent {
 /// Worker-side coordinator: serialises enter / leave runners over a
 /// single cancel oneshot. `request(op_id, desired, ...)` replaces any
 /// in-flight runner with a new one; the old runner observes the
-/// cancel and returns silently without emitting a result (codex
-/// round 5 #3). Only the surviving runner publishes a matching
+/// cancel and returns silently without emitting a result. Only the surviving runner publishes a matching
 /// `op_id` result, which keeps the daemon's op_id gate simple.
 pub struct ExclusiveCoordinator {
     cancel: Option<oneshot::Sender<()>>,
@@ -445,8 +441,8 @@ impl ExclusiveCoordinator {
             if let Some(h) = prev {
                 let _ = h.await;
             }
-            // codex round 9 #1: after the previous runner has been
-            // collected but before any side-effect runs, check the
+            // After the previous runner has been collected but before
+            // any side effect runs, check the
             // cancel oneshot. If the controller already cancelled us
             // (a faster third request landed during prev.await), the
             // CDS calls inside run_* are skipped entirely and no
@@ -473,11 +469,10 @@ async fn run_exclusive_reconciler(
     writer_tx: mpsc::UnboundedSender<WorkerToService>,
     commit_tx: Option<mpsc::UnboundedSender<ExclusiveCommitEvent>>,
 ) {
-    // codex round 5 #4: idempotent paths must still ack — the daemon
-    // gates state advancement on receiving a matching op_id.
+    // Idempotent paths must still ack because the daemon gates state
+    // advancement on receiving a matching op_id.
     //
-    // codex follow-up P2 (2026-05-26): poison MUST NOT degrade to
-    // `currently_active = false`. A poisoned slot containing
+    // Poisoning must not degrade to `currently_active = false`. A poisoned slot containing
     // `Some(layout)` means we are still detached; treating it as
     // false would drive `(true, _) → run_enter` (re-detach catastrophe)
     // or `(false, _) → idempotent Left` (daemon thinks done but layout
@@ -538,9 +533,9 @@ async fn run_enter(
     commit_tx: Option<&mpsc::UnboundedSender<ExclusiveCommitEvent>>,
 ) {
     let Some(name) = attached else {
-        // Diagnostic log (2026-05-27): every EnterFailed branch in this
-        // function must surface `op_id` + the underlying reason at
-        // `error!` level. Without these the daemon's bounded-backoff
+        // Every EnterFailed branch in this function must surface `op_id`
+        // and the underlying reason at `error!` level. Without these the
+        // daemon's bounded-backoff
         // retry loop looks like an infinite repeat from the outside —
         // the actual CDS / GDI failure that produced the EnterFailed
         // is invisible.
@@ -563,8 +558,8 @@ async fn run_enter(
     // Wait for either the prompt to complete naturally or cancel.
     tokio::select! {
         _ = &mut cancel => {
-            // codex round 5 #3: old runner cancelled — return without
-            // emitting a result. The new runner will publish the
+            // The old runner was cancelled, so return without emitting
+            // a result. The new runner will publish the
             // actual final state.
             prompt_ctrl.cancel();
             prompt_waiter.wait().await;
@@ -619,8 +614,8 @@ async fn run_enter(
             // The slot store is the only handle the Drop guard / future
             // leave path will have to undo this.
             //
-            // Codex follow-up P2 (2026-05-26): poison MUST recover via
-            // `PoisonError::into_inner()` and store the layout anyway.
+            // Recover poisoned slots via `PoisonError::into_inner()` and
+            // store the layout anyway.
             // The prior "poison ⇒ rollback + EnterFailed" path was a
             // safe default under the "treat poison as failure" policy,
             // but discarded the inner data the guard still owned —
@@ -645,8 +640,8 @@ async fn run_enter(
                 ExclusiveDirection::Entering,
                 ExclusiveOutcome::Entered,
             );
-            // E2E fix 2026-05-27: notify the session loop that the
-            // CDS batch committed so it can restart WGC capture for
+            // Notify the session loop that the CDS batch committed so
+            // it can restart WGC capture for
             // any connection bound to the (now-stale) HMONITOR. A
             // closed channel is benign — only the test path leaves
             // commit_tx unset.
@@ -699,7 +694,7 @@ enum LeaveOutcome {
     /// `leave_fn` returned `Err`. **Slot retains the layout** so a
     /// subsequent leave attempt — explicit retry, future
     /// `SetVirtualDisplayExclusive(false)`, or the session-end
-    /// [`ExclusiveGuard`] Drop — can try again. Codex P1 #2.
+    /// [`ExclusiveGuard`] Drop — can try again.
     Failed(String),
 }
 
@@ -707,10 +702,10 @@ enum LeaveOutcome {
 /// `leave_fn`, and clears the slot **only on success**. The previous
 /// implementation `take()`d the layout before calling `leave_exclusive`;
 /// a partial reattach failure then left the daemon with no
-/// recoverable state and the worker with an empty slot. Codex P1 #2.
+/// recoverable state and the worker with an empty slot.
 ///
-/// Codex follow-up P2 (2026-05-26): lock poisoning recovers via
-/// `PoisonError::into_inner()` rather than aborting the leave. A
+/// Lock poisoning recovers via `PoisonError::into_inner()` rather
+/// than aborting the leave. A
 /// poisoned slot may still contain a valid `Some(layout)` — the
 /// previous "treat poison as failure" path would ack
 /// `LeftWithErrors` to the daemon while leaving the slot's data
@@ -777,8 +772,8 @@ async fn run_leave(
         Ok(o) => o,
         Err(join_err) => LeaveOutcome::Failed(format!("leave join: {join_err}")),
     };
-    // E2E fix 2026-05-27: notify the session loop after every leave
-    // attempt that touched CDS — `Succeeded` and `Failed` both
+    // Notify the session loop after every leave attempt that touched
+    // CDS — `Succeeded` and `Failed` both
     // committed (or partially-committed) the reattach + position
     // restore batch, so WGC's HMONITOR mapping has shifted either
     // way. `Empty` (slot was already None) is the idempotent path
@@ -788,7 +783,7 @@ async fn run_leave(
     let needs_refresh = matches!(outcome, LeaveOutcome::Succeeded | LeaveOutcome::Failed(_));
     let exclusive_outcome = match outcome {
         // Idempotent (slot was empty) still acks `Left` so the
-        // daemon's `current_op_id` gate fires (codex round 5 #4).
+        // daemon's `current_op_id` gate fires.
         LeaveOutcome::Empty | LeaveOutcome::Succeeded => ExclusiveOutcome::Left,
         LeaveOutcome::Failed(msg) => ExclusiveOutcome::LeftWithErrors(msg),
     };
@@ -1295,7 +1290,7 @@ mod tests {
     }
 
     /// `run_leave` on an already-empty slot is idempotent — replies
-    /// with `Left` (codex round 5 #4) so the daemon's `current_op_id`
+    /// with `Left` so the daemon's `current_op_id`
     /// gate still sees the ack.
     #[tokio::test]
     async fn run_leave_idempotent_when_no_layout() {
@@ -1315,7 +1310,7 @@ mod tests {
 
     /// `run_exclusive_reconciler` (true, true) — desired enter while
     /// already active — must still emit `Entered(op_id)` so the
-    /// daemon's op_id gate fires (codex round 5 #4).
+    /// daemon's op_id gate fires.
     #[tokio::test]
     async fn reconciler_idempotent_true_true_acks_entered() {
         let layout = empty_layout();
@@ -1350,7 +1345,7 @@ mod tests {
     }
 
     /// `run_exclusive_reconciler` (false, false) — desired leave while
-    /// already idle — must still emit `Left(op_id)` (codex round 5 #4).
+    /// already idle — must still emit `Left(op_id)`.
     #[tokio::test]
     async fn reconciler_idempotent_false_false_acks_left() {
         let layout = empty_layout();
@@ -1377,7 +1372,7 @@ mod tests {
         }
     }
 
-    /// E2E fix 2026-05-27: `run_enter` without an attached display
+    /// `run_enter` without an attached display
     /// MUST NOT post `ExclusiveCommitEvent::Entered` on the commit
     /// channel — the early-EnterFailed return short-circuits before
     /// any CDS commit happens, so there is nothing for the session
@@ -1401,7 +1396,7 @@ mod tests {
         }
     }
 
-    /// E2E fix 2026-05-27: `run_leave` on an empty slot is the
+    /// `run_leave` on an empty slot is the
     /// idempotent path that does NOT touch CDS — it must NOT post
     /// `ExclusiveCommitEvent::Left` either, otherwise the session
     /// loop would Stop+Start media for nothing on every redundant
@@ -1420,7 +1415,7 @@ mod tests {
         }
     }
 
-    /// E2E fix 2026-05-27: `set_commit_channel` installs the sender;
+    /// `set_commit_channel` installs the sender;
     /// subsequent `request()` calls clone it through to the runner.
     /// We cannot exercise the actual `Entered` / `Left` post without
     /// real GDI, but we can pin that the channel install is wired
@@ -1485,7 +1480,7 @@ mod tests {
 
     /// `ExclusiveCoordinator`: a follow-up request cancels the prior
     /// runner; only the surviving op's runner must emit a result
-    /// (codex round 5 #3 + round 9 #1). The first runner is fast
+    /// The first runner is fast
     /// enough on the idempotent path that it may race the cancel —
     /// the contract is "at most one extra Left(100), the Left(101)
     /// is guaranteed". So the test asserts: (a) the final op_id 101
@@ -1532,7 +1527,7 @@ mod tests {
     }
 
     // ───────────────────────────────────────────────────────────────
-    // Codex P1 #2 regression — slot retention on leave failure
+    // Slot retention on leave failure
     // ───────────────────────────────────────────────────────────────
 
     /// `attempt_leave_with_fn` clears the slot only on success — the
@@ -1547,7 +1542,7 @@ mod tests {
         assert!(slot.lock().unwrap().is_none());
     }
 
-    /// Codex P1 #2: when `leave_fn` returns `Err`, the slot must
+    /// When `leave_fn` returns `Err`, the slot must
     /// retain the layout so a future Drop guard / explicit retry can
     /// try again. The previous implementation `take()`d before
     /// calling `leave_exclusive`, irreversibly destroying state.
@@ -1571,7 +1566,7 @@ mod tests {
         assert!(slot.lock().unwrap().is_some());
     }
 
-    /// Codex follow-up P2 (2026-05-26): a poisoned slot containing
+    /// A poisoned slot containing
     /// `Some(layout)` must still drive `leave_fn` against that layout
     /// — the previous "treat poison as failure" returned without
     /// calling `leave_fn`, leaving the still-detached physical
@@ -1613,7 +1608,7 @@ mod tests {
         assert!(inner.is_none(), "slot must be empty after successful leave");
     }
 
-    /// Codex follow-up P2 sibling test: a poisoned **empty** slot
+    /// A poisoned **empty** slot
     /// must still classify as `Empty` (idempotent path) — the
     /// recovery `into_inner()` reads `None`, no `leave_fn` call.
     #[test]
@@ -1640,7 +1635,7 @@ mod tests {
         );
     }
 
-    /// Codex follow-up P2: `ExclusiveGuard::drop` must recover the
+    /// `ExclusiveGuard::drop` must recover the
     /// layout via `PoisonError::into_inner()` and STILL attempt
     /// `leave_exclusive`. The previous code returned on poison,
     /// throwing away the last recovery chance.

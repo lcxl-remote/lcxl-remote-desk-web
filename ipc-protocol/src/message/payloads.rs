@@ -124,8 +124,8 @@ pub struct SignalingErrorPayload {
 // =============== Media + per-connection control ===============
 
 /// One encoded media frame travelling worker → daemon over the dedicated
-/// `MediaTransport`. Sized for 4K H.264 IDR frames (up to ~2 MB) which
-/// the POC validated end-to-end at P99 < 16 ms.
+/// `MediaTransport`. Sized for 4K H.264 IDR frames (up to ~2 MB), validated
+/// end-to-end at P99 < 16 ms.
 ///
 /// `ts_ns` is wall-clock nanoseconds (`SystemTime::now()`) stamped at the
 /// instant the encoder finished producing the frame; the daemon uses

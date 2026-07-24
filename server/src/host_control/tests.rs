@@ -1010,7 +1010,7 @@ fn tauri_client_count_saturates_at_zero() {
     assert_eq!(hub.tauri_client_count(), 0);
 }
 
-// Plan §6 兜底: Forwarder upstream lost — every in-flight approval is
+// Forwarder upstream lost: every in-flight approval is
 // resolved as deny without business code observing a hang.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forwarder_upstream_disconnect_denies_pending() {
@@ -1045,7 +1045,7 @@ async fn forwarder_upstream_disconnect_denies_pending() {
     assert!(hub.inner.pending_approvals.lock().unwrap().is_empty());
 }
 
-// Plan §6 兜底: Aggregator's cancel_all_for_tauri_loss routes a
+// Aggregator's cancel_all_for_tauri_loss routes a
 // SecurityApprovalCancel to each owning forwarder and clears the tables.
 #[tokio::test]
 async fn aggregator_cancel_all_for_tauri_loss_routes_directionally() {
@@ -1139,7 +1139,7 @@ async fn deny_all_pending_resolves_everything() {
     assert_eq!(hub.pending_replay_count(), 0);
 }
 
-// P2: helper to wait until the readiness-probe entry for `req_id` exists.
+// Wait until the readiness-probe entry for `req_id` exists.
 async fn wait_for_pending_ack(hub: &HostControlHub, req_id: &str) {
     for _ in 0..200 {
         if hub.inner.pending_acks.lock().unwrap().contains_key(req_id) {
@@ -1150,7 +1150,7 @@ async fn wait_for_pending_ack(hub: &HostControlHub, req_id: &str) {
     panic!("pending_acks never registered for {req_id}");
 }
 
-// P2: an ack within the probe window advances to phase 2 (unbounded wait),
+// An ack within the probe window advances to phase 2 (unbounded wait),
 // where a later submit resolves the request normally.
 #[tokio::test]
 async fn local_ack_enters_wait_then_submit_resolves() {
@@ -1185,7 +1185,7 @@ async fn local_ack_enters_wait_then_submit_resolves() {
     assert!(hub.inner.pending_acks.lock().unwrap().is_empty());
 }
 
-// P2 (codex #1): zero ack within the probe window denies, clears all
+// Zero ack within the probe window denies, clears all
 // daemon-self bookkeeping, and broadcasts Finished so any created windows die.
 #[tokio::test]
 async fn local_probe_timeout_denies_and_broadcasts_finished() {
@@ -1231,7 +1231,7 @@ async fn local_probe_timeout_denies_and_broadcasts_finished() {
     assert!(hub.inner.pending_acks.lock().unwrap().is_empty());
 }
 
-// P2 (codex #2): ack is idempotent. The first ack fires the probe oneshot;
+// Ack is idempotent. The first ack fires the probe oneshot;
 // a replayed ack after the request has entered phase 2 still reports ready
 // (pending_approvals still holds it).
 #[tokio::test]
@@ -1262,7 +1262,7 @@ async fn notify_approval_ack_idempotent_in_phase2() {
         .unwrap();
 }
 
-// P2 (codex #3): worker-originated requests are "ready" without creating a
+// Worker-originated requests are "ready" without creating a
 // probe, so the shared approval page does not break them; the directional
 // route remains intact for submit.
 #[test]
@@ -1283,14 +1283,14 @@ fn notify_approval_ack_worker_originated_is_ready_without_probe() {
     assert_eq!(hub.pop_upstream_for_req("r-w"), Some(9));
 }
 
-// P2: a truly unknown req_id is not ready.
+// A truly unknown req_id is not ready.
 #[test]
 fn notify_approval_ack_unknown_returns_false() {
     let hub = HostControlHub::new_local();
     assert!(!hub.notify_approval_ack("ghost"));
 }
 
-// P2 (codex #2/four-round): a direct submit inside the probe window must win
+// A direct submit inside the probe window must win
 // over the probe deny. submit_approval never touches pending_acks, so the
 // select! `rx` arm is the only ready arm. Looped to shake out select!
 // randomness.
@@ -1329,7 +1329,7 @@ async fn direct_submit_during_probe_wins_over_deny() {
     }
 }
 
-// P2 (codex #1, three-round): Forwarder never registers a readiness probe and
+// Forwarder never registers a readiness probe and
 // resolves via the upstream-delivered submit (the worker is authoritative).
 #[tokio::test]
 async fn forwarder_request_registers_no_pending_acks() {
@@ -1369,7 +1369,7 @@ async fn forwarder_request_registers_no_pending_acks() {
     assert!(resp.approved);
 }
 
-// P2: deny_all_pending also drops any in-flight readiness probes.
+// deny_all_pending also drops any in-flight readiness probes.
 #[tokio::test]
 async fn deny_all_pending_clears_pending_acks() {
     let hub = HostControlHub::new_local();

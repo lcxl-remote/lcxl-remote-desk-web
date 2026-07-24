@@ -226,8 +226,8 @@ pub struct Finding {
     pub explanation: String,
 }
 
-/// A command the model suggests. M1b is **suggest-only** — nothing executes;
-/// `requires_confirmation` is a placeholder the M2 confirm flow will honour.
+/// A command the model suggests. This payload is **suggest-only**; execution
+/// requires the separate confirmation flow.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]

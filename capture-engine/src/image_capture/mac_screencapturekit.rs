@@ -809,8 +809,8 @@ mod tests {
 
     #[test]
     fn select_rep_index_picks_rep_for_backing_scale() {
-        // The four representations a system cursor ships (observed via the
-        // Phase 0 spike): 1x / 2x / 5x / 10x of a 17pt-wide cursor.
+        // A system cursor can ship 1x / 2x / 5x / 10x representations of a
+        // 17pt-wide cursor.
         let widths = [17u32, 34, 85, 170];
         assert_eq!(select_rep_index(&widths, 17, 1.0), 0); // non-Retina -> 17px
         assert_eq!(select_rep_index(&widths, 17, 2.0), 1); // Retina 2x  -> 34px

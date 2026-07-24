@@ -25,8 +25,8 @@ mod wincode_tests {
     //!   * `signaling_type_wire_tag_matches_discriminant_for_all_variants`
     //!     — encode each variant and assert the *first four bytes* of
     //!     the encoded payload equal `(variant as i32).to_le_bytes()`.
-    //!     This is the byte-level check the migration plan and code
-    //!     review both call out: a round-trip test pairs encode and
+    //!     This byte-level check is necessary because a round-trip test
+    //!     pairs encode and
     //!     decode, so a `#[wincode(tag = N)]` that silently disagrees
     //!     with the `repr(i32)` discriminant for a single variant
     //!     (e.g. typo `tag = 101` on a `= 102` variant) would still

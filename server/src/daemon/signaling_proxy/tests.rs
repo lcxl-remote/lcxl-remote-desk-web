@@ -1543,8 +1543,7 @@ fn build_virtual_display_response_failed_does_not_update_supervisor_cache() {
 /// Non-service-daemon startup paths leave `RouterContext.virtual_display`
 /// at `None`. If a stale or test-induced `VirtualDisplayAttachResult`
 /// arrives, the dispatch helper must drop it without panicking.
-/// Regression guard for the original v2 plan, which did not specify
-/// behaviour for this branch.
+/// Regression guard for the disabled-supervisor branch.
 #[tokio::test]
 async fn dispatch_attach_result_drops_message_when_supervisor_disabled() {
     use desk_ipc_protocol::message::{

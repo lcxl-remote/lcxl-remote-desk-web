@@ -971,7 +971,7 @@ fn cursor_sync_data_round_trips_with_embedded_true() {
     assert_eq!(decoded.screen_height, 1440);
 }
 
-/// Backward-compatible deserialization (codex r2 #2): a payload
+/// Backward-compatible deserialization: a payload
 /// without the `embedded` field defaults to `embedded=false`,
 /// so old browsers / cached versions continue to parse cleanly.
 #[test]
@@ -1124,7 +1124,7 @@ fn display_info_for_size_handles_negative_left_top() {
     assert_eq!(di.desktop_coordinates.bottom, 1080);
 }
 
-/// Verifies the core codex r1 #2 invariant: a settings-changed
+/// Verifies that a settings-changed
 /// rebuild that fires *after* a resolution change still picks up
 /// the new size, because every `create_video_encoder` flows
 /// through `display_info_for_size(&base, encoder_init_size)`.
@@ -1208,7 +1208,7 @@ fn capture_key_guard_clears_map_on_drop() {
     );
 }
 
-/// Race regression test (codex 2026-05-24): `stop_media` is
+/// Race regression test: `stop_media` is
 /// fire-and-forget, so the old video pipeline thread may finish
 /// unwinding *after* a `start_media` for the same connection_id
 /// has finished subscribing and written its own

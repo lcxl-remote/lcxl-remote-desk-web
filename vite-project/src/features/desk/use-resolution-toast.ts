@@ -97,8 +97,8 @@ export interface UseResolutionToastResult {
  *   logic is self-contained and can be unit-tested with fake timers
  *   in isolation, without spinning up the full WebRTC + signaling
  *   mock surface.
- * - Codex round 1 #3 called out two failure modes the inline draft
- *   couldn't easily cover: an `updating` toast that never clears
+ * - The state machine covers two failure modes that inline state
+ *   cannot handle cleanly: an `updating` toast that never clears
  *   when the echo is lost (watchdog) and a stale echo from an old
  *   request id overriding the toast (latest-id gate). Both live
  *   inside this hook.

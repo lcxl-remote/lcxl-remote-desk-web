@@ -29,8 +29,7 @@ use crate::{AgentEnvelope, AgentError, CallerRef, Capability, ExecutionMode, Ope
 
 /// The fixed set of audit event types currently emitted. Stored on the wire /
 /// in the audit row as the dotted string form (free-text column), so adding a
-/// type later (e.g. `ai.capability.denied` with the M4 policy engine) is
-/// additive.
+/// type later (for example, `ai.capability.denied`) is additive.
 #[derive(
     Debug,
     Clone,
@@ -199,8 +198,8 @@ impl AuditEvent {
             session_id: envelope.target.session_id.clone(),
             event_type: event_type.as_str().to_string(),
             capability: None,
-            // Risk is the server-classified final value; there is no classifier
-            // yet (it lands with exec / policy in M2/M4), so it stays unset.
+            // This generic lifecycle builder has no classified command result,
+            // so risk stays unset.
             risk: None,
             mode: Some(envelope.scope.mode.as_str().to_string()),
             result: String::new(),
@@ -785,9 +784,7 @@ impl ExecutionMode {
     }
 }
 
-/// Consumer of audit events. A logging sink is wired today (single-machine
-/// form); M2 adds a database-backed sink that maps each [`AuditEvent`] to an
-/// `ai_audit_event` row. Object-safe so the emitter can hold
+/// Consumer of audit events. Object-safe so the emitter can hold
 /// `Arc<dyn AuditSink>` and tests can substitute a recording mock — mirroring
 /// the [`crate::DeviceAgent`] rationale.
 #[async_trait::async_trait]

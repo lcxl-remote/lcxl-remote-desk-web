@@ -135,7 +135,7 @@ describe("useResolutionToast", () => {
     });
 
     /**
-     * Codex round 1 #3: a debounced or stuck old request can still
+     * A debounced or stuck old request can still
      * land an echo on the wire after the user moved on. The toast
      * must reflect the latest user intent — old echoes are silently
      * dropped on the floor, not allowed to flicker the new updating
@@ -159,7 +159,7 @@ describe("useResolutionToast", () => {
     });
 
     /**
-     * Codex round 1 #3: without a watchdog a lost or never-acked
+     * Without a watchdog a lost or never-acked
      * request would freeze the spinner forever. Promote to a
      * timeout-flavoured failed toast at the watchdog deadline.
      */
@@ -183,7 +183,7 @@ describe("useResolutionToast", () => {
     });
 
     /**
-     * Codex round 1 #3: RTC dropping out is an unambiguous signal
+     * RTC dropping out is an unambiguous signal
      * that no echo is coming. Don't strand the toast on the screen.
      */
     it("clears the toast when isRTCConnected flips to false", () => {

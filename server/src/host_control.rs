@@ -632,7 +632,7 @@ impl HostControlHub {
     ///   2. Otherwise the daemon-self request is already past the probe (phase 2)
     ///      or being replayed -> still ready.
     ///   3. Otherwise a worker-originated request (routes/replay) -> ready, but
-    ///      no probe is created (worker path is out of scope for P2 fallback).
+    ///      no probe is created because the worker owns that readiness path.
     ///   4. Truly unknown -> not ready.
     pub fn notify_approval_ack(&self, req_id: &str) -> bool {
         if let Some(tx) = self.inner.pending_acks.lock().unwrap().remove(req_id) {
@@ -677,8 +677,8 @@ impl HostControlHub {
     /// session). Returns `false` if `req_id` is unknown to both routing tables.
     pub fn submit_approval(&self, req_id: &str, response: ApprovalResponse) -> bool {
         if self.inner.mode == HubMode::Aggregator {
-            // Worker-originated requests: route directionally via pending_routes —
-            // never broadcast SecurityApprovalSubmit (plan review #6/#7).
+            // Worker-originated requests route directionally via pending_routes;
+            // never broadcast SecurityApprovalSubmit.
             if let Some(session_id) = self.pop_upstream_for_req(req_id) {
                 let msg = HostControlMessage::SecurityApprovalSubmit {
                     req_id: req_id.to_string(),

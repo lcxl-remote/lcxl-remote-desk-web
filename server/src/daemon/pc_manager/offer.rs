@@ -88,14 +88,14 @@ pub async fn handle_offer(
     log::info!(
         "[pc_manager] Offer from {from_connection_id}: has_video={has_video}, has_audio={has_audio}"
     );
-    // F3 (observe-only): record the remote SDP's advertised
+    // Observe only: record the remote SDP's advertised
     // `a=max-message-size` and assert chunk_size + binary-header fits.
     // webrtc-rs 0.17.1 does not expose the negotiated value on
     // `RTCSctpTransport::get_capabilities()` (it currently hard-codes
     // `0`), so we parse the SDP text directly. The check is informational
     // only — a violation logs at `error!` but does NOT block the offer;
     // the actual `dc.send` will surface the failure via
-    // F1/F2 (`FileTransferSendErrorKind::PacketTooLarge`) anyway, but
+    // `FileTransferSendErrorKind::PacketTooLarge` anyway, but
     // having the warning at SDP time means we catch it before the first
     // byte of file data hits the channel.
     log_sdp_max_message_size(from_connection_id, sdp_str);

@@ -337,7 +337,7 @@ pub enum Capability {
     ContainerLogs,
     #[serde(rename = "screen.capture.current")]
     ScreenCaptureCurrent,
-    // P1 execute — reserved; shape frozen, impl in M2.
+    // Execute capabilities are reserved; their wire shape is frozen.
     #[serde(rename = "shell.exec.readonly")]
     ShellExecReadonly,
     #[serde(rename = "shell.exec.confirmed")]
@@ -358,7 +358,8 @@ pub struct AgentOperation {
 #[serde(tag = "kind", content = "params", rename_all = "snake_case")]
 pub enum OperationInput {
     ReadContext(ReadContextInput),
-    /// Reserved; rejected with `UnsupportedCapability` until M2.
+    /// Rejected by raw agent-request routing; confirmed execution uses its
+    /// dedicated preview and approval flow.
     Exec(ExecInput),
 }
 
@@ -380,9 +381,8 @@ impl OperationInput {
     /// classification, not a wire choice. Hard-coding a value here would break
     /// authz (always returning `ShellExecConfirmed` would reject a user who
     /// only holds `shell.exec.readonly` before the server could classify the
-    /// command). So `Exec` returns `None`; M2 introduces
-    /// `required_capability(classification)` and freezes the exec mapping then.
-    /// Only reads exist today, so `None` is never observed.
+    /// command). Therefore `Exec` returns `None`; callers must use
+    /// `required_capability(classification)` after classification.
     pub fn capability(&self) -> Option<Capability> {
         match self {
             OperationInput::ReadContext(rc) => Some(match &rc.kind {
@@ -400,8 +400,7 @@ impl OperationInput {
         }
     }
 
-    /// Frozen exec capability mapping (the M2 gap [`OperationInput::capability`]
-    /// deliberately left open). The `shell.exec.readonly` vs
+    /// Exec capability mapping. The `shell.exec.readonly` vs
     /// `shell.exec.confirmed` split is **not** derivable from the wire input —
     /// it is the output of server-side risk classification — so it is resolved
     /// here from a [`CommandClassification`] instead.
@@ -748,7 +747,7 @@ pub enum ImageFormat {
     Webp,
 }
 
-// -------- exec (reserved; shape frozen, impl in M2) --------
+// -------- exec request shape --------
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
@@ -762,8 +761,8 @@ pub struct ExecInput {
     pub max_stderr_bytes: u32,
 }
 
-/// Open-ended exec target. `Shell` is the M2 form; `Domain` reserves the
-/// adb / domain-tool wedge without a future skeleton break.
+/// Open-ended exec target. `Shell` carries shell commands; `Domain` reserves
+/// domain-specific tools without requiring a wire-shape break.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
@@ -894,8 +893,8 @@ pub enum AgentOutcome {
 // ============================ Trait ============================
 
 /// Device-side capability surface. One async dispatch over [`AgentEnvelope`].
-/// Implemented by DeskServer / SessionWorker for read_context; exec lands in
-/// M2.
+/// Implemented by DeskServer / SessionWorker for read context. Confirmed
+/// execution uses its dedicated preview and approval flow.
 ///
 /// `#[async_trait]` (boxed future) is used deliberately instead of RPITIT: the
 /// server-side orchestrator/router needs `Arc<dyn DeviceAgent>` (a registry of

@@ -453,7 +453,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // authorization point. door1 denies them for an *admitted* capped
             // session; blocking here also closes the pre-`RequestRemote` window,
             // where the host has no admission record yet and would otherwise pass
-            // them (F1). Session media tuning (`UpdateDeskSettings`) is
+            // them. Session media tuning (`UpdateDeskSettings`) is
             // session-scoped, not host config, so it is intentionally not listed.
             if is_owner_plane_management_frame(signaling_model.signaling_type) {
                 return DeskSignalFacadeError::custom_error(

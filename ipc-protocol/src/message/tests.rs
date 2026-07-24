@@ -1822,7 +1822,7 @@ fn set_virtual_display_exclusive_round_trips_serde_json() {
 /// Every `ExclusiveOutcome` variant must round-trip. The pipeline
 /// emits exactly these four shapes; a regression that adds or
 /// removes one is a wire break. EnterCancelled is intentionally
-/// absent (removed in design round 6).
+/// absent because it is not part of the wire contract.
 #[test]
 fn exclusive_result_all_four_outcomes_round_trip_wincode() {
     let cases = [

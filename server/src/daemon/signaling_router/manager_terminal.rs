@@ -407,7 +407,7 @@ pub(super) async fn handle_list_terminal_inbound(
 /// parse turns that into `UnsupportedCapability`.
 pub(super) const SUPPORTED_OPERATION_KINDS: &[&str] = &["read_context", "exec"];
 
-/// Inner `ContextKind` tags (the actual P0 read capabilities) this build
+/// Inner `ContextKind` tags (the supported read capabilities) this build
 /// can collect. The unknown-kind check descends to this level because
 /// the permission point is nested — `operation.input.kind` is only the
 /// `read_context` / `exec` dispatch layer; the real capability is

@@ -145,7 +145,7 @@ pub(super) fn capped_session_permits_matrix_over_all_signaling_types() {
         );
     }
 
-    // Spot-check the owner-plane frames codex flagged: no worker-side meet gate
+    // Spot-check owner-plane frames: no worker-side meet gate
     // protects them, so door1 must deny them for a capped session even under a
     // permissive ceiling.
     for t in [

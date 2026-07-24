@@ -363,8 +363,8 @@ pub(super) async fn auto_request_falls_back_to_60_when_cache_zero() {
 
 /// Manual requests must keep their original semantics — `refresh_hz=0`
 /// fails `validate_mode` as a zero dimension, not silently rescued
-/// by the auto fallback. Regression guard for the codex-flagged
-/// "fallback may leak into manual path" risk.
+/// by the auto fallback. This guards against the fallback leaking
+/// into the manual path.
 #[tokio::test]
 pub(super) async fn manual_zero_refresh_still_invalid() {
     let (ctx, mut rx, _worker_rx) = make_ctx_with_attached_supervisor().await;
@@ -777,12 +777,12 @@ pub(super) async fn idempotent_hits_when_zero_refresh_resolves_to_cached() {
     );
 }
 
-/// Codex round 1 #1 regression: after a complete detach the
+/// After a complete detach the
 /// dimension cache is cleared (refresh survives), so the next
 /// same-resolution request must NOT be faked — it must reach the
 /// worker and actually drive the IDD. This pins the fix for the
-/// fake-Applied-on-stale-cache hazard that the codex review
-/// caught. We model "post-reattach" state directly by injecting a
+/// fake-Applied-on-stale-cache hazard. We model "post-reattach"
+/// state directly by injecting a
 /// fresh Attached supervisor with only the refresh portion of the
 /// cache populated (mirroring what `reset_known_dimensions` leaves
 /// behind after the supervisor goes through an

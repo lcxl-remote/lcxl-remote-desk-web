@@ -1,10 +1,9 @@
 //! Confirmed-execution wire types (control end ↔ server) and the daemon's
 //! authoritative execution plan.
 //!
-//! M2 turns the M1b "suggest only" diagnosis into a controlled
-//! suggest → confirm → execute → backfill loop. The shapes here are the
-//! contract for that loop; the risk classifier, confirm-flow state machine,
-//! worker executor, and signaling wiring land in later steps and consume them.
+//! These shapes define the controlled suggest → confirm → execute → backfill
+//! loop shared by the risk classifier, confirm-flow state machine, worker
+//! executor, and signaling layer.
 //!
 //! Two safety invariants are baked into the types:
 //!
@@ -80,10 +79,8 @@ pub enum ExecEffect {
 /// The server's executability decision for a classified command.
 ///
 /// Three outcomes, all strictly non-automatic — even `ConfirmRequired` still
-/// needs an explicit user approval before anything runs. (The earlier draft's
-/// auto-execution variants `AutoLow` / `SessionAuthorizable` were removed; M2
-/// has no automatic path. `NotExecutable` is *more* restrictive than execution,
-/// not a relaxation.)
+/// needs an explicit user approval before anything runs. `NotExecutable` is
+/// *more* restrictive than execution, not a relaxation.
 #[derive(
     Debug,
     Clone,

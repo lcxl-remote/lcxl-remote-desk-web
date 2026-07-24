@@ -25,8 +25,7 @@ pub const SERVICE_API_PORT: u16 = 8082;
 ///
 /// `ready_tx`, when supplied, is fired exactly once after the HTTP server has
 /// successfully bound its listening socket. Workers should not be spawned until
-/// the signal arrives so their forwarder ws clients connect on the first try
-/// (plan review #5).
+/// the signal arrives so their forwarder ws clients connect on the first try.
 pub async fn run_local_api(
     settings: Arc<SharedSettings>,
     tauri_bridge: Arc<TauriIpcBridge>,

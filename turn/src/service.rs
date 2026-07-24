@@ -277,7 +277,7 @@ mod classify_tests {
 
     #[test]
     fn malformed_channeldata_does_not_leak_as_relay() {
-        // The codex example: too short to be valid ChannelData; its first two
+        // Too short to be valid ChannelData; its first two
         // bytes decode to STUN method 0x006 (Send), but the STUN header check
         // (length + magic cookie) rejects it, so it stays Control.
         assert!(!is_relay(&[0x40, 0x06]));

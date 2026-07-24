@@ -44,7 +44,7 @@ fn start_media_payload_video_device_is_some_when_settings_set() {
     );
 }
 
-// ============== F3: SDP max-message-size parser ==============
+// ============== SDP max-message-size parser ==============
 
 /// Chrome's SDP advertises 262144 (256 KiB) on a session-level
 /// attribute. The parser must surface it as an unsigned value.
@@ -2085,7 +2085,7 @@ async fn cleanup_pc_keeps_supervisor_when_other_pcs_remain() {
     );
 }
 
-/// Codex round 4 #10: a held `PendingRequestGuard` represents a new
+/// A held `PendingRequestGuard` represents a new
 /// `RequestRemote` mid-`ensure_attached` that hasn't registered a
 /// PC yet. Cleanup of an old PC during this window must NOT detach
 /// the IDD — the new connection is about to use it.
@@ -2133,7 +2133,7 @@ async fn cleanup_pc_keeps_supervisor_when_pending_request_active() {
     );
 }
 
-/// Codex round 3 #3 + cleanup_pc N→0 gate: a `cleanup_pc` call for
+/// The cleanup_pc N→0 gate ensures that a `cleanup_pc` call for
 /// a connection id that was never registered (stale
 /// `ConnectionRemoved` after the PC was already torn down) must
 /// NOT trigger N→0 detach, even though `registry.len()` may
@@ -2181,7 +2181,7 @@ async fn cleanup_pc_unknown_connection_does_not_detach_supervisor() {
     );
 }
 
-/// Codex P1 #1 regression: when the departing PC was the sole
+/// When the departing PC was the sole
 /// `accept_control=true` holder but another PC remains live (so
 /// `registry.len() > 0` blocks the N→0 detach), the old code
 /// never recomputed the exclusive-mode desired flag — the
@@ -2275,7 +2275,7 @@ async fn cleanup_pc_triggers_exclusive_recompute_when_other_pcs_remain() {
 
     // The recompute closure must have been invoked at least once
     // with the supervisor's real `active` snapshot. Without the
-    // P1 #1 fix it would never run on this path.
+    // It must run on this path as well.
     assert!(
         call_count.load(Ordering::SeqCst) >= 1,
         "recompute_desired closure must be invoked at least once on cleanup",
@@ -2284,7 +2284,7 @@ async fn cleanup_pc_triggers_exclusive_recompute_when_other_pcs_remain() {
     assert!(!registry.any_with_accept_control().await);
 }
 
-/// Codex P1 #1 sanity: cleanup of an unknown connection
+/// Cleanup of an unknown connection
 /// (stale ConnectionRemoved) must NOT trigger recompute — the
 /// gate is `removed.is_some()`.
 #[tokio::test]
@@ -2721,7 +2721,7 @@ async fn cleanup_pc_unindexes_grant_connection() {
 /// media steps are no-ops for it; the terminal-aware branch must still send the
 /// worker a `CloseTerminalRequest` (kill the shell) and a `SetConnectionCeiling`
 /// clear, and drop the connection's admission / terminal mark / grant index.
-/// Without this a revoked code's terminals would keep running (the codex Major).
+/// Without this, a revoked code's terminals would keep running.
 #[tokio::test]
 async fn close_grant_session_tears_down_terminal_connection() {
     use desk_ipc_protocol::message::ServiceToWorker;

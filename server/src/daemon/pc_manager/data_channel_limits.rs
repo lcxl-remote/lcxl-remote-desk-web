@@ -73,9 +73,9 @@ pub(super) fn parse_sdp_max_message_size(sdp: &str) -> Option<u64> {
 pub(super) fn log_sdp_max_message_size(connection_id: &str, sdp: &str) {
     // Constants from the worker dispatcher reach across the
     // daemon ↔ worker boundary because chunk_size is currently a
-    // compile-time constant on the worker side. A future negotiated
-    // chunk_size (deferred F3 follow-up) would consult this value to
-    // pick the maximum; for now we just check our static choice fits.
+    // compile-time constant on the worker side. Future chunk-size
+    // negotiation would consult this value to pick the maximum; for now
+    // we just check our static choice fits.
     use crate::model::file_transfer::BINARY_HEADER_SIZE;
     use crate::worker::file_transfer_dispatcher::FILE_TRANSFER_CHUNK_SIZE_TX;
     let required = (FILE_TRANSFER_CHUNK_SIZE_TX + BINARY_HEADER_SIZE) as u64;

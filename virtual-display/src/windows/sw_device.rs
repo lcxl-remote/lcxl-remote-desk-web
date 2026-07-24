@@ -2,8 +2,8 @@
 //!
 //! Materialises the lcxl IDD as a software device via `SwDeviceCreate`,
 //! waits for the OS to confirm creation, and holds the handle so
-//! `SwDeviceClose` fires on drop. Modelled on the IddCx sample PoC,
-//! but trimmed to the signatures the production trait needs.
+//! `SwDeviceClose` fires on drop. It follows the IddCx sample while
+//! exposing only the signatures the production trait needs.
 //!
 //! GDI display-name resolution (`\\.\DISPLAYn`) does **not** live here
 //! because `EnumDisplayDevicesW` is thread-desktop-bound and returns an
@@ -35,7 +35,7 @@ use crate::{VirtualDisplayError, VirtualDisplayHandleInner};
 /// Hardware ID published by the lcxl production virtual-display INF.
 /// Production installs MUST advertise this exact string in their INF,
 /// or the OS will not match a driver and `SwDeviceCreate` reports
-/// no-match. Deliberately distinct from the PoC HW ID
+/// no-match. Deliberately distinct from the sample driver's HW ID
 /// `LcxlIddSampleDriver` so the two INFs can coexist on a developer
 /// test machine without overlapping.
 pub const LCXL_IDD_HARDWARE_ID: &str = "LcxlVirtualDisplay";
@@ -493,7 +493,7 @@ mod tests {
     fn hardware_id_constants_match_inf_contract() {
         // The production INF MUST advertise this exact hardware ID,
         // otherwise SwDeviceCreate reports no driver match. Kept
-        // deliberately different from the IddCx sample PoC HW ID
+        // deliberately different from the IddCx sample driver's HW ID
         // (`LcxlIddSampleDriver`) so the two INFs can coexist on a
         // dev box.
         assert_eq!(LCXL_IDD_HARDWARE_ID, "LcxlVirtualDisplay");

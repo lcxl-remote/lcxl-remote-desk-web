@@ -15,10 +15,10 @@
 //!   parameters, ...). Each one rides a typed `ServiceToWorker::*`
 //!   IPC variant — there is no opaque-envelope bridge anymore.
 //!
-//! Batches 0–4 of the typed-IPC migration removed the transitional
+//! The typed IPC path has no transitional
 //! `ServiceToWorker::SignalingMessage` / `WorkerToService::SignalingMessage`
-//! variants and the `RouteOutcome::ForwardToWorker` fallback that fed
-//! them. `route` now never falls back: every inbound `SignalingType`
+//! variants or `RouteOutcome::ForwardToWorker` fallback. `route`
+//! never falls back: every inbound `SignalingType`
 //! is either handled inline (daemon-owned) or shipped to the worker
 //! through a dedicated typed IPC variant.
 
@@ -302,9 +302,8 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // ---- Worker-bound: user-session resources ----
         // Each of these rides a dedicated typed `ServiceToWorker::*`
         // IPC variant — see `route` below for the per-type dispatch
-        // helpers (batches 1–3 of the typed-IPC migration covered
-        // them all; the legacy `SignalingMessage` bridge no longer
-        // exists).
+        // helpers. The legacy `SignalingMessage` bridge does not
+        // exist.
         //
         // `ChangeDisplaySettings` joins this list with the virtual
         // display integration: the daemon validates the request,
@@ -744,7 +743,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             // pending_requests reflects the actual outstanding work.
             drop(pending_guard);
 
-            // Round 3 #12 / codex post-ensure cleanup: if handle_request_remote
+            // Post-ensure cleanup: if handle_request_remote
             // failed to register a PC (parse error, registry collision,
             // build_peer_connection failure, ...) the supervisor would
             // remain Attached with no PC ever holding it, and no cleanup

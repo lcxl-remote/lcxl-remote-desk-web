@@ -1,4 +1,4 @@
-//! Server-side exec risk classification (M2 confirm-execute).
+//! Server-side exec risk classification for confirmed execution.
 //!
 //! Pure, I/O-free classification of an [`ExecInput`] into a
 //! [`CommandClassification`] plus, for a whitelist match, an immutable

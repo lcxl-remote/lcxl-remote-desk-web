@@ -272,8 +272,8 @@ impl WorkerSession {
         let _exclusive_guard = crate::worker::virtual_display::ExclusiveGuard::new(Arc::clone(
             &vd_state.exclusive_layout,
         ));
-        // E2E fix 2026-05-27: WGC capture sessions bound via
-        // `CreateForMonitor(HMONITOR)` survive the CDS commit at the
+        // WGC capture sessions bound via `CreateForMonitor(HMONITOR)`
+        // survive the CDS commit at the
         // API level but stop emitting fresh frames after exclusive
         // enter/leave because the IDD's framebuffer mapping moves
         // underneath them. The reconciler posts an
@@ -493,8 +493,8 @@ impl WorkerSession {
                                             payload.video_codec,
                                             payload.fps,
                                         );
-                                        // E2E diagnostic 2026-05-27: snapshot
-                                        // layout when capture starts so we
+                                        // Snapshot the layout when capture starts
+                                        // so we
                                         // can correlate "which device the
                                         // browser picked" (payload.video_device)
                                         // with "the current OS layout / which
@@ -609,9 +609,8 @@ impl WorkerSession {
                                 ServiceToWorker::WhiteboardCommand(payload) => {
                                     whiteboard_dispatcher.handle_command(payload).await;
                                 }
-                                // Typed-IPC migration batch 1: replaces the
-                                // legacy `SignalingMessage` opaque envelope
-                                // for these two types. The worker still
+                                // These typed requests replace the legacy
+                                // `SignalingMessage` opaque envelope. The worker still
                                 // dispatches through `DeskSession::
                                 // handle_message` because the actual
                                 // handlers in `service::signaling` are
@@ -619,9 +618,7 @@ impl WorkerSession {
                                 // path and shouldn't be duplicated; we
                                 // rebuild a lightweight `SignalingModel`
                                 // from the typed payload so the existing
-                                // arms keep working unmodified. Subsequent
-                                // batches that retire `handle_message`
-                                // entirely will inline these calls.
+                                // arms keep working without duplicating the handlers.
                                 ServiceToWorker::EnablePrivateScreen(payload) => {
                                     dispatch_typed_signaling(
                                         &mut desk_session,
@@ -642,8 +639,7 @@ impl WorkerSession {
                                     )
                                     .await;
                                 }
-                                // Typed-IPC migration batch 2: manager
-                                // plane requests. Worker rebuilds a
+                                // Manager-plane typed requests rebuild a
                                 // SignalingModel with the original
                                 // request_id so DeskSession::handle_message
                                 // emits a response carrying that same
@@ -761,8 +757,7 @@ impl WorkerSession {
                                         }
                                     }
                                 }
-                                // Typed-IPC migration batch 3: terminal
-                                // plane requests. Worker rebuilds a
+                                // Terminal-plane typed requests rebuild a
                                 // SignalingModel with the original
                                 // request_id (where applicable) so
                                 // DeskSession::handle_message produces
@@ -830,8 +825,8 @@ impl WorkerSession {
                                     )
                                     .await;
                                 }
-                                // F1: daemon-side `dc.send` failed. The
-                                // daemon already classified + logged the
+                                // The daemon-side `dc.send` failed. The
+                                // daemon already classified and logged the
                                 // wire error; the worker owns transfer
                                 // state and the browser-facing
                                 // `TransferError` JSON shape, so it
@@ -971,8 +966,8 @@ impl WorkerSession {
                                             "Resolved virtual display instance_id {} -> {}",
                                             instance_id, display_name,
                                         );
-                                        // E2E diagnostic 2026-05-27: log full
-                                        // GDI layout right after a new IDD
+                                        // Log the full GDI layout right after a
+                                        // new IDD
                                         // monitor attaches, so we can see if
                                         // Windows put it at primary by
                                         // default (the suspected cause of
@@ -1023,8 +1018,7 @@ impl WorkerSession {
                                 }
                                 ServiceToWorker::DetachVirtualDisplay => {
                                     info!("Worker received DetachVirtualDisplay");
-                                    // E2E diagnostic 2026-05-27: snapshot
-                                    // layout the instant the worker is told
+                                    // Snapshot layout the instant the worker is told
                                     // to detach, before any teardown runs.
                                     // Useful for understanding what state
                                     // we were in just before the IDD goes
@@ -1033,8 +1027,7 @@ impl WorkerSession {
                                     desk_virtual_display::log_active_displays_for_diagnostics(
                                         "pre-detach",
                                     );
-                                    // codex round 2 #5 + round 7 #5: by this
-                                    // point the daemon should have already
+                                    // By this point the daemon should have already
                                     // sent SetVirtualDisplayExclusive(false)
                                     // and awaited idle. But if a protocol
                                     // violation lands a Detach while
@@ -1325,8 +1318,7 @@ impl WorkerSession {
                             // typed `WorkerToService::*` variant — error
                             // responses go through the SignalingError
                             // catch-all regardless of their original
-                            // type. After batch 4 of the typed-IPC
-                            // migration there is no opaque-envelope
+                            // type. There is no opaque-envelope
                             // bridge fallback; unrouted text is logged
                             // + dropped inside the helper.
                             if let Some(payload) =
@@ -1394,8 +1386,8 @@ impl WorkerSession {
                     );
                 }
 
-                // E2E fix 2026-05-27: the exclusive coordinator posts
-                // here after each successful enter_exclusive /
+                // The exclusive coordinator posts here after each
+                // successful enter_exclusive /
                 // leave_exclusive CDS batch. We run the same
                 // `invalidate_capture_key + Stop/Start media` cycle
                 // SetVirtualDisplayMode already does — WGC bound to

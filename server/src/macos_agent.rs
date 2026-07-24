@@ -7,8 +7,7 @@
 //! the only thing that writes it (the OS-service install path is not used on
 //! macOS).
 //!
-//! Semantics pinned down by the in-session launchd spike
-//! (`pocs/poc-macos-launchd`, verified):
+//! The `pocs/poc-macos-launchd` fixture validates these semantics:
 //! - `launchctl disable gui/<uid>/<label>` is a persistent override that blocks
 //!   the next login load but does NOT kill a currently-running job and does NOT
 //!   stop its in-session `KeepAlive`. `bootout` is the only true unload, and it

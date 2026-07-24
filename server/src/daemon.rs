@@ -152,8 +152,8 @@ pub async fn run_service_daemon_inner(
     // refreshes `tauri_login_token` on every Tauri ws connect.
     let tauri_bridge = TauriIpcBridge::new();
 
-    // Spawn local_api FIRST so /ws/host_upstream is reachable before any
-    // forwarder starts trying to connect (plan review #5).
+    // Spawn local_api first so /ws/host_upstream is reachable before any
+    // forwarder starts trying to connect.
     let (api_ready_tx, api_ready_rx) = oneshot::channel::<()>();
     let api_handle = {
         let settings = Arc::clone(&shared_settings);
@@ -247,9 +247,8 @@ pub async fn run_service_daemon_inner(
         // captures `settings` and `pc_registry` Arc clones but
         // intentionally does NOT capture the supervisor itself; the
         // supervisor invokes the closure with `active` it has
-        // already taken from `is_active()` (codex round 7 #1, breaks
-        // the self-reference + lock cycle the previous round
-        // would have introduced).
+        // already taken from `is_active()`, avoiding a self-reference
+        // and lock cycle.
         {
             let settings = shared_settings_data.clone().into_inner();
             let pc_registry = pc_registry.clone();

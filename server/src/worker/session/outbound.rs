@@ -21,11 +21,8 @@ pub(super) fn build_hub_from_init(
     }
 }
 
-/// Typed-IPC migration helper: convert a typed `ServiceToWorker`
-/// payload back into a `SignalingModel` so the existing
-/// `DeskSession::handle_message` dispatch can run unchanged. Used by
-/// batch 1 (and subsequent batches) until each `handle_message` arm
-/// is fully migrated and the legacy dispatcher can be retired.
+/// Convert a typed `ServiceToWorker` payload into the `SignalingModel`
+/// consumed by the shared `DeskSession::handle_message` dispatcher.
 ///
 /// Build / serialise failures are non-fatal: they log + drop, same
 /// behaviour the previous `SignalingMessage` JSON-bridge path had on
@@ -114,9 +111,8 @@ pub(super) async fn dispatch_typed_signaling_with_request_id<T>(
 /// 2. **Typed success responses / notifications** for migrated
 ///    SignalingTypes (PrivateScreenStateChanged, Manager*, Terminal*):
 ///    routed via [`try_route_typed_outbound`].
-/// 3. **Anything else**: log + drop. Returns `None`. After batch 4
-///    of the typed-IPC migration there is no `SignalingMessage`
-///    fallback bridge — every outbound type the daemon needs to
+/// 3. **Anything else**: log + drop. Returns `None`. There is no
+///    `SignalingMessage` fallback bridge — every outbound type the daemon needs to
 ///    surface to the browser is explicitly typed. A `None` result
 ///    indicates either a parse failure (malformed JSON the worker
 ///    never produced under normal operation) or a `SignalingType` no

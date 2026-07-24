@@ -33,7 +33,7 @@
 //! - **Event transport** carries `ServiceToWorker` / `WorkerToService`.
 //!   Bounded(256) queue, *never drops* — sender awaits-on-full so the
 //!   producer slows down. Splitting media from events eliminates the
-//!   head-of-line blocking the POC measured under 4K extreme load
+//!   head-of-line blocking measured under 4K extreme load
 //!   (mouse P99 from 2.6 ms → 0.56 ms; max from 10 ms → 3.6 ms).
 //!
 //! See the [`dual_transport`] module for traits, the in-process

@@ -195,7 +195,7 @@ async fn integration_forwarder_inbound_resolves_request() {
 }
 
 /// Forwarder upstream goes offline mid-flight — every pending oneshot is
-/// resolved as deny via the disconnect watcher (plan §6 兜底).
+/// resolved as deny via the disconnect watcher.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn integration_forwarder_disconnect_denies_all_pending() {
     let upstream = UpstreamForwarder::new_for_test(true);

@@ -44,7 +44,7 @@ fn screen_output_rebuild_variant_can_be_matched() {
 }
 
 // -----------------------------------------------------------------
-// Cursor fingerprint (M1) — size-aware identity.
+// Cursor fingerprint — size-aware identity.
 // -----------------------------------------------------------------
 
 /// Two `Shape` fingerprints with the same `id` but different
@@ -117,7 +117,7 @@ fn dxgi_fingerprint_embedded_differs_from_hidden_and_shape() {
 }
 
 // -----------------------------------------------------------------
-// Embedded-cursor detection (M3) — WebRTC heuristic.
+// Embedded-cursor detection — WebRTC heuristic.
 // -----------------------------------------------------------------
 
 fn frame_info_for_embedded_test(

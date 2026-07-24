@@ -74,7 +74,7 @@ const URGENT_DROP: f64 = 0.5;
 /// Falling follows the estimate immediately; rising is rate-limited so
 /// one optimistic REMB sample cannot re-open the floodgates (AIMD
 /// style). Tuned against live REMB traces; revisit together with the
-/// REMB observation notes in the implementation plan.
+/// REMB observations documented below.
 const RAISE_PER_SECOND: f64 = 0.5;
 
 /// A cap change the caller must ship to the worker as

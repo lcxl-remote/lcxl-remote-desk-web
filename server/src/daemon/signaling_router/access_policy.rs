@@ -194,7 +194,7 @@ pub(super) fn risk_str(risk: desk_agent_protocol::RiskLevel) -> &'static str {
 /// `ServiceToWorker::*` typed IPC variants; daemon-emitted notifications
 /// and dead-enum variants (`Answer`, `Init`, `Heartbeat`, `Error`,
 /// `Unknown`, ...) are trace-logged + dropped. There is no fallback
-/// path — the typed-IPC migration removed the `SignalingMessage` bridge.
+/// path because the typed IPC path has no `SignalingMessage` bridge.
 pub(super) async fn promote_desktop_resources(
     model: &SignalingModel,
     ctx: &RouterContext,

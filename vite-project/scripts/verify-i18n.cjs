@@ -16,7 +16,7 @@
  * Dynamic keys (e.g. t(item.title) for menus, t(i18nKey, ...) from a URL param)
  * are runtime-resolved and skipped — they carry no string literal to check.
  *
- * Pass --allow-fallback to skip check 3 during migration (before the codemod).
+ * Pass --allow-fallback to skip check 3 when auditing a transitional locale tree.
  * Zero deps beyond `typescript`.
  */
 const fs = require('node:fs');

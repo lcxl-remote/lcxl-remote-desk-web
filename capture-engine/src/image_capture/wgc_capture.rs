@@ -204,8 +204,8 @@ impl ImageOutputEnumerator for WgcImageOutputEnumerator {
         // is the natural source. DXGI also enumerates IDD virtual
         // displays (the IDD driver registers a virtual IDXGIAdapter),
         // but it hands back IDXGIOutput, not HMONITOR, so we still
-        // need GDI here regardless of IDD support. PoC spike B
-        // proved the round-trip end-to-end.
+        // need GDI here regardless of IDD support; this path has been
+        // validated end-to-end.
         let infos = enum_display_infos()?;
         log::info!(
             "WgcImageOutputEnumerator: enumerated {} monitor(s) via EnumDisplayMonitors",

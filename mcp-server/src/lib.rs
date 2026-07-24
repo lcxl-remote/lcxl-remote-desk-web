@@ -8,7 +8,7 @@
 //! there is no dependency cycle (server → mcp-server → agent-protocol) and the
 //! trust-field injection / auditing stay server-side.
 //!
-//! Security stance (codex protocol §14):
+//! Security stance (agent protocol §14):
 //! - The tool set is a **static whitelist** of read-only tools. No exec / write
 //!   / control tool exists — it cannot be reached because it is not defined. AI
 //!   diagnosis is **not** an MCP tool: it is orchestrated by the central signaling

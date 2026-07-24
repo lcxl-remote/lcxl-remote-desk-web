@@ -1220,8 +1220,8 @@ async fn on_exclusive_result_op_id_gate() {
     s.shutdown_driver_loop().await;
 }
 
-/// `apply_result_transition` table (codex round 6 #5: only four
-/// outcomes; EnterCancelled was removed).
+/// `apply_result_transition` table: the wire contract has four
+/// outcomes and intentionally omits EnterCancelled.
 #[test]
 fn apply_result_transition_table() {
     // Entering + Entered -> Active
@@ -1433,7 +1433,7 @@ async fn on_exclusive_result_left_resets_retry_state() {
     s.shutdown_driver_loop().await;
 }
 
-/// E2E fix 2026-05-27: a first `EnterFailed` must arm the
+/// A first `EnterFailed` must arm the
 /// enter-side backoff (count → 1, `next_enter_at` → now + 4 s)
 /// and `prepare_next_action` must short-circuit while the gate
 /// is still in effect. Symmetric to the LeftWithErrors test.
@@ -1493,7 +1493,7 @@ async fn on_exclusive_result_enter_failed_arms_retry() {
     s.shutdown_driver_loop().await;
 }
 
-/// E2E fix 2026-05-27: after `MAX_ENTER_RETRIES` consecutive
+/// After `MAX_ENTER_RETRIES` consecutive
 /// `EnterFailed`, the supervisor must clear `exclusive_desired`
 /// so the `(Idle, desired=true) → Entering` row stops firing.
 /// Counts must reset too so a fresh acquire later starts at zero.
@@ -1548,7 +1548,7 @@ async fn on_exclusive_result_enter_failed_exhausts_after_max_retries() {
     s.shutdown_driver_loop().await;
 }
 
-/// E2E fix 2026-05-27: a successful `Entered` (after one or more
+/// A successful `Entered` (after one or more
 /// failed retries) must clear `enter_retry_count` and
 /// `next_enter_at` — otherwise the next attach inherits stale
 /// backoff bookkeeping.
@@ -1579,7 +1579,7 @@ async fn on_exclusive_result_entered_resets_retry_state() {
     s.shutdown_driver_loop().await;
 }
 
-/// E2E fix 2026-05-27: `prepare_next_action` gates the enter
+/// `prepare_next_action` gates the enter
 /// path symmetrically to the leave path. With a pending
 /// `next_enter_at` in the future and `(Idle, desired=true)`, the
 /// call must return `None` instead of advancing to Entering.

@@ -1,10 +1,8 @@
 //! Single-machine audit sink.
 //!
-//! Audit events are currently kept in the local log rather than a database: each event
-//! is written as one structured `log` line. The database-backed sink (mapping
-//! every [`AuditEvent`] onto an `ai_audit_event` row) lands in M2 and reuses the
-//! same [`AuditSink`] contract, so the emitter (the worker's
-//! [`super::LocalDeviceAgent`]) does not change when persistence arrives.
+//! Audit events are kept in the local log rather than a database: each event
+//! is written as one structured `log` line through the shared [`AuditSink`]
+//! contract.
 //!
 //! Only content-free fields are logged (the builders already guarantee
 //! summaries carry counts / sizes, never raw data).

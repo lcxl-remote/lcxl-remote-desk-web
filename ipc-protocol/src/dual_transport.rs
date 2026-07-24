@@ -13,7 +13,7 @@
 //!    [`WorkerToService`](crate::message::WorkerToService). Larger
 //!    bounded capacity, *never drops*; the sender awaits on full so the
 //!    upstream producer slows down. Splitting events from media is what
-//!    eliminates head-of-line blocking under 4K extreme load (POC found
+//!    eliminates head-of-line blocking under 4K extreme load (measurements found
 //!    mouse latency dropped from 10 ms max to 0.56 ms P99 once the two
 //!    were on independent pipes).
 //!
@@ -47,7 +47,7 @@
 //!   the daemon can `StopMedia` + `StartMedia` to reset the channel,
 //!   instead of the worker self-deciding to abort.
 //! - Capacities (`MEDIA_QUEUE_CAP = 8`, `EVENT_QUEUE_CAP = 256`) come
-//!   from the POC sizing — `8` covers ~133 ms of 60 fps frames so the
+//!   from load-test sizing — `8` covers ~133 ms of 60 fps frames so the
 //!   daemon has slack for one IDR-write spike, and `256` is well above
 //!   the worst-case event burst (mouse 100 Hz × few connections + a
 //!   handful of one-shot commands).
@@ -849,7 +849,7 @@ mod tests {
     }
 
     /// A 2 MB I-frame (the upper-end of a 4K H.264 IDR seen
-    /// in the POC) must round-trip through the framed media lane.
+    /// in load tests) must round-trip through the framed media lane.
     /// Combined with `framed_event_above_4mib_round_trips`, this
     /// covers both the media and event framed paths against the
     /// 4 MiB preallocation default — the worker's real-world IDR

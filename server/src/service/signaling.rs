@@ -817,8 +817,7 @@ mod sender_tests {
 
     /// `send_error` should produce a Text variant whose decoded model
     /// carries a non-success `response_state` with the given error code.
-    /// This is the upstream of `WorkerToService::SignalingError` after
-    /// batch 4 of the typed-IPC migration.
+    /// This is the upstream of `WorkerToService::SignalingError`.
     #[tokio::test]
     async fn send_error_round_trips_with_error_response_state() {
         let (tx, mut rx) = mpsc::unbounded_channel::<DeskSessionMessage>();

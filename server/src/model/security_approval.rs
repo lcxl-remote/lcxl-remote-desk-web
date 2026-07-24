@@ -136,7 +136,7 @@ pub type SecurityApprovalReceiver = std::sync::mpsc::Receiver<SecurityApprovalCo
 /// - `None` → ask the user via the Host Control Hub; deny if no UI is available.
 ///
 /// If the user checks "remember", the corresponding `settings.security.allow_*`
-/// field is updated and persisted (kept here, not in the hub, per plan review #1) —
+/// field is updated and persisted here rather than in the hub —
 /// **unless `suppress_remember` is set**. A capped grant / code-session connection
 /// passes `suppress_remember = true`: its prompt fires because the meet of the
 /// owner's per-code ceiling and the global landed on `None`, and letting the local
@@ -393,7 +393,7 @@ mod tests {
         assert_eq!(s.security.allow_terminal, Some(true));
     }
 
-    /// F3: a capped grant / code-session (`suppress_remember = true`) that the local
+    /// A capped grant / code-session (`suppress_remember = true`) that the local
     /// user approves *with* remember is honored for this request but must NOT widen
     /// the host global — the owner's per-code ceiling stays the only authority.
     #[tokio::test]

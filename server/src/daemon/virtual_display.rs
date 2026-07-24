@@ -71,7 +71,7 @@ pub enum ExclusiveState {
 }
 
 /// `state` + `current_op_id` co-mutate under a single write lock so
-/// the codex round 6 #3 invariant ("op_id and state are always
+/// the invariant ("op_id and state are always
 /// observed together") is enforced by the type system. Reading
 /// `current_op_id` without holding the lock is intentionally
 /// unsupported — the field is private to this module.
@@ -87,8 +87,7 @@ struct ExclusiveInner {
     /// equal `current_op_id` (i.e. came from a superseded request).
     current_op_id: u64,
     /// Number of consecutive `LeftWithErrors` results received since
-    /// the last successful `Left` / explicit reset (codex follow-up
-    /// P1, 2026-05-26). When this reaches [`MAX_LEAVE_RETRIES`] the
+    /// the last successful `Left` / explicit reset. When this reaches [`MAX_LEAVE_RETRIES`] the
     /// supervisor force-Idles and stops auto-retrying, leaving the
     /// worker's `ExclusiveGuard` Drop / OS logoff as the final
     /// recovery path. Reset on every successful `Left` and on
@@ -104,12 +103,12 @@ struct ExclusiveInner {
     /// right time.
     next_leave_at: Option<Instant>,
     /// Number of consecutive `EnterFailed` results received since the
-    /// last successful `Entered` / explicit reset (e2e fix
-    /// 2026-05-27, symmetric to `leave_retry_count`). Without this
+    /// last successful `Entered` / explicit reset, symmetric to
+    /// `leave_retry_count`. Without this
     /// gate, `(Entering, EnterFailed) → Idle` is immediately
     /// re-triggered by `prepare_next_action` because `desired=true`
     /// is still set — producing the infinite "5 s prompt, fail,
-    /// repeat" loop the user hit in e2e. When this reaches
+    /// repeat" loop. When this reaches
     /// [`MAX_ENTER_RETRIES`] the supervisor force-clears
     /// `exclusive_desired` so the loop terminates; the user must
     /// re-acquire control (or toggle the setting) to retry.
@@ -125,9 +124,8 @@ struct ExclusiveInner {
 /// desired exclusive state at attach edges (where the supervisor is
 /// the only party that knows the transition just happened).
 ///
-/// Signature is `Fn(active: bool) -> (desired, prompt_ms)` — codex
-/// round 7 #1 forced the `active` parameter out of the closure body
-/// so the closure never has to reach back into the supervisor (which
+/// Signature is `Fn(active: bool) -> (desired, prompt_ms)` so the
+/// closure never has to reach back into the supervisor (which
 /// would form a self-reference and a potential lock cycle). The
 /// supervisor takes `active = self.is_active().await` itself before
 /// calling the closure.
@@ -162,9 +160,8 @@ const MAX_BACKOFF: Duration = Duration::from_secs(10);
 
 /// Cap on how many consecutive `LeftWithErrors` results the daemon
 /// will auto-retry before forcing the state back to `Idle` and
-/// logging an operator-visible error (codex follow-up P1,
-/// 2026-05-26). Three retries with the schedule below gives the
-/// worker ~14 s total (2 s + 4 s + 8 s); after that, the layout
+/// logging an operator-visible error. Three retries with the schedule
+/// below gives the worker ~14 s total (2 s + 4 s + 8 s); after that, the layout
 /// retained on the worker side is left to `ExclusiveGuard::drop`
 /// at session end + CDS transient logoff fallback. Picking a low
 /// cap is intentional: `leave_exclusive` is mostly deterministic
@@ -178,8 +175,8 @@ const MAX_LEAVE_RETRIES: u8 = 3;
 /// final give-up: ~14 s, comparable to one ICE failed-timeout.
 const LEAVE_RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
 
-/// E2E fix 2026-05-27: cap on consecutive `EnterFailed` results
-/// before the supervisor stops auto-retrying. Symmetric to
+/// Cap on consecutive `EnterFailed` results before the supervisor
+/// stops auto-retrying. Symmetric to
 /// [`MAX_LEAVE_RETRIES`]. When the budget is exhausted, the
 /// supervisor clears `exclusive_desired` so the
 /// `(Idle, desired=true) → Entering` row stops firing; the user
@@ -329,8 +326,8 @@ pub struct VirtualDisplaySupervisor {
     // dedicated driver loop owns the IPC sends + retries; the public
     // surface is `set_desired_exclusive` (write the desired flag) and
     // `on_exclusive_result` (apply the worker's reply).
-    /// State + op_id co-mutated under one RwLock. Type-level
-    /// enforcement of codex round 6 #3.
+    /// State + op_id co-mutated under one RwLock so they are always
+    /// observed and updated together.
     exclusive_inner: Arc<RwLock<ExclusiveInner>>,
     /// Desired state set by the router (control change / settings
     /// change) and by `recompute_desired()` at attach edges.
@@ -508,10 +505,10 @@ impl VirtualDisplaySupervisor {
         // Exclusive teardown must precede the SwDevice drop on
         // apply(false) — otherwise the worker would receive
         // SetVirtualDisplayExclusive(false) after the virtual display
-        // has already disappeared from the OS (codex round 2 #1).
+        // has already disappeared from the OS.
         // For apply(true), reset before the Attach IPC so the driver
         // loop sees a clean (Idle, desired=false) slate for the new
-        // attach cycle (codex round 7 #5).
+        // attach cycle.
         if !desired {
             self.set_desired_exclusive(false, 0);
             if let Err(e) = self.await_exclusive_idle(EXCLUSIVE_TEARDOWN_TIMEOUT).await {
@@ -523,8 +520,8 @@ impl VirtualDisplaySupervisor {
             }
             self.reset_exclusive_state().await;
         } else {
-            // codex round 7 #5: reset BEFORE the Attach IPC. The
-            // driver loop must see a clean state machine for the new
+            // Reset before the Attach IPC. The driver loop must see a
+            // clean state machine for the new
             // attach cycle so a stale result from a previous cycle
             // cannot pollute the new op_id space.
             let needs_reset = matches!(
@@ -733,8 +730,7 @@ impl VirtualDisplaySupervisor {
                 // Reset cached dimensions unconditionally on every
                 // Attached outcome — covering BOTH the Attaching→Attached
                 // promotion edge AND the already-Attached re-attach path
-                // worker takes after a restart. The latter is the case
-                // codex round 2 #2 caught: a worker restart re-sends
+                // worker takes after a restart. A worker restart re-sends
                 // AttachVirtualDisplay and lands here while the
                 // supervisor is still Attached, and the IDD has been
                 // reborn at the driver's default mode rather than the
@@ -823,8 +819,7 @@ impl VirtualDisplaySupervisor {
                              until the next worker restart",
                         );
                     }
-                    // codex round 6 #1 + round 7 #1: attach just
-                    // promoted to Attached, so `is_active()` is now
+                    // Attach just promoted to Attached, so `is_active()` is now
                     // true. The router-injected desired_computer may
                     // have returned `false` while we were still
                     // Attaching; recompute now so the driver loop can
@@ -858,8 +853,8 @@ impl VirtualDisplaySupervisor {
         // wedge an Attach send between our Detach and the final state
         // transition to Disabled.
         let _lifecycle = self.lifecycle_lock.lock().await;
-        // codex round 6 #2: shutdown must also tear down the
-        // exclusive layer before the SwDevice handle is dropped.
+        // Shutdown must also tear down the exclusive layer before the
+        // SwDevice handle is dropped.
         self.set_desired_exclusive(false, 0);
         if let Err(e) = self.await_exclusive_idle(EXCLUSIVE_TEARDOWN_TIMEOUT).await {
             warn!("[virtual-display] shutdown exclusive teardown timed out: {e}");
@@ -959,8 +954,8 @@ impl VirtualDisplaySupervisor {
 
         loop {
             if self.is_attach_cache_synced().await {
-                // codex round 6 #1: defensive recompute on the
-                // ensure_attached return path so a race where on_worker_
+                // Defensively recompute on the ensure_attached return
+                // path so a race where on_worker_
                 // attach_result's recompute fires before is_active() is
                 // observably true still surfaces the new desired state.
                 self.recompute_desired().await;
@@ -1085,8 +1080,8 @@ impl VirtualDisplaySupervisor {
         self.reconcile_notify.notify_one();
     }
 
-    /// codex round 6 #1 + round 7 #1: re-derive the desired flag at
-    /// attach edges. The supervisor takes the `is_active()` snapshot
+    /// Re-derive the desired flag at attach edges. The supervisor
+    /// takes the `is_active()` snapshot
     /// itself (in this method, *not* inside the closure) so the
     /// closure body never reaches back into the supervisor's locks.
     /// Callers must `drop(state_guard)` before awaiting this — the
@@ -1148,8 +1143,7 @@ impl VirtualDisplaySupervisor {
         // Reset the leave-retry bookkeeping too —
         // a fresh apply(true) / apply(false) / shutdown must not
         // inherit a stale retry-budget counter from the previous
-        // generation. E2E fix 2026-05-27: same applies to the enter
-        // retry bookkeeping.
+        // generation. The same applies to the enter retry bookkeeping.
         inner.leave_retry_count = 0;
         inner.next_leave_at = None;
         inner.enter_retry_count = 0;
@@ -1162,8 +1156,8 @@ impl VirtualDisplaySupervisor {
 
     /// Apply a worker result. Drops stale results whose `op_id` does
     /// not match `current_op_id`. State transition runs in the same
-    /// write lock that loaded `current_op_id` so codex round 5 #1's
-    /// "load + take write" race is closed by construction.
+    /// write lock that loaded `current_op_id`, closing the
+    /// "load + take write" race by construction.
     pub async fn on_exclusive_result(&self, payload: ExclusiveResultPayload) {
         let mut inner = self.exclusive_inner.write().await;
         if payload.op_id != inner.current_op_id {
@@ -1222,8 +1216,8 @@ impl VirtualDisplaySupervisor {
                 inner.leave_retry_count = 0;
                 inner.next_leave_at = None;
             }
-            // E2E fix 2026-05-27: enter side gets its own bounded
-            // backoff symmetric to the leave path. Without this gate
+            // The enter side gets its own bounded backoff symmetric
+            // to the leave path. Without this gate
             // `(Entering, EnterFailed) → Idle` is immediately
             // re-triggered by `prepare_next_action` because
             // `desired=true` is still set, producing an infinite
@@ -1322,11 +1316,11 @@ impl VirtualDisplaySupervisor {
                 inner.next_leave_at = None;
             }
         }
-        // E2E fix 2026-05-27: same gate for the symmetric
+        // Use the same gate for the symmetric
         // `(Idle, desired=true) → Entering` retry path. Without it,
         // `apply_result_transition` puts EnterFailed back into Idle
         // and the reconciler immediately resends — producing the
-        // infinite re-prompt loop observed in e2e.
+        // infinite re-prompt loop.
         if matches!(current, ExclusiveState::Idle) && desired {
             if let Some(retry_at) = inner.next_enter_at {
                 let now = Instant::now();
@@ -1354,9 +1348,9 @@ impl VirtualDisplaySupervisor {
     }
 
     /// Guarded rollback. Only reverses if `current_op_id` and
-    /// observed `state` still match the values that `prepare_next_action`
-    /// recorded — codex round 5 #2 prevents a concurrent reset from
-    /// being clobbered.
+    /// observed `state` still match the values that
+    /// `prepare_next_action` recorded, so a concurrent reset cannot
+    /// be clobbered.
     async fn rollback_send_failure(
         &self,
         failed_op_id: u64,
@@ -1424,9 +1418,9 @@ impl VirtualDisplaySupervisor {
     }
 }
 
-/// State transition table driven by an `ExclusiveResult`. Implements
-/// the codex round 6 #5 acceptance (4 outcomes only — EnterCancelled
-/// deleted). The `Leaving + Entered` row is defensive (a stale
+/// State transition table driven by an `ExclusiveResult`. The wire
+/// contract has four outcomes; `EnterCancelled` is intentionally
+/// absent. The `Leaving + Entered` row is defensive (a stale
 /// `Entered` should never reach here thanks to the op_id gate, but
 /// keeping the row guards against a wire regression).
 ///
