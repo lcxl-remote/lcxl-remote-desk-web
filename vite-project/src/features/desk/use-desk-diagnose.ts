@@ -25,6 +25,7 @@ import {
     snapshotConversationKey,
     snapshotLiveTurn,
     type DiagnoseEvent,
+    type DiagnoseSessionSummary,
     type DiagnoseStartOptions,
     type DiagnoseState,
     type SessionSnapshot,
@@ -85,11 +86,19 @@ const CANCEL_STATE_POLL_MS = 500;
  */
 export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagnoseProps) {
     const [state, setState] = useState<DiagnoseState>(INITIAL_STATE);
+    const [historySessions, setHistorySessions] = useState<DiagnoseSessionSummary[]>([]);
+    const [historyLoading, setHistoryLoading] = useState(false);
+    const [historyError, setHistoryError] = useState(false);
+    const [canContinue, setCanContinue] = useState(true);
     const activeRequestRef = useRef<string | null>(null);
     // The conversation id threaded across follow-up turns. Minted lazily on the
     // first `start`; cleared on a desk change / reset so the next turn
     // opens a fresh conversation (subject-namespaced server-side).
     const conversationIdRef = useRef<string | null>(null);
+    // Opaque selector returned by the history endpoint. It allows a legacy
+    // session (whose client continuation id was never persisted) to be viewed
+    // after selection while authorization remains actor/device scoped.
+    const selectedSessionIdRef = useRef<string | null>(null);
     // Highest applied seq, so duplicate / out-of-order frames cannot corrupt
     // the accumulated summary. Reset to -1 per run (frames start at seq 0).
     const lastSeqRef = useRef<number>(-1);
@@ -104,12 +113,15 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
     const fetchSnapshot = useCallback(async () => {
         if (!deskId) return;
         const conversationId = conversationIdRef.current;
-        if (!conversationId) return;
+        const selectedSessionId = selectedSessionIdRef.current;
+        if (!conversationId && !selectedSessionId) return;
         let res: Response;
         try {
             res = await fetch(
                 `/api/my/diagnose-session?connection=${encodeURIComponent(deskId)}` +
-                    `&conversation=${encodeURIComponent(conversationId)}`,
+                    (selectedSessionId
+                        ? `&session=${encodeURIComponent(selectedSessionId)}`
+                        : `&conversation=${encodeURIComponent(conversationId ?? '')}`),
                 { credentials: 'include', headers: { Accept: 'application/json' } },
             );
         } catch {
@@ -159,6 +171,10 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         activeRequestRef.current = null;
         lastSeqRef.current = -1;
         lastAppliedSeqRef.current = -1;
+        selectedSessionIdRef.current = null;
+        setCanContinue(true);
+        setHistorySessions([]);
+        setHistoryError(false);
         let restored: string | null = null;
         try {
             restored = deskId ? localStorage.getItem(snapshotConversationKey(deskId)) : null;
@@ -195,10 +211,11 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
 
     const start = useCallback(
         (question: string, options?: DiagnoseStartOptions) => {
-            if (!deskId) return;
+            if (!deskId || !canContinue) return;
             // Reuse the conversation across follow-ups; mint one on the first turn.
             if (!conversationIdRef.current) {
                 conversationIdRef.current = v4();
+                selectedSessionIdRef.current = null;
                 lastAppliedSeqRef.current = -1;
             }
             const conversationId = conversationIdRef.current;
@@ -236,7 +253,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                 history: snapshotLiveTurn(prev),
             }));
         },
-        [deskId, sendMessage],
+        [canContinue, deskId, sendMessage],
     );
 
     // Full reset back to the question form. If a run is still in flight (the
@@ -250,8 +267,10 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         }
         activeRequestRef.current = null;
         conversationIdRef.current = null;
+        selectedSessionIdRef.current = null;
         lastSeqRef.current = -1;
         lastAppliedSeqRef.current = -1;
+        setCanContinue(true);
         try {
             if (deskId) localStorage.removeItem(snapshotConversationKey(deskId));
         } catch {
@@ -259,6 +278,59 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         }
         setState(INITIAL_STATE);
     }, [deskId, sendMessage]);
+
+    const refreshHistory = useCallback(async () => {
+        if (!deskId) return;
+        setHistoryLoading(true);
+        setHistoryError(false);
+        try {
+            const res = await fetch(
+                `/api/my/diagnose-sessions?connection=${encodeURIComponent(deskId)}&limit=50`,
+                { credentials: 'include', headers: { Accept: 'application/json' } },
+            );
+            if (!res.ok) throw new Error('history request failed');
+            const body = (await res.json()) as {
+                success?: boolean;
+                code?: number;
+                data?: { sessions?: DiagnoseSessionSummary[] };
+            };
+            if (body.success === false || body.code !== 0 || !body.data?.sessions) {
+                throw new Error('history response failed');
+            }
+            setHistorySessions(body.data.sessions);
+        } catch {
+            setHistoryError(true);
+        } finally {
+            setHistoryLoading(false);
+        }
+    }, [deskId]);
+
+    const restoreSession = useCallback(
+        async (summary: DiagnoseSessionSummary) => {
+            if (!deskId || summary.active) return;
+            activeRequestRef.current = null;
+            conversationIdRef.current = summary.conversationId ?? null;
+            selectedSessionIdRef.current = summary.sessionId;
+            lastSeqRef.current = -1;
+            lastAppliedSeqRef.current = -1;
+            setCanContinue(!!summary.conversationId);
+            setState(INITIAL_STATE);
+            try {
+                if (summary.conversationId) {
+                    localStorage.setItem(
+                        snapshotConversationKey(deskId),
+                        summary.conversationId,
+                    );
+                } else {
+                    localStorage.removeItem(snapshotConversationKey(deskId));
+                }
+            } catch {
+                // The selected history remains usable for this tab.
+            }
+            await fetchSnapshot();
+        },
+        [deskId, fetchSnapshot],
+    );
 
     // Approve the command the agentic loop is parked on: send `ResolveExec`
     // (correlated by the server-minted `exec_request_id`) so the backend
@@ -519,5 +591,11 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         approveExec,
         rejectExec,
         cancelBackgroundExec,
+        historySessions,
+        historyLoading,
+        historyError,
+        refreshHistory,
+        restoreSession,
+        canContinue,
     };
 }

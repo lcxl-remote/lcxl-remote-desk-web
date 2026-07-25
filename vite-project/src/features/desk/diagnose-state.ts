@@ -375,6 +375,17 @@ export type SessionSnapshot = {
     messages: SnapshotMessage[];
 };
 
+/** One authorized history-list row for the current target device. */
+export type DiagnoseSessionSummary = {
+    sessionId: string;
+    conversationId?: string | null;
+    firstQuestion?: string | null;
+    createdAt: string;
+    updatedAt: string;
+    active: boolean;
+    messageCount: number;
+};
+
 /** Poll cadence for the snapshot while the tab is visible (a staleness floor; a
  *  server push would only make it faster). */
 export const SNAPSHOT_POLL_MS = 20000;

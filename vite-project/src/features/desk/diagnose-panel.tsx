@@ -2,6 +2,7 @@ import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import {
     AlertCircle,
+    History,
     Loader2,
     Stethoscope,
     Terminal as TerminalIcon,
@@ -15,6 +16,7 @@ import { agentErrorMessage } from "@/lib/agent-error-i18n"
 import {
     extractStreamingSummary,
     type DiagnoseState,
+    type DiagnoseSessionSummary,
     type DiagnoseStartOptions,
 } from "./use-desk-diagnose"
 import {
@@ -50,6 +52,12 @@ type DiagnosePanelProps = {
      *  diagnose request. Undefined for the personal view / open-source control end,
      *  which keeps everything personal-scoped. */
     orgId?: number
+    historySessions?: DiagnoseSessionSummary[]
+    historyLoading?: boolean
+    historyError?: boolean
+    onRefreshHistory?: () => void
+    onRestoreSession?: (session: DiagnoseSessionSummary) => void
+    canContinue?: boolean
 }
 
 export function DiagnosePanel({
@@ -63,6 +71,12 @@ export function DiagnosePanel({
     onRejectExec,
     onCancelBackgroundExec,
     orgId,
+    historySessions = [],
+    historyLoading = false,
+    historyError = false,
+    onRefreshHistory,
+    onRestoreSession,
+    canContinue = true,
 }: DiagnosePanelProps) {
     const { t, i18n } = useTranslation()
     const [question, setQuestion] = useState("")
@@ -70,6 +84,14 @@ export function DiagnosePanel({
     // The manager-selected agent model, or null when the selector is hidden
     // (open-source signal) — in which case no `model_id` is sent.
     const [modelId, setModelId] = useState<number | null>(null)
+    const [showHistory, setShowHistory] = useState(false)
+
+    const toggleHistory = () => {
+        setShowHistory((current) => {
+            if (!current) onRefreshHistory?.()
+            return !current
+        })
+    }
 
     const presets: string[] = [
         t("pages.desk.diagnose.presetCpu"),
@@ -149,6 +171,71 @@ export function DiagnosePanel({
                 <p className="mb-3 rounded-md bg-white/10 px-2 py-1 text-xs text-white/60">
                     {t("pages.desk.diagnose.aiDisclaimer")}
                 </p>
+                {showHistory && (
+                    <div className="flex flex-col gap-2">
+                        <div className="flex items-center justify-between">
+                            <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-300">
+                                {t("pages.desk.diagnose.historyTitle")}
+                            </h3>
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                className="h-7 px-2 text-xs"
+                                onClick={() => onRefreshHistory?.()}
+                            >
+                                {t("pages.desk.diagnose.historyRefresh")}
+                            </Button>
+                        </div>
+                        {historyLoading ? (
+                            <div className="flex items-center gap-2 py-4 text-xs text-gray-400">
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                {t("pages.desk.diagnose.historyLoading")}
+                            </div>
+                        ) : historyError ? (
+                            <div className="py-4 text-xs text-red-300">
+                                {t("pages.desk.diagnose.historyError")}
+                            </div>
+                        ) : historySessions.length === 0 ? (
+                            <div className="py-4 text-xs text-gray-400">
+                                {t("pages.desk.diagnose.historyEmpty")}
+                            </div>
+                        ) : (
+                            historySessions.map((session) => (
+                                <button
+                                    type="button"
+                                    key={session.sessionId}
+                                    disabled={session.active}
+                                    className="rounded-md border border-white/15 bg-white/5 p-2 text-left transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+                                    onClick={() => {
+                                        onRestoreSession?.(session)
+                                        setShowHistory(false)
+                                    }}
+                                >
+                                    <div className="line-clamp-2 text-xs font-medium text-white/90">
+                                        {session.firstQuestion ||
+                                            t("pages.desk.diagnose.historyUntitled")}
+                                    </div>
+                                    <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-gray-400">
+                                        <span>
+                                            {new Intl.DateTimeFormat(i18n.language, {
+                                                dateStyle: "medium",
+                                                timeStyle: "short",
+                                            }).format(new Date(session.updatedAt))}
+                                        </span>
+                                        <span>
+                                            {session.active
+                                                ? t("pages.desk.diagnose.historyActive")
+                                                : t("pages.desk.diagnose.historyOpen")}
+                                        </span>
+                                    </div>
+                                </button>
+                            ))
+                        )}
+                    </div>
+                )}
+                {!showHistory && (
+                    <>
                 {/* Conversation transcript (prior settled turns) */}
                 {(state.phase === "running" ||
                     state.phase === "done" ||
@@ -291,7 +378,7 @@ export function DiagnosePanel({
                         </div>
                         {/* A failed turn is settled, so a follow-up may continue the
                             same conversation (the backend allows re-claiming it). */}
-                        <FollowUpComposer onSubmit={askFollowUp} />
+                        {canContinue && <FollowUpComposer onSubmit={askFollowUp} />}
                     </div>
                 )}
 
@@ -501,13 +588,33 @@ export function DiagnosePanel({
                             ) : null
                         )}
                         {/* Continue the conversation with another question. */}
-                        <FollowUpComposer onSubmit={askFollowUp} />
+                        {canContinue ? (
+                            <FollowUpComposer onSubmit={askFollowUp} />
+                        ) : (
+                            <p className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-200">
+                                {t("pages.desk.diagnose.historyReadOnly")}
+                            </p>
+                        )}
                     </div>
+                )}
+                    </>
                 )}
             </div>
 
             {/* Footer actions */}
             <div className="flex items-center gap-2 border-t border-white/15 px-4 py-3">
+                <Button
+                    size="sm"
+                    variant="ghost"
+                    className="flex-1"
+                    onClick={toggleHistory}
+                    disabled={state.phase === "running"}
+                >
+                    <History className="mr-1.5 h-3.5 w-3.5" />
+                    {showHistory
+                        ? t("pages.desk.diagnose.historyBack")
+                        : t("pages.desk.diagnose.history")}
+                </Button>
                 {state.phase !== "idle" && (
                     <Button size="sm" variant="ghost" className="flex-1" onClick={onReset}>
                         {t("pages.desk.diagnose.newDiagnosis")}
