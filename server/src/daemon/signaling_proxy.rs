@@ -257,7 +257,8 @@ pub async fn run_signaling_proxy(
                 let rx = outbound_tx.subscribe();
                 // The local loopback is `TrustedCentral` in Default mode but is NOT
                 // the manager link, so fatal device-quota rejection is disabled here.
-                let _ = maintain_proxy_connection(
+                let display_url = redact_token_in_url(&local_url);
+                if let Err(error) = maintain_proxy_connection(
                     settings.clone(),
                     &router_ctx,
                     local_url,
@@ -269,7 +270,10 @@ pub async fn run_signaling_proxy(
                     None,
                     RemoteAccessCentralLink::Local,
                 )
-                .await;
+                .await
+                {
+                    warn!("[Proxy] Local signaling connection to {display_url} failed: {error}");
+                }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
