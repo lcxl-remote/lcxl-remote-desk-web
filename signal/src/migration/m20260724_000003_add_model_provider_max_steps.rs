@@ -14,7 +14,7 @@ impl MigrationTrait for Migration {
                         ColumnDef::new(ModelProvider::MaxStepsPerTurn)
                             .integer()
                             .not_null()
-                            .default(20),
+                            .default(40),
                     )
                     .to_owned(),
             )
@@ -75,6 +75,6 @@ mod tests {
         .await
         .unwrap()
         .expect("existing provider row survives the migration");
-        assert_eq!(row.max_steps_per_turn, 20);
+        assert_eq!(row.max_steps_per_turn, 40);
     }
 }

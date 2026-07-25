@@ -14,7 +14,7 @@ impl MigrationTrait for Migration {
                         ColumnDef::new(ModelProvider::MaxSameToolCallsPerTurn)
                             .integer()
                             .not_null()
-                            .default(10),
+                            .default(20),
                     )
                     .to_owned(),
             )
@@ -84,6 +84,6 @@ mod tests {
         .await
         .unwrap()
         .expect("legacy provider row survives the migration");
-        assert_eq!(row.max_same_tool_calls_per_turn, 10);
+        assert_eq!(row.max_same_tool_calls_per_turn, 20);
     }
 }

@@ -278,7 +278,7 @@ pub struct ModelProviderPublic {
     pub execution_mode: ExecutionMode,
     #[schema(minimum = 1, maximum = 50)]
     pub max_same_tool_calls_per_turn: u32,
-    #[schema(minimum = 1, maximum = 50)]
+    #[schema(minimum = 1, maximum = 80)]
     pub max_steps_per_turn: u32,
     /// Whether a non-empty API key is configured. The key itself is never
     /// returned.
@@ -310,8 +310,8 @@ pub struct ModelProviderUpdate {
     #[schema(minimum = 1, maximum = 50)]
     pub max_same_tool_calls_per_turn: Option<u32>,
     /// Per-turn model reasoning-round budget. Must be at least the same-tool
-    /// repeat limit. Valid range: 1..=50.
-    #[schema(minimum = 1, maximum = 50)]
+    /// repeat limit. Valid range: 1..=80.
+    #[schema(minimum = 1, maximum = 80)]
     pub max_steps_per_turn: Option<u32>,
     /// Write-only. `None` = leave unchanged; `Some("")` = clear; `Some(x)` = set.
     pub api_key: Option<String>,

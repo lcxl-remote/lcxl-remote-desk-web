@@ -14,6 +14,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { AiGeneratedMark } from "@/components/ai-generated-mark"
+import { MarkdownContent } from "@/components/markdown-content"
 import { agentErrorMessage } from "@/lib/agent-error-i18n"
 import {
     type Confidence,
@@ -278,9 +279,9 @@ export function ConversationHistory({ turns }: { turns: DiagnoseHistoryTurn[] })
                             />
                         )}
                         {aiReply && (
-                            <div className="max-w-[90%] self-start whitespace-pre-wrap rounded-lg rounded-bl-sm bg-white/10 px-2.5 py-1.5 text-xs text-white/80">
+                            <MarkdownContent className="max-w-[90%] self-start rounded-lg rounded-bl-sm bg-white/10 px-2.5 py-1.5 text-xs text-white/80">
                                 {aiReply}
-                            </div>
+                            </MarkdownContent>
                         )}
                         <ToolTimeline tools={turn.tools} />
                         {localizedError && (

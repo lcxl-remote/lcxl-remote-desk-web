@@ -212,6 +212,41 @@ describe("DiagnosePanel", () => {
         expect(screen.getByText("plenty free")).toBeInTheDocument()
     })
 
+    it("done: safely renders GitHub-flavored Markdown in the agent answer", () => {
+        const { container } = render(
+            <DiagnosePanel
+                state={{
+                    ...baseState,
+                    phase: "done",
+                    answer: [
+                        "## CPU report",
+                        "",
+                        "**Usage** is high.",
+                        "",
+                        "| Metric | Value |",
+                        "| --- | --- |",
+                        "| CPU | 99% |",
+                        "",
+                        "<script>alert('unsafe')</script>",
+                        "",
+                        "![remote pixel](https://example.invalid/pixel.png)",
+                    ].join("\n"),
+                }}
+                onStart={vi.fn()}
+                onHandoff={vi.fn()}
+                onReset={vi.fn()}
+                onClose={vi.fn()}
+            />,
+        )
+
+        expect(screen.getByRole("heading", { name: "CPU report" })).toBeInTheDocument()
+        expect(screen.getByText("Usage").tagName).toBe("STRONG")
+        expect(screen.getByRole("table")).toBeInTheDocument()
+        expect(container.querySelector("script")).toBeNull()
+        expect(container.querySelector("img")).toBeNull()
+        expect(screen.getByText("remote pixel")).toBeInTheDocument()
+    })
+
     it("error: the failed question stays visible above the error", () => {
         renderPanel({ phase: "error", question: "why crash?", error: "boom" })
         expect(screen.getByText("why crash?")).toBeInTheDocument()

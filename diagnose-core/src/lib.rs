@@ -55,15 +55,15 @@ pub const DEFAULT_MAX_CONTEXT_BYTES: usize = 131_072;
 /// One round is one model response and may request multiple tools; the final
 /// answer also consumes a round. The counter resets when a new user turn is
 /// claimed.
-pub const MAX_STEPS_PER_TURN: u32 = 20;
+pub const MAX_STEPS_PER_TURN: u32 = 40;
 pub const MIN_STEPS_PER_TURN: u32 = 1;
-pub const MAX_STEPS_PER_TURN_LIMIT: u32 = 50;
+pub const MAX_STEPS_PER_TURN_LIMIT: u32 = 80;
 
 /// Circuit-breaker bound on how many times the **same** tool may be invoked within
 /// a single turn, catching a model stuck re-calling one tool. Turn-level like
 /// [`MAX_STEPS_PER_TURN`]. Runtimes may expose an operator setting and pass a
 /// value within [`MIN_SAME_TOOL_PER_TURN`]..=[`MAX_SAME_TOOL_PER_TURN_LIMIT`];
 /// this constant is the fallback default.
-pub const MAX_SAME_TOOL_PER_TURN: u32 = 10;
+pub const MAX_SAME_TOOL_PER_TURN: u32 = 20;
 pub const MIN_SAME_TOOL_PER_TURN: u32 = 1;
 pub const MAX_SAME_TOOL_PER_TURN_LIMIT: u32 = 50;

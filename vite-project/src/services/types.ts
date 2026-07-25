@@ -1730,7 +1730,7 @@ export type ModelProviderPublic = {
     max_same_tool_calls_per_turn: number;
     /**
      * @minLength 1
-     * @maxLength 50
+     * @maxLength 80
      * @type integer, int32
     */
     max_steps_per_turn: number;
@@ -1776,9 +1776,9 @@ export type ModelProviderUpdate = {
     */
     max_same_tool_calls_per_turn?: number | null;
     /**
-     * @description Per-turn model reasoning-round budget. Must be at least the same-tool\nrepeat limit. Valid range: 1..=50.
+     * @description Per-turn model reasoning-round budget. Must be at least the same-tool\nrepeat limit. Valid range: 1..=80.
      * @minLength 1
-     * @maxLength 50
+     * @maxLength 80
      * @type integer,null, int32
     */
     max_steps_per_turn?: number | null;
@@ -2429,7 +2429,7 @@ export type RestResponseModelProviderPublic = {
         max_same_tool_calls_per_turn: number;
         /**
          * @minLength 1
-         * @maxLength 50
+         * @maxLength 80
          * @type integer, int32
         */
         max_steps_per_turn: number;

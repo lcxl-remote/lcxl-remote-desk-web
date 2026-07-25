@@ -39,6 +39,7 @@ graph LR
 - **Owner-Confirmed Actions** — in Confirm Each Action / Session Approved mode, the authenticated owner may approve an off-template PowerShell, pwsh, bash, or sh command. It is always shown as **Critical** and only the effective blocklist is claimed to have been checked.
 - **No Autonomous Approval** — the model may request a command, but it cannot approve its own request. Fleet, automation, MCP, shared-access, and non-owner paths remain template-only or non-executable.
 - **Bounded, Continuable Turns** — the central loop stops after too many calls to the same tool type. Completed output and tool results remain visible and persisted, so the user can send a follow-up such as “continue” in the same conversation.
+- **Readable Answers** — assistant prose is rendered as GitHub-flavored Markdown, including headings, lists, code, and tables. Raw HTML is ignored and model-supplied image URLs are not loaded.
 - **Shared Core** — the transport-neutral diagnostic logic lives in the `desk-diagnose-core` crate, reused by the central brain so behavior never drifts.
 
 ::: tip DeskServer-only mode has no local brain
@@ -47,7 +48,7 @@ A headless `desk-server` is a pure thin edge: it has **no embedded signaling ser
 
 ## Configuration
 
-The **model provider** (provider, base URL, model, API key, output format, granted execution mode, per-turn reasoning-round limit, and per-turn same-tool call limit) is configured on the **central signaling server**. The reasoning-round limit defaults to **20**, accepts **1–50**, counts model responses rather than individual tool calls, and cannot be lower than the same-tool limit. The same-tool limit defaults to **10**, accepts **1–50**, and counts calls to one tool type even when its arguments differ. Both are independent of the Desk Server's simultaneous-command-process limit. **API keys are strictly server-side secrets** — they are never returned to the browser, never written to logs, and never included in any public settings DTO.
+The **model provider** (provider, base URL, model, API key, output format, granted execution mode, per-turn reasoning-round limit, and per-turn same-tool call limit) is configured on the **central signaling server**. The reasoning-round limit defaults to **40**, accepts **1–80**, counts model responses rather than individual tool calls, and cannot be lower than the same-tool limit. The same-tool limit defaults to **20**, accepts **1–50**, and counts calls to one tool type even when its arguments differ. Both are independent of the Desk Server's simultaneous-command-process limit. **API keys are strictly server-side secrets** — they are never returned to the browser, never written to logs, and never included in any public settings DTO.
 
 A **Test connection** button next to Save probes the **saved** provider config end-to-end: it sends a tiny chat request (a one-word reply) through the configured base URL / API key / model and reports the latency and a reply snippet, or the real upstream reason on failure. It runs against the stored config, so save your edits before testing. The API key stays server-side throughout.
 

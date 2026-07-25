@@ -89,6 +89,32 @@ describe("AiModelSettings", () => {
         expect(h.providerMutateAsync).not.toHaveBeenCalled()
     })
 
+    it("uses the raised 40-round and 20-call defaults when limits are absent", async () => {
+        delete h.providerData.max_steps_per_turn
+        delete h.providerData.max_same_tool_calls_per_turn
+        render(<AiModelSettings />)
+        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+
+        fireEvent.click(screen.getAllByText("Save Settings")[0])
+        await waitFor(() => expect(h.providerMutateAsync).toHaveBeenCalled())
+
+        expect(lastProviderPayload().max_steps_per_turn).toBe(40)
+        expect(lastProviderPayload().max_same_tool_calls_per_turn).toBe(20)
+    })
+
+    it("accepts an 80-round limit", async () => {
+        render(<AiModelSettings />)
+        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+
+        fireEvent.change(screen.getByLabelText("Model reasoning rounds per turn"), {
+            target: { value: "80" },
+        })
+        fireEvent.click(screen.getAllByText("Save Settings")[0])
+        await waitFor(() => expect(h.providerMutateAsync).toHaveBeenCalled())
+
+        expect(lastProviderPayload().max_steps_per_turn).toBe(80)
+    })
+
     it("includes a typed api_key in the provider payload", async () => {
         render(<AiModelSettings />)
         const keyInput = await screen.findByPlaceholderText(/Configured/i)

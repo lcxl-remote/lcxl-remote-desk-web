@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { AiGeneratedMark } from "@/components/ai-generated-mark"
+import { MarkdownContent } from "@/components/markdown-content"
 import { agentErrorMessage } from "@/lib/agent-error-i18n"
 import {
     extractStreamingSummary,
@@ -238,9 +239,9 @@ export function DiagnosePanel({
                                     marked. Driven by the AI text being present
                                     (fail-closed); the model is not yet known mid-stream. */}
                                 <AiGeneratedMark className="self-start border-white/25 bg-white/10 text-white/80" />
-                                <p className="whitespace-pre-wrap text-sm text-white/90">
+                                <MarkdownContent className="text-sm text-white/90">
                                     {streamingSummary}
-                                </p>
+                                </MarkdownContent>
                             </div>
                         )}
                         <ToolTimeline tools={state.tools} />
@@ -271,9 +272,9 @@ export function DiagnosePanel({
                                     provenance={state.provenance}
                                     className="self-start border-white/25 bg-white/10 text-white/80"
                                 />
-                                <p className="whitespace-pre-wrap text-sm text-white/90">
+                                <MarkdownContent className="text-sm text-white/90">
                                     {streamingSummary}
-                                </p>
+                                </MarkdownContent>
                             </div>
                         )}
                         <ToolTimeline tools={state.tools} />
@@ -325,9 +326,9 @@ export function DiagnosePanel({
                                             )}
                                         </Badge>
                                     </div>
-                                    <p className="whitespace-pre-wrap text-sm text-white/90">
+                                    <MarkdownContent className="text-sm text-white/90">
                                         {result.summary}
-                                    </p>
+                                    </MarkdownContent>
                                 </section>
 
                                 {/* Findings / evidence */}
@@ -475,9 +476,9 @@ export function DiagnosePanel({
                                     <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
                                         {t("pages.desk.diagnose.answer")}
                                     </h3>
-                                    <p className="whitespace-pre-wrap text-sm text-white/90">
+                                    <MarkdownContent className="text-sm text-white/90">
                                         {state.answer || streamingSummary}
-                                    </p>
+                                    </MarkdownContent>
                                 </section>
                             </div>
                         ) : (
@@ -485,9 +486,9 @@ export function DiagnosePanel({
                             <div className="flex flex-col gap-2">
                                 <ToolTimeline tools={state.tools} />
                                 {streamingSummary ? (
-                                    <p className="whitespace-pre-wrap text-sm text-white/90">
+                                    <MarkdownContent className="text-sm text-white/90">
                                         {streamingSummary}
-                                    </p>
+                                    </MarkdownContent>
                                 ) : (
                                     <p className="text-sm text-white/60">
                                         {t(

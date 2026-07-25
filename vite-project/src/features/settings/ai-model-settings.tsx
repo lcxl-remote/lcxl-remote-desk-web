@@ -29,11 +29,11 @@ const PROVIDERS = ["openai-compatible", "anthropic"] as const
 // rejects them), so they are intentionally omitted here.
 const EXECUTION_MODES = ["suggest_only", "read_only", "confirm_each_action"] as const
 const MAX_STEPS_MIN = 1
-const MAX_STEPS_MAX = 50
-const MAX_STEPS_DEFAULT = 20
+const MAX_STEPS_MAX = 80
+const MAX_STEPS_DEFAULT = 40
 const SAME_TOOL_LIMIT_MIN = 1
 const SAME_TOOL_LIMIT_MAX = 50
-const SAME_TOOL_LIMIT_DEFAULT = 10
+const SAME_TOOL_LIMIT_DEFAULT = 20
 
 const providerSchema = z.object({
     provider: z.enum(PROVIDERS),
