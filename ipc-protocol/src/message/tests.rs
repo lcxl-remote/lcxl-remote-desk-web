@@ -1933,7 +1933,9 @@ fn sample_agent_envelope() -> desk_agent_protocol::AgentEnvelope {
 
 fn sample_exec_plan() -> desk_agent_protocol::exec::ExecPlan {
     use desk_agent_protocol::RiskLevel;
-    use desk_agent_protocol::exec::{ApprovalId, ExecPlan, ExecRequestId, ExecShellKind};
+    use desk_agent_protocol::exec::{
+        ApprovalId, ExecExecutionBasis, ExecPlan, ExecRequestId, ExecShellKind,
+    };
     ExecPlan {
         execution_generation: "gen-1".into(),
         exec_request_id: ExecRequestId("exec-1".to_string()),
@@ -1942,6 +1944,7 @@ fn sample_exec_plan() -> desk_agent_protocol::exec::ExecPlan {
         cwd: None,
         shell: ExecShellKind::Native,
         risk: RiskLevel::High,
+        execution_basis: ExecExecutionBasis::Template,
         template_id: "docker_restart".to_string(),
         approval_id: ApprovalId("appr-1".to_string()),
         fingerprint: "fp".to_string(),
