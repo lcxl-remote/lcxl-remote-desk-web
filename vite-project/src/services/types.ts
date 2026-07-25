@@ -1044,6 +1044,11 @@ export type SnapshotToolCallDto = {
 
 export type SnapshotMessageDto = {
     /**
+     * @description Server-issued id that correlates a delayed background completion with\nthe task originally returned by `exec_command`.
+     * @type string,null
+    */
+    backgroundTaskId?: string | null;
+    /**
      * @type string
     */
     id: string;

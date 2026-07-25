@@ -67,6 +67,7 @@ impl SignalAgentSessionStore {
         event_id: &str,
         execution_id: &str,
         tool_call_id: &str,
+        background_task_id: &str,
         result_text: &str,
         now: &str,
     ) -> Result<EventAppend, AgentError> {
@@ -88,7 +89,14 @@ impl SignalAgentSessionStore {
             {
                 return Ok(EventAppend::Busy);
             }
-            if !session.apply_completion(event_id, execution_id, tool_call_id, result_text, now) {
+            if !session.apply_completion(
+                event_id,
+                execution_id,
+                tool_call_id,
+                background_task_id,
+                result_text,
+                now,
+            ) {
                 return Ok(EventAppend::AlreadyPresent);
             }
             session.add_pending_auto_trigger(PendingAutoTrigger {
@@ -354,6 +362,7 @@ impl SessionSeam for SignalAgentSessionStore {
                                         &task.event_id,
                                         &task.execution_generation,
                                         &task.tool_call_id,
+                                        &task.exec_request_id,
                                         result_text,
                                         params.now.clone(),
                                     );
@@ -646,6 +655,7 @@ mod tests {
                     "event-1",
                     "generation-1",
                     "call-1",
+                    "task-1",
                     "done",
                     &Utc::now().to_rfc3339(),
                 )
@@ -676,6 +686,7 @@ mod tests {
                     "event-1",
                     "generation-1",
                     "call-1",
+                    "task-1",
                     "done",
                     &now,
                 )
@@ -691,6 +702,7 @@ mod tests {
                     "event-1",
                     "generation-1",
                     "call-1",
+                    "task-1",
                     "done",
                     &now,
                 )
@@ -707,7 +719,9 @@ mod tests {
             saved
                 .conversation
                 .iter()
-                .any(|message| message.message_id == "event-1" && message.text == "done")
+                .any(|message| message.message_id == "event-1"
+                    && message.background_task_id.as_deref() == Some("task-1")
+                    && message.text == "done")
         );
 
         assert_eq!(

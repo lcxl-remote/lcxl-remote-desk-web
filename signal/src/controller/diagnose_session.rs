@@ -45,6 +45,10 @@ pub struct SnapshotMessageDto {
     pub tool_calls: Vec<SnapshotToolCallDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Server-issued id that correlates a delayed background completion with
+    /// the task originally returned by `exec_command`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_task_id: Option<String>,
 }
 
 impl From<ChatMessage> for SnapshotMessageDto {
@@ -63,6 +67,7 @@ impl From<ChatMessage> for SnapshotMessageDto {
                 })
                 .collect(),
             tool_call_id: message.tool_call_id,
+            background_task_id: message.background_task_id,
         }
     }
 }
@@ -161,5 +166,10 @@ mod tests {
         assert_eq!(value["id"], "m1");
         assert_eq!(value["toolCalls"][0]["argumentsJson"], "{}");
         assert!(value.get("tool_calls").is_none());
+
+        let completion = ChatMessage::untrusted_output("done-1", "call-1", "task-1", "exit_code=0");
+        let value = serde_json::to_value(SnapshotMessageDto::from(completion)).unwrap();
+        assert_eq!(value["backgroundTaskId"], "task-1");
+        assert!(value.get("background_task_id").is_none());
     }
 }

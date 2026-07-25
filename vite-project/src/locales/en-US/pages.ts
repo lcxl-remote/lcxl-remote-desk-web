@@ -579,6 +579,8 @@ export default {
   'pages.desk.diagnose.answer': 'Answer',
   'pages.desk.diagnose.backgroundRunning': 'A command is still running in the background',
   'pages.desk.diagnose.backgroundFinished': 'Background task finished',
+  'pages.desk.diagnose.backgroundDispatched': 'Moved to background',
+  'pages.desk.diagnose.backgroundTaskId': 'Task ID',
   'pages.desk.diagnose.backgroundCancel': 'Cancel command',
   'pages.desk.diagnose.backgroundCancelling': 'Cancelling…',
   'pages.desk.diagnose.newDiagnosis': 'New diagnosis',

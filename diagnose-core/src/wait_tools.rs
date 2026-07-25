@@ -21,8 +21,8 @@ pub const WAIT_TOOL_NAME: &str = "wait_for_task";
 /// The wait tool's model-facing arguments.
 #[derive(Debug, Clone, Deserialize, Default)]
 struct WaitTaskParams {
-    /// The id of the background task to wait on — the `exec_request_id` the dispatch
-    /// tool result named ("dispatched as background task <id>").
+    /// The id of the background task to wait on — the `background_task_id` field
+    /// returned by the dispatch tool result.
     #[serde(default)]
     task_id: String,
 }
@@ -46,9 +46,9 @@ pub fn wait_tool_registry() -> Vec<RegisteredTool> {
         spec: ToolSpec {
             name: WAIT_TOOL_NAME.to_string(),
             description: "Wait for a previously dispatched background command to \
-                finish and return its result. Pass the task id from the dispatch \
-                message. Returns promptly if it is still running so you can keep \
-                working or wait again."
+                finish and return its result. Pass `background_task_id` from the \
+                structured dispatch result. Returns promptly if it is still running \
+                so you can keep working or wait again."
                 .to_string(),
             parameters_schema: json!({
                 "type": "object",

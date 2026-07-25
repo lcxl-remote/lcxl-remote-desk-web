@@ -438,6 +438,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                             status: event.awaiting_approval ? 'awaiting_approval' : 'running',
                             argumentsJson: event.tool_arguments_json ?? '',
                             output: null,
+                            backgroundTaskId: null,
                         };
                         let timeline = prev.timeline;
                         if (streamed) {
@@ -469,6 +470,9 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                                     ...activity,
                                     status,
                                     output: event.tool_output ?? '',
+                                    backgroundTaskId:
+                                        event.background_task_id ??
+                                        activity.backgroundTaskId,
                                 }),
                             ),
                         };

@@ -169,18 +169,22 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
         ));
     }
 
-    fn on_tool_finished(&mut self, call_id: &str, ok: bool, output: &str) {
+    fn on_tool_finished(
+        &mut self,
+        call_id: &str,
+        ok: bool,
+        output: &str,
+        background_task_id: Option<&str>,
+    ) {
         if self.terminated {
             return;
         }
         let seq = self.next_seq();
-        self.sink.emit(DiagnoseEvent::tool_finished(
-            &self.request_id,
-            seq,
-            call_id,
-            ok,
-            output,
-        ));
+        let mut event = DiagnoseEvent::tool_finished(&self.request_id, seq, call_id, ok, output);
+        if let Some(background_task_id) = background_task_id {
+            event = event.with_background_task_id(background_task_id);
+        }
+        self.sink.emit(event);
     }
 
     fn on_answer_committed(&mut self, text: &str) {
@@ -284,7 +288,7 @@ mod tests {
         let mut b = StreamingTurnSink::new(sink, "req-1");
         b.turn_started("turn-1");
         b.on_tool_started("sysinfo", "c1", r#"{"limit":5}"#);
-        b.on_tool_finished("c1", true, "five processes");
+        b.on_tool_finished("c1", true, "five processes", None);
         b.on_answer_committed("all good");
 
         let ev = store.borrow();
@@ -310,9 +314,26 @@ mod tests {
         assert!(!ev[1].awaiting_approval);
         assert_eq!(ev[2].tool_ok, Some(true));
         assert_eq!(ev[2].tool_output.as_deref(), Some("five processes"));
+        assert!(ev[2].background_task_id.is_none());
         assert_eq!(ev[3].answer.as_deref(), Some("all good"));
         assert!(ev[3].is_terminal());
         assert!(b.is_terminated());
+    }
+
+    #[test]
+    fn background_dispatch_frame_carries_structured_task_id() {
+        let (store, sink) = recorder();
+        let mut bridge = StreamingTurnSink::new(sink, "req-1");
+        bridge.on_tool_finished(
+            "c1",
+            true,
+            r#"{"status":"background_running","background_task_id":"exec_task_1"}"#,
+            Some("exec_task_1"),
+        );
+
+        let events = store.borrow();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].background_task_id.as_deref(), Some("exec_task_1"));
     }
 
     /// An injected provenance is stamped onto the terminal `Answer` frame so the

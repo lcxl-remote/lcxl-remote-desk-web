@@ -665,6 +665,7 @@ impl PersistedAgentSession {
         event_id: &str,
         execution_id: &str,
         tool_call_id: &str,
+        background_task_id: &str,
         result_text: impl Into<String>,
         now: impl Into<String>,
     ) -> bool {
@@ -692,6 +693,7 @@ impl PersistedAgentSession {
             {
                 msg.text = result_text;
                 msg.message_id = event_id.to_string();
+                msg.background_task_id = Some(background_task_id.to_string());
             }
             self.execution_state = ExecutionState::None;
             self.updated_at = now;
@@ -705,17 +707,16 @@ impl PersistedAgentSession {
             .iter()
             .any(|id| id == tool_call_id);
         if open {
-            self.conversation
-                .push(crate::chat::ChatMessage::tool_result(
-                    event_id,
-                    tool_call_id,
-                    result_text,
-                ));
+            let mut message =
+                crate::chat::ChatMessage::tool_result(event_id, tool_call_id, result_text);
+            message.background_task_id = Some(background_task_id.to_string());
+            self.conversation.push(message);
         } else {
             self.conversation
                 .push(crate::chat::ChatMessage::untrusted_output(
                     event_id,
                     tool_call_id,
+                    background_task_id,
                     result_text,
                 ));
         }
@@ -1296,7 +1297,7 @@ mod tests {
         };
         let base = s.conversation.len();
 
-        assert!(s.apply_completion("work:8:done", "e9", "call-1", "exit_code=0", "t1"));
+        assert!(s.apply_completion("work:8:done", "e9", "call-1", "task-9", "exit_code=0", "t1"));
         assert_eq!(s.conversation.len(), base + 1);
         let ev = s.conversation.last().unwrap();
         assert_eq!(ev.message_id, "work:8:done");
@@ -1311,6 +1312,7 @@ mod tests {
             Some("call-1"),
             "the snapshot can associate the late completion with its tool card"
         );
+        assert_eq!(ev.background_task_id.as_deref(), Some("task-9"));
         assert_eq!(
             s.execution_state,
             ExecutionState::None,
@@ -1318,7 +1320,7 @@ mod tests {
         );
 
         // Redelivery of the same event is a no-op.
-        assert!(!s.apply_completion("work:8:done", "e9", "call-1", "exit_code=0", "t2"));
+        assert!(!s.apply_completion("work:8:done", "e9", "call-1", "task-9", "exit_code=0", "t2"));
         assert_eq!(s.conversation.len(), base + 1);
     }
 
@@ -1340,7 +1342,7 @@ mod tests {
         // No tool result for call-1 yet — the call is open.
         assert_eq!(s.unclosed_tool_call_ids(), vec!["call-1".to_string()]);
 
-        assert!(s.apply_completion("work:8:done", "e9", "call-1", "exit_code=0", "t1"));
+        assert!(s.apply_completion("work:8:done", "e9", "call-1", "task-9", "exit_code=0", "t1"));
         assert!(
             s.unclosed_tool_call_ids().is_empty(),
             "the call is now closed"
@@ -1349,6 +1351,7 @@ mod tests {
         assert_eq!(msg.message_id, "work:8:done");
         assert_eq!(msg.role, ChatRole::Tool);
         assert_eq!(msg.tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(msg.background_task_id.as_deref(), Some("task-9"));
         assert_eq!(msg.text, "exit_code=0");
     }
 
@@ -1371,7 +1374,7 @@ mod tests {
         };
         let base = s.conversation.len();
 
-        assert!(s.apply_completion("work:8:done", "e9", "call-1", "exit_code=0", "t1"));
+        assert!(s.apply_completion("work:8:done", "e9", "call-1", "task-9", "exit_code=0", "t1"));
         assert_eq!(s.conversation.len(), base, "no second result appended");
         assert_eq!(s.execution_state, ExecutionState::None);
         let msg = s
@@ -1383,7 +1386,7 @@ mod tests {
         assert_eq!(msg.message_id, "work:8:done", "the placeholder is re-keyed");
 
         // Redelivery finds the re-keyed message present and is a no-op.
-        assert!(!s.apply_completion("work:8:done", "e9", "call-1", "again", "t2"));
+        assert!(!s.apply_completion("work:8:done", "e9", "call-1", "task-9", "again", "t2"));
         assert_eq!(s.conversation.len(), base);
     }
 
@@ -1398,7 +1401,7 @@ mod tests {
             "exit_code=0",
         ));
         let base = s.conversation.len();
-        assert!(!s.apply_completion("work:8:done", "e9", "call-1", "exit_code=0", "t1"));
+        assert!(!s.apply_completion("work:8:done", "e9", "call-1", "task-9", "exit_code=0", "t1"));
         assert_eq!(s.conversation.len(), base);
     }
 
@@ -1410,11 +1413,10 @@ mod tests {
     fn mark_execution_unknown_transitions_and_anchors_the_placeholder() {
         let mut s = session();
         // The dispatch closed the call with a running-task placeholder.
-        s.conversation.push(crate::chat::ChatMessage::tool_result(
-            "run-1",
-            "call-1",
-            "dispatched as background task exec_t9; still running",
-        ));
+        s.conversation
+            .push(crate::chat::ChatMessage::background_task_running(
+                "run-1", "call-1", "exec_t9",
+            ));
         s.execution_state = ExecutionState::Executing {
             work_id: 8,
             execution_id: "e9".into(),

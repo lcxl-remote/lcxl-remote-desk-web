@@ -306,6 +306,7 @@ describe('useDeskDiagnose', () => {
                     status: 'running',
                     argumentsJson: '{"detail":true}',
                     output: null,
+                    backgroundTaskId: null,
                 },
             },
         ]);
@@ -323,8 +324,9 @@ describe('useDeskDiagnose', () => {
         expect(result.current.state.timeline[1]).toMatchObject({
             kind: 'tool',
             activity: {
-            status: 'ok',
-            output: 'hostname=desk-1',
+                status: 'ok',
+                output: 'hostname=desk-1',
+                backgroundTaskId: null,
             },
         });
 
@@ -537,6 +539,42 @@ describe('useDeskDiagnose', () => {
         expect(sendMessage).not.toHaveBeenCalled();
     });
 
+    it('stores a background dispatch id separately from the model-facing JSON result', () => {
+        const { result, feed } = renderDiagnose();
+        act(() => result.current.start('run a long command', {}));
+
+        feed(
+            frame({
+                request_id: 'req-1',
+                seq: 0,
+                kind: 'tool_started',
+                tool_name: 'exec_command',
+                tool_call_id: 'c1',
+                tool_arguments_json: '{"command":"Start-Sleep -Seconds 30"}',
+            }),
+        );
+        feed(
+            frame({
+                request_id: 'req-1',
+                seq: 1,
+                kind: 'tool_finished',
+                tool_call_id: 'c1',
+                tool_ok: true,
+                tool_output:
+                    '{"status":"background_running","background_task_id":"exec_task_30"}',
+                background_task_id: 'exec_task_30',
+            }),
+        );
+
+        expect(result.current.state.timeline[0]).toMatchObject({
+            kind: 'tool',
+            activity: {
+                status: 'ok',
+                backgroundTaskId: 'exec_task_30',
+            },
+        });
+    });
+
     it('rejects an agentic ExecPreview with a reject decision', () => {
         const { result, feed } = renderDiagnose();
         act(() => result.current.start('restart nginx', {}));
@@ -658,6 +696,7 @@ describe('useDeskDiagnose', () => {
                     status: 'ok',
                     argumentsJson: '{"command":"ps"}',
                     output: 'pid=4242',
+                    backgroundTaskId: null,
                 },
             },
         ]);
@@ -685,6 +724,7 @@ describe('useDeskDiagnose', () => {
                     status: 'ok',
                     argumentsJson: '{"command":"ps"}',
                     output: 'pid=4242',
+                    backgroundTaskId: null,
                 },
             },
         ]);
@@ -772,14 +812,17 @@ describe('buildSnapshotTranscript', () => {
             {
                 id: 't1',
                 role: 'tool',
-                text: 'command dispatched as background task',
+                text:
+                    '{"status":"background_running","background_task_id":"exec_task_1"}',
                 toolCallId: 'c1',
+                backgroundTaskId: 'exec_task_1',
             },
             {
                 id: 'out1',
                 role: 'untrusted_output',
                 text: 'exit_code=0',
                 toolCallId: 'c1',
+                backgroundTaskId: 'exec_task_1',
             },
             { id: 'a2', role: 'assistant', text: 'The restart succeeded (exit 0).' },
         ];
@@ -793,12 +836,17 @@ describe('buildSnapshotTranscript', () => {
         ]);
         expect(turns[0].timeline[1]).toMatchObject({
             kind: 'tool',
-            activity: { output: 'command dispatched as background task' },
+            activity: {
+                output:
+                    '{"status":"background_running","background_task_id":"exec_task_1"}',
+                backgroundTaskId: 'exec_task_1',
+            },
         });
         expect(turns[0].timeline[2]).toEqual({
             kind: 'background_completion',
             id: 'out1',
             toolCallId: 'c1',
+            taskId: 'exec_task_1',
             output: 'exit_code=0',
         });
     });
@@ -827,6 +875,7 @@ describe('buildSnapshotTranscript', () => {
                     status: 'ok',
                     argumentsJson: '{}',
                     output: '90% full',
+                    backgroundTaskId: null,
                 },
             },
             {

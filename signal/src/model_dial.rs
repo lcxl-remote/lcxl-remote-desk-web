@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_diagnose_core::chat::{
     ChatMessage, ChatRole, ModelTurn, StopReason, TokenUsage, ToolCall, ToolChoice,
-    frame_untrusted_output,
+    frame_background_task_output, frame_untrusted_output,
 };
 use desk_diagnose_core::prompt::ResponseFormatSpec;
 use desk_diagnose_core::seam::{ModelRequest, ModelSeam, TurnSink};
@@ -495,7 +495,12 @@ fn openai_message_to_json(m: &ChatMessage) -> Value {
     // fenced `user` turn — never `system` — so device bytes cannot steer the model.
     // Kept in step with the agentic adapter via the shared fence.
     if m.role == ChatRole::UntrustedOutput {
-        return json!({ "role": "user", "content": frame_untrusted_output(&m.text) });
+        let content = m
+            .background_task_id
+            .as_deref()
+            .map(|task_id| frame_background_task_output(task_id, &m.text))
+            .unwrap_or_else(|| frame_untrusted_output(&m.text));
+        return json!({ "role": "user", "content": content });
     }
     let content = match &m.image_data_url {
         Some(url) => json!([
@@ -731,9 +736,14 @@ fn anthropic_message_to_json(m: &ChatMessage) -> Value {
     // Completed command output for an already-closed call: a fenced `user` turn via
     // the shared fence, so device bytes are read as inert data, not instructions.
     if m.role == ChatRole::UntrustedOutput {
+        let content = m
+            .background_task_id
+            .as_deref()
+            .map(|task_id| frame_background_task_output(task_id, &m.text))
+            .unwrap_or_else(|| frame_untrusted_output(&m.text));
         return json!({
             "role": "user",
-            "content": frame_untrusted_output(&m.text),
+            "content": content,
         });
     }
     if m.role == ChatRole::Assistant && !m.tool_calls.is_empty() {
@@ -1221,7 +1231,7 @@ mod tests {
         let req = ModelRequest::text_only(
             vec![
                 ChatMessage::text("s", ChatRole::System, "rules"),
-                ChatMessage::untrusted_output("ev", "call", injection),
+                ChatMessage::untrusted_output("ev", "call", "task-1", injection),
             ],
             ResponseFormatSpec::None,
         );
@@ -1231,6 +1241,7 @@ mod tests {
         let oc = openai["messages"][1]["content"].as_str().unwrap();
         assert!(oc.starts_with(UNTRUSTED_OUTPUT_OPEN));
         assert!(oc.ends_with(UNTRUSTED_OUTPUT_CLOSE));
+        assert!(oc.contains("background_task_id: task-1"));
         assert!(oc.contains(injection));
 
         let anthropic = build_anthropic_body("claude-x", &req);
@@ -1240,6 +1251,7 @@ mod tests {
         assert_eq!(msgs[0]["role"], "user");
         let ac = msgs[0]["content"].as_str().unwrap();
         assert!(ac.starts_with(UNTRUSTED_OUTPUT_OPEN));
+        assert!(ac.contains("background_task_id: task-1"));
         assert!(ac.contains(injection));
     }
 

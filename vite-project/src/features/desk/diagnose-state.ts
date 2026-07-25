@@ -79,6 +79,8 @@ export type DiagnoseEvent = {
     tool_ok?: boolean | null;
     /** `tool_finished`: redacted, bounded output returned to the model. */
     tool_output?: string | null;
+    /** `tool_finished`: stable id when execution continues in the background. */
+    background_task_id?: string | null;
     /** `answer`: the agentic turn's final natural-language answer. */
     answer?: string | null;
     /** `final` / `answer`: machine-readable AI marking for the content frame. */
@@ -95,6 +97,7 @@ export type ToolActivity = {
     status: ToolActivityStatus;
     argumentsJson: string;
     output: string | null;
+    backgroundTaskId: string | null;
 };
 
 /** One visible item in an agentic turn, kept in backend message order. */
@@ -114,6 +117,7 @@ export type DiagnoseTimelineItem =
           kind: 'background_completion';
           id: string;
           toolCallId: string | null;
+          taskId: string | null;
           output: string;
       };
 
@@ -364,6 +368,7 @@ export type SnapshotMessage = {
     text: string;
     toolCalls?: { id: string; name: string; argumentsJson: string }[];
     toolCallId?: string | null;
+    backgroundTaskId?: string | null;
 };
 
 /** A settled snapshot: the persisted transcript plus a monotonic sequence. */
@@ -430,6 +435,7 @@ export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHi
                         status: 'ok',
                         argumentsJson: tc.argumentsJson,
                         output: null,
+                        backgroundTaskId: null,
                     },
                 });
             }
@@ -442,6 +448,8 @@ export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHi
                               ...item.activity,
                               status: 'ok',
                               output: m.text,
+                              backgroundTaskId:
+                                  m.backgroundTaskId ?? item.activity.backgroundTaskId,
                           },
                       }
                     : item,
@@ -451,6 +459,7 @@ export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHi
                 kind: 'background_completion',
                 id: m.id,
                 toolCallId: m.toolCallId ?? null,
+                taskId: m.backgroundTaskId ?? null,
                 output: m.text,
             });
         }

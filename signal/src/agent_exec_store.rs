@@ -241,6 +241,7 @@ impl SignalAgentExecStore {
                         &task.event_id,
                         &task.execution_generation,
                         &task.tool_call_id,
+                        &task.exec_request_id,
                         task.result_text.as_deref().unwrap_or("execution completed"),
                         &now,
                     )

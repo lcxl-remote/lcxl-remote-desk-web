@@ -944,6 +944,7 @@ async fn reacting_to_a_completion_clears_its_pending_trigger() {
     seeded.conversation.push(ChatMessage::untrusted_output(
         "done-1",
         "call-1",
+        "task-1",
         "exit_code=0",
     ));
     seeded.add_pending_auto_trigger(PendingAutoTrigger {
@@ -1005,6 +1006,7 @@ async fn resume_runs_against_the_existing_tail_without_appending() {
     seeded.conversation.push(ChatMessage::untrusted_output(
         "done-1",
         "call-1",
+        "task-1",
         "exit_code=0",
     ));
     seeded.add_pending_auto_trigger(PendingAutoTrigger {
@@ -1108,6 +1110,13 @@ async fn mutating_unknown_closes_with_placeholder_and_hides_mutating() {
     // The follow-up model call did not advertise the mutating tool (no new
     // mutation while an outcome is unknown), but kept the read tool.
     let reqs = model.requests.borrow();
+    let replayed_dispatch = reqs[1]
+        .messages
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("c1"))
+        .expect("the model follow-up sees the dispatch result");
+    let replayed_json: serde_json::Value = serde_json::from_str(&replayed_dispatch.text).unwrap();
+    assert_eq!(replayed_json["background_task_id"], "exec_task9");
     let follow_up: Vec<_> = reqs[1].tools.iter().map(|t| t.name.clone()).collect();
     assert!(!follow_up.contains(&"exec_command".to_string()));
     assert!(follow_up.contains(&"read_sys".to_string()));
@@ -1176,8 +1185,14 @@ async fn mutating_dispatched_closes_with_task_id_and_hides_mutating() {
         .iter()
         .find(|m| m.tool_call_id.as_deref() == Some("c1"))
         .unwrap();
-    assert!(closed.text.contains("background task"));
-    assert!(closed.text.contains("exec_task9"));
+    assert_eq!(
+        closed.background_task_id.as_deref(),
+        Some("exec_task9"),
+        "the UI correlation id is persisted separately from model output"
+    );
+    let dispatch: serde_json::Value = serde_json::from_str(&closed.text).unwrap();
+    assert_eq!(dispatch["status"], "background_running");
+    assert_eq!(dispatch["background_task_id"], "exec_task9");
     // A dispatched task leaves its completion delivery for the publisher — the
     // foreground never acks it.
     assert!(scripted.acks.borrow().is_empty());
@@ -1321,7 +1336,10 @@ async fn wait_for_task_still_running_keeps_the_task() {
         .iter()
         .find(|m| m.tool_call_id.as_deref() == Some("c2"))
         .unwrap();
-    assert!(result.text.contains("still running"));
+    assert_eq!(result.background_task_id.as_deref(), Some("exec_task9"));
+    let dispatch: serde_json::Value = serde_json::from_str(&result.text).unwrap();
+    assert_eq!(dispatch["status"], "background_running");
+    assert_eq!(dispatch["background_task_id"], "exec_task9");
     assert!(scripted.acks.borrow().is_empty());
 }
 
@@ -1708,10 +1726,19 @@ impl TurnSink for EventLog {
             .borrow_mut()
             .push(format!("approval:{tool_name}:{call_id}:{arguments_json}"));
     }
-    fn on_tool_finished(&mut self, call_id: &str, ok: bool, output: &str) {
+    fn on_tool_finished(
+        &mut self,
+        call_id: &str,
+        ok: bool,
+        output: &str,
+        background_task_id: Option<&str>,
+    ) {
+        let background = background_task_id
+            .map(|id| format!(":{id}"))
+            .unwrap_or_default();
         self.0
             .borrow_mut()
-            .push(format!("finished:{call_id}:{ok}:{output}"));
+            .push(format!("finished:{call_id}:{ok}:{output}{background}"));
     }
     fn on_answer_committed(&mut self, text: &str) {
         self.0.borrow_mut().push(format!("answer:{text}"));

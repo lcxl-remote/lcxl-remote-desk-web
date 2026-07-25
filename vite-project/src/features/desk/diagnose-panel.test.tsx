@@ -32,9 +32,20 @@ const assistantItem = (
     provenance: DiagnoseState["provenance"] = null,
 ) => ({ kind: "assistant" as const, id, text, provenance });
 
+type TestToolActivity = Extract<
+    DiagnoseState["timeline"][number],
+    { kind: "tool" }
+>["activity"];
+
 const toolItem = (
-    activity: Extract<DiagnoseState["timeline"][number], { kind: "tool" }>["activity"],
-) => ({ kind: "tool" as const, id: activity.callId, activity });
+    activity: Omit<TestToolActivity, "backgroundTaskId"> & {
+        backgroundTaskId?: string | null;
+    },
+) => ({
+    kind: "tool" as const,
+    id: activity.callId,
+    activity: { backgroundTaskId: null, ...activity },
+});
 
 function renderPanel(state: Partial<DiagnoseState>) {
     const onStart = vi.fn();
@@ -146,7 +157,7 @@ describe("DiagnosePanel", () => {
         expect(screen.getByText("network.ports")).toBeInTheDocument();
     });
 
-    it("does not label a tool-only background turn as handed off", () => {
+    it("renders a background dispatch as localized status and a structured task id", () => {
         renderPanel({
             phase: "done",
             backgroundExecution: {
@@ -165,7 +176,9 @@ describe("DiagnosePanel", () => {
                             name: "exec_command",
                             status: "ok",
                             argumentsJson: '{"command":"Start-Sleep -Seconds 30"}',
-                            output: "command dispatched as background task",
+                            output:
+                                '{"status":"background_running","background_task_id":"exec_task_30"}',
+                            backgroundTaskId: "exec_task_30",
                         }),
                     ],
                     phase: "done",
@@ -175,7 +188,12 @@ describe("DiagnosePanel", () => {
                 },
             ],
         });
-        expect(screen.getByText("command dispatched as background task")).toBeInTheDocument();
+        expect(screen.getByText("Moved to background")).toBeInTheDocument();
+        fireEvent.click(screen.getByText("exec_command"));
+        expect(screen.getByText("exec_task_30")).toBeVisible();
+        expect(
+            screen.queryByText(/command dispatched as background task/),
+        ).not.toBeInTheDocument();
     });
 
     it("error: shows the failure message", () => {
@@ -251,12 +269,15 @@ describe("DiagnosePanel", () => {
                     name: "exec_command",
                     status: "ok",
                     argumentsJson: '{"command":"Start-Sleep -Seconds 30"}',
-                    output: "command dispatched as background task",
+                    output:
+                        '{"status":"background_running","background_task_id":"exec_task_30"}',
+                    backgroundTaskId: "exec_task_30",
                 }),
                 {
                     kind: "background_completion",
                     id: "out1",
                     toolCallId: "c1",
+                    taskId: "exec_task_30",
                     output: "exit_code=0\nstdout=finished",
                 },
                 assistantItem("The background command finished normally."),
@@ -277,9 +298,22 @@ describe("DiagnosePanel", () => {
         ).toBeTruthy();
 
         fireEvent.click(completionTitle);
+        expect(screen.getAllByText(/Task ID/).some((node) => node.textContent)).toBe(true);
+        expect(
+            screen
+                .getAllByText("exec_task_30")
+                .filter((node) => (node.closest("details") as HTMLDetailsElement).open),
+        ).toHaveLength(1);
         expect(screen.getByText(/stdout=finished/)).toBeVisible();
         fireEvent.click(screen.getByText("exec_command"));
-        expect(screen.getByText("command dispatched as background task")).toBeVisible();
+        expect(
+            screen
+                .getAllByText("exec_task_30")
+                .filter((node) => (node.closest("details") as HTMLDetailsElement).open),
+        ).toHaveLength(2);
+        expect(
+            screen.queryByText("command dispatched as background task"),
+        ).not.toBeInTheDocument();
     });
 
     it("done: a follow-up composer continues the conversation", () => {

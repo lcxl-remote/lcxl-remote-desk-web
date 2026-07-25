@@ -154,6 +154,11 @@ function ToolActivityCard({ tool }: { tool: ToolActivity }) {
                         {t("pages.desk.diagnose.toolAwaiting")}
                     </span>
                 )}
+                {tool.backgroundTaskId && (
+                    <span className="text-blue-300">
+                        {t("pages.desk.diagnose.backgroundDispatched")}
+                    </span>
+                )}
             </summary>
             <div className="flex flex-col gap-2 border-t border-white/10 px-2 py-2">
                 <div>
@@ -168,26 +173,63 @@ function ToolActivityCard({ tool }: { tool: ToolActivity }) {
                     <div className="mb-1 font-medium text-white/60">
                         {t("pages.desk.diagnose.toolOutput")}
                     </div>
-                    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-black/30 p-2 font-mono text-[11px] text-white/80">
-                        {tool.output === null
-                            ? t("pages.desk.diagnose.toolOutputPending")
-                            : tool.output ||
-                              t("pages.desk.diagnose.toolOutputEmpty")}
-                    </pre>
+                    {tool.backgroundTaskId ? (
+                        <div className="flex flex-col gap-1.5 rounded bg-black/30 p-2 text-[11px] text-white/80">
+                            <span className="flex min-w-0 items-center gap-1 text-white/60">
+                                <span className="shrink-0">
+                                    {t("pages.desk.diagnose.backgroundTaskId")}:
+                                </span>
+                                <code
+                                    className="min-w-0 select-all break-all font-mono text-blue-200"
+                                    title={tool.backgroundTaskId}
+                                >
+                                    {tool.backgroundTaskId}
+                                </code>
+                            </span>
+                        </div>
+                    ) : (
+                        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-black/30 p-2 font-mono text-[11px] text-white/80">
+                            {tool.output === null
+                                ? t("pages.desk.diagnose.toolOutputPending")
+                                : tool.output ||
+                                  t("pages.desk.diagnose.toolOutputEmpty")}
+                        </pre>
+                    )}
                 </div>
             </div>
         </details>
     )
 }
 
-function BackgroundCompletionCard({ output }: { output: string }) {
+function BackgroundCompletionCard({
+    taskId,
+    output,
+}: {
+    taskId: string | null
+    output: string
+}) {
     const { t } = useTranslation()
     return (
         <details className="group rounded border border-blue-400/20 bg-blue-400/5 text-xs text-white/80">
             <summary className="flex cursor-pointer list-none items-center gap-2 px-2 py-1.5 [&::-webkit-details-marker]:hidden">
                 <ChevronRight className="h-3 w-3 shrink-0 text-white/40 transition-transform group-open:rotate-90" />
                 <TerminalIcon className="h-3 w-3 shrink-0 text-blue-300" />
-                <span>{t("pages.desk.diagnose.backgroundFinished")}</span>
+                <span className="shrink-0">
+                    {t("pages.desk.diagnose.backgroundFinished")}
+                </span>
+                {taskId && (
+                    <span className="ml-auto flex min-w-0 items-center gap-1 text-white/50">
+                        <span className="shrink-0">
+                            {t("pages.desk.diagnose.backgroundTaskId")}:
+                        </span>
+                        <code
+                            className="min-w-0 select-all truncate font-mono text-[11px] text-blue-200"
+                            title={taskId}
+                        >
+                            {taskId}
+                        </code>
+                    </span>
+                )}
             </summary>
             <div className="border-t border-white/10 px-2 py-2">
                 <div className="mb-1 font-medium text-white/60">
@@ -227,7 +269,13 @@ export function ConversationTimeline({
                 if (item.kind === "tool") {
                     return <ToolActivityCard key={item.id} tool={item.activity} />
                 }
-                return <BackgroundCompletionCard key={item.id} output={item.output} />
+                return (
+                    <BackgroundCompletionCard
+                        key={item.id}
+                        taskId={item.taskId}
+                        output={item.output}
+                    />
+                )
             })}
         </div>
     )

@@ -84,8 +84,14 @@ pub trait TurnSink {
     /// A dispatched tool call produced its result; `ok` is whether it yielded a
     /// usable result (an executed/read success) rather than an error / rejection /
     /// unknown outcome.
-    fn on_tool_finished(&mut self, call_id: &str, ok: bool, output: &str) {
-        let _ = (call_id, ok, output);
+    fn on_tool_finished(
+        &mut self,
+        call_id: &str,
+        ok: bool,
+        output: &str,
+        background_task_id: Option<&str>,
+    ) {
+        let _ = (call_id, ok, output, background_task_id);
     }
 
     /// The turn committed a final natural-language answer.

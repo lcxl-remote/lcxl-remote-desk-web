@@ -369,14 +369,16 @@ fn finish_tool(
     ok: bool,
     sink: &mut dyn TurnSink,
 ) {
-    let output = session
+    let result = session
         .conversation
         .iter()
         .rev()
-        .find(|message| message.tool_call_id.as_deref() == Some(call_id))
+        .find(|message| message.tool_call_id.as_deref() == Some(call_id));
+    let output = result
         .map(|message| message.text.as_str())
         .unwrap_or_default();
-    sink.on_tool_finished(call_id, ok, output);
+    let background_task_id = result.and_then(|message| message.background_task_id.as_deref());
+    sink.on_tool_finished(call_id, ok, output, background_task_id);
 }
 
 /// Run one validated mutating tool call: approval + execution via the seam, then
@@ -509,14 +511,13 @@ async fn run_mutating<F: FnMut() -> String>(
             // notification. The conversation stays usable — a result is coming — but
             // no second mutation starts until this one finishes (`Executing` blocks
             // `allows_new_mutation`).
-            session.conversation.push(ChatMessage::tool_result(
-                mint(),
-                &call.id,
-                format!(
-                    "command dispatched as background task {}; still running, its result will follow",
-                    id.exec_request_id
-                ),
-            ));
+            session
+                .conversation
+                .push(ChatMessage::background_task_running(
+                    mint(),
+                    &call.id,
+                    &id.exec_request_id,
+                ));
             session.execution_state = ExecutionState::Executing {
                 work_id: id.work_id,
                 execution_id: id.execution_id,
@@ -642,13 +643,13 @@ async fn run_wait<F: FnMut() -> String>(
             finish_tool(session, &call.id, true, sink);
         }
         Ok(WaitOutcome::StillRunning) => {
-            session.conversation.push(ChatMessage::tool_result(
-                mint(),
-                &call.id,
-                format!(
-                    "background task {exec_request_id} is still running; its result will follow"
-                ),
-            ));
+            session
+                .conversation
+                .push(ChatMessage::background_task_running(
+                    mint(),
+                    &call.id,
+                    &exec_request_id,
+                ));
             finish_tool(session, &call.id, true, sink);
         }
         Ok(WaitOutcome::Unknown) => {

@@ -293,7 +293,8 @@ pub enum DiagnoseEventKind {
     /// `awaiting_approval`).
     ToolStarted,
     /// A dispatched tool call produced its result; carries `tool_call_id` +
-    /// `tool_ok` + `tool_output`.
+    /// `tool_ok` + `tool_output`, plus `background_task_id` when execution
+    /// continues in the background.
     ToolFinished,
     /// Terminal: the agentic turn committed a final natural-language answer
     /// (carries `answer`). Distinct from [`Final`], which carries a structured
@@ -352,6 +353,10 @@ pub struct DiagnoseEvent {
     /// model. It is diagnostic data, not trusted markup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_output: Option<String>,
+    /// `kind = ToolFinished`: the server-issued execution request id when this
+    /// result reports a command continuing as a background task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_task_id: Option<String>,
     /// `kind = Answer`: the agentic turn's final natural-language answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
@@ -382,6 +387,7 @@ impl DiagnoseEvent {
             awaiting_approval: false,
             tool_ok: None,
             tool_output: None,
+            background_task_id: None,
             answer: None,
             provenance: None,
         }
@@ -472,6 +478,13 @@ impl DiagnoseEvent {
             tool_output: Some(output.into()),
             ..Self::base(request_id, seq, DiagnoseEventKind::ToolFinished)
         }
+    }
+
+    /// Attach the stable background-task correlation id to a `ToolFinished`
+    /// dispatch receipt.
+    pub fn with_background_task_id(mut self, background_task_id: impl Into<String>) -> Self {
+        self.background_task_id = Some(background_task_id.into());
+        self
     }
 
     /// A terminal `Answer` frame carrying the agentic turn's final answer text.
@@ -687,13 +700,26 @@ mod tests {
                 true,
                 r#"{"command":"uptime"}"#,
             ),
-            DiagnoseEvent::tool_finished("req_1", 3, "c1", true, "healthy"),
+            DiagnoseEvent::tool_finished(
+                "req_1",
+                3,
+                "c1",
+                true,
+                r#"{"status":"background_running","background_task_id":"exec_task_1"}"#,
+            )
+            .with_background_task_id("exec_task_1"),
             DiagnoseEvent::tool_finished("req_1", 4, "c2", false, "rejected"),
             DiagnoseEvent::answer("req_1", 5, "the host is healthy"),
         ];
         assert_eq!(frames[0].turn_id.as_deref(), Some("turn-1"));
         assert_eq!(frames[1].tool_arguments_json.as_deref(), Some("{}"));
-        assert_eq!(frames[3].tool_output.as_deref(), Some("healthy"));
+        assert!(
+            frames[3]
+                .tool_output
+                .as_deref()
+                .is_some_and(|output| output.contains("background_running"))
+        );
+        assert_eq!(frames[3].background_task_id.as_deref(), Some("exec_task_1"));
         for frame in frames {
             let json = serde_json::to_string(&frame).expect("json encode");
             let back: DiagnoseEvent = serde_json::from_str(&json).expect("json decode");
