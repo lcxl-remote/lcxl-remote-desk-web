@@ -25,6 +25,8 @@ target/
 # Added by cargo
 
 /target
+/openapi.json
+/vite-project/openapi.json
 
 .vscode/
 conf/

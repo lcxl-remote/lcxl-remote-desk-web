@@ -3,11 +3,12 @@ import { pluginOas } from '@kubb/plugin-oas'
 import { pluginTs } from '@kubb/plugin-ts'
 import { pluginReactQuery } from '@kubb/plugin-react-query'
 import { pluginClient } from '@kubb/plugin-client'
+import { requireOpenApiInputPath } from './scripts/openapi-input.ts'
 
 export default defineConfig({
     root: '.',
     input: {
-        path: './openapi.json',
+        path: requireOpenApiInputPath(),
     },
     output: {
         path: './src/services',

@@ -27,7 +27,7 @@ cd vite-project && npm run build                       # 类型检查 + 构建
 # 后端 API 变更后，重新生成前端客户端代码（离线 dump，无需运行中的 server）
 # Windows: cd vite-project && .\update_openapi.ps1
 # Linux/macOS: cd vite-project && ./update_openapi.sh
-# (脚本内部走 `dump-openapi` 子命令，从路由注册离线导出 spec，不连 DB/Redis/HTTP)
+# (脚本把离线 spec 写入系统临时文件，交给 Kubb 后自动删除；仓库不跟踪 openapi.json)
 ```
 
 ### Linux 系统依赖

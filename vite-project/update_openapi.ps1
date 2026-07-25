@@ -9,12 +9,29 @@ $ErrorActionPreference = "Stop"
 # config resolve correctly regardless of where the script is invoked from.
 Set-Location $PSScriptRoot
 
-# $ErrorActionPreference = "Stop" does not catch native (exe) non-zero exits, so
-# check $LASTEXITCODE after each command — otherwise a failed dump would still
-# run Kubb against a stale spec and report success.
-Write-Host "Dumping OpenAPI spec (offline)..."
-cargo run -q -p lcxl-remote-desk-server -- dump-openapi --out openapi.json
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-Write-Host "Generating Kubb clients..."
-npx kubb generate
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$specPath = Join-Path ([System.IO.Path]::GetTempPath()) (
+    "lcxl-desk-openapi-{0}.json" -f [System.Guid]::NewGuid()
+)
+$previousInputPath = $env:KUBB_OPENAPI_PATH
+
+try {
+    # $ErrorActionPreference = "Stop" does not catch native (exe) non-zero
+    # exits, so check $LASTEXITCODE after each command.
+    Write-Host "Dumping OpenAPI spec (offline)..."
+    cargo run -q -p lcxl-remote-desk-server -- dump-openapi --out $specPath
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    $env:KUBB_OPENAPI_PATH = $specPath
+    Write-Host "Generating Kubb clients..."
+    npx kubb generate
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+finally {
+    if ($null -eq $previousInputPath) {
+        Remove-Item Env:KUBB_OPENAPI_PATH -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:KUBB_OPENAPI_PATH = $previousInputPath
+    }
+    Remove-Item -LiteralPath $specPath -Force -ErrorAction SilentlyContinue
+}

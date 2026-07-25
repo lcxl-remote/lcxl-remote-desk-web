@@ -24,7 +24,7 @@ cd vite-project
 ./update_openapi.sh
 ```
 
-脚本走 `dump-openapi` 子命令，从路由注册离线导出规范——不连 DB / Redis / HTTP。
+脚本走 `dump-openapi` 子命令，从路由注册离线导出规范——不连 DB / Redis / HTTP。规范通过临时文件交给 Kubb，生成结束后自动删除；仓库不再跟踪生成的 `openapi.json`。
 
 ::: tip
 `vite-project/src/services/` 下的文件由 Kubb 生成——请勿手动修改。

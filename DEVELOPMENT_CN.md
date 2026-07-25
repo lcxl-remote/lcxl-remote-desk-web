@@ -259,6 +259,8 @@ video_fps = 30               # 开发时可降低帧率以减少资源消耗
 cargo run -p lcxl-remote-desk-server -- dump-openapi --out openapi.json
 ```
 
+前端重新生成脚本使用生成后自动清理的临时规范文件，因此 Git 不再跟踪生成的 `openapi.json`。
+
 ### API 端点
 
 #### 认证相关

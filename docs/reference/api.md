@@ -24,7 +24,7 @@ cd vite-project
 ./update_openapi.sh
 ```
 
-The scripts use the `dump-openapi` subcommand to export the spec from the route registration offline — no DB / Redis / HTTP needed.
+The scripts use the `dump-openapi` subcommand to export the spec from the route registration offline — no DB / Redis / HTTP needed. The spec is passed to Kubb through a temporary file and deleted afterward; generated `openapi.json` files are not tracked in the repository.
 
 ::: tip
 Generated files under `vite-project/src/services/` are produced by Kubb — do not edit them by hand.

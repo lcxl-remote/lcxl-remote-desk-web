@@ -191,6 +191,9 @@ anyway. Generate the spec locally with the offline subcommand:
 cargo run -p lcxl-remote-desk-server -- dump-openapi --out openapi.json
 ```
 
+The frontend regeneration scripts instead use an automatically cleaned
+temporary spec file, so generated `openapi.json` files are not tracked in Git.
+
 ## CLI Arguments
 
 ```bash
