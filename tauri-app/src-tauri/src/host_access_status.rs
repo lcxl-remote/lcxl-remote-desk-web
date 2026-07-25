@@ -486,7 +486,6 @@ fn reconcile_windows(
         if let Some(window) = app_handle.get_webview_window(&label) {
             dispatch_snapshot(&window, snapshot);
             constrain_window_to_monitor(&window, monitors.get(index));
-            let _ = window.show();
             continue;
         }
         match build_status_window(
@@ -541,7 +540,7 @@ fn build_status_window(
             if let tauri::webview::PageLoadEvent::Finished = event.event() {
                 crate::inject_native_bridge_state(&window);
                 dispatch_snapshot(&window, &initial);
-                let _ = window.show();
+                reveal_status_window(&window);
             }
         })
         .build()
@@ -556,6 +555,34 @@ fn build_status_window(
     position_window(&window, monitor);
     let _ = window.set_always_on_top(true);
     Ok(())
+}
+
+fn status_window_needs_reveal(is_visible: Option<bool>) -> bool {
+    !matches!(is_visible, Some(true))
+}
+
+fn reveal_status_window(window: &WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    {
+        // TAO implements `show()` as `makeKeyAndOrderFront` on macOS. Make the
+        // hidden status window temporarily unable to become key so revealing it
+        // cannot take keyboard focus from the local user's active application.
+        if let Err(error) = window.set_focusable(false) {
+            log::warn!("Failed to make host-access window non-focusable: {error}");
+            return;
+        }
+        let show_result = window.show();
+        if let Err(error) = window.set_focusable(true) {
+            log::warn!("Failed to restore host-access window focusability: {error}");
+        }
+        if let Err(error) = show_result {
+            log::warn!("Failed to reveal host-access window: {error}");
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    if let Err(error) = window.show() {
+        log::warn!("Failed to reveal host-access window: {error}");
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -724,8 +751,10 @@ fn show_started_notification(app_handle: &AppHandle) {
 
 pub(crate) fn show_status_windows(app_handle: &AppHandle) {
     for (label, window) in app_handle.webview_windows() {
-        if label.starts_with(STATUS_LABEL_PREFIX) {
-            let _ = window.show();
+        if label.starts_with(STATUS_LABEL_PREFIX)
+            && status_window_needs_reveal(window.is_visible().ok())
+        {
+            reveal_status_window(&window);
         }
     }
 }
@@ -752,6 +781,13 @@ mod tests {
         value.remote_access.mode = HostRemoteAccessMode::Locked;
 
         assert!(snapshot_should_display(&value));
+    }
+
+    #[test]
+    fn visibility_guard_skips_revealing_an_already_visible_status_window() {
+        assert!(!status_window_needs_reveal(Some(true)));
+        assert!(status_window_needs_reveal(Some(false)));
+        assert!(status_window_needs_reveal(None));
     }
 
     #[test]
