@@ -111,10 +111,8 @@ pub(super) async fn handle_edge_exec_request_inbound(
     // the host's current local execution mode are both authoritative; either can
     // tighten to ReadOnly/SuggestOnly after the preview, which must shut this
     // dispatch down before worker handoff.
-    let effective_mode = {
-        let local_mode = ctx.settings.read().await.ai_policy.execution_mode;
-        authz.scope.mode.restrict_to(local_mode)
-    };
+    let local_policy = ctx.settings.read().await.ai_policy.clone();
+    let effective_mode = { authz.scope.mode.restrict_to(local_policy.execution_mode) };
     if payload.plan().execution_basis
         == desk_agent_protocol::exec::ExecExecutionBasis::OwnerBlocklistOnly
         && !matches!(
@@ -141,14 +139,23 @@ pub(super) async fn handle_edge_exec_request_inbound(
         EdgeExecRequestPayload::Agentic {
             plan,
             validation_input,
-        } => validate_agentic_edge_exec(
-            plan,
-            validation_input,
-            authz.exec_admission_policy,
-            authz.max_risk,
-            &templates,
-            &effective_blocklist,
-        ),
+        } => {
+            let mut validation_input = validation_input.clone();
+            desk_diagnose_core::exec_tools::apply_exec_runtime_ceiling(
+                &mut validation_input,
+                local_policy
+                    .max_command_runtime_seconds
+                    .saturating_mul(1_000),
+            );
+            validate_agentic_edge_exec(
+                plan,
+                &validation_input,
+                authz.exec_admission_policy,
+                authz.max_risk,
+                &templates,
+                &effective_blocklist,
+            )
+        }
     };
     if let Some(reason) = rejection {
         log::warn!("[edge-exec] PEP rejected plan for request {request_id}: {reason}");

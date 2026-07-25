@@ -3,6 +3,7 @@ pub mod daemon;
 pub mod diagnose;
 pub mod error;
 pub mod exec;
+pub mod exec_shells;
 pub mod host_activity;
 pub mod host_control;
 pub mod locale;
@@ -84,6 +85,7 @@ use desk_signal::{
             batch_delete_device_codes, create_device_code, delete_device_code, list_device_codes,
             update_device_code,
         },
+        diagnose_session::get_diagnose_session,
         model_provider::{get_model_provider, test_model_provider, update_model_provider},
         signaling::open_signaling_handle,
         terminal::{list_terminal, open_terminal_session},
@@ -197,7 +199,7 @@ pub fn configure_api_surface(
                 // (Default / Signaling / ServiceDaemon). A pure DeskServer has
                 // no embedded signaling route, so it never offers this endpoint.
                 if opts.include_signaling {
-                    cfg.service(create_token);
+                    cfg.service(create_token).service(get_diagnose_session);
                 }
             })
             .service(
@@ -1151,6 +1153,7 @@ mod tests {
             "/api/desk/settings",
             "/api/desk/device_codes",
             "/api/desk/signaling",
+            "/api/my/diagnose-session",
             "/api/turn/info",
         ] {
             assert!(
@@ -1259,6 +1262,8 @@ mod tests {
             token: Some("test-token".into()),
             debug_build: false,
             repository_url: None,
+            available_exec_shells: None,
+            max_ai_command_runtime_ms: None,
         };
         let query = serde_urlencoded::to_string(&version).unwrap();
         let uri = format!("/api/desk/signaling?{query}");

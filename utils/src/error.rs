@@ -287,6 +287,11 @@ impl DeskErrorCode {
     /// maps this code to a localized loop-prevention message. Rides the
     /// agent-error wire, not an HTTP status.
     pub const AGENT_SAME_TOOL_REPEAT_LIMIT: DeskErrorCode = DeskErrorCode(70);
+    /// The model requested a shell that the target did not report as usable by
+    /// the AI executor. The model receives the target's verified shell list and
+    /// may retry with one of those values; the control end may localize this code
+    /// if it surfaces the tool error.
+    pub const AI_EXEC_SHELL_UNSUPPORTED: DeskErrorCode = DeskErrorCode(71);
     /// The account is in a self-deletion state (`email_pending` / `grace` /
     /// `deleting` / `deleted`) and the requested mutating action is refused while
     /// the deletion is pending. The user must cancel the deletion first. Carried

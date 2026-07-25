@@ -1,5 +1,6 @@
 pub mod access_grant;
 pub mod agent_exec;
+pub mod agent_exec_store;
 pub mod agent_session_store;
 pub mod ai_usage;
 pub mod collect_pending;

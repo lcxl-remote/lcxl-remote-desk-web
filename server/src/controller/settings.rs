@@ -604,6 +604,7 @@ mod tests {
             .set_json(AiExecutionPolicyUpdate {
                 execution_mode: Some(desk_agent_protocol::ExecutionMode::ConfirmEachAction),
                 max_concurrent_executions: None,
+                max_command_runtime_seconds: None,
             })
             .to_request();
         let resp = test::call_service(&app, req).await;

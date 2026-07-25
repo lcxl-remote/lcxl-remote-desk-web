@@ -14,28 +14,40 @@ use desk_agent_protocol::edge_exec::{
 };
 use desk_agent_protocol::evidence::EvidenceSnapshot;
 use desk_agent_protocol::exec::{
-    ApprovalDecision, ApprovalId, ExecDecision, ExecPlan, ExecPreview, ExecRequestId,
-    ResolveExecData,
+    ApprovalDecision, ApprovalId, ExecDecision, ExecExecutionBasis, ExecPlan, ExecPreview,
+    ExecRequestId, ResolveExecData,
+};
+use desk_agent_protocol::exec_lifecycle::{
+    ExecControlAction, ExecControlPayload, ExecState, ExecStateReplyPayload,
 };
 use desk_agent_protocol::{
     AgentError, AgentErrorKind, AgentOutcome, AgentScope, ExecInput, OperationInput, RiskLevel,
 };
 use desk_diagnose_core::chat::ToolCall;
 use desk_diagnose_core::exec_classify::classify_command_with_policy;
-use desk_diagnose_core::exec_tools::build_exec_input;
+use desk_diagnose_core::exec_tools::{
+    build_exec_input, canonical_exec_shell, exec_shell_is_available,
+    sanitize_available_exec_shells, unsupported_exec_shell_error,
+};
 use desk_diagnose_core::read_tools::build_read_operation;
-use desk_diagnose_core::seam::{ExecContext, ExecIdentity, ExecOutcome, ToolRunOutput, ToolSeam};
+use desk_diagnose_core::seam::{
+    ExecContext, ExecIdentity, ExecOutcome, ToolRunOutput, ToolSeam, WaitOutcome,
+};
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
-use desk_signal_facade::service::EdgeExecObserver;
+use desk_signal_facade::service::{EdgeExecObserver, ExecStateReplyObserver};
 use sea_orm::DatabaseConnection;
 use tokio::sync::oneshot;
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 const RESULT_SLACK: Duration = Duration::from_secs(30);
+const FOREGROUND_THRESHOLD: Duration = Duration::from_secs(8);
+const WAIT_FOR_TASK_TIMEOUT: Duration = Duration::from_secs(10);
+const WAIT_FOR_TASK_POLL: Duration = Duration::from_millis(250);
 
 struct ApprovalPending {
     browser_connection_id: String,
+    diagnose_request_id: String,
     tx: oneshot::Sender<ApprovalDecision>,
 }
 
@@ -44,10 +56,16 @@ struct ResultPending {
     tx: oneshot::Sender<EdgeExecDisposition>,
 }
 
+struct StateQueryPending {
+    target_connection_id: String,
+    tx: oneshot::Sender<ExecStateReplyPayload>,
+}
+
 #[derive(Default)]
 pub struct SignalAgentExecPending {
     approvals: Mutex<HashMap<String, ApprovalPending>>,
     results: Mutex<HashMap<String, ResultPending>>,
+    state_queries: Mutex<HashMap<String, StateQueryPending>>,
 }
 
 impl SignalAgentExecPending {
@@ -59,6 +77,7 @@ impl SignalAgentExecPending {
         &self,
         request_id: String,
         browser_connection_id: String,
+        diagnose_request_id: String,
     ) -> Option<oneshot::Receiver<ApprovalDecision>> {
         let (tx, rx) = oneshot::channel();
         let mut pending = self.approvals.lock().expect("approval pending lock");
@@ -69,6 +88,7 @@ impl SignalAgentExecPending {
             request_id,
             ApprovalPending {
                 browser_connection_id,
+                diagnose_request_id,
                 tx,
             },
         );
@@ -105,6 +125,30 @@ impl SignalAgentExecPending {
         let ids: Vec<String> = pending
             .iter()
             .filter(|(_, entry)| entry.browser_connection_id == browser_connection_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            pending.remove(id);
+        }
+        ids.len()
+    }
+
+    /// Cancel only approvals owned by one diagnose request on one browser.
+    ///
+    /// A stale cancellation from an older diagnosis must not cancel a newer
+    /// turn's approval on the same signaling connection.
+    pub fn cancel_approvals_for_diagnosis(
+        &self,
+        browser_connection_id: &str,
+        diagnose_request_id: &str,
+    ) -> usize {
+        let mut pending = self.approvals.lock().expect("approval pending lock");
+        let ids: Vec<String> = pending
+            .iter()
+            .filter(|(_, entry)| {
+                entry.browser_connection_id == browser_connection_id
+                    && entry.diagnose_request_id == diagnose_request_id
+            })
             .map(|(id, _)| id.clone())
             .collect();
         for id in &ids {
@@ -155,6 +199,52 @@ impl SignalAgentExecPending {
             .remove(request_id);
     }
 
+    fn register_state_query(
+        &self,
+        execution_generation: String,
+        target_connection_id: String,
+    ) -> Option<oneshot::Receiver<ExecStateReplyPayload>> {
+        let (tx, rx) = oneshot::channel();
+        let mut pending = self.state_queries.lock().expect("state query pending lock");
+        if pending.contains_key(&execution_generation) {
+            return None;
+        }
+        pending.insert(
+            execution_generation,
+            StateQueryPending {
+                target_connection_id,
+                tx,
+            },
+        );
+        Some(rx)
+    }
+
+    fn deliver_state_reply(
+        &self,
+        source_connection_id: &str,
+        payload: ExecStateReplyPayload,
+    ) -> bool {
+        let mut pending = self.state_queries.lock().expect("state query pending lock");
+        let Some(entry) = pending.get(&payload.execution_generation) else {
+            return false;
+        };
+        if entry.target_connection_id != source_connection_id {
+            return false;
+        }
+        let entry = pending
+            .remove(&payload.execution_generation)
+            .expect("entry checked above");
+        let _ = entry.tx.send(payload);
+        true
+    }
+
+    fn cancel_state_query(&self, execution_generation: &str) {
+        self.state_queries
+            .lock()
+            .expect("state query pending lock")
+            .remove(execution_generation);
+    }
+
     /// Wake every waiter bound to a signaling connection that just closed.
     pub fn drain_for_connection(&self, connection_id: &str) {
         self.cancel_approvals_for_browser(connection_id);
@@ -166,6 +256,15 @@ impl SignalAgentExecPending {
             .collect();
         for id in ids {
             results.remove(&id);
+        }
+        let mut queries = self.state_queries.lock().expect("state query pending lock");
+        let ids: Vec<String> = queries
+            .iter()
+            .filter(|(_, entry)| entry.target_connection_id == connection_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            queries.remove(&id);
         }
     }
 }
@@ -221,9 +320,21 @@ pub struct SignalAgentTools {
     connections: Arc<SharedConnectionMap>,
     pending: Arc<SignalAgentExecPending>,
     target_connection_id: String,
+    diagnose_request_id: String,
     snapshot: EvidenceSnapshot,
     admission_policy: ExecAdmissionPolicy,
     max_risk: RiskLevel,
+    available_exec_shells: Vec<String>,
+    max_command_runtime_ms: u32,
+}
+
+enum SignalDispatch {
+    Settled {
+        task: crate::entity::agent_exec_task::Model,
+        disposition: EdgeExecDisposition,
+    },
+    Dispatched(crate::entity::agent_exec_task::Model),
+    Unknown(crate::entity::agent_exec_task::Model),
 }
 
 impl SignalAgentTools {
@@ -232,18 +343,24 @@ impl SignalAgentTools {
         connections: Arc<SharedConnectionMap>,
         pending: Arc<SignalAgentExecPending>,
         target_connection_id: String,
+        diagnose_request_id: String,
         snapshot: EvidenceSnapshot,
         admission_policy: ExecAdmissionPolicy,
         max_risk: RiskLevel,
+        available_exec_shells: Vec<String>,
+        max_command_runtime_ms: u32,
     ) -> Self {
         Self {
             db,
             connections,
             pending,
             target_connection_id,
+            diagnose_request_id,
             snapshot,
             admission_policy,
             max_risk,
+            available_exec_shells: sanitize_available_exec_shells(&available_exec_shells),
+            max_command_runtime_ms,
         }
     }
 
@@ -277,13 +394,50 @@ impl SignalAgentTools {
         send_frame(&browser, &frame).await
     }
 
+    async fn query_state(
+        &self,
+        execution_generation: &str,
+    ) -> Result<Option<ExecStateReplyPayload>, AgentError> {
+        let target = self.connection(&self.target_connection_id).await?;
+        let Some(rx) = self.pending.register_state_query(
+            execution_generation.to_string(),
+            self.target_connection_id.clone(),
+        ) else {
+            return Ok(None);
+        };
+        let payload = ExecControlPayload {
+            execution_generation: execution_generation.to_string(),
+            action: ExecControlAction::QueryState,
+        };
+        let frame = SignalingModel::new(
+            execution_generation,
+            SignalingType::ExecControl,
+            None,
+            Some(self.target_connection_id.clone()),
+            serde_json::to_value(payload).ok(),
+            None,
+        );
+        if let Err(error) = send_frame(&target, &frame).await {
+            self.pending.cancel_state_query(execution_generation);
+            return Err(error);
+        }
+        match tokio::time::timeout(Duration::from_secs(5), rx).await {
+            Ok(Ok(reply)) => Ok(Some(reply)),
+            _ => {
+                self.pending.cancel_state_query(execution_generation);
+                Ok(None)
+            }
+        }
+    }
+
     async fn dispatch(
         &self,
         actor_user_id: i32,
         scope: AgentScope,
         plan: ExecPlan,
         validation_input: ExecInput,
-    ) -> Result<EdgeExecDisposition, AgentError> {
+        ctx: &ExecContext,
+    ) -> Result<SignalDispatch, AgentError> {
         let target = self.connection(&self.target_connection_id).await?;
         let audience = target
             .model
@@ -298,10 +452,30 @@ impl SignalAgentTools {
                 )
             })?;
         let request_id = plan.execution_generation.clone();
+        let exec_store = crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone());
+        let deadline = chrono::Utc::now()
+            + chrono::Duration::milliseconds(plan.timeout_ms as i64)
+            + chrono::Duration::from_std(RESULT_SLACK).unwrap_or_default();
+        let task = exec_store
+            .create(
+                &plan.exec_request_id.0,
+                &request_id,
+                &ctx.conversation_id,
+                &ctx.tool_call_id,
+                &self.target_connection_id,
+                deadline,
+            )
+            .await?;
         let Some(rx) = self
             .pending
             .register_result(request_id.clone(), self.target_connection_id.clone())
         else {
+            if let Err(error) = exec_store.mark_unsent(&request_id).await {
+                log::warn!(
+                    "[agent-exec] could not settle a duplicate unsent task: {}",
+                    error.message
+                );
+            }
             return Err(safe(
                 AgentErrorKind::Internal,
                 "an execution with this id is already pending",
@@ -348,17 +522,38 @@ impl SignalAgentTools {
         );
         if let Err(error) = send_frame(&target, &frame).await {
             self.pending.cancel_result(&request_id);
+            if let Err(store_error) = exec_store.mark_unsent(&request_id).await {
+                log::warn!(
+                    "[agent-exec] could not settle an unsent task: {}",
+                    store_error.message
+                );
+            }
             return Err(error);
         }
-        let timeout = Duration::from_millis(plan.timeout_ms as u64) + RESULT_SLACK;
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(disposition)) => Ok(disposition),
-            _ => {
+        if let Err(error) = exec_store.mark_running(&request_id).await {
+            // The frame may already be executing on the host. Never turn a
+            // post-send bookkeeping failure into a claim that nothing ran; keep
+            // the durable identity and let a later state query reconcile it.
+            log::error!(
+                "[agent-exec] execution sent but running state was not persisted: {}",
+                error.message
+            );
+            self.pending.cancel_result(&request_id);
+            return Ok(SignalDispatch::Unknown(task));
+        }
+        match tokio::time::timeout(FOREGROUND_THRESHOLD, rx).await {
+            Ok(Ok(disposition)) => Ok(SignalDispatch::Settled { task, disposition }),
+            Ok(Err(_)) => {
                 self.pending.cancel_result(&request_id);
-                Ok(EdgeExecDisposition::ExecutionStateUnknown {
-                    reason: "the host did not return an execution result".into(),
-                })
+                let disposition = EdgeExecDisposition::ExecutionStateUnknown {
+                    reason: "the host connection closed before returning a result".into(),
+                };
+                let _ = exec_store
+                    .finalize(&self.target_connection_id, &request_id, &disposition)
+                    .await?;
+                Ok(SignalDispatch::Unknown(task))
             }
+            Err(_) => Ok(SignalDispatch::Dispatched(task)),
         }
     }
 }
@@ -393,7 +588,7 @@ impl ToolSeam for SignalAgentTools {
         ctx: &ExecContext,
     ) -> Result<ExecOutcome, AgentError> {
         let (operation, _) = build_exec_input(call)?;
-        let validation_input = match operation {
+        let mut validation_input = match operation {
             OperationInput::Exec(input) => input,
             _ => {
                 return Err(safe(
@@ -402,17 +597,42 @@ impl ToolSeam for SignalAgentTools {
                 ));
             }
         };
+        desk_diagnose_core::exec_tools::apply_exec_runtime_ceiling(
+            &mut validation_input,
+            self.max_command_runtime_ms,
+        );
         let classified = classify_command_with_policy(
             &validation_input,
             &[],
             desk_agent_protocol::exec_policy::builtin_blocklist(),
             self.admission_policy,
         );
+        let requested_shell = match &validation_input.target {
+            desk_agent_protocol::ExecTarget::Shell { shell } => shell.as_str(),
+            _ => "",
+        };
+        if classified.draft.is_none()
+            && (canonical_exec_shell(requested_shell).is_none()
+                || !exec_shell_is_available(requested_shell, &self.available_exec_shells))
+        {
+            return Err(unsupported_exec_shell_error(
+                requested_shell,
+                &self.available_exec_shells,
+            ));
+        }
         let Some(draft) = classified.draft else {
             return Ok(ExecOutcome::Rejected {
                 reason: Some(classified.classification.impact),
             });
         };
+        if draft.execution_basis == ExecExecutionBasis::OwnerBlocklistOnly
+            && !exec_shell_is_available(requested_shell, &self.available_exec_shells)
+        {
+            return Err(unsupported_exec_shell_error(
+                requested_shell,
+                &self.available_exec_shells,
+            ));
+        }
         if classified.classification.decision != ExecDecision::ConfirmRequired
             || draft.risk > self.max_risk
         {
@@ -450,10 +670,11 @@ impl ToolSeam for SignalAgentTools {
             executable: true,
             blocked_reason: None,
         };
-        let Some(approval_rx) = self
-            .pending
-            .register_approval(exec_request_id.0.clone(), browser_connection_id.to_string())
-        else {
+        let Some(approval_rx) = self.pending.register_approval(
+            exec_request_id.0.clone(),
+            browser_connection_id.to_string(),
+            self.diagnose_request_id.clone(),
+        ) else {
             return Err(safe(
                 AgentErrorKind::Internal,
                 "an approval with this id is already pending",
@@ -530,39 +751,162 @@ impl ToolSeam for SignalAgentTools {
         let mut refreshed_scope = ctx.scope.clone();
         refreshed_scope.mode = effective_mode;
         match self
-            .dispatch(actor_user_id, refreshed_scope, plan, validation_input)
+            .dispatch(actor_user_id, refreshed_scope, plan, validation_input, ctx)
             .await?
         {
-            EdgeExecDisposition::Executed { outcome } => Ok(ExecOutcome::Executed {
+            SignalDispatch::Settled {
+                task,
+                disposition: EdgeExecDisposition::Executed { outcome },
+            } => Ok(ExecOutcome::Executed {
                 output: ToolRunOutput {
                     content: outcome_content(&outcome),
                     image_data_url: None,
                 },
-                event_id: None,
+                event_id: Some(task.event_id),
             }),
-            EdgeExecDisposition::RejectedBeforeDispatch { reason }
-            | EdgeExecDisposition::DispatchFailedBeforeWorker { reason }
-            | EdgeExecDisposition::HostAtCapacity { reason } => Ok(ExecOutcome::Rejected {
-                reason: Some(reason),
-            }),
-            EdgeExecDisposition::ExecutionStateUnknown { .. } => {
-                Ok(ExecOutcome::Unknown(ExecIdentity {
-                    work_id: 0,
-                    execution_id,
-                    exec_request_id: exec_request_id.0,
-                }))
+            SignalDispatch::Settled {
+                task,
+                disposition:
+                    EdgeExecDisposition::RejectedBeforeDispatch { reason }
+                    | EdgeExecDisposition::DispatchFailedBeforeWorker { reason }
+                    | EdgeExecDisposition::HostAtCapacity { reason },
+            } => {
+                crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone())
+                    .consume_event(&task.event_id)
+                    .await?;
+                Ok(ExecOutcome::Rejected {
+                    reason: Some(reason),
+                })
             }
+            SignalDispatch::Settled {
+                task,
+                disposition: EdgeExecDisposition::ExecutionStateUnknown { .. },
+            }
+            | SignalDispatch::Unknown(task) => Ok(ExecOutcome::Unknown(ExecIdentity {
+                work_id: task.id,
+                execution_id: task.execution_generation,
+                exec_request_id: task.exec_request_id,
+            })),
+            SignalDispatch::Dispatched(task) => Ok(ExecOutcome::Dispatched(ExecIdentity {
+                work_id: task.id,
+                execution_id: task.execution_generation,
+                exec_request_id: task.exec_request_id,
+            })),
         }
+    }
+
+    async fn ack_delivery(&self, event_id: &str) -> Result<(), AgentError> {
+        crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone())
+            .consume_event(event_id)
+            .await
+    }
+
+    async fn wait_for_task(
+        &self,
+        exec_request_id: &str,
+        execution_id: &str,
+    ) -> Result<WaitOutcome, AgentError> {
+        let store = crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone());
+        let deadline = tokio::time::Instant::now() + WAIT_FOR_TASK_TIMEOUT;
+        loop {
+            let Some(task) = store.find(exec_request_id, execution_id).await? else {
+                return Err(safe(
+                    AgentErrorKind::InvalidInput,
+                    "that background task is no longer tracked",
+                ));
+            };
+            match task.status.as_str() {
+                crate::agent_exec_store::STATUS_DONE => {
+                    return Ok(WaitOutcome::Completed {
+                        output: ToolRunOutput {
+                            content: task
+                                .result_text
+                                .unwrap_or_else(|| "execution completed".to_string()),
+                            image_data_url: None,
+                        },
+                        event_id: Some(task.event_id),
+                    });
+                }
+                crate::agent_exec_store::STATUS_UNKNOWN => return Ok(WaitOutcome::Unknown),
+                _ => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let Some(reply) = self.query_state(execution_id).await? else {
+                    return Ok(WaitOutcome::StillRunning);
+                };
+                if matches!(reply.state, ExecState::Reserved | ExecState::Running) {
+                    return Ok(WaitOutcome::StillRunning);
+                }
+                let disposition = EdgeExecDisposition::from_reconciled_state(&reply);
+                store
+                    .finalize(&task.target_connection_id, execution_id, &disposition)
+                    .await?;
+                let settled = store
+                    .find(exec_request_id, execution_id)
+                    .await?
+                    .ok_or_else(|| {
+                        safe(
+                            AgentErrorKind::InvalidInput,
+                            "that background task is no longer tracked",
+                        )
+                    })?;
+                if settled.status == crate::agent_exec_store::STATUS_UNKNOWN {
+                    return Ok(WaitOutcome::Unknown);
+                }
+                return Ok(WaitOutcome::Completed {
+                    output: ToolRunOutput {
+                        content: settled
+                            .result_text
+                            .unwrap_or_else(|| "execution completed".to_string()),
+                        image_data_url: None,
+                    },
+                    event_id: Some(settled.event_id),
+                });
+            }
+            tokio::time::sleep(WAIT_FOR_TASK_POLL).await;
+        }
+    }
+}
+
+pub struct SignalExecStateReplyObserver {
+    pending: Arc<SignalAgentExecPending>,
+}
+
+impl SignalExecStateReplyObserver {
+    pub fn new(pending: Arc<SignalAgentExecPending>) -> Self {
+        Self { pending }
+    }
+}
+
+impl ExecStateReplyObserver for SignalExecStateReplyObserver {
+    fn on_exec_state_reply<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let Ok(payload) = model.get_data::<ExecStateReplyPayload>() else {
+                log::warn!("[agent-exec] malformed ExecStateReply was dropped");
+                return;
+            };
+            if !self
+                .pending
+                .deliver_state_reply(&source.model.connection_id, payload)
+            {
+                log::debug!("[agent-exec] uncorrelated ExecStateReply was dropped");
+            }
+        })
     }
 }
 
 pub struct SignalEdgeExecObserver {
     pending: Arc<SignalAgentExecPending>,
+    db: DatabaseConnection,
 }
 
 impl SignalEdgeExecObserver {
-    pub fn new(pending: Arc<SignalAgentExecPending>) -> Self {
-        Self { pending }
+    pub fn new(pending: Arc<SignalAgentExecPending>, db: DatabaseConnection) -> Self {
+        Self { pending, db }
     }
 }
 
@@ -580,10 +924,30 @@ impl EdgeExecObserver for SignalEdgeExecObserver {
                     return;
                 }
             };
-            if !self
-                .pending
-                .deliver_result(&source.model.connection_id, payload)
+            let store = crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone());
+            let correlated = match store
+                .finalize(
+                    &source.model.connection_id,
+                    &payload.request_id,
+                    &payload.disposition,
+                )
+                .await
             {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(error) => {
+                    log::error!(
+                        "[agent-exec] could not persist EdgeExecResult: {}",
+                        error.message
+                    );
+                    false
+                }
+            };
+            if correlated {
+                let _ = self
+                    .pending
+                    .deliver_result(&source.model.connection_id, payload);
+            } else {
                 log::warn!("[agent-exec] uncorrelated EdgeExecResult was dropped");
             }
         })
@@ -605,7 +969,7 @@ mod tests {
     async fn approval_is_bound_to_the_originating_browser_and_one_shot() {
         let pending = SignalAgentExecPending::new();
         let rx = pending
-            .register_approval("e1".into(), "browser-a".into())
+            .register_approval("e1".into(), "browser-a".into(), "diagnose-a".into())
             .unwrap();
         assert!(!pending.resolve("browser-b", &resolve("e1", ApprovalDecision::Approve)));
         assert!(pending.resolve("browser-a", &resolve("e1", ApprovalDecision::Approve)));
@@ -617,16 +981,39 @@ mod tests {
     async fn browser_disconnect_cancels_only_its_pending_approvals() {
         let pending = SignalAgentExecPending::new();
         let a = pending
-            .register_approval("a".into(), "browser-a".into())
+            .register_approval("a".into(), "browser-a".into(), "diagnose-a".into())
             .unwrap();
         let b = pending
-            .register_approval("b".into(), "browser-b".into())
+            .register_approval("b".into(), "browser-b".into(), "diagnose-b".into())
             .unwrap();
 
         assert_eq!(pending.cancel_approvals_for_browser("browser-a"), 1);
         assert!(a.await.is_err());
         assert!(pending.resolve("browser-b", &resolve("b", ApprovalDecision::Approve),));
         assert_eq!(b.await.unwrap(), ApprovalDecision::Approve);
+    }
+
+    #[tokio::test]
+    async fn diagnose_cancel_is_request_scoped_on_the_same_browser() {
+        let pending = SignalAgentExecPending::new();
+        let old = pending
+            .register_approval("old".into(), "browser-a".into(), "diagnose-old".into())
+            .unwrap();
+        let current = pending
+            .register_approval(
+                "current".into(),
+                "browser-a".into(),
+                "diagnose-current".into(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            pending.cancel_approvals_for_diagnosis("browser-a", "diagnose-old"),
+            1
+        );
+        assert!(old.await.is_err());
+        assert!(pending.resolve("browser-a", &resolve("current", ApprovalDecision::Approve)));
+        assert_eq!(current.await.unwrap(), ApprovalDecision::Approve);
     }
 
     #[tokio::test]
@@ -657,5 +1044,24 @@ mod tests {
             rx.await.unwrap(),
             EdgeExecDisposition::RejectedBeforeDispatch { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn state_reply_is_bound_to_the_queried_host_and_one_shot() {
+        let pending = SignalAgentExecPending::new();
+        let rx = pending
+            .register_state_query("g1".into(), "edge-a".into())
+            .unwrap();
+        let reply = ExecStateReplyPayload {
+            execution_generation: "g1".into(),
+            state: ExecState::Running,
+            containment_identity: None,
+            running_ms: Some(9_000),
+            detail: None,
+            result_json: None,
+        };
+        assert!(!pending.deliver_state_reply("edge-b", reply.clone()));
+        assert!(pending.deliver_state_reply("edge-a", reply));
+        assert_eq!(rx.await.unwrap().state, ExecState::Running);
     }
 }

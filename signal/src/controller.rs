@@ -1,6 +1,7 @@
 pub mod ai_usage;
 pub mod connection;
 pub mod device_code;
+pub mod diagnose_session;
 pub mod model_provider;
 pub mod signaling;
 pub mod terminal;

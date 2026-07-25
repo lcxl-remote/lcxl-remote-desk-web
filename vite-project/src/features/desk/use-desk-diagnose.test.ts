@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import {
     useDeskDiagnose,
@@ -12,6 +12,7 @@ import {
     SIGNALING_TYPE_CODE_DIAGNOSE,
     SIGNALING_TYPE_CODE_DIAGNOSE_EVENT,
     SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL,
+    SIGNALING_TYPE_CODE_EXEC_CONTROL,
     SIGNALING_TYPE_CODE_EXEC_PREVIEW,
     SIGNALING_TYPE_CODE_RESOLVE_EXEC,
 } from './constants';
@@ -23,6 +24,11 @@ const sendMessage = vi.fn(() => 'req-1');
 
 beforeEach(() => {
     sendMessage.mockClear();
+    localStorage.clear();
+});
+
+afterEach(() => {
+    vi.unstubAllGlobals();
 });
 
 function frame(event: DiagnoseEvent): SignalingMessage {
@@ -364,8 +370,20 @@ describe('useDeskDiagnose', () => {
         const { result, feed } = renderDiagnose();
         act(() => result.current.start('restart nginx', {}));
 
+        feed(
+            frame({
+                request_id: 'req-1',
+                seq: 0,
+                kind: 'tool_started',
+                tool_name: 'exec_command',
+                tool_call_id: 'c1',
+                awaiting_approval: true,
+                tool_arguments_json: '{"command":"systemctl restart nginx"}',
+            }),
+        );
         feed(execPreviewFrame());
         expect(result.current.state.pendingExec?.command).toBe('systemctl restart nginx');
+        expect(result.current.state.tools[0].status).toBe('awaiting_approval');
 
         sendMessage.mockClear();
         act(() => result.current.approveExec());
@@ -376,6 +394,84 @@ describe('useDeskDiagnose', () => {
         );
         // The card clears once resolved; completion shows via the tool timeline.
         expect(result.current.state.pendingExec).toBeNull();
+        expect(result.current.state.tools[0].status).toBe('running');
+    });
+
+    it('recovers a settled live request from the persisted snapshot', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({
+            status: 200,
+            ok: true,
+            json: async () => ({
+                success: true,
+                code: 0,
+                data: {
+                    seq: 9,
+                    active: false,
+                    requestId: 'req-1',
+                    activeExecutionGeneration: 'generation-bg-1',
+                    messages: [
+                        { id: 'u1', role: 'user', text: 'run it' },
+                        {
+                            id: 'a1',
+                            role: 'assistant',
+                            text: '',
+                            toolCalls: [
+                                {
+                                    id: 'c1',
+                                    name: 'exec_command',
+                                    argumentsJson: '{"command":"Start-Sleep -Seconds 30"}',
+                                },
+                            ],
+                        },
+                        {
+                            id: 't1',
+                            role: 'tool',
+                            text: 'the approval session was cancelled',
+                            toolCallId: 'c1',
+                        },
+                        { id: 'a2', role: 'assistant', text: 'The command did not run.' },
+                    ],
+                },
+            }),
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        Object.defineProperty(document, 'visibilityState', {
+            configurable: true,
+            value: 'visible',
+        });
+
+        const { result } = renderDiagnose();
+        act(() => result.current.start('run it', {}));
+        await act(async () => {
+            document.dispatchEvent(new Event('visibilitychange'));
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(result.current.state.phase).toBe('done');
+        expect(result.current.state.history).toHaveLength(1);
+        expect(result.current.state.history[0].answer).toBe('The command did not run.');
+        expect(result.current.state.history[0].tools[0]).toMatchObject({
+            status: 'ok',
+            output: 'the approval session was cancelled',
+        });
+        expect(result.current.state.backgroundExecution).toEqual({
+            executionGeneration: 'generation-bg-1',
+            cancelRequested: false,
+        });
+
+        sendMessage.mockClear();
+        act(() => result.current.cancelBackgroundExec());
+        expect(sendMessage).toHaveBeenCalledWith(
+            SIGNALING_TYPE_CODE_EXEC_CONTROL,
+            {
+                execution_generation: 'generation-bg-1',
+                action: 'cancel',
+                requested_by: 'diagnose-operator',
+            },
+            'desk-1',
+        );
+        expect(result.current.state.backgroundExecution?.cancelRequested).toBe(true);
     });
 
     it('rejects an agentic ExecPreview with a reject decision', () => {

@@ -55,7 +55,7 @@ pub(super) async fn handle_confirm_exec_inbound(
     };
 
     // The operation must be an exec; a read operation is a protocol error.
-    let OperationInput::Exec(exec_input) = data.operation.input else {
+    let OperationInput::Exec(mut exec_input) = data.operation.input else {
         // Recorded for the same reason as the parse failure above: a protocol
         // error, not a capability decision.
         ctx.audit
@@ -88,6 +88,18 @@ pub(super) async fn handle_confirm_exec_inbound(
         );
         return Ok(());
     };
+
+    let (local_mode, local_runtime_ms) = {
+        let settings = ctx.settings.read().await;
+        (
+            settings.ai_policy.execution_mode,
+            settings
+                .ai_policy
+                .max_command_runtime_seconds
+                .saturating_mul(1_000),
+        )
+    };
+    desk_diagnose_core::exec_tools::apply_exec_runtime_ceiling(&mut exec_input, local_runtime_ms);
 
     let shell = exec_shell_label(&exec_input);
     let command = exec_input.command.clone();
@@ -136,10 +148,9 @@ pub(super) async fn handle_confirm_exec_inbound(
     // never widen it (a SuggestOnly / ReadOnly local config caps a broad central
     // grant). Off that link the local mode applies directly.
     let execution_mode = {
-        let s = ctx.settings.read().await;
         match &ctx.inbound_authz {
-            Some(authz) => authz.scope.mode.restrict_to(s.ai_policy.execution_mode),
-            None => s.ai_policy.execution_mode,
+            Some(authz) => authz.scope.mode.restrict_to(local_mode),
+            None => local_mode,
         }
     };
 
@@ -610,8 +621,10 @@ pub(super) async fn handle_resolve_exec_inbound(
             // Rebuild against the latest local snapshots before minting an
             // approval token. The stored central mode may only be narrowed by
             // the current device-local ceiling; it can never be widened here.
-            let local_mode = ctx.settings.read().await.ai_policy.execution_mode;
-            let current_mode = consumed.execution_mode.restrict_to(local_mode);
+            let local_policy = ctx.settings.read().await.ai_policy.clone();
+            let current_mode = consumed
+                .execution_mode
+                .restrict_to(local_policy.execution_mode);
             let mode_allows = match (
                 consumed.classification.decision,
                 consumed.classification.effect,
@@ -629,8 +642,15 @@ pub(super) async fn handle_resolve_exec_inbound(
             };
             let operator_templates = ctx.command_templates.snapshot();
             let effective_blocklist = ctx.command_blocklist.snapshot();
+            let mut refreshed_input = consumed.input.clone();
+            desk_diagnose_core::exec_tools::apply_exec_runtime_ceiling(
+                &mut refreshed_input,
+                local_policy
+                    .max_command_runtime_seconds
+                    .saturating_mul(1_000),
+            );
             let rebuilt = crate::exec::classify_command_with_policy(
-                &consumed.input,
+                &refreshed_input,
                 &operator_templates,
                 &effective_blocklist,
                 consumed.admission_policy,

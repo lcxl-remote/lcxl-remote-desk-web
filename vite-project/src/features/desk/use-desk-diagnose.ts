@@ -4,10 +4,13 @@ import {
     SIGNALING_TYPE_CODE_DIAGNOSE,
     SIGNALING_TYPE_CODE_DIAGNOSE_EVENT,
     SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL,
+    SIGNALING_TYPE_CODE_EXEC_CONTROL,
     SIGNALING_TYPE_CODE_EXEC_PREVIEW,
+    SIGNALING_TYPE_CODE_EXEC_STATE_REPLY,
     SIGNALING_TYPE_CODE_RESOLVE_EXEC,
 } from './constants';
 import type { ExecPreview } from '../exec/use-confirm-exec';
+import type { ExecStateReplyPayload } from '../exec/use-confirm-exec';
 import type { SignalingMessage, SignalingSubscriber } from './use-desk-signaling';
 
 export * from './diagnose-state';
@@ -55,18 +58,13 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
     // Highest snapshot seq applied to the transcript, so a poll never regresses to
     // an older view of the shared session.
     const lastAppliedSeqRef = useRef<number>(-1);
-    // Set once the snapshot endpoint is found absent (open-source signal → 404), so
-    // the panel stops polling and behaves exactly as it did before this feature.
-    const snapshotUnsupportedRef = useRef(false);
-
     // Fetch the shared session snapshot and, when it advances and no live turn owns
     // the view, rebuild the transcript from it — rehydrating history and surfacing
-    // an automation answer the request-scoped stream never delivered. Best-effort: a
-    // network blip retries next tick; a 404 disables the feature (open-source
-    // signal); a uniform not-accessible (`code !== 0`) is left for a later tick, when
-    // the device may have reconnected or the session may have appeared.
+    // an automation answer the request-scoped stream never delivered. Best-effort:
+    // a network blip or a uniform not-accessible (`code !== 0`) is left for a later
+    // tick, when the device may have reconnected or the session may have appeared.
     const fetchSnapshot = useCallback(async () => {
-        if (!deskId || snapshotUnsupportedRef.current) return;
+        if (!deskId) return;
         const conversationId = conversationIdRef.current;
         if (!conversationId) return;
         let res: Response;
@@ -79,10 +77,6 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         } catch {
             return; // transient: keep polling
         }
-        if (res.status === 404) {
-            snapshotUnsupportedRef.current = true; // no such endpoint (open-source signal)
-            return;
-        }
         if (!res.ok) return;
         let body: { success?: boolean; code?: number; data?: SessionSnapshot } | null = null;
         try {
@@ -92,15 +86,32 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         }
         if (!body || body.success === false || body.code !== 0 || !body.data) return;
         const snapshot = body.data;
-        // Never regress to an older snapshot; never overwrite a live turn (reconcile
-        // once it settles and the next poll advances).
+        // Never regress to an older snapshot. An active snapshot is not a settled
+        // transcript yet. While a live request owns the panel, only its matching
+        // settled snapshot may recover the UI; this prevents a poll racing just
+        // after `start()` from applying the prior turn's settled row.
         if (snapshot.seq <= lastAppliedSeqRef.current) return;
-        if (activeRequestRef.current !== null) return;
+        if (snapshot.active) return;
+        const activeRequest = activeRequestRef.current;
+        if (activeRequest !== null && snapshot.requestId !== activeRequest) return;
+        activeRequestRef.current = null;
         lastAppliedSeqRef.current = snapshot.seq;
         const history = buildSnapshotTranscript(snapshot.messages);
-        // The snapshot is the whole settled transcript, so collapse any settled
-        // current-turn display into it and return to idle (no duplicated turn).
-        setState({ ...INITIAL_STATE, conversationId, history });
+        // The snapshot is the whole settled transcript, so collapse any stale live
+        // display into it. A non-empty transcript remains in the completed view,
+        // where it is visible and the user can ask a follow-up.
+        setState({
+            ...INITIAL_STATE,
+            phase: history.length > 0 ? 'done' : 'idle',
+            conversationId,
+            history,
+            backgroundExecution: snapshot.activeExecutionGeneration
+                ? {
+                      executionGeneration: snapshot.activeExecutionGeneration,
+                      cancelRequested: false,
+                  }
+                : null,
+        });
     }, [deskId]);
 
     // A desk change rebinds the subject: restore that desk's persisted conversation
@@ -128,8 +139,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         const tick = () => {
             if (
                 document.visibilityState === 'visible' &&
-                conversationIdRef.current &&
-                !snapshotUnsupportedRef.current
+                conversationIdRef.current
             ) {
                 void fetchSnapshot();
             }
@@ -247,7 +257,22 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
             { exec_request_id: reqId, decision: 'approve' },
             deskId,
         );
-        setState((prev) => ({ ...prev, pendingExec: null }));
+        setState((prev) => {
+            const awaitingTools = prev.tools
+                .map((tool, index) => ({ tool, index }))
+                .filter(({ tool }) => tool.status === 'awaiting_approval');
+            const awaiting = awaitingTools[awaitingTools.length - 1]?.index;
+            return {
+                ...prev,
+                pendingExec: null,
+                tools:
+                    awaiting === undefined
+                        ? prev.tools
+                        : prev.tools.map((tool, index) =>
+                              index === awaiting ? { ...tool, status: 'running' } : tool,
+                          ),
+            };
+        });
     }, [deskId, sendMessage, state.pendingExec]);
 
     // Reject the parked command: send `ResolveExec` with `reject` so the loop
@@ -264,12 +289,49 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         setState((prev) => ({ ...prev, pendingExec: null }));
     }, [deskId, sendMessage, state.pendingExec]);
 
+    /** Ask the host to stop the durable background command shown by the snapshot. */
+    const cancelBackgroundExec = useCallback(() => {
+        const generation = state.backgroundExecution?.executionGeneration;
+        if (!deskId || !generation) return;
+        sendMessage(
+            SIGNALING_TYPE_CODE_EXEC_CONTROL,
+            {
+                execution_generation: generation,
+                action: 'cancel',
+                requested_by: 'diagnose-operator',
+            },
+            deskId,
+        );
+        setState((prev) => ({
+            ...prev,
+            backgroundExecution: prev.backgroundExecution
+                ? { ...prev.backgroundExecution, cancelRequested: true }
+                : null,
+        }));
+    }, [deskId, sendMessage, state.backgroundExecution]);
+
     useEffect(() => {
         // Subscribe to the lossless signaling stream. DiagnoseEvent frames
         // are pushed rapidly (status / partial / final) and ordered by
         // `seq`; the previous single-value delivery could coalesce a burst
         // and drop intermediate frames, so streaming relies on this path.
         const handle = (message: SignalingMessage) => {
+            if (message.signaling_type === SIGNALING_TYPE_CODE_EXEC_STATE_REPLY) {
+                const payload = message.signaling_data as ExecStateReplyPayload | null;
+                if (!payload) return;
+                setState((prev) => {
+                    if (
+                        prev.backgroundExecution?.executionGeneration !==
+                        payload.execution_generation
+                    ) {
+                        return prev;
+                    }
+                    return payload.state === 'running' || payload.state === 'reserved'
+                        ? prev
+                        : { ...prev, backgroundExecution: null };
+                });
+                return;
+            }
             // An unsolicited `ExecPreview` arriving while a run is in flight is the
             // agentic loop asking to run a command. The suggested-command flow
             // (`use-desk-exec`) owns previews it requested and correlates them by its
@@ -357,6 +419,11 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                     }
                     case 'answer':
                         activeRequestRef.current = null;
+                        // A command may have crossed the foreground threshold just
+                        // before this answer. Pull the settled snapshot immediately
+                        // so its durable generation and cancel button appear without
+                        // waiting for the periodic poll.
+                        queueMicrotask(() => void fetchSnapshot());
                         return {
                             ...prev,
                             phase: 'done',
@@ -370,7 +437,15 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
             });
         };
         return subscribe(handle);
-    }, [subscribe]);
+    }, [fetchSnapshot, subscribe]);
 
-    return { state, start, handoff, reset, approveExec, rejectExec };
+    return {
+        state,
+        start,
+        handoff,
+        reset,
+        approveExec,
+        rejectExec,
+        cancelBackgroundExec,
+    };
 }

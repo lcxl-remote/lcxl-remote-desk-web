@@ -45,6 +45,12 @@ export type AiExecutionPolicyPublic = {
     */
     execution_mode: ExecutionMode;
     /**
+     * @description Total wall-time ceiling for one AI command, in seconds.
+     * @minLength 0
+     * @type integer, int32
+    */
+    max_command_runtime_seconds: number;
+    /**
      * @description How many commands may run on this device at once.
      * @minLength 0
      * @type integer, int32
@@ -57,6 +63,12 @@ export type AiExecutionPolicyPublic = {
 */
 export type AiExecutionPolicyUpdate = {
     execution_mode?: (null | ExecutionMode);
+    /**
+     * @description `None` leaves the stored wall-time ceiling unchanged. Out-of-range values\nare clamped into the device-supported range.
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    max_command_runtime_seconds?: number | null;
     /**
      * @description `None` leaves the stored ceiling unchanged. Out-of-range values are clamped\ninto [`MIN_MAX_CONCURRENT_EXECUTIONS`]..=[`MAX_MAX_CONCURRENT_EXECUTIONS`].
      * @minLength 0
@@ -315,6 +327,11 @@ export type VersionInfo = {
     */
     api_version: number;
     /**
+     * @description Canonical shell names the host has verified as usable by the AI command\nexecutor. This is narrower than the interactive-terminal list: only\ninterpreters supported by the free-form classifier are reported.
+     * @type string,null
+    */
+    available_exec_shells?: string | null;
+    /**
      * @description The build number of the server.
      * @type integer, int32
     */
@@ -339,6 +356,12 @@ export type VersionInfo = {
      * @type string,null
     */
     display_name?: string | null;
+    /**
+     * @description Edge-local total wall-time ceiling for one AI command. The central brain\nadvertises this to the model and reproduces it when sealing a plan; the\nedge re-applies the current value at PEP time.
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    max_ai_command_runtime_ms?: number | null;
     /**
      * @description Operation system enum
      * @type string
@@ -1002,6 +1025,70 @@ export type DeviceCodeUpdateParams = {
      * @type string
     */
     device_code: string;
+};
+
+export type SnapshotToolCallDto = {
+    /**
+     * @type string
+    */
+    argumentsJson: string;
+    /**
+     * @type string
+    */
+    id: string;
+    /**
+     * @type string
+    */
+    name: string;
+};
+
+export type SnapshotMessageDto = {
+    /**
+     * @type string
+    */
+    id: string;
+    /**
+     * @type string
+    */
+    role: string;
+    /**
+     * @type string
+    */
+    text: string;
+    /**
+     * @type string,null
+    */
+    toolCallId?: string | null;
+    /**
+     * @type array | undefined
+    */
+    toolCalls?: SnapshotToolCallDto[];
+};
+
+export type DiagnoseSessionSnapshotDto = {
+    /**
+     * @description Whether the persisted turn is still running or awaiting approval.
+     * @type boolean
+    */
+    active: boolean;
+    /**
+     * @description Running background command generation that may be cancelled.
+     * @type string,null
+    */
+    activeExecutionGeneration?: string | null;
+    /**
+     * @type array
+    */
+    messages: SnapshotMessageDto[];
+    /**
+     * @description Diagnose request currently represented by the persisted turn.
+     * @type string,null
+    */
+    requestId?: string | null;
+    /**
+     * @type integer, int64
+    */
+    seq: number;
 };
 
 /**
@@ -2027,6 +2114,12 @@ export type RestResponseAiExecutionPolicyPublic = {
         */
         execution_mode: ExecutionMode;
         /**
+         * @description Total wall-time ceiling for one AI command, in seconds.
+         * @minLength 0
+         * @type integer, int32
+        */
+        max_command_runtime_seconds: number;
+        /**
          * @description How many commands may run on this device at once.
          * @minLength 0
          * @type integer, int32
@@ -2226,6 +2319,49 @@ export type RestResponseCreateApiTokenResult = {
          * @type string
         */
         token: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseDiagnoseSessionSnapshotDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description Whether the persisted turn is still running or awaiting approval.
+         * @type boolean
+        */
+        active: boolean;
+        /**
+         * @description Running background command generation that may be cancelled.
+         * @type string,null
+        */
+        activeExecutionGeneration?: string | null;
+        /**
+         * @type array
+        */
+        messages: SnapshotMessageDto[];
+        /**
+         * @description Diagnose request currently represented by the persisted turn.
+         * @type string,null
+        */
+        requestId?: string | null;
+        /**
+         * @type integer, int64
+        */
+        seq: number;
     };
     /**
      * @type string,null
@@ -4667,6 +4803,17 @@ export type OpenSignalingHandleQueryParams = {
      * @type string | undefined
     */
     repository_url?: string;
+    /**
+     * @description Canonical shell names the host has verified as usable by the AI command\nexecutor. This is narrower than the interactive-terminal list: only\ninterpreters supported by the free-form classifier are reported.
+     * @type string | undefined
+    */
+    available_exec_shells?: string;
+    /**
+     * @description Edge-local total wall-time ceiling for one AI command. The central brain\nadvertises this to the model and reproduces it when sealing a plan; the\nedge re-applies the current value at PEP time.
+     * @minLength 0
+     * @type integer | undefined, int32
+    */
+    max_ai_command_runtime_ms?: number;
 };
 
 /**
@@ -4995,6 +5142,32 @@ export type GetModelUsageQueryResponse = GetModelUsage200;
 export type GetModelUsageQuery = {
     Response: GetModelUsage200;
     QueryParams: GetModelUsageQueryParams;
+    Errors: any;
+};
+
+export type GetDiagnoseSessionQueryParams = {
+    /**
+     * @description Target connection id
+     * @type string
+    */
+    connection: string;
+    /**
+     * @description Client conversation intent
+     * @type string
+    */
+    conversation: string;
+};
+
+/**
+ * @description Conversation snapshot, or a uniform not-found/not-accessible response
+*/
+export type GetDiagnoseSession200 = RestResponseDiagnoseSessionSnapshotDto;
+
+export type GetDiagnoseSessionQueryResponse = GetDiagnoseSession200;
+
+export type GetDiagnoseSessionQuery = {
+    Response: GetDiagnoseSession200;
+    QueryParams: GetDiagnoseSessionQueryParams;
     Errors: any;
 };
 

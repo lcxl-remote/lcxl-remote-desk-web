@@ -268,6 +268,11 @@ export type DiagnoseState = {
      * loop executes tools sequentially.
      */
     pendingExec: ExecPreview | null;
+    /** A durable background command still running on the target. */
+    backgroundExecution: {
+        executionGeneration: string;
+        cancelRequested: boolean;
+    } | null;
     /** Prior settled turns of this conversation, oldest first. */
     history: DiagnoseHistoryTurn[];
 };
@@ -287,6 +292,7 @@ export const INITIAL_STATE: DiagnoseState = {
     answer: null,
     provenance: null,
     pendingExec: null,
+    backgroundExecution: null,
     history: [],
 };
 
@@ -337,6 +343,9 @@ export type SnapshotMessage = {
 /** A settled snapshot: the persisted transcript plus a monotonic sequence. */
 export type SessionSnapshot = {
     seq: number;
+    active: boolean;
+    requestId?: string | null;
+    activeExecutionGeneration?: string | null;
     messages: SnapshotMessage[];
 };
 

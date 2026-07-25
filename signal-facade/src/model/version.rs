@@ -31,6 +31,16 @@ pub struct VersionInfo {
     /// Defaults to `None` for peers that do not report it.
     #[serde(default)]
     pub repository_url: Option<String>,
+    /// Canonical shell names the host has verified as usable by the AI command
+    /// executor. This is narrower than the interactive-terminal list: only
+    /// interpreters supported by the free-form classifier are reported.
+    #[serde(default)]
+    pub available_exec_shells: Option<String>,
+    /// Edge-local total wall-time ceiling for one AI command. The central brain
+    /// advertises this to the model and reproduces it when sealing a plan; the
+    /// edge re-applies the current value at PEP time.
+    #[serde(default)]
+    pub max_ai_command_runtime_ms: Option<u32>,
 }
 
 impl VersionInfo {
@@ -55,7 +65,26 @@ impl VersionInfo {
             // the binary that constructs this info, so it reports our own build.
             debug_build: cfg!(debug_assertions),
             repository_url: None,
+            available_exec_shells: None,
+            max_ai_command_runtime_ms: None,
         }
+    }
+
+    /// Store canonical shell names in the query-safe comma-separated wire field.
+    pub fn set_available_exec_shells(&mut self, shells: &[String]) {
+        self.available_exec_shells = (!shells.is_empty()).then(|| shells.join(","));
+    }
+
+    /// Decode the host-reported query field into individual shell names.
+    pub fn available_exec_shell_list(&self) -> Vec<String> {
+        self.available_exec_shells
+            .as_deref()
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|shell| !shell.is_empty())
+            .map(str::to_string)
+            .collect()
     }
 }
 
@@ -77,6 +106,8 @@ mod tests {
             VersionInfo::new(1, 42, "abc".into(), RemoteDeskTypeEnum::Server, None, None);
         info.debug_build = true;
         info.repository_url = Some("https://example.test/repo.git".into());
+        info.set_available_exec_shells(&["powershell".into(), "pwsh".into()]);
+        info.max_ai_command_runtime_ms = Some(600_000);
 
         let query = serde_urlencoded::to_string(&info).unwrap();
         let decoded: VersionInfo = serde_urlencoded::from_str(&query).unwrap();
@@ -86,6 +117,11 @@ mod tests {
             decoded.repository_url.as_deref(),
             Some("https://example.test/repo.git")
         );
+        assert_eq!(
+            decoded.available_exec_shell_list(),
+            vec!["powershell".to_string(), "pwsh".to_string()]
+        );
+        assert_eq!(decoded.max_ai_command_runtime_ms, Some(600_000));
     }
 
     #[test]
@@ -98,6 +134,8 @@ mod tests {
 
         assert!(!decoded.debug_build);
         assert_eq!(decoded.repository_url, None);
+        assert!(decoded.available_exec_shell_list().is_empty());
+        assert_eq!(decoded.max_ai_command_runtime_ms, None);
     }
 
     #[test]

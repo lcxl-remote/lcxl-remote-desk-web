@@ -46,6 +46,8 @@ type DiagnosePanelProps = {
     onApproveExec?: () => void
     /** Reject the command the agentic loop is parked on (agentic path). */
     onRejectExec?: () => void
+    /** Stop the durable background command currently attached to the session. */
+    onCancelBackgroundExec?: () => void
     /** Manager-only active-organization id, threaded to the model selector and the
      *  diagnose request. Undefined for the personal view / open-source control end,
      *  which keeps everything personal-scoped. */
@@ -62,6 +64,7 @@ export function DiagnosePanel({
     exec,
     onApproveExec,
     onRejectExec,
+    onCancelBackgroundExec,
     orgId,
 }: DiagnosePanelProps) {
     const { t, i18n } = useTranslation()
@@ -298,6 +301,30 @@ export function DiagnosePanel({
                 {/* Result (done) */}
                 {state.phase === "done" && (
                     <div className="flex flex-col gap-4">
+                        {state.backgroundExecution && onCancelBackgroundExec && (
+                            <section className="flex items-center justify-between gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
+                                <div className="min-w-0">
+                                    <div className="text-xs font-medium text-amber-200">
+                                        {t("pages.desk.diagnose.backgroundRunning")}
+                                    </div>
+                                    <div className="truncate font-mono text-[10px] text-white/50">
+                                        {state.backgroundExecution.executionGeneration}
+                                    </div>
+                                </div>
+                                <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="destructive"
+                                    className="h-7 shrink-0 text-xs"
+                                    disabled={state.backgroundExecution.cancelRequested}
+                                    onClick={onCancelBackgroundExec}
+                                >
+                                    {state.backgroundExecution.cancelRequested
+                                        ? t("pages.desk.diagnose.backgroundCancelling")
+                                        : t("pages.desk.diagnose.backgroundCancel")}
+                                </Button>
+                            </section>
+                        )}
                         {/* AI-generated marking (Art.50(2)) for any AI-derived
                             result / answer. Shown by the presence of AI content,
                             not by provenance being set (fail-closed); provenance

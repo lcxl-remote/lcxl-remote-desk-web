@@ -203,12 +203,12 @@ pub trait CollectObserver: Send + Sync {
 // ====== EdgeExecObserver trait ======
 
 /// Consumes inbound `EdgeExecResult` frames (a structured
-/// `EdgeExecDisposition` for one fleet execution attempt) from a desk-server
-/// daemon. The manager implements this to route the result into its execution
-/// pending store, keyed by the per-attempt `request_id` and validated against
-/// the connection that the matching `EdgeExecRequest` was pushed to; the signal
-/// server leaves it unset, so the frames are ignored there. `source` is the
-/// reporting connection (a token-authenticated desk server).
+/// `EdgeExecDisposition` for one central-agent or fleet execution attempt) from
+/// a desk-server daemon. Manager and OSS Signal route the result into their
+/// respective durable task stores, keyed by the per-attempt `request_id` and
+/// validated against the connection that received the matching
+/// `EdgeExecRequest`. `source` is the reporting connection (a
+/// token-authenticated desk server).
 pub trait EdgeExecObserver: Send + Sync {
     fn on_fleet_exec_result<'a>(
         &'a self,
@@ -219,13 +219,12 @@ pub trait EdgeExecObserver: Send + Sync {
 
 // ====== ExecStateReplyObserver trait ======
 
-/// Consumes inbound `ExecStateReply` frames that answer a query the manager
-/// itself issued (a reconcile of an execution whose live result it lost). The
-/// manager implements this to feed the reply into its state-query pending store,
-/// keyed by the execution generation and validated against the reporting
-/// connection; the signal server leaves it unset. A reply carrying a
-/// `to_connection_id` is a browser-initiated query's answer and is relayed to
-/// that peer instead — only a reply with no peer target is the manager's own.
+/// Consumes inbound `ExecStateReply` frames that answer a query the central brain
+/// itself issued (a reconcile of an execution whose live result it lost).
+/// Manager and OSS Signal feed the reply into a state-query pending store keyed
+/// by execution generation and validated against the reporting connection. A
+/// reply carrying a `to_connection_id` is a browser-initiated query's answer and
+/// is relayed to that peer instead.
 pub trait ExecStateReplyObserver: Send + Sync {
     fn on_exec_state_reply<'a>(
         &'a self,

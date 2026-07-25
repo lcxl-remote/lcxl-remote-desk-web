@@ -27,19 +27,19 @@ use crate::exec::{ExecContainmentSnapshot, ExecExecutionBasis, ExecPlanDraft, Ex
 
 /// Hard caps enforced on control-end-supplied limits before they reach the
 /// worker.
-pub const MAX_TIMEOUT_MS: u32 = 60_000;
-pub const DEFAULT_TIMEOUT_MS: u32 = 30_000;
+pub const MAX_TIMEOUT_MS: u32 = 7_200_000; // 2 h
+pub const DEFAULT_TIMEOUT_MS: u32 = 600_000; // 10 min
 pub const MIN_TIMEOUT_MS: u32 = 1_000;
 pub const MAX_OUTPUT_BYTES: u32 = 1 << 20; // 1 MiB
 pub const DEFAULT_OUTPUT_BYTES: u32 = 64 * 1024;
 
 /// Absolute wall-time ceilings the product enforces, independent of any template,
-/// policy, or device setting. A **foreground** command (the default) may run up to
-/// [`PRODUCT_MAX_FOREGROUND_MS`]; only a template on the background whitelist may
-/// run up to [`PRODUCT_MAX_BACKGROUND_MS`]. There is deliberately **no unbounded
+/// policy, or device setting. Foreground waiting and worker wall time are
+/// deliberately separate: the agent may detach after a few seconds while the
+/// worker continues up to this finite cap. There is deliberately **no unbounded
 /// option**: a finite wall time is the one fail-safe that holds even when the
 /// manager or network is unreachable.
-pub const PRODUCT_MAX_FOREGROUND_MS: u32 = 60_000; // 1 min
+pub const PRODUCT_MAX_FOREGROUND_MS: u32 = MAX_TIMEOUT_MS;
 pub const PRODUCT_MAX_BACKGROUND_MS: u32 = 7_200_000; // 2 h
 
 /// The effective wall time for a template dispatch under the layered cap.
@@ -525,7 +525,7 @@ mod tests {
     #[test]
     fn clamped_caps_excessive_values() {
         let mut input = exec_input("docker ps");
-        input.timeout_ms = 999_999;
+        input.timeout_ms = u32::MAX;
         input.max_stdout_bytes = 99_999_999;
         input.max_stderr_bytes = 10;
         let limits = ExecLimits::clamped(&input);
@@ -699,9 +699,15 @@ mod tests {
 
     #[test]
     fn foreground_template_cannot_exceed_the_foreground_ceiling() {
-        // A foreground template declaring 5 min is clamped to the 1-min product cap.
+        // A foreground template cannot exceed the finite two-hour product cap.
         assert_eq!(
-            effective_wall_ms(None, Some(300_000), None, None, false),
+            effective_wall_ms(
+                None,
+                Some(PRODUCT_MAX_FOREGROUND_MS.saturating_mul(2)),
+                None,
+                None,
+                false
+            ),
             PRODUCT_MAX_FOREGROUND_MS
         );
     }

@@ -14,6 +14,7 @@
 use desk_agent_protocol::{
     AgentError, AgentErrorKind, Capability, ExecInput, ExecTarget, OperationInput,
 };
+use desk_utils::error::DeskErrorCode;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -22,11 +23,19 @@ use crate::registry::{RegisteredTool, ToolEffect};
 
 /// The single mutating exec tool the agent loop exposes.
 pub const EXEC_TOOL_NAME: &str = "exec_command";
+/// Canonical free-form shell names understood by the shared classifier.
+///
+/// `ExecShellKind::Native` is deliberately absent: it is an internal direct-spawn
+/// mode used by sealed templates, not a model-selectable interpreter.
+pub const SUPPORTED_EXEC_SHELLS: &[&str] = &["powershell", "pwsh", "bash", "sh"];
 
 /// Default execution limits applied when the model omits them. Concrete values are
 /// tuned against M1a measurement; the contract is that the model never sets
 /// unbounded limits.
-const DEFAULT_EXEC_TIMEOUT_MS: u32 = 10_000;
+// The agent loop stops waiting after its much shorter foreground threshold and
+// tracks the command in the background. The wall-time limit remains finite and
+// defaults to ten minutes unless the target advertises a narrower local ceiling.
+const DEFAULT_EXEC_TIMEOUT_MS: u32 = desk_agent_protocol::exec_policy::DEFAULT_TIMEOUT_MS;
 const DEFAULT_EXEC_MAX_STDOUT_BYTES: u32 = 65_536;
 const DEFAULT_EXEC_MAX_STDERR_BYTES: u32 = 65_536;
 /// Requested shell family when the model does not specify one; the server's
@@ -64,6 +73,44 @@ fn bad_arguments(detail: impl std::fmt::Display) -> AgentError {
 /// The mutating tools the agent loop exposes (subject to scope/mode filtering and
 /// the no-mutation-while-unknown rule). One tool today: [`EXEC_TOOL_NAME`].
 pub fn exec_tool_registry() -> Vec<RegisteredTool> {
+    exec_tool_registry_for_shells(
+        &SUPPORTED_EXEC_SHELLS
+            .iter()
+            .map(|shell| (*shell).to_string())
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Build the exec tool with a target-specific shell enum.
+///
+/// Constraining the JSON schema keeps the model from spending tool calls trying
+/// interpreters that cannot run on the target. The execution seam still
+/// revalidates the choice authoritatively.
+pub fn exec_tool_registry_for_shells(available_shells: &[String]) -> Vec<RegisteredTool> {
+    exec_tool_registry_for_shells_with_timeout(available_shells, DEFAULT_EXEC_TIMEOUT_MS)
+}
+
+/// Build the exec tool with the target's local command-runtime ceiling.
+pub fn exec_tool_registry_for_shells_with_timeout(
+    available_shells: &[String],
+    max_runtime_ms: u32,
+) -> Vec<RegisteredTool> {
+    let available_shells = sanitize_available_exec_shells(available_shells);
+    let max_runtime_ms = max_runtime_ms.clamp(
+        desk_agent_protocol::exec_policy::MIN_TIMEOUT_MS,
+        desk_agent_protocol::exec_policy::MAX_TIMEOUT_MS,
+    );
+    let shell_description = if available_shells.is_empty() {
+        "No AI execution shell is currently available on the target device.".to_string()
+    } else {
+        format!(
+            "Shell verified as available on the target device. Choose one of: {}. \
+             Prefer {} unless the command specifically requires another listed shell.",
+            available_shells.join(", "),
+            available_shells[0]
+        )
+    };
+    let preferred_shell = available_shells.first().cloned();
     vec![RegisteredTool {
         spec: ToolSpec {
             name: EXEC_TOOL_NAME.to_string(),
@@ -76,18 +123,105 @@ pub fn exec_tool_registry() -> Vec<RegisteredTool> {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "The command to run."},
-                    "shell": {"type": "string", "description": "Shell family, e.g. powershell or bash."},
+                    "shell": {
+                        "type": "string",
+                        "enum": available_shells,
+                        "default": preferred_shell,
+                        "description": shell_description
+                    },
                     "cwd": {"type": "string"},
-                    "timeout_ms": {"type": "integer", "minimum": 0},
+                    "timeout_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": max_runtime_ms,
+                        "default": max_runtime_ms,
+                        "description": format!(
+                            "Command wall-time limit in milliseconds. Defaults to the target device ceiling of {max_runtime_ms}; set it explicitly only when a shorter limit is required."
+                        )
+                    },
                     "reason": {"type": "string", "description": "Why this command is needed."}
                 },
-                "required": ["command"]
+                "required": ["command", "shell"]
             }),
         },
         // Exposure gate only; the real authz capability is decided by classification.
         required_capability: Capability::ShellExecConfirmed,
         effect: ToolEffect::Mutating,
     }]
+}
+
+/// Apply the target device's local wall-time ceiling before classification.
+///
+/// A missing model value adopts the ceiling. An explicit shorter value is kept;
+/// a larger one is narrowed. Central and edge both call this helper so the sealed
+/// draft remains byte-for-byte reproducible.
+pub fn apply_exec_runtime_ceiling(input: &mut ExecInput, max_runtime_ms: u32) {
+    let ceiling = max_runtime_ms.clamp(
+        desk_agent_protocol::exec_policy::MIN_TIMEOUT_MS,
+        desk_agent_protocol::exec_policy::MAX_TIMEOUT_MS,
+    );
+    input.timeout_ms = if input.timeout_ms == 0 {
+        ceiling
+    } else {
+        input.timeout_ms.min(ceiling)
+    };
+}
+
+/// Normalize a model-provided interpreter name to the canonical executor name.
+pub fn canonical_exec_shell(shell: &str) -> Option<&'static str> {
+    match shell.trim().to_ascii_lowercase().as_str() {
+        "powershell" | "powershell.exe" => Some("powershell"),
+        "pwsh" | "pwsh.exe" => Some("pwsh"),
+        "bash" | "bash.exe" => Some("bash"),
+        "sh" | "sh.exe" => Some("sh"),
+        _ => None,
+    }
+}
+
+/// Keep only canonical classifier-supported names, preserving host preference
+/// order and removing duplicates. A host report never widens the executor.
+pub fn sanitize_available_exec_shells(shells: &[String]) -> Vec<String> {
+    let mut sanitized = Vec::new();
+    for shell in shells {
+        let Some(canonical) = canonical_exec_shell(shell) else {
+            continue;
+        };
+        if !sanitized.iter().any(|item| item == canonical) {
+            sanitized.push(canonical.to_string());
+        }
+    }
+    sanitized
+}
+
+/// Whether the requested interpreter is in the target's verified capability set.
+pub fn exec_shell_is_available(shell: &str, available_shells: &[String]) -> bool {
+    let Some(requested) = canonical_exec_shell(shell) else {
+        return false;
+    };
+    sanitize_available_exec_shells(available_shells)
+        .iter()
+        .any(|available| available == requested)
+}
+
+/// Model-safe structured error for an interpreter that is unsupported or not
+/// usable on this target.
+pub fn unsupported_exec_shell_error(
+    requested_shell: &str,
+    available_shells: &[String],
+) -> AgentError {
+    let details = json!({
+        "error_code": "unsupported_exec_shell",
+        "requested_shell": requested_shell,
+        "available_shells": sanitize_available_exec_shells(available_shells),
+        "retryable": true
+    });
+    AgentError {
+        kind: AgentErrorKind::InvalidInput,
+        message: details.to_string(),
+        retryable: true,
+        safe_for_model: true,
+        error_code: Some(DeskErrorCode::AI_EXEC_SHELL_UNSUPPORTED.code()),
+    }
 }
 
 /// Map an exec tool call to the neutral [`OperationInput::Exec`] plus the model's
@@ -120,7 +254,9 @@ pub fn build_exec_input(call: &ToolCall) -> Result<(OperationInput, Option<Strin
         },
         command: params.command,
         cwd: params.cwd,
-        timeout_ms: params.timeout_ms.unwrap_or(DEFAULT_EXEC_TIMEOUT_MS),
+        // Keep an omitted timeout distinguishable until the target-specific
+        // execution ceiling is applied by the central execution seam.
+        timeout_ms: params.timeout_ms.unwrap_or(0),
         max_stdout_bytes: DEFAULT_EXEC_MAX_STDOUT_BYTES,
         max_stderr_bytes: DEFAULT_EXEC_MAX_STDERR_BYTES,
     };
@@ -148,6 +284,69 @@ mod tests {
         assert_eq!(reg[0].name(), EXEC_TOOL_NAME);
         assert_eq!(reg[0].effect, ToolEffect::Mutating);
         assert_eq!(reg[0].required_capability, Capability::ShellExecConfirmed);
+        assert_eq!(
+            reg[0].spec.parameters_schema["properties"]["shell"]["enum"],
+            json!(SUPPORTED_EXEC_SHELLS)
+        );
+        assert_eq!(
+            reg[0].spec.parameters_schema["required"],
+            json!(["command", "shell"])
+        );
+        assert_eq!(
+            reg[0].spec.parameters_schema["properties"]["shell"]["default"],
+            json!("powershell")
+        );
+    }
+
+    #[test]
+    fn target_shells_are_filtered_and_deduplicated() {
+        let shells = sanitize_available_exec_shells(&[
+            "powershell.exe".into(),
+            "cmd".into(),
+            "bash".into(),
+            "powershell".into(),
+        ]);
+        assert_eq!(shells, vec!["powershell".to_string(), "bash".to_string()]);
+    }
+
+    #[test]
+    fn target_runtime_ceiling_is_advertised_and_applied() {
+        let registry = exec_tool_registry_for_shells_with_timeout(&["powershell".into()], 120_000);
+        assert_eq!(
+            registry[0].spec.parameters_schema["properties"]["timeout_ms"]["maximum"],
+            json!(120_000)
+        );
+
+        let mut input = match build_exec_input(&call(
+            r#"{"command":"Get-Process","shell":"powershell","timeout_ms":900000}"#,
+        ))
+        .unwrap()
+        .0
+        {
+            OperationInput::Exec(input) => input,
+            other => panic!("expected Exec, got {other:?}"),
+        };
+        apply_exec_runtime_ceiling(&mut input, 120_000);
+        assert_eq!(input.timeout_ms, 120_000);
+        input.timeout_ms = 0;
+        apply_exec_runtime_ceiling(&mut input, 300_000);
+        assert_eq!(input.timeout_ms, 300_000);
+    }
+
+    #[test]
+    fn unsupported_shell_error_carries_retry_details() {
+        let error = unsupported_exec_shell_error("cmd", &["powershell".into()]);
+        assert_eq!(
+            error.error_code,
+            Some(DeskErrorCode::AI_EXEC_SHELL_UNSUPPORTED.code())
+        );
+        assert!(error.retryable);
+        assert!(error.message.contains("\"requested_shell\":\"cmd\""));
+        assert!(
+            error
+                .message
+                .contains("\"available_shells\":[\"powershell\"]")
+        );
     }
 
     /// A populated call maps to an `Exec` input with the command, shell, and bounded
@@ -162,7 +361,7 @@ mod tests {
         match input {
             OperationInput::Exec(e) => {
                 assert_eq!(e.command, "Restart-Service Spooler");
-                assert_eq!(e.timeout_ms, DEFAULT_EXEC_TIMEOUT_MS);
+                assert_eq!(e.timeout_ms, 0);
                 assert_eq!(e.max_stdout_bytes, DEFAULT_EXEC_MAX_STDOUT_BYTES);
                 assert!(matches!(e.target, ExecTarget::Shell { shell } if shell == "powershell"));
             }

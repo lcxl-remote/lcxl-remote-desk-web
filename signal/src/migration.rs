@@ -12,6 +12,7 @@ mod m20260724_000001_create_agent_session;
 mod m20260724_000002_add_model_provider_same_tool_limit;
 mod m20260724_000003_add_model_provider_max_steps;
 mod m20260724_000004_raise_agent_turn_defaults;
+mod m20260725_000001_create_agent_exec_task;
 
 pub struct Migrator;
 
@@ -31,6 +32,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260724_000002_add_model_provider_same_tool_limit::Migration),
             Box::new(m20260724_000003_add_model_provider_max_steps::Migration),
             Box::new(m20260724_000004_raise_agent_turn_defaults::Migration),
+            Box::new(m20260725_000001_create_agent_exec_task::Migration),
         ]
     }
 }

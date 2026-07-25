@@ -105,12 +105,13 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// `Some` only in the manager (which feeds them into its orchestrator's
     /// pending store); `None` elsewhere, where they are ignored.
     pub collect_observer: Option<Arc<dyn CollectObserver>>,
-    /// Fleet-execution result consumer for inbound `EdgeExecResult` frames.
-    /// `Some` only in the manager (which feeds them into its execution pending
-    /// store); `None` elsewhere, where they are ignored.
+    /// Central-agent execution result consumer for inbound `EdgeExecResult`
+    /// frames. Manager feeds its distributed execution ledger; OSS Signal feeds
+    /// its single-node SQLite task ledger.
     pub edge_exec_observer: Option<Arc<dyn EdgeExecObserver>>,
-    /// Reconcile-reply consumer for inbound `ExecStateReply` frames the manager
-    /// itself asked for. `Some` only in the manager; `None` elsewhere.
+    /// Reconcile-reply consumer for an inbound `ExecStateReply` the central brain
+    /// itself asked for. Both Manager and OSS Signal use it to recover a missed
+    /// live result from the host's authoritative ledger.
     pub exec_state_reply_observer: Option<Arc<dyn ExecStateReplyObserver>>,
     /// Remote read-tool response consumer for inbound `RemoteToolResponse` frames.
     /// `Some` only in the manager (which feeds them into its remote-tool pending
@@ -828,11 +829,24 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::TerminalCompleteResult
             | SignalingType::ExecPreview
             | SignalingType::ExecResult
-            // Progress frames are host-originated facts, relayed to the control
-            // end unchanged.
-            | SignalingType::ExecLifecycle => {
+            => {
                 // Generic forwarding
                 self.forward_to_peer(&signaling_model, false).await?;
+            }
+
+            // Browser-owned executions carry a browser target and relay there.
+            // Centrally-owned edge executions intentionally carry no peer target:
+            // their authoritative result is consumed by the central observer, so
+            // lifecycle progress is advisory and must not be forwarded to `None`.
+            SignalingType::ExecLifecycle => {
+                if signaling_model.to_connection_id.is_some() {
+                    self.forward_to_peer(&signaling_model, false).await?;
+                } else {
+                    log::trace!(
+                        "Received central ExecLifecycle for {}, no peer relay needed",
+                        signaling_model.request_id
+                    );
+                }
             }
 
             // A state reply answers either a browser's query or the manager's own

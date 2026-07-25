@@ -128,7 +128,7 @@ fn acceptance_executable_plans_are_bounded_and_metachar_free() {
     input.timeout_ms = u32::MAX;
     input.max_stdout_bytes = u32::MAX;
     let draft = classify_command(&input).draft.expect("executable");
-    assert!(draft.timeout_ms <= 60_000);
+    assert!(draft.timeout_ms <= desk_agent_protocol::exec_policy::MAX_TIMEOUT_MS);
     assert!(draft.max_stdout_bytes <= 1 << 20);
     // The rendered argv only contains the validated value, bound into a fixed
     // PowerShell template — no metacharacters from the original string.

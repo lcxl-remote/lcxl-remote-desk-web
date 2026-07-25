@@ -662,6 +662,37 @@ pub(super) async fn agentic_owner_freeform_is_rejected_when_local_mode_tightens(
     assert!(ctx.edge_exec_pending.lock().unwrap().is_empty());
 }
 
+#[tokio::test]
+pub(super) async fn agentic_plan_is_rejected_when_local_runtime_ceiling_tightens() {
+    let (mut ctx, mut rx) = make_ctx_with_rx().await;
+    ctx.exec_supported = true;
+    {
+        let mut settings = ctx.settings.write().await;
+        settings.ai_policy.execution_mode = ExecutionMode::ConfirmEachAction;
+        settings.ai_policy.max_command_runtime_seconds = 10;
+    }
+    let mut authz = authz_block(
+        vec![Capability::ShellExecConfirmed],
+        vec!["shell.plan"],
+        ExecutionMode::ConfirmEachAction,
+        desk_agent_protocol::RiskLevel::Critical,
+    );
+    authz.exec_admission_policy = desk_agent_protocol::authz::ExecAdmissionPolicy::OwnerInteractive;
+    ctx.inbound_authz = Some(authz);
+    let input = agentic_input("Get-ChildItem C:\\", None, 60_000);
+    let plan = owner_agentic_plan_from_input(&input, "a-owner-runtime");
+
+    handle_edge_exec_request_inbound(&ctx, &agentic_exec_model("a-owner-runtime", &plan, &input))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        read_fleet_result(&mut rx).disposition,
+        EdgeExecDisposition::RejectedBeforeDispatch { .. }
+    ));
+    assert!(ctx.edge_exec_pending.lock().unwrap().is_empty());
+}
+
 #[test]
 pub(super) fn fleet_always_rejects_owner_freeform_basis() {
     let input = agentic_input("Get-ChildItem C:\\", None, 0);

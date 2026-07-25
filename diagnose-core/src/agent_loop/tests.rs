@@ -1583,6 +1583,110 @@ async fn mutating_backend_error_fails_turn() {
     );
 }
 
+/// A model-safe pre-dispatch error may explicitly allow the model to correct its
+/// arguments. The error result is included in the next request, and a corrected
+/// command can execute in the same user turn.
+#[tokio::test]
+async fn retryable_mutating_error_returns_to_model_for_correction() {
+    struct RetryableThenExecuted {
+        calls: RefCell<u32>,
+    }
+    #[async_trait(?Send)]
+    impl ToolSeam for RetryableThenExecuted {
+        async fn run_read(&self, _call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
+            unreachable!("no read in this test")
+        }
+
+        async fn confirm_and_exec(
+            &self,
+            _call: &ToolCall,
+            _ctx: &ExecContext,
+        ) -> Result<ExecOutcome, AgentError> {
+            let mut calls = self.calls.borrow_mut();
+            *calls += 1;
+            if *calls == 1 {
+                Err(AgentError {
+                    kind: desk_agent_protocol::AgentErrorKind::InvalidInput,
+                    message: r#"{"error_code":"unsupported_exec_shell","requested_shell":"bash","available_shells":["powershell"],"retryable":true}"#.into(),
+                    retryable: true,
+                    safe_for_model: true,
+                    error_code: Some(
+                        desk_utils::error::DeskErrorCode::AI_EXEC_SHELL_UNSUPPORTED.code(),
+                    ),
+                })
+            } else {
+                Ok(ExecOutcome::Executed {
+                    output: ToolRunOutput {
+                        content: "exit_code=0".into(),
+                        image_data_url: None,
+                    },
+                    event_id: None,
+                })
+            }
+        }
+    }
+
+    let sess = MemSession::default();
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use_args(
+                    "c1",
+                    "exec_command",
+                    r#"{"command":"sleep 1","shell":"bash"}"#,
+                ),
+                tool_use_args(
+                    "c2",
+                    "exec_command",
+                    r#"{"command":"Start-Sleep 1","shell":"powershell"}"#,
+                ),
+                answer("done"),
+            ]
+            .into(),
+        ),
+        requests: requests.clone(),
+    };
+    let tools = RetryableThenExecuted {
+        calls: RefCell::new(0),
+    };
+    let reg = vec![mutating_tool(
+        "exec_command",
+        Capability::ShellExecConfirmed,
+    )];
+    let clock = || "t".to_string();
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    let user = ChatMessage::text("u", ChatRole::User, "sleep briefly");
+    let deps = LoopDeps {
+        session_seam: &sess,
+        model: &model,
+        tools: &tools,
+        registry: &reg,
+        response_format: ResponseFormatSpec::None,
+        system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
+        max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
+        max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
+        max_same_tool_per_turn: crate::MAX_SAME_TOOL_PER_TURN,
+        clock: &clock,
+        heartbeat: None,
+    };
+
+    let outcome = run_agent_turn(&deps, exec_claim(), user, &mut sink)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("done".into()));
+    assert_eq!(*tools.calls.borrow(), 2);
+    assert_eq!(requests.borrow().len(), 3);
+    assert!(
+        requests.borrow()[1]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("unsupported_exec_shell")),
+        "the correction step must see the structured shell error"
+    );
+}
+
 // ---------------------------- Streaming lifecycle ----------------------------
 
 /// A sink that records every lifecycle event in order (text deltas excluded so

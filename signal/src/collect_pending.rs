@@ -56,6 +56,11 @@ pub struct CollectContext {
     pub scope: AgentScope,
     pub max_risk: RiskLevel,
     pub exec_admission_policy: ExecAdmissionPolicy,
+    /// Canonical interpreters the target verified as runnable by AI execution when
+    /// it registered its signaling connection.
+    pub available_exec_shells: Vec<String>,
+    /// Target-reported local total wall-time ceiling for one AI command.
+    pub max_command_runtime_ms: u32,
     /// The original collection intent (question + context kinds + locale), reused
     /// to build the model prompt once evidence arrives.
     pub request: DiagnoseRequestData,
@@ -266,6 +271,8 @@ mod tests {
             },
             max_risk: RiskLevel::Critical,
             exec_admission_policy: ExecAdmissionPolicy::TemplateOnly,
+            available_exec_shells: Vec::new(),
+            max_command_runtime_ms: desk_agent_protocol::exec_policy::DEFAULT_TIMEOUT_MS,
             request: DiagnoseRequestData::default(),
         }
     }

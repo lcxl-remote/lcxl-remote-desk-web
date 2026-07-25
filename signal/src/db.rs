@@ -43,6 +43,7 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
 
             // Auto migrate
             Migrator::up(&db, None).await?;
+            crate::agent_exec_store::start_completion_publisher(db.clone());
 
             Ok(db)
         })

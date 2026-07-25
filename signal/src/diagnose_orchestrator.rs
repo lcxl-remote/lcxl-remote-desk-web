@@ -20,25 +20,28 @@
 
 use actix_web::web;
 use desk_agent_protocol::diagnose::{
-    CollectRequest, CollectResponse, DiagnoseEvent, DiagnoseRequestData,
+    CollectRequest, CollectResponse, DiagnoseEvent, DiagnoseEventKind, DiagnoseRequestData,
 };
 use desk_agent_protocol::evidence::EvidenceSnapshot;
 use desk_agent_protocol::provenance::AiProvenance;
 use desk_agent_protocol::{AgentError, AgentErrorKind, Capability, ExecutionMode};
 use desk_diagnose_core::DEFAULT_MAX_CONTEXT_BYTES;
-use desk_diagnose_core::agent_loop::{LoopDeps, run_agent_turn};
+use desk_diagnose_core::agent_loop::{LoopDeps, LoopOutcome, resume_agent_turn, run_agent_turn};
 use desk_diagnose_core::agentic_prompt::build_agentic_system_message;
 use desk_diagnose_core::chat::{ChatMessage, ChatRole};
 use desk_diagnose_core::conversation_key::derive_conversation_key;
-use desk_diagnose_core::exec_tools::exec_tool_registry;
+use desk_diagnose_core::exec_tools::{
+    exec_tool_registry_for_shells_with_timeout, sanitize_available_exec_shells,
+};
 use desk_diagnose_core::prompt::ResponseFormatSpec;
 #[cfg(test)]
 use desk_diagnose_core::prompt::diagnosis_json_schema;
 use desk_diagnose_core::read_tools::read_tool_registry;
 use desk_diagnose_core::seam::{
-    ClaimTurnParams, HeartbeatGuard, LeaseHeartbeat, ModelRequest, ModelSeam, SessionSeam, TurnSink,
+    ClaimTurnParams, HeartbeatGuard, LeaseHeartbeat, ModelRequest, ModelSeam, SessionSeam,
+    ToolRunOutput, ToolSeam, TurnSink,
 };
-use desk_diagnose_core::session::TriggerOrigin;
+use desk_diagnose_core::session::{PersistedAgentSession, TriggerOrigin};
 use desk_diagnose_core::stream::StreamingTurnSink;
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
@@ -54,6 +57,7 @@ use crate::model_provider;
 use crate::model_provider::ResponseFormatMode;
 
 const AGENT_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const SIGNALING_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 struct SignalStoreHeartbeat {
     store: crate::agent_session_store::SignalAgentSessionStore,
@@ -139,12 +143,12 @@ fn transport_error(message: impl Into<String>) -> AgentError {
 /// Serialize and send one signaling frame to a connection over its WebSocket.
 async fn send_frame(conn: &ConnectionState, frame: &SignalingModel) -> Result<(), String> {
     let text = serde_json::to_string(frame).map_err(|e| format!("encode frame: {e}"))?;
-    conn.session
-        .write()
-        .await
-        .text(text)
-        .await
-        .map_err(|e| format!("send to {}: {e}", conn.model.connection_id))
+    tokio::time::timeout(SIGNALING_SEND_TIMEOUT, async {
+        conn.session.write().await.text(text).await
+    })
+    .await
+    .map_err(|_| format!("send to {} timed out", conn.model.connection_id))?
+    .map_err(|e| format!("send to {}: {e}", conn.model.connection_id))
 }
 
 /// Push a `CollectRequest` to the target edge over its (trusted-central)
@@ -188,8 +192,31 @@ pub async fn stream_event(
         serde_json::to_value(event).ok(),
         None,
     );
-    if let Err(e) = send_frame(&conn, &frame).await {
-        log::warn!("[diagnose] failed to stream event to {browser_connection_id}: {e}");
+    match send_frame(&conn, &frame).await {
+        Ok(())
+            if !matches!(
+                &event.kind,
+                DiagnoseEventKind::Partial | DiagnoseEventKind::Status
+            ) =>
+        {
+            log::info!(
+                "[diagnose] streamed event request_id={} browser={} kind={:?} seq={}",
+                event.request_id,
+                browser_connection_id,
+                event.kind,
+                event.seq
+            );
+        }
+        Ok(()) => {}
+        Err(e) => {
+            log::warn!(
+                "[diagnose] failed to stream event request_id={} browser={} kind={:?} seq={}: {e}",
+                event.request_id,
+                browser_connection_id,
+                event.kind,
+                event.seq
+            );
+        }
     }
 }
 
@@ -249,6 +276,8 @@ pub async fn start_diagnosis(
     scope: desk_agent_protocol::AgentScope,
     max_risk: desk_agent_protocol::RiskLevel,
     exec_admission_policy: desk_agent_protocol::authz::ExecAdmissionPolicy,
+    available_exec_shells: Vec<String>,
+    max_command_runtime_ms: u32,
     request: DiagnoseRequestData,
 ) {
     let ctx = CollectContext {
@@ -260,6 +289,8 @@ pub async fn start_diagnosis(
         scope,
         max_risk,
         exec_admission_policy,
+        available_exec_shells: sanitize_available_exec_shells(&available_exec_shells),
+        max_command_runtime_ms,
         request: request.clone(),
     };
     if !pending.register(ctx) {
@@ -369,6 +400,94 @@ impl ModelSeam for MeteredSignalModel {
     }
 }
 
+const AUTO_FOLLOW_UP_MAX_STEPS: u32 = 4;
+
+struct CompletionOnlyTools;
+
+#[async_trait::async_trait(?Send)]
+impl ToolSeam for CompletionOnlyTools {
+    async fn run_read(
+        &self,
+        _call: &desk_diagnose_core::chat::ToolCall,
+    ) -> Result<ToolRunOutput, AgentError> {
+        Err(AgentError {
+            kind: AgentErrorKind::UnsupportedCapability,
+            message: "tools are not available in a completion follow-up".into(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        })
+    }
+}
+
+struct DiscardTurnSink;
+
+impl TurnSink for DiscardTurnSink {
+    fn on_text_delta(&mut self, _delta: &str) {}
+}
+
+/// Fire a read-only model turn after a durable background completion has been
+/// appended to an OSS Signal session. The caller retries `TurnBusy`; every other
+/// outcome has spent one bounded automation turn and is persisted for snapshot
+/// polling. No tools are exposed, so this follow-up can interpret the completed
+/// result but can never dispatch another command.
+pub async fn resume_completion_turn(
+    db: DatabaseConnection,
+    session: PersistedAgentSession,
+) -> Result<LoopOutcome, AgentError> {
+    let config = model_provider::load(&db)
+        .await
+        .map_err(|e| transport_error(format!("failed to load model provider config: {e}")))?;
+    let seam = SignalModelSeam::from_config(&config)?;
+    let model = MeteredSignalModel {
+        inner: seam,
+        db: db.clone(),
+        model_name: config.model.clone().unwrap_or_default(),
+    };
+    let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db);
+    let heartbeat = SignalStoreHeartbeat {
+        store: sessions.clone(),
+    };
+    let clock = || chrono::Utc::now().to_rfc3339();
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    let claim = ClaimTurnParams {
+        conversation_id: session.conversation_id,
+        actor_id: session.actor_id,
+        device_id: session.device_id,
+        policy_revision: session.policy_revision,
+        current_pdp_scope: session.scope_snapshot,
+        turn_id,
+        // Keep the browser's settled request binding so snapshot polling can
+        // replace the earlier placeholder answer with this follow-up transcript.
+        request_id: session.current_request_id,
+        connection_id: None,
+        trigger_origin: TriggerOrigin::ExecCompletion,
+        now: clock(),
+    };
+    let tools = CompletionOnlyTools;
+    let registry = Vec::new();
+    let deps = LoopDeps {
+        session_seam: &sessions,
+        model: &model,
+        tools: &tools,
+        registry: &registry,
+        response_format: ResponseFormatSpec::None,
+        system_prompt: build_agentic_system_message(None),
+        max_context_bytes: config
+            .max_context_bytes
+            .map(|value| value as usize)
+            .unwrap_or(DEFAULT_MAX_CONTEXT_BYTES),
+        max_steps_per_turn: config.max_steps_per_turn.min(AUTO_FOLLOW_UP_MAX_STEPS),
+        max_same_tool_per_turn: config
+            .max_same_tool_calls_per_turn
+            .min(AUTO_FOLLOW_UP_MAX_STEPS),
+        clock: &clock,
+        heartbeat: Some(&heartbeat),
+    };
+    let mut sink = DiscardTurnSink;
+    resume_agent_turn(&deps, claim, &mut sink).await
+}
+
 /// Run the signal-owned multi-turn agent loop once the initial evidence snapshot
 /// is complete. Read tools replay this redacted snapshot; an exec tool parks for
 /// the browser's explicit approval and then dispatches through the edge PEP.
@@ -430,8 +549,12 @@ pub async fn run_model_phase(
             ctx.scope.mode,
             ExecutionMode::ConfirmEachAction | ExecutionMode::SessionApproved
         )
+        && !ctx.available_exec_shells.is_empty()
     {
-        registry.extend(exec_tool_registry());
+        registry.extend(exec_tool_registry_for_shells_with_timeout(
+            &ctx.available_exec_shells,
+            ctx.max_command_runtime_ms,
+        ));
     }
 
     let connections = connection_map.clone().into_inner();
@@ -440,9 +563,12 @@ pub async fn run_model_phase(
         connections,
         crate::agent_exec::global_agent_exec_pending(),
         ctx.target_connection_id.clone(),
+        ctx.request_id.clone(),
         snapshot,
         ctx.exec_admission_policy,
         ctx.max_risk,
+        ctx.available_exec_shells.clone(),
+        ctx.max_command_runtime_ms,
     );
     let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db);
     let heartbeat = SignalStoreHeartbeat {
@@ -683,6 +809,8 @@ mod tests {
             },
             max_risk: desk_agent_protocol::RiskLevel::Critical,
             exec_admission_policy: desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly,
+            available_exec_shells: Vec::new(),
+            max_command_runtime_ms: desk_agent_protocol::exec_policy::DEFAULT_TIMEOUT_MS,
             request: DiagnoseRequestData::default(),
         }));
         assert!(!b.register(CollectContext {
@@ -699,6 +827,8 @@ mod tests {
             },
             max_risk: desk_agent_protocol::RiskLevel::Critical,
             exec_admission_policy: desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly,
+            available_exec_shells: Vec::new(),
+            max_command_runtime_ms: desk_agent_protocol::exec_policy::DEFAULT_TIMEOUT_MS,
             request: DiagnoseRequestData::default(),
         }));
         // Clean up so the global store does not leak into other tests.

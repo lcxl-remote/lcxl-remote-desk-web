@@ -528,7 +528,11 @@ async fn run_mutating<F: FnMut() -> String>(
             );
         }
         // A model-safe execution error becomes an error tool-result; a backend
-        // transport error fails the turn.
+        // transport error fails the turn. A seam may mark a pre-dispatch error
+        // retryable (for example, an unavailable interpreter). In that case no
+        // command ran, so let the model inspect the result and choose a valid
+        // alternative in the next step. Non-retryable failures retain the
+        // conservative stop-the-batch behavior.
         Err(e) if e.safe_for_model => {
             session.conversation.push(ChatMessage::tool_result(
                 mint(),
@@ -536,7 +540,9 @@ async fn run_mutating<F: FnMut() -> String>(
                 format!("execution error: {}", e.message),
             ));
             finish_tool(session, &call.id, false, sink);
-            *halted = Some("not executed: a prior command failed".to_string());
+            if !e.retryable {
+                *halted = Some("not executed: a prior command failed".to_string());
+            }
         }
         Err(e) => {
             deps.session_seam.save(session).await?;

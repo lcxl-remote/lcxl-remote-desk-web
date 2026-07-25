@@ -240,6 +240,8 @@ mod tests {
             token: None,
             debug_build: false,
             repository_url: None,
+            available_exec_shells: None,
+            max_ai_command_runtime_ms: None,
         }
     }
 

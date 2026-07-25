@@ -39,6 +39,15 @@ pub const DEFAULT_MAX_CONCURRENT_EXECUTIONS: u32 = 4;
 pub const MIN_MAX_CONCURRENT_EXECUTIONS: u32 = 1;
 pub const MAX_MAX_CONCURRENT_EXECUTIONS: u32 = 64;
 
+/// Default and accepted range for one AI command's total wall time. Eight
+/// seconds only controls when an agent stops waiting in the foreground; this
+/// separate ceiling bounds the worker process after it becomes a background
+/// task. The two-hour maximum matches the protocol's absolute fail-safe.
+pub const DEFAULT_MAX_COMMAND_RUNTIME_SECONDS: u32 = 10 * 60;
+pub const MIN_MAX_COMMAND_RUNTIME_SECONDS: u32 = 10;
+pub const MAX_MAX_COMMAND_RUNTIME_SECONDS: u32 =
+    desk_agent_protocol::exec_policy::PRODUCT_MAX_BACKGROUND_MS / 1_000;
+
 /// Persisted edge-local AI execution policy.
 ///
 /// Holds no model credentials (those live on the central brain); the fields are
@@ -64,6 +73,8 @@ pub struct AiExecutionPolicy {
     /// open-source signal server bypasses it entirely, so the device keeps its own
     /// ceiling.
     pub max_concurrent_executions: u32,
+    /// Total wall-time ceiling for each AI-started command, in seconds.
+    pub max_command_runtime_seconds: u32,
 }
 
 impl Default for AiExecutionPolicy {
@@ -71,6 +82,7 @@ impl Default for AiExecutionPolicy {
         Self {
             execution_mode: ExecutionMode::default(),
             max_concurrent_executions: DEFAULT_MAX_CONCURRENT_EXECUTIONS,
+            max_command_runtime_seconds: DEFAULT_MAX_COMMAND_RUNTIME_SECONDS,
         }
     }
 }
@@ -81,6 +93,7 @@ impl AiExecutionPolicy {
         AiExecutionPolicyPublic {
             execution_mode: self.execution_mode,
             max_concurrent_executions: self.max_concurrent_executions,
+            max_command_runtime_seconds: self.max_command_runtime_seconds,
         }
     }
 
@@ -100,6 +113,12 @@ impl AiExecutionPolicy {
             self.max_concurrent_executions =
                 max.clamp(MIN_MAX_CONCURRENT_EXECUTIONS, MAX_MAX_CONCURRENT_EXECUTIONS);
         }
+        if let Some(seconds) = update.max_command_runtime_seconds {
+            self.max_command_runtime_seconds = seconds.clamp(
+                MIN_MAX_COMMAND_RUNTIME_SECONDS,
+                MAX_MAX_COMMAND_RUNTIME_SECONDS,
+            );
+        }
     }
 }
 
@@ -110,6 +129,8 @@ pub struct AiExecutionPolicyPublic {
     pub execution_mode: ExecutionMode,
     /// How many commands may run on this device at once.
     pub max_concurrent_executions: u32,
+    /// Total wall-time ceiling for one AI command, in seconds.
+    pub max_command_runtime_seconds: u32,
 }
 
 /// Update body for `POST /api/desk/settings/ai-policy`.
@@ -121,6 +142,9 @@ pub struct AiExecutionPolicyUpdate {
     /// `None` leaves the stored ceiling unchanged. Out-of-range values are clamped
     /// into [`MIN_MAX_CONCURRENT_EXECUTIONS`]..=[`MAX_MAX_CONCURRENT_EXECUTIONS`].
     pub max_concurrent_executions: Option<u32>,
+    /// `None` leaves the stored wall-time ceiling unchanged. Out-of-range values
+    /// are clamped into the device-supported range.
+    pub max_command_runtime_seconds: Option<u32>,
 }
 
 #[cfg(test)]
@@ -138,6 +162,10 @@ mod tests {
             DEFAULT_MAX_CONCURRENT_EXECUTIONS
         );
         assert!(policy.max_concurrent_executions >= MIN_MAX_CONCURRENT_EXECUTIONS);
+        assert_eq!(
+            policy.max_command_runtime_seconds,
+            DEFAULT_MAX_COMMAND_RUNTIME_SECONDS
+        );
     }
 
     /// An out-of-range ceiling is clamped, never stored as-is and never zero.
@@ -148,6 +176,7 @@ mod tests {
         policy.apply_update(AiExecutionPolicyUpdate {
             execution_mode: None,
             max_concurrent_executions: Some(0),
+            max_command_runtime_seconds: None,
         });
         assert_eq!(
             policy.max_concurrent_executions,
@@ -157,6 +186,7 @@ mod tests {
         policy.apply_update(AiExecutionPolicyUpdate {
             execution_mode: None,
             max_concurrent_executions: Some(u32::MAX),
+            max_command_runtime_seconds: None,
         });
         assert_eq!(
             policy.max_concurrent_executions,
@@ -166,6 +196,7 @@ mod tests {
         policy.apply_update(AiExecutionPolicyUpdate {
             execution_mode: None,
             max_concurrent_executions: Some(8),
+            max_command_runtime_seconds: None,
         });
         assert_eq!(policy.max_concurrent_executions, 8);
     }
@@ -177,10 +208,12 @@ mod tests {
         let mut policy = AiExecutionPolicy {
             execution_mode: ExecutionMode::SuggestOnly,
             max_concurrent_executions: 9,
+            max_command_runtime_seconds: DEFAULT_MAX_COMMAND_RUNTIME_SECONDS,
         };
         policy.apply_update(AiExecutionPolicyUpdate {
             execution_mode: Some(ExecutionMode::ConfirmEachAction),
             max_concurrent_executions: None,
+            max_command_runtime_seconds: None,
         });
         assert_eq!(policy.max_concurrent_executions, 9);
         assert_eq!(policy.execution_mode, ExecutionMode::ConfirmEachAction);
@@ -188,9 +221,36 @@ mod tests {
         policy.apply_update(AiExecutionPolicyUpdate {
             execution_mode: None,
             max_concurrent_executions: Some(3),
+            max_command_runtime_seconds: None,
         });
         assert_eq!(policy.execution_mode, ExecutionMode::ConfirmEachAction);
         assert_eq!(policy.max_concurrent_executions, 3);
+    }
+
+    #[test]
+    fn command_runtime_defaults_to_ten_minutes_and_is_clamped() {
+        let mut policy = AiExecutionPolicy::default();
+        assert_eq!(policy.max_command_runtime_seconds, 600);
+
+        policy.apply_update(AiExecutionPolicyUpdate {
+            execution_mode: None,
+            max_concurrent_executions: None,
+            max_command_runtime_seconds: Some(1),
+        });
+        assert_eq!(
+            policy.max_command_runtime_seconds,
+            MIN_MAX_COMMAND_RUNTIME_SECONDS
+        );
+
+        policy.apply_update(AiExecutionPolicyUpdate {
+            execution_mode: None,
+            max_concurrent_executions: None,
+            max_command_runtime_seconds: Some(u32::MAX),
+        });
+        assert_eq!(
+            policy.max_command_runtime_seconds,
+            MAX_MAX_COMMAND_RUNTIME_SECONDS
+        );
     }
 
     /// Default execution mode is `suggest_only`, and a config written before the
@@ -220,6 +280,7 @@ mod tests {
             s.apply_update(AiExecutionPolicyUpdate {
                 execution_mode: Some(mode),
                 max_concurrent_executions: None,
+                max_command_runtime_seconds: None,
             });
             assert_eq!(s.execution_mode, mode);
         }
@@ -227,11 +288,13 @@ mod tests {
         s.apply_update(AiExecutionPolicyUpdate {
             execution_mode: Some(ExecutionMode::ConfirmEachAction),
             max_concurrent_executions: None,
+            max_command_runtime_seconds: None,
         });
         for mode in [ExecutionMode::SessionApproved, ExecutionMode::Automated] {
             s.apply_update(AiExecutionPolicyUpdate {
                 execution_mode: Some(mode),
                 max_concurrent_executions: None,
+                max_command_runtime_seconds: None,
             });
             assert_eq!(
                 s.execution_mode,
@@ -252,6 +315,7 @@ mod tests {
         s.apply_update(AiExecutionPolicyUpdate {
             execution_mode: Some(ExecutionMode::ConfirmEachAction),
             max_concurrent_executions: None,
+            max_command_runtime_seconds: None,
         });
         assert_eq!(
             s.public_view().execution_mode,

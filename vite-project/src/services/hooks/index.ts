@@ -20,6 +20,8 @@ export type { DeleteDeviceCodeMutationKey } from "./deviceCodeController/useDele
 export type { ListDeviceCodesQueryKey } from "./deviceCodeController/useListDeviceCodes.ts";
 export type { ListDeviceCodesSuspenseQueryKey } from "./deviceCodeController/useListDeviceCodesSuspense.ts";
 export type { UpdateDeviceCodeMutationKey } from "./deviceCodeController/useUpdateDeviceCode.ts";
+export type { GetDiagnoseSessionQueryKey } from "./diagnoseSessionController/useGetDiagnoseSession.ts";
+export type { GetDiagnoseSessionSuspenseQueryKey } from "./diagnoseSessionController/useGetDiagnoseSessionSuspense.ts";
 export type { QueryLogSettingsQueryKey } from "./logController/useQueryLogSettings.ts";
 export type { QueryLogSettingsSuspenseQueryKey } from "./logController/useQueryLogSettingsSuspense.ts";
 export type { UpdateLogSettingsMutationKey } from "./logController/useUpdateLogSettings.ts";
@@ -160,6 +162,12 @@ export { useListDeviceCodesSuspense } from "./deviceCodeController/useListDevice
 export { updateDeviceCodeMutationKey } from "./deviceCodeController/useUpdateDeviceCode.ts";
 export { updateDeviceCodeMutationOptions } from "./deviceCodeController/useUpdateDeviceCode.ts";
 export { useUpdateDeviceCode } from "./deviceCodeController/useUpdateDeviceCode.ts";
+export { getDiagnoseSessionQueryKey } from "./diagnoseSessionController/useGetDiagnoseSession.ts";
+export { getDiagnoseSessionQueryOptions } from "./diagnoseSessionController/useGetDiagnoseSession.ts";
+export { useGetDiagnoseSession } from "./diagnoseSessionController/useGetDiagnoseSession.ts";
+export { getDiagnoseSessionSuspenseQueryKey } from "./diagnoseSessionController/useGetDiagnoseSessionSuspense.ts";
+export { getDiagnoseSessionSuspenseQueryOptions } from "./diagnoseSessionController/useGetDiagnoseSessionSuspense.ts";
+export { useGetDiagnoseSessionSuspense } from "./diagnoseSessionController/useGetDiagnoseSessionSuspense.ts";
 export { queryLogSettingsQueryKey } from "./logController/useQueryLogSettings.ts";
 export { queryLogSettingsQueryOptions } from "./logController/useQueryLogSettings.ts";
 export { useQueryLogSettings } from "./logController/useQueryLogSettings.ts";

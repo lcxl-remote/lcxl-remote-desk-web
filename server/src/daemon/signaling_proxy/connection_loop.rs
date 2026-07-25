@@ -60,6 +60,19 @@ pub(super) async fn maintain_proxy_connection(
         Some(client_id),
     );
     version_info.token = Some(auth_token);
+    version_info.set_available_exec_shells(&crate::exec_shells::available_exec_shells());
+    let advertised_ai_command_runtime_ms = {
+        let settings = settings.read().await;
+        settings
+            .ai_policy
+            .max_command_runtime_seconds
+            .saturating_mul(1_000)
+    };
+    version_info.max_ai_command_runtime_ms = Some(advertised_ai_command_runtime_ms);
+    log::info!(
+        "[agent-exec] verified available shells: {:?}",
+        version_info.available_exec_shell_list()
+    );
     if !crate::version::SERVER_REPOSITORY_URL.is_empty() {
         version_info.repository_url = Some(crate::version::SERVER_REPOSITORY_URL.to_string());
     }
@@ -133,6 +146,8 @@ pub(super) async fn maintain_proxy_connection(
     let (mut sink, mut stream) = framed.split();
     let mut remote_access_reconcile = tokio::time::interval(Duration::from_secs(2));
     remote_access_reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut agent_capability_reconcile = tokio::time::interval(Duration::from_secs(2));
+    agent_capability_reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut remote_access_commands = if remote_access_central_link != RemoteAccessCentralLink::None
     {
         router_ctx
@@ -264,6 +279,30 @@ pub(super) async fn maintain_proxy_connection(
                     && let Err(error) = sink.send(awc::ws::Message::Text(command.into())).await
                 {
                     error!("[remote-access] peer eviction send failed: {error}");
+                    break;
+                }
+            }
+
+            // The runtime ceiling is registration metadata used by the central
+            // model schema and plan sealer. Reconnect all upstreams when the
+            // locally authoritative value changes so a newly started diagnosis
+            // observes the saved setting instead of a stale connection-time cap.
+            _ = agent_capability_reconcile.tick() => {
+                let current = {
+                    let settings = settings.read().await;
+                    settings
+                        .ai_policy
+                        .max_command_runtime_seconds
+                        .saturating_mul(1_000)
+                };
+                if current != advertised_ai_command_runtime_ms {
+                    info!(
+                        "[agent-exec] command runtime ceiling changed from {}ms to {}ms; reconnecting {}",
+                        advertised_ai_command_runtime_ms,
+                        current,
+                        redact_token_in_url(&signaling_url)
+                    );
+                    let _ = sink.send(awc::ws::Message::Close(None)).await;
                     break;
                 }
             }

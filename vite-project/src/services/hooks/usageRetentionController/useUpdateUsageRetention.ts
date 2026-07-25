@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { UpdateUsageRetentionMutationRequest, UpdateUsageRetentionMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import { updateUsageRetention } from "../../clients.ts";
+import type { UpdateUsageRetentionMutationRequest, UpdateUsageRetentionMutationResponse } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
+import { updateUsageRetention } from "../../clients.ts";
 
 export const updateUsageRetentionMutationKey = () => [{ url: '/api/usage/usage-retention' }] as const
 

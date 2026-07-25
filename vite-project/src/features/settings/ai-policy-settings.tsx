@@ -22,6 +22,8 @@ import { useToast } from "@/hooks/use-toast"
 const EXECUTION_MODES = ["suggest_only", "read_only", "confirm_each_action"] as const
 const MIN_CONCURRENT_EXECUTIONS = 1
 const MAX_CONCURRENT_EXECUTIONS = 64
+const MIN_COMMAND_RUNTIME_SECONDS = 10
+const MAX_COMMAND_RUNTIME_SECONDS = 7200
 
 const policySchema = z.object({
     execution_mode: z.enum(EXECUTION_MODES),
@@ -30,6 +32,11 @@ const policySchema = z.object({
         .int()
         .min(MIN_CONCURRENT_EXECUTIONS)
         .max(MAX_CONCURRENT_EXECUTIONS),
+    max_command_runtime_seconds: z
+        .number()
+        .int()
+        .min(MIN_COMMAND_RUNTIME_SECONDS)
+        .max(MAX_COMMAND_RUNTIME_SECONDS),
 })
 
 type PolicyFormValues = z.infer<typeof policySchema>
@@ -71,7 +78,11 @@ export function AiPolicySettings() {
 
     const policyForm = useForm<PolicyFormValues>({
         resolver: zodResolver(policySchema),
-        defaultValues: { execution_mode: "suggest_only", max_concurrent_executions: 4 },
+        defaultValues: {
+            execution_mode: "suggest_only",
+            max_concurrent_executions: 4,
+            max_command_runtime_seconds: 600,
+        },
     })
     const collectionForm = useForm<CollectionPolicyFormValues>({
         resolver: zodResolver(collectionPolicySchema),
@@ -86,6 +97,8 @@ export function AiPolicySettings() {
                 execution_mode: normalizeExecutionMode(policyResponse.data.execution_mode),
                 max_concurrent_executions:
                     policyResponse.data.max_concurrent_executions ?? 4,
+                max_command_runtime_seconds:
+                    policyResponse.data.max_command_runtime_seconds ?? 600,
             })
         }
     }, [policyResponse?.data, isPolicyLoading, policyForm])
@@ -105,6 +118,7 @@ export function AiPolicySettings() {
         const payload: AiExecutionPolicyUpdate = {
             execution_mode: values.execution_mode,
             max_concurrent_executions: values.max_concurrent_executions,
+            max_command_runtime_seconds: values.max_command_runtime_seconds,
         }
         try {
             await updatePolicy({ data: payload })
@@ -219,6 +233,37 @@ export function AiPolicySettings() {
                                         </FormControl>
                                         <FormDescription>
                                             {t("pages.aiPolicy.maxConcurrentExecutions.description")}
+                                        </FormDescription>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+                            <FormField
+                                control={policyForm.control}
+                                name="max_command_runtime_seconds"
+                                render={({ field }) => (
+                                    <FormItem>
+                                        <FormLabel>{t("pages.aiPolicy.maxCommandRuntime")}</FormLabel>
+                                        <FormControl>
+                                            <Input
+                                                type="number"
+                                                min={MIN_COMMAND_RUNTIME_SECONDS}
+                                                max={MAX_COMMAND_RUNTIME_SECONDS}
+                                                name={field.name}
+                                                ref={field.ref}
+                                                onBlur={field.onBlur}
+                                                value={field.value}
+                                                onChange={(e) =>
+                                                    field.onChange(
+                                                        e.target.value === ""
+                                                            ? Number.NaN
+                                                            : e.target.valueAsNumber,
+                                                    )
+                                                }
+                                            />
+                                        </FormControl>
+                                        <FormDescription>
+                                            {t("pages.aiPolicy.maxCommandRuntime.description")}
                                         </FormDescription>
                                         <FormMessage />
                                     </FormItem>

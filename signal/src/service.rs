@@ -242,7 +242,12 @@ pub async fn handle_signaling(
     );
     let edge_exec_observer = std::sync::Arc::new(crate::agent_exec::SignalEdgeExecObserver::new(
         crate::agent_exec::global_agent_exec_pending(),
+        crate::db::get_db().clone(),
     ));
+    let exec_state_reply_observer =
+        std::sync::Arc::new(crate::agent_exec::SignalExecStateReplyObserver::new(
+            crate::agent_exec::global_agent_exec_pending(),
+        ));
     // The single-account owner is stamped with full control; a code-session
     // (anonymous redeemer) is stamped with the redeemed code's ceiling via the
     // shared grant store. Both share the process-global store so a grant minted at
@@ -280,6 +285,7 @@ pub async fn handle_signaling(
     .with_request_remote_authorizer(request_remote_authorizer)
     .with_collect_observer(collect_observer)
     .with_edge_exec_observer(edge_exec_observer)
+    .with_exec_state_reply_observer(exec_state_reply_observer)
     .with_remote_access_admission_authorizer(remote_access_control.clone())
     .with_host_remote_access_controller(remote_access_control);
 

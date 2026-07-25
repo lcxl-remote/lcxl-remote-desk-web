@@ -17,8 +17,10 @@
 //! decision is stamped into an [`AuthorizationBlock`]. The edge (PEP) validates
 //! the binding and enforces the carried decision.
 //!
-//! Single-node assumption: the portable signal keeps its pending state in process
-//! memory (it is not horizontally scaled like the manager).
+//! Single-node assumption: short-lived approval/result waiters stay in process
+//! memory, while dispatched Agent execution tasks and completion delivery are
+//! durable in the local SQLite database (it is not horizontally scaled like the
+//! manager).
 
 use std::sync::Arc;
 
@@ -267,8 +269,14 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
             // the relay pre-flight.
             if model.signaling_type == SignalingType::DiagnoseCancel {
                 self.collect_pending.cancel(&model.request_id);
-                crate::agent_exec::global_agent_exec_pending()
-                    .cancel_approvals_for_browser(&actor.model.connection_id);
+                let cancelled = crate::agent_exec::global_agent_exec_pending()
+                    .cancel_approvals_for_diagnosis(&actor.model.connection_id, &model.request_id);
+                log::info!(
+                    "[agent-exec] diagnose cancel request_id={} browser={} cancelled_approvals={}",
+                    model.request_id,
+                    actor.model.connection_id,
+                    cancelled
+                );
                 return ControlFrameOutcome::Handled;
             }
             // A copilot cancel is consumed centrally (the copilot runs on signal,
@@ -285,6 +293,12 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                     && crate::agent_exec::global_agent_exec_pending()
                         .resolve(&actor.model.connection_id, &data)
                 {
+                    log::info!(
+                        "[agent-exec] approval resolved exec_request_id={} browser={} decision={:?}",
+                        data.exec_request_id.0,
+                        actor.model.connection_id,
+                        data.decision
+                    );
                     return ControlFrameOutcome::Handled;
                 }
                 return ControlFrameOutcome::Forward(model.clone());
@@ -307,7 +321,7 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                     message: "AI frame missing target connection".to_string(),
                 };
             };
-            let audience = {
+            let target_descriptor = {
                 let map = connection_map.read().await;
                 match map.get(&to_id) {
                     None => Err(TargetReject {
@@ -318,11 +332,23 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                         target.auth_context.auth_kind,
                         target.auth_context.remote_desk_type,
                         target.model.version_info.client_id.as_deref(),
-                    ),
+                    )
+                    .map(|audience| {
+                        (
+                            audience,
+                            target.model.version_info.available_exec_shell_list(),
+                            target
+                                .model
+                                .version_info
+                                .max_ai_command_runtime_ms
+                                .unwrap_or(desk_agent_protocol::exec_policy::DEFAULT_TIMEOUT_MS),
+                        )
+                    }),
                 }
             };
-            let audience = match audience {
-                Ok(a) => a,
+            let (audience, available_exec_shells, max_command_runtime_ms) = match target_descriptor
+            {
+                Ok(descriptor) => descriptor,
                 Err(reject) => {
                     return ControlFrameOutcome::Reject {
                         code: reject.code,
@@ -335,6 +361,10 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
             let (scope, orchestrator_grants, max_risk) = single_account_decision(mode);
 
             match model.signaling_type {
+                // Acting on an already-authorized execution does not mint a new
+                // plan. The authenticated single-account owner may forward a
+                // cancel/query directly; the host answers from its durable ledger.
+                SignalingType::ExecControl => ControlFrameOutcome::Forward(model.clone()),
                 // Single round-trip device frames: wrap with the decision and
                 // relay to the edge, which re-checks and enforces.
                 SignalingType::AgentRequest | SignalingType::ConfirmExec => {
@@ -385,6 +415,8 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                             }
                             _ => ExecAdmissionPolicy::TemplateOnly,
                         },
+                        available_exec_shells,
+                        max_command_runtime_ms,
                         request,
                     )
                     .await;

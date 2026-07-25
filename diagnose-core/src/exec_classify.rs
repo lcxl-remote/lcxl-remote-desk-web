@@ -612,7 +612,7 @@ mod tests {
     #[test]
     fn limits_are_clamped() {
         let mut input = shell_input("Get-Service -Name Spooler");
-        input.timeout_ms = 999_999;
+        input.timeout_ms = u32::MAX;
         input.max_stdout_bytes = 99_999_999;
         input.max_stderr_bytes = 10;
         let out = classify_command(&input);
