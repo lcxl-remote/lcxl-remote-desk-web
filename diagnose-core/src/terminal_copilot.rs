@@ -465,7 +465,7 @@ impl<S: CopilotFrameSink> TurnSink for CopilotStreamSink<S> {
         }
     }
 
-    fn on_tool_started(&mut self, tool_name: &str, _call_id: &str) {
+    fn on_tool_started(&mut self, tool_name: &str, _call_id: &str, _arguments_json: &str) {
         if self.terminated {
             return;
         }
@@ -790,7 +790,7 @@ mod tests {
     fn stream_sink_maps_tool_then_final_in_order() {
         let (store, sink) = recorder();
         let mut s = CopilotStreamSink::new(sink, "req-1");
-        s.on_tool_started("read_system_info", "c1");
+        s.on_tool_started("read_system_info", "c1", "{}");
         s.emit_final(TerminalCopilotAnswer {
             explanation_md: "done".into(),
             suggestions: Vec::new(),
@@ -864,7 +864,7 @@ mod tests {
             safe_for_model: true,
             error_code: None,
         });
-        s.on_tool_started("t", "c");
+        s.on_tool_started("t", "c", "{}");
         let ev = store.borrow();
         assert_eq!(ev.len(), 1);
         assert_eq!(ev[0].kind, TerminalCopilotEventKind::Final);

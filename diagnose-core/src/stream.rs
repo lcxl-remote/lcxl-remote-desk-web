@@ -139,7 +139,7 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
             .emit(DiagnoseEvent::partial(&self.request_id, seq, delta));
     }
 
-    fn on_tool_started(&mut self, tool_name: &str, call_id: &str) {
+    fn on_tool_started(&mut self, tool_name: &str, call_id: &str, arguments_json: &str) {
         if self.terminated {
             return;
         }
@@ -150,10 +150,11 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
             tool_name,
             call_id,
             false,
+            arguments_json,
         ));
     }
 
-    fn on_awaiting_approval(&mut self, tool_name: &str, call_id: &str) {
+    fn on_awaiting_approval(&mut self, tool_name: &str, call_id: &str, arguments_json: &str) {
         if self.terminated {
             return;
         }
@@ -164,10 +165,11 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
             tool_name,
             call_id,
             true,
+            arguments_json,
         ));
     }
 
-    fn on_tool_finished(&mut self, call_id: &str, ok: bool) {
+    fn on_tool_finished(&mut self, call_id: &str, ok: bool, output: &str) {
         if self.terminated {
             return;
         }
@@ -177,6 +179,7 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
             seq,
             call_id,
             ok,
+            output,
         ));
     }
 
@@ -280,8 +283,8 @@ mod tests {
         let (store, sink) = recorder();
         let mut b = StreamingTurnSink::new(sink, "req-1");
         b.turn_started("turn-1");
-        b.on_tool_started("sysinfo", "c1");
-        b.on_tool_finished("c1", true);
+        b.on_tool_started("sysinfo", "c1", r#"{"limit":5}"#);
+        b.on_tool_finished("c1", true, "five processes");
         b.on_answer_committed("all good");
 
         let ev = store.borrow();
@@ -303,8 +306,10 @@ mod tests {
         assert_eq!(ev[0].turn_id.as_deref(), Some("turn-1"));
         assert_eq!(ev[1].tool_name.as_deref(), Some("sysinfo"));
         assert_eq!(ev[1].tool_call_id.as_deref(), Some("c1"));
+        assert_eq!(ev[1].tool_arguments_json.as_deref(), Some(r#"{"limit":5}"#));
         assert!(!ev[1].awaiting_approval);
         assert_eq!(ev[2].tool_ok, Some(true));
+        assert_eq!(ev[2].tool_output.as_deref(), Some("five processes"));
         assert_eq!(ev[3].answer.as_deref(), Some("all good"));
         assert!(ev[3].is_terminal());
         assert!(b.is_terminated());
@@ -348,10 +353,14 @@ mod tests {
     fn awaiting_approval_sets_the_flag() {
         let (store, sink) = recorder();
         let mut b = StreamingTurnSink::new(sink, "r");
-        b.on_awaiting_approval("exec_command", "c1");
+        b.on_awaiting_approval("exec_command", "c1", r#"{"command":"uptime"}"#);
         let ev = store.borrow();
         assert_eq!(ev[0].kind, DiagnoseEventKind::ToolStarted);
         assert_eq!(ev[0].tool_name.as_deref(), Some("exec_command"));
+        assert_eq!(
+            ev[0].tool_arguments_json.as_deref(),
+            Some(r#"{"command":"uptime"}"#)
+        );
         assert!(ev[0].awaiting_approval);
     }
 
@@ -384,7 +393,7 @@ mod tests {
             safe_for_model: true,
             error_code: None,
         });
-        b.on_tool_started("t", "c");
+        b.on_tool_started("t", "c", "{}");
         b.finish_outcome(&LoopOutcome::Answered("done".into()));
         let ev = store.borrow();
         assert_eq!(ev.len(), 1);

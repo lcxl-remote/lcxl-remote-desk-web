@@ -289,10 +289,11 @@ pub enum DiagnoseEventKind {
     /// An agentic turn has started (carries `turn_id`).
     TurnStarted,
     /// A tool call was dispatched (read tool) or is awaiting approval (mutating
-    /// tool); carries `tool_name` + `tool_call_id` (and `awaiting_approval`).
+    /// tool); carries `tool_name` + `tool_call_id` + `tool_arguments_json` (and
+    /// `awaiting_approval`).
     ToolStarted,
     /// A dispatched tool call produced its result; carries `tool_call_id` +
-    /// `tool_ok`.
+    /// `tool_ok` + `tool_output`.
     ToolFinished,
     /// Terminal: the agentic turn committed a final natural-language answer
     /// (carries `answer`). Distinct from [`Final`], which carries a structured
@@ -331,6 +332,10 @@ pub struct DiagnoseEvent {
     /// `kind = ToolStarted`: the model-facing name of the tool being run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    /// `kind = ToolStarted`: the raw JSON arguments produced by the model.
+    /// Consumers may pretty-print valid JSON but must treat it as untrusted text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_arguments_json: Option<String>,
     /// `kind = ToolStarted` / `ToolFinished`: the tool call id, correlating the
     /// start and finish of one call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -343,6 +348,10 @@ pub struct DiagnoseEvent {
     /// error / rejection / unknown outcome).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_ok: Option<bool>,
+    /// `kind = ToolFinished`: the same redacted, bounded text returned to the
+    /// model. It is diagnostic data, not trusted markup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_output: Option<String>,
     /// `kind = Answer`: the agentic turn's final natural-language answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
@@ -368,9 +377,11 @@ impl DiagnoseEvent {
             error: None,
             turn_id: None,
             tool_name: None,
+            tool_arguments_json: None,
             tool_call_id: None,
             awaiting_approval: false,
             tool_ok: None,
+            tool_output: None,
             answer: None,
             provenance: None,
         }
@@ -436,11 +447,13 @@ impl DiagnoseEvent {
         tool_name: impl Into<String>,
         tool_call_id: impl Into<String>,
         awaiting_approval: bool,
+        arguments_json: impl Into<String>,
     ) -> Self {
         Self {
             tool_name: Some(tool_name.into()),
             tool_call_id: Some(tool_call_id.into()),
             awaiting_approval,
+            tool_arguments_json: Some(arguments_json.into()),
             ..Self::base(request_id, seq, DiagnoseEventKind::ToolStarted)
         }
     }
@@ -451,10 +464,12 @@ impl DiagnoseEvent {
         seq: u32,
         tool_call_id: impl Into<String>,
         ok: bool,
+        output: impl Into<String>,
     ) -> Self {
         Self {
             tool_call_id: Some(tool_call_id.into()),
             tool_ok: Some(ok),
+            tool_output: Some(output.into()),
             ..Self::base(request_id, seq, DiagnoseEventKind::ToolFinished)
         }
     }
@@ -636,8 +651,8 @@ mod tests {
         assert!(!DiagnoseEvent::status("r", 0, "x").is_terminal());
         assert!(!DiagnoseEvent::partial("r", 1, "y").is_terminal());
         assert!(!DiagnoseEvent::turn_started("r", 0, "turn-1").is_terminal());
-        assert!(!DiagnoseEvent::tool_started("r", 1, "sysinfo", "c1", false).is_terminal());
-        assert!(!DiagnoseEvent::tool_finished("r", 2, "c1", true).is_terminal());
+        assert!(!DiagnoseEvent::tool_started("r", 1, "sysinfo", "c1", false, "{}").is_terminal());
+        assert!(!DiagnoseEvent::tool_finished("r", 2, "c1", true, "ok").is_terminal());
         assert!(DiagnoseEvent::answer("r", 3, "all good").is_terminal());
         assert!(DiagnoseEvent::final_result("r", 2, Diagnosis::default()).is_terminal());
         assert!(
@@ -663,12 +678,22 @@ mod tests {
         let config = unbounded_config();
         let frames = [
             DiagnoseEvent::turn_started("req_1", 0, "turn-1"),
-            DiagnoseEvent::tool_started("req_1", 1, "read_system_info", "c1", false),
-            DiagnoseEvent::tool_started("req_1", 2, "exec_command", "c2", true),
-            DiagnoseEvent::tool_finished("req_1", 3, "c1", true),
-            DiagnoseEvent::tool_finished("req_1", 4, "c2", false),
+            DiagnoseEvent::tool_started("req_1", 1, "read_system_info", "c1", false, "{}"),
+            DiagnoseEvent::tool_started(
+                "req_1",
+                2,
+                "exec_command",
+                "c2",
+                true,
+                r#"{"command":"uptime"}"#,
+            ),
+            DiagnoseEvent::tool_finished("req_1", 3, "c1", true, "healthy"),
+            DiagnoseEvent::tool_finished("req_1", 4, "c2", false, "rejected"),
             DiagnoseEvent::answer("req_1", 5, "the host is healthy"),
         ];
+        assert_eq!(frames[0].turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(frames[1].tool_arguments_json.as_deref(), Some("{}"));
+        assert_eq!(frames[3].tool_output.as_deref(), Some("healthy"));
         for frame in frames {
             let json = serde_json::to_string(&frame).expect("json encode");
             let back: DiagnoseEvent = serde_json::from_str(&json).expect("json decode");
@@ -681,8 +706,20 @@ mod tests {
         }
 
         // The mutating tool start is flagged awaiting approval; a read start is not.
-        assert!(DiagnoseEvent::tool_started("r", 0, "exec_command", "c", true).awaiting_approval);
-        let read = DiagnoseEvent::tool_started("r", 0, "sysinfo", "c", false);
+        let exec = DiagnoseEvent::tool_started(
+            "r",
+            0,
+            "exec_command",
+            "c",
+            true,
+            r#"{"command":"uptime"}"#,
+        );
+        assert!(exec.awaiting_approval);
+        assert_eq!(
+            exec.tool_arguments_json.as_deref(),
+            Some(r#"{"command":"uptime"}"#)
+        );
+        let read = DiagnoseEvent::tool_started("r", 0, "sysinfo", "c", false, "{}");
         assert!(!read.awaiting_approval);
         // The default-false flag is omitted from JSON.
         let json = serde_json::to_string(&read).unwrap();

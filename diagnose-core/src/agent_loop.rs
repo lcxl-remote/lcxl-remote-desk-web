@@ -320,7 +320,7 @@ async fn run_inner(
                         ToolEffect::ReadOnly => {
                             // A read tool error is reported back as a tool result;
                             // the backend transport itself does not fail the turn.
-                            sink.on_tool_started(&call.name, &call.id);
+                            sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
                             let (out, ok) = match deps.tools.run_read(call).await {
                                 Ok(out) => (out, true),
                                 Err(e) => (
@@ -334,7 +334,7 @@ async fn run_inner(
                             let mut msg = ChatMessage::tool_result(mint(), &call.id, out.content);
                             msg.image_data_url = out.image_data_url;
                             session.conversation.push(msg);
-                            sink.on_tool_finished(&call.id, ok);
+                            finish_tool(session, &call.id, ok, sink);
                         }
                         ToolEffect::Mutating => {
                             run_mutating(
@@ -358,6 +358,25 @@ async fn run_inner(
             }
         }
     }
+}
+
+/// Emit a tool's terminal UI event from the authoritative result that was just
+/// appended to the conversation. Tool output reaches the UI through the same
+/// redacted, bounded path used for model context.
+fn finish_tool(
+    session: &crate::session::PersistedAgentSession,
+    call_id: &str,
+    ok: bool,
+    sink: &mut dyn TurnSink,
+) {
+    let output = session
+        .conversation
+        .iter()
+        .rev()
+        .find(|message| message.tool_call_id.as_deref() == Some(call_id))
+        .map(|message| message.text.as_str())
+        .unwrap_or_default();
+    sink.on_tool_finished(call_id, ok, output);
 }
 
 /// Run one validated mutating tool call: approval + execution via the seam, then
@@ -387,7 +406,7 @@ async fn run_mutating<F: FnMut() -> String>(
             &call.id,
             "not executed: an automation turn cannot start a new command",
         ));
-        sink.on_tool_finished(&call.id, false);
+        finish_tool(session, &call.id, false, sink);
         *halted = Some("not executed: an automation turn cannot start a new command".to_string());
         return Ok(());
     }
@@ -407,7 +426,7 @@ async fn run_mutating<F: FnMut() -> String>(
     // observable across instances; restore Running once the seam returns.
     session.turn_state = TurnState::AwaitingApproval;
     deps.session_seam.save(session).await?;
-    sink.on_awaiting_approval(&call.name, &call.id);
+    sink.on_awaiting_approval(&call.name, &call.id, &call.arguments_json);
     let outcome = deps.tools.confirm_and_exec(call, &ctx).await;
     session.turn_state = TurnState::Running;
 
@@ -430,7 +449,7 @@ async fn run_mutating<F: FnMut() -> String>(
             let mut msg = ChatMessage::tool_result(message_id, &call.id, output.content);
             msg.image_data_url = output.image_data_url;
             session.conversation.push(msg);
-            sink.on_tool_finished(&call.id, true);
+            finish_tool(session, &call.id, true, sink);
         }
         Ok(ExecOutcome::Rejected { reason }) => {
             let text = match reason {
@@ -440,7 +459,7 @@ async fn run_mutating<F: FnMut() -> String>(
             session
                 .conversation
                 .push(ChatMessage::tool_result(mint(), &call.id, text));
-            sink.on_tool_finished(&call.id, false);
+            finish_tool(session, &call.id, false, sink);
             *halted = Some("not executed: a prior command in this turn was not run".to_string());
         }
         Ok(ExecOutcome::Cancelled { reason }) => {
@@ -451,7 +470,7 @@ async fn run_mutating<F: FnMut() -> String>(
             session
                 .conversation
                 .push(ChatMessage::tool_result(mint(), &call.id, text));
-            sink.on_tool_finished(&call.id, false);
+            finish_tool(session, &call.id, false, sink);
             *halted = Some("not executed: a prior command in this turn was cancelled".to_string());
         }
         Ok(ExecOutcome::ApprovalTimeout) => {
@@ -460,7 +479,7 @@ async fn run_mutating<F: FnMut() -> String>(
                 &call.id,
                 "approval timed out; the command was not executed",
             ));
-            sink.on_tool_finished(&call.id, false);
+            finish_tool(session, &call.id, false, sink);
             *halted = Some("not executed: a prior command in this turn was not run".to_string());
         }
         Ok(ExecOutcome::Unknown(id)) => {
@@ -480,7 +499,7 @@ async fn run_mutating<F: FnMut() -> String>(
                 placeholder_message_id: placeholder_id,
                 since: (deps.clock)(),
             };
-            sink.on_tool_finished(&call.id, false);
+            finish_tool(session, &call.id, false, sink);
             *halted = Some("not executed: a prior command's outcome is unknown".to_string());
         }
         Ok(ExecOutcome::Dispatched(id)) => {
@@ -503,7 +522,7 @@ async fn run_mutating<F: FnMut() -> String>(
                 execution_id: id.execution_id,
                 exec_request_id: id.exec_request_id,
             };
-            sink.on_tool_finished(&call.id, true);
+            finish_tool(session, &call.id, true, sink);
             *halted = Some(
                 "a prior command in this turn is still running as a background task".to_string(),
             );
@@ -516,7 +535,7 @@ async fn run_mutating<F: FnMut() -> String>(
                 &call.id,
                 format!("execution error: {}", e.message),
             ));
-            sink.on_tool_finished(&call.id, false);
+            finish_tool(session, &call.id, false, sink);
             *halted = Some("not executed: a prior command failed".to_string());
         }
         Err(e) => {
@@ -594,7 +613,7 @@ async fn run_wait<F: FnMut() -> String>(
         return Ok(());
     }
 
-    sink.on_tool_started(&call.name, &call.id);
+    sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
     let outcome = deps
         .tools
         .wait_for_task(&exec_request_id, &execution_id)
@@ -614,7 +633,7 @@ async fn run_wait<F: FnMut() -> String>(
             session.conversation.push(msg);
             // The awaited task settled: a follow-up may mutate again.
             session.execution_state = ExecutionState::None;
-            sink.on_tool_finished(&call.id, true);
+            finish_tool(session, &call.id, true, sink);
         }
         Ok(WaitOutcome::StillRunning) => {
             session.conversation.push(ChatMessage::tool_result(
@@ -624,7 +643,7 @@ async fn run_wait<F: FnMut() -> String>(
                     "background task {exec_request_id} is still running; its result will follow"
                 ),
             ));
-            sink.on_tool_finished(&call.id, true);
+            finish_tool(session, &call.id, true, sink);
         }
         Ok(WaitOutcome::Unknown) => {
             // The task was recovered without a result. Degrade to an unknown outcome
@@ -643,7 +662,7 @@ async fn run_wait<F: FnMut() -> String>(
                 placeholder_message_id: placeholder_id,
                 since: (deps.clock)(),
             };
-            sink.on_tool_finished(&call.id, false);
+            finish_tool(session, &call.id, false, sink);
             *halted = Some("a prior command's outcome is unknown".to_string());
         }
         Err(e) if e.safe_for_model => {
@@ -652,7 +671,7 @@ async fn run_wait<F: FnMut() -> String>(
                 &call.id,
                 format!("wait error: {}", e.message),
             ));
-            sink.on_tool_finished(&call.id, false);
+            finish_tool(session, &call.id, false, sink);
         }
         Err(e) => {
             deps.session_seam.save(session).await?;

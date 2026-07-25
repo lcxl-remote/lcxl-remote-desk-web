@@ -1590,18 +1590,20 @@ async fn mutating_backend_error_fails_turn() {
 struct EventLog(Rc<RefCell<Vec<String>>>);
 impl TurnSink for EventLog {
     fn on_text_delta(&mut self, _delta: &str) {}
-    fn on_tool_started(&mut self, tool_name: &str, call_id: &str) {
+    fn on_tool_started(&mut self, tool_name: &str, call_id: &str, arguments_json: &str) {
         self.0
             .borrow_mut()
-            .push(format!("started:{tool_name}:{call_id}"));
+            .push(format!("started:{tool_name}:{call_id}:{arguments_json}"));
     }
-    fn on_awaiting_approval(&mut self, tool_name: &str, call_id: &str) {
+    fn on_awaiting_approval(&mut self, tool_name: &str, call_id: &str, arguments_json: &str) {
         self.0
             .borrow_mut()
-            .push(format!("approval:{tool_name}:{call_id}"));
+            .push(format!("approval:{tool_name}:{call_id}:{arguments_json}"));
     }
-    fn on_tool_finished(&mut self, call_id: &str, ok: bool) {
-        self.0.borrow_mut().push(format!("finished:{call_id}:{ok}"));
+    fn on_tool_finished(&mut self, call_id: &str, ok: bool, output: &str) {
+        self.0
+            .borrow_mut()
+            .push(format!("finished:{call_id}:{ok}:{output}"));
     }
     fn on_answer_committed(&mut self, text: &str) {
         self.0.borrow_mut().push(format!("answer:{text}"));
@@ -1639,8 +1641,8 @@ async fn streams_read_tool_lifecycle_events() {
     assert_eq!(
         *log.borrow(),
         vec![
-            "started:sysinfo:c1".to_string(),
-            "finished:c1:true".to_string(),
+            "started:sysinfo:c1:{}".to_string(),
+            "finished:c1:true:sysinfo: ok".to_string(),
             "answer:done".to_string(),
         ]
     );
@@ -1681,8 +1683,8 @@ async fn streams_awaiting_approval_event() {
     assert_eq!(
         *log.borrow(),
         vec![
-            "approval:exec_command:c1".to_string(),
-            "finished:c1:true".to_string(),
+            "approval:exec_command:c1:{}".to_string(),
+            "finished:c1:true:exit_code=0".to_string(),
             "answer:ok".to_string(),
         ]
     );

@@ -40,6 +40,7 @@ graph LR
 - **No Autonomous Approval** — the model may request a command, but it cannot approve its own request. Fleet, automation, MCP, shared-access, and non-owner paths remain template-only or non-executable.
 - **Bounded, Continuable Turns** — the central loop stops after too many calls to the same tool type. Completed output and tool results remain visible and persisted, so the user can send a follow-up such as “continue” in the same conversation.
 - **Readable Answers** — assistant prose is rendered as GitHub-flavored Markdown, including headings, lists, code, and tables. Raw HTML is ignored and model-supplied image URLs are not loaded.
+- **Inspectable Tool Calls** — select any item in the tool timeline to expand the model-produced JSON input and the redacted, bounded output returned to the model. The details remain available in settled turns and Manager-restored conversation history.
 - **Shared Core** — the transport-neutral diagnostic logic lives in the `desk-diagnose-core` crate, reused by the central brain so behavior never drifts.
 
 ::: tip DeskServer-only mode has no local brain

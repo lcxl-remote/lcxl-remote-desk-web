@@ -72,20 +72,20 @@ pub trait TurnSink {
     fn on_text_delta(&mut self, delta: &str);
 
     /// A read tool call was dispatched (about to run).
-    fn on_tool_started(&mut self, tool_name: &str, call_id: &str) {
-        let _ = (tool_name, call_id);
+    fn on_tool_started(&mut self, tool_name: &str, call_id: &str, arguments_json: &str) {
+        let _ = (tool_name, call_id, arguments_json);
     }
 
     /// A mutating tool call is waiting for the operator's approval decision.
-    fn on_awaiting_approval(&mut self, tool_name: &str, call_id: &str) {
-        let _ = (tool_name, call_id);
+    fn on_awaiting_approval(&mut self, tool_name: &str, call_id: &str, arguments_json: &str) {
+        let _ = (tool_name, call_id, arguments_json);
     }
 
     /// A dispatched tool call produced its result; `ok` is whether it yielded a
     /// usable result (an executed/read success) rather than an error / rejection /
     /// unknown outcome.
-    fn on_tool_finished(&mut self, call_id: &str, ok: bool) {
-        let _ = (call_id, ok);
+    fn on_tool_finished(&mut self, call_id: &str, ok: bool, output: &str) {
+        let _ = (call_id, ok, output);
     }
 
     /// The turn committed a final natural-language answer.

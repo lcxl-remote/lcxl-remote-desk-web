@@ -69,12 +69,16 @@ export type DiagnoseEvent = {
     turn_id?: string | null;
     /** `tool_started`: the model-facing tool name. */
     tool_name?: string | null;
+    /** `tool_started`: the raw JSON arguments produced by the model. */
+    tool_arguments_json?: string | null;
     /** `tool_started` / `tool_finished`: the tool call id. */
     tool_call_id?: string | null;
     /** `tool_started`: a mutating tool waiting for the operator's approval. */
     awaiting_approval?: boolean;
     /** `tool_finished`: whether the call produced a usable result. */
     tool_ok?: boolean | null;
+    /** `tool_finished`: redacted, bounded output returned to the model. */
+    tool_output?: string | null;
     /** `answer`: the agentic turn's final natural-language answer. */
     answer?: string | null;
     /** `final` / `answer`: machine-readable AI marking for the content frame. */
@@ -89,6 +93,8 @@ export type ToolActivity = {
     callId: string;
     name: string;
     status: ToolActivityStatus;
+    argumentsJson: string;
+    output: string | null;
 };
 
 export type DiagnoseStartOptions = {
@@ -349,8 +355,10 @@ export function snapshotConversationKey(deskId: string): string {
  * turns at each `user` message. Assistant text becomes the turn's answer (several
  * assistant answers in one turn — e.g. an automation follow-up appended after the
  * original — are joined), and assistant tool calls become the turn's tool activity.
- * Internal `tool` / `system_event` / `untrusted_output` messages carry no
- * user-facing turn text and are skipped. Pure, so it is unit-tested directly.
+ * Tool-result messages are correlated back to the assistant's call so a
+ * restored transcript retains expandable input/output details. Other internal
+ * messages carry no user-facing turn text and are skipped. Pure, so it is
+ * unit-tested directly.
  */
 export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHistoryTurn[] {
     const turns: DiagnoseHistoryTurn[] = [];
@@ -377,10 +385,20 @@ export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHi
                 current.answer = current.answer ? `${current.answer}\n\n${m.text}` : m.text;
             }
             for (const tc of m.toolCalls ?? []) {
-                current.tools.push({ callId: tc.id, name: tc.name, status: 'ok' });
+                current.tools.push({
+                    callId: tc.id,
+                    name: tc.name,
+                    status: 'ok',
+                    argumentsJson: tc.argumentsJson,
+                    output: null,
+                });
             }
+        } else if (m.role === 'tool' && current && m.toolCallId) {
+            current.tools = current.tools.map((tool) =>
+                tool.callId === m.toolCallId ? { ...tool, output: m.text } : tool,
+            );
         }
-        // `tool` / `system_event` / `untrusted_output`: internal, no visible turn text.
+        // `system_event` / `untrusted_output`: internal, no visible turn text.
     }
     if (current) turns.push(current);
     return turns;

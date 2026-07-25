@@ -4,6 +4,7 @@ import {
     Ban,
     Check,
     CheckCircle2,
+    ChevronRight,
     Clock,
     Loader2,
     Play,
@@ -129,9 +130,18 @@ function ToolStatusIcon({ status }: { status: ToolActivityStatus }) {
     }
 }
 
+function formatToolArguments(argumentsJson: string): string {
+    if (!argumentsJson.trim()) return "{}"
+    try {
+        return JSON.stringify(JSON.parse(argumentsJson), null, 2)
+    } catch {
+        return argumentsJson
+    }
+}
+
 /**
  * The agentic loop's tool-activity timeline: each tool call the model made this
- * turn, with its live status (running / awaiting approval / ok / failed). Empty
+ * turn, with its live status and expandable model input / redacted output. Empty
  * for the single-turn diagnose path, so it renders nothing there.
  */
 export function ToolTimeline({ tools }: { tools: ToolActivity[] }) {
@@ -144,18 +154,41 @@ export function ToolTimeline({ tools }: { tools: ToolActivity[] }) {
             </h3>
             <ul className="flex flex-col gap-1">
                 {tools.map((tool) => (
-                    <li
-                        key={tool.callId}
-                        className="flex items-center gap-2 text-xs text-white/80"
-                    >
-                        <ToolStatusIcon status={tool.status} />
-                        <Wrench className="h-3 w-3 shrink-0 text-white/40" />
-                        <span className="truncate font-mono">{tool.name}</span>
-                        {tool.status === "awaiting_approval" && (
-                            <span className="text-amber-300">
-                                {t("pages.desk.diagnose.toolAwaiting")}
-                            </span>
-                        )}
+                    <li key={tool.callId}>
+                        <details className="group rounded border border-white/10 bg-black/10 text-xs text-white/80">
+                            <summary className="flex cursor-pointer list-none items-center gap-2 px-2 py-1.5 [&::-webkit-details-marker]:hidden">
+                                <ChevronRight className="h-3 w-3 shrink-0 text-white/40 transition-transform group-open:rotate-90" />
+                                <ToolStatusIcon status={tool.status} />
+                                <Wrench className="h-3 w-3 shrink-0 text-white/40" />
+                                <span className="truncate font-mono">{tool.name}</span>
+                                {tool.status === "awaiting_approval" && (
+                                    <span className="text-amber-300">
+                                        {t("pages.desk.diagnose.toolAwaiting")}
+                                    </span>
+                                )}
+                            </summary>
+                            <div className="flex flex-col gap-2 border-t border-white/10 px-2 py-2">
+                                <div>
+                                    <div className="mb-1 font-medium text-white/60">
+                                        {t("pages.desk.diagnose.toolInput")}
+                                    </div>
+                                    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-black/30 p-2 font-mono text-[11px] text-white/80">
+                                        {formatToolArguments(tool.argumentsJson)}
+                                    </pre>
+                                </div>
+                                <div>
+                                    <div className="mb-1 font-medium text-white/60">
+                                        {t("pages.desk.diagnose.toolOutput")}
+                                    </div>
+                                    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-black/30 p-2 font-mono text-[11px] text-white/80">
+                                        {tool.output === null
+                                            ? t("pages.desk.diagnose.toolOutputPending")
+                                            : tool.output ||
+                                              t("pages.desk.diagnose.toolOutputEmpty")}
+                                    </pre>
+                                </div>
+                            </div>
+                        </details>
                     </li>
                 ))}
             </ul>

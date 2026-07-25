@@ -151,7 +151,15 @@ describe("DiagnosePanel", () => {
         renderPanel({
             phase: "error",
             partialSummary: "CPU usage is concentrated in process 4242.",
-            tools: [{ callId: "c1", name: "execute_command", status: "ok" }],
+            tools: [
+                {
+                    callId: "c1",
+                    name: "execute_command",
+                    status: "ok",
+                    argumentsJson: "{}",
+                    output: "done",
+                },
+            ],
             error: "the assistant stopped after repeating the same action too many times",
             errorCode: 70,
         });
@@ -169,6 +177,27 @@ describe("DiagnosePanel", () => {
                 "the assistant stopped after repeating the same action too many times",
             ),
         ).not.toBeInTheDocument();
+    });
+
+    it("expands a tool call to show formatted input and output", () => {
+        renderPanel({
+            phase: "done",
+            answer: "The process list was collected.",
+            tools: [
+                {
+                    callId: "c1",
+                    name: "read_process_list",
+                    status: "ok",
+                    argumentsJson: '{"limit":5,"sort":"cpu_desc"}',
+                    output: "pid=42 cpu=98%",
+                },
+            ],
+        });
+
+        expect(screen.queryByText(/"limit": 5/)).not.toBeVisible();
+        fireEvent.click(screen.getByText("read_process_list"));
+        expect(screen.getByText(/"limit": 5/)).toBeVisible();
+        expect(screen.getByText("pid=42 cpu=98%")).toBeVisible();
     });
 
     it("done: a follow-up composer continues the conversation", () => {

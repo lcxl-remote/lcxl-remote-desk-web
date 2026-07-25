@@ -294,14 +294,33 @@ describe('useDeskDiagnose', () => {
                 kind: 'tool_started',
                 tool_name: 'read_system_info',
                 tool_call_id: 'c1',
+                tool_arguments_json: '{"detail":true}',
             }),
         );
         expect(result.current.state.tools).toEqual([
-            { callId: 'c1', name: 'read_system_info', status: 'running' },
+            {
+                callId: 'c1',
+                name: 'read_system_info',
+                status: 'running',
+                argumentsJson: '{"detail":true}',
+                output: null,
+            },
         ]);
 
-        feed(frame({ request_id: 'req-1', seq: 2, kind: 'tool_finished', tool_call_id: 'c1', tool_ok: true }));
-        expect(result.current.state.tools[0].status).toBe('ok');
+        feed(
+            frame({
+                request_id: 'req-1',
+                seq: 2,
+                kind: 'tool_finished',
+                tool_call_id: 'c1',
+                tool_ok: true,
+                tool_output: 'hostname=desk-1',
+            }),
+        );
+        expect(result.current.state.tools[0]).toMatchObject({
+            status: 'ok',
+            output: 'hostname=desk-1',
+        });
 
         feed(frame({ request_id: 'req-1', seq: 3, kind: 'answer', answer: 'the host is healthy' }));
         expect(result.current.state.phase).toBe('done');
@@ -323,11 +342,21 @@ describe('useDeskDiagnose', () => {
                 tool_name: 'exec_command',
                 tool_call_id: 'c1',
                 awaiting_approval: true,
+                tool_arguments_json: '{"command":"restart"}',
             }),
         );
         expect(result.current.state.tools[0].status).toBe('awaiting_approval');
 
-        feed(frame({ request_id: 'req-1', seq: 1, kind: 'tool_finished', tool_call_id: 'c1', tool_ok: false }));
+        feed(
+            frame({
+                request_id: 'req-1',
+                seq: 1,
+                kind: 'tool_finished',
+                tool_call_id: 'c1',
+                tool_ok: false,
+                tool_output: 'operator rejected the command',
+            }),
+        );
         expect(result.current.state.tools[0].status).toBe('failed');
     });
 
@@ -422,6 +451,7 @@ describe('useDeskDiagnose', () => {
                 kind: 'tool_started',
                 tool_name: 'execute_command',
                 tool_call_id: 'c1',
+                tool_arguments_json: '{"command":"ps"}',
             }),
         );
         feed(
@@ -431,6 +461,7 @@ describe('useDeskDiagnose', () => {
                 kind: 'tool_finished',
                 tool_call_id: 'c1',
                 tool_ok: true,
+                tool_output: 'pid=4242',
             }),
         );
         feed(
@@ -450,7 +481,13 @@ describe('useDeskDiagnose', () => {
         expect(result.current.state.phase).toBe('error');
         expect(result.current.state.partialSummary).toBe('process 4242 is using the CPU');
         expect(result.current.state.tools).toEqual([
-            { callId: 'c1', name: 'execute_command', status: 'ok' },
+            {
+                callId: 'c1',
+                name: 'execute_command',
+                status: 'ok',
+                argumentsJson: '{"command":"ps"}',
+                output: 'pid=4242',
+            },
         ]);
 
         act(() => result.current.start('continue', {}));
@@ -461,7 +498,13 @@ describe('useDeskDiagnose', () => {
         expect(result.current.state.history[0].phase).toBe('error');
         expect(result.current.state.history[0].summary).toBe('process 4242 is using the CPU');
         expect(result.current.state.history[0].tools).toEqual([
-            { callId: 'c1', name: 'execute_command', status: 'ok' },
+            {
+                callId: 'c1',
+                name: 'execute_command',
+                status: 'ok',
+                argumentsJson: '{"command":"ps"}',
+                output: 'pid=4242',
+            },
         ]);
         expect(result.current.state.history[0].error).toBe('repeat limit');
         expect(result.current.state.history[0].errorCode).toBe(70);
@@ -563,7 +606,15 @@ describe('buildSnapshotTranscript', () => {
         ];
         const turns = buildSnapshotTranscript(messages);
         expect(turns).toHaveLength(1);
-        expect(turns[0].tools).toEqual([{ callId: 'c1', name: 'read_disk', status: 'ok' }]);
+        expect(turns[0].tools).toEqual([
+            {
+                callId: 'c1',
+                name: 'read_disk',
+                status: 'ok',
+                argumentsJson: '{}',
+                output: '90% full',
+            },
+        ]);
         expect(turns[0].answer).toBe('The disk is 90% full.');
     });
 

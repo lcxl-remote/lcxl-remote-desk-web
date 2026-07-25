@@ -327,6 +327,8 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                             callId: event.tool_call_id,
                             name: event.tool_name ?? event.tool_call_id,
                             status: event.awaiting_approval ? 'awaiting_approval' : 'running',
+                            argumentsJson: event.tool_arguments_json ?? '',
+                            output: null,
                         };
                         // Replace an existing entry for the same call (e.g. a re-emit)
                         // rather than duplicating it.
@@ -343,7 +345,13 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                         return {
                             ...prev,
                             tools: prev.tools.map((tt) =>
-                                tt.callId === event.tool_call_id ? { ...tt, status } : tt,
+                                tt.callId === event.tool_call_id
+                                    ? {
+                                          ...tt,
+                                          status,
+                                          output: event.tool_output ?? '',
+                                      }
+                                    : tt,
                             ),
                         };
                     }
