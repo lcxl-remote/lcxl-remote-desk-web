@@ -24,7 +24,14 @@ pub const TAG: &str = "DiagnoseSession";
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct DiagnoseSessionQuery {
     pub connection: String,
-    pub conversation: String,
+    pub conversation: Option<String>,
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DiagnoseSessionListQuery {
+    pub connection: String,
+    pub limit: Option<u64>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -85,6 +92,24 @@ pub struct DiagnoseSessionSnapshotDto {
     pub messages: Vec<SnapshotMessageDto>,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnoseSessionSummaryDto {
+    pub session_id: String,
+    pub conversation_id: Option<String>,
+    pub first_question: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub active: bool,
+    pub message_count: usize,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnoseSessionListDto {
+    pub sessions: Vec<DiagnoseSessionSummaryDto>,
+}
+
 fn not_accessible() -> HttpResponse {
     HttpResponse::Ok().json(RestResponse::<()>::failed(
         DeskErrorCode::PERMISSION_ERROR,
@@ -97,7 +122,8 @@ fn not_accessible() -> HttpResponse {
     summary = "Read an AI-diagnose conversation snapshot (browser view)",
     params(
         ("connection" = String, Query, description = "Target connection id"),
-        ("conversation" = String, Query, description = "Client conversation intent"),
+        ("conversation" = Option<String>, Query, description = "Client conversation intent"),
+        ("session" = Option<String>, Query, description = "Opaque session id from history list"),
     ),
     responses((status = 200, description = "Conversation snapshot, or a uniform \
         not-found/not-accessible response", body = RestResponse<DiagnoseSessionSnapshotDto>)),
@@ -123,18 +149,28 @@ pub async fn get_diagnose_session(
         }
     };
 
-    let key = derive_conversation_key(
-        &SINGLE_ACCOUNT_USER_ID.to_string(),
-        &target_audience,
-        Some(query.conversation.as_str()),
-        "",
-    );
-    let snapshot = SignalAgentSessionStore::new(crate::db::get_db().clone())
-        .read_snapshot(&key)
-        .await
-        .map_err(|error| {
-            DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
-        })?;
+    let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
+    let store = SignalAgentSessionStore::new(crate::db::get_db().clone());
+    let snapshot = match (
+        query.session.as_deref().filter(|value| !value.is_empty()),
+        query.conversation.as_deref(),
+    ) {
+        (Some(session_id), _) => {
+            store
+                .read_snapshot_for_subject(session_id, &actor_id, &target_audience)
+                .await
+        }
+        (None, Some(conversation)) => {
+            let key = derive_conversation_key(&actor_id, &target_audience, Some(conversation), "");
+            store
+                .read_snapshot_for_subject(&key, &actor_id, &target_audience)
+                .await
+        }
+        (None, None) => return Ok(not_accessible()),
+    }
+    .map_err(|error| {
+        DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
+    })?;
     match snapshot {
         Some(snapshot) => Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
             DiagnoseSessionSnapshotDto {
@@ -147,6 +183,63 @@ pub async fn get_diagnose_session(
         ))),
         None => Ok(not_accessible()),
     }
+}
+
+#[utoipa::path(
+    tag = TAG,
+    summary = "List recent AI-diagnose conversations for a device",
+    params(
+        ("connection" = String, Query, description = "Target connection id"),
+        ("limit" = Option<u64>, Query, description = "Maximum rows, default 30 and capped at 100"),
+    ),
+    responses((status = 200, description = "Authorized recent diagnose sessions",
+        body = RestResponse<DiagnoseSessionListDto>)),
+)]
+#[get("/my/diagnose-sessions")]
+pub async fn list_diagnose_sessions(
+    connection_map: web::Data<SharedConnectionMap>,
+    query: web::Query<DiagnoseSessionListQuery>,
+) -> Result<HttpResponse, DeskSignalError> {
+    let target_audience = {
+        let map = connection_map.read().await;
+        let Some(target) = map.get(&query.connection) else {
+            return Ok(not_accessible());
+        };
+        if target.auth_context.auth_kind != AuthKind::TokenAuth
+            || target.auth_context.remote_desk_type != RemoteDeskTypeEnum::Server
+        {
+            return Ok(not_accessible());
+        }
+        match target.model.version_info.client_id.as_deref() {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => return Ok(not_accessible()),
+        }
+    };
+    let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
+    let limit = query.limit.unwrap_or(30).clamp(1, 100);
+    let summaries = SignalAgentSessionStore::new(crate::db::get_db().clone())
+        .list_diagnose_sessions(&actor_id, &target_audience, limit)
+        .await
+        .map_err(|error| {
+            DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
+        })?;
+    let sessions = summaries
+        .into_iter()
+        .map(|summary| DiagnoseSessionSummaryDto {
+            session_id: summary.session_id,
+            conversation_id: summary.client_conversation_id,
+            first_question: summary.first_question,
+            created_at: summary.created_at,
+            updated_at: summary.updated_at,
+            active: summary.active,
+            message_count: summary.message_count,
+        })
+        .collect();
+    Ok(
+        HttpResponse::Ok().json(RestResponse::succeed_with_data(DiagnoseSessionListDto {
+            sessions,
+        })),
+    )
 }
 
 #[cfg(test)]

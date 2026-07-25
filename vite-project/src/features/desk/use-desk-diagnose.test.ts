@@ -377,6 +377,101 @@ describe('useDeskDiagnose', () => {
         });
     });
 
+    it('lists and restores a resumable historical diagnosis', async () => {
+        const summary = {
+            sessionId: 'server-session-1',
+            conversationId: 'client-conversation-1',
+            firstQuestion: 'why slow?',
+            createdAt: '2026-07-20T00:00:00Z',
+            updatedAt: '2026-07-20T00:01:00Z',
+            active: false,
+            messageCount: 2,
+        };
+        const fetchMock = vi.fn(async (input: string | URL | Request) => {
+            const url = String(input);
+            return {
+                ok: true,
+                json: async () =>
+                    url.includes('/diagnose-sessions?')
+                        ? {
+                              success: true,
+                              code: 0,
+                              data: { sessions: [summary] },
+                          }
+                        : {
+                              success: true,
+                              code: 0,
+                              data: {
+                                  seq: 4,
+                                  active: false,
+                                  requestId: 'req-old',
+                                  messages: [
+                                      { id: 'u1', role: 'user', text: 'why slow?' },
+                                      {
+                                          id: 'a1',
+                                          role: 'assistant',
+                                          text: 'A process is using the CPU.',
+                                      },
+                                  ],
+                              },
+                          },
+            } as Response;
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const { result } = renderDiagnose();
+
+        await act(async () => result.current.refreshHistory());
+        expect(result.current.historySessions).toEqual([summary]);
+
+        await act(async () => result.current.restoreSession(summary));
+        expect(result.current.state.phase).toBe('done');
+        expect(result.current.state.history[0].question).toBe('why slow?');
+        expect(result.current.canContinue).toBe(true);
+        expect(localStorage.getItem(snapshotConversationKey('desk-1'))).toBe(
+            'client-conversation-1',
+        );
+        expect(fetchMock).toHaveBeenLastCalledWith(
+            expect.stringContaining('&session=server-session-1'),
+            expect.any(Object),
+        );
+    });
+
+    it('restores a legacy historical diagnosis as read-only', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => ({
+                success: true,
+                code: 0,
+                data: {
+                    seq: 2,
+                    active: false,
+                    messages: [
+                        { id: 'u1', role: 'user', text: 'legacy question' },
+                        { id: 'a1', role: 'assistant', text: 'legacy answer' },
+                    ],
+                },
+            }),
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const { result } = renderDiagnose();
+        await act(async () =>
+            result.current.restoreSession({
+                sessionId: 'legacy-session',
+                conversationId: null,
+                firstQuestion: 'legacy question',
+                createdAt: '2026-07-01T00:00:00Z',
+                updatedAt: '2026-07-01T00:01:00Z',
+                active: false,
+                messageCount: 2,
+            }),
+        );
+
+        expect(result.current.state.phase).toBe('done');
+        expect(result.current.canContinue).toBe(false);
+        act(() => result.current.start('try to continue', {}));
+        expect(sendMessage).not.toHaveBeenCalled();
+    });
+
     it('captures an agentic ExecPreview while a run is in flight and approves it', () => {
         const { result, feed } = renderDiagnose();
         act(() => result.current.start('restart nginx', {}));

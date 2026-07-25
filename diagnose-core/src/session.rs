@@ -179,6 +179,20 @@ pub enum TriggerOrigin {
     ExecCompletion,
 }
 
+/// User-facing surface that owns an agent session.
+///
+/// Older persisted rows predate this discriminator and deserialize as
+/// [`Unknown`]. Callers may keep those rows visible for backward-compatible
+/// read-only history, while newly created sessions are tagged precisely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSessionSurface {
+    #[default]
+    Unknown,
+    Diagnose,
+    TerminalCopilot,
+}
+
 impl TriggerOrigin {
     /// Whether a turn of this origin may start a **new** mutating command. Only a
     /// `User` turn may; an `ExecCompletion` turn is barred so completions cannot
@@ -222,6 +236,14 @@ pub struct PendingAutoTrigger {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedAgentSession {
     pub conversation_id: String,
+    /// Validated client continuation intent. The storage key remains the
+    /// subject-namespaced `conversation_id`; this value exists so an authorized
+    /// history viewer can resume a selected conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_conversation_id: Option<String>,
+    /// User-facing surface that created this session.
+    #[serde(default)]
+    pub surface: AgentSessionSurface,
     pub conversation: Vec<crate::chat::ChatMessage>,
 
     // ---- Persistent security subject (validated each follow-up; never rebinds) ----
@@ -323,6 +345,8 @@ impl PersistedAgentSession {
     ) -> Self {
         Self {
             conversation_id: conversation_id.into(),
+            client_conversation_id: None,
+            surface: AgentSessionSurface::Unknown,
             conversation: Vec::new(),
             actor_id: actor_id.into(),
             device_id: device_id.into(),
@@ -346,6 +370,21 @@ impl PersistedAgentSession {
             created_at: now.clone().into(),
             updated_at: now.into(),
             version: 0,
+        }
+    }
+
+    /// Attach validated client-facing metadata to a new session, or upgrade a
+    /// legacy row when it is next claimed from a known surface.
+    pub fn adopt_client_metadata(
+        &mut self,
+        client_conversation_id: Option<&str>,
+        surface: AgentSessionSurface,
+    ) {
+        if self.client_conversation_id.is_none() {
+            self.client_conversation_id = client_conversation_id.map(str::to_string);
+        }
+        if self.surface == AgentSessionSurface::Unknown {
+            self.surface = surface;
         }
     }
 

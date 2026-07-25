@@ -8,7 +8,9 @@ actually still active after approval.
 ## What Is Shown
 
 When activity starts, each attached physical display gets a compact,
-always-on-top card in its upper-right corner. The collapsed card distinguishes:
+non-activating, always-on-top card in its upper-right corner. Showing or
+refreshing the card does not take keyboard focus from the local user's active
+application. The collapsed card distinguishes:
 
 - screen viewing from mouse and keyboard control;
 - remote terminal activity;

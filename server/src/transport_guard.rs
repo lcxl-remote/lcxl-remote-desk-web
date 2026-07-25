@@ -53,6 +53,12 @@ impl HostResolver for SystemHostResolver {
         host: &'a str,
         port: u16,
     ) -> LocalBoxFuture<'a, std::io::Result<Vec<SocketAddr>>> {
+        // `http::Uri::host()` preserves IPv6 authority brackets, while Unix
+        // socket resolvers expect the raw literal and reject names like `[::1]`.
+        let host = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host);
         Box::pin(async move { Ok(tokio::net::lookup_host((host, port)).await?.collect()) })
     }
 }
@@ -141,7 +147,7 @@ impl Resolve for TransportGuardResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     /// A fake resolver returning a fixed address set for any host, so a "domain"
     /// can be made to resolve to an internal / public / metadata address.
@@ -172,6 +178,20 @@ mod tests {
             scheme_is_tls,
             enforce_public_tls,
         }
+    }
+
+    #[actix_web::test]
+    async fn system_resolver_accepts_bracketed_ipv6_literal() {
+        let port = 48123;
+        let resolved = SystemHostResolver
+            .resolve("[::1]", port)
+            .await
+            .expect("bracketed IPv6 literal should resolve");
+
+        assert!(
+            resolved.contains(&SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port)),
+            "resolver should return the IPv6 loopback address"
+        );
     }
 
     #[actix_web::test]

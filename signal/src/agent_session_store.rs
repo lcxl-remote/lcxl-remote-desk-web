@@ -5,11 +5,12 @@ use chrono::{DateTime, Duration, Utc};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_diagnose_core::seam::{ClaimError, ClaimTurnParams, SessionSeam};
 use desk_diagnose_core::session::{
-    PendingAutoTrigger, PersistedAgentSession, RecoveryVerdict, TurnClaimError,
+    AgentSessionSurface, PendingAutoTrigger, PersistedAgentSession, RecoveryVerdict, TurnClaimError,
 };
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
 };
 
 use crate::entity::{agent_exec_task, agent_session};
@@ -20,11 +21,27 @@ const CLAIM_ATTEMPTS: usize = 5;
 #[derive(Clone)]
 pub struct SignalAgentSessionStore {
     db: DatabaseConnection,
+    client_conversation_id: Option<String>,
+    surface: AgentSessionSurface,
 }
 
 impl SignalAgentSessionStore {
     pub fn new(db: DatabaseConnection) -> Self {
-        Self { db }
+        Self {
+            db,
+            client_conversation_id: None,
+            surface: AgentSessionSurface::Unknown,
+        }
+    }
+
+    pub fn with_client_metadata(
+        mut self,
+        client_conversation_id: Option<String>,
+        surface: AgentSessionSurface,
+    ) -> Self {
+        self.client_conversation_id = client_conversation_id;
+        self.surface = surface;
+        self
     }
 
     /// Read the persisted conversation for the browser's recoverable view.
@@ -55,6 +72,146 @@ impl SignalAgentSessionStore {
             active_execution_generation,
             messages: session.conversation,
         }))
+    }
+
+    pub async fn read_snapshot_for_subject(
+        &self,
+        conversation_id: &str,
+        actor_id: &str,
+        device_id: &str,
+    ) -> Result<Option<SessionSnapshot>, AgentError> {
+        let row = agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq(conversation_id))
+            .filter(agent_session::Column::ActorId.eq(actor_id))
+            .filter(agent_session::Column::DeviceId.eq(device_id))
+            .one(&self.db)
+            .await
+            .map_err(|e| internal(format!("load agent session snapshot: {e}")))?;
+        row.map(snapshot_from_row).transpose()
+    }
+
+    pub async fn list_diagnose_sessions(
+        &self,
+        actor_id: &str,
+        device_id: &str,
+        limit: u64,
+    ) -> Result<Vec<SessionSummary>, AgentError> {
+        let rows = agent_session::Entity::find()
+            .filter(agent_session::Column::ActorId.eq(actor_id))
+            .filter(agent_session::Column::DeviceId.eq(device_id))
+            .order_by_desc(agent_session::Column::UpdatedAt)
+            .limit(limit.saturating_mul(4).max(limit))
+            .all(&self.db)
+            .await
+            .map_err(|e| internal(format!("list agent sessions: {e}")))?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let session: PersistedAgentSession = match serde_json::from_str(&row.state_json) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        log::warn!(
+                            "Skipping undecodable agent session history row id={}: {error}",
+                            row.id
+                        );
+                        return None;
+                    }
+                };
+                if session.surface == AgentSessionSurface::TerminalCopilot {
+                    return None;
+                }
+                let first_question = session
+                    .conversation
+                    .iter()
+                    .find(|message| message.role == desk_diagnose_core::chat::ChatRole::User)
+                    .map(|message| message.text.clone());
+                Some(SessionSummary {
+                    session_id: row.conversation_id,
+                    client_conversation_id: session.client_conversation_id,
+                    first_question,
+                    created_at: row.created_at.to_rfc3339(),
+                    updated_at: row.updated_at.to_rfc3339(),
+                    active: session.turn_state.is_active(),
+                    message_count: session.conversation.len(),
+                })
+            })
+            .take(limit as usize)
+            .collect())
+    }
+
+    /// Recover one active session whose lease has expired without claiming a new
+    /// turn. The retention sweep uses this before age deletion so a process crash
+    /// cannot leave a row permanently protected as active.
+    pub async fn settle_lapsed_session(
+        &self,
+        row: &agent_session::Model,
+        now: DateTime<Utc>,
+    ) -> Result<bool, AgentError> {
+        let mut session: PersistedAgentSession = serde_json::from_str(&row.state_json)
+            .map_err(|e| internal(format!("decode lapsed agent session: {e}")))?;
+        if !session.turn_state.is_active()
+            || row.lease_deadline.is_some_and(|deadline| deadline >= now)
+        {
+            return Ok(false);
+        }
+
+        let unclosed = session.unclosed_tool_call_ids();
+        let task = if unclosed.len() == 1 {
+            agent_exec_task::Entity::find()
+                .filter(agent_exec_task::Column::ConversationId.eq(&session.conversation_id))
+                .filter(agent_exec_task::Column::ToolCallId.eq(unclosed[0].clone()))
+                .order_by_desc(agent_exec_task::Column::Id)
+                .one(&self.db)
+                .await
+                .map_err(|e| internal(format!("load lapsed agent execution: {e}")))?
+        } else {
+            None
+        };
+        let now_text = now.to_rfc3339();
+        match task {
+            Some(task) => {
+                session.recover_session(
+                    RecoveryVerdict::OutcomeUnknown {
+                        work_id: task.id,
+                        execution_id: task.execution_generation.clone(),
+                        exec_request_id: task.exec_request_id.clone(),
+                    },
+                    now_text.clone(),
+                );
+                if task.status == crate::agent_exec_store::STATUS_DONE
+                    && let Some(result_text) = task.result_text
+                {
+                    session.apply_completion(
+                        &task.event_id,
+                        &task.execution_generation,
+                        &task.tool_call_id,
+                        &task.exec_request_id,
+                        result_text,
+                        now_text.clone(),
+                    );
+                }
+            }
+            None => session.recover_session(RecoveryVerdict::InterruptedUnknown, now_text),
+        }
+        let new_version = row.version + 1;
+        session.version = new_version;
+        let state_json = serde_json::to_string(&session)
+            .map_err(|e| internal(format!("encode lapsed agent session: {e}")))?;
+        let result = agent_session::Entity::update_many()
+            .col_expr(agent_session::Column::StateJson, Expr::value(state_json))
+            .col_expr(agent_session::Column::Version, Expr::value(new_version))
+            .col_expr(
+                agent_session::Column::LeaseDeadline,
+                Expr::value(Option::<DateTime<Utc>>::None),
+            )
+            .col_expr(agent_session::Column::UpdatedAt, Expr::value(now))
+            .filter(agent_session::Column::Id.eq(row.id))
+            .filter(agent_session::Column::Version.eq(row.version))
+            .exec(&self.db)
+            .await
+            .map_err(|e| internal(format!("settle lapsed agent session: {e}")))?;
+        Ok(result.rows_affected == 1)
     }
 
     /// Append a host execution result without taking over an active model turn.
@@ -267,6 +424,33 @@ pub struct SessionSnapshot {
     pub messages: Vec<desk_diagnose_core::chat::ChatMessage>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub client_conversation_id: Option<String>,
+    pub first_question: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub active: bool,
+    pub message_count: usize,
+}
+
+fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, AgentError> {
+    let session: PersistedAgentSession = serde_json::from_str(&row.state_json)
+        .map_err(|e| internal(format!("decode agent session snapshot: {e}")))?;
+    let active_execution_generation = session
+        .execution_state
+        .waitable_task()
+        .map(|(_, execution_id, _)| execution_id.to_string());
+    Ok(SessionSnapshot {
+        seq: row.version,
+        active: session.turn_state.is_active(),
+        request_id: session.current_request_id,
+        active_execution_generation,
+        messages: session.conversation,
+    })
+}
+
 fn internal(message: impl Into<String>) -> AgentError {
     AgentError {
         kind: AgentErrorKind::Internal,
@@ -316,6 +500,10 @@ impl SessionSeam for SignalAgentSessionStore {
                     session
                         .check_subject(&params.actor_id, &params.device_id)
                         .map_err(ClaimError::Subject)?;
+                    session.adopt_client_metadata(
+                        self.client_conversation_id.as_deref(),
+                        self.surface,
+                    );
 
                     if session.turn_state.is_active() {
                         let lease_live = row.lease_deadline.is_some_and(|d| d >= now);
@@ -425,6 +613,10 @@ impl SessionSeam for SignalAgentSessionStore {
                         params.policy_revision,
                         params.current_pdp_scope.clone(),
                         params.now.clone(),
+                    );
+                    session.adopt_client_metadata(
+                        self.client_conversation_id.as_deref(),
+                        self.surface,
                     );
                     let _ = session.begin_turn(
                         params.turn_id.clone(),
@@ -631,6 +823,65 @@ mod tests {
             "a settled model turn still exposes its running background command"
         );
         assert!(settled.seq > active.seq);
+    }
+
+    #[tokio::test]
+    async fn history_is_subject_scoped_and_excludes_other_surfaces() {
+        use desk_diagnose_core::chat::{ChatMessage, ChatRole};
+
+        let base = store().await;
+        let db = base.db.clone();
+        let diagnose = SignalAgentSessionStore::new(db.clone())
+            .with_client_metadata(Some("client-conv-1".into()), AgentSessionSurface::Diagnose);
+        let mut session = diagnose.claim_turn(claim("turn-1")).await.unwrap();
+        session
+            .conversation
+            .push(ChatMessage::text("u1", ChatRole::User, "why slow?"));
+        session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+        diagnose.save(&mut session).await.unwrap();
+
+        let terminal = SignalAgentSessionStore::new(db).with_client_metadata(
+            Some("terminal-conv-1".into()),
+            AgentSessionSurface::TerminalCopilot,
+        );
+        let mut terminal_claim = claim("terminal-turn");
+        terminal_claim.conversation_id = "terminal-session".into();
+        let mut terminal_session = terminal.claim_turn(terminal_claim).await.unwrap();
+        terminal_session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+        terminal.save(&mut terminal_session).await.unwrap();
+
+        let initial = diagnose
+            .list_diagnose_sessions("1", "device-1", 30)
+            .await
+            .unwrap();
+        assert_eq!(initial.len(), 1);
+
+        agent_session::Entity::update_many()
+            .col_expr(
+                agent_session::Column::StateJson,
+                Expr::value("{not valid json"),
+            )
+            .filter(agent_session::Column::ConversationId.eq("terminal-session"))
+            .exec(&diagnose.db)
+            .await
+            .unwrap();
+        let summaries = diagnose
+            .list_diagnose_sessions("1", "device-1", 30)
+            .await
+            .unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(
+            summaries[0].client_conversation_id.as_deref(),
+            Some("client-conv-1")
+        );
+        assert_eq!(summaries[0].first_question.as_deref(), Some("why slow?"));
+        assert!(
+            diagnose
+                .read_snapshot_for_subject("conversation-1", "2", "device-1")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

@@ -29,7 +29,9 @@ use desk_diagnose_core::DEFAULT_MAX_CONTEXT_BYTES;
 use desk_diagnose_core::agent_loop::{LoopDeps, LoopOutcome, resume_agent_turn, run_agent_turn};
 use desk_diagnose_core::agentic_prompt::build_agentic_system_message;
 use desk_diagnose_core::chat::{ChatMessage, ChatRole};
-use desk_diagnose_core::conversation_key::derive_conversation_key;
+use desk_diagnose_core::conversation_key::{
+    derive_conversation_key, is_valid_client_conversation_id,
+};
 use desk_diagnose_core::exec_tools::{
     exec_tool_registry_for_shells_with_timeout, sanitize_available_exec_shells,
 };
@@ -41,7 +43,7 @@ use desk_diagnose_core::seam::{
     ClaimTurnParams, HeartbeatGuard, LeaseHeartbeat, ModelRequest, ModelSeam, SessionSeam,
     ToolRunOutput, ToolSeam, TurnSink,
 };
-use desk_diagnose_core::session::{PersistedAgentSession, TriggerOrigin};
+use desk_diagnose_core::session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin};
 use desk_diagnose_core::stream::StreamingTurnSink;
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
@@ -570,7 +572,15 @@ pub async fn run_model_phase(
         ctx.available_exec_shells.clone(),
         ctx.max_command_runtime_ms,
     );
-    let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db);
+    let client_conversation_id = ctx
+        .request
+        .conversation_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| is_valid_client_conversation_id(id))
+        .map(str::to_string);
+    let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db)
+        .with_client_metadata(client_conversation_id, AgentSessionSurface::Diagnose);
     let heartbeat = SignalStoreHeartbeat {
         store: sessions.clone(),
     };

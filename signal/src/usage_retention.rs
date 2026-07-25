@@ -3,8 +3,8 @@
 //! The portable signal server is single-node and single-account, so there is
 //! exactly one retention config (the singleton row in
 //! [`crate::entity::usage_retention`]). It controls how many days of
-//! `turn_usage_hourly` / `ai_usage_hourly` rollups are kept before the cleanup
-//! loop deletes them.
+//! `turn_usage_hourly` / `ai_usage_hourly` rollups and idle AI diagnosis
+//! conversations are kept before the cleanup loop deletes them.
 //!
 //! Unlike the manager's cluster-shared config (optimistic-concurrency `revision`
 //! for multi-instance safety), the signal server never runs multi-instance, so
@@ -16,11 +16,15 @@ use std::time::Duration;
 use chrono::Utc;
 use sea_orm::ActiveValue::Set;
 use sea_orm::prelude::DateTimeUtc;
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, Statement, Value};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Statement, TransactionTrait, Value,
+};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::entity::usage_retention::{self, SINGLETON_ID};
+use crate::entity::{agent_exec_task, agent_session};
 
 /// Default retention window (days) when no row has been written yet.
 pub const DEFAULT_RETENTION_DAYS: u32 = 30;
@@ -36,6 +40,8 @@ pub struct UsageRetentionConfig {
     pub turn_days: u32,
     /// Retention window for AI token rollups (`ai_usage_hourly`), in days.
     pub ai_days: u32,
+    /// Idle retention window for AI diagnosis conversations, in days.
+    pub agent_session_days: u32,
 }
 
 impl Default for UsageRetentionConfig {
@@ -43,6 +49,7 @@ impl Default for UsageRetentionConfig {
         Self {
             turn_days: DEFAULT_RETENTION_DAYS,
             ai_days: DEFAULT_RETENTION_DAYS,
+            agent_session_days: DEFAULT_RETENTION_DAYS,
         }
     }
 }
@@ -52,12 +59,17 @@ impl UsageRetentionConfig {
         Self {
             turn_days: row.turn_days.max(0) as u32,
             ai_days: row.ai_days.max(0) as u32,
+            agent_session_days: row.agent_session_days.max(0) as u32,
         }
     }
 
     /// Reject out-of-range windows before persisting.
     pub fn validate(&self) -> Result<(), String> {
-        for (label, days) in [("turn_days", self.turn_days), ("ai_days", self.ai_days)] {
+        for (label, days) in [
+            ("turn_days", self.turn_days),
+            ("ai_days", self.ai_days),
+            ("agent_session_days", self.agent_session_days),
+        ] {
             if days < MIN_RETENTION_DAYS {
                 return Err(format!(
                     "{label} must be at least {MIN_RETENTION_DAYS} day(s)"
@@ -75,6 +87,7 @@ impl UsageRetentionConfig {
             id: Set(SINGLETON_ID),
             turn_days: Set(self.turn_days.min(i32::MAX as u32) as i32),
             ai_days: Set(self.ai_days.min(i32::MAX as u32) as i32),
+            agent_session_days: Set(self.agent_session_days.min(i32::MAX as u32) as i32),
             updated_at: Set(chrono::Utc::now()),
         }
     }
@@ -101,6 +114,7 @@ pub async fn save(db: &DatabaseConnection, config: UsageRetentionConfig) -> Resu
                 .update_columns([
                     usage_retention::Column::TurnDays,
                     usage_retention::Column::AiDays,
+                    usage_retention::Column::AgentSessionDays,
                     usage_retention::Column::UpdatedAt,
                 ])
                 .to_owned(),
@@ -119,6 +133,7 @@ const CLEANUP_BATCH_HOURS: u64 = 24;
 const CLEANUP_MAX_BATCHES_PER_TICK: usize = 500;
 /// Cleanup tick cadence.
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(3600);
+const AGENT_SESSION_BATCH_ROWS: u64 = 1000;
 
 const TURN_USAGE_TABLE: &str = "turn_usage_hourly";
 const AI_USAGE_TABLE: &str = "ai_usage_hourly";
@@ -158,9 +173,92 @@ async fn cleanup_table(
     Ok(total)
 }
 
+/// Recover lapsed active sessions, then delete settled sessions older than the
+/// configured idle window together with their durable execution rows.
+async fn cleanup_agent_sessions(
+    db: &DatabaseConnection,
+    cutoff: DateTimeUtc,
+    now: DateTimeUtc,
+) -> Result<(u64, u64), DbErr> {
+    let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone());
+    let mut settled = 0;
+    for _ in 0..CLEANUP_MAX_BATCHES_PER_TICK {
+        let rows = agent_session::Entity::find()
+            .filter(agent_session::Column::LeaseDeadline.lt(now))
+            .order_by_asc(agent_session::Column::LeaseDeadline)
+            .limit(AGENT_SESSION_BATCH_ROWS)
+            .all(db)
+            .await?;
+        if rows.is_empty() {
+            break;
+        }
+        let mut advanced = false;
+        for row in &rows {
+            if store
+                .settle_lapsed_session(row, now)
+                .await
+                .map_err(|error| DbErr::Custom(error.message))?
+            {
+                settled += 1;
+                advanced = true;
+            }
+        }
+        if rows.len() < AGENT_SESSION_BATCH_ROWS as usize || !advanced {
+            break;
+        }
+    }
+
+    let mut deleted = 0;
+    for _ in 0..CLEANUP_MAX_BATCHES_PER_TICK {
+        let rows = agent_session::Entity::find()
+            .filter(agent_session::Column::UpdatedAt.lt(cutoff))
+            .order_by_asc(agent_session::Column::UpdatedAt)
+            .limit(AGENT_SESSION_BATCH_ROWS)
+            .all(db)
+            .await?;
+        let ids: Vec<i64> = rows
+            .iter()
+            .filter_map(|row| {
+                serde_json::from_str::<desk_diagnose_core::session::PersistedAgentSession>(
+                    &row.state_json,
+                )
+                .ok()
+                .filter(|session| !session.turn_state.is_active())
+                .map(|_| row.id)
+            })
+            .collect();
+        if ids.is_empty() {
+            break;
+        }
+        let conversation_ids: Vec<String> = rows
+            .iter()
+            .filter(|row| ids.contains(&row.id))
+            .map(|row| row.conversation_id.clone())
+            .collect();
+        let txn = db.begin().await?;
+        agent_exec_task::Entity::delete_many()
+            .filter(agent_exec_task::Column::ConversationId.is_in(conversation_ids))
+            .exec(&txn)
+            .await?;
+        let result = agent_session::Entity::delete_many()
+            .filter(agent_session::Column::Id.is_in(ids))
+            .exec(&txn)
+            .await?;
+        txn.commit().await?;
+        deleted += result.rows_affected;
+        if rows.len() < AGENT_SESSION_BATCH_ROWS as usize {
+            break;
+        }
+    }
+    Ok((settled, deleted))
+}
+
 /// Run one cleanup pass over both rollup tables using the current retention config.
-/// Returns `(turn_rows, ai_rows)` deleted.
-pub async fn cleanup_once(db: &DatabaseConnection, now: DateTimeUtc) -> Result<(u64, u64), DbErr> {
+/// Returns `(turn_rows, ai_rows, settled_sessions, deleted_sessions)`.
+pub async fn cleanup_once(
+    db: &DatabaseConnection,
+    now: DateTimeUtc,
+) -> Result<(u64, u64, u64, u64), DbErr> {
     let cfg = load(db).await?;
     let turn = cleanup_table(
         db,
@@ -174,7 +272,13 @@ pub async fn cleanup_once(db: &DatabaseConnection, now: DateTimeUtc) -> Result<(
         now - chrono::Duration::days(cfg.ai_days as i64),
     )
     .await?;
-    Ok((turn, ai))
+    let (settled, sessions) = cleanup_agent_sessions(
+        db,
+        now - chrono::Duration::days(cfg.agent_session_days as i64),
+        now,
+    )
+    .await?;
+    Ok((turn, ai, settled, sessions))
 }
 
 /// Run the retention cleanup forever on a fixed interval. Spawned once after the
@@ -185,8 +289,11 @@ pub async fn run_retention_cleanup_loop(db: DatabaseConnection) {
     loop {
         ticker.tick().await;
         match cleanup_once(&db, Utc::now()).await {
-            Ok((t, a)) if t > 0 || a > 0 => {
-                log::info!("Signal usage retention cleanup deleted {t} TURN + {a} AI rollup rows");
+            Ok((t, a, settled, sessions)) if t > 0 || a > 0 || settled > 0 || sessions > 0 => {
+                log::info!(
+                    "Signal retention cleanup deleted {t} TURN + {a} AI rollup rows, \
+                     settled {settled} lapsed and deleted {sessions} agent sessions"
+                );
             }
             Ok(_) => {}
             Err(e) => log::warn!("Signal usage retention cleanup failed: {e}"),
@@ -224,6 +331,7 @@ mod tests {
             UsageRetentionConfig {
                 turn_days: 90,
                 ai_days: 45,
+                agent_session_days: 60,
             },
         )
         .await
@@ -231,6 +339,7 @@ mod tests {
         let loaded = load(&db).await.unwrap();
         assert_eq!(loaded.turn_days, 90);
         assert_eq!(loaded.ai_days, 45);
+        assert_eq!(loaded.agent_session_days, 60);
     }
 
     #[tokio::test]
@@ -241,6 +350,7 @@ mod tests {
             UsageRetentionConfig {
                 turn_days: 30,
                 ai_days: 30,
+                agent_session_days: 30,
             },
         )
         .await
@@ -250,6 +360,7 @@ mod tests {
             UsageRetentionConfig {
                 turn_days: 7,
                 ai_days: 7,
+                agent_session_days: 14,
             },
         )
         .await
@@ -259,6 +370,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].turn_days, 7);
         assert_eq!(rows[0].ai_days, 7);
+        assert_eq!(rows[0].agent_session_days, 14);
     }
 
     #[test]
@@ -266,7 +378,8 @@ mod tests {
         assert!(
             UsageRetentionConfig {
                 turn_days: 0,
-                ai_days: 30
+                ai_days: 30,
+                agent_session_days: 30,
             }
             .validate()
             .is_err()
@@ -274,7 +387,8 @@ mod tests {
         assert!(
             UsageRetentionConfig {
                 turn_days: 30,
-                ai_days: MAX_RETENTION_DAYS + 1
+                ai_days: MAX_RETENTION_DAYS + 1,
+                agent_session_days: 30,
             }
             .validate()
             .is_err()
@@ -282,7 +396,8 @@ mod tests {
         assert!(
             UsageRetentionConfig {
                 turn_days: 1,
-                ai_days: MAX_RETENTION_DAYS
+                ai_days: MAX_RETENTION_DAYS,
+                agent_session_days: 30,
             }
             .validate()
             .is_ok()
@@ -301,6 +416,8 @@ mod tests {
             schema.create_table_from_entity(usage_retention::Entity),
             schema.create_table_from_entity(turn_usage::Entity),
             schema.create_table_from_entity(ai_usage::Entity),
+            schema.create_table_from_entity(agent_session::Entity),
+            schema.create_table_from_entity(agent_exec_task::Entity),
         ] {
             db.execute(&stmt).await.unwrap();
         }
@@ -345,6 +462,58 @@ mod tests {
             .collect();
         hs.sort();
         hs
+    }
+
+    async fn seed_session(
+        db: &DatabaseConnection,
+        conversation_id: &str,
+        updated_at: DateTimeUtc,
+        active: bool,
+        lease_deadline: Option<DateTimeUtc>,
+    ) {
+        use desk_agent_protocol::{AgentScope, ExecutionMode};
+        use desk_diagnose_core::session::PersistedAgentSession;
+
+        let mut session = PersistedAgentSession::new(
+            conversation_id,
+            "1",
+            "device-1",
+            0,
+            AgentScope {
+                granted: vec![],
+                mode: ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            updated_at.to_rfc3339(),
+        );
+        if active {
+            session
+                .begin_turn(
+                    "turn-1",
+                    Some("request-1".into()),
+                    Some("browser-1".into()),
+                    0,
+                    session.scope_snapshot.clone(),
+                    updated_at.to_rfc3339(),
+                )
+                .unwrap();
+        }
+        agent_session::ActiveModel {
+            conversation_id: Set(conversation_id.into()),
+            actor_id: Set("1".into()),
+            device_id: Set("device-1".into()),
+            state_json: Set(serde_json::to_string(&session).unwrap()),
+            version: Set(0),
+            lease_token: Set(session.lease_token as i64),
+            lease_deadline: Set(lease_deadline),
+            created_at: Set(updated_at),
+            updated_at: Set(updated_at),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -393,14 +562,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_session_cleanup_deletes_only_old_settled_rows_and_recovers_lapsed() {
+        let db = cleanup_db().await;
+        seed_session(&db, "recent", days_ago(5), false, None).await;
+        seed_session(&db, "old-settled", days_ago(40), false, None).await;
+        seed_session(
+            &db,
+            "old-live",
+            days_ago(40),
+            true,
+            Some(now() + chrono::Duration::hours(1)),
+        )
+        .await;
+        seed_session(
+            &db,
+            "old-lapsed",
+            days_ago(40),
+            true,
+            Some(now() - chrono::Duration::hours(1)),
+        )
+        .await;
+
+        let (settled, deleted) = cleanup_agent_sessions(&db, days_ago(30), now())
+            .await
+            .unwrap();
+        assert_eq!(settled, 1);
+        assert_eq!(deleted, 1);
+        let rows = agent_session::Entity::find().all(&db).await.unwrap();
+        let ids: Vec<_> = rows
+            .iter()
+            .map(|row| row.conversation_id.as_str())
+            .collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&"recent"));
+        assert!(ids.contains(&"old-live"));
+        assert!(ids.contains(&"old-lapsed"));
+        let recovered = rows
+            .iter()
+            .find(|row| row.conversation_id == "old-lapsed")
+            .unwrap();
+        let recovered: desk_diagnose_core::session::PersistedAgentSession =
+            serde_json::from_str(&recovered.state_json).unwrap();
+        assert!(!recovered.turn_state.is_active());
+    }
+
+    #[tokio::test]
     async fn cleanup_once_uses_config_windows() {
         let db = cleanup_db().await;
         // Default config = 30d for both.
         seed_turn(&db, "d1", days_ago(0)).await;
         seed_turn(&db, "d1", days_ago(400)).await;
-        let (turn, ai) = cleanup_once(&db, now()).await.unwrap();
+        let (turn, ai, settled, sessions) = cleanup_once(&db, now()).await.unwrap();
         assert_eq!(turn, 1);
         assert_eq!(ai, 0);
+        assert_eq!(settled, 0);
+        assert_eq!(sessions, 0);
         assert_eq!(turn_hours(&db).await, vec![days_ago(0)]);
     }
 }

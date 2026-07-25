@@ -1110,13 +1110,6 @@ async fn mutating_unknown_closes_with_placeholder_and_hides_mutating() {
     // The follow-up model call did not advertise the mutating tool (no new
     // mutation while an outcome is unknown), but kept the read tool.
     let reqs = model.requests.borrow();
-    let replayed_dispatch = reqs[1]
-        .messages
-        .iter()
-        .find(|message| message.tool_call_id.as_deref() == Some("c1"))
-        .expect("the model follow-up sees the dispatch result");
-    let replayed_json: serde_json::Value = serde_json::from_str(&replayed_dispatch.text).unwrap();
-    assert_eq!(replayed_json["background_task_id"], "exec_task9");
     let follow_up: Vec<_> = reqs[1].tools.iter().map(|t| t.name.clone()).collect();
     assert!(!follow_up.contains(&"exec_command".to_string()));
     assert!(follow_up.contains(&"read_sys".to_string()));
@@ -1199,6 +1192,13 @@ async fn mutating_dispatched_closes_with_task_id_and_hides_mutating() {
     // The follow-up model call did not advertise the mutating tool (no second
     // mutation while one is running) but kept the read tool.
     let reqs = model.requests.borrow();
+    let replayed_dispatch = reqs[1]
+        .messages
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("c1"))
+        .expect("the model follow-up sees the dispatch result");
+    let replayed_json: serde_json::Value = serde_json::from_str(&replayed_dispatch.text).unwrap();
+    assert_eq!(replayed_json["background_task_id"], "exec_task9");
     let follow_up: Vec<_> = reqs[1].tools.iter().map(|t| t.name.clone()).collect();
     assert!(!follow_up.contains(&"exec_command".to_string()));
     assert!(follow_up.contains(&"read_sys".to_string()));

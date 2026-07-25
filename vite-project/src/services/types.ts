@@ -1027,6 +1027,45 @@ export type DeviceCodeUpdateParams = {
     device_code: string;
 };
 
+export type DiagnoseSessionSummaryDto = {
+    /**
+     * @type boolean
+    */
+    active: boolean;
+    /**
+     * @type string,null
+    */
+    conversationId?: string | null;
+    /**
+     * @type string
+    */
+    createdAt: string;
+    /**
+     * @type string,null
+    */
+    firstQuestion?: string | null;
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    messageCount: number;
+    /**
+     * @type string
+    */
+    sessionId: string;
+    /**
+     * @type string
+    */
+    updatedAt: string;
+};
+
+export type DiagnoseSessionListDto = {
+    /**
+     * @type array
+    */
+    sessions: DiagnoseSessionSummaryDto[];
+};
+
 export type SnapshotToolCallDto = {
     /**
      * @type string
@@ -2335,6 +2374,30 @@ export type RestResponseCreateApiTokenResult = {
     success: boolean;
 };
 
+export type RestResponseDiagnoseSessionListDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        sessions: DiagnoseSessionSummaryDto[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseDiagnoseSessionSnapshotDto = {
     /**
      * @type integer, int32
@@ -3333,6 +3396,12 @@ export type RestResponseUsageRetentionConfig = {
     */
     data?: {
         /**
+         * @description Idle retention window for AI diagnosis conversations, in days.
+         * @minLength 0
+         * @type integer, int32
+        */
+        agent_session_days: number;
+        /**
          * @description Retention window for AI token rollups (`ai_usage_hourly`), in days.
          * @minLength 0
          * @type integer, int32
@@ -4078,6 +4147,12 @@ export type TurnUsageResult = {
  * @description Usage-retention windows, one per rollup family, in whole days.
 */
 export type UsageRetentionConfig = {
+    /**
+     * @description Idle retention window for AI diagnosis conversations, in days.
+     * @minLength 0
+     * @type integer, int32
+    */
+    agent_session_days: number;
     /**
      * @description Retention window for AI token rollups (`ai_usage_hourly`), in days.
      * @minLength 0
@@ -5158,9 +5233,14 @@ export type GetDiagnoseSessionQueryParams = {
     connection: string;
     /**
      * @description Client conversation intent
-     * @type string
+     * @type string | undefined
     */
-    conversation: string;
+    conversation?: string;
+    /**
+     * @description Opaque session id from history list
+     * @type string | undefined
+    */
+    session?: string;
 };
 
 /**
@@ -5173,6 +5253,33 @@ export type GetDiagnoseSessionQueryResponse = GetDiagnoseSession200;
 export type GetDiagnoseSessionQuery = {
     Response: GetDiagnoseSession200;
     QueryParams: GetDiagnoseSessionQueryParams;
+    Errors: any;
+};
+
+export type ListDiagnoseSessionsQueryParams = {
+    /**
+     * @description Target connection id
+     * @type string
+    */
+    connection: string;
+    /**
+     * @description Maximum rows, default 30 and capped at 100
+     * @minLength 0
+     * @type integer | undefined, int64
+    */
+    limit?: number;
+};
+
+/**
+ * @description Authorized recent diagnose sessions
+*/
+export type ListDiagnoseSessions200 = RestResponseDiagnoseSessionListDto;
+
+export type ListDiagnoseSessionsQueryResponse = ListDiagnoseSessions200;
+
+export type ListDiagnoseSessionsQuery = {
+    Response: ListDiagnoseSessions200;
+    QueryParams: ListDiagnoseSessionsQueryParams;
     Errors: any;
 };
 

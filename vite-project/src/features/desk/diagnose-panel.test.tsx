@@ -89,6 +89,52 @@ describe("DiagnosePanel", () => {
         expect(textarea.value).toBe("Why is CPU usage so high?");
     });
 
+    it("lists historical diagnoses and restores the selected session", () => {
+        const onRefreshHistory = vi.fn();
+        const onRestoreSession = vi.fn();
+        const session = {
+            sessionId: "session-1",
+            conversationId: "conversation-1",
+            firstQuestion: "Why is CPU usage high?",
+            createdAt: "2026-07-20T08:00:00Z",
+            updatedAt: "2026-07-20T08:05:00Z",
+            active: false,
+            messageCount: 3,
+        };
+        render(
+            <DiagnosePanel
+                state={baseState}
+                onStart={vi.fn()}
+                onReset={vi.fn()}
+                onClose={vi.fn()}
+                historySessions={[session]}
+                onRefreshHistory={onRefreshHistory}
+                onRestoreSession={onRestoreSession}
+            />,
+        );
+
+        fireEvent.click(screen.getByText("History"));
+        expect(onRefreshHistory).toHaveBeenCalledTimes(1);
+        fireEvent.click(screen.getByText("Why is CPU usage high?"));
+        expect(onRestoreSession).toHaveBeenCalledWith(session);
+    });
+
+    it("marks legacy historical sessions as read-only", () => {
+        render(
+            <DiagnosePanel
+                state={{ ...baseState, phase: "done" }}
+                onStart={vi.fn()}
+                onReset={vi.fn()}
+                onClose={vi.fn()}
+                canContinue={false}
+            />,
+        );
+        expect(
+            screen.getByText(/This older conversation predates resumable history/),
+        ).toBeInTheDocument();
+        expect(screen.queryByText("Ask a follow-up")).not.toBeInTheDocument();
+    });
+
     it("running: shows the localized status and streaming summary", () => {
         renderPanel({ phase: "running", status: "modeling", partialSummary: "thinking..." });
         expect(screen.getByText("Analyzing with the model...")).toBeInTheDocument();

@@ -918,6 +918,12 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                                 onApproveExec={diagnose.approveExec}
                                 onRejectExec={diagnose.rejectExec}
                                 onCancelBackgroundExec={diagnose.cancelBackgroundExec}
+                                historySessions={diagnose.historySessions}
+                                historyLoading={diagnose.historyLoading}
+                                historyError={diagnose.historyError}
+                                onRefreshHistory={diagnose.refreshHistory}
+                                onRestoreSession={diagnose.restoreSession}
+                                canContinue={diagnose.canContinue}
                                 orgId={orgId}
                             />
                         )}
