@@ -52,6 +52,11 @@ webkit2gtk = { version = "2.0", features = ["v2_38"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.23", features = ["highsierra"] }
 core-foundation = "0.9"
+# Raw `msg_send!` against the `*mut AnyObject` Tauri hands back from
+# `ns_window()`. Deliberately no `objc2-app-kit`: that crate tracks objc2 0.6,
+# which tao/wry already pull in, so adding it would put two incompatible
+# `NSWindow` types in the same dependency tree.
+objc2 = { workspace = true }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

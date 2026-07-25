@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -5,14 +7,35 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
-/// System-level input blocking
-pub fn block_input(block: bool) -> Result<(), String> {
+/// Invoked by a platform input interceptor once the user has fully entered the
+/// local escape chord that dismisses the privacy screen.
+///
+/// It runs on the interception thread, so implementations must return
+/// immediately: macOS disables an event tap whose callback is slow, and the
+/// privacy screen state machine tears that same thread down while handling the
+/// dismissal, so waiting on it would deadlock.
+pub type LocalEscapeCallback = Arc<dyn Fn() + Send + Sync + 'static>;
+
+/// System-level input blocking.
+///
+/// Only macOS routes `on_local_escape`; the other platforms rely on the Tauri
+/// global shortcut alone and ignore it.
+pub fn block_input(
+    block: bool,
+    on_local_escape: Option<LocalEscapeCallback>,
+) -> Result<(), String> {
     #[cfg(target_os = "windows")]
-    return windows::block_input(block);
+    {
+        let _ = on_local_escape;
+        return windows::block_input(block);
+    }
     #[cfg(target_os = "macos")]
-    return macos::block_input(block);
+    return macos::block_input(block, on_local_escape);
     #[cfg(target_os = "linux")]
-    return linux::block_input(block);
+    {
+        let _ = on_local_escape;
+        return linux::block_input(block);
+    }
 }
 
 /// Resolve the attached LCXL virtual display to the OS monitor name.

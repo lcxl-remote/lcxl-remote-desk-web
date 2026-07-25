@@ -2599,6 +2599,7 @@ name = "desk-input-injection"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "core-foundation 0.9.4",
  "core-graphics 0.23.2",
  "desk-capture-engine",
  "desk-signal-facade",
@@ -4993,6 +4994,7 @@ dependencies = [
  "futures-util",
  "lcxl-remote-desk-server",
  "log",
+ "objc2 0.5.2",
  "raw-window-handle",
  "rust-i18n",
  "serde",

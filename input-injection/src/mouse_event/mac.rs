@@ -1,13 +1,12 @@
 use crate::{
     error::InputError,
+    macos_event::post_remote_input_event,
     model::{
         data_channel::{MouseEventData, MouseEventHandler},
         geometry::SharedMonitorGeometry,
     },
 };
-use core_graphics::event::{
-    CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, ScrollEventUnit,
-};
+use core_graphics::event::{CGEvent, CGEventType, CGMouseButton, ScrollEventUnit};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 use desk_utils::error::DeskErrorCode;
@@ -120,7 +119,7 @@ impl MouseEventHandler for MacMouseEventHandler {
         let source = Self::create_source()?;
         match CGEvent::new_mouse_event(source, mouse_type, point, mouse_button) {
             Ok(cg_event) => {
-                cg_event.post(CGEventTapLocation::HID);
+                post_remote_input_event(&cg_event);
                 Ok(())
             }
             Err(_) => InputError::custom_error(
@@ -145,7 +144,7 @@ impl MouseEventHandler for MacMouseEventHandler {
         let source = Self::create_source()?;
         match CGEvent::new_mouse_event(source, mouse_type, point, mouse_button) {
             Ok(cg_event) => {
-                cg_event.post(CGEventTapLocation::HID);
+                post_remote_input_event(&cg_event);
                 Ok(())
             }
             Err(_) => InputError::custom_error(
@@ -173,7 +172,7 @@ impl MouseEventHandler for MacMouseEventHandler {
         let source = Self::create_source()?;
         match CGEvent::new_mouse_event(source, mouse_type, point, mouse_button) {
             Ok(cg_event) => {
-                cg_event.post(CGEventTapLocation::HID);
+                post_remote_input_event(&cg_event);
                 Ok(())
             }
             Err(_) => InputError::custom_error(
@@ -195,7 +194,7 @@ impl MouseEventHandler for MacMouseEventHandler {
         let source = Self::create_source()?;
         match CGEvent::new_scroll_event(source, ScrollEventUnit::PIXEL, wheel_count, dy, 0, 0) {
             Ok(cg_event) => {
-                cg_event.post(CGEventTapLocation::HID);
+                post_remote_input_event(&cg_event);
                 Ok(())
             }
             Err(_) => InputError::custom_error(

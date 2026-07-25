@@ -1,8 +1,9 @@
 use crate::{
     error::InputError,
+    macos_event::post_remote_input_event,
     model::data_channel::{KeyboardEventData, KeyboardEventHandler},
 };
-use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode, KeyCode};
+use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode, KeyCode};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use desk_utils::error::DeskErrorCode;
 
@@ -59,7 +60,7 @@ impl KeyboardEventHandler for MacKeyboardEventHandler {
             match CGEvent::new_keyboard_event(source, keycode, true) {
                 Ok(cg_event) => {
                     cg_event.set_flags(cg_event_flags(event));
-                    cg_event.post(CGEventTapLocation::HID);
+                    post_remote_input_event(&cg_event);
                     Ok(())
                 }
                 Err(_) => InputError::custom_error(
@@ -79,7 +80,7 @@ impl KeyboardEventHandler for MacKeyboardEventHandler {
             match CGEvent::new_keyboard_event(source, keycode, false) {
                 Ok(cg_event) => {
                     cg_event.set_flags(cg_event_flags(event));
-                    cg_event.post(CGEventTapLocation::HID);
+                    post_remote_input_event(&cg_event);
                     Ok(())
                 }
                 Err(_) => InputError::custom_error(
