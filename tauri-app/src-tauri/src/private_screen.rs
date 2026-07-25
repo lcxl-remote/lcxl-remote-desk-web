@@ -154,7 +154,7 @@ impl PrivateScreenManager {
             }
 
             window.show().map_err(|e| e.to_string())?;
-            window.set_fullscreen(true).map_err(|e| e.to_string())?;
+            crate::overlay_window::enter_overlay_fullscreen(&window)?;
             window.set_always_on_top(true).map_err(|e| e.to_string())?;
             window.set_focus().map_err(|e| e.to_string())?;
             let _ = window.set_ignore_cursor_events(true);

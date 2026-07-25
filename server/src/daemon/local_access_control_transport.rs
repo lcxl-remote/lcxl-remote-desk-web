@@ -388,9 +388,9 @@ fn unix_executable_path(pid: u32) -> Result<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn unix_executable_path(pid: u32) -> Result<PathBuf> {
-    Ok(PathBuf::from(libproc::libproc::proc_pid::pidpath(
-        pid as i32,
-    )?))
+    libproc::libproc::proc_pid::pidpath(pid as i32)
+        .map(PathBuf::from)
+        .map_err(anyhow::Error::msg)
 }
 
 pub async fn execute_native(
@@ -485,6 +485,15 @@ mod tests {
             choose_local_access_user_sid(None, Some("daemon".into())),
             Some("daemon".into())
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_current_process_executable_path_resolves() {
+        let path = unix_executable_path(std::process::id()).unwrap();
+
+        assert!(path.is_absolute());
+        assert!(path.file_name().is_some());
     }
 
     #[cfg(target_os = "windows")]

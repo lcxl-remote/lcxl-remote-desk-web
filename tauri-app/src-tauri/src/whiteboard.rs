@@ -137,16 +137,7 @@ impl WhiteboardManager {
         }
 
         window.show().map_err(|e| e.to_string())?;
-        // On macOS, native fullscreen (`set_fullscreen`) moves the window into
-        // its own Space with an opaque black backing, so the transparent overlay
-        // would render the whole screen black. Simple fullscreen instead hides
-        // the menu bar and Dock and sizes the window to the full screen frame
-        // without a separate Space, keeping the live desktop visible beneath the
-        // transparent overlay. On non-macOS platforms this falls back to
-        // `set_fullscreen`, preserving the previous behavior.
-        window
-            .set_simple_fullscreen(true)
-            .map_err(|e| e.to_string())?;
+        crate::overlay_window::enter_overlay_fullscreen(&window)?;
         window.set_always_on_top(true).map_err(|e| e.to_string())?;
         // Mouse events pass through to the desktop beneath
         let _ = window.set_ignore_cursor_events(true);

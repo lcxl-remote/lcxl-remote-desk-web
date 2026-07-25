@@ -4,6 +4,7 @@ mod host_access_status;
 mod ipc_client;
 #[cfg(target_os = "macos")]
 mod macos_relocate;
+mod overlay_window;
 mod platform;
 mod private_screen;
 mod security_approval;
