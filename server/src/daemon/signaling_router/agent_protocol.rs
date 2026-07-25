@@ -272,12 +272,12 @@ pub(super) async fn handle_diagnose_inbound(
     Ok(())
 }
 
-/// Route a control-end `DiagnoseCancel` (handoff to a human). The message
+/// Route a control-end `DiagnoseCancel` when the operator starts over. The message
 /// `request_id` is the cancelled diagnosis's id. AI diagnosis is orchestrated by
 /// the central signaling brain, which owns the run lifecycle and audit trail, so
 /// on the edge this only aborts any locally tracked task handle (defensive) and
 /// is otherwise a no-op. No `DiagnoseEvent` is streamed back — the control end
-/// already closed the panel and retains the evidence locally.
+/// already reset the panel.
 pub(super) async fn handle_diagnose_cancel_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,

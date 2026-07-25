@@ -26,7 +26,7 @@ fn classify_diagnose_pair_is_daemon_owned() {
         classify(SignalingType::DiagnoseEvent),
         RouteOwnership::Daemon
     );
-    // The handoff notification is handled inline by the daemon too.
+    // The start-over cancellation is handled inline by the daemon too.
     assert_eq!(
         classify(SignalingType::DiagnoseCancel),
         RouteOwnership::Daemon
@@ -290,7 +290,7 @@ fn diagnose_cancel_model() -> SignalingModel {
     )
 }
 
-/// A cancel aborts the in-flight orchestrator task (start-over / handoff) so
+/// A start-over cancel aborts the in-flight orchestrator task so
 /// a slow model call does not keep running, and clears the registry entry.
 #[actix_web::test]
 async fn diagnose_cancel_aborts_inflight_task() {
@@ -316,7 +316,7 @@ async fn diagnose_cancel_aborts_inflight_task() {
     );
 }
 
-/// Handoff with no orchestrator injected (ServiceDaemon-like) is a no-op: no
+/// Cancellation with no orchestrator injected (ServiceDaemon-like) is a no-op: no
 /// audit, no frame.
 #[tokio::test]
 async fn diagnose_cancel_without_orchestrator_is_noop() {

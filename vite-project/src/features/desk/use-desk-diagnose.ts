@@ -10,7 +10,10 @@ import {
     SIGNALING_TYPE_CODE_RESOLVE_EXEC,
 } from './constants';
 import type { ExecPreview } from '../exec/use-confirm-exec';
-import type { ExecStateReplyPayload } from '../exec/use-confirm-exec';
+import type {
+    ExecControlPayload,
+    ExecStateReplyPayload,
+} from '../exec/use-confirm-exec';
 import type { SignalingMessage, SignalingSubscriber } from './use-desk-signaling';
 
 export * from './diagnose-state';
@@ -39,17 +42,22 @@ type UseDeskDiagnoseProps = {
     ) => string;
 };
 
+// A cancel is acknowledged before the worker necessarily finishes reclaiming the
+// process tree. The durable exec ledger therefore has to be queried until it
+// settles; otherwise the UI can remain on "cancelling" until the much slower
+// conversation snapshot poll happens to refresh it.
+const CANCEL_STATE_POLL_MS = 500;
+
 /**
  * Drives an AI diagnosis over signaling: sends a `Diagnose` request, aggregates
  * the notification-style `DiagnoseEvent` stream by `request_id` (ordered by
- * `seq`), and exposes a 转人工 (handoff) action that closes the flow while
- * retaining the gathered result and notifies the host for auditing.
+ * `seq`), and supports cancelling an in-flight run when the operator starts over.
  */
 export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagnoseProps) {
     const [state, setState] = useState<DiagnoseState>(INITIAL_STATE);
     const activeRequestRef = useRef<string | null>(null);
     // The conversation id threaded across follow-up turns. Minted lazily on the
-    // first `start`; cleared on a desk change / reset / handoff so the next turn
+    // first `start`; cleared on a desk change / reset so the next turn
     // opens a fresh conversation (subject-namespaced server-side).
     const conversationIdRef = useRef<string | null>(null);
     // Highest applied seq, so duplicate / out-of-order frames cannot corrupt
@@ -201,32 +209,10 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         [deskId, sendMessage],
     );
 
-    // 转人工: stop tracking the stream, keep whatever evidence / suggestions
-    // were gathered visible in the panel, and notify the host (which records an
-    // `ai.task.cancelled` audit). Correlated by the original diagnosis id.
-    const handoff = useCallback(() => {
-        const requestId = activeRequestRef.current;
-        if (deskId && requestId) {
-            sendMessage(SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL, null, deskId, requestId);
-        }
-        activeRequestRef.current = null;
-        // A handed-off turn leaves an orphaned session behind; any follow-up must
-        // open a new conversation rather than re-claim it — so drop the persisted
-        // intent too, and stop applying its snapshot.
-        conversationIdRef.current = null;
-        lastAppliedSeqRef.current = -1;
-        try {
-            if (deskId) localStorage.removeItem(snapshotConversationKey(deskId));
-        } catch {
-            /* storage unavailable: nothing to clear */
-        }
-        setState((prev) => ({ ...prev, phase: 'done', pendingExec: null }));
-    }, [deskId, sendMessage]);
-
     // Full reset back to the question form. If a run is still in flight (the
     // user is starting over from `running`, e.g. a slow model or a dropped
-    // connection left the panel spinning), notify the host so it can audit the
-    // abandonment — mirroring 转人工 — before we stop tracking the request.
+    // connection left the panel spinning), notify the host so it can stop and
+    // audit the abandoned run before we stop tracking the request.
     const reset = useCallback(() => {
         const requestId = activeRequestRef.current;
         if (deskId && requestId) {
@@ -293,15 +279,12 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
     const cancelBackgroundExec = useCallback(() => {
         const generation = state.backgroundExecution?.executionGeneration;
         if (!deskId || !generation) return;
-        sendMessage(
-            SIGNALING_TYPE_CODE_EXEC_CONTROL,
-            {
-                execution_generation: generation,
-                action: 'cancel',
-                requested_by: 'diagnose-operator',
-            },
-            deskId,
-        );
+        const payload: ExecControlPayload = {
+            execution_generation: generation,
+            action: 'cancel',
+            requested_by: 'diagnose-operator',
+        };
+        sendMessage(SIGNALING_TYPE_CODE_EXEC_CONTROL, payload, deskId);
         setState((prev) => ({
             ...prev,
             backgroundExecution: prev.backgroundExecution
@@ -309,6 +292,26 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                 : null,
         }));
     }, [deskId, sendMessage, state.backgroundExecution]);
+
+    useEffect(() => {
+        const background = state.backgroundExecution;
+        if (!deskId || !background?.cancelRequested) return;
+
+        const queryState = () => {
+            const payload: ExecControlPayload = {
+                execution_generation: background.executionGeneration,
+                action: 'query_state',
+            };
+            sendMessage(SIGNALING_TYPE_CODE_EXEC_CONTROL, payload, deskId);
+        };
+        const interval = window.setInterval(queryState, CANCEL_STATE_POLL_MS);
+        return () => window.clearInterval(interval);
+    }, [
+        deskId,
+        sendMessage,
+        state.backgroundExecution?.cancelRequested,
+        state.backgroundExecution?.executionGeneration,
+    ]);
 
     useEffect(() => {
         // Subscribe to the lossless signaling stream. DiagnoseEvent frames
@@ -442,7 +445,6 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
     return {
         state,
         start,
-        handoff,
         reset,
         approveExec,
         rejectExec,

@@ -60,8 +60,7 @@ pub enum AuditEventType {
     /// The redactor failed and the orchestrator refused to send to the model
     /// (fail-closed).
     RedactionFailed,
-    /// A diagnose task was cancelled (e.g. the operator handed off to manual
-    /// remote control).
+    /// A diagnose task was cancelled because the operator abandoned the run.
     TaskCancelled,
 
     // ---- confirmed-execution lifecycle ----
@@ -412,8 +411,7 @@ impl AuditEvent {
         event
     }
 
-    /// `ai.task.cancelled` — the diagnose task was cancelled (e.g. operator
-    /// handoff to manual remote control).
+    /// `ai.task.cancelled` — the diagnose task was abandoned by the operator.
     pub fn task_cancelled(event_id: String, occurred_at: String, request_id: &str) -> Self {
         let mut event = Self::task_scoped(
             event_id,

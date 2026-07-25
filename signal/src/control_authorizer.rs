@@ -263,7 +263,7 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
         model: &'a SignalingModel,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ControlFrameOutcome> + Send + 'a>> {
         Box::pin(async move {
-            // Handoff / start-over for a centrally-orchestrated diagnosis: cancel
+            // Start-over for a centrally-orchestrated diagnosis: cancel
             // the pending collection (if any) and never relay — the edge has no
             // diagnose task. Needs only the request id, so it is handled before
             // the relay pre-flight.

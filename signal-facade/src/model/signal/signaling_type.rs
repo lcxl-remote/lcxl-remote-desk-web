@@ -212,11 +212,10 @@ pub enum SignalingType {
     /// the control end instead of being consumed by the one-shot callback map.
     #[wincode(tag = 603)]
     DiagnoseEvent = 603,
-    /// AI Diagnose cancellation (control end → host). Sent when the operator
-    /// hands a diagnosis off to a human ("转人工"). Carries no payload; the
-    /// message `request_id` correlates the cancelled diagnosis. Handoff has no
-    /// orchestrator state-machine branch — the daemon only records an
-    /// `ai.task.cancelled` audit so the handoff is auditable.
+    /// AI Diagnose cancellation (control end → host / manager). Sent when the
+    /// operator starts over while a diagnosis is still running. Carries no
+    /// payload; the message `request_id` correlates the cancelled diagnosis so
+    /// pending collection, approval, and model work can be stopped and audited.
     #[wincode(tag = 604)]
     DiagnoseCancel = 604,
 

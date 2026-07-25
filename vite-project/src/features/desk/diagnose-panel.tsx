@@ -5,7 +5,6 @@ import {
     Loader2,
     Stethoscope,
     Terminal as TerminalIcon,
-    UserCog,
     X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -34,7 +33,6 @@ import { ModelSelector } from "./model-selector"
 type DiagnosePanelProps = {
     state: DiagnoseState
     onStart: (question: string, options: DiagnoseStartOptions) => void
-    onHandoff: () => void
     onReset: () => void
     onClose: () => void
     /** Live signaling connection state; a drop while running is surfaced so the
@@ -57,7 +55,6 @@ type DiagnosePanelProps = {
 export function DiagnosePanel({
     state,
     onStart,
-    onHandoff,
     onReset,
     onClose,
     isConnected = true,
@@ -516,13 +513,7 @@ export function DiagnosePanel({
                                     <MarkdownContent className="text-sm text-white/90">
                                         {streamingSummary}
                                     </MarkdownContent>
-                                ) : (
-                                    <p className="text-sm text-white/60">
-                                        {t(
-                                            "pages.desk.diagnose.handedOff",
-                                        )}
-                                    </p>
-                                )}
+                                ) : null}
                             </div>
                         )}
                         {/* Continue the conversation with another question. */}
@@ -533,17 +524,6 @@ export function DiagnosePanel({
 
             {/* Footer actions */}
             <div className="flex items-center gap-2 border-t border-white/15 px-4 py-3">
-                {(state.phase === "running" || state.phase === "done") && (
-                    <Button
-                        size="sm"
-                        variant="secondary"
-                        className="flex-1"
-                        onClick={onHandoff}
-                    >
-                        <UserCog className="mr-1 h-3.5 w-3.5" />
-                        {t("pages.desk.diagnose.handoff")}
-                    </Button>
-                )}
                 {state.phase !== "idle" && (
                     <Button size="sm" variant="ghost" className="flex-1" onClick={onReset}>
                         {t("pages.desk.diagnose.newDiagnosis")}

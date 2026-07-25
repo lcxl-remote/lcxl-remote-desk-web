@@ -92,6 +92,18 @@ export type ExecStateReplyPayload = {
     detail: string | null;
 };
 
+/** Browser wire shape of the flattened Rust `ExecControlPayload`. */
+export type ExecControlPayload =
+    | {
+          execution_generation: string;
+          action: 'cancel';
+          requested_by: string;
+      }
+    | {
+          execution_generation: string;
+          action: 'query_state';
+      };
+
 /** Whether a state settles the execution, so there is nothing left to wait for. */
 function isSettled(state: ExecState): boolean {
     return state === 'terminal' || state === 'indeterminate' || state === 'spawn_failed';
@@ -284,15 +296,12 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
         (rowIndex: number) => {
             const entry = entries[rowIndex];
             if (!deskId || !entry?.executionGeneration) return;
-            sendMessage(
-                SIGNALING_TYPE_CODE_EXEC_CONTROL,
-                {
-                    execution_generation: entry.executionGeneration,
-                    action: 'cancel',
-                    requested_by: 'control-end',
-                },
-                deskId,
-            );
+            const payload: ExecControlPayload = {
+                execution_generation: entry.executionGeneration,
+                action: 'cancel',
+                requested_by: 'control-end',
+            };
+            sendMessage(SIGNALING_TYPE_CODE_EXEC_CONTROL, payload, deskId);
             // The row is not moved to a finished phase: a stop that was asked for
             // is not a stop that happened, and only the host's own result says
             // whether — and how far — the command ran.
@@ -309,11 +318,11 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
         (rowIndex: number) => {
             const entry = entries[rowIndex];
             if (!deskId || !entry?.executionGeneration) return;
-            sendMessage(
-                SIGNALING_TYPE_CODE_EXEC_CONTROL,
-                { execution_generation: entry.executionGeneration, action: 'query_state' },
-                deskId,
-            );
+            const payload: ExecControlPayload = {
+                execution_generation: entry.executionGeneration,
+                action: 'query_state',
+            };
+            sendMessage(SIGNALING_TYPE_CODE_EXEC_CONTROL, payload, deskId);
         },
         [deskId, entries, sendMessage],
     );

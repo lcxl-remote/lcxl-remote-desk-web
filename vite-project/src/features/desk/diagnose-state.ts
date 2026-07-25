@@ -189,8 +189,7 @@ export function extractStreamingSummary(raw: string): string {
 }
 
 // `idle` before a run, `running` while frames stream, `done` on a terminal
-// `final` (or after a handoff that keeps the gathered result), `error` on a
-// terminal `error` frame.
+// `final`, `error` on a terminal `error` frame.
 export type DiagnosePhase = 'idle' | 'running' | 'done' | 'error';
 
 /**
@@ -231,7 +230,7 @@ export type DiagnoseState = {
     /**
      * Stable id threaded across follow-up turns so the backend continues the
      * same agentic session (the model sees prior turns). Minted on the first
-     * `start`, regenerated on a desk change / `reset` / `handoff`.
+     * `start`, regenerated on a desk change / `reset`.
      */
     conversationId: string | null;
     requestId: string | null;

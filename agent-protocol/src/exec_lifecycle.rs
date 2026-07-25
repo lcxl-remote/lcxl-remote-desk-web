@@ -86,6 +86,10 @@ pub enum ExecControlAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ExecControlPayload {
     pub execution_generation: String,
+    /// Flatten the internally tagged action so the wire frame is
+    /// `{ execution_generation, action, ...action_fields }`. This is also the
+    /// shape consumed by browser control ends.
+    #[serde(flatten)]
     pub action: ExecControlAction,
 }
 
@@ -283,11 +287,28 @@ mod tests {
                 action: ExecControlAction::QueryState,
             },
         ];
-        for frame in frames {
+        for frame in &frames {
             let json = serde_json::to_string(&frame).expect("encode");
             let back: ExecControlPayload = serde_json::from_str(&json).expect("decode");
-            assert_eq!(frame, back);
+            assert_eq!(frame, &back);
         }
+        let cancel_json = serde_json::to_value(&frames[0]).expect("encode cancel");
+        assert_eq!(
+            cancel_json,
+            serde_json::json!({
+                "execution_generation": "gen-1",
+                "action": "cancel",
+                "requested_by": "operator:7"
+            })
+        );
+        let query_json = serde_json::to_value(&frames[1]).expect("encode query");
+        assert_eq!(
+            query_json,
+            serde_json::json!({
+                "execution_generation": "gen-1",
+                "action": "query_state"
+            })
+        );
         let json = serde_json::to_string(&ExecControlAction::QueryState).unwrap();
         assert!(json.contains("\"action\":\"query_state\""), "{json}");
     }

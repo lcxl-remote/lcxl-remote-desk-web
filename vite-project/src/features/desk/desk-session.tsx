@@ -911,7 +911,6 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                             <DiagnosePanel
                                 state={diagnose.state}
                                 onStart={diagnose.start}
-                                onHandoff={diagnose.handoff}
                                 onReset={diagnose.reset}
                                 onClose={() => setShowDiagnose(false)}
                                 isConnected={isConnected}

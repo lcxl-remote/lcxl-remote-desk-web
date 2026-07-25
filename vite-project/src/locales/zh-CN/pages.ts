@@ -575,8 +575,6 @@ export default {
   'pages.desk.diagnose.toolOutputPending': '正在等待工具返回…',
   'pages.desk.diagnose.toolOutputEmpty': '（无输出）',
   'pages.desk.diagnose.answer': '回答',
-  'pages.desk.diagnose.handoff': '转人工',
-  'pages.desk.diagnose.handedOff': '已转交人工处理。',
   'pages.desk.diagnose.backgroundRunning': '命令仍在后台运行',
   'pages.desk.diagnose.backgroundCancel': '取消命令',
   'pages.desk.diagnose.backgroundCancelling': '正在取消…',

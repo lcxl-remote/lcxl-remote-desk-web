@@ -32,9 +32,9 @@ export const SIGNALING_TYPE_CODE_DESKTOP_READY = 501;
 // carry `request_id` + `seq` + `kind`, never a one-shot response.
 export const SIGNALING_TYPE_CODE_DIAGNOSE = 602;
 export const SIGNALING_TYPE_CODE_DIAGNOSE_EVENT = 603;
-// Handoff to a human ("转人工"): control end -> host. The host records an
-// `ai.task.cancelled` audit. Carries no payload; the message request_id
-// correlates the cancelled diagnosis.
+// Cancel an in-flight diagnosis when the operator starts over. The host stops
+// pending work and records an `ai.task.cancelled` audit. Carries no payload;
+// the message request_id correlates the cancelled diagnosis.
 export const SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL = 604;
 
 // AI confirmed execution: ConfirmExec / ResolveExec (control end -> host) and

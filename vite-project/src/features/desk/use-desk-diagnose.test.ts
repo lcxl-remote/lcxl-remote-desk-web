@@ -14,9 +14,10 @@ import {
     SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL,
     SIGNALING_TYPE_CODE_EXEC_CONTROL,
     SIGNALING_TYPE_CODE_EXEC_PREVIEW,
+    SIGNALING_TYPE_CODE_EXEC_STATE_REPLY,
     SIGNALING_TYPE_CODE_RESOLVE_EXEC,
 } from './constants';
-import type { ExecPreview } from '../exec/use-confirm-exec';
+import type { ExecPreview, ExecStateReplyPayload } from '../exec/use-confirm-exec';
 
 // `sendMessage` returns the wire request_id; the hook keys its aggregation on
 // it. Fixed to "req-1" so test frames can target the active request.
@@ -28,6 +29,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
 });
 
@@ -236,27 +238,6 @@ describe('useDeskDiagnose', () => {
         expect(result.current.state.error).toBe('redaction failed');
     });
 
-    it('handoff sends DiagnoseCancel with the diagnosis id and keeps the result', () => {
-        const { result, feed } = renderDiagnose();
-        act(() => result.current.start('why?', {}));
-        feed(frame({ request_id: 'req-1', seq: 0, kind: 'partial', partial_summary: 'partial text' }));
-
-        act(() => result.current.handoff());
-
-        expect(sendMessage).toHaveBeenLastCalledWith(
-            SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL,
-            null,
-            'desk-1',
-            'req-1',
-        );
-        expect(result.current.state.phase).toBe('done');
-        expect(result.current.state.partialSummary).toBe('partial text');
-
-        // Frames after handoff are ignored (no active request).
-        feed(frame({ request_id: 'req-1', seq: 1, kind: 'partial', partial_summary: ' more' }));
-        expect(result.current.state.partialSummary).toBe('partial text');
-    });
-
     it('reset returns to the idle question form', () => {
         const { result } = renderDiagnose();
         act(() => result.current.start('why?', {}));
@@ -398,6 +379,7 @@ describe('useDeskDiagnose', () => {
     });
 
     it('recovers a settled live request from the persisted snapshot', async () => {
+        vi.useFakeTimers();
         const fetchMock = vi.fn().mockResolvedValue({
             status: 200,
             ok: true,
@@ -440,7 +422,7 @@ describe('useDeskDiagnose', () => {
             value: 'visible',
         });
 
-        const { result } = renderDiagnose();
+        const { result, feed } = renderDiagnose();
         act(() => result.current.start('run it', {}));
         await act(async () => {
             document.dispatchEvent(new Event('visibilitychange'));
@@ -472,6 +454,47 @@ describe('useDeskDiagnose', () => {
             'desk-1',
         );
         expect(result.current.state.backgroundExecution?.cancelRequested).toBe(true);
+
+        sendMessage.mockClear();
+        act(() => vi.advanceTimersByTime(500));
+        expect(sendMessage).toHaveBeenCalledWith(
+            SIGNALING_TYPE_CODE_EXEC_CONTROL,
+            {
+                execution_generation: 'generation-bg-1',
+                action: 'query_state',
+            },
+            'desk-1',
+        );
+
+        const running: ExecStateReplyPayload = {
+            execution_generation: 'generation-bg-1',
+            state: 'running',
+            containment_identity: null,
+            running_ms: 1_000,
+            detail: null,
+        };
+        feed({
+            request_id: 'state-running',
+            signaling_type: SIGNALING_TYPE_CODE_EXEC_STATE_REPLY,
+            signaling_data: running,
+        });
+        expect(result.current.state.backgroundExecution?.cancelRequested).toBe(true);
+
+        const terminal: ExecStateReplyPayload = {
+            ...running,
+            state: 'terminal',
+            running_ms: null,
+        };
+        feed({
+            request_id: 'state-terminal',
+            signaling_type: SIGNALING_TYPE_CODE_EXEC_STATE_REPLY,
+            signaling_data: terminal,
+        });
+        expect(result.current.state.backgroundExecution).toBeNull();
+
+        sendMessage.mockClear();
+        act(() => vi.advanceTimersByTime(1_000));
+        expect(sendMessage).not.toHaveBeenCalled();
     });
 
     it('rejects an agentic ExecPreview with a reject decision', () => {
@@ -613,15 +636,6 @@ describe('useDeskDiagnose', () => {
         act(() => result.current.start('q2', {}));
         expect(conversationIdOfCall(1)).not.toBe(conversationIdOfCall(0));
         expect(result.current.state.history).toEqual([]);
-    });
-
-    it('handoff makes the next turn a new conversation', () => {
-        const { result, feed } = renderDiagnose();
-        act(() => result.current.start('q1', {}));
-        feed(frame({ request_id: 'req-1', seq: 0, kind: 'answer', answer: 'a' }));
-        act(() => result.current.handoff());
-        act(() => result.current.start('q2', {}));
-        expect(conversationIdOfCall(1)).not.toBe(conversationIdOfCall(0));
     });
 
     it('a desk change regenerates the conversation and clears the transcript', () => {

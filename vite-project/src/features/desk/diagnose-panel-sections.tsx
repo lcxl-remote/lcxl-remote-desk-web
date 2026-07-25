@@ -322,11 +322,6 @@ export function ConversationHistory({ turns }: { turns: DiagnoseHistoryTurn[] })
                                 {localizedError}
                             </div>
                         )}
-                        {!aiReply && !localizedError && (
-                            <div className="max-w-[90%] self-start whitespace-pre-wrap rounded-lg rounded-bl-sm bg-white/10 px-2.5 py-1.5 text-xs text-white/80">
-                                {t("pages.desk.diagnose.handedOff")}
-                            </div>
-                        )}
                     </div>
                 )
             })}

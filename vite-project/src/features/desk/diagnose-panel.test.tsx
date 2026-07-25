@@ -23,24 +23,23 @@ const baseState: DiagnoseState = {
     answer: null,
     provenance: null,
     pendingExec: null,
+    backgroundExecution: null,
     history: [],
 };
 
 function renderPanel(state: Partial<DiagnoseState>) {
     const onStart = vi.fn();
-    const onHandoff = vi.fn();
     const onReset = vi.fn();
     const onClose = vi.fn();
     render(
         <DiagnosePanel
             state={{ ...baseState, ...state }}
             onStart={onStart}
-            onHandoff={onHandoff}
             onReset={onReset}
             onClose={onClose}
         />,
     );
-    return { onStart, onHandoff, onReset, onClose };
+    return { onStart, onReset, onClose };
 }
 
 describe("DiagnosePanel", () => {
@@ -99,7 +98,6 @@ describe("DiagnosePanel", () => {
             <DiagnosePanel
                 state={{ ...baseState, phase: "running" }}
                 onStart={vi.fn()}
-                onHandoff={vi.fn()}
                 onReset={vi.fn()}
                 onClose={vi.fn()}
                 isConnected={false}
@@ -108,8 +106,8 @@ describe("DiagnosePanel", () => {
         expect(screen.getByText(/Connection lost/)).toBeInTheDocument();
     });
 
-    it("done: renders the result sections and handoff calls onHandoff", () => {
-        const { onHandoff } = renderPanel({
+    it("done: renders the result sections", () => {
+        renderPanel({
             phase: "done",
             result: {
                 summary: "Port 8080 is busy",
@@ -137,9 +135,39 @@ describe("DiagnosePanel", () => {
         expect(screen.getByText("Get-NetTCPConnection -LocalPort 8080")).toBeInTheDocument();
         expect(screen.getByText("Stop the conflicting service")).toBeInTheDocument();
         expect(screen.getByText("network.ports")).toBeInTheDocument();
+    });
 
-        fireEvent.click(screen.getByText("Hand off to human"));
-        expect(onHandoff).toHaveBeenCalled();
+    it("does not label a tool-only background turn as handed off", () => {
+        renderPanel({
+            phase: "done",
+            backgroundExecution: {
+                executionGeneration: "generation-bg-1",
+                cancelRequested: false,
+            },
+            history: [
+                {
+                    requestId: "req-bg",
+                    question: "run a 30 second command",
+                    result: null,
+                    answer: null,
+                    summary: "",
+                    tools: [
+                        {
+                            callId: "call-bg",
+                            name: "exec_command",
+                            status: "ok",
+                            argumentsJson: '{"command":"Start-Sleep -Seconds 30"}',
+                            output: "command dispatched as background task",
+                        },
+                    ],
+                    phase: "done",
+                    error: null,
+                    errorCode: null,
+                    provenance: null,
+                },
+            ],
+        });
+        expect(screen.getByText("command dispatched as background task")).toBeInTheDocument();
     });
 
     it("error: shows the failure message", () => {
@@ -262,7 +290,6 @@ describe("DiagnosePanel", () => {
                     ].join("\n"),
                 }}
                 onStart={vi.fn()}
-                onHandoff={vi.fn()}
                 onReset={vi.fn()}
                 onClose={vi.fn()}
             />,
@@ -412,7 +439,6 @@ describe("DiagnosePanel", () => {
             <DiagnosePanel
                 state={{ ...baseState, ...doneWithCommand }}
                 onStart={vi.fn()}
-                onHandoff={vi.fn()}
                 onReset={vi.fn()}
                 onClose={vi.fn()}
                 exec={exec}
@@ -557,7 +583,6 @@ describe("DiagnosePanel", () => {
                     },
                 }}
                 onStart={vi.fn()}
-                onHandoff={vi.fn()}
                 onReset={vi.fn()}
                 onClose={vi.fn()}
                 onApproveExec={onApproveExec}
@@ -630,7 +655,6 @@ describe("DiagnosePanel", () => {
             <DiagnosePanel
                 state={{ ...baseState, phase: "running", status: "modeling" }}
                 onStart={vi.fn()}
-                onHandoff={vi.fn()}
                 onReset={vi.fn()}
                 onClose={vi.fn()}
             />,

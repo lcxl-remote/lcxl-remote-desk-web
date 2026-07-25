@@ -132,11 +132,17 @@ pub(super) async fn a_cancel_reaches_the_worker_and_still_answers_from_the_ledge
 
     handle_exec_control_inbound(
         &ctx,
-        &exec_control_model(
+        &SignalingModel::new(
             "req-1",
-            ExecControlAction::Cancel {
-                requested_by: "operator:7".into(),
-            },
+            SignalingType::ExecControl,
+            Some("conn-1".to_string()),
+            None,
+            Some(serde_json::json!({
+                "execution_generation": "gen-1",
+                "action": "cancel",
+                "requested_by": "operator:7"
+            })),
+            None,
         ),
     )
     .await

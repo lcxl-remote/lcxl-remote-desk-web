@@ -404,6 +404,24 @@ mod tests {
         SignalAgentExecStore::new(db)
     }
 
+    #[test]
+    fn cancelled_execution_is_preserved_for_the_automatic_follow_up() {
+        let disposition = EdgeExecDisposition::Executed {
+            outcome: AgentOutcome::Err(AgentError {
+                kind: AgentErrorKind::Cancelled,
+                message: "the command was cancelled and its process tree reclaimed".into(),
+                retryable: false,
+                safe_for_model: true,
+                error_code: None,
+            }),
+        };
+
+        assert_eq!(
+            disposition_text(&disposition).as_deref(),
+            Some("execution failed: the command was cancelled and its process tree reclaimed")
+        );
+    }
+
     #[tokio::test]
     async fn result_is_source_bound_and_persisted_before_delivery() {
         let store = store().await;

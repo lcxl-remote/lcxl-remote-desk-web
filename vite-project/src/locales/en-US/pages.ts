@@ -577,8 +577,6 @@ export default {
   'pages.desk.diagnose.toolOutputPending': 'Waiting for the tool result…',
   'pages.desk.diagnose.toolOutputEmpty': '(empty output)',
   'pages.desk.diagnose.answer': 'Answer',
-  'pages.desk.diagnose.handoff': 'Hand off to human',
-  'pages.desk.diagnose.handedOff': 'Handed off to a human operator.',
   'pages.desk.diagnose.backgroundRunning': 'A command is still running in the background',
   'pages.desk.diagnose.backgroundCancel': 'Cancel command',
   'pages.desk.diagnose.backgroundCancelling': 'Cancelling…',

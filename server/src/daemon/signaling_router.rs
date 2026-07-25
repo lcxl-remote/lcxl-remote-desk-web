@@ -197,8 +197,8 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // daemon-side (it owns the model call + redaction + streaming), so this
         // is handled inline against the daemon's orchestrator rather than
         // forwarded over IPC.
-        // DiagnoseCancel is the handoff notification — handled inline against
-        // the daemon's orchestrator (audit only), like `Diagnose`.
+        // DiagnoseCancel stops a run the control end abandoned by starting over;
+        // handle it inline against the daemon's orchestrator, like `Diagnose`.
         SignalingType::Diagnose | SignalingType::DiagnoseCancel => RouteOwnership::Daemon,
 
         // In-terminal AI copilot: control end → daemon. Like `Diagnose`, the
@@ -901,9 +901,8 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // or reply `FEATURE_UNAVAILABLE` (ServiceDaemon, where the orchestrator
         // is not injected). Streams `DiagnoseEvent` frames back to the browser.
         SignalingType::Diagnose => handle_diagnose_inbound(ctx, model).await,
-        // AI Diagnose handoff ("转人工"): a UI-side action with no orchestrator
-        // state branch. The daemon only records an `ai.task.cancelled` audit so
-        // the handoff is auditable; no `DiagnoseEvent` is streamed back.
+        // AI Diagnose cancellation: stop the run abandoned by a UI start-over and
+        // record an `ai.task.cancelled` audit; no `DiagnoseEvent` is streamed back.
         SignalingType::DiagnoseCancel => handle_diagnose_cancel_inbound(ctx, model).await,
         // In-terminal AI copilot: run the daemon-side orchestrator (Default /
         // DeskServer) or reply `FEATURE_UNAVAILABLE` (ServiceDaemon, where the

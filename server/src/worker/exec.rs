@@ -552,6 +552,41 @@ mod tests {
         );
     }
 
+    /// Windows uses a job object rather than a Unix process group. Exercise the
+    /// actual PowerShell shape produced for free-form commands so a delivered
+    /// cancel cannot silently wait for the command's natural completion.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_cancelled_powershell_command_returns_promptly() {
+        let cancel = ExecCancel::new();
+        let watcher = cancel.subscribe();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel.cancel();
+        });
+
+        let mut p = plan("irrelevant", 30_000, 4096);
+        p.program = "powershell.exe".into();
+        p.argv = vec![
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            "Start-Sleep -Seconds 30".into(),
+        ];
+        p.shell = ExecShellKind::Powershell;
+
+        let started = Instant::now();
+        let outcome = execute_plan_cancellable(&p, |_| {}, Some(watcher)).await;
+        assert!(
+            matches!(&outcome, AgentOutcome::Err(e) if e.kind == AgentErrorKind::Cancelled),
+            "expected a cancellation, got {outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the Windows job did not stop promptly"
+        );
+    }
+
     /// Dropping every stop switch is not a cancellation. A command whose canceller
     /// went away must run to its own conclusion rather than being killed by the
     /// disappearance of something that never asked for anything.

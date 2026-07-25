@@ -884,7 +884,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             //
             // `DiagnoseCancel` is included so the manager can run it centrally:
             // diagnosis is orchestrated on the manager (thin-edge model), so a
-            // handoff/abort must cancel the manager's pending collection and
+            // start-over/abort must cancel the manager's pending collection and
             // record the cancellation rather than be relayed to a host that has
             // no diagnose task. With no authorizer (signal server) it relays to
             // the host that is running the diagnosis, exactly like before.
