@@ -242,6 +242,46 @@ describe("DiagnosePanel", () => {
         ).toBeTruthy();
     });
 
+    it("appends a background completion after the dispatch result and before the AI reply", () => {
+        renderPanel({
+            phase: "done",
+            timeline: [
+                toolItem({
+                    callId: "c1",
+                    name: "exec_command",
+                    status: "ok",
+                    argumentsJson: '{"command":"Start-Sleep -Seconds 30"}',
+                    output: "command dispatched as background task",
+                }),
+                {
+                    kind: "background_completion",
+                    id: "out1",
+                    toolCallId: "c1",
+                    output: "exit_code=0\nstdout=finished",
+                },
+                assistantItem("The background command finished normally."),
+            ],
+        });
+
+        const tool = screen.getByText("exec_command").closest("details");
+        const completionTitle = screen.getByText("Background task finished");
+        const completion = completionTitle.closest("details");
+        const answer = screen.getByText("The background command finished normally.");
+        expect(
+            tool?.compareDocumentPosition(completionTitle) &
+                Node.DOCUMENT_POSITION_FOLLOWING,
+        ).toBeTruthy();
+        expect(
+            completion?.compareDocumentPosition(answer) &
+                Node.DOCUMENT_POSITION_FOLLOWING,
+        ).toBeTruthy();
+
+        fireEvent.click(completionTitle);
+        expect(screen.getByText(/stdout=finished/)).toBeVisible();
+        fireEvent.click(screen.getByText("exec_command"));
+        expect(screen.getByText("command dispatched as background task")).toBeVisible();
+    });
+
     it("done: a follow-up composer continues the conversation", () => {
         const { onStart } = renderPanel({
             phase: "done",

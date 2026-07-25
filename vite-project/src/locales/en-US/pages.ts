@@ -578,6 +578,7 @@ export default {
   'pages.desk.diagnose.toolOutputEmpty': '(empty output)',
   'pages.desk.diagnose.answer': 'Answer',
   'pages.desk.diagnose.backgroundRunning': 'A command is still running in the background',
+  'pages.desk.diagnose.backgroundFinished': 'Background task finished',
   'pages.desk.diagnose.backgroundCancel': 'Cancel command',
   'pages.desk.diagnose.backgroundCancelling': 'Cancelling…',
   'pages.desk.diagnose.newDiagnosis': 'New diagnosis',

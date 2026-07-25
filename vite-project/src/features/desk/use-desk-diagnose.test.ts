@@ -754,7 +754,7 @@ describe('buildSnapshotTranscript', () => {
         });
     });
 
-    it('keeps command activity before the automation follow-up and applies its final output', () => {
+    it('appends background completion between the command result and automation follow-up', () => {
         const messages: SnapshotMessage[] = [
             { id: 'u1', role: 'user', text: 'restart the service' },
             {
@@ -788,11 +788,18 @@ describe('buildSnapshotTranscript', () => {
         expect(turns[0].timeline.map((item) => item.kind)).toEqual([
             'assistant',
             'tool',
+            'background_completion',
             'assistant',
         ]);
         expect(turns[0].timeline[1]).toMatchObject({
             kind: 'tool',
-            activity: { output: 'exit_code=0' },
+            activity: { output: 'command dispatched as background task' },
+        });
+        expect(turns[0].timeline[2]).toEqual({
+            kind: 'background_completion',
+            id: 'out1',
+            toolCallId: 'c1',
+            output: 'exit_code=0',
         });
     });
 

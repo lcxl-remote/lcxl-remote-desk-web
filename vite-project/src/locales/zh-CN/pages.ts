@@ -576,6 +576,7 @@ export default {
   'pages.desk.diagnose.toolOutputEmpty': '（无输出）',
   'pages.desk.diagnose.answer': '回答',
   'pages.desk.diagnose.backgroundRunning': '命令仍在后台运行',
+  'pages.desk.diagnose.backgroundFinished': '后台任务已结束',
   'pages.desk.diagnose.backgroundCancel': '取消命令',
   'pages.desk.diagnose.backgroundCancelling': '正在取消…',
   'pages.desk.diagnose.newDiagnosis': '新建诊断',

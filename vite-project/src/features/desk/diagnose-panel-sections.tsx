@@ -180,7 +180,28 @@ function ToolActivityCard({ tool }: { tool: ToolActivity }) {
     )
 }
 
-/** Assistant messages and tool calls rendered in their original chronology. */
+function BackgroundCompletionCard({ output }: { output: string }) {
+    const { t } = useTranslation()
+    return (
+        <details className="group rounded border border-blue-400/20 bg-blue-400/5 text-xs text-white/80">
+            <summary className="flex cursor-pointer list-none items-center gap-2 px-2 py-1.5 [&::-webkit-details-marker]:hidden">
+                <ChevronRight className="h-3 w-3 shrink-0 text-white/40 transition-transform group-open:rotate-90" />
+                <TerminalIcon className="h-3 w-3 shrink-0 text-blue-300" />
+                <span>{t("pages.desk.diagnose.backgroundFinished")}</span>
+            </summary>
+            <div className="border-t border-white/10 px-2 py-2">
+                <div className="mb-1 font-medium text-white/60">
+                    {t("pages.desk.diagnose.toolOutput")}
+                </div>
+                <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-black/30 p-2 font-mono text-[11px] text-white/80">
+                    {output || t("pages.desk.diagnose.toolOutputEmpty")}
+                </pre>
+            </div>
+        </details>
+    )
+}
+
+/** Conversation items rendered in their original chronology. */
 export function ConversationTimeline({
     items,
 }: {
@@ -189,21 +210,25 @@ export function ConversationTimeline({
     if (items.length === 0) return null
     return (
         <div className="flex flex-col gap-2">
-            {items.map((item) =>
-                item.kind === "assistant" ? (
-                    <div key={item.id} className="flex flex-col gap-1.5">
-                        <AiGeneratedMark
-                            provenance={item.provenance}
-                            className="self-start border-white/25 bg-white/10 text-white/80"
-                        />
-                        <MarkdownContent className="max-w-[90%] self-start rounded-lg rounded-bl-sm bg-white/10 px-2.5 py-1.5 text-sm text-white/90">
-                            {item.text}
-                        </MarkdownContent>
-                    </div>
-                ) : (
-                    <ToolActivityCard key={item.id} tool={item.activity} />
-                ),
-            )}
+            {items.map((item) => {
+                if (item.kind === "assistant") {
+                    return (
+                        <div key={item.id} className="flex flex-col gap-1.5">
+                            <AiGeneratedMark
+                                provenance={item.provenance}
+                                className="self-start border-white/25 bg-white/10 text-white/80"
+                            />
+                            <MarkdownContent className="max-w-[90%] self-start rounded-lg rounded-bl-sm bg-white/10 px-2.5 py-1.5 text-sm text-white/90">
+                                {item.text}
+                            </MarkdownContent>
+                        </div>
+                    )
+                }
+                if (item.kind === "tool") {
+                    return <ToolActivityCard key={item.id} tool={item.activity} />
+                }
+                return <BackgroundCompletionCard key={item.id} output={item.output} />
+            })}
         </div>
     )
 }

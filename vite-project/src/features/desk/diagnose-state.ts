@@ -109,6 +109,12 @@ export type DiagnoseTimelineItem =
           kind: 'tool';
           id: string;
           activity: ToolActivity;
+      }
+    | {
+          kind: 'background_completion';
+          id: string;
+          toolCallId: string | null;
+          output: string;
       };
 
 export type DiagnoseStartOptions = {
@@ -381,10 +387,10 @@ export function snapshotConversationKey(deskId: string): string {
 
 /**
  * Rebuild the settled transcript from a snapshot: group the flat message list into
- * turns at each `user` message. Assistant text and tool calls remain separate
- * timeline items, preserving their original order. Tool-result and background
- * completion messages update the corresponding tool item without moving it, so
- * an automatic assistant follow-up stays below the command it follows.
+ * turns at each `user` message. Assistant text, tool calls, and background
+ * completion messages remain separate timeline items in their original order.
+ * A direct tool result updates its call card; a later background completion is
+ * appended as its own event before the automatic assistant follow-up.
  */
 export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHistoryTurn[] {
     const turns: DiagnoseHistoryTurn[] = [];
@@ -427,11 +433,7 @@ export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHi
                     },
                 });
             }
-        } else if (
-            (m.role === 'tool' || m.role === 'untrusted_output') &&
-            current &&
-            m.toolCallId
-        ) {
+        } else if (m.role === 'tool' && current && m.toolCallId) {
             current.timeline = current.timeline.map((item) =>
                 item.kind === 'tool' && item.activity.callId === m.toolCallId
                     ? {
@@ -444,6 +446,13 @@ export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHi
                       }
                     : item,
             );
+        } else if (m.role === 'untrusted_output' && current) {
+            current.timeline.push({
+                kind: 'background_completion',
+                id: m.id,
+                toolCallId: m.toolCallId ?? null,
+                output: m.text,
+            });
         }
         // Unlinked internal/system messages carry no user-facing turn text.
     }
