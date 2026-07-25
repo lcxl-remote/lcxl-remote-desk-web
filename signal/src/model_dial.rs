@@ -1221,7 +1221,7 @@ mod tests {
         let req = ModelRequest::text_only(
             vec![
                 ChatMessage::text("s", ChatRole::System, "rules"),
-                ChatMessage::untrusted_output("ev", injection),
+                ChatMessage::untrusted_output("ev", "call", injection),
             ],
             ResponseFormatSpec::None,
         );

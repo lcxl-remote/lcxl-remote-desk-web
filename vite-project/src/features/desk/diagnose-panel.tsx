@@ -19,11 +19,11 @@ import {
 } from "./use-desk-diagnose"
 import {
     AgenticExecApproval,
+    ConversationTimeline,
     ConversationHistory,
     ExecRow,
     FollowUpComposer,
     QuestionBubble,
-    ToolTimeline,
     confidenceClass,
     riskClass,
     type ExecControls,
@@ -231,6 +231,7 @@ export function DiagnosePanel({
                             <Loader2 className="h-3.5 w-3.5 animate-spin" />
                             {statusLabel(state.status)}
                         </div>
+                        <ConversationTimeline items={state.timeline} />
                         {streamingSummary && (
                             <div className="flex flex-col gap-2">
                                 {/* AI-generated marking (Art.50(2)) for the streaming
@@ -244,7 +245,6 @@ export function DiagnosePanel({
                                 </MarkdownContent>
                             </div>
                         )}
-                        <ToolTimeline tools={state.tools} />
                         {state.pendingExec && onApproveExec && onRejectExec && (
                             <AgenticExecApproval
                                 preview={state.pendingExec}
@@ -266,6 +266,7 @@ export function DiagnosePanel({
                 {/* Error */}
                 {state.phase === "error" && (
                     <div className="flex flex-col gap-3">
+                        <ConversationTimeline items={state.timeline} />
                         {streamingSummary && (
                             <div className="flex flex-col gap-2">
                                 <AiGeneratedMark
@@ -277,7 +278,6 @@ export function DiagnosePanel({
                                 </MarkdownContent>
                             </div>
                         )}
-                        <ToolTimeline tools={state.tools} />
                         <div className="flex items-start gap-2 text-sm text-red-300">
                             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                             <span>
@@ -326,7 +326,7 @@ export function DiagnosePanel({
                             result / answer. Shown by the presence of AI content,
                             not by provenance being set (fail-closed); provenance
                             enriches the tooltip with the model when known. */}
-                        {(result || state.answer !== null || streamingSummary) && (
+                        {(result || (state.timeline.length === 0 && streamingSummary)) && (
                             <AiGeneratedMark
                                 provenance={state.provenance}
                                 className="self-start border-white/25 bg-white/10 text-white/80"
@@ -491,30 +491,14 @@ export function DiagnosePanel({
                                     </section>
                                 )}
                             </>
-                        ) : state.answer !== null ? (
-                            // Agentic loop final answer (free text, not a
-                            // structured Diagnosis) plus the tool timeline.
-                            <div className="flex flex-col gap-4">
-                                <ToolTimeline tools={state.tools} />
-                                <section className="flex flex-col gap-2">
-                                    <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-                                        {t("pages.desk.diagnose.answer")}
-                                    </h3>
-                                    <MarkdownContent className="text-sm text-white/90">
-                                        {state.answer || streamingSummary}
-                                    </MarkdownContent>
-                                </section>
-                            </div>
+                        ) : state.timeline.length > 0 ? (
+                            <ConversationTimeline items={state.timeline} />
                         ) : (
-                            // Handed off mid-stream with whatever was gathered.
-                            <div className="flex flex-col gap-2">
-                                <ToolTimeline tools={state.tools} />
-                                {streamingSummary ? (
-                                    <MarkdownContent className="text-sm text-white/90">
-                                        {streamingSummary}
-                                    </MarkdownContent>
-                                ) : null}
-                            </div>
+                            streamingSummary ? (
+                                <MarkdownContent className="text-sm text-white/90">
+                                    {streamingSummary}
+                                </MarkdownContent>
+                            ) : null
                         )}
                         {/* Continue the conversation with another question. */}
                         <FollowUpComposer onSubmit={askFollowUp} />

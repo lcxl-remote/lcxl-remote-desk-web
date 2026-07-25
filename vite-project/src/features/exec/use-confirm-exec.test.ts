@@ -74,8 +74,6 @@ function executablePreview(): ExecPreview {
         cwd: null,
         timeout_ms: 30000,
         risk: 'low',
-        impact: 'x',
-        policy_note: null,
         requires_confirmation: true,
         executable: true,
         blocked_reason: null,
@@ -154,8 +152,6 @@ describe('useConfirmExec', () => {
             cwd: null,
             timeout_ms: 30000,
             risk: 'blocked',
-            impact: 'Blocked: matches a prohibited pattern (download-and-execute)',
-            policy_note: null,
             requires_confirmation: false,
             executable: false,
             blocked_reason: 'Blocked: matches a prohibited pattern (download-and-execute)',
@@ -165,7 +161,7 @@ describe('useConfirmExec', () => {
         expect(hook.result.current.entries[0].error).toContain('download-and-execute');
     });
 
-    it('surfaces the policy_note when a preview is non-executable by mode', () => {
+    it('surfaces the blocked reason when a preview is non-executable by mode', () => {
         const { hook, feed } = render();
         act(() => hook.result.current.requestPreview(0, input));
         const preview: ExecPreview = {
@@ -175,11 +171,9 @@ describe('useConfirmExec', () => {
             cwd: null,
             timeout_ms: 0,
             risk: 'low',
-            impact: 'Would read the spooler service status',
-            policy_note: 'AI command execution is disabled (suggest-only mode)',
             requires_confirmation: false,
             executable: false,
-            blocked_reason: null,
+            blocked_reason: 'AI command execution is disabled (suggest-only mode)',
         };
         act(() => feed(previewFrame('req-1', preview)));
         expect(hook.result.current.entries[0].phase).toBe('error');

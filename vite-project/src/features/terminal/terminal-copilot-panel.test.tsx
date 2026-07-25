@@ -153,8 +153,6 @@ describe("TerminalCopilotPanel exec promotion", () => {
                     cwd: null,
                     timeout_ms: 30000,
                     risk: "low",
-                    impact: "Reads the nginx service status",
-                    policy_note: null,
                     requires_confirmation: true,
                     executable: true,
                     blocked_reason: null,
@@ -167,7 +165,6 @@ describe("TerminalCopilotPanel exec promotion", () => {
         renderPanel([suggestion()], exec);
         // Run is replaced by the lifecycle card once an entry exists.
         expect(screen.queryByText("Run")).not.toBeInTheDocument();
-        expect(screen.getByText("Reads the nginx service status")).toBeInTheDocument();
         fireEvent.click(screen.getByText("Approve & run"));
         expect(exec.approve).toHaveBeenCalledWith(0);
         fireEvent.click(screen.getByText("Reject"));
@@ -185,8 +182,6 @@ describe("TerminalCopilotPanel exec promotion", () => {
                     cwd: null,
                     timeout_ms: 0,
                     risk: "low",
-                    impact: "Reads the nginx service status",
-                    policy_note: "AI command execution is disabled (suggest-only mode)",
                     requires_confirmation: false,
                     executable: false,
                     blocked_reason: null,
@@ -223,8 +218,6 @@ describe("TerminalCopilotPanel exec promotion", () => {
                     cwd: null,
                     timeout_ms: 0,
                     risk: "blocked",
-                    impact: "Blocked",
-                    policy_note: null,
                     requires_confirmation: false,
                     executable: false,
                     blocked_reason: "Blocked: matches a prohibited pattern",

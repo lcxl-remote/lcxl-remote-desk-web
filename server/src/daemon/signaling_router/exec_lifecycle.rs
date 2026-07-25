@@ -45,9 +45,7 @@ pub(super) async fn handle_confirm_exec_inbound(
                     None,
                     0,
                     desk_agent_protocol::RiskLevel::High,
-                    "Invalid request".to_string(),
                     Some(format!("bad ConfirmExec payload: {e}")),
-                    None,
                 ),
             );
             return Ok(());
@@ -81,9 +79,7 @@ pub(super) async fn handle_confirm_exec_inbound(
                 None,
                 0,
                 desk_agent_protocol::RiskLevel::High,
-                "Invalid request".to_string(),
                 Some("ConfirmExec requires an exec operation".to_string()),
-                None,
             ),
         );
         return Ok(());
@@ -131,9 +127,7 @@ pub(super) async fn handle_confirm_exec_inbound(
                 cwd,
                 limits.timeout_ms,
                 desk_agent_protocol::RiskLevel::High,
-                "AI command execution is not available in this mode".to_string(),
                 Some("unsupported in this startup mode".to_string()),
-                None,
             ),
         );
         return Ok(());
@@ -197,9 +191,7 @@ pub(super) async fn handle_confirm_exec_inbound(
                 cwd,
                 limits.timeout_ms,
                 classification.risk,
-                "command exceeds the policy risk ceiling".to_string(),
                 Some("blocked by policy max_risk".to_string()),
-                None,
             ),
         );
         return Ok(());
@@ -236,9 +228,7 @@ pub(super) async fn handle_confirm_exec_inbound(
                 cwd,
                 limits.timeout_ms,
                 classification.risk,
-                "command requires a capability the policy does not grant".to_string(),
                 Some("blocked by policy scope".to_string()),
-                None,
             ),
         );
         return Ok(());
@@ -270,8 +260,6 @@ pub(super) async fn handle_confirm_exec_inbound(
                     cwd,
                     limits.timeout_ms,
                     classification.risk,
-                    classification.impact.clone(),
-                    None,
                     Some(classification.impact),
                 ),
             );
@@ -371,10 +359,6 @@ pub(super) async fn handle_confirm_exec_inbound(
                 timeout_ms: limits.timeout_ms,
                 risk: classification.risk,
                 execution_basis,
-                impact: classification.impact,
-                policy_note: classification
-                    .matched_template
-                    .map(|t| format!("session-approved template {t}")),
                 requires_confirmation: false,
                 executable: true,
                 blocked_reason: None,
@@ -418,10 +402,6 @@ pub(super) async fn handle_confirm_exec_inbound(
             timeout_ms: limits.timeout_ms,
             risk: classification.risk,
             execution_basis,
-            impact: classification.impact,
-            policy_note: classification
-                .matched_template
-                .map(|t| format!("matched template {t}")),
             requires_confirmation: true,
             executable: true,
             blocked_reason: None,
@@ -452,9 +432,7 @@ pub(super) async fn handle_confirm_exec_inbound(
             cwd,
             limits.timeout_ms,
             classification.risk,
-            classification.impact,
             mode_note,
-            None,
         ),
     );
     Ok(())

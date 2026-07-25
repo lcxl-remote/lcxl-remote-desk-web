@@ -153,9 +153,8 @@ pub struct ConfirmExecData {
 /// Server → control end (`ExecPreview`): the classification result the
 /// confirmation dialog renders.
 ///
-/// `exec_request_id` is `Some` only when a template matched (a pending approval
-/// was created); for a blocklist hit or an off-template command it is `None` and
-/// `executable = false`.
+/// `exec_request_id` is `Some` only when execution can proceed (immediately or
+/// after approval); denied commands carry no request id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]
 pub struct ExecPreview {
     pub exec_request_id: Option<ExecRequestId>,
@@ -169,16 +168,10 @@ pub struct ExecPreview {
     /// The server-authoritative basis used to classify this preview.
     #[serde(default)]
     pub execution_basis: ExecExecutionBasis,
-    /// What executing this would do (from the classification).
-    pub impact: String,
-    /// Server policy note (e.g. which template matched, or why the mode forbids
-    /// it).
-    pub policy_note: Option<String>,
     pub requires_confirmation: bool,
-    /// Whether this command can be executed through the AI path at all. `false`
-    /// for blocklist hits and off-template commands.
+    /// Whether this command can be executed through the AI path at all.
     pub executable: bool,
-    /// Present for a blocklist hit; the operator-facing reason it is denied.
+    /// The operator-facing reason for a non-executable preview.
     pub blocked_reason: Option<String>,
 }
 
@@ -632,8 +625,6 @@ mod tests {
             timeout_ms: 10_000,
             risk: RiskLevel::Low,
             execution_basis: ExecExecutionBasis::Template,
-            impact: "Reads the status of a service".into(),
-            policy_note: Some("matched template get_service".into()),
             requires_confirmation: true,
             executable: true,
             blocked_reason: None,
@@ -665,9 +656,13 @@ mod tests {
             }),
         };
 
-        // JSON round-trips.
+        // JSON round-trips. The preview carries only fields needed to render and
+        // resolve execution; classifier prose is not part of the control protocol.
+        let preview_json = serde_json::to_string(&preview).unwrap();
+        assert!(!preview_json.contains("\"impact\""));
+        assert!(!preview_json.contains("\"policy_note\""));
         for json in [
-            serde_json::to_string(&preview).unwrap(),
+            preview_json,
             serde_json::to_string(&resolve).unwrap(),
             serde_json::to_string(&result_ok).unwrap(),
             serde_json::to_string(&result_err).unwrap(),

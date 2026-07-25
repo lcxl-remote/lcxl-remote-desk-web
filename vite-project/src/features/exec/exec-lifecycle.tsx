@@ -76,14 +76,10 @@ export function ExecLifecycle({
                 <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-black/40 p-1.5 font-mono text-xs text-green-300">
                     {p.command}
                 </pre>
-                <div className="text-xs text-white/80">{p.impact}</div>
                 {p.execution_basis === "owner_blocklist_only" && (
                     <div className="rounded border border-red-500/50 bg-red-950/40 p-1.5 text-[11px] font-medium text-red-200">
                         {t("pages.exec.freeformWarning")}
                     </div>
-                )}
-                {p.policy_note && (
-                    <div className="text-[10px] text-white/50">{p.policy_note}</div>
                 )}
                 <div className="text-[10px] text-white/50">
                     {t("pages.exec.timeout")}: {Math.round(p.timeout_ms / 1000)}s

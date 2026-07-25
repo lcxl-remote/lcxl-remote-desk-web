@@ -39,8 +39,6 @@ export type ExecPreview = {
     risk: RiskLevel;
     /** Server-authoritative admission basis; absent on an older server. */
     execution_basis?: "template" | "owner_blocklist_only";
-    impact: string;
-    policy_note: string | null;
     requires_confirmation: boolean;
     executable: boolean;
     blocked_reason: string | null;
@@ -363,7 +361,7 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                         output: null,
                         error: preview.executable
                             ? null
-                            : (preview.blocked_reason ?? preview.policy_note ?? preview.impact),
+                            : preview.blocked_reason,
                     },
                 }));
                 return;

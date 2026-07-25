@@ -941,9 +941,11 @@ async fn reacting_to_a_completion_clears_its_pending_trigger() {
     // (id "done-1") plus a pending entry keyed on it, and a second pending entry
     // ("done-absent") whose message is not in the conversation.
     let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "t0");
-    seeded
-        .conversation
-        .push(ChatMessage::untrusted_output("done-1", "exit_code=0"));
+    seeded.conversation.push(ChatMessage::untrusted_output(
+        "done-1",
+        "call-1",
+        "exit_code=0",
+    ));
     seeded.add_pending_auto_trigger(PendingAutoTrigger {
         work_id: 1,
         execution_id: "e1".into(),
@@ -1000,9 +1002,11 @@ async fn resume_runs_against_the_existing_tail_without_appending() {
     let mut sink = Collector(Rc::new(RefCell::new(String::new())));
 
     let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "t0");
-    seeded
-        .conversation
-        .push(ChatMessage::untrusted_output("done-1", "exit_code=0"));
+    seeded.conversation.push(ChatMessage::untrusted_output(
+        "done-1",
+        "call-1",
+        "exit_code=0",
+    ));
     seeded.add_pending_auto_trigger(PendingAutoTrigger {
         work_id: 1,
         execution_id: "e1".into(),

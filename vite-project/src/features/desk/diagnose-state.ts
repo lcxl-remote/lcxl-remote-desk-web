@@ -97,6 +97,20 @@ export type ToolActivity = {
     output: string | null;
 };
 
+/** One visible item in an agentic turn, kept in backend message order. */
+export type DiagnoseTimelineItem =
+    | {
+          kind: 'assistant';
+          id: string;
+          text: string;
+          provenance: AiProvenance | null;
+      }
+    | {
+          kind: 'tool';
+          id: string;
+          activity: ToolActivity;
+      };
+
 export type DiagnoseStartOptions = {
     includeScreen?: boolean;
     contextKinds?: string[];
@@ -204,12 +218,10 @@ export type DiagnoseHistoryTurn = {
     question: string;
     /** Structured result, if a `final` frame arrived (single-turn path). */
     result: Diagnosis | null;
-    /** Agentic free-text answer, if an `answer` frame arrived. */
-    answer: string | null;
     /** Streaming summary captured for this turn (fallback display text). */
     summary: string;
-    /** The turn's tool activity. */
-    tools: ToolActivity[];
+    /** Assistant messages and tool calls in their original order. */
+    timeline: DiagnoseTimelineItem[];
     /** How the turn settled. */
     phase: 'done' | 'error';
     /** Failure message if the turn errored. */
@@ -248,10 +260,8 @@ export type DiagnoseState = {
     errorCode: number | null;
     /** Latest agentic turn id (set on a `turn_started` frame). */
     turnId: string | null;
-    /** The agentic tool-activity timeline, in call order (agentic path). */
-    tools: ToolActivity[];
-    /** The agentic turn's final answer text, set on an `answer` frame. */
-    answer: string | null;
+    /** Assistant messages and tool calls in their original order. */
+    timeline: DiagnoseTimelineItem[];
     /**
      * Machine-readable AI marking for the current result / answer (Art.50(2)),
      * set on a `final` / `answer` frame. Null does not mean "not AI" — the
@@ -287,8 +297,7 @@ export const INITIAL_STATE: DiagnoseState = {
     error: null,
     errorCode: null,
     turnId: null,
-    tools: [],
-    answer: null,
+    timeline: [],
     provenance: null,
     pendingExec: null,
     backgroundExecution: null,
@@ -304,15 +313,27 @@ export function snapshotLiveTurn(prev: DiagnoseState): DiagnoseHistoryTurn[] {
     if ((prev.phase !== 'done' && prev.phase !== 'error') || !prev.requestId) {
         return prev.history;
     }
+    const summary = extractStreamingSummary(prev.partialSummary);
+    const timeline =
+        !prev.result && summary
+            ? [
+                  ...prev.timeline,
+                  {
+                      kind: 'assistant' as const,
+                      id: `assistant:${prev.requestId}:settled`,
+                      text: summary,
+                      provenance: prev.provenance,
+                  },
+              ]
+            : prev.timeline;
     return [
         ...prev.history,
         {
             requestId: prev.requestId,
             question: prev.question,
             result: prev.result,
-            answer: prev.answer,
-            summary: extractStreamingSummary(prev.partialSummary),
-            tools: prev.tools,
+            summary,
+            timeline,
             phase: prev.phase,
             error: prev.error,
             errorCode: prev.errorCode,
@@ -360,13 +381,10 @@ export function snapshotConversationKey(deskId: string): string {
 
 /**
  * Rebuild the settled transcript from a snapshot: group the flat message list into
- * turns at each `user` message. Assistant text becomes the turn's answer (several
- * assistant answers in one turn — e.g. an automation follow-up appended after the
- * original — are joined), and assistant tool calls become the turn's tool activity.
- * Tool-result messages are correlated back to the assistant's call so a
- * restored transcript retains expandable input/output details. Other internal
- * messages carry no user-facing turn text and are skipped. Pure, so it is
- * unit-tested directly.
+ * turns at each `user` message. Assistant text and tool calls remain separate
+ * timeline items, preserving their original order. Tool-result and background
+ * completion messages update the corresponding tool item without moving it, so
+ * an automatic assistant follow-up stays below the command it follows.
  */
 export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHistoryTurn[] {
     const turns: DiagnoseHistoryTurn[] = [];
@@ -374,9 +392,8 @@ export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHi
         requestId: id,
         question,
         result: null,
-        answer: null,
         summary: '',
-        tools: [],
+        timeline: [],
         phase: 'done',
         error: null,
         errorCode: null,
@@ -390,23 +407,45 @@ export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHi
         } else if (m.role === 'assistant') {
             if (!current) current = open(m.id, '');
             if (m.text) {
-                current.answer = current.answer ? `${current.answer}\n\n${m.text}` : m.text;
-            }
-            for (const tc of m.toolCalls ?? []) {
-                current.tools.push({
-                    callId: tc.id,
-                    name: tc.name,
-                    status: 'ok',
-                    argumentsJson: tc.argumentsJson,
-                    output: null,
+                current.timeline.push({
+                    kind: 'assistant',
+                    id: m.id,
+                    text: m.text,
+                    provenance: null,
                 });
             }
-        } else if (m.role === 'tool' && current && m.toolCallId) {
-            current.tools = current.tools.map((tool) =>
-                tool.callId === m.toolCallId ? { ...tool, output: m.text } : tool,
+            for (const tc of m.toolCalls ?? []) {
+                current.timeline.push({
+                    kind: 'tool',
+                    id: tc.id,
+                    activity: {
+                        callId: tc.id,
+                        name: tc.name,
+                        status: 'ok',
+                        argumentsJson: tc.argumentsJson,
+                        output: null,
+                    },
+                });
+            }
+        } else if (
+            (m.role === 'tool' || m.role === 'untrusted_output') &&
+            current &&
+            m.toolCallId
+        ) {
+            current.timeline = current.timeline.map((item) =>
+                item.kind === 'tool' && item.activity.callId === m.toolCallId
+                    ? {
+                          ...item,
+                          activity: {
+                              ...item.activity,
+                              status: 'ok',
+                              output: m.text,
+                          },
+                      }
+                    : item,
             );
         }
-        // `system_event` / `untrusted_output`: internal, no visible turn text.
+        // Unlinked internal/system messages carry no user-facing turn text.
     }
     if (current) turns.push(current);
     return turns;

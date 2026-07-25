@@ -51,8 +51,6 @@ function execPreviewFrame(overrides: Partial<ExecPreview> = {}): SignalingMessag
         cwd: null,
         timeout_ms: 30_000,
         risk: 'high',
-        impact: 'Restarts the nginx service.',
-        policy_note: null,
         requires_confirmation: true,
         executable: true,
         blocked_reason: null,
@@ -278,43 +276,67 @@ describe('useDeskDiagnose', () => {
             frame({
                 request_id: 'req-1',
                 seq: 1,
+                kind: 'partial',
+                partial_summary: 'let me check',
+            }),
+        );
+        feed(
+            frame({
+                request_id: 'req-1',
+                seq: 2,
                 kind: 'tool_started',
                 tool_name: 'read_system_info',
                 tool_call_id: 'c1',
                 tool_arguments_json: '{"detail":true}',
             }),
         );
-        expect(result.current.state.tools).toEqual([
+        expect(result.current.state.timeline).toEqual([
             {
-                callId: 'c1',
-                name: 'read_system_info',
-                status: 'running',
-                argumentsJson: '{"detail":true}',
-                output: null,
+                kind: 'assistant',
+                id: 'assistant:req-1:2',
+                text: 'let me check',
+                provenance: null,
+            },
+            {
+                kind: 'tool',
+                id: 'c1',
+                activity: {
+                    callId: 'c1',
+                    name: 'read_system_info',
+                    status: 'running',
+                    argumentsJson: '{"detail":true}',
+                    output: null,
+                },
             },
         ]);
 
         feed(
             frame({
                 request_id: 'req-1',
-                seq: 2,
+                seq: 3,
                 kind: 'tool_finished',
                 tool_call_id: 'c1',
                 tool_ok: true,
                 tool_output: 'hostname=desk-1',
             }),
         );
-        expect(result.current.state.tools[0]).toMatchObject({
+        expect(result.current.state.timeline[1]).toMatchObject({
+            kind: 'tool',
+            activity: {
             status: 'ok',
             output: 'hostname=desk-1',
+            },
         });
 
-        feed(frame({ request_id: 'req-1', seq: 3, kind: 'answer', answer: 'the host is healthy' }));
+        feed(frame({ request_id: 'req-1', seq: 4, kind: 'answer', answer: 'the host is healthy' }));
         expect(result.current.state.phase).toBe('done');
-        expect(result.current.state.answer).toBe('the host is healthy');
+        expect(result.current.state.timeline[2]).toMatchObject({
+            kind: 'assistant',
+            text: 'the host is healthy',
+        });
         // Frames after the terminal answer are ignored (request closed).
-        feed(frame({ request_id: 'req-1', seq: 4, kind: 'answer', answer: 'late' }));
-        expect(result.current.state.answer).toBe('the host is healthy');
+        feed(frame({ request_id: 'req-1', seq: 5, kind: 'answer', answer: 'late' }));
+        expect(result.current.state.timeline).toHaveLength(3);
     });
 
     it('marks a mutating tool as awaiting approval, then failed on a bad finish', () => {
@@ -332,7 +354,10 @@ describe('useDeskDiagnose', () => {
                 tool_arguments_json: '{"command":"restart"}',
             }),
         );
-        expect(result.current.state.tools[0].status).toBe('awaiting_approval');
+        expect(result.current.state.timeline[0]).toMatchObject({
+            kind: 'tool',
+            activity: { status: 'awaiting_approval' },
+        });
 
         feed(
             frame({
@@ -344,7 +369,10 @@ describe('useDeskDiagnose', () => {
                 tool_output: 'operator rejected the command',
             }),
         );
-        expect(result.current.state.tools[0].status).toBe('failed');
+        expect(result.current.state.timeline[0]).toMatchObject({
+            kind: 'tool',
+            activity: { status: 'failed' },
+        });
     });
 
     it('captures an agentic ExecPreview while a run is in flight and approves it', () => {
@@ -364,7 +392,10 @@ describe('useDeskDiagnose', () => {
         );
         feed(execPreviewFrame());
         expect(result.current.state.pendingExec?.command).toBe('systemctl restart nginx');
-        expect(result.current.state.tools[0].status).toBe('awaiting_approval');
+        expect(result.current.state.timeline[0]).toMatchObject({
+            kind: 'tool',
+            activity: { status: 'awaiting_approval' },
+        });
 
         sendMessage.mockClear();
         act(() => result.current.approveExec());
@@ -375,7 +406,10 @@ describe('useDeskDiagnose', () => {
         );
         // The card clears once resolved; completion shows via the tool timeline.
         expect(result.current.state.pendingExec).toBeNull();
-        expect(result.current.state.tools[0].status).toBe('running');
+        expect(result.current.state.timeline[0]).toMatchObject({
+            kind: 'tool',
+            activity: { status: 'running' },
+        });
     });
 
     it('recovers a settled live request from the persisted snapshot', async () => {
@@ -432,10 +466,16 @@ describe('useDeskDiagnose', () => {
 
         expect(result.current.state.phase).toBe('done');
         expect(result.current.state.history).toHaveLength(1);
-        expect(result.current.state.history[0].answer).toBe('The command did not run.');
-        expect(result.current.state.history[0].tools[0]).toMatchObject({
-            status: 'ok',
-            output: 'the approval session was cancelled',
+        expect(result.current.state.history[0].timeline[1]).toMatchObject({
+            kind: 'assistant',
+            text: 'The command did not run.',
+        });
+        expect(result.current.state.history[0].timeline[0]).toMatchObject({
+            kind: 'tool',
+            activity: {
+                status: 'ok',
+                output: 'the approval session was cancelled',
+            },
         });
         expect(result.current.state.backgroundExecution).toEqual({
             executionGeneration: 'generation-bg-1',
@@ -548,7 +588,10 @@ describe('useDeskDiagnose', () => {
         expect(result.current.state.question).toBe('and memory?');
         expect(result.current.state.history).toHaveLength(1);
         expect(result.current.state.history[0].question).toBe('why slow?');
-        expect(result.current.state.history[0].answer).toBe('cpu is busy');
+        expect(result.current.state.history[0].timeline[0]).toMatchObject({
+            kind: 'assistant',
+            text: 'cpu is busy',
+        });
     });
 
     it('a follow-up after a circuit breaker keeps prior output and continues the same conversation', () => {
@@ -598,14 +641,24 @@ describe('useDeskDiagnose', () => {
             }),
         );
         expect(result.current.state.phase).toBe('error');
-        expect(result.current.state.partialSummary).toBe('process 4242 is using the CPU');
-        expect(result.current.state.tools).toEqual([
+        expect(result.current.state.partialSummary).toBe('');
+        expect(result.current.state.timeline).toEqual([
             {
-                callId: 'c1',
-                name: 'execute_command',
-                status: 'ok',
-                argumentsJson: '{"command":"ps"}',
-                output: 'pid=4242',
+                kind: 'assistant',
+                id: 'assistant:req-1:1',
+                text: 'process 4242 is using the CPU',
+                provenance: null,
+            },
+            {
+                kind: 'tool',
+                id: 'c1',
+                activity: {
+                    callId: 'c1',
+                    name: 'execute_command',
+                    status: 'ok',
+                    argumentsJson: '{"command":"ps"}',
+                    output: 'pid=4242',
+                },
             },
         ]);
 
@@ -615,14 +668,24 @@ describe('useDeskDiagnose', () => {
         expect(conversationIdOfCall(1)).toBe(conv);
         expect(result.current.state.history).toHaveLength(1);
         expect(result.current.state.history[0].phase).toBe('error');
-        expect(result.current.state.history[0].summary).toBe('process 4242 is using the CPU');
-        expect(result.current.state.history[0].tools).toEqual([
+        expect(result.current.state.history[0].summary).toBe('');
+        expect(result.current.state.history[0].timeline).toEqual([
             {
-                callId: 'c1',
-                name: 'execute_command',
-                status: 'ok',
-                argumentsJson: '{"command":"ps"}',
-                output: 'pid=4242',
+                kind: 'assistant',
+                id: 'assistant:req-1:1',
+                text: 'process 4242 is using the CPU',
+                provenance: null,
+            },
+            {
+                kind: 'tool',
+                id: 'c1',
+                activity: {
+                    callId: 'c1',
+                    name: 'execute_command',
+                    status: 'ok',
+                    argumentsJson: '{"command":"ps"}',
+                    output: 'pid=4242',
+                },
             },
         ]);
         expect(result.current.state.history[0].error).toBe('repeat limit');
@@ -678,28 +741,59 @@ describe('buildSnapshotTranscript', () => {
         const turns = buildSnapshotTranscript(messages);
         expect(turns).toHaveLength(2);
         expect(turns[0].question).toBe('why is cpu high?');
-        expect(turns[0].answer).toBe('A runaway process.');
+        expect(turns[0].timeline[0]).toMatchObject({
+            kind: 'assistant',
+            text: 'A runaway process.',
+        });
         expect(turns[0].requestId).toBe('u1');
         expect(turns[0].phase).toBe('done');
         expect(turns[1].question).toBe('and memory?');
-        expect(turns[1].answer).toBe('Memory is fine.');
+        expect(turns[1].timeline[0]).toMatchObject({
+            kind: 'assistant',
+            text: 'Memory is fine.',
+        });
     });
 
-    it('joins several assistant answers in one turn — an automation follow-up appears appended', () => {
-        // A user turn, its original answer, the command output the automation turn
-        // reacted to (untrusted_output, skipped from the visible text), then the
-        // automation answer — all before any new user message, so one turn.
+    it('keeps command activity before the automation follow-up and applies its final output', () => {
         const messages: SnapshotMessage[] = [
             { id: 'u1', role: 'user', text: 'restart the service' },
-            { id: 'a1', role: 'assistant', text: 'Dispatched; it is restarting.' },
-            { id: 'out1', role: 'untrusted_output', text: 'exit_code=0' },
+            {
+                id: 'a1',
+                role: 'assistant',
+                text: 'I will restart it.',
+                toolCalls: [
+                    {
+                        id: 'c1',
+                        name: 'exec_command',
+                        argumentsJson: '{"command":"restart"}',
+                    },
+                ],
+            },
+            {
+                id: 't1',
+                role: 'tool',
+                text: 'command dispatched as background task',
+                toolCallId: 'c1',
+            },
+            {
+                id: 'out1',
+                role: 'untrusted_output',
+                text: 'exit_code=0',
+                toolCallId: 'c1',
+            },
             { id: 'a2', role: 'assistant', text: 'The restart succeeded (exit 0).' },
         ];
         const turns = buildSnapshotTranscript(messages);
         expect(turns).toHaveLength(1);
-        expect(turns[0].answer).toBe(
-            'Dispatched; it is restarting.\n\nThe restart succeeded (exit 0).',
-        );
+        expect(turns[0].timeline.map((item) => item.kind)).toEqual([
+            'assistant',
+            'tool',
+            'assistant',
+        ]);
+        expect(turns[0].timeline[1]).toMatchObject({
+            kind: 'tool',
+            activity: { output: 'exit_code=0' },
+        });
     });
 
     it('captures assistant tool calls as tool activity and skips internal messages', () => {
@@ -716,16 +810,25 @@ describe('buildSnapshotTranscript', () => {
         ];
         const turns = buildSnapshotTranscript(messages);
         expect(turns).toHaveLength(1);
-        expect(turns[0].tools).toEqual([
+        expect(turns[0].timeline).toEqual([
             {
-                callId: 'c1',
-                name: 'read_disk',
-                status: 'ok',
-                argumentsJson: '{}',
-                output: '90% full',
+                kind: 'tool',
+                id: 'c1',
+                activity: {
+                    callId: 'c1',
+                    name: 'read_disk',
+                    status: 'ok',
+                    argumentsJson: '{}',
+                    output: '90% full',
+                },
+            },
+            {
+                kind: 'assistant',
+                id: 'a2',
+                text: 'The disk is 90% full.',
+                provenance: null,
             },
         ]);
-        expect(turns[0].answer).toBe('The disk is 90% full.');
     });
 
     it('tolerates a leading assistant message with no preceding user turn', () => {
@@ -735,6 +838,9 @@ describe('buildSnapshotTranscript', () => {
         const turns = buildSnapshotTranscript(messages);
         expect(turns).toHaveLength(1);
         expect(turns[0].question).toBe('');
-        expect(turns[0].answer).toBe('orphan answer');
+        expect(turns[0].timeline[0]).toMatchObject({
+            kind: 'assistant',
+            text: 'orphan answer',
+        });
     });
 });

@@ -20,6 +20,7 @@ import { agentErrorMessage } from "@/lib/agent-error-i18n"
 import {
     type Confidence,
     type DiagnoseHistoryTurn,
+    type DiagnoseTimelineItem,
     type RiskLevel,
     type SuggestedCommand,
     type ToolActivity,
@@ -139,60 +140,71 @@ function formatToolArguments(argumentsJson: string): string {
     }
 }
 
-/**
- * The agentic loop's tool-activity timeline: each tool call the model made this
- * turn, with its live status and expandable model input / redacted output. Empty
- * for the single-turn diagnose path, so it renders nothing there.
- */
-export function ToolTimeline({ tools }: { tools: ToolActivity[] }) {
+function ToolActivityCard({ tool }: { tool: ToolActivity }) {
     const { t } = useTranslation()
-    if (tools.length === 0) return null
     return (
-        <section className="flex flex-col gap-1.5">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-                {t("pages.desk.diagnose.toolActivity")}
-            </h3>
-            <ul className="flex flex-col gap-1">
-                {tools.map((tool) => (
-                    <li key={tool.callId}>
-                        <details className="group rounded border border-white/10 bg-black/10 text-xs text-white/80">
-                            <summary className="flex cursor-pointer list-none items-center gap-2 px-2 py-1.5 [&::-webkit-details-marker]:hidden">
-                                <ChevronRight className="h-3 w-3 shrink-0 text-white/40 transition-transform group-open:rotate-90" />
-                                <ToolStatusIcon status={tool.status} />
-                                <Wrench className="h-3 w-3 shrink-0 text-white/40" />
-                                <span className="truncate font-mono">{tool.name}</span>
-                                {tool.status === "awaiting_approval" && (
-                                    <span className="text-amber-300">
-                                        {t("pages.desk.diagnose.toolAwaiting")}
-                                    </span>
-                                )}
-                            </summary>
-                            <div className="flex flex-col gap-2 border-t border-white/10 px-2 py-2">
-                                <div>
-                                    <div className="mb-1 font-medium text-white/60">
-                                        {t("pages.desk.diagnose.toolInput")}
-                                    </div>
-                                    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-black/30 p-2 font-mono text-[11px] text-white/80">
-                                        {formatToolArguments(tool.argumentsJson)}
-                                    </pre>
-                                </div>
-                                <div>
-                                    <div className="mb-1 font-medium text-white/60">
-                                        {t("pages.desk.diagnose.toolOutput")}
-                                    </div>
-                                    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-black/30 p-2 font-mono text-[11px] text-white/80">
-                                        {tool.output === null
-                                            ? t("pages.desk.diagnose.toolOutputPending")
-                                            : tool.output ||
-                                              t("pages.desk.diagnose.toolOutputEmpty")}
-                                    </pre>
-                                </div>
-                            </div>
-                        </details>
-                    </li>
-                ))}
-            </ul>
-        </section>
+        <details className="group rounded border border-white/10 bg-black/10 text-xs text-white/80">
+            <summary className="flex cursor-pointer list-none items-center gap-2 px-2 py-1.5 [&::-webkit-details-marker]:hidden">
+                <ChevronRight className="h-3 w-3 shrink-0 text-white/40 transition-transform group-open:rotate-90" />
+                <ToolStatusIcon status={tool.status} />
+                <Wrench className="h-3 w-3 shrink-0 text-white/40" />
+                <span className="truncate font-mono">{tool.name}</span>
+                {tool.status === "awaiting_approval" && (
+                    <span className="text-amber-300">
+                        {t("pages.desk.diagnose.toolAwaiting")}
+                    </span>
+                )}
+            </summary>
+            <div className="flex flex-col gap-2 border-t border-white/10 px-2 py-2">
+                <div>
+                    <div className="mb-1 font-medium text-white/60">
+                        {t("pages.desk.diagnose.toolInput")}
+                    </div>
+                    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-black/30 p-2 font-mono text-[11px] text-white/80">
+                        {formatToolArguments(tool.argumentsJson)}
+                    </pre>
+                </div>
+                <div>
+                    <div className="mb-1 font-medium text-white/60">
+                        {t("pages.desk.diagnose.toolOutput")}
+                    </div>
+                    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-black/30 p-2 font-mono text-[11px] text-white/80">
+                        {tool.output === null
+                            ? t("pages.desk.diagnose.toolOutputPending")
+                            : tool.output ||
+                              t("pages.desk.diagnose.toolOutputEmpty")}
+                    </pre>
+                </div>
+            </div>
+        </details>
+    )
+}
+
+/** Assistant messages and tool calls rendered in their original chronology. */
+export function ConversationTimeline({
+    items,
+}: {
+    items: DiagnoseTimelineItem[]
+}) {
+    if (items.length === 0) return null
+    return (
+        <div className="flex flex-col gap-2">
+            {items.map((item) =>
+                item.kind === "assistant" ? (
+                    <div key={item.id} className="flex flex-col gap-1.5">
+                        <AiGeneratedMark
+                            provenance={item.provenance}
+                            className="self-start border-white/25 bg-white/10 text-white/80"
+                        />
+                        <MarkdownContent className="max-w-[90%] self-start rounded-lg rounded-bl-sm bg-white/10 px-2.5 py-1.5 text-sm text-white/90">
+                            {item.text}
+                        </MarkdownContent>
+                    </div>
+                ) : (
+                    <ToolActivityCard key={item.id} tool={item.activity} />
+                ),
+            )}
+        </div>
     )
 }
 
@@ -201,7 +213,7 @@ export function ToolTimeline({ tools }: { tools: ToolActivity[] }) {
  * command and the loop is blocked until the operator approves or rejects it.
  * Unlike `ExecRow` (a suggested command the operator chose to run), this is
  * pushed by the AI itself, so it shows the full command the model wants to run
- * alongside the server's classification (risk / impact / policy / timeout).
+ * alongside the server's classification (risk / timeout).
  * Nothing runs without an explicit Approve.
  */
 export function AgenticExecApproval({
@@ -231,14 +243,10 @@ export function AgenticExecApproval({
             <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-black/40 p-1.5 font-mono text-xs text-green-300">
                 {preview.command}
             </pre>
-            <div className="text-xs text-white/80">{preview.impact}</div>
             {preview.execution_basis === "owner_blocklist_only" && (
                 <div className="rounded border border-red-500/50 bg-red-950/40 p-1.5 text-[11px] font-medium text-red-200">
                     {t("pages.desk.diagnose.exec.freeformWarning")}
                 </div>
-            )}
-            {preview.policy_note && (
-                <div className="text-[10px] text-white/50">{preview.policy_note}</div>
             )}
             <div className="text-[10px] text-white/50">
                 {t("pages.desk.diagnose.exec.timeout")}:{" "}
@@ -293,30 +301,26 @@ export function ConversationHistory({ turns }: { turns: DiagnoseHistoryTurn[] })
     return (
         <div className="flex flex-col gap-3 border-b border-white/10 pb-3">
             {turns.map((turn) => {
-                const aiReply =
-                    turn.answer ?? turn.result?.summary ?? turn.summary
+                const aiReply = turn.result?.summary ?? turn.summary
                 const localizedError = turn.error
                     ? agentErrorMessage(t, turn.errorCode, turn.error, turn.error)
                     : null
                 return (
                     <div key={turn.requestId} className="flex flex-col gap-1.5">
                         <QuestionBubble question={turn.question} />
-                        {/* AI-generated marking (Art.50(2)) for a settled AI
-                            answer, mirroring the live turn. Driven by an AI
-                            reply being present, not by provenance (fail-closed);
-                            an error turn carries no AI content, so no marking. */}
-                        {aiReply && (
+                        {turn.timeline.length > 0 ? (
+                            <ConversationTimeline items={turn.timeline} />
+                        ) : aiReply ? (
+                            <>
                             <AiGeneratedMark
                                 provenance={turn.provenance}
                                 className="self-start border-white/25 bg-white/10 text-white/80"
                             />
-                        )}
-                        {aiReply && (
                             <MarkdownContent className="max-w-[90%] self-start rounded-lg rounded-bl-sm bg-white/10 px-2.5 py-1.5 text-xs text-white/80">
                                 {aiReply}
                             </MarkdownContent>
-                        )}
-                        <ToolTimeline tools={turn.tools} />
+                            </>
+                        ) : null}
                         {localizedError && (
                             <div className="max-w-[90%] self-start whitespace-pre-wrap rounded-lg rounded-bl-sm bg-red-500/15 px-2.5 py-1.5 text-xs text-red-200">
                                 {localizedError}

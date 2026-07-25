@@ -19,13 +19,22 @@ const baseState: DiagnoseState = {
     error: null,
     errorCode: null,
     turnId: null,
-    tools: [],
-    answer: null,
+    timeline: [],
     provenance: null,
     pendingExec: null,
     backgroundExecution: null,
     history: [],
 };
+
+const assistantItem = (
+    text: string,
+    id = "assistant-1",
+    provenance: DiagnoseState["provenance"] = null,
+) => ({ kind: "assistant" as const, id, text, provenance });
+
+const toolItem = (
+    activity: Extract<DiagnoseState["timeline"][number], { kind: "tool" }>["activity"],
+) => ({ kind: "tool" as const, id: activity.callId, activity });
 
 function renderPanel(state: Partial<DiagnoseState>) {
     const onStart = vi.fn();
@@ -149,16 +158,15 @@ describe("DiagnosePanel", () => {
                     requestId: "req-bg",
                     question: "run a 30 second command",
                     result: null,
-                    answer: null,
                     summary: "",
-                    tools: [
-                        {
+                    timeline: [
+                        toolItem({
                             callId: "call-bg",
                             name: "exec_command",
                             status: "ok",
                             argumentsJson: '{"command":"Start-Sleep -Seconds 30"}',
                             output: "command dispatched as background task",
-                        },
+                        }),
                     ],
                     phase: "done",
                     error: null,
@@ -179,14 +187,14 @@ describe("DiagnosePanel", () => {
         renderPanel({
             phase: "error",
             partialSummary: "CPU usage is concentrated in process 4242.",
-            tools: [
-                {
+            timeline: [
+                toolItem({
                     callId: "c1",
                     name: "execute_command",
                     status: "ok",
                     argumentsJson: "{}",
                     output: "done",
-                },
+                }),
             ],
             error: "the assistant stopped after repeating the same action too many times",
             errorCode: 70,
@@ -210,15 +218,15 @@ describe("DiagnosePanel", () => {
     it("expands a tool call to show formatted input and output", () => {
         renderPanel({
             phase: "done",
-            answer: "The process list was collected.",
-            tools: [
-                {
+            timeline: [
+                toolItem({
                     callId: "c1",
                     name: "read_process_list",
                     status: "ok",
                     argumentsJson: '{"limit":5,"sort":"cpu_desc"}',
                     output: "pid=42 cpu=98%",
-                },
+                }),
+                assistantItem("The process list was collected."),
             ],
         });
 
@@ -226,10 +234,19 @@ describe("DiagnosePanel", () => {
         fireEvent.click(screen.getByText("read_process_list"));
         expect(screen.getByText(/"limit": 5/)).toBeVisible();
         expect(screen.getByText("pid=42 cpu=98%")).toBeVisible();
+        const tool = screen.getByText("read_process_list").closest("details");
+        const answer = screen.getByText("The process list was collected.");
+        expect(
+            tool?.compareDocumentPosition(answer) &
+                Node.DOCUMENT_POSITION_FOLLOWING,
+        ).toBeTruthy();
     });
 
     it("done: a follow-up composer continues the conversation", () => {
-        const { onStart } = renderPanel({ phase: "done", answer: "the host is healthy" });
+        const { onStart } = renderPanel({
+            phase: "done",
+            timeline: [assistantItem("the host is healthy")],
+        });
         const followUp = screen.getByPlaceholderText("Ask a follow-up question…");
         fireEvent.change(followUp, { target: { value: "and the disk?" } });
         fireEvent.click(screen.getByText("Send follow-up"));
@@ -264,7 +281,11 @@ describe("DiagnosePanel", () => {
     })
 
     it("done: the answered question stays visible above its result", () => {
-        renderPanel({ phase: "done", question: "and the disk?", answer: "plenty free" })
+        renderPanel({
+            phase: "done",
+            question: "and the disk?",
+            timeline: [assistantItem("plenty free")],
+        })
         expect(screen.getByText("and the disk?")).toBeInTheDocument()
         expect(screen.getByText("plenty free")).toBeInTheDocument()
     })
@@ -275,7 +296,7 @@ describe("DiagnosePanel", () => {
                 state={{
                     ...baseState,
                     phase: "done",
-                    answer: [
+                    timeline: [assistantItem([
                         "## CPU report",
                         "",
                         "**Usage** is high.",
@@ -287,7 +308,7 @@ describe("DiagnosePanel", () => {
                         "<script>alert('unsafe')</script>",
                         "",
                         "![remote pixel](https://example.invalid/pixel.png)",
-                    ].join("\n"),
+                    ].join("\n"))],
                 }}
                 onStart={vi.fn()}
                 onReset={vi.fn()}
@@ -318,9 +339,8 @@ describe("DiagnosePanel", () => {
                     requestId: "req-0",
                     question: "why is cpu high?",
                     result: null,
-                    answer: "a runaway process",
                     summary: "",
-                    tools: [],
+                    timeline: [assistantItem("a runaway process")],
                     phase: "done",
                     error: null,
                     errorCode: null,
@@ -343,9 +363,14 @@ describe("DiagnosePanel", () => {
                     requestId: "req-0",
                     question: "why is cpu high?",
                     result: null,
-                    answer: "a runaway process",
                     summary: "",
-                    tools: [],
+                    timeline: [
+                        assistantItem(
+                            "a runaway process",
+                            "assistant-1",
+                            { model_id: "gpt-4o", marking_scheme: "lcxl-ai-provenance/1" },
+                        ),
+                    ],
                     phase: "done",
                     error: null,
                     errorCode: null,
@@ -370,9 +395,8 @@ describe("DiagnosePanel", () => {
                     requestId: "req-0",
                     question: "why is cpu high?",
                     result: null,
-                    answer: "a runaway process",
                     summary: "",
-                    tools: [],
+                    timeline: [assistantItem("a runaway process")],
                     phase: "done",
                     error: null,
                     errorCode: null,
@@ -392,9 +416,8 @@ describe("DiagnosePanel", () => {
                     requestId: "req-0",
                     question: "why is cpu high?",
                     result: null,
-                    answer: null,
                     summary: "",
-                    tools: [],
+                    timeline: [],
                     phase: "error",
                     error: "collection failed",
                     errorCode: null,
@@ -467,8 +490,6 @@ describe("DiagnosePanel", () => {
                     cwd: null,
                     timeout_ms: 30000,
                     risk: "low",
-                    impact: "Read the status of a Windows service",
-                    policy_note: "matched template get_service_named",
                     requires_confirmation: true,
                     executable: true,
                     blocked_reason: null,
@@ -478,7 +499,6 @@ describe("DiagnosePanel", () => {
                 error: null,
             },
         });
-        expect(screen.getByText("Read the status of a Windows service")).toBeInTheDocument();
         fireEvent.click(screen.getByText("Approve & run"));
         expect(exec.approve).toHaveBeenCalledWith(0);
         fireEvent.click(screen.getByText("Reject"));
@@ -496,8 +516,6 @@ describe("DiagnosePanel", () => {
                     cwd: null,
                     timeout_ms: 30000,
                     risk: "critical",
-                    impact: "Runs an owner-requested free-form command.",
-                    policy_note: null,
                     requires_confirmation: true,
                     executable: true,
                     blocked_reason: null,
@@ -574,8 +592,6 @@ describe("DiagnosePanel", () => {
                         cwd: null,
                         timeout_ms: 30000,
                         risk: "critical",
-                        impact: "Restarts the nginx service.",
-                        policy_note: null,
                         requires_confirmation: true,
                         executable: true,
                         blocked_reason: null,
@@ -630,7 +646,11 @@ describe("DiagnosePanel", () => {
     it("marks the agentic free-text answer as AI-generated even without provenance (fail-closed)", () => {
         // No provenance on the frame: the answer is still AI content, so the mark
         // must show regardless.
-        renderPanel({ phase: "done", answer: "the host is healthy", provenance: null });
+        renderPanel({
+            phase: "done",
+            timeline: [assistantItem("the host is healthy")],
+            provenance: null,
+        });
         expect(screen.getByText("AI-generated")).toBeInTheDocument();
     });
 

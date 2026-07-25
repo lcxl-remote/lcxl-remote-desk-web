@@ -21,15 +21,45 @@ import {
     INITIAL_STATE,
     SNAPSHOT_POLL_MS,
     buildSnapshotTranscript,
+    extractStreamingSummary,
     snapshotConversationKey,
     snapshotLiveTurn,
     type DiagnoseEvent,
     type DiagnoseStartOptions,
     type DiagnoseState,
     type SessionSnapshot,
+    type DiagnoseTimelineItem,
     type ToolActivity,
     type ToolActivityStatus,
 } from './diagnose-state';
+
+function upsertTool(
+    timeline: DiagnoseTimelineItem[],
+    activity: ToolActivity,
+): DiagnoseTimelineItem[] {
+    const existing = timeline.findIndex(
+        (item) => item.kind === 'tool' && item.activity.callId === activity.callId,
+    );
+    const item: DiagnoseTimelineItem = {
+        kind: 'tool',
+        id: activity.callId,
+        activity,
+    };
+    if (existing === -1) return [...timeline, item];
+    return timeline.map((current, index) => (index === existing ? item : current));
+}
+
+function updateTool(
+    timeline: DiagnoseTimelineItem[],
+    callId: string,
+    update: (activity: ToolActivity) => ToolActivity,
+): DiagnoseTimelineItem[] {
+    return timeline.map((item) =>
+        item.kind === 'tool' && item.activity.callId === callId
+            ? { ...item, activity: update(item.activity) }
+            : item,
+    );
+}
 
 type UseDeskDiagnoseProps = {
     deskId: string | null;
@@ -244,18 +274,31 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
             deskId,
         );
         setState((prev) => {
-            const awaitingTools = prev.tools
-                .map((tool, index) => ({ tool, index }))
-                .filter(({ tool }) => tool.status === 'awaiting_approval');
-            const awaiting = awaitingTools[awaitingTools.length - 1]?.index;
+            let awaiting = -1;
+            prev.timeline.forEach((item, index) => {
+                if (
+                    item.kind === 'tool' &&
+                    item.activity.status === 'awaiting_approval'
+                ) {
+                    awaiting = index;
+                }
+            });
             return {
                 ...prev,
                 pendingExec: null,
-                tools:
-                    awaiting === undefined
-                        ? prev.tools
-                        : prev.tools.map((tool, index) =>
-                              index === awaiting ? { ...tool, status: 'running' } : tool,
+                timeline:
+                    awaiting === -1
+                        ? prev.timeline
+                        : prev.timeline.map((item, index) =>
+                              index === awaiting && item.kind === 'tool'
+                                  ? {
+                                        ...item,
+                                        activity: {
+                                            ...item.activity,
+                                            status: 'running',
+                                        },
+                                    }
+                                  : item,
                           ),
             };
         });
@@ -388,6 +431,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                         return { ...prev, turnId: event.turn_id ?? prev.turnId };
                     case 'tool_started': {
                         if (!event.tool_call_id) return prev;
+                        const streamed = extractStreamingSummary(prev.partialSummary);
                         const activity: ToolActivity = {
                             callId: event.tool_call_id,
                             name: event.tool_name ?? event.tool_call_id,
@@ -395,28 +439,37 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                             argumentsJson: event.tool_arguments_json ?? '',
                             output: null,
                         };
-                        // Replace an existing entry for the same call (e.g. a re-emit)
-                        // rather than duplicating it.
-                        const tools = prev.tools.some((tt) => tt.callId === activity.callId)
-                            ? prev.tools.map((tt) =>
-                                  tt.callId === activity.callId ? activity : tt,
-                              )
-                            : [...prev.tools, activity];
-                        return { ...prev, tools };
+                        let timeline = prev.timeline;
+                        if (streamed) {
+                            timeline = [
+                                ...timeline,
+                                {
+                                    kind: 'assistant',
+                                    id: `assistant:${event.request_id}:${event.seq}`,
+                                    text: streamed,
+                                    provenance: null,
+                                },
+                            ];
+                        }
+                        return {
+                            ...prev,
+                            partialSummary: '',
+                            timeline: upsertTool(timeline, activity),
+                        };
                     }
                     case 'tool_finished': {
                         if (!event.tool_call_id) return prev;
                         const status: ToolActivityStatus = event.tool_ok ? 'ok' : 'failed';
                         return {
                             ...prev,
-                            tools: prev.tools.map((tt) =>
-                                tt.callId === event.tool_call_id
-                                    ? {
-                                          ...tt,
-                                          status,
-                                          output: event.tool_output ?? '',
-                                      }
-                                    : tt,
+                            timeline: updateTool(
+                                prev.timeline,
+                                event.tool_call_id,
+                                (activity) => ({
+                                    ...activity,
+                                    status,
+                                    output: event.tool_output ?? '',
+                                }),
                             ),
                         };
                     }
@@ -427,13 +480,30 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                         // so its durable generation and cancel button appear without
                         // waiting for the periodic poll.
                         queueMicrotask(() => void fetchSnapshot());
-                        return {
-                            ...prev,
-                            phase: 'done',
-                            answer: event.answer ?? '',
-                            provenance: event.provenance ?? null,
-                            pendingExec: null,
-                        };
+                        {
+                            const answer =
+                                event.answer ??
+                                extractStreamingSummary(prev.partialSummary);
+                            const timeline = answer
+                                ? [
+                                      ...prev.timeline,
+                                      {
+                                          kind: 'assistant' as const,
+                                          id: `assistant:${event.request_id}:${event.seq}`,
+                                          text: answer,
+                                          provenance: event.provenance ?? null,
+                                      },
+                                  ]
+                                : prev.timeline;
+                            return {
+                                ...prev,
+                                phase: 'done',
+                                partialSummary: '',
+                                timeline,
+                                provenance: event.provenance ?? null,
+                                pendingExec: null,
+                            };
+                        }
                     default:
                         return prev;
                 }

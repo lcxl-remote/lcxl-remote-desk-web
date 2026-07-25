@@ -368,15 +368,12 @@ pub(super) fn send_notification<T: serde::Serialize>(
 
 /// Build a non-executable [`ExecPreview`] (blocked / off-template / mode-denied /
 /// gate-denied). No pending approval is created.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn non_executable_preview(
     shell: String,
     command: String,
     cwd: Option<String>,
     timeout_ms: u32,
     risk: desk_agent_protocol::RiskLevel,
-    impact: String,
-    policy_note: Option<String>,
     blocked_reason: Option<String>,
 ) -> ExecPreview {
     ExecPreview {
@@ -387,8 +384,6 @@ pub(super) fn non_executable_preview(
         timeout_ms,
         risk,
         execution_basis: desk_agent_protocol::exec::ExecExecutionBasis::Template,
-        impact,
-        policy_note,
         requires_confirmation: false,
         executable: false,
         blocked_reason,

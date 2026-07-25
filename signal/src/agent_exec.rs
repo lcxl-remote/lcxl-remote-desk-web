@@ -658,14 +658,6 @@ impl ToolSeam for SignalAgentTools {
             timeout_ms: draft.timeout_ms,
             risk: draft.risk,
             execution_basis: draft.execution_basis,
-            impact: classified.classification.impact.clone(),
-            policy_note: if draft.execution_basis
-                == desk_agent_protocol::exec::ExecExecutionBasis::OwnerBlocklistOnly
-            {
-                Some("owner-confirmed free-form command; only the blocklist was checked".into())
-            } else {
-                classified.classification.matched_template.clone()
-            },
             requires_confirmation: true,
             executable: true,
             blocked_reason: None,

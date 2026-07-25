@@ -715,6 +715,7 @@ impl PersistedAgentSession {
             self.conversation
                 .push(crate::chat::ChatMessage::untrusted_output(
                     event_id,
+                    tool_call_id,
                     result_text,
                 ));
         }
@@ -1305,6 +1306,11 @@ mod tests {
             "device output must be fenced as untrusted data, not a system message"
         );
         assert_eq!(ev.text, "exit_code=0");
+        assert_eq!(
+            ev.tool_call_id.as_deref(),
+            Some("call-1"),
+            "the snapshot can associate the late completion with its tool card"
+        );
         assert_eq!(
             s.execution_state,
             ExecutionState::None,
