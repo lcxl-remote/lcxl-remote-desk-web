@@ -1723,6 +1723,18 @@ export type ModelProviderPublic = {
     */
     max_context_bytes?: number | null;
     /**
+     * @minLength 1
+     * @maxLength 50
+     * @type integer, int32
+    */
+    max_same_tool_calls_per_turn: number;
+    /**
+     * @minLength 1
+     * @maxLength 50
+     * @type integer, int32
+    */
+    max_steps_per_turn: number;
+    /**
      * @type string,null
     */
     model?: string | null;
@@ -1756,6 +1768,20 @@ export type ModelProviderUpdate = {
      * @type integer,null, int64
     */
     max_context_bytes?: number | null;
+    /**
+     * @description Per-turn cap for calls to the same tool name. Valid range: 1..=50.
+     * @minLength 1
+     * @maxLength 50
+     * @type integer,null, int32
+    */
+    max_same_tool_calls_per_turn?: number | null;
+    /**
+     * @description Per-turn model reasoning-round budget. Must be at least the same-tool\nrepeat limit. Valid range: 1..=50.
+     * @minLength 1
+     * @maxLength 50
+     * @type integer,null, int32
+    */
+    max_steps_per_turn?: number | null;
     /**
      * @type string,null
     */
@@ -2395,6 +2421,18 @@ export type RestResponseModelProviderPublic = {
          * @type integer,null, int64
         */
         max_context_bytes?: number | null;
+        /**
+         * @minLength 1
+         * @maxLength 50
+         * @type integer, int32
+        */
+        max_same_tool_calls_per_turn: number;
+        /**
+         * @minLength 1
+         * @maxLength 50
+         * @type integer, int32
+        */
+        max_steps_per_turn: number;
         /**
          * @type string,null
         */

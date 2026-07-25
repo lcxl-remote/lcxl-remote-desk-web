@@ -161,6 +161,12 @@ export const router = createBrowserRouter([
                             Component: (await import('@/features/settings/ai-model-settings')).AiModelSettings,
                         }),
                     },
+                    {
+                        path: 'ai-policy',
+                        lazy: async () => ({
+                            Component: (await import('@/features/settings/ai-policy-settings')).AiPolicySettings,
+                        }),
+                    },
                 ]
             },
             {

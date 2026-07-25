@@ -63,7 +63,46 @@ pub async fn update_model_provider(
 ) -> Result<HttpResponse, DeskSignalError> {
     let db = crate::db::get_db();
     let mut config = model_provider::load(db).await?;
-    config.apply_update(body.into_inner());
+    let update = body.into_inner();
+    if let Some(limit) = update.max_steps_per_turn
+        && !(model_provider::MAX_STEPS_MIN..=model_provider::MAX_STEPS_MAX).contains(&limit)
+    {
+        return Err(DeskSignalError::new_custom_error(
+            DeskErrorCode::INVALID_PARAMS,
+            &format!(
+                "max_steps_per_turn must be between {} and {}",
+                model_provider::MAX_STEPS_MIN,
+                model_provider::MAX_STEPS_MAX
+            ),
+        ));
+    }
+    if let Some(limit) = update.max_same_tool_calls_per_turn
+        && !(model_provider::MAX_SAME_TOOL_CALLS_MIN..=model_provider::MAX_SAME_TOOL_CALLS_MAX)
+            .contains(&limit)
+    {
+        return Err(DeskSignalError::new_custom_error(
+            DeskErrorCode::INVALID_PARAMS,
+            &format!(
+                "max_same_tool_calls_per_turn must be between {} and {}",
+                model_provider::MAX_SAME_TOOL_CALLS_MIN,
+                model_provider::MAX_SAME_TOOL_CALLS_MAX
+            ),
+        ));
+    }
+    let next_max_steps = update
+        .max_steps_per_turn
+        .unwrap_or(config.max_steps_per_turn);
+    let next_same_tool_limit = update
+        .max_same_tool_calls_per_turn
+        .unwrap_or(config.max_same_tool_calls_per_turn);
+    if !model_provider::step_budget_covers_same_tool_limit(next_max_steps, next_same_tool_limit) {
+        return Err(DeskSignalError::new_custom_error(
+            DeskErrorCode::INVALID_PARAMS,
+            "max_steps_per_turn must be greater than or equal to \
+             max_same_tool_calls_per_turn",
+        ));
+    }
+    config.apply_update(update);
     // Write-time SSRF check: reject a base_url whose scheme or IP-literal host is
     // not permitted by the active mode. Domain hosts pass here and are re-checked
     // authoritatively at dial time by the connect-time resolver. An unset base_url

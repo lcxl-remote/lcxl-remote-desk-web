@@ -149,10 +149,16 @@ pub(super) async fn handle_confirm_exec_inbound(
     // the manager's built-in-minus-disabled ∪ custom set on a fleet link).
     let operator_templates = ctx.command_templates.snapshot();
     let effective_blocklist = ctx.command_blocklist.snapshot();
-    let outcome = crate::exec::classify_command_with_all(
+    let admission_policy = ctx
+        .inbound_authz
+        .as_ref()
+        .map(|authz| authz.exec_admission_policy)
+        .unwrap_or_default();
+    let outcome = crate::exec::classify_command_with_policy(
         &exec_input,
         &operator_templates,
         &effective_blocklist,
+        admission_policy,
     );
     let classification = outcome.classification;
 
@@ -287,6 +293,7 @@ pub(super) async fn handle_confirm_exec_inbound(
     {
         let capability = OperationInput::required_capability(&classification).map(|c| c.as_str());
         let risk = classification.risk;
+        let execution_basis = draft.execution_basis;
 
         // On a manager link the ConfirmExec frame request_id is the PDP's
         // authorization-ledger key; carry it through the whole exec lifecycle so
@@ -352,6 +359,7 @@ pub(super) async fn handle_confirm_exec_inbound(
                 cwd,
                 timeout_ms: limits.timeout_ms,
                 risk: classification.risk,
+                execution_basis,
                 impact: classification.impact,
                 policy_note: classification
                     .matched_template
@@ -369,6 +377,9 @@ pub(super) async fn handle_confirm_exec_inbound(
         // `session_template` (when present) is carried so that approving this
         // preview grants the template for the rest of the session.
         let exec_request_id = ctx.exec_approvals.insert(
+            exec_input,
+            admission_policy,
+            execution_mode,
             draft,
             classification.clone(),
             connection_id,
@@ -395,6 +406,7 @@ pub(super) async fn handle_confirm_exec_inbound(
             cwd,
             timeout_ms: limits.timeout_ms,
             risk: classification.risk,
+            execution_basis,
             impact: classification.impact,
             policy_note: classification
                 .matched_template
@@ -529,20 +541,6 @@ pub(super) async fn handle_resolve_exec_inbound(
     use crate::daemon::exec_approval::TakeOutcome;
     use desk_agent_protocol::exec::ApprovalDecision;
 
-    // Agentic (model-initiated) exec: the loop is awaiting this decision through the
-    // coordinator. If it matches, deliver the decision and stop — the agentic seam
-    // drives dispatch itself, so it must not also run the browser-initiated
-    // park/consume flow below. The command's completion is audited on the worker
-    // `ExecResult` round-trip (the `command_completed` event); approval-event audit
-    // parity with the browser flow is a follow-up (the manager runtime records the
-    // full approval lifecycle in its durable work-item audit).
-    if ctx.agentic_exec.resolve_approval(
-        &data.exec_request_id.0,
-        matches!(data.decision, ApprovalDecision::Approve),
-    ) {
-        return Ok(());
-    }
-
     // Approve / reject are bound to the connection that requested the preview.
     let outcome = ctx
         .exec_approvals
@@ -608,6 +606,66 @@ pub(super) async fn handle_resolve_exec_inbound(
                     return Ok(());
                 }
             };
+
+            // Rebuild against the latest local snapshots before minting an
+            // approval token. The stored central mode may only be narrowed by
+            // the current device-local ceiling; it can never be widened here.
+            let local_mode = ctx.settings.read().await.ai_policy.execution_mode;
+            let current_mode = consumed.execution_mode.restrict_to(local_mode);
+            let mode_allows = match (
+                consumed.classification.decision,
+                consumed.classification.effect,
+                current_mode,
+            ) {
+                (ExecDecision::ConfirmRequired, _, ExecutionMode::SuggestOnly) => false,
+                (
+                    ExecDecision::ConfirmRequired,
+                    Some(ExecEffect::Mutating),
+                    ExecutionMode::ReadOnly,
+                ) => false,
+                (ExecDecision::ConfirmRequired, _, ExecutionMode::Automated) => false,
+                (ExecDecision::ConfirmRequired, _, _) => true,
+                _ => false,
+            };
+            let operator_templates = ctx.command_templates.snapshot();
+            let effective_blocklist = ctx.command_blocklist.snapshot();
+            let rebuilt = crate::exec::classify_command_with_policy(
+                &consumed.input,
+                &operator_templates,
+                &effective_blocklist,
+                consumed.admission_policy,
+            );
+            let draft_matches = rebuilt.draft.as_ref() == Some(&consumed.draft);
+            if !mode_allows || rebuilt.classification != consumed.classification || !draft_matches {
+                let audit_source = consumed.source_request_id.as_deref();
+                ctx.audit
+                    .record(
+                        AuditEvent::capability_denied(
+                            new_audit_event_id(),
+                            audit_now(),
+                            &data.exec_request_id.0,
+                            risk_str(consumed.classification.risk),
+                            "execution policy changed after preview".to_string(),
+                        )
+                        .with_task_id(audit_source),
+                    )
+                    .await;
+                send_exec_result(
+                    &ctx.outbound_tx,
+                    &request_id,
+                    to,
+                    ExecResultPayload {
+                        exec_request_id: data.exec_request_id,
+                        outcome: AgentOutcome::Err(agent_error(
+                            AgentErrorKind::PermissionDenied,
+                            "execution policy changed; preview the command again",
+                            false,
+                            true,
+                        )),
+                    },
+                );
+                return Ok(());
+            }
 
             let capability =
                 OperationInput::required_capability(&consumed.classification).map(|c| c.as_str());
@@ -837,6 +895,7 @@ pub(super) fn plan_matches_draft(
     expected.program == plan.program
         && expected.argv == plan.argv
         && expected.risk == plan.risk
+        && expected.execution_basis == plan.execution_basis
         && expected.shell == plan.shell
         && expected.cwd == plan.cwd
         && expected.template_id == plan.template_id
@@ -844,6 +903,7 @@ pub(super) fn plan_matches_draft(
         && expected.max_stdout_bytes == plan.max_stdout_bytes
         && expected.max_stderr_bytes == plan.max_stderr_bytes
         && expected.fingerprint == plan.fingerprint
+        && expected.containment == plan.containment
 }
 
 /// Source-agnostic PEP checks that every sealed [`ExecPlan`] must pass regardless
@@ -878,7 +938,7 @@ pub(super) fn pep_common_checks(
     // Enforcement-tier fail-closed: a plan that demands native-hard containment must
     // not spawn on a host that can only provide the baseline tier. This runs before
     // dispatch (the reason surfaces as RejectedBeforeDispatch), so the host never
-    // silently downgrades — the manager only ever learns the command ran under the
+    // silently downgrades — the trusted central only ever learns the command ran under the
     // tier it required, or that it was refused.
     if plan.containment.required_enforcement
         == desk_agent_protocol::exec::RequiredEnforcement::NativeHard
@@ -890,8 +950,8 @@ pub(super) fn pep_common_checks(
     None
 }
 
-/// Re-validate a manager-sealed **fleet** [`ExecPlan`] against this daemon's own
-/// view (defense in depth — the manager draft is never trusted). Returns the
+/// Re-validate a trusted-central-sealed **fleet** [`ExecPlan`] against this daemon's
+/// own view (defense in depth — the central draft is never trusted). Returns the
 /// model-safe rejection reason on the first failure, or `None` when the plan
 /// passes. Order: common checks (blocklist, risk ceiling) → exact-argv whitelist
 /// + fingerprint.
@@ -914,6 +974,9 @@ pub(super) fn validate_fleet_edge_exec(
     templates: &[desk_agent_protocol::command_template::SyncedCommandTemplate],
     blocklist: &[desk_agent_protocol::command_blocklist::BlocklistRule],
 ) -> Option<String> {
+    if plan.execution_basis != desk_agent_protocol::exec::ExecExecutionBasis::Template {
+        return Some("pep_rejected:fleet_requires_template_basis".to_string());
+    }
     if let Some(reason) = pep_common_checks(plan, max_risk, blocklist) {
         return Some(reason);
     }
@@ -948,23 +1011,21 @@ pub(super) fn validate_fleet_edge_exec(
     None
 }
 
-/// Re-validate a manager-sealed **agentic** [`ExecPlan`] by re-running the shared
-/// command classifier over the daemon-only `validation_input` envelope. Returns
-/// the model-safe rejection reason on the first failure, or `None` when the plan
-/// passes. Order: common checks (blocklist, risk ceiling) → re-classification.
+/// Re-validate a trusted-central-sealed **agentic** [`ExecPlan`] by re-running the
+/// shared command classifier over the daemon-only `validation_input` envelope.
+/// Returns the model-safe rejection reason on the first failure, or `None` when
+/// the plan passes. Order: common checks (blocklist, risk ceiling) →
+/// re-classification.
 ///
-/// The agentic plan was sealed at the manager from a per-turn classification of
+/// The agentic plan was sealed at the trusted central from a per-turn classification of
 /// this exact input (built-in **or** operator template, clamped per-turn limits +
 /// the input's cwd), which the fixed fleet render cannot reproduce. So instead of
 /// re-rendering a template with fleet defaults, the daemon feeds `validation_input`
-/// back through [`classify_command_with_all`] with its own operator snapshot and
-/// effective blocklist — the same function, the same tables the manager used — and
+/// back through the policy-aware classifier with its own operator snapshot and
+/// effective blocklist — the same function and tables the central used — and
 /// requires the result to be `ConfirmRequired` with a draft that reproduces the
-/// sealed plan field-for-field. This naturally covers both the built-in and
-/// operator template families and the per-turn clamped limits / cwd, and it makes
-/// an in-bounds limit tamper detectable: the classifier re-derives the limits from
-/// the input, so a plan whose limits were altered away from what the input yields
-/// no longer matches.
+/// sealed plan field-for-field. This naturally covers templates and the explicit
+/// owner-interactive free-form basis, along with per-turn clamped limits / cwd.
 ///
 /// Honest boundary: this defeats a tamper that alters only the sealed plan's
 /// **executable / classification draft fields** (program, argv, cwd, shell, risk,
@@ -972,25 +1033,34 @@ pub(super) fn validate_fleet_edge_exec(
 /// It does not by itself vouch for the two id fields that are not on the draft
 /// (`exec_request_id`, `approval_id`); those are bound separately in
 /// [`handle_edge_exec_request_inbound`] (frame-id match + non-empty approval token),
-/// and their values remain transport-trusted manager metadata, not an independent
-/// cryptographic commitment. Nor is it a commitment against a manager that alters
-/// `validation_input` and `plan` in lockstep — that is the same trust level as the
-/// fleet path, where the manager is the PDP.
+/// and their values remain transport-trusted central metadata, not an independent
+/// cryptographic commitment. The edge trusts the central stamp to mean that the
+/// central consumed a one-shot approval; it does not independently prove that UI
+/// event. Nor is this a commitment against a central that alters
+/// `validation_input` and `plan` in lockstep — manager and the owner's OSS signal
+/// are both trusted PDPs in their respective deployments.
 pub(super) fn validate_agentic_edge_exec(
     plan: &ExecPlan,
     validation_input: &desk_agent_protocol::ExecInput,
+    admission_policy: desk_agent_protocol::authz::ExecAdmissionPolicy,
     max_risk: desk_agent_protocol::RiskLevel,
     templates: &[desk_agent_protocol::command_template::SyncedCommandTemplate],
     blocklist: &[desk_agent_protocol::command_blocklist::BlocklistRule],
 ) -> Option<String> {
+    if plan.execution_basis == desk_agent_protocol::exec::ExecExecutionBasis::OwnerBlocklistOnly
+        && admission_policy != desk_agent_protocol::authz::ExecAdmissionPolicy::OwnerInteractive
+    {
+        return Some("pep_rejected:owner_basis_without_owner_policy".to_string());
+    }
     if let Some(reason) = pep_common_checks(plan, max_risk, blocklist) {
         return Some(reason);
     }
 
-    let outcome = desk_diagnose_core::exec_classify::classify_command_with_all(
+    let outcome = desk_diagnose_core::exec_classify::classify_command_with_policy(
         validation_input,
         templates,
         blocklist,
+        admission_policy,
     );
     if outcome.classification.decision != ExecDecision::ConfirmRequired {
         return Some("pep_rejected:agentic_not_executable".to_string());

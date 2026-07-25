@@ -1,4 +1,4 @@
-//! Whitelist command templates — the **only** source of executable commands.
+//! Whitelist command templates and shared deterministic shell renderers.
 //!
 //! Each template is a fixed token pattern (literals + typed parameter slots)
 //! plus a renderer that produces the canonical `(program, argv)`. Matching is on
@@ -96,9 +96,9 @@ pub struct Template {
 /// Wrap a fixed PowerShell command line as a non-interactive `-Command`
 /// invocation. The command line is built only from literal text and
 /// pre-validated values, so it carries no shell metacharacters.
-fn powershell(command: String) -> (String, Vec<String>) {
+pub(super) fn powershell_command(program: &str, command: String) -> (String, Vec<String>) {
     (
-        "powershell".to_string(),
+        program.to_string(),
         vec![
             "-NoProfile".to_string(),
             "-NonInteractive".to_string(),
@@ -106,6 +106,10 @@ fn powershell(command: String) -> (String, Vec<String>) {
             command,
         ],
     )
+}
+
+fn powershell(command: String) -> (String, Vec<String>) {
+    powershell_command("powershell", command)
 }
 
 fn render_get_service(b: &[String]) -> (String, Vec<String>) {

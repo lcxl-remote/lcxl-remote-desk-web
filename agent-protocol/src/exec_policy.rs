@@ -21,7 +21,7 @@ use std::sync::LazyLock;
 use crate::ExecInput;
 use crate::command_blocklist::{BlocklistMatcher, BlocklistRule, blocklist_match};
 use crate::command_template::SyncedCommandTemplate;
-use crate::exec::{ExecContainmentSnapshot, ExecPlanDraft, ExecShellKind};
+use crate::exec::{ExecContainmentSnapshot, ExecExecutionBasis, ExecPlanDraft, ExecShellKind};
 
 // ============================ Execution limits ============================
 
@@ -193,6 +193,7 @@ pub fn build_exact_argv_draft(
         // Operator argv is executed as a direct spawn (no shell wrapping).
         shell: ExecShellKind::Native,
         risk: template.risk(),
+        execution_basis: ExecExecutionBasis::Template,
         template_id: template.template_id.clone(),
         fingerprint,
         timeout_ms,

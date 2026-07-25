@@ -213,16 +213,16 @@ pub fn build_messages(
 
     // Advertise the executable command catalog (when execution is enabled) so the
     // model prefers forms the server can actually run. The forms must be emitted
-    // verbatim — the server only runs commands that match a whitelist template
-    // exactly, so any extra flag / pipe / formatting makes the command advisory
-    // only. An empty list (suggest-only mode) appends nothing.
+    // verbatim so they take the lower-risk template path. Owner-only free-form
+    // execution remains possible, but is always Critical and explicitly approved.
+    // An empty list (suggest-only mode) appends nothing.
     if !executable_commands.is_empty() {
         system_text.push_str(
             "\n\nEXECUTABLE COMMANDS — these command forms can be run on the device \
              after the user explicitly approves each one. When a fix calls for one \
              of them, put it in `commands` using the EXACT form shown (substitute \
              only the <placeholder>; add no extra flags, pipes, redirection, \
-             quoting, or formatting). Any other command is advisory only:\n",
+             quoting, or formatting):\n",
         );
         for line in executable_commands {
             system_text.push_str("- ");

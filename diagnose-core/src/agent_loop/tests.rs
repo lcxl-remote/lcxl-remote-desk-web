@@ -174,6 +174,7 @@ fn deps<'a>(
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
         max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
+        max_same_tool_per_turn: crate::MAX_SAME_TOOL_PER_TURN,
         clock,
         heartbeat: None,
     }
@@ -236,14 +237,13 @@ async fn runs_read_tool_then_answers() {
     let clock = || "t".to_string();
     let mut sink = Collector(Rc::new(RefCell::new(String::new())));
     let user = ChatMessage::text("u", ChatRole::User, "q");
-    let outcome = run_agent_turn(
-        &deps(&sess, &model, &tools, &reg, &clock),
-        claim(),
-        user,
-        &mut sink,
-    )
-    .await
-    .unwrap();
+    let deps = LoopDeps {
+        max_steps_per_turn: crate::MAX_SAME_TOOL_PER_TURN + 2,
+        ..deps(&sess, &model, &tools, &reg, &clock)
+    };
+    let outcome = run_agent_turn(&deps, claim(), user, &mut sink)
+        .await
+        .unwrap();
 
     assert_eq!(outcome, LoopOutcome::Answered("done".into()));
     assert_eq!(*tools.calls.borrow(), vec!["sysinfo"]);
@@ -409,9 +409,10 @@ async fn tight_step_budget_circuit_breaks_at_two() {
 #[tokio::test]
 async fn same_tool_repeat_circuit_breaks() {
     let sess = MemSession::default();
-    let turns: std::collections::VecDeque<_> = (0..crate::MAX_STEPS_PER_TURN + 5)
+    let mut turns: std::collections::VecDeque<_> = (0..=crate::MAX_SAME_TOOL_PER_TURN)
         .map(|i| tool_use(&format!("c{i}"), "sysinfo"))
         .collect();
+    turns.push_back(answer("continued"));
     let model = ScriptModel {
         turns: RefCell::new(turns),
         requests: Rc::new(RefCell::new(vec![])),
@@ -424,14 +425,13 @@ async fn same_tool_repeat_circuit_breaks() {
     let clock = || "t".to_string();
     let mut sink = Collector(Rc::new(RefCell::new(String::new())));
     let user = ChatMessage::text("u", ChatRole::User, "q");
-    let outcome = run_agent_turn(
-        &deps(&sess, &model, &tools, &reg, &clock),
-        claim(),
-        user,
-        &mut sink,
-    )
-    .await
-    .unwrap();
+    let deps = LoopDeps {
+        max_steps_per_turn: crate::MAX_SAME_TOOL_PER_TURN + 2,
+        ..deps(&sess, &model, &tools, &reg, &clock)
+    };
+    let outcome = run_agent_turn(&deps, claim(), user, &mut sink)
+        .await
+        .unwrap();
     assert_eq!(
         outcome,
         LoopOutcome::CircuitBreak(CircuitBreakReason::SameToolRepeat)
@@ -441,6 +441,35 @@ async fn same_tool_repeat_circuit_breaks() {
         tools.calls.borrow().len(),
         crate::MAX_SAME_TOOL_PER_TURN as usize
     );
+
+    // The skipped over-limit call receives a synthetic result, leaving a valid
+    // conversation that a user can continue in the next turn.
+    let persisted = sess.inner.borrow();
+    let last = persisted
+        .as_ref()
+        .unwrap()
+        .conversation
+        .last()
+        .expect("synthetic result persisted");
+    assert_eq!(last.role, ChatRole::Tool);
+    let expected_call_id = format!("c{}", crate::MAX_SAME_TOOL_PER_TURN);
+    assert_eq!(
+        last.tool_call_id.as_deref(),
+        Some(expected_call_id.as_str())
+    );
+    drop(persisted);
+
+    let mut continuation = claim();
+    continuation.turn_id = "turn-continued".into();
+    let continued = run_agent_turn(
+        &deps,
+        continuation,
+        ChatMessage::text("u2", ChatRole::User, "continue"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(continued, LoopOutcome::Answered("continued".into()));
 }
 
 /// A protocol violation (EndTurn carrying tool calls) is surfaced and settles
@@ -775,6 +804,7 @@ fn exec_deps<'a>(
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
         max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
+        max_same_tool_per_turn: crate::MAX_SAME_TOOL_PER_TURN,
         clock,
         heartbeat: None,
     }
@@ -1538,6 +1568,7 @@ async fn mutating_backend_error_fails_turn() {
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
         max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
+        max_same_tool_per_turn: crate::MAX_SAME_TOOL_PER_TURN,
         clock: &clock,
         heartbeat: None,
     };

@@ -20,6 +20,7 @@ export const AGENT_ERROR_CODE = {
     COPILOT_PROTOCOL_VIOLATION: 59,
     COPILOT_TURN_BUSY: 60,
     COPILOT_SUBJECT_MISMATCH: 61,
+    AGENT_SAME_TOOL_REPEAT_LIMIT: 70,
 } as const;
 
 /** Codes with a dedicated localized message. */
@@ -31,6 +32,7 @@ const CODE_TO_KEY: Record<number, string> = {
     [AGENT_ERROR_CODE.COPILOT_PROTOCOL_VIOLATION]: 'pages.agentError.copilotProtocolViolation',
     [AGENT_ERROR_CODE.COPILOT_TURN_BUSY]: 'pages.agentError.copilotTurnBusy',
     [AGENT_ERROR_CODE.COPILOT_SUBJECT_MISMATCH]: 'pages.agentError.copilotSubjectMismatch',
+    [AGENT_ERROR_CODE.AGENT_SAME_TOOL_REPEAT_LIMIT]: 'pages.agentError.sameToolRepeatLimit',
 };
 
 /**

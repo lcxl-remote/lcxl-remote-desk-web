@@ -14,6 +14,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { AiGeneratedMark } from "@/components/ai-generated-mark"
+import { agentErrorMessage } from "@/lib/agent-error-i18n"
 import {
     type Confidence,
     type DiagnoseHistoryTurn,
@@ -197,6 +198,11 @@ export function AgenticExecApproval({
                 {preview.command}
             </pre>
             <div className="text-xs text-white/80">{preview.impact}</div>
+            {preview.execution_basis === "owner_blocklist_only" && (
+                <div className="rounded border border-red-500/50 bg-red-950/40 p-1.5 text-[11px] font-medium text-red-200">
+                    {t("pages.desk.diagnose.exec.freeformWarning")}
+                </div>
+            )}
             {preview.policy_note && (
                 <div className="text-[10px] text-white/50">{preview.policy_note}</div>
             )}
@@ -206,6 +212,7 @@ export function AgenticExecApproval({
             </div>
             <div className="mt-1 flex gap-2">
                 <Button
+                    type="button"
                     size="sm"
                     className="h-7 flex-1 bg-red-600 text-xs hover:bg-red-700"
                     onClick={onApprove}
@@ -214,6 +221,7 @@ export function AgenticExecApproval({
                     {t("pages.desk.diagnose.exec.approve")}
                 </Button>
                 <Button
+                    type="button"
                     size="sm"
                     variant="ghost"
                     className="h-7 flex-1 text-xs"
@@ -253,7 +261,9 @@ export function ConversationHistory({ turns }: { turns: DiagnoseHistoryTurn[] })
             {turns.map((turn) => {
                 const aiReply =
                     turn.answer ?? turn.result?.summary ?? turn.summary
-                const reply = turn.error ? turn.error : aiReply
+                const localizedError = turn.error
+                    ? agentErrorMessage(t, turn.errorCode, turn.error, turn.error)
+                    : null
                 return (
                     <div key={turn.requestId} className="flex flex-col gap-1.5">
                         <QuestionBubble question={turn.question} />
@@ -261,24 +271,28 @@ export function ConversationHistory({ turns }: { turns: DiagnoseHistoryTurn[] })
                             answer, mirroring the live turn. Driven by an AI
                             reply being present, not by provenance (fail-closed);
                             an error turn carries no AI content, so no marking. */}
-                        {turn.phase === "done" && aiReply && (
+                        {aiReply && (
                             <AiGeneratedMark
                                 provenance={turn.provenance}
                                 className="self-start border-white/25 bg-white/10 text-white/80"
                             />
                         )}
-                        <div
-                            className={`max-w-[90%] self-start whitespace-pre-wrap rounded-lg rounded-bl-sm px-2.5 py-1.5 text-xs ${
-                                turn.phase === "error"
-                                    ? "bg-red-500/15 text-red-200"
-                                    : "bg-white/10 text-white/80"
-                            }`}
-                        >
-                            {reply ||
-                                t(
-                                    "pages.desk.diagnose.handedOff",
-                                )}
-                        </div>
+                        {aiReply && (
+                            <div className="max-w-[90%] self-start whitespace-pre-wrap rounded-lg rounded-bl-sm bg-white/10 px-2.5 py-1.5 text-xs text-white/80">
+                                {aiReply}
+                            </div>
+                        )}
+                        <ToolTimeline tools={turn.tools} />
+                        {localizedError && (
+                            <div className="max-w-[90%] self-start whitespace-pre-wrap rounded-lg rounded-bl-sm bg-red-500/15 px-2.5 py-1.5 text-xs text-red-200">
+                                {localizedError}
+                            </div>
+                        )}
+                        {!aiReply && !localizedError && (
+                            <div className="max-w-[90%] self-start whitespace-pre-wrap rounded-lg rounded-bl-sm bg-white/10 px-2.5 py-1.5 text-xs text-white/80">
+                                {t("pages.desk.diagnose.handedOff")}
+                            </div>
+                        )}
                     </div>
                 )
             })}

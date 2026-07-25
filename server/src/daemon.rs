@@ -1,4 +1,3 @@
-pub mod agentic_exec;
 pub mod bitrate_controller;
 pub mod codec_negotiation;
 pub mod command_blocklist;

@@ -88,6 +88,9 @@ pub struct LoopDeps<'a> {
     /// [`crate::MAX_STEPS_PER_TURN`]; the latency-sensitive terminal copilot
     /// passes a tighter bound.
     pub max_steps_per_turn: u32,
+    /// Per-turn cap for calls to the same tool. Kept independent of the total
+    /// step budget because one model response may request multiple tools.
+    pub max_same_tool_per_turn: u32,
     /// Wall-clock source (RFC3339); the core stays free of a time dependency.
     pub clock: &'a dyn Fn() -> String,
     /// Optional background lease renewer. After the turn is claimed the loop starts
@@ -261,7 +264,7 @@ async fn run_inner(
                 // times out, or goes to an unknown outcome, the rest of the turn's
                 // calls are not executed (§3). `halted` holds the skip note.
                 let mut halted: Option<String> = None;
-                for call in &turn.tool_calls {
+                for (call_index, call) in turn.tool_calls.iter().enumerate() {
                     if let Some(note) = &halted {
                         session.conversation.push(ChatMessage::tool_result(
                             mint(),
@@ -274,7 +277,21 @@ async fn run_inner(
                     // Same-tool repeat circuit breaker.
                     let count = same_tool.entry(call.name.clone()).or_insert(0);
                     *count += 1;
-                    if *count > crate::MAX_SAME_TOOL_PER_TURN {
+                    if *count > deps.max_same_tool_per_turn {
+                        // Keep the persisted conversation valid for a follow-up:
+                        // every tool call in the assistant message must have a
+                        // corresponding result, including calls skipped by this
+                        // circuit breaker.
+                        for skipped in &turn.tool_calls[call_index..] {
+                            session.conversation.push(ChatMessage::tool_result(
+                                mint(),
+                                &skipped.id,
+                                format!(
+                                    "tool `{}` was not run because the per-turn repeat limit was reached",
+                                    skipped.name
+                                ),
+                            ));
+                        }
                         deps.session_seam.save(session).await?;
                         return Ok(LoopOutcome::CircuitBreak(
                             CircuitBreakReason::SameToolRepeat,

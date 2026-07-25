@@ -18,6 +18,7 @@
 use desk_agent_protocol::diagnose::DiagnoseEvent;
 use desk_agent_protocol::provenance::AiProvenance;
 use desk_agent_protocol::{AgentError, AgentErrorKind};
+use desk_utils::error::DeskErrorCode;
 
 use crate::agent_loop::{CircuitBreakReason, LoopOutcome};
 use crate::seam::TurnSink;
@@ -55,10 +56,17 @@ pub struct StreamingTurnSink<S> {
 impl<S: DiagnoseFrameSink> StreamingTurnSink<S> {
     /// Build a sink streaming a single diagnose request's frames to `sink`.
     pub fn new(sink: S, request_id: impl Into<String>) -> Self {
+        Self::starting_at(sink, request_id, 0)
+    }
+
+    /// Build a sink whose first emitted frame uses `initial_seq`. Runtimes that
+    /// emitted collection/modeling status frames before entering the shared loop
+    /// use this to preserve one monotonic request stream.
+    pub fn starting_at(sink: S, request_id: impl Into<String>, initial_seq: u32) -> Self {
         Self {
             sink,
             request_id: request_id.into(),
-            seq: 0,
+            seq: initial_seq,
             terminated: false,
             provenance: None,
         }
@@ -203,23 +211,25 @@ pub fn terminal_error_for(outcome: &LoopOutcome) -> Option<AgentError> {
             message: "the model response was truncated before it finished; please retry".into(),
             retryable: true,
             safe_for_model: true,
-            error_code: None,
+            error_code: Some(DeskErrorCode::COPILOT_RESPONSE_TRUNCATED.code()),
         },
         LoopOutcome::CircuitBreak(reason) => {
-            let message = match reason {
-                CircuitBreakReason::StepBudget => {
-                    "the assistant stopped after too many steps without reaching an answer"
-                }
-                CircuitBreakReason::SameToolRepeat => {
-                    "the assistant stopped after repeating the same action too many times"
-                }
+            let (message, error_code) = match reason {
+                CircuitBreakReason::StepBudget => (
+                    "the assistant stopped after too many steps without reaching an answer",
+                    DeskErrorCode::COPILOT_STEP_LIMIT_EXCEEDED,
+                ),
+                CircuitBreakReason::SameToolRepeat => (
+                    "the assistant stopped after repeating the same action too many times",
+                    DeskErrorCode::AGENT_SAME_TOOL_REPEAT_LIMIT,
+                ),
             };
             AgentError {
                 kind: AgentErrorKind::Internal,
                 message: message.into(),
                 retryable: false,
                 safe_for_model: true,
-                error_code: None,
+                error_code: Some(error_code.code()),
             }
         }
         LoopOutcome::ProtocolError(_) => AgentError {
@@ -227,21 +237,21 @@ pub fn terminal_error_for(outcome: &LoopOutcome) -> Option<AgentError> {
             message: "the model returned an invalid response".into(),
             retryable: true,
             safe_for_model: true,
-            error_code: None,
+            error_code: Some(DeskErrorCode::COPILOT_PROTOCOL_VIOLATION.code()),
         },
         LoopOutcome::TurnBusy => AgentError {
             kind: AgentErrorKind::SessionUnavailable,
             message: "a diagnosis is already running for this conversation".into(),
             retryable: true,
             safe_for_model: true,
-            error_code: None,
+            error_code: Some(DeskErrorCode::COPILOT_TURN_BUSY.code()),
         },
         LoopOutcome::SubjectRejected(_) => AgentError {
             kind: AgentErrorKind::PermissionDenied,
             message: "this conversation belongs to a different user".into(),
             retryable: false,
             safe_for_model: true,
-            error_code: None,
+            error_code: Some(DeskErrorCode::COPILOT_SUBJECT_MISMATCH.code()),
         },
     };
     Some(err)
@@ -425,20 +435,45 @@ mod tests {
         let truncated = terminal_error_for(&LoopOutcome::Truncated).unwrap();
         assert_eq!(truncated.kind, AgentErrorKind::OutputLimitExceeded);
         assert!(truncated.retryable);
+        assert_eq!(
+            truncated.error_code,
+            Some(DeskErrorCode::COPILOT_RESPONSE_TRUNCATED.code())
+        );
 
         let busy = terminal_error_for(&LoopOutcome::TurnBusy).unwrap();
         assert_eq!(busy.kind, AgentErrorKind::SessionUnavailable);
         assert!(busy.retryable);
+        assert_eq!(
+            busy.error_code,
+            Some(DeskErrorCode::COPILOT_TURN_BUSY.code())
+        );
 
         let breaker =
             terminal_error_for(&LoopOutcome::CircuitBreak(CircuitBreakReason::StepBudget)).unwrap();
         assert_eq!(breaker.kind, AgentErrorKind::Internal);
         assert!(!breaker.retryable);
+        assert_eq!(
+            breaker.error_code,
+            Some(DeskErrorCode::COPILOT_STEP_LIMIT_EXCEEDED.code())
+        );
+
+        let repeat = terminal_error_for(&LoopOutcome::CircuitBreak(
+            CircuitBreakReason::SameToolRepeat,
+        ))
+        .unwrap();
+        assert_eq!(
+            repeat.error_code,
+            Some(DeskErrorCode::AGENT_SAME_TOOL_REPEAT_LIMIT.code())
+        );
 
         let subject =
             terminal_error_for(&LoopOutcome::SubjectRejected(SubjectMismatch::Device)).unwrap();
         assert_eq!(subject.kind, AgentErrorKind::PermissionDenied);
         assert!(!subject.retryable);
+        assert_eq!(
+            subject.error_code,
+            Some(DeskErrorCode::COPILOT_SUBJECT_MISMATCH.code())
+        );
     }
 
     /// A turn that starts then truncates: TurnStarted, then the runtime maps the

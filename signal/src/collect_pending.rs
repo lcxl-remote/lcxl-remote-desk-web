@@ -21,9 +21,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use desk_agent_protocol::authz::ExecAdmissionPolicy;
 use desk_agent_protocol::diagnose::{CollectResponseChunk, DiagnoseRequestData};
 use desk_agent_protocol::evidence::EvidenceSnapshot;
-use desk_agent_protocol::{AgentError, AgentErrorKind};
+use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope, RiskLevel};
 use desk_diagnose_core::chunk::SnapshotReassembler;
 
 /// How long the central orchestrator keeps a pending collection before reaping
@@ -47,6 +48,14 @@ pub struct CollectContext {
     /// Signaling connection id of the browser that started the diagnosis (where
     /// the orchestrated result streams back).
     pub browser_connection_id: String,
+    /// Trusted single-account subject used to namespace the durable conversation.
+    pub actor_user_id: i32,
+    /// Stable target client id (not the reconnectable signaling connection id).
+    pub target_device_id: String,
+    /// Central PDP snapshot adopted at the turn boundary.
+    pub scope: AgentScope,
+    pub max_risk: RiskLevel,
+    pub exec_admission_policy: ExecAdmissionPolicy,
     /// The original collection intent (question + context kinds + locale), reused
     /// to build the model prompt once evidence arrives.
     pub request: DiagnoseRequestData,
@@ -247,6 +256,16 @@ mod tests {
             request_id: request_id.to_string(),
             target_connection_id: target.to_string(),
             browser_connection_id: "browser-1".to_string(),
+            actor_user_id: 1,
+            target_device_id: "device-1".to_string(),
+            scope: AgentScope {
+                granted: vec![],
+                mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            max_risk: RiskLevel::Critical,
+            exec_admission_policy: ExecAdmissionPolicy::TemplateOnly,
             request: DiagnoseRequestData::default(),
         }
     }

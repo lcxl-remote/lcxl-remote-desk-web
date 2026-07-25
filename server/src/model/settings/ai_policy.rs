@@ -47,13 +47,13 @@ pub const MAX_MAX_CONCURRENT_EXECUTIONS: u32 = 64;
 #[serde(default)]
 pub struct AiExecutionPolicy {
     /// How far the AI may go in acting on the device. Default `suggest_only`
-    /// (the AI only proposes commands). `read_only` / `confirm_each_action`
-    /// permit confirmed execution of whitelist templates; every real execution
-    /// still requires an explicit per-command user approval. `session_approved`
-    /// additionally lets the first approval of a template stand for the rest of
-    /// the connection's session. `automated` (run without any confirmation) is
-    /// not implemented and is refused. On a central link this caps the centrally
-    /// granted mode; it never widens it.
+    /// (the AI only proposes commands). `read_only` permits only known read-only
+    /// templates. `confirm_each_action` permits confirmed execution, including a
+    /// trusted owner's blocklist-only command; every such command needs explicit
+    /// approval. `session_approved` additionally lets the first approval of a
+    /// template stand for the rest of the connection, but owner free-form remains
+    /// per-command. `automated` is not implemented and is refused. On a central
+    /// link this caps the centrally granted mode; it never widens it.
     pub execution_mode: ExecutionMode,
     /// How many commands may run concurrently on this device, across every
     /// caller.

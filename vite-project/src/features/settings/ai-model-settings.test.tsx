@@ -8,15 +8,10 @@ vi.mock("@/hooks/use-toast", () => ({
     useToast: () => ({ toast: h.toast }),
 }))
 
-// Mutable query payloads + spies on the three update mutations (central model
-// provider, edge execution ceiling, edge collection policy).
+// Mutable central model-provider query payload + update spy.
 const h = vi.hoisted(() => ({
     providerData: {} as Record<string, unknown>,
     providerMutateAsync: vi.fn(async () => ({})),
-    policyData: {} as Record<string, unknown>,
-    policyMutateAsync: vi.fn(async () => ({})),
-    collectionData: {} as Record<string, unknown>,
-    collectionMutateAsync: vi.fn(async () => ({})),
     toast: vi.fn(),
 }))
 
@@ -25,18 +20,6 @@ vi.mock("@/services/hooks/modelProviderController/useGetModelProvider", () => ({
 }))
 vi.mock("@/services/hooks/modelProviderController/useUpdateModelProvider", () => ({
     useUpdateModelProvider: () => ({ mutateAsync: h.providerMutateAsync, isPending: false }),
-}))
-vi.mock("@/services/hooks/aiModelController/useQueryAiPolicySettings", () => ({
-    useQueryAiPolicySettings: () => ({ data: { data: h.policyData }, isLoading: false }),
-}))
-vi.mock("@/services/hooks/aiModelController/useUpdateAiPolicySettings", () => ({
-    useUpdateAiPolicySettings: () => ({ mutateAsync: h.policyMutateAsync, isPending: false }),
-}))
-vi.mock("@/services/hooks/aiModelController/useQueryCollectionPolicySettings", () => ({
-    useQueryCollectionPolicySettings: () => ({ data: { data: h.collectionData }, isLoading: false }),
-}))
-vi.mock("@/services/hooks/aiModelController/useUpdateCollectionPolicySettings", () => ({
-    useUpdateCollectionPolicySettings: () => ({ mutateAsync: h.collectionMutateAsync, isPending: false }),
 }))
 vi.mock("@/services/hooks/modelProviderController/useTestModelProvider", () => ({
     useTestModelProvider: () => ({ mutateAsync: vi.fn(), isPending: false }),
@@ -50,8 +33,6 @@ function lastProviderPayload() {
 
 beforeEach(() => {
     h.providerMutateAsync.mockClear()
-    h.policyMutateAsync.mockClear()
-    h.collectionMutateAsync.mockClear()
     h.toast.mockClear()
     h.providerData = {
         provider: "openai-compatible",
@@ -60,10 +41,10 @@ beforeEach(() => {
         max_context_bytes: 0,
         response_format: "json_schema",
         execution_mode: "read_only",
+        max_steps_per_turn: 20,
+        max_same_tool_calls_per_turn: 10,
         api_key_set: true,
     }
-    h.policyData = { execution_mode: "confirm_each_action" }
-    h.collectionData = { allow_screen: false, allow_logs: true }
 })
 
 describe("AiModelSettings", () => {
@@ -81,6 +62,8 @@ describe("AiModelSettings", () => {
         expect(payload.base_url).toBe("https://api.example/v1")
         // The central grant carries the execution mode.
         expect(payload.execution_mode).toBe("read_only")
+        expect(payload.max_steps_per_turn).toBe(20)
+        expect(payload.max_same_tool_calls_per_turn).toBe(10)
         // The provider form no longer carries the collection policy.
         expect(payload.allow_logs).toBeUndefined()
         expect(payload.allow_screen).toBeUndefined()
@@ -89,31 +72,21 @@ describe("AiModelSettings", () => {
         expect(payload.max_context_bytes).toBeUndefined()
     })
 
-    it("saves the local execution ceiling from its own form, hydrated from its query", async () => {
+    it("rejects a reasoning-round limit below the same-tool limit", async () => {
         render(<AiModelSettings />)
         await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
 
-        // The second "Save Settings" button belongs to the execution-ceiling card.
-        fireEvent.click(screen.getAllByText("Save Settings")[1])
-        await waitFor(() => expect(h.policyMutateAsync).toHaveBeenCalled())
+        fireEvent.change(screen.getByLabelText("Model reasoning rounds per turn"), {
+            target: { value: "9" },
+        })
+        fireEvent.click(screen.getAllByText("Save Settings")[0])
 
-        const payload = (h.policyMutateAsync.mock.calls[0][0] as { data: Record<string, unknown> }).data
-        // Hydrated from policyData (execution_mode: confirm_each_action).
-        expect(payload.execution_mode).toBe("confirm_each_action")
-    })
-
-    it("saves the collection policy from its own form, hydrated from its query", async () => {
-        render(<AiModelSettings />)
-        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
-
-        // The third "Save Settings" button belongs to the collection-policy card.
-        fireEvent.click(screen.getAllByText("Save Settings")[2])
-        await waitFor(() => expect(h.collectionMutateAsync).toHaveBeenCalled())
-
-        const payload = (h.collectionMutateAsync.mock.calls[0][0] as { data: Record<string, unknown> }).data
-        // Hydrated from collectionData (allow_logs: true, allow_screen: false).
-        expect(payload.allow_logs).toBe(true)
-        expect(payload.allow_screen).toBe(false)
+        expect(
+            await screen.findByText(
+                "The model reasoning-round limit cannot be lower than the same-tool call limit.",
+            ),
+        ).toBeInTheDocument()
+        expect(h.providerMutateAsync).not.toHaveBeenCalled()
     })
 
     it("includes a typed api_key in the provider payload", async () => {

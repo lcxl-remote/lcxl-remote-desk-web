@@ -416,11 +416,6 @@ pub struct RouterContext {
     /// `exec_request_id`. Always present (in-memory state); the startup-mode and
     /// execution-mode gates decide whether it is ever populated.
     pub exec_approvals: Arc<crate::daemon::exec_approval::PendingApprovalStore>,
-    /// Await-based coordination for the agentic (model-initiated) exec path: bridges
-    /// the inbound `ResolveExec` decision and the worker's `ExecResult` to the loop's
-    /// awaiting seam (distinct from the browser-initiated `exec_approvals` flow).
-    /// Always present; populated only while an agentic exec is in flight.
-    pub agentic_exec: Arc<crate::daemon::agentic_exec::AgenticExecCoordinator>,
     /// Session-scoped approvals for `ExecutionMode::SessionApproved`, keyed by
     /// the control-end connection. Once a template is confirmed in this mode it
     /// is granted for the rest of that connection's session; releasing control

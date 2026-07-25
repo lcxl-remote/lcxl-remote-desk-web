@@ -83,6 +83,40 @@ impl Drop for ConnectionDeviceGuard {
     }
 }
 
+/// Wakes any owner-confirmed exec waiters bound to a signaling peer when that
+/// peer disconnects. An operator disconnect before approval therefore cannot
+/// leave a command eligible for later dispatch, while a target disconnect wakes
+/// the result waiter into the conservative unknown outcome.
+struct CentralPendingConnectionGuard {
+    pending: Arc<crate::agent_exec::SignalAgentExecPending>,
+    collect_pending: Arc<crate::collect_pending::CollectPendingStore>,
+    connection_map: web::Data<SharedConnectionMap>,
+    connection_id: String,
+}
+
+impl Drop for CentralPendingConnectionGuard {
+    fn drop(&mut self) {
+        self.pending.drain_for_connection(&self.connection_id);
+        let affected = self
+            .collect_pending
+            .drain_for_connection(&self.connection_id);
+        let disconnected = self.connection_id.clone();
+        for ctx in affected {
+            if ctx.browser_connection_id == disconnected {
+                continue;
+            }
+            let connection_map = self.connection_map.clone();
+            actix_web::rt::spawn(async move {
+                crate::diagnose_orchestrator::stream_collection_connection_lost(
+                    connection_map.as_ref(),
+                    ctx,
+                )
+                .await;
+            });
+        }
+    }
+}
+
 /// Resolve the single-account auth context for a connection's adjudicated role on
 /// the OSS signal. Roles are already server-adjudicated upstream (a `Server` only
 /// via a valid node token; everything else via the session cookie), so the auth
@@ -191,6 +225,12 @@ pub async fn handle_signaling(
     // observer that feeds inbound evidence responses back into the diagnosis. Both
     // share the process-global pending store (the portable signal is single-node).
     let collect_pending = crate::diagnose_orchestrator::global_pending_store();
+    let _central_pending_guard = CentralPendingConnectionGuard {
+        pending: crate::agent_exec::global_agent_exec_pending(),
+        collect_pending: collect_pending.clone(),
+        connection_map: connection_map.clone(),
+        connection_id: connection_id.clone(),
+    };
     let control_authorizer =
         std::sync::Arc::new(crate::control_authorizer::SignalControlAuthorizer::new(
             crate::db::get_db().clone(),
@@ -200,6 +240,9 @@ pub async fn handle_signaling(
     let collect_observer = std::sync::Arc::new(
         crate::diagnose_orchestrator::SignalCollectObserver::new(connection_map.clone()),
     );
+    let edge_exec_observer = std::sync::Arc::new(crate::agent_exec::SignalEdgeExecObserver::new(
+        crate::agent_exec::global_agent_exec_pending(),
+    ));
     // The single-account owner is stamped with full control; a code-session
     // (anonymous redeemer) is stamped with the redeemed code's ceiling via the
     // shared grant store. Both share the process-global store so a grant minted at
@@ -236,6 +279,7 @@ pub async fn handle_signaling(
     .with_control_authorizer(control_authorizer)
     .with_request_remote_authorizer(request_remote_authorizer)
     .with_collect_observer(collect_observer)
+    .with_edge_exec_observer(edge_exec_observer)
     .with_remote_access_admission_authorizer(remote_access_control.clone())
     .with_host_remote_access_controller(remote_access_control);
 

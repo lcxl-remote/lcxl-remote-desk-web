@@ -265,6 +265,18 @@ export function DiagnosePanel({
                 {/* Error */}
                 {state.phase === "error" && (
                     <div className="flex flex-col gap-3">
+                        {streamingSummary && (
+                            <div className="flex flex-col gap-2">
+                                <AiGeneratedMark
+                                    provenance={state.provenance}
+                                    className="self-start border-white/25 bg-white/10 text-white/80"
+                                />
+                                <p className="whitespace-pre-wrap text-sm text-white/90">
+                                    {streamingSummary}
+                                </p>
+                            </div>
+                        )}
+                        <ToolTimeline tools={state.tools} />
                         <div className="flex items-start gap-2 text-sm text-red-300">
                             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                             <span>

@@ -566,6 +566,73 @@ pub(super) async fn resolve_exec_reject_consumes_without_result_frame() {
 }
 
 #[tokio::test]
+pub(super) async fn approve_rejects_when_blocklist_changes_after_preview() {
+    let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+    ctx.inbound_authz = Some(owner_authz_block(ExecutionMode::ConfirmEachAction));
+    handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "Get-ChildItem C:\\"))
+        .await
+        .unwrap();
+    let exec_request_id = read_preview(&mut rx).exec_request_id.unwrap();
+
+    route(
+        &command_blocklist_sync_model(
+            vec![custom_blocklist_rule(
+                "custom.get_child_item",
+                "get-childitem",
+            )],
+            Some(1),
+        ),
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    handle_resolve_exec_inbound(
+        &ctx,
+        &resolve_exec_model("r2", exec_request_id, ApprovalDecision::Approve),
+    )
+    .await
+    .unwrap();
+    let result = read_response(&mut rx)
+        .get_data::<ExecResultPayload>()
+        .expect("policy-change ExecResult");
+    match result.outcome {
+        AgentOutcome::Err(error) => {
+            assert_eq!(error.kind, AgentErrorKind::PermissionDenied);
+            assert!(error.message.contains("policy changed"));
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+    assert_eq!(ctx.exec_approvals.len(), 0);
+}
+
+#[tokio::test]
+pub(super) async fn approve_rejects_when_local_mode_tightens_after_preview() {
+    let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+    ctx.inbound_authz = Some(owner_authz_block(ExecutionMode::ConfirmEachAction));
+    handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "Get-ChildItem C:\\"))
+        .await
+        .unwrap();
+    let exec_request_id = read_preview(&mut rx).exec_request_id.unwrap();
+    ctx.settings.write().await.ai_policy.execution_mode = ExecutionMode::SuggestOnly;
+
+    handle_resolve_exec_inbound(
+        &ctx,
+        &resolve_exec_model("r2", exec_request_id, ApprovalDecision::Approve),
+    )
+    .await
+    .unwrap();
+    let result = read_response(&mut rx)
+        .get_data::<ExecResultPayload>()
+        .expect("mode-change ExecResult");
+    assert!(matches!(
+        result.outcome,
+        AgentOutcome::Err(ref error) if error.kind == AgentErrorKind::PermissionDenied
+    ));
+    assert_eq!(ctx.exec_approvals.len(), 0);
+}
+
+#[tokio::test]
 pub(super) async fn agent_request_plane_permanently_rejects_exec() {
     let (ctx, mut rx) = make_ctx_with_rx().await; // Even with execution fully enabled, the raw AgentRequest plane refuses
     // exec — it must go through the confirm flow.
@@ -633,6 +700,7 @@ pub(super) async fn confirm_exec_local_mode_caps_manager_authorization() {
         },
         orchestrator_grants: Vec::new(),
         max_risk: RiskLevel::Critical,
+        exec_admission_policy: desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly,
         actor: AuthzActor { user_id: Some(1) },
         device: AuthzDevice { device_id: Some(1) },
         request_id: "r-exec".to_string(),

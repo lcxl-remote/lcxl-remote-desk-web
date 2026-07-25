@@ -18,7 +18,8 @@
 //! - [`chat`]: provider-agnostic chat / tool-calling contracts (messages, tools,
 //!   model turn, stop-reason validation) the model adapters and agentic loop share.
 //! - [`exec_classify`]: pure exec command classification (blocklist, tokenizer,
-//!   template whitelist) → a [`desk_agent_protocol::exec::CommandClassification`]
+//!   template set, plus the explicit owner-interactive fallback) → a
+//!   [`desk_agent_protocol::exec::CommandClassification`]
 //!   plus a sealed plan draft, shared so both runtimes gate execution identically.
 //! - [`seam`]: the [`ModelSeam`](seam::ModelSeam) the loop calls, abstracting the
 //!   wire dialect.
@@ -49,14 +50,20 @@ pub mod wait_tools;
 /// Default model context budget when `max_context_bytes` is unset (128 KB).
 pub const DEFAULT_MAX_CONTEXT_BYTES: usize = 131_072;
 
-/// Circuit-breaker bound on model→tool steps within a single turn before the loop
-/// stops (turn-level: reset when a turn is claimed). Prevents a prompt-injected or
-/// looping model from driving unbounded tool calls in one turn. The concrete value
-/// is tuned against M1a measurement; the semantics (per-turn, not per-conversation)
-/// are the contract.
-pub const MAX_STEPS_PER_TURN: u32 = 6;
+/// Default circuit-breaker bound on model reasoning rounds within a single turn.
+///
+/// One round is one model response and may request multiple tools; the final
+/// answer also consumes a round. The counter resets when a new user turn is
+/// claimed.
+pub const MAX_STEPS_PER_TURN: u32 = 20;
+pub const MIN_STEPS_PER_TURN: u32 = 1;
+pub const MAX_STEPS_PER_TURN_LIMIT: u32 = 50;
 
 /// Circuit-breaker bound on how many times the **same** tool may be invoked within
 /// a single turn, catching a model stuck re-calling one tool. Turn-level like
-/// [`MAX_STEPS_PER_TURN`].
-pub const MAX_SAME_TOOL_PER_TURN: u32 = 3;
+/// [`MAX_STEPS_PER_TURN`]. Runtimes may expose an operator setting and pass a
+/// value within [`MIN_SAME_TOOL_PER_TURN`]..=[`MAX_SAME_TOOL_PER_TURN_LIMIT`];
+/// this constant is the fallback default.
+pub const MAX_SAME_TOOL_PER_TURN: u32 = 10;
+pub const MIN_SAME_TOOL_PER_TURN: u32 = 1;
+pub const MAX_SAME_TOOL_PER_TURN_LIMIT: u32 = 50;

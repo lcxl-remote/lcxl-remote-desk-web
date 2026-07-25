@@ -11,5 +11,5 @@
 pub use desk_agent_protocol::exec_policy::ExecLimits;
 pub use desk_diagnose_core::exec_classify::{
     ClassifyOutcome, CommandForm, classify_command, classify_command_with,
-    classify_command_with_all, command_forms,
+    classify_command_with_all, classify_command_with_policy, command_forms,
 };

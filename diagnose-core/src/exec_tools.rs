@@ -68,8 +68,9 @@ pub fn exec_tool_registry() -> Vec<RegisteredTool> {
         spec: ToolSpec {
             name: EXEC_TOOL_NAME.to_string(),
             description: "Run a shell command on the device. Requires explicit \
-                operator approval before it executes; only whitelisted commands are \
-                executable."
+                operator approval before it executes. Commands outside a known \
+                template are admitted only for the authenticated device owner, are \
+                always classified Critical, and still pass the server blocklist."
                 .to_string(),
             parameters_schema: json!({
                 "type": "object",

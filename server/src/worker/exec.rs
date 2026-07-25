@@ -617,6 +617,7 @@ mod tests {
             cwd: None,
             shell: ExecShellKind::Native,
             risk: RiskLevel::Low,
+            execution_basis: desk_agent_protocol::exec::ExecExecutionBasis::Template,
             template_id: "test".into(),
             approval_id: desk_agent_protocol::exec::ApprovalId("appr_t".into()),
             fingerprint: "fp".into(),

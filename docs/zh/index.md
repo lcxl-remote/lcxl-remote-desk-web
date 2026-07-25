@@ -19,7 +19,7 @@ hero:
 features:
   - icon: 🤖
     title: AI 原生设计
-    details: 内置只读诊断 Agent，读取设备状态以自然语言排障。服务端是权限的唯一可信源；模型默认只给建议、不执行。
+    details: 内置诊断 Agent 可读取设备状态并提出命令。仅 owner 可在逐命令明确确认后执行；服务端仍是权限与风险的唯一可信源。
     link: /zh/features/ai-diagnostics
     linkText: AI 诊断
   - icon: 🔌

@@ -268,6 +268,7 @@ fn deps<'a>(
         system_prompt: build_agentic_system_message(None),
         max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
+        max_same_tool_per_turn: crate::MAX_SAME_TOOL_PER_TURN,
         clock,
         heartbeat: None,
     }
@@ -519,15 +520,14 @@ async fn acceptance_circuit_breaker_bounds_tool_loop() {
     let reg = vec![read_tool("read_log", Capability::LogRecent)];
     let clock = || "t".to_string();
     let user = ChatMessage::text("u", ChatRole::User, "keep checking");
+    let deps = LoopDeps {
+        max_steps_per_turn: crate::MAX_SAME_TOOL_PER_TURN + 2,
+        ..deps(&sess, &model, &tools, &reg, &clock)
+    };
 
-    let outcome = run_agent_turn(
-        &deps(&sess, &model, &tools, &reg, &clock),
-        claim(read_only_scope()),
-        user,
-        &mut NullTurnSink,
-    )
-    .await
-    .unwrap();
+    let outcome = run_agent_turn(&deps, claim(read_only_scope()), user, &mut NullTurnSink)
+        .await
+        .unwrap();
 
     assert_eq!(
         outcome,

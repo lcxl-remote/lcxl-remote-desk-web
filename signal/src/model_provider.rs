@@ -25,6 +25,17 @@ use utoipa::ToSchema;
 
 use crate::entity::model_provider::{self, SINGLETON_ID};
 
+pub const MAX_STEPS_MIN: u32 = desk_diagnose_core::MIN_STEPS_PER_TURN;
+pub const MAX_STEPS_MAX: u32 = desk_diagnose_core::MAX_STEPS_PER_TURN_LIMIT;
+pub const MAX_STEPS_DEFAULT: u32 = desk_diagnose_core::MAX_STEPS_PER_TURN;
+pub const MAX_SAME_TOOL_CALLS_MIN: u32 = desk_diagnose_core::MIN_SAME_TOOL_PER_TURN;
+pub const MAX_SAME_TOOL_CALLS_MAX: u32 = desk_diagnose_core::MAX_SAME_TOOL_PER_TURN_LIMIT;
+pub const MAX_SAME_TOOL_CALLS_DEFAULT: u32 = desk_diagnose_core::MAX_SAME_TOOL_PER_TURN;
+
+pub fn step_budget_covers_same_tool_limit(max_steps: u32, same_tool_limit: u32) -> bool {
+    max_steps >= same_tool_limit
+}
+
 /// Whether an [`ExecutionMode`] is one the confirm-execute flow supports.
 /// `SessionApproved` / `Automated` are frozen in the protocol enum but not
 /// selectable yet; persisting them is rejected so the stored grant stays in the
@@ -73,7 +84,7 @@ fn enum_from_wire<T: serde::de::DeserializeOwned + Default>(raw: &str) -> T {
 /// defaults).
 ///
 /// `Debug` is implemented by hand so `api_key` is never rendered.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ModelProviderConfig {
     /// Provider identifier, e.g. `"openai-compatible"`.
     pub provider: Option<String>,
@@ -92,6 +103,28 @@ pub struct ModelProviderConfig {
     /// it issues to edges. Edges still apply their own local ceiling on top, so
     /// this is the granted breadth, not the final one.
     pub execution_mode: ExecutionMode,
+    /// Per-turn circuit-breaker cap for calls to one tool name. This is a
+    /// central agent-runtime limit, not an edge command-concurrency limit.
+    pub max_same_tool_calls_per_turn: u32,
+    /// Per-turn model reasoning-round budget. One round may contain multiple
+    /// tool calls and the final answer also consumes a round.
+    pub max_steps_per_turn: u32,
+}
+
+impl Default for ModelProviderConfig {
+    fn default() -> Self {
+        Self {
+            provider: None,
+            model: None,
+            base_url: None,
+            api_key: None,
+            max_context_bytes: None,
+            response_format: ResponseFormatMode::default(),
+            execution_mode: ExecutionMode::default(),
+            max_same_tool_calls_per_turn: MAX_SAME_TOOL_CALLS_DEFAULT,
+            max_steps_per_turn: MAX_STEPS_DEFAULT,
+        }
+    }
 }
 
 impl ModelProviderConfig {
@@ -116,6 +149,8 @@ impl ModelProviderConfig {
             max_context_bytes: self.max_context_bytes,
             response_format: self.response_format,
             execution_mode: self.execution_mode,
+            max_same_tool_calls_per_turn: self.max_same_tool_calls_per_turn,
+            max_steps_per_turn: self.max_steps_per_turn,
             api_key_set: self.api_key_set(),
         }
     }
@@ -144,6 +179,18 @@ impl ModelProviderConfig {
         {
             self.execution_mode = execution_mode;
         }
+        if let Some(limit) = update.max_same_tool_calls_per_turn {
+            self.max_same_tool_calls_per_turn =
+                limit.clamp(MAX_SAME_TOOL_CALLS_MIN, MAX_SAME_TOOL_CALLS_MAX);
+        }
+        if let Some(limit) = update.max_steps_per_turn {
+            self.max_steps_per_turn = limit.clamp(MAX_STEPS_MIN, MAX_STEPS_MAX);
+        }
+        // Keep the cross-field invariant even for non-HTTP callers or legacy
+        // stored values. The API rejects this shape; the domain layer repairs it.
+        self.max_steps_per_turn = self
+            .max_steps_per_turn
+            .max(self.max_same_tool_calls_per_turn);
         match update.api_key {
             None => {}                                          // leave unchanged
             Some(key) if key.is_empty() => self.api_key = None, // clear
@@ -160,6 +207,14 @@ impl ModelProviderConfig {
             max_context_bytes: row.max_context_bytes.map(|v| v.max(0) as u64),
             response_format: enum_from_wire(&row.response_format),
             execution_mode: enum_from_wire(&row.execution_mode),
+            max_same_tool_calls_per_turn: (row.max_same_tool_calls_per_turn.max(0) as u32)
+                .clamp(MAX_SAME_TOOL_CALLS_MIN, MAX_SAME_TOOL_CALLS_MAX),
+            max_steps_per_turn: (row.max_steps_per_turn.max(0) as u32)
+                .clamp(MAX_STEPS_MIN, MAX_STEPS_MAX)
+                .max(
+                    (row.max_same_tool_calls_per_turn.max(0) as u32)
+                        .clamp(MAX_SAME_TOOL_CALLS_MIN, MAX_SAME_TOOL_CALLS_MAX),
+                ),
         }
     }
 
@@ -175,6 +230,17 @@ impl ModelProviderConfig {
                 .map(|v| v.min(i64::MAX as u64) as i64)),
             response_format: Set(enum_to_wire(&self.response_format)),
             execution_mode: Set(enum_to_wire(&self.execution_mode)),
+            max_same_tool_calls_per_turn: Set(self
+                .max_same_tool_calls_per_turn
+                .clamp(MAX_SAME_TOOL_CALLS_MIN, MAX_SAME_TOOL_CALLS_MAX)
+                as i32),
+            max_steps_per_turn: Set(self
+                .max_steps_per_turn
+                .clamp(MAX_STEPS_MIN, MAX_STEPS_MAX)
+                .max(
+                    self.max_same_tool_calls_per_turn
+                        .clamp(MAX_SAME_TOOL_CALLS_MIN, MAX_SAME_TOOL_CALLS_MAX),
+                ) as i32),
             updated_at: Set(chrono::Utc::now()),
         }
     }
@@ -191,13 +257,18 @@ impl fmt::Debug for ModelProviderConfig {
             .field("max_context_bytes", &self.max_context_bytes)
             .field("response_format", &self.response_format)
             .field("execution_mode", &self.execution_mode)
+            .field(
+                "max_same_tool_calls_per_turn",
+                &self.max_same_tool_calls_per_turn,
+            )
+            .field("max_steps_per_turn", &self.max_steps_per_turn)
             .finish()
     }
 }
 
 /// Masked public view returned by the provider-config query endpoint. Carries no
 /// secret: only whether a key is configured (`api_key_set`).
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct ModelProviderPublic {
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -205,9 +276,19 @@ pub struct ModelProviderPublic {
     pub max_context_bytes: Option<u64>,
     pub response_format: ResponseFormatMode,
     pub execution_mode: ExecutionMode,
+    #[schema(minimum = 1, maximum = 50)]
+    pub max_same_tool_calls_per_turn: u32,
+    #[schema(minimum = 1, maximum = 50)]
+    pub max_steps_per_turn: u32,
     /// Whether a non-empty API key is configured. The key itself is never
     /// returned.
     pub api_key_set: bool,
+}
+
+impl Default for ModelProviderPublic {
+    fn default() -> Self {
+        ModelProviderConfig::default().public_view()
+    }
 }
 
 /// Update body for the provider-config update endpoint.
@@ -225,6 +306,13 @@ pub struct ModelProviderUpdate {
     /// `None` leaves the stored grant unchanged. A not-yet-selectable mode
     /// (`session_approved` / `automated`) is ignored.
     pub execution_mode: Option<ExecutionMode>,
+    /// Per-turn cap for calls to the same tool name. Valid range: 1..=50.
+    #[schema(minimum = 1, maximum = 50)]
+    pub max_same_tool_calls_per_turn: Option<u32>,
+    /// Per-turn model reasoning-round budget. Must be at least the same-tool
+    /// repeat limit. Valid range: 1..=50.
+    #[schema(minimum = 1, maximum = 50)]
+    pub max_steps_per_turn: Option<u32>,
     /// Write-only. `None` = leave unchanged; `Some("")` = clear; `Some(x)` = set.
     pub api_key: Option<String>,
 }
@@ -238,6 +326,11 @@ impl fmt::Debug for ModelProviderUpdate {
             .field("max_context_bytes", &self.max_context_bytes)
             .field("response_format", &self.response_format)
             .field("execution_mode", &self.execution_mode)
+            .field(
+                "max_same_tool_calls_per_turn",
+                &self.max_same_tool_calls_per_turn,
+            )
+            .field("max_steps_per_turn", &self.max_steps_per_turn)
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
             .finish()
     }
@@ -269,6 +362,8 @@ pub async fn save(db: &DatabaseConnection, config: ModelProviderConfig) -> Resul
                     model_provider::Column::MaxContextBytes,
                     model_provider::Column::ResponseFormat,
                     model_provider::Column::ExecutionMode,
+                    model_provider::Column::MaxSameToolCallsPerTurn,
+                    model_provider::Column::MaxStepsPerTurn,
                     model_provider::Column::UpdatedAt,
                 ])
                 .to_owned(),
@@ -300,6 +395,8 @@ mod tests {
             max_context_bytes: Some(131_072),
             response_format: ResponseFormatMode::JsonObject,
             execution_mode: ExecutionMode::SuggestOnly,
+            max_same_tool_calls_per_turn: MAX_SAME_TOOL_CALLS_DEFAULT,
+            max_steps_per_turn: MAX_STEPS_DEFAULT,
         }
     }
 
@@ -399,6 +496,11 @@ mod tests {
         let cfg = load(&db).await.unwrap();
         assert!(!cfg.is_configured());
         assert_eq!(cfg.execution_mode, ExecutionMode::SuggestOnly);
+        assert_eq!(
+            cfg.max_same_tool_calls_per_turn,
+            MAX_SAME_TOOL_CALLS_DEFAULT
+        );
+        assert_eq!(cfg.max_steps_per_turn, MAX_STEPS_DEFAULT);
     }
 
     #[tokio::test]
@@ -407,6 +509,8 @@ mod tests {
         let mut cfg = configured();
         cfg.response_format = ResponseFormatMode::JsonSchema;
         cfg.execution_mode = ExecutionMode::ConfirmEachAction;
+        cfg.max_same_tool_calls_per_turn = 17;
+        cfg.max_steps_per_turn = 23;
         save(&db, cfg).await.unwrap();
 
         let loaded = load(&db).await.unwrap();
@@ -415,6 +519,45 @@ mod tests {
         assert_eq!(loaded.max_context_bytes, Some(131_072));
         assert_eq!(loaded.response_format, ResponseFormatMode::JsonSchema);
         assert_eq!(loaded.execution_mode, ExecutionMode::ConfirmEachAction);
+        assert_eq!(loaded.max_same_tool_calls_per_turn, 17);
+        assert_eq!(loaded.max_steps_per_turn, 23);
+    }
+
+    #[test]
+    fn update_same_tool_limit_is_bounded_defensively() {
+        let mut cfg = configured();
+        cfg.apply_update(ModelProviderUpdate {
+            max_same_tool_calls_per_turn: Some(0),
+            ..Default::default()
+        });
+        assert_eq!(cfg.max_same_tool_calls_per_turn, MAX_SAME_TOOL_CALLS_MIN);
+        cfg.apply_update(ModelProviderUpdate {
+            max_same_tool_calls_per_turn: Some(MAX_SAME_TOOL_CALLS_MAX + 1),
+            ..Default::default()
+        });
+        assert_eq!(cfg.max_same_tool_calls_per_turn, MAX_SAME_TOOL_CALLS_MAX);
+        assert_eq!(cfg.max_steps_per_turn, MAX_SAME_TOOL_CALLS_MAX);
+    }
+
+    #[test]
+    fn update_step_budget_is_bounded_and_not_below_same_tool_limit() {
+        assert!(step_budget_covers_same_tool_limit(20, 10));
+        assert!(!step_budget_covers_same_tool_limit(9, 10));
+
+        let mut cfg = configured();
+        cfg.apply_update(ModelProviderUpdate {
+            max_same_tool_calls_per_turn: Some(18),
+            max_steps_per_turn: Some(5),
+            ..Default::default()
+        });
+        assert_eq!(cfg.max_same_tool_calls_per_turn, 18);
+        assert_eq!(cfg.max_steps_per_turn, 18);
+
+        cfg.apply_update(ModelProviderUpdate {
+            max_steps_per_turn: Some(MAX_STEPS_MAX + 1),
+            ..Default::default()
+        });
+        assert_eq!(cfg.max_steps_per_turn, MAX_STEPS_MAX);
     }
 
     #[tokio::test]

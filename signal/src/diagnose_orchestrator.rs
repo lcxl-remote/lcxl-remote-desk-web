@@ -24,11 +24,22 @@ use desk_agent_protocol::diagnose::{
 };
 use desk_agent_protocol::evidence::EvidenceSnapshot;
 use desk_agent_protocol::provenance::AiProvenance;
-use desk_agent_protocol::{AgentError, AgentErrorKind};
+use desk_agent_protocol::{AgentError, AgentErrorKind, Capability, ExecutionMode};
 use desk_diagnose_core::DEFAULT_MAX_CONTEXT_BYTES;
-use desk_diagnose_core::parser::parse_diagnosis;
-use desk_diagnose_core::prompt::{ResponseFormatSpec, build_messages, diagnosis_json_schema};
-use desk_diagnose_core::seam::{ModelRequest, ModelSeam, NullTurnSink};
+use desk_diagnose_core::agent_loop::{LoopDeps, run_agent_turn};
+use desk_diagnose_core::agentic_prompt::build_agentic_system_message;
+use desk_diagnose_core::chat::{ChatMessage, ChatRole};
+use desk_diagnose_core::conversation_key::derive_conversation_key;
+use desk_diagnose_core::exec_tools::exec_tool_registry;
+use desk_diagnose_core::prompt::ResponseFormatSpec;
+#[cfg(test)]
+use desk_diagnose_core::prompt::diagnosis_json_schema;
+use desk_diagnose_core::read_tools::read_tool_registry;
+use desk_diagnose_core::seam::{
+    ClaimTurnParams, HeartbeatGuard, LeaseHeartbeat, ModelRequest, ModelSeam, SessionSeam, TurnSink,
+};
+use desk_diagnose_core::session::TriggerOrigin;
+use desk_diagnose_core::stream::StreamingTurnSink;
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use desk_signal_facade::service::CollectObserver;
@@ -38,7 +49,43 @@ use std::sync::Arc;
 use crate::ai_usage::{self, AiUsageDelta};
 use crate::collect_pending::{AcceptOutcome, CollectContext, CollectPendingStore};
 use crate::model_dial::SignalModelSeam;
-use crate::model_provider::{self, ResponseFormatMode};
+use crate::model_provider;
+#[cfg(test)]
+use crate::model_provider::ResponseFormatMode;
+
+const AGENT_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+struct SignalStoreHeartbeat {
+    store: crate::agent_session_store::SignalAgentSessionStore,
+}
+
+impl LeaseHeartbeat for SignalStoreHeartbeat {
+    fn start(&self, conversation_id: String, lease_token: u64) -> Box<dyn HeartbeatGuard> {
+        let store = self.store.clone();
+        let handle = actix_web::rt::spawn(async move {
+            loop {
+                tokio::time::sleep(AGENT_HEARTBEAT_INTERVAL).await;
+                let now = chrono::Utc::now().to_rfc3339();
+                if store
+                    .heartbeat(&conversation_id, lease_token, &now)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Box::new(SignalHeartbeatGuard(handle))
+    }
+}
+
+struct SignalHeartbeatGuard(actix_web::rt::task::JoinHandle<()>);
+impl HeartbeatGuard for SignalHeartbeatGuard {}
+impl Drop for SignalHeartbeatGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// Process-global pending-collection store. The portable signal is single-node,
 /// so one store per process is correct: the authorizer (on the browser
@@ -164,6 +211,29 @@ pub async fn stream_diagnose_error(
     .await;
 }
 
+/// Fail a still-collecting diagnosis when either signaling peer disappears.
+/// If the browser itself disconnected there is nowhere to stream, so consuming
+/// the pending entry is sufficient.
+pub(crate) async fn stream_collection_connection_lost(
+    connection_map: &SharedConnectionMap,
+    ctx: CollectContext,
+) {
+    stream_diagnose_error(
+        connection_map,
+        &ctx.browser_connection_id,
+        &ctx.request_id,
+        seq::MODELING,
+        AgentError {
+            kind: AgentErrorKind::TargetOffline,
+            message: "the target disconnected while evidence was being collected".to_string(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        },
+    )
+    .await;
+}
+
 /// Start a diagnosis: register the pending collection, then push a
 /// `CollectRequest` to the target edge. Streams a `collecting` status to the
 /// browser; on a registration clash (replay) or a failed push it rolls back and
@@ -174,12 +244,22 @@ pub async fn start_diagnosis(
     request_id: &str,
     target_connection_id: &str,
     browser_connection_id: &str,
+    actor_user_id: i32,
+    target_device_id: String,
+    scope: desk_agent_protocol::AgentScope,
+    max_risk: desk_agent_protocol::RiskLevel,
+    exec_admission_policy: desk_agent_protocol::authz::ExecAdmissionPolicy,
     request: DiagnoseRequestData,
 ) {
     let ctx = CollectContext {
         request_id: request_id.to_string(),
         target_connection_id: target_connection_id.to_string(),
         browser_connection_id: browser_connection_id.to_string(),
+        actor_user_id,
+        target_device_id,
+        scope,
+        max_risk,
+        exec_admission_policy,
         request: request.clone(),
     };
     if !pending.register(ctx) {
@@ -236,6 +316,7 @@ pub async fn start_diagnosis(
 }
 
 /// Map the configured response-format mode to the neutral prompt spec.
+#[cfg(test)]
 fn response_format_spec(mode: ResponseFormatMode) -> ResponseFormatSpec {
     match mode {
         ResponseFormatMode::None => ResponseFormatSpec::None,
@@ -269,9 +350,28 @@ pub(crate) async fn record_usage(
     }
 }
 
-/// Run the model phase once the evidence snapshot is complete: build the prompt,
-/// dial the configured provider, parse the structured diagnosis, and stream it to
-/// the browser. Any failure streams a terminal error instead.
+struct MeteredSignalModel {
+    inner: SignalModelSeam,
+    db: DatabaseConnection,
+    model_name: String,
+}
+
+#[async_trait::async_trait(?Send)]
+impl ModelSeam for MeteredSignalModel {
+    async fn call(
+        &self,
+        request: ModelRequest,
+        sink: &mut dyn TurnSink,
+    ) -> Result<desk_diagnose_core::chat::ModelTurn, AgentError> {
+        let turn = self.inner.call(request, sink).await?;
+        record_usage(&self.db, &self.model_name, &turn.usage).await;
+        Ok(turn)
+    }
+}
+
+/// Run the signal-owned multi-turn agent loop once the initial evidence snapshot
+/// is complete. Read tools replay this redacted snapshot; an exec tool parks for
+/// the browser's explicit approval and then dispatches through the edge PEP.
 pub async fn run_model_phase(
     db: DatabaseConnection,
     connection_map: web::Data<SharedConnectionMap>,
@@ -319,56 +419,99 @@ pub async fn run_model_phase(
         .max_context_bytes
         .map(|v| v as usize)
         .unwrap_or(DEFAULT_MAX_CONTEXT_BYTES);
-    let messages = build_messages(
-        &ctx.request.question,
-        &snapshot,
-        max_ctx,
-        ctx.request.locale.as_deref(),
-        &[],
-    );
-    let request = ModelRequest::text_only(messages, response_format_spec(config.response_format));
-
-    let mut sink = NullTurnSink;
-    let turn = match seam.call(request, &mut sink).await {
-        Ok(t) => t,
-        Err(e) => {
-            stream_diagnose_error(
-                map,
-                &ctx.browser_connection_id,
-                &ctx.request_id,
-                seq::TERMINAL,
-                e,
-            )
-            .await;
-            return;
-        }
+    let model = MeteredSignalModel {
+        inner: seam,
+        db: db.clone(),
+        model_name: config.model.clone().unwrap_or_default(),
     };
+    let mut registry = read_tool_registry();
+    if ctx.scope.granted.contains(&Capability::ShellExecConfirmed)
+        && matches!(
+            ctx.scope.mode,
+            ExecutionMode::ConfirmEachAction | ExecutionMode::SessionApproved
+        )
+    {
+        registry.extend(exec_tool_registry());
+    }
 
-    record_usage(
-        &db,
-        config.model.as_deref().unwrap_or_default(),
-        &turn.usage,
-    )
-    .await;
+    let connections = connection_map.clone().into_inner();
+    let tools = crate::agent_exec::SignalAgentTools::new(
+        db.clone(),
+        connections,
+        crate::agent_exec::global_agent_exec_pending(),
+        ctx.target_connection_id.clone(),
+        snapshot,
+        ctx.exec_admission_policy,
+        ctx.max_risk,
+    );
+    let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db);
+    let heartbeat = SignalStoreHeartbeat {
+        store: sessions.clone(),
+    };
+    let actor_id = ctx.actor_user_id.to_string();
+    let conversation_id = derive_conversation_key(
+        &actor_id,
+        &ctx.target_device_id,
+        ctx.request.conversation_id.as_deref(),
+        &ctx.request_id,
+    );
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    let clock = || chrono::Utc::now().to_rfc3339();
+    let deps = LoopDeps {
+        session_seam: &sessions,
+        model: &model,
+        tools: &tools,
+        registry: &registry,
+        response_format: ResponseFormatSpec::None,
+        system_prompt: build_agentic_system_message(ctx.request.locale.as_deref()),
+        max_context_bytes: max_ctx,
+        max_steps_per_turn: config.max_steps_per_turn,
+        max_same_tool_per_turn: config.max_same_tool_calls_per_turn,
+        clock: &clock,
+        heartbeat: Some(&heartbeat),
+    };
+    let claim = ClaimTurnParams {
+        conversation_id,
+        actor_id,
+        device_id: ctx.target_device_id.clone(),
+        policy_revision: 0,
+        current_pdp_scope: ctx.scope.clone(),
+        turn_id: turn_id.clone(),
+        request_id: Some(ctx.request_id.clone()),
+        connection_id: Some(ctx.browser_connection_id.clone()),
+        trigger_origin: TriggerOrigin::User,
+        now: clock(),
+    };
+    let user = ChatMessage::text(
+        uuid::Uuid::new_v4().to_string(),
+        ChatRole::User,
+        ctx.request.question.clone(),
+    );
 
-    let (mut diagnosis, _outcome) = parse_diagnosis(&turn.text);
-    // The orchestrator stamps the authoritative collected-capability list (the
-    // parser leaves it empty).
-    diagnosis.collected = snapshot
-        .contexts
-        .iter()
-        .map(|c| c.capability.clone())
-        .collect();
-    // Mark the AI-generated result with machine-readable provenance (Art.50(2)).
-    let provenance =
-        AiProvenance::stamp(config.model.clone(), Some(chrono::Utc::now().to_rfc3339()));
-    stream_event(
-        map,
-        &ctx.browser_connection_id,
-        &DiagnoseEvent::final_result(&ctx.request_id, seq::TERMINAL, diagnosis)
-            .with_provenance(provenance),
-    )
-    .await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DiagnoseEvent>();
+    let forward_map = connection_map.clone();
+    let forward_browser = ctx.browser_connection_id.clone();
+    let forwarder = actix_web::rt::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            stream_event(forward_map.as_ref(), &forward_browser, &event).await;
+        }
+    });
+    let frame_sink = move |event: DiagnoseEvent| {
+        let _ = tx.send(event);
+    };
+    let mut sink =
+        StreamingTurnSink::starting_at(frame_sink, ctx.request_id.clone(), seq::TERMINAL);
+    sink.set_provenance(AiProvenance::stamp(
+        config.model,
+        Some(chrono::Utc::now().to_rfc3339()),
+    ));
+    sink.turn_started(&turn_id);
+    match run_agent_turn(&deps, claim, user, &mut sink).await {
+        Ok(outcome) => sink.finish_outcome(&outcome),
+        Err(error) => sink.error(error),
+    }
+    drop(sink);
+    let _ = forwarder.await;
 }
 
 /// Consume an inbound `CollectResponse` from a desk-server edge: feed the chunk
@@ -530,12 +673,32 @@ mod tests {
             request_id: "r-shared".to_string(),
             target_connection_id: "edge-1".to_string(),
             browser_connection_id: "browser-1".to_string(),
+            actor_user_id: 1,
+            target_device_id: "device-1".to_string(),
+            scope: desk_agent_protocol::AgentScope {
+                granted: vec![],
+                mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            max_risk: desk_agent_protocol::RiskLevel::Critical,
+            exec_admission_policy: desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly,
             request: DiagnoseRequestData::default(),
         }));
         assert!(!b.register(CollectContext {
             request_id: "r-shared".to_string(),
             target_connection_id: "edge-1".to_string(),
             browser_connection_id: "browser-1".to_string(),
+            actor_user_id: 1,
+            target_device_id: "device-1".to_string(),
+            scope: desk_agent_protocol::AgentScope {
+                granted: vec![],
+                mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            max_risk: desk_agent_protocol::RiskLevel::Critical,
+            exec_admission_policy: desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly,
             request: DiagnoseRequestData::default(),
         }));
         // Clean up so the global store does not leak into other tests.

@@ -21,10 +21,13 @@
 //! single-threaded runtime, so the seam future is non-`Send`, matching the core's
 //! `ModelSeam` contract.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_diagnose_core::chat::{
-    ChatMessage, ChatRole, ModelTurn, StopReason, TokenUsage, frame_untrusted_output,
+    ChatMessage, ChatRole, ModelTurn, StopReason, TokenUsage, ToolCall, ToolChoice,
+    frame_untrusted_output,
 };
 use desk_diagnose_core::prompt::ResponseFormatSpec;
 use desk_diagnose_core::seam::{ModelRequest, ModelSeam, TurnSink};
@@ -36,6 +39,9 @@ use crate::model_provider::ModelProviderConfig;
 /// `max_tokens`. Generous for a structured diagnosis; the prompt and the parser
 /// degrade gracefully if the model runs long.
 const ANTHROPIC_MAX_TOKENS: u32 = 4096;
+/// Delimiter used when an in-conversation system event must be represented as
+/// an Anthropic user turn (Anthropic only supports one hoisted system prompt).
+const SYSTEM_EVENT_PREFIX: &str = "[system-event] ";
 /// The Anthropic API version header value.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Connect timeout for the provider HTTP client.
@@ -293,6 +299,11 @@ impl ModelSeam for SignalModelSeam {
             )
             .finish();
 
+        log::info!(
+            "[model-dial] starting {:?} model turn with {} advertised tool(s)",
+            self.dialect,
+            request.tools.len()
+        );
         let body = self.build_body(&request);
         let mut http = client
             .post(self.endpoint())
@@ -345,7 +356,13 @@ impl ModelSeam for SignalModelSeam {
                 return Err(transport_error(err));
             }
         }
-        Ok(state.into_turn())
+        let turn = state.into_turn();
+        log::info!(
+            "[model-dial] completed model turn: stop_reason={:?}, tool_call_count={}",
+            turn.stop_reason,
+            turn.tool_calls.len()
+        );
+        Ok(turn)
     }
 }
 
@@ -459,12 +476,18 @@ impl StreamState {
 
 // ============================ OpenAI dialect ============================
 
-/// Map one [`ChatMessage`] to OpenAI message JSON (text-only diagnose shape; a
-/// vision image rides as a multimodal content array).
+/// Map one [`ChatMessage`] to OpenAI message JSON, including assistant tool calls
+/// and their tool-result replies.
 fn openai_message_to_json(m: &ChatMessage) -> Value {
+    if m.role == ChatRole::Tool {
+        return json!({
+            "role": "tool",
+            "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
+            "content": m.text,
+        });
+    }
     // A mid-conversation system event renders as an in-place `system` message. The
-    // diagnose path never produces this role, but the mapping is kept in step with
-    // the agentic adapter so no dialect can ever emit the raw sentinel token.
+    // gateway sees it as injected context rather than a user utterance.
     if m.role == ChatRole::SystemEvent {
         return json!({ "role": "system", "content": m.text });
     }
@@ -479,14 +502,35 @@ fn openai_message_to_json(m: &ChatMessage) -> Value {
             {"type": "text", "text": m.text},
             {"type": "image_url", "image_url": {"url": url}},
         ]),
+        None if m.role == ChatRole::Assistant && m.text.is_empty() && !m.tool_calls.is_empty() => {
+            Value::Null
+        }
         None => json!(m.text),
     };
-    json!({ "role": m.role.as_str(), "content": content })
+    let mut obj = json!({ "role": m.role.as_str(), "content": content });
+    if !m.tool_calls.is_empty() {
+        obj["tool_calls"] = Value::Array(
+            m.tool_calls
+                .iter()
+                .map(|call| {
+                    json!({
+                        "id": call.id,
+                        "type": "function",
+                        "function": {
+                            "name": call.name,
+                            "arguments": call.arguments_json,
+                        },
+                    })
+                })
+                .collect(),
+        );
+    }
+    obj
 }
 
-/// Build the streaming `/chat/completions` body. The diagnose path is tool-free,
-/// so no tools are advertised. `stream_options.include_usage` asks the gateway to
-/// emit a final usage chunk (omitted by default when streaming).
+/// Build the streaming `/chat/completions` body, including any tools exposed by
+/// the agent loop. `stream_options.include_usage` asks the gateway to emit a final
+/// usage chunk (omitted by default when streaming).
 fn build_openai_body(model: &str, request: &ModelRequest) -> Value {
     let messages: Vec<Value> = request
         .messages
@@ -501,6 +545,29 @@ fn build_openai_body(model: &str, request: &ModelRequest) -> Value {
     });
     if let Some(max) = request.max_output_tokens {
         body["max_tokens"] = json!(max);
+    }
+    if !request.tools.is_empty() {
+        body["tools"] = Value::Array(
+            request
+                .tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.parameters_schema,
+                        },
+                    })
+                })
+                .collect(),
+        );
+        body["tool_choice"] = match request.tool_choice {
+            ToolChoice::Auto => json!("auto"),
+            ToolChoice::None => json!("none"),
+            ToolChoice::Required => json!("required"),
+        };
     }
     match &request.response_format {
         ResponseFormatSpec::None => {}
@@ -551,7 +618,15 @@ struct OpenAiStreamState {
     text: String,
     finish_reason: Option<String>,
     usage: Option<Value>,
+    tool_calls: Vec<ToolCallBuilder>,
     error: Option<String>,
+}
+
+#[derive(Default)]
+struct ToolCallBuilder {
+    id: String,
+    name: String,
+    arguments: String,
 }
 
 impl OpenAiStreamState {
@@ -576,7 +651,13 @@ impl OpenAiStreamState {
         if let Some(fr) = choice.get("finish_reason").and_then(|f| f.as_str()) {
             self.finish_reason = Some(fr.to_string());
         }
-        let delta = choice.get("delta")?.get("content")?.as_str()?;
+        let delta = choice.get("delta")?;
+        if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+            for call in calls {
+                self.accumulate_tool_call(call);
+            }
+        }
+        let delta = delta.get("content")?.as_str()?;
         if delta.is_empty() {
             return None;
         }
@@ -584,27 +665,67 @@ impl OpenAiStreamState {
         Some(delta.to_string())
     }
 
+    fn accumulate_tool_call(&mut self, call: &Value) {
+        let index = call["index"].as_u64().unwrap_or(0) as usize;
+        if index >= self.tool_calls.len() {
+            self.tool_calls
+                .resize_with(index + 1, ToolCallBuilder::default);
+        }
+        let builder = &mut self.tool_calls[index];
+        if let Some(id) = call["id"].as_str()
+            && !id.is_empty()
+        {
+            builder.id = id.to_string();
+        }
+        if let Some(name) = call["function"]["name"].as_str()
+            && !name.is_empty()
+        {
+            builder.name = name.to_string();
+        }
+        if let Some(arguments) = call["function"]["arguments"].as_str() {
+            builder.arguments.push_str(arguments);
+        }
+    }
+
     fn into_turn(self) -> ModelTurn {
         ModelTurn {
             stop_reason: openai_stop_reason(self.finish_reason.as_deref()),
             usage: openai_usage(self.usage.as_ref()),
             text: self.text,
-            tool_calls: Vec::new(),
+            tool_calls: self
+                .tool_calls
+                .into_iter()
+                .map(|call| ToolCall {
+                    id: call.id,
+                    name: call.name,
+                    arguments_json: call.arguments,
+                })
+                .collect(),
         }
     }
 }
 
 // ============================ Anthropic dialect ============================
 
-/// Map one non-system [`ChatMessage`] to an Anthropic `messages[]` entry.
+/// Map one non-system [`ChatMessage`] to an Anthropic `messages[]` entry,
+/// including tool-use blocks and tool-result replies.
 fn anthropic_message_to_json(m: &ChatMessage) -> Value {
+    if m.role == ChatRole::Tool {
+        return json!({
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
+                "content": m.text,
+            }],
+        });
+    }
     // A mid-conversation system event degrades to a `user` turn with an explicit
-    // delimiter (Anthropic has no non-hoisted system role). Kept in step with the
-    // agentic adapter; the diagnose path never produces this role.
+    // delimiter (Anthropic has no non-hoisted system role).
     if m.role == ChatRole::SystemEvent {
         return json!({
             "role": "user",
-            "content": format!("[system-event] {}", m.text),
+            "content": format!("{SYSTEM_EVENT_PREFIX}{}", m.text),
         });
     }
     // Completed command output for an already-closed call: a fenced `user` turn via
@@ -614,6 +735,23 @@ fn anthropic_message_to_json(m: &ChatMessage) -> Value {
             "role": "user",
             "content": frame_untrusted_output(&m.text),
         });
+    }
+    if m.role == ChatRole::Assistant && !m.tool_calls.is_empty() {
+        let mut blocks = Vec::new();
+        if !m.text.is_empty() {
+            blocks.push(json!({"type": "text", "text": m.text}));
+        }
+        for call in &m.tool_calls {
+            let input: Value = serde_json::from_str(&call.arguments_json)
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
+            blocks.push(json!({
+                "type": "tool_use",
+                "id": call.id,
+                "name": call.name,
+                "input": input,
+            }));
+        }
+        return json!({"role": "assistant", "content": blocks});
     }
     let content = match &m.image_data_url {
         Some(url) => {
@@ -644,8 +782,7 @@ fn split_data_url(url: &str) -> Option<(String, String)> {
 }
 
 /// Build the streaming `/v1/messages` body. System text is hoisted to the
-/// top-level `system` field; the rest become `messages`. The diagnose path is
-/// tool-free.
+/// top-level `system` field; the rest become `messages`.
 fn build_anthropic_body(model: &str, request: &ModelRequest) -> Value {
     let mut system = String::new();
     let mut messages: Vec<Value> = Vec::new();
@@ -668,6 +805,26 @@ fn build_anthropic_body(model: &str, request: &ModelRequest) -> Value {
     if !system.is_empty() {
         body["system"] = json!(system);
     }
+    // Anthropic has no `tool_choice:"none"`; express it by omitting the tools.
+    if request.tool_choice != ToolChoice::None && !request.tools.is_empty() {
+        body["tools"] = Value::Array(
+            request
+                .tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "input_schema": tool.parameters_schema,
+                    })
+                })
+                .collect(),
+        );
+        body["tool_choice"] = match request.tool_choice {
+            ToolChoice::Required => json!({"type": "any"}),
+            ToolChoice::Auto | ToolChoice::None => json!({"type": "auto"}),
+        };
+    }
     body
 }
 
@@ -682,12 +839,13 @@ fn anthropic_stop_reason(reason: Option<&str>) -> StopReason {
 }
 
 /// Accumulates an Anthropic Messages SSE stream into a [`ModelTurn`]. The event
-/// types consumed: `message_start` (input usage), `content_block_delta` with a
-/// `text_delta` (the streamed text), `message_delta` (stop reason + output usage),
-/// and `error`. Other events (`ping`, block start/stop, `message_stop`) are inert.
+/// types consumed: `message_start` (input usage), `content_block_start` with
+/// `tool_use`, `content_block_delta` with text or tool JSON fragments,
+/// `message_delta` (stop reason + output usage), and `error`.
 #[derive(Default)]
 struct AnthropicStreamState {
     text: String,
+    tool_uses: BTreeMap<usize, ToolCallBuilder>,
     stop_reason: Option<String>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
@@ -721,17 +879,43 @@ impl AnthropicStreamState {
                 }
                 None
             }
+            "content_block_start" => {
+                let index = v.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let block = v.get("content_block")?;
+                if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                    let builder = self.tool_uses.entry(index).or_default();
+                    if let Some(id) = block.get("id").and_then(Value::as_str) {
+                        builder.id = id.to_string();
+                    }
+                    if let Some(name) = block.get("name").and_then(Value::as_str) {
+                        builder.name = name.to_string();
+                    }
+                }
+                None
+            }
             "content_block_delta" => {
                 let d = v.get("delta")?;
-                if d.get("type").and_then(|t| t.as_str()) != Some("text_delta") {
-                    return None;
+                match d.get("type").and_then(Value::as_str) {
+                    Some("text_delta") => {
+                        let text = d.get("text")?.as_str()?;
+                        if text.is_empty() {
+                            return None;
+                        }
+                        self.text.push_str(text);
+                        Some(text.to_string())
+                    }
+                    Some("input_json_delta") => {
+                        let index = v.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                        let fragment = d.get("partial_json").and_then(Value::as_str)?;
+                        self.tool_uses
+                            .entry(index)
+                            .or_default()
+                            .arguments
+                            .push_str(fragment);
+                        None
+                    }
+                    _ => None,
                 }
-                let text = d.get("text")?.as_str()?;
-                if text.is_empty() {
-                    return None;
-                }
-                self.text.push_str(text);
-                Some(text.to_string())
             }
             "message_delta" => {
                 if let Some(sr) = v
@@ -761,7 +945,15 @@ impl AnthropicStreamState {
                 cache_write_tokens: self.cache_write,
             },
             text: self.text,
-            tool_calls: Vec::new(),
+            tool_calls: self
+                .tool_uses
+                .into_values()
+                .map(|call| ToolCall {
+                    id: call.id,
+                    name: call.name,
+                    arguments_json: call.arguments,
+                })
+                .collect(),
         }
     }
 }
@@ -770,6 +962,7 @@ impl AnthropicStreamState {
 mod tests {
     use super::*;
     use crate::model_provider::ResponseFormatMode;
+    use desk_diagnose_core::chat::{ToolCallRef, ToolSpec};
     use desk_utils::ssrf::ProviderSsrfMode;
 
     #[test]
@@ -834,6 +1027,36 @@ mod tests {
         )
     }
 
+    fn tool_request(choice: ToolChoice) -> ModelRequest {
+        ModelRequest {
+            messages: vec![
+                ChatMessage::text("s", ChatRole::System, "you are a diagnostician"),
+                ChatMessage::text("u", ChatRole::User, "inspect the system"),
+                ChatMessage::assistant_tool_calls(
+                    "a",
+                    "",
+                    vec![ToolCallRef {
+                        id: "call_1".to_string(),
+                        name: "read_system_info".to_string(),
+                        arguments_json: r#"{"detail":"brief"}"#.to_string(),
+                    }],
+                ),
+                ChatMessage::tool_result("t", "call_1", r#"{"cpu":42}"#),
+            ],
+            tools: vec![ToolSpec {
+                name: "read_system_info".to_string(),
+                description: "Read system information".to_string(),
+                parameters_schema: json!({
+                    "type": "object",
+                    "properties": {"detail": {"type": "string"}}
+                }),
+            }],
+            tool_choice: choice,
+            response_format: ResponseFormatSpec::None,
+            max_output_tokens: None,
+        }
+    }
+
     #[test]
     fn dialect_resolves_case_insensitively_with_openai_fallback() {
         assert_eq!(
@@ -880,6 +1103,8 @@ mod tests {
             max_context_bytes: None,
             response_format: ResponseFormatMode::JsonObject,
             execution_mode: Default::default(),
+            max_same_tool_calls_per_turn: crate::model_provider::MAX_SAME_TOOL_CALLS_DEFAULT,
+            max_steps_per_turn: crate::model_provider::MAX_STEPS_DEFAULT,
         };
         let seam = SignalModelSeam::from_config(&cfg).expect("seam builds");
         assert_eq!(seam.dialect, Dialect::Anthropic);
@@ -910,6 +1135,26 @@ mod tests {
     }
 
     #[test]
+    fn openai_body_advertises_tools_and_replays_tool_history() {
+        let body = build_openai_body("gpt-test", &tool_request(ToolChoice::Auto));
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "read_system_info");
+        assert_eq!(
+            body["tools"][0]["function"]["parameters"]["properties"]["detail"]["type"],
+            "string"
+        );
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["messages"][2]["role"], "assistant");
+        assert!(body["messages"][2]["content"].is_null());
+        assert_eq!(
+            body["messages"][2]["tool_calls"][0]["function"]["arguments"],
+            r#"{"detail":"brief"}"#
+        );
+        assert_eq!(body["messages"][3]["role"], "tool");
+        assert_eq!(body["messages"][3]["tool_call_id"], "call_1");
+    }
+
+    #[test]
     fn anthropic_body_hoists_system_and_requires_max_tokens() {
         let body = build_anthropic_body("claude-x", &text_request(ResponseFormatSpec::JsonObject));
         assert_eq!(body["model"], "claude-x");
@@ -918,6 +1163,27 @@ mod tests {
         assert_eq!(body["system"], "you are a diagnostician");
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
         assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn anthropic_body_advertises_tools_and_replays_tool_history() {
+        let body = build_anthropic_body("claude-x", &tool_request(ToolChoice::Required));
+        assert_eq!(body["tools"][0]["name"], "read_system_info");
+        assert_eq!(
+            body["tools"][0]["input_schema"]["properties"]["detail"]["type"],
+            "string"
+        );
+        assert_eq!(body["tool_choice"]["type"], "any");
+        assert_eq!(body["messages"][1]["role"], "assistant");
+        assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
+        assert_eq!(body["messages"][1]["content"][0]["id"], "call_1");
+        assert_eq!(body["messages"][2]["role"], "user");
+        assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
+        assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "call_1");
+
+        let none = build_anthropic_body("claude-x", &tool_request(ToolChoice::None));
+        assert!(none.get("tools").is_none());
+        assert!(none.get("tool_choice").is_none());
     }
 
     /// A system-event message never emits the raw sentinel role: OpenAI renders an
@@ -1023,6 +1289,24 @@ mod tests {
         assert_eq!(turn.usage.output_tokens, Some(20));
     }
 
+    #[test]
+    fn openai_stream_assembles_fragmented_tool_call() {
+        let mut s = OpenAiStreamState::default();
+        for payload in [
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_7","type":"function","function":{"name":"exec_command","arguments":"{\"command\":"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"ps aux\"}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ] {
+            assert!(s.apply(payload).is_none());
+        }
+        let turn = s.into_turn();
+        assert_eq!(turn.stop_reason, StopReason::ToolUse);
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].id, "call_7");
+        assert_eq!(turn.tool_calls[0].name, "exec_command");
+        assert_eq!(turn.tool_calls[0].arguments_json, r#"{"command":"ps aux"}"#);
+    }
+
     /// A mid-stream OpenAI error payload is surfaced (so the dial fails) rather
     /// than silently producing a partial turn.
     #[test]
@@ -1061,6 +1345,25 @@ mod tests {
         assert_eq!(turn.usage.output_tokens, Some(10));
         assert_eq!(turn.usage.cache_read_tokens, Some(5));
         assert_eq!(turn.usage.cache_write_tokens, Some(7));
+    }
+
+    #[test]
+    fn anthropic_stream_assembles_fragmented_tool_use() {
+        let mut s = AnthropicStreamState::default();
+        for payload in [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_9","name":"exec_command","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"ps aux\"}"}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":10}}"#,
+        ] {
+            assert!(s.apply(payload).is_none());
+        }
+        let turn = s.into_turn();
+        assert_eq!(turn.stop_reason, StopReason::ToolUse);
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].id, "toolu_9");
+        assert_eq!(turn.tool_calls[0].name, "exec_command");
+        assert_eq!(turn.tool_calls[0].arguments_json, r#"{"command":"ps aux"}"#);
     }
 
     /// A mid-stream Anthropic `error` event is surfaced.

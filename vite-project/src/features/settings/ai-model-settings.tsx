@@ -8,11 +8,7 @@ import { Loader2, Save, PlugZap } from "lucide-react"
 import { useGetModelProvider } from "@/services/hooks/modelProviderController/useGetModelProvider"
 import { useUpdateModelProvider } from "@/services/hooks/modelProviderController/useUpdateModelProvider"
 import { useTestModelProvider } from "@/services/hooks/modelProviderController/useTestModelProvider"
-import { useQueryAiPolicySettings } from "@/services/hooks/aiModelController/useQueryAiPolicySettings"
-import { useUpdateAiPolicySettings } from "@/services/hooks/aiModelController/useUpdateAiPolicySettings"
-import { useQueryCollectionPolicySettings } from "@/services/hooks/aiModelController/useQueryCollectionPolicySettings"
-import { useUpdateCollectionPolicySettings } from "@/services/hooks/aiModelController/useUpdateCollectionPolicySettings"
-import type { ModelProviderUpdate, AiExecutionPolicyUpdate, CollectionPolicySettingsUpdate } from "@/services/types"
+import type { ModelProviderUpdate } from "@/services/types"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -32,6 +28,12 @@ const PROVIDERS = ["openai-compatible", "anthropic"] as const
 // `automated` are frozen in the protocol but not selectable yet (the backend
 // rejects them), so they are intentionally omitted here.
 const EXECUTION_MODES = ["suggest_only", "read_only", "confirm_each_action"] as const
+const MAX_STEPS_MIN = 1
+const MAX_STEPS_MAX = 50
+const MAX_STEPS_DEFAULT = 20
+const SAME_TOOL_LIMIT_MIN = 1
+const SAME_TOOL_LIMIT_MAX = 50
+const SAME_TOOL_LIMIT_DEFAULT = 10
 
 const providerSchema = z.object({
     provider: z.enum(PROVIDERS),
@@ -42,35 +44,21 @@ const providerSchema = z.object({
     max_context_bytes: z.number().min(0),
     response_format: z.enum(RESPONSE_FORMATS),
     execution_mode: z.enum(EXECUTION_MODES),
+    max_steps_per_turn: z
+        .number()
+        .int()
+        .min(MAX_STEPS_MIN)
+        .max(MAX_STEPS_MAX),
+    max_same_tool_calls_per_turn: z
+        .number()
+        .int()
+        .min(SAME_TOOL_LIMIT_MIN)
+        .max(SAME_TOOL_LIMIT_MAX),
 })
 
 type ProviderFormValues = z.infer<typeof providerSchema>
 
-// Mirrors the server's clamp, so the UI refuses a value the server would have
-// silently adjusted rather than reporting success for something it did not save.
-const MIN_CONCURRENT_EXECUTIONS = 1
-const MAX_CONCURRENT_EXECUTIONS = 64
-
-const policySchema = z.object({
-    execution_mode: z.enum(EXECUTION_MODES),
-    max_concurrent_executions: z
-        .number()
-        .int()
-        .min(MIN_CONCURRENT_EXECUTIONS)
-        .max(MAX_CONCURRENT_EXECUTIONS),
-})
-
-type PolicyFormValues = z.infer<typeof policySchema>
-
-const collectionPolicySchema = z.object({
-    allow_screen: z.boolean(),
-    allow_logs: z.boolean(),
-})
-
-type CollectionPolicyFormValues = z.infer<typeof collectionPolicySchema>
-
-// Render an execution-mode <SelectItem> set with localized labels. Shared by the
-// central grant and the local ceiling selectors.
+// Render the central execution-grant choices.
 function ExecutionModeItems() {
     const { t } = useTranslation()
     return (
@@ -112,6 +100,8 @@ export function AiModelSettings() {
             max_context_bytes: 0,
             response_format: "json_object",
             execution_mode: "suggest_only",
+            max_steps_per_turn: MAX_STEPS_DEFAULT,
+            max_same_tool_calls_per_turn: SAME_TOOL_LIMIT_DEFAULT,
         },
     })
 
@@ -140,11 +130,21 @@ export function AiModelSettings() {
                 max_context_bytes: data.max_context_bytes ?? 0,
                 response_format: rf,
                 execution_mode: normalizeExecutionMode(data.execution_mode),
+                max_steps_per_turn: data.max_steps_per_turn ?? MAX_STEPS_DEFAULT,
+                max_same_tool_calls_per_turn:
+                    data.max_same_tool_calls_per_turn ?? SAME_TOOL_LIMIT_DEFAULT,
             })
         }
     }, [providerResponse?.data, isLoading, form])
 
     const onSubmit = async (values: ProviderFormValues) => {
+        if (values.max_steps_per_turn < values.max_same_tool_calls_per_turn) {
+            form.setError("max_steps_per_turn", {
+                type: "validate",
+                message: t("pages.aiModel.settings.maxStepsPerTurn.notBelowSameTool"),
+            })
+            return
+        }
         // api_key is write-only: clearing wins, then a typed value sets it, and
         // an empty field leaves the stored key unchanged (omit it).
         let api_key: string | undefined
@@ -162,6 +162,8 @@ export function AiModelSettings() {
             max_context_bytes: values.max_context_bytes > 0 ? values.max_context_bytes : undefined,
             response_format: values.response_format,
             execution_mode: values.execution_mode,
+            max_steps_per_turn: values.max_steps_per_turn,
+            max_same_tool_calls_per_turn: values.max_same_tool_calls_per_turn,
             api_key,
         }
 
@@ -213,90 +215,6 @@ export function AiModelSettings() {
                 variant: "destructive",
                 title: t("pages.aiModel.settings.testFailed"),
                 description: t("pages.aiModel.settings.updateFailedMessage"),
-            })
-        }
-    }
-
-    // Local execution ceiling: the device owner's cap on AI actions. The effective
-    // mode is the more restrictive of the central grant and this ceiling, so a
-    // confirmed action needs both set above suggest-only.
-    const { data: policyResponse, isLoading: isPolicyLoading } = useQueryAiPolicySettings()
-    const { mutateAsync: updatePolicy, isPending: isPolicyUpdating } = useUpdateAiPolicySettings()
-
-    const policyForm = useForm<PolicyFormValues>({
-        resolver: zodResolver(policySchema),
-        defaultValues: { execution_mode: "suggest_only", max_concurrent_executions: 4 },
-    })
-
-    const didHydratePolicyRef = useRef(false)
-    useEffect(() => {
-        if (policyResponse?.data && !isPolicyLoading && !didHydratePolicyRef.current) {
-            didHydratePolicyRef.current = true
-            policyForm.reset({
-                execution_mode: normalizeExecutionMode(policyResponse.data.execution_mode),
-                max_concurrent_executions:
-                    policyResponse.data.max_concurrent_executions ?? 4,
-            })
-        }
-    }, [policyResponse?.data, isPolicyLoading, policyForm])
-
-    const onSubmitPolicy = async (values: PolicyFormValues) => {
-        const payload: AiExecutionPolicyUpdate = {
-            execution_mode: values.execution_mode,
-            max_concurrent_executions: values.max_concurrent_executions,
-        }
-        try {
-            await updatePolicy({ data: payload })
-            toast({
-                title: t("pages.system.settings.success"),
-                description: t("pages.aiPolicy.updateSucceedMessage"),
-            })
-        } catch {
-            toast({
-                variant: "destructive",
-                title: t("pages.system.settings.error"),
-                description: t("pages.aiPolicy.updateFailedMessage"),
-            })
-        }
-    }
-
-    // Collection policy: a separate edge-side gate (allow_logs / allow_screen),
-    // independent of the execution mode. The host always applies it locally.
-    const { data: collectionResponse, isLoading: isCollectionLoading } = useQueryCollectionPolicySettings()
-    const { mutateAsync: updateCollection, isPending: isCollectionUpdating } = useUpdateCollectionPolicySettings()
-
-    const collectionForm = useForm<CollectionPolicyFormValues>({
-        resolver: zodResolver(collectionPolicySchema),
-        defaultValues: { allow_screen: false, allow_logs: false },
-    })
-
-    const didHydrateCollectionRef = useRef(false)
-    useEffect(() => {
-        if (collectionResponse?.data && !isCollectionLoading && !didHydrateCollectionRef.current) {
-            didHydrateCollectionRef.current = true
-            collectionForm.reset({
-                allow_screen: collectionResponse.data.allow_screen ?? false,
-                allow_logs: collectionResponse.data.allow_logs ?? false,
-            })
-        }
-    }, [collectionResponse?.data, isCollectionLoading, collectionForm])
-
-    const onSubmitCollection = async (values: CollectionPolicyFormValues) => {
-        const payload: CollectionPolicySettingsUpdate = {
-            allow_screen: values.allow_screen,
-            allow_logs: values.allow_logs,
-        }
-        try {
-            await updateCollection({ data: payload })
-            toast({
-                title: t("pages.system.settings.success"),
-                description: t("pages.collectionPolicy.updateSucceedMessage"),
-            })
-        } catch {
-            toast({
-                variant: "destructive",
-                title: t("pages.system.settings.error"),
-                description: t("pages.collectionPolicy.updateFailedMessage"),
             })
         }
     }
@@ -529,6 +447,78 @@ export function AiModelSettings() {
                                 )}
                             />
 
+                            <FormField
+                                control={form.control}
+                                name="max_steps_per_turn"
+                                render={({ field }) => (
+                                    <FormItem>
+                                        <FormLabel>
+                                            {t("pages.aiModel.settings.maxStepsPerTurn")}
+                                        </FormLabel>
+                                        <FormControl>
+                                            <Input
+                                                type="number"
+                                                min={MAX_STEPS_MIN}
+                                                max={MAX_STEPS_MAX}
+                                                step={1}
+                                                {...field}
+                                                value={field.value}
+                                                onChange={(event) =>
+                                                    field.onChange(Number(event.target.value))
+                                                }
+                                            />
+                                        </FormControl>
+                                        <FormDescription>
+                                            {t(
+                                                "pages.aiModel.settings.maxStepsPerTurn.description",
+                                                {
+                                                    min: MAX_STEPS_MIN,
+                                                    max: MAX_STEPS_MAX,
+                                                    defaultValue: MAX_STEPS_DEFAULT,
+                                                },
+                                            )}
+                                        </FormDescription>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+
+                            <FormField
+                                control={form.control}
+                                name="max_same_tool_calls_per_turn"
+                                render={({ field }) => (
+                                    <FormItem>
+                                        <FormLabel>
+                                            {t("pages.aiModel.settings.maxSameToolCallsPerTurn")}
+                                        </FormLabel>
+                                        <FormControl>
+                                            <Input
+                                                type="number"
+                                                min={SAME_TOOL_LIMIT_MIN}
+                                                max={SAME_TOOL_LIMIT_MAX}
+                                                step={1}
+                                                {...field}
+                                                value={field.value}
+                                                onChange={(event) =>
+                                                    field.onChange(Number(event.target.value))
+                                                }
+                                            />
+                                        </FormControl>
+                                        <FormDescription>
+                                            {t(
+                                                "pages.aiModel.settings.maxSameToolCallsPerTurn.description",
+                                                {
+                                                    min: SAME_TOOL_LIMIT_MIN,
+                                                    max: SAME_TOOL_LIMIT_MAX,
+                                                    defaultValue: SAME_TOOL_LIMIT_DEFAULT,
+                                                },
+                                            )}
+                                        </FormDescription>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+
                             <div className="flex justify-end gap-2">
                                 <Button type="button" variant="outline" onClick={onTestConnection} disabled={isTesting || isProviderUpdating}>
                                     {isTesting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PlugZap className="mr-2 h-4 w-4" />}
@@ -544,143 +534,6 @@ export function AiModelSettings() {
                 </CardContent>
             </Card>
 
-            <Card className="mt-6">
-                <CardHeader>
-                    <CardTitle>{t("pages.aiPolicy.title")}</CardTitle>
-                    <CardDescription>
-                        {t("pages.aiPolicy.description")}
-                    </CardDescription>
-                </CardHeader>
-                <CardContent>
-                    <Form {...policyForm}>
-                        <form onSubmit={policyForm.handleSubmit(onSubmitPolicy)} className="space-y-4">
-                            <FormField
-                                control={policyForm.control}
-                                name="execution_mode"
-                                render={({ field }) => (
-                                    <FormItem>
-                                        <FormLabel>{t("pages.aiPolicy.executionMode")}</FormLabel>
-                                        <Select
-                                            key={field.value || "ceiling-empty"}
-                                            onValueChange={field.onChange}
-                                            defaultValue={field.value}
-                                        >
-                                            <FormControl>
-                                                <SelectTrigger>
-                                                    <SelectValue />
-                                                </SelectTrigger>
-                                            </FormControl>
-                                            <SelectContent>
-                                                <ExecutionModeItems />
-                                            </SelectContent>
-                                        </Select>
-                                        <FormDescription>
-                                            {t("pages.aiPolicy.executionMode.description")}
-                                        </FormDescription>
-                                        <FormMessage />
-                                    </FormItem>
-                                )}
-                            />
-                            <FormField
-                                control={policyForm.control}
-                                name="max_concurrent_executions"
-                                render={({ field }) => (
-                                    <FormItem>
-                                        <FormLabel>{t("pages.aiPolicy.maxConcurrentExecutions")}</FormLabel>
-                                        <FormControl>
-                                            <Input
-                                                type="number"
-                                                min={MIN_CONCURRENT_EXECUTIONS}
-                                                max={MAX_CONCURRENT_EXECUTIONS}
-                                                name={field.name}
-                                                ref={field.ref}
-                                                onBlur={field.onBlur}
-                                                value={field.value}
-                                                // The field is a number, so an
-                                                // emptied box must not become the
-                                                // string "" and slip past the
-                                                // numeric bounds.
-                                                onChange={(e) =>
-                                                    field.onChange(
-                                                        e.target.value === ""
-                                                            ? Number.NaN
-                                                            : e.target.valueAsNumber,
-                                                    )
-                                                }
-                                            />
-                                        </FormControl>
-                                        <FormDescription>
-                                            {t("pages.aiPolicy.maxConcurrentExecutions.description")}
-                                        </FormDescription>
-                                        <FormMessage />
-                                    </FormItem>
-                                )}
-                            />
-                            <div className="flex justify-end">
-                                <Button type="submit" disabled={isPolicyUpdating}>
-                                    {isPolicyUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                                    {t("pages.system.settings.save")}
-                                </Button>
-                            </div>
-                        </form>
-                    </Form>
-                </CardContent>
-            </Card>
-
-            <Card className="mt-6">
-                <CardHeader>
-                    <CardTitle>{t("pages.collectionPolicy.title")}</CardTitle>
-                    <CardDescription>
-                        {t("pages.collectionPolicy.description")}
-                    </CardDescription>
-                </CardHeader>
-                <CardContent>
-                    <Form {...collectionForm}>
-                        <form onSubmit={collectionForm.handleSubmit(onSubmitCollection)} className="space-y-4">
-                            <FormField
-                                control={collectionForm.control}
-                                name="allow_logs"
-                                render={({ field }) => (
-                                    <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
-                                        <div className="space-y-0.5">
-                                            <FormLabel>{t("pages.collectionPolicy.allowLogs")}</FormLabel>
-                                            <FormDescription>
-                                                {t("pages.collectionPolicy.allowLogs.description")}
-                                            </FormDescription>
-                                        </div>
-                                        <FormControl>
-                                            <Switch checked={field.value} onCheckedChange={field.onChange} />
-                                        </FormControl>
-                                    </FormItem>
-                                )}
-                            />
-                            <FormField
-                                control={collectionForm.control}
-                                name="allow_screen"
-                                render={({ field }) => (
-                                    <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
-                                        <div className="space-y-0.5">
-                                            <FormLabel>{t("pages.collectionPolicy.allowScreen")}</FormLabel>
-                                            <FormDescription>
-                                                {t("pages.collectionPolicy.allowScreen.description")}
-                                            </FormDescription>
-                                        </div>
-                                        <FormControl>
-                                            <Switch checked={field.value} onCheckedChange={field.onChange} />
-                                        </FormControl>
-                                    </FormItem>
-                                )}
-                            />
-                            <div className="flex justify-end">
-                                <Button type="submit" disabled={isCollectionUpdating}>
-                                    {isCollectionUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                                    {t("pages.system.settings.save")}
-                                </Button>
-                            </div>
-                        </form>
-                    </Form>
-                </CardContent>
-            </Card>
         </div>
     )
 }

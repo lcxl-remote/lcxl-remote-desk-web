@@ -399,7 +399,9 @@ mod tests {
 
     fn sample_plan() -> ExecPlan {
         use crate::RiskLevel;
-        use crate::exec::{ApprovalId, ExecPlanDraft, ExecRequestId, ExecShellKind};
+        use crate::exec::{
+            ApprovalId, ExecExecutionBasis, ExecPlanDraft, ExecRequestId, ExecShellKind,
+        };
         ExecPlan::from_draft(
             ExecRequestId("req-1".into()),
             "gen-1",
@@ -410,6 +412,7 @@ mod tests {
                 cwd: None,
                 shell: ExecShellKind::Powershell,
                 risk: RiskLevel::Low,
+                execution_basis: ExecExecutionBasis::Template,
                 template_id: "get_service".into(),
                 fingerprint: "fp-1".into(),
                 timeout_ms: 10_000,

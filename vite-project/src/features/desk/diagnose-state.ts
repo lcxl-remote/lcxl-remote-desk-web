@@ -209,6 +209,8 @@ export type DiagnoseHistoryTurn = {
     phase: 'done' | 'error';
     /** Failure message if the turn errored. */
     error: string | null;
+    /** Stable business code used to localize the failure. */
+    errorCode: number | null;
     /**
      * Machine-readable AI marking (Art.50(2)) captured for this settled turn,
      * so the transcript keeps marking past AI answers the same way the live
@@ -302,6 +304,7 @@ export function snapshotLiveTurn(prev: DiagnoseState): DiagnoseHistoryTurn[] {
             tools: prev.tools,
             phase: prev.phase,
             error: prev.error,
+            errorCode: prev.errorCode,
             provenance: prev.provenance,
         },
     ];
@@ -360,6 +363,7 @@ export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHi
         tools: [],
         phase: 'done',
         error: null,
+        errorCode: null,
         provenance: null,
     });
     let current: DiagnoseHistoryTurn | null = null;

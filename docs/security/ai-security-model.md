@@ -16,6 +16,16 @@ The default execution mode is **suggest-only**: the model can propose commands b
 
 Both the **AI diagnosis panel** and the **terminal AI copilot** share one sealed confirmation chain. The copilot itself stays suggest-only — it never executes anything on its own. For a `confirm_required` suggestion, the operator may explicitly **promote it to execution**: that click relays the exact command to the host, which **re-classifies it server-side** (a control plane's self-reported decision is never trusted), mints the `exec_request_id`, and returns a preview the operator must **approve** before anything runs. Execution is gated by the same **local execution ceiling** — left at suggest-only it is off, so the Run action returns a non-executable preview that guides the owner to raise the ceiling first. Raising it opens confirmed execution for every AI surface on that device (diagnosis and copilot alike), not the copilot alone.
 
+## Owner-Interactive Free-Form Commands
+
+Template matching remains the default admission policy. A trusted central brain may explicitly grant `OwnerInteractive` only to the authenticated owner acting on that owner's own device. The open-source signal's single authenticated account is its owner subject. Non-owners, shared/access-code sessions, organization members acting on shared devices, fleet execution, automation, MCP, and raw agent requests remain template-only or disabled.
+
+An off-template owner command is not declared safe. The blocklist is a broad, best-effort prefilter rather than a complete semantic sandbox. Every such command is therefore classified **Critical**, shown in full with its shell/cwd/timeout and a “blocklist only” warning, and requires a one-shot explicit approval. The approval action has no default focus or Enter default. The model may propose and wait; it cannot approve.
+
+The approved draft is reclassified before dispatch and must match field-for-field. The edge then independently checks the authorization binding, current local execution ceiling, blocklist, admission basis, limits, and sealed plan before the worker receives only frozen `program + argv`. `cmd.exe` and zsh free-form commands are not admitted in the first release.
+
+For agentic execution, the edge cannot observe the browser click itself. It trusts the authenticated central stamp to mean that the central consumed a valid one-shot approval; compromising manager or the owner's OSS signal therefore compromises that approval boundary. The edge still prevents untrusted-source forgery and transport/plan drift, but resisting a compromised central would require a separate host-local approval proof.
+
 ## The device's own concurrency ceiling
 
 A host also caps how many commands may run **at the same time**

@@ -50,7 +50,7 @@ Once connected, video, Opus audio, and data channels (for input, clipboard, and 
 
 ## AI as a Control Plane
 
-Beyond the browser, AI models can **read and analyze** device state. The server orchestrates a strict pipeline — **collect → redact → model → render** — for in-client diagnostics, and a read-only MCP server exposes the same read capabilities to local AI assistants. See [AI Diagnostics](/features/ai-diagnostics) and the [AI Security Model](/security/ai-security-model).
+Beyond the browser, AI models can **read and analyze** device state. The server orchestrates a strict pipeline — **collect → redact → model → render** — for in-client diagnostics. On an owner's own device, the agent may additionally request a command; the host executes it only after the owner confirms the exact full command. The MCP server remains read-only. See [AI Diagnostics](/features/ai-diagnostics) and the [AI Security Model](/security/ai-security-model).
 
 ## Next
 

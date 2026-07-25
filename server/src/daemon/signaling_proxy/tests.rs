@@ -571,7 +571,6 @@ async fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
         remote_read: None,
         exec_supported: false,
         exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
-        agentic_exec: Arc::new(crate::daemon::agentic_exec::AgenticExecCoordinator::new()),
         session_approvals: Arc::new(crate::daemon::session_approval::SessionApprovalStore::new()),
         command_templates: Arc::new(crate::daemon::command_templates::CommandTemplateCache::new()),
         command_blocklist: Arc::new(crate::daemon::command_blocklist::CommandBlocklistCache::new()),
@@ -584,6 +583,18 @@ async fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
         support_link_state: Arc::new(crate::daemon::support_link_state::SupportLinkState::new()),
     };
     (ctx, outbound_tx)
+}
+
+#[test]
+fn ordinary_exec_result_is_not_consumed_as_edge_exec() {
+    let pending = std::sync::Mutex::new(std::collections::HashSet::new());
+    assert!(
+        !super::take_edge_exec_correlation(&pending, "browser-exec"),
+        "an ordinary ExecResult must continue to the browser forwarding branch"
+    );
+    pending.lock().unwrap().insert("central-exec".into());
+    assert!(super::take_edge_exec_correlation(&pending, "central-exec"));
+    assert!(!super::take_edge_exec_correlation(&pending, "central-exec"));
 }
 
 /// Worker-bound signaling without `from_connection_id` is dropped
@@ -904,6 +915,7 @@ fn block(request_id: &str, audience: &str) -> AuthorizationBlock {
         },
         orchestrator_grants: vec!["ai.diagnose".to_string()],
         max_risk: RiskLevel::Low,
+        exec_admission_policy: desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly,
         actor: AuthzActor { user_id: Some(1) },
         device: AuthzDevice { device_id: Some(2) },
         request_id: request_id.to_string(),

@@ -12,11 +12,12 @@
 //!   no shell metacharacters), and the worker executes that argv verbatim. The
 //!   control end's free-form [`crate::ExecInput::command`] is used only for
 //!   classification and preview — it is **never** sent to the worker.
-//! - **Only a whitelist template is executable.** Off-template commands are
-//!   classified, previewed, and then fall back to suggest-only; they never
-//!   produce an [`ExecPlanDraft`]. Blocklist hits are hard-denied. Every real
-//!   execution still requires an explicit user approval that mints an
-//!   `approval_id` server-side — there is no automatic path.
+//! - **Execution basis is explicit.** Template execution remains the default.
+//!   A trusted central may authorize an authenticated device owner to approve
+//!   one off-template command, which is marked
+//!   [`ExecExecutionBasis::OwnerBlocklistOnly`]. Blocklist hits remain
+//!   hard-denied, and every real execution still requires an explicit user
+//!   approval that mints an `approval_id` server-side.
 //!
 //! All wire types derive `serde` (JSON, control-end signaling), `wincode` (the
 //! daemon ↔ worker IPC carrying [`ExecPlan`] / [`ExecResultPayload`]), and
@@ -165,6 +166,9 @@ pub struct ExecPreview {
     pub cwd: Option<String>,
     pub timeout_ms: u32,
     pub risk: RiskLevel,
+    /// The server-authoritative basis used to classify this preview.
+    #[serde(default)]
+    pub execution_basis: ExecExecutionBasis,
     /// What executing this would do (from the classification).
     pub impact: String,
     /// Server policy note (e.g. which template matched, or why the mode forbids
@@ -244,6 +248,34 @@ pub enum ExecShellKind {
     Powershell,
     Bash,
     Sh,
+}
+
+/// The trust basis under which an execution draft was produced.
+///
+/// This is classification metadata. It is compared as part of the full draft
+/// but deliberately excluded from the worker-field fingerprint.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    SchemaWrite,
+    SchemaRead,
+    ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecExecutionBasis {
+    /// The command matched a built-in or operator template.
+    #[default]
+    Template,
+    /// The device owner explicitly approved an off-template command after the
+    /// effective blocklist and structural checks passed.
+    OwnerBlocklistOnly,
 }
 
 /// The OS-level containment tier a template demands. The edge fails closed
@@ -337,6 +369,10 @@ pub struct ExecPlanDraft {
     pub cwd: Option<String>,
     pub shell: ExecShellKind,
     pub risk: RiskLevel,
+    /// The classification basis. This is not part of `fingerprint`; callers
+    /// reject drift by comparing the complete draft.
+    #[serde(default)]
+    pub execution_basis: ExecExecutionBasis,
     /// Identifier of the whitelist template this was rendered from.
     pub template_id: String,
     /// Stable hash over `program + argv + cwd + limits` (PowerShell templates
@@ -387,6 +423,9 @@ pub struct ExecPlan {
     pub cwd: Option<String>,
     pub shell: ExecShellKind,
     pub risk: RiskLevel,
+    /// Copied verbatim from the approved draft.
+    #[serde(default)]
+    pub execution_basis: ExecExecutionBasis,
     pub template_id: String,
     /// Minted at approval time; proves the execution was user-approved.
     pub approval_id: ApprovalId,
@@ -423,6 +462,7 @@ impl ExecPlan {
             cwd: draft.cwd,
             shell: draft.shell,
             risk: draft.risk,
+            execution_basis: draft.execution_basis,
             template_id: draft.template_id,
             approval_id,
             fingerprint: draft.fingerprint,
@@ -476,6 +516,7 @@ mod tests {
             cwd: None,
             shell: ExecShellKind::Powershell,
             risk: RiskLevel::Low,
+            execution_basis: ExecExecutionBasis::Template,
             template_id: "get_service".into(),
             fingerprint: "abc123".into(),
             timeout_ms: 10_000,
@@ -554,6 +595,7 @@ mod tests {
         assert_eq!(plan.fingerprint, draft.fingerprint);
         assert_eq!(plan.template_id, draft.template_id);
         assert_eq!(plan.timeout_ms, draft.timeout_ms);
+        assert_eq!(plan.execution_basis, draft.execution_basis);
     }
 
     /// Retrying a task keeps its task id and takes a fresh generation. The two
@@ -589,6 +631,7 @@ mod tests {
             cwd: None,
             timeout_ms: 10_000,
             risk: RiskLevel::Low,
+            execution_basis: ExecExecutionBasis::Template,
             impact: "Reads the status of a service".into(),
             policy_note: Some("matched template get_service".into()),
             requires_confirmation: true,
@@ -648,6 +691,31 @@ mod tests {
                 wincode::config::deserialize(&bytes, config).expect("decode");
             assert_eq!(payload, back);
         }
+    }
+
+    #[test]
+    fn legacy_json_defaults_execution_basis_to_template() {
+        let mut draft_value = serde_json::to_value(sample_draft()).expect("encode draft");
+        draft_value
+            .as_object_mut()
+            .expect("draft object")
+            .remove("execution_basis");
+        let draft: ExecPlanDraft = serde_json::from_value(draft_value).expect("decode draft");
+        assert_eq!(draft.execution_basis, ExecExecutionBasis::Template);
+
+        let plan = ExecPlan::from_draft(
+            ExecRequestId("exec_legacy".into()),
+            "gen_legacy",
+            ApprovalId("approval_legacy".into()),
+            sample_draft(),
+        );
+        let mut plan_value = serde_json::to_value(plan).expect("encode plan");
+        plan_value
+            .as_object_mut()
+            .expect("plan object")
+            .remove("execution_basis");
+        let plan: ExecPlan = serde_json::from_value(plan_value).expect("decode plan");
+        assert_eq!(plan.execution_basis, ExecExecutionBasis::Template);
     }
 
     #[test]

@@ -523,6 +523,24 @@ pub(super) fn agentic_plan_from_input(
     )
 }
 
+pub(super) fn owner_agentic_plan_from_input(
+    input: &desk_agent_protocol::ExecInput,
+    request_id: &str,
+) -> ExecPlan {
+    let outcome = desk_diagnose_core::exec_classify::classify_command_with_policy(
+        input,
+        &[],
+        desk_agent_protocol::exec_policy::builtin_blocklist(),
+        desk_agent_protocol::authz::ExecAdmissionPolicy::OwnerInteractive,
+    );
+    ExecPlan::from_draft(
+        ExecRequestId("exec_owner_task_1".to_string()),
+        request_id,
+        ApprovalId("appr-owner-1".to_string()),
+        outcome.draft.expect("owner input must classify"),
+    )
+}
+
 /// A built-in template plan with a per-turn clamped timeout + cwd passes the
 /// agentic PEP — the exact case the fleet-only PEP (fixed defaults, no cwd)
 /// would have rejected. Re-classification reproduces the plan field-for-field.
@@ -544,6 +562,7 @@ pub(super) fn agentic_builtin_plan_with_cwd_and_clamped_limits_passes() {
         validate_agentic_edge_exec(
             &plan,
             &input,
+            desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly,
             desk_agent_protocol::RiskLevel::Critical,
             &[],
             desk_agent_protocol::exec_policy::builtin_blocklist(),
@@ -568,12 +587,93 @@ pub(super) fn agentic_operator_template_plan_passes() {
         validate_agentic_edge_exec(
             &plan,
             &input,
+            desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly,
             desk_agent_protocol::RiskLevel::High,
             &operator,
             desk_agent_protocol::exec_policy::builtin_blocklist(),
         ),
         None
     );
+}
+
+#[test]
+pub(super) fn agentic_owner_freeform_requires_explicit_owner_policy() {
+    let input = agentic_input("Get-ChildItem C:\\", None, 0);
+    let plan = owner_agentic_plan_from_input(&input, "a-owner");
+    assert_eq!(
+        plan.execution_basis,
+        desk_agent_protocol::exec::ExecExecutionBasis::OwnerBlocklistOnly
+    );
+    assert_eq!(
+        validate_agentic_edge_exec(
+            &plan,
+            &input,
+            desk_agent_protocol::authz::ExecAdmissionPolicy::OwnerInteractive,
+            desk_agent_protocol::RiskLevel::Critical,
+            &[],
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
+        ),
+        None
+    );
+    let reason = validate_agentic_edge_exec(
+        &plan,
+        &input,
+        desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly,
+        desk_agent_protocol::RiskLevel::Critical,
+        &[],
+        desk_agent_protocol::exec_policy::builtin_blocklist(),
+    )
+    .expect("template-only agentic must reject owner basis");
+    assert!(
+        reason.contains("owner_basis_without_owner_policy"),
+        "{reason}"
+    );
+}
+
+#[tokio::test]
+pub(super) async fn agentic_owner_freeform_is_rejected_when_local_mode_tightens() {
+    let (mut ctx, mut rx) = make_ctx_with_rx().await;
+    ctx.exec_supported = true;
+    ctx.settings.write().await.ai_policy.execution_mode = ExecutionMode::ReadOnly;
+    let mut authz = authz_block(
+        vec![Capability::ShellExecConfirmed],
+        vec!["shell.plan"],
+        ExecutionMode::ConfirmEachAction,
+        desk_agent_protocol::RiskLevel::Critical,
+    );
+    authz.exec_admission_policy = desk_agent_protocol::authz::ExecAdmissionPolicy::OwnerInteractive;
+    ctx.inbound_authz = Some(authz);
+    let input = agentic_input("Get-ChildItem C:\\", None, 0);
+    let plan = owner_agentic_plan_from_input(&input, "a-owner-mode");
+
+    handle_edge_exec_request_inbound(&ctx, &agentic_exec_model("a-owner-mode", &plan, &input))
+        .await
+        .unwrap();
+
+    match read_fleet_result(&mut rx).disposition {
+        EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
+            assert!(
+                reason.contains("owner_interactive_mode_disabled"),
+                "{reason}"
+            );
+        }
+        other => panic!("expected local-mode rejection, got {other:?}"),
+    }
+    assert!(ctx.edge_exec_pending.lock().unwrap().is_empty());
+}
+
+#[test]
+pub(super) fn fleet_always_rejects_owner_freeform_basis() {
+    let input = agentic_input("Get-ChildItem C:\\", None, 0);
+    let plan = owner_agentic_plan_from_input(&input, "a-owner");
+    let reason = validate_fleet_edge_exec(
+        &plan,
+        desk_agent_protocol::RiskLevel::Critical,
+        &[],
+        desk_agent_protocol::exec_policy::builtin_blocklist(),
+    )
+    .expect("fleet must reject owner basis");
+    assert!(reason.contains("fleet_requires_template_basis"), "{reason}");
 }
 
 /// A self-consistent in-bounds limit tamper (timeout widened to another valid
@@ -599,6 +699,7 @@ pub(super) fn agentic_in_bounds_limit_tamper_rejected() {
     let reason = validate_agentic_edge_exec(
         &plan,
         &input,
+        desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly,
         desk_agent_protocol::RiskLevel::High,
         &[],
         desk_agent_protocol::exec_policy::builtin_blocklist(),
@@ -618,6 +719,7 @@ pub(super) fn agentic_input_mismatched_with_plan_rejected() {
     let reason = validate_agentic_edge_exec(
         &plan,
         &other_input,
+        desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly,
         desk_agent_protocol::RiskLevel::High,
         &[],
         desk_agent_protocol::exec_policy::builtin_blocklist(),
@@ -646,6 +748,7 @@ pub(super) fn agentic_risk_above_max_rejected() {
     let reason = validate_agentic_edge_exec(
         &high_plan,
         &high_input,
+        desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly,
         desk_agent_protocol::RiskLevel::Medium,
         &operator,
         desk_agent_protocol::exec_policy::builtin_blocklist(),

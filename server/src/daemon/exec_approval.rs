@@ -5,8 +5,9 @@
 //! here keyed by that id. `ResolveExec` later looks the id up, consumes it
 //! (removing it so it can never be approved twice), and — on approve — seals the
 //! stored draft into an `ExecPlan` with a freshly minted `approval_id`. The
-//! draft is sealed at preview time and never re-rendered, so the previewed plan
-//! is exactly the executed plan.
+//! original input and admission policy are retained so approval can rebuild the
+//! draft against the latest local policy snapshot. Only an exactly equal rebuild
+//! seals the draft that was shown at preview time.
 //!
 //! State is in-memory and short-lived: a daemon restart simply drops pending
 //! approvals (the control end re-previews). Entries expire after [`TTL`].
@@ -15,6 +16,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use desk_agent_protocol::ExecInput;
+use desk_agent_protocol::ExecutionMode;
+use desk_agent_protocol::authz::ExecAdmissionPolicy;
 use desk_agent_protocol::exec::{
     ApprovalId, CommandClassification, ExecPlan, ExecPlanDraft, ExecRequestId,
 };
@@ -24,6 +28,9 @@ pub const TTL: Duration = Duration::from_secs(120);
 
 /// One parked, executable preview awaiting the user's decision.
 struct PendingApproval {
+    input: ExecInput,
+    admission_policy: ExecAdmissionPolicy,
+    execution_mode: ExecutionMode,
     draft: ExecPlanDraft,
     classification: CommandClassification,
     created_at: Instant,
@@ -44,6 +51,9 @@ struct PendingApproval {
 
 /// Outcome of consuming a pending approval.
 pub struct ConsumedApproval {
+    pub input: ExecInput,
+    pub admission_policy: ExecAdmissionPolicy,
+    pub execution_mode: ExecutionMode,
     pub draft: ExecPlanDraft,
     pub classification: CommandClassification,
     pub connection_id: Option<String>,
@@ -79,6 +89,9 @@ impl PendingApprovalStore {
     /// [`ExecRequestId`]. Opportunistically evicts expired entries.
     pub fn insert(
         &self,
+        input: ExecInput,
+        admission_policy: ExecAdmissionPolicy,
+        execution_mode: ExecutionMode,
         draft: ExecPlanDraft,
         classification: CommandClassification,
         connection_id: Option<String>,
@@ -91,6 +104,9 @@ impl PendingApprovalStore {
         map.insert(
             id.0.clone(),
             PendingApproval {
+                input,
+                admission_policy,
+                execution_mode,
                 draft,
                 classification,
                 created_at: Instant::now(),
@@ -125,6 +141,9 @@ impl PendingApprovalStore {
             return TakeOutcome::NotFound;
         }
         TakeOutcome::Consumed(ConsumedApproval {
+            input: pending.input,
+            admission_policy: pending.admission_policy,
+            execution_mode: pending.execution_mode,
             draft: pending.draft,
             classification: pending.classification,
             connection_id: pending.connection_id,
@@ -179,7 +198,21 @@ fn evict_expired(map: &mut HashMap<String, PendingApproval>) {
 mod tests {
     use super::*;
     use desk_agent_protocol::RiskLevel;
-    use desk_agent_protocol::exec::{ExecDecision, ExecEffect, ExecShellKind};
+    use desk_agent_protocol::authz::ExecAdmissionPolicy;
+    use desk_agent_protocol::exec::{ExecDecision, ExecEffect, ExecExecutionBasis, ExecShellKind};
+
+    fn input() -> ExecInput {
+        ExecInput {
+            target: desk_agent_protocol::ExecTarget::Shell {
+                shell: "powershell".into(),
+            },
+            command: "docker restart web1".into(),
+            cwd: None,
+            timeout_ms: 30_000,
+            max_stdout_bytes: 65_536,
+            max_stderr_bytes: 65_536,
+        }
+    }
 
     fn draft() -> ExecPlanDraft {
         ExecPlanDraft {
@@ -188,6 +221,7 @@ mod tests {
             cwd: None,
             shell: ExecShellKind::Native,
             risk: RiskLevel::High,
+            execution_basis: ExecExecutionBasis::Template,
             template_id: "docker_restart".into(),
             fingerprint: "fp".into(),
             timeout_ms: 30_000,
@@ -218,6 +252,9 @@ mod tests {
     fn insert_then_take_returns_the_draft_once() {
         let store = PendingApprovalStore::new();
         let id = store.insert(
+            input(),
+            ExecAdmissionPolicy::TemplateOnly,
+            ExecutionMode::ConfirmEachAction,
             draft(),
             classification(),
             Some("conn1".into()),
@@ -229,6 +266,9 @@ mod tests {
         let consumed = is_consumed(store.take(&id, Some("conn1"))).expect("first take");
         assert_eq!(consumed.draft.template_id, "docker_restart");
         assert_eq!(consumed.connection_id.as_deref(), Some("conn1"));
+        assert_eq!(consumed.input, input());
+        assert_eq!(consumed.admission_policy, ExecAdmissionPolicy::TemplateOnly);
+        assert_eq!(consumed.execution_mode, ExecutionMode::ConfirmEachAction);
         // The source frame request_id (ledger key) survives the round-trip.
         assert_eq!(consumed.source_request_id.as_deref(), Some("frame_req_1"));
         assert_eq!(store.len(), 0);
@@ -244,6 +284,9 @@ mod tests {
     fn session_grant_template_round_trips_through_take() {
         let store = PendingApprovalStore::new();
         let id = store.insert(
+            input(),
+            ExecAdmissionPolicy::TemplateOnly,
+            ExecutionMode::SessionApproved,
             draft(),
             classification(),
             Some("conn1".into()),
@@ -269,7 +312,16 @@ mod tests {
     #[test]
     fn take_from_other_connection_is_forbidden_and_keeps_pending() {
         let store = PendingApprovalStore::new();
-        let id = store.insert(draft(), classification(), Some("owner".into()), None, None);
+        let id = store.insert(
+            input(),
+            ExecAdmissionPolicy::TemplateOnly,
+            ExecutionMode::ConfirmEachAction,
+            draft(),
+            classification(),
+            Some("owner".into()),
+            None,
+            None,
+        );
 
         // A different connection cannot consume — and the pending is preserved.
         assert!(matches!(
@@ -298,8 +350,26 @@ mod tests {
     #[test]
     fn minted_ids_are_unique() {
         let store = PendingApprovalStore::new();
-        let a = store.insert(draft(), classification(), None, None, None);
-        let b = store.insert(draft(), classification(), None, None, None);
+        let a = store.insert(
+            input(),
+            ExecAdmissionPolicy::TemplateOnly,
+            ExecutionMode::ConfirmEachAction,
+            draft(),
+            classification(),
+            None,
+            None,
+            None,
+        );
+        let b = store.insert(
+            input(),
+            ExecAdmissionPolicy::TemplateOnly,
+            ExecutionMode::ConfirmEachAction,
+            draft(),
+            classification(),
+            None,
+            None,
+            None,
+        );
         assert_ne!(a, b);
     }
 }

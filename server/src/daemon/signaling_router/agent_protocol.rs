@@ -386,6 +386,7 @@ pub(super) fn non_executable_preview(
         cwd,
         timeout_ms,
         risk,
+        execution_basis: desk_agent_protocol::exec::ExecExecutionBasis::Template,
         impact,
         policy_note,
         requires_confirmation: false,

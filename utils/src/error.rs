@@ -282,6 +282,11 @@ impl DeskErrorCode {
     /// caller (a stale or cross-session continuation). The control end maps this
     /// code to a localized message. Rides the agent-error wire, not an HTTP status.
     pub const COPILOT_SUBJECT_MISMATCH: DeskErrorCode = DeskErrorCode(61);
+    /// The agent stopped a turn because the model requested the same tool more
+    /// times than the per-turn repeat circuit breaker permits. The control end
+    /// maps this code to a localized loop-prevention message. Rides the
+    /// agent-error wire, not an HTTP status.
+    pub const AGENT_SAME_TOOL_REPEAT_LIMIT: DeskErrorCode = DeskErrorCode(70);
     /// The account is in a self-deletion state (`email_pending` / `grace` /
     /// `deleting` / `deleted`) and the requested mutating action is refused while
     /// the deletion is pending. The user must cancel the deletion first. Carried
@@ -562,6 +567,7 @@ mod tests {
         assert_eq!(DeskErrorCode::COPILOT_PROTOCOL_VIOLATION.code(), 59);
         assert_eq!(DeskErrorCode::COPILOT_TURN_BUSY.code(), 60);
         assert_eq!(DeskErrorCode::COPILOT_SUBJECT_MISMATCH.code(), 61);
+        assert_eq!(DeskErrorCode::AGENT_SAME_TOOL_REPEAT_LIMIT.code(), 70);
         let codes = [
             DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(),
             DeskErrorCode::DEVICE_CLIENT_ID_REQUIRED.code(),

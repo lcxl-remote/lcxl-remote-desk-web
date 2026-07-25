@@ -28,7 +28,6 @@ async fn make_ctx() -> RouterContext {
         remote_read: None,
         exec_supported: false,
         exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
-        agentic_exec: Arc::new(crate::daemon::agentic_exec::AgenticExecCoordinator::new()),
         session_approvals: Arc::new(crate::daemon::session_approval::SessionApprovalStore::new()),
         command_templates: Arc::new(crate::daemon::command_templates::CommandTemplateCache::new()),
         command_blocklist: Arc::new(crate::daemon::command_blocklist::CommandBlocklistCache::new()),

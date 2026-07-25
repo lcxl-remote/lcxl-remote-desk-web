@@ -403,7 +403,7 @@ describe('useDeskDiagnose', () => {
         expect(result.current.state.history[0].answer).toBe('cpu is busy');
     });
 
-    it('a follow-up after an error continues the same conversation', () => {
+    it('a follow-up after a circuit breaker keeps prior output and continues the same conversation', () => {
         const { result, feed } = renderDiagnose();
         act(() => result.current.start('why slow?', {}));
         const conv = conversationIdOfCall(0);
@@ -411,19 +411,60 @@ describe('useDeskDiagnose', () => {
             frame({
                 request_id: 'req-1',
                 seq: 0,
+                kind: 'partial',
+                partial_summary: 'process 4242 is using the CPU',
+            }),
+        );
+        feed(
+            frame({
+                request_id: 'req-1',
+                seq: 1,
+                kind: 'tool_started',
+                tool_name: 'execute_command',
+                tool_call_id: 'c1',
+            }),
+        );
+        feed(
+            frame({
+                request_id: 'req-1',
+                seq: 2,
+                kind: 'tool_finished',
+                tool_call_id: 'c1',
+                tool_ok: true,
+            }),
+        );
+        feed(
+            frame({
+                request_id: 'req-1',
+                seq: 3,
                 kind: 'error',
-                error: { kind: 'internal', message: 'boom', retryable: true, safe_for_model: true },
+                error: {
+                    kind: 'internal',
+                    message: 'repeat limit',
+                    retryable: false,
+                    safe_for_model: true,
+                    error_code: 70,
+                },
             }),
         );
         expect(result.current.state.phase).toBe('error');
+        expect(result.current.state.partialSummary).toBe('process 4242 is using the CPU');
+        expect(result.current.state.tools).toEqual([
+            { callId: 'c1', name: 'execute_command', status: 'ok' },
+        ]);
 
-        act(() => result.current.start('try again', {}));
+        act(() => result.current.start('continue', {}));
         // The failed turn is settled, so the follow-up reuses the conversation and
         // the failed turn is captured in the transcript.
         expect(conversationIdOfCall(1)).toBe(conv);
         expect(result.current.state.history).toHaveLength(1);
         expect(result.current.state.history[0].phase).toBe('error');
-        expect(result.current.state.history[0].error).toBe('boom');
+        expect(result.current.state.history[0].summary).toBe('process 4242 is using the CPU');
+        expect(result.current.state.history[0].tools).toEqual([
+            { callId: 'c1', name: 'execute_command', status: 'ok' },
+        ]);
+        expect(result.current.state.history[0].error).toBe('repeat limit');
+        expect(result.current.state.history[0].errorCode).toBe(70);
     });
 
     it('reset starts a new conversation on the next turn', () => {

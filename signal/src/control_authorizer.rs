@@ -25,9 +25,10 @@ use std::sync::Arc;
 use actix_web::web;
 use desk_agent_protocol::authz::{
     AUTHORIZATION_BLOCK_VERSION, AuthorizationBlock, AuthorizedControlPayload, AuthzActor,
-    AuthzDevice,
+    AuthzDevice, ExecAdmissionPolicy,
 };
 use desk_agent_protocol::diagnose::DiagnoseRequestData;
+use desk_agent_protocol::exec::ResolveExecData;
 use desk_agent_protocol::{AgentScope, Capability, ExecutionMode, RiskLevel};
 use desk_signal_facade::model::auth_context::{AuthContext, AuthKind};
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
@@ -169,6 +170,12 @@ fn build_wrapper_outcome(
     };
     let authz = AuthorizationBlock {
         version: AUTHORIZATION_BLOCK_VERSION,
+        exec_admission_policy: match scope.mode {
+            ExecutionMode::ConfirmEachAction | ExecutionMode::SessionApproved => {
+                ExecAdmissionPolicy::OwnerInteractive
+            }
+            _ => ExecAdmissionPolicy::TemplateOnly,
+        },
         scope,
         orchestrator_grants,
         max_risk,
@@ -260,6 +267,8 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
             // the relay pre-flight.
             if model.signaling_type == SignalingType::DiagnoseCancel {
                 self.collect_pending.cancel(&model.request_id);
+                crate::agent_exec::global_agent_exec_pending()
+                    .cancel_approvals_for_browser(&actor.model.connection_id);
                 return ControlFrameOutcome::Handled;
             }
             // A copilot cancel is consumed centrally (the copilot runs on signal,
@@ -267,10 +276,17 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
             if model.signaling_type == SignalingType::TerminalCopilotCancel {
                 return ControlFrameOutcome::Handled;
             }
-            // A host exec's `ResolveExec` rides its prior approval; OSS signal owns
-            // no durable agentic work items, so it relays the resolution to the
-            // edge unwrapped, exactly as a plain relay would.
+            // A signal-owned agentic exec parks its approval here. Consume only
+            // when the request id and browser connection both match; otherwise
+            // this is the ordinary browser-initiated ConfirmExec flow and still
+            // relays to the host unchanged.
             if model.signaling_type == SignalingType::ResolveExec {
+                if let Ok(data) = model.get_data::<ResolveExecData>()
+                    && crate::agent_exec::global_agent_exec_pending()
+                        .resolve(&actor.model.connection_id, &data)
+                {
+                    return ControlFrameOutcome::Handled;
+                }
                 return ControlFrameOutcome::Forward(model.clone());
             }
 
@@ -359,6 +375,16 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                         &model.request_id,
                         &to_id,
                         &browser_connection_id,
+                        actor_user_id,
+                        audience,
+                        scope,
+                        max_risk,
+                        match mode {
+                            ExecutionMode::ConfirmEachAction | ExecutionMode::SessionApproved => {
+                                ExecAdmissionPolicy::OwnerInteractive
+                            }
+                            _ => ExecAdmissionPolicy::TemplateOnly,
+                        },
                         request,
                     )
                     .await;

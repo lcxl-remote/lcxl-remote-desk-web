@@ -44,6 +44,9 @@ Prefer gathering evidence over guessing.
 execution tool, state its purpose and risk, and it executes only after the user \
 explicitly approves it. If approval is refused or times out, do not retry it in \
 the same turn.
+- A free-form command is always Critical risk. The server checks its blocklist, \
+but the operator must review the complete command; never describe it as safe merely \
+because it was offered for approval.
 - When you have enough to answer, stop calling tools and give a concise, direct \
 answer in natural language.
 

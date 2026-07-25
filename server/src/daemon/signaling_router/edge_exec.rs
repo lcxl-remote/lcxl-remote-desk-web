@@ -1,7 +1,8 @@
 use super::*;
 
-/// Handle an inbound `EdgeExecRequest` from the manager. The frame has already
-/// passed the proxy's source gate (Manager-only) and dedicated authz gate (which
+/// Handle an inbound `EdgeExecRequest` from a trusted central brain (manager or
+/// OSS signal). The frame has already passed the proxy's trusted-central source
+/// gate and dedicated authz gate (which
 /// unwrapped the inner [`ExecPlan`] and set `ctx.inbound_authz`). This re-
 /// validates the plan (PEP) and, on success, dispatches it to the worker
 /// correlated as a fleet execution; every exit emits exactly one
@@ -106,6 +107,31 @@ pub(super) async fn handle_edge_exec_request_inbound(
         return Ok(());
     }
 
+    // Owner free-form is an interactive-only admission. The central grant and
+    // the host's current local execution mode are both authoritative; either can
+    // tighten to ReadOnly/SuggestOnly after the preview, which must shut this
+    // dispatch down before worker handoff.
+    let effective_mode = {
+        let local_mode = ctx.settings.read().await.ai_policy.execution_mode;
+        authz.scope.mode.restrict_to(local_mode)
+    };
+    if payload.plan().execution_basis
+        == desk_agent_protocol::exec::ExecExecutionBasis::OwnerBlocklistOnly
+        && !matches!(
+            effective_mode,
+            ExecutionMode::ConfirmEachAction | ExecutionMode::SessionApproved
+        )
+    {
+        send_edge_exec_result(
+            &ctx.outbound_tx,
+            &request_id,
+            EdgeExecDisposition::RejectedBeforeDispatch {
+                reason: "pep_rejected:owner_interactive_mode_disabled".to_string(),
+            },
+        );
+        return Ok(());
+    }
+
     let templates = ctx.command_templates.snapshot();
     let effective_blocklist = ctx.command_blocklist.snapshot();
     let rejection = match &payload {
@@ -118,6 +144,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
         } => validate_agentic_edge_exec(
             plan,
             validation_input,
+            authz.exec_admission_policy,
             authz.max_risk,
             &templates,
             &effective_blocklist,
@@ -140,7 +167,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
 }
 
 /// Dispatch a PEP-validated fleet [`ExecPlan`] to the worker, correlated so the
-/// worker's `WorkerToService::ExecResult` is relayed back to the manager as a
+/// worker's `WorkerToService::ExecResult` is relayed back to the trusted central as a
 /// `EdgeExecResult(Executed{..})` (see the proxy's `ExecResult` handler). On a
 /// send failure the plan never reached the worker, so the change definitely did
 /// not run → `DispatchFailedBeforeWorker`.

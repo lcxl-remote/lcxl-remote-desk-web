@@ -2586,6 +2586,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "desk-agent-protocol",
+ "desk-utils",
  "regex",
  "serde",
  "serde_json",

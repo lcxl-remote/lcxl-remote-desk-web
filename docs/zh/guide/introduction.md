@@ -1,6 +1,6 @@
 # 介绍
 
-**LCXL Remote Desk** 是一款 **AI 原生（AI-Native）**、开源、高性能的远程桌面。它把 AI 当作**与浏览器并列的一等控制端**：除了基于浏览器的远程控制，它还内置一个只读诊断 AI Agent，读取设备当前状态来排查问题，并通过一个只读 [MCP](https://modelcontextprotocol.io/) 服务把这些只读能力开放给外部 AI 助手。
+**LCXL Remote Desk** 是一款 **AI 原生（AI-Native）**、开源、高性能的远程桌面。它把 AI 当作**与浏览器并列的一等控制端**：除了基于浏览器的远程控制，它还内置诊断 AI Agent，可读取设备状态并提出由 owner 确认的命令；对外部 AI 助手则只通过只读 [MCP](https://modelcontextprotocol.io/) 服务开放读取能力。
 
 后端使用 Rust (Actix-Web) 编写，前端使用 React + Vite + Tailwind CSS。
 
@@ -23,7 +23,7 @@ AI 层是**安全优先、模型无关**的（兼容 OpenAI 与 Anthropic API）
 
 ## 核心功能
 
-- **AI 诊断**——用自然语言提问；系统采集只读状态（系统信息、进程、端口、日志），本地脱敏后发给模型分析并给出修复建议。
+- **AI 诊断**——用自然语言提问；系统采集只读状态并在本地脱敏后交给模型分析。在 owner 自己的设备上，Agent 还可请求执行受支持 shell 的命令，但只有 owner 明确确认该条完整命令后才会执行。
 - **只读 MCP 服务**——`--startup-mode mcp-stdio` 向本地 AI 助手暴露一个静态白名单的只读工具集，无执行或写入权限。
 - **高性能串流**——基于 WebRTC，支持 AV1 / H.264 / VP8 / VP9 编码与 Opus 音频。
 - **远程终端**——内置 xterm.js 终端，支持完整 shell 交互。

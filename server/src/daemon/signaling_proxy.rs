@@ -34,6 +34,16 @@ use rustls_native_certs::load_native_certs;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{broadcast, watch};
 
+fn take_edge_exec_correlation(
+    pending: &std::sync::Mutex<std::collections::HashSet<String>>,
+    request_id: &str,
+) -> bool {
+    pending
+        .lock()
+        .map(|mut pending| pending.remove(request_id))
+        .unwrap_or(false)
+}
+
 /// Whether the host should keep the manager link connected right now: the
 /// manager URL and API token are both configured (non-empty) **and** the
 /// host-local `manager_enabled` toggle is not turned off (`Some(false)`).
@@ -104,14 +114,11 @@ pub async fn run_signaling_proxy(
 
     let (outbound_tx, _seed_rx) = broadcast::channel::<String>(128);
 
-    // Operator command templates (built-in baseline ∪ manager-synced) and the
-    // agentic exec coordinator are shared by the agentic diagnose runtime (exec
-    // classify + approval/result waits), the router (ResolveExec routing), and the
-    // worker-message loop (ExecResult delivery), so all reference the same state.
+    // Operator command templates (built-in baseline ∪ manager-synced) are shared by
+    // every inbound execution path so preview and dispatch see the same snapshot.
     let command_templates = Arc::new(crate::daemon::command_templates::CommandTemplateCache::new());
     let command_blocklist =
         Arc::new(crate::daemon::command_blocklist::CommandBlocklistCache::new());
-    let agentic_exec = Arc::new(crate::daemon::agentic_exec::AgenticExecCoordinator::new());
 
     // The diagnose orchestrator runs daemon-side wherever an in-process worker
     // can collect locally (Default / DeskServer); ServiceDaemon leaves it `None`.
@@ -186,7 +193,6 @@ pub async fn run_signaling_proxy(
         // execute (Default / DeskServer), gated like the diagnose orchestrator.
         exec_supported: diagnose_orchestrator.is_some(),
         exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
-        agentic_exec: agentic_exec.clone(),
         session_approvals: Arc::new(crate::daemon::session_approval::SessionApprovalStore::new()),
         command_templates: command_templates.clone(),
         command_blocklist: command_blocklist.clone(),
@@ -1008,24 +1014,11 @@ pub async fn run_signaling_proxy(
                         )
                         .await;
                 }
-                // Agentic exec correlation: if the model-initiated loop is awaiting
-                // this result (keyed by `exec_request_id`), hand it to the awaiting
-                // runner and suppress the browser-bound frame — the loop feeds the
-                // result back to the model instead.
-                if router_ctx.agentic_exec.deliver_result(
-                    &payload.result.exec_request_id.0,
-                    payload.result.outcome.clone(),
-                ) {
-                    continue;
-                }
                 // Fleet exec correlation: if this result is for an in-flight
                 // fleet attempt, relay it to the manager as a `EdgeExecResult`
                 // (`Executed`) instead of an `ExecResult(609)` toward a browser.
-                let is_fleet = router_ctx
-                    .edge_exec_pending
-                    .lock()
-                    .map(|mut p| p.remove(&payload.request_id))
-                    .unwrap_or(false);
+                let is_fleet =
+                    take_edge_exec_correlation(&router_ctx.edge_exec_pending, &payload.request_id);
                 if is_fleet {
                     signaling_router::send_edge_exec_result(
                         &outbound_tx,

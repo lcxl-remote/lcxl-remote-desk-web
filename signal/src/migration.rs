@@ -8,6 +8,9 @@ mod m20260708_000001_create_usage_hour_indexes;
 mod m20260708_000002_create_usage_retention_table;
 mod m20260710_000001_add_device_code_capabilities;
 mod m20260722_000001_create_host_remote_access_state;
+mod m20260724_000001_create_agent_session;
+mod m20260724_000002_add_model_provider_same_tool_limit;
+mod m20260724_000003_add_model_provider_max_steps;
 
 pub struct Migrator;
 
@@ -23,6 +26,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260708_000002_create_usage_retention_table::Migration),
             Box::new(m20260710_000001_add_device_code_capabilities::Migration),
             Box::new(m20260722_000001_create_host_remote_access_state::Migration),
+            Box::new(m20260724_000001_create_agent_session::Migration),
+            Box::new(m20260724_000002_add_model_provider_same_tool_limit::Migration),
+            Box::new(m20260724_000003_add_model_provider_max_steps::Migration),
         ]
     }
 }

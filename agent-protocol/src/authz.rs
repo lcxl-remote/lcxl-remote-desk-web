@@ -22,6 +22,21 @@ use crate::{AgentScope, RiskLevel};
 /// version it does not understand.
 pub const AUTHORIZATION_BLOCK_VERSION: u16 = 1;
 
+/// Whether an authorized exec request must match a command template or may
+/// fall back to an owner-confirmed free-form command.
+///
+/// This is a per-request PDP decision, not a persisted feature switch. Missing
+/// fields always deserialize to [`TemplateOnly`](Self::TemplateOnly).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecAdmissionPolicy {
+    /// Only commands rendered from a built-in or operator template may execute.
+    #[default]
+    TemplateOnly,
+    /// The authenticated device owner may approve one off-template command.
+    OwnerInteractive,
+}
+
 /// Resolved actor identity (the control end / operator), from the manager's
 /// validated connection `AuthContext` — never self-reported by the control end.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +62,9 @@ pub struct AuthorizationBlock {
     pub orchestrator_grants: Vec<String>,
     /// Maximum risk the exec path may reach (ConfirmExec gate).
     pub max_risk: RiskLevel,
+    /// Exec classification policy resolved by the trusted central PDP.
+    #[serde(default)]
+    pub exec_admission_policy: ExecAdmissionPolicy,
     /// Resolved actor identity.
     pub actor: AuthzActor,
     /// Resolved device identity.
@@ -141,6 +159,7 @@ mod tests {
             },
             orchestrator_grants: vec!["ai.diagnose".to_string()],
             max_risk: RiskLevel::Medium,
+            exec_admission_policy: ExecAdmissionPolicy::TemplateOnly,
             actor: AuthzActor { user_id: Some(7) },
             device: AuthzDevice {
                 device_id: Some(42),
@@ -216,5 +235,33 @@ mod tests {
             serde_json::from_str(&json).expect("decode");
         assert_eq!(back.inner.question, "why slow?");
         assert_eq!(back.authz, block());
+    }
+
+    #[test]
+    fn legacy_block_without_exec_admission_policy_defaults_to_template_only() {
+        let mut value = serde_json::to_value(block()).expect("encode");
+        value
+            .as_object_mut()
+            .expect("block object")
+            .remove("exec_admission_policy");
+        let decoded: AuthorizationBlock = serde_json::from_value(value).expect("decode");
+        assert_eq!(
+            decoded.exec_admission_policy,
+            ExecAdmissionPolicy::TemplateOnly
+        );
+    }
+
+    #[test]
+    fn legacy_reader_can_ignore_the_new_exec_admission_policy_field() {
+        #[derive(Deserialize)]
+        struct LegacyAuthorizationBlock {
+            version: u16,
+            request_id: String,
+        }
+
+        let value = serde_json::to_value(block()).expect("encode");
+        let decoded: LegacyAuthorizationBlock = serde_json::from_value(value).expect("decode");
+        assert_eq!(decoded.version, AUTHORIZATION_BLOCK_VERSION);
+        assert_eq!(decoded.request_id, "req-1");
     }
 }

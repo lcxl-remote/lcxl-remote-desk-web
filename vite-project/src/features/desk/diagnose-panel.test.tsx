@@ -17,6 +17,7 @@ const baseState: DiagnoseState = {
     partialSummary: "",
     result: null,
     error: null,
+    errorCode: null,
     turnId: null,
     tools: [],
     answer: null,
@@ -146,6 +147,30 @@ describe("DiagnosePanel", () => {
         expect(screen.getByText("evidence redaction failed")).toBeInTheDocument();
     });
 
+    it("error: localizes the same-tool repeat circuit breaker by error code", () => {
+        renderPanel({
+            phase: "error",
+            partialSummary: "CPU usage is concentrated in process 4242.",
+            tools: [{ callId: "c1", name: "execute_command", status: "ok" }],
+            error: "the assistant stopped after repeating the same action too many times",
+            errorCode: 70,
+        });
+        expect(
+            screen.getByText("CPU usage is concentrated in process 4242."),
+        ).toBeInTheDocument();
+        expect(screen.getByText("execute_command")).toBeInTheDocument();
+        expect(
+            screen.getByText(
+                "The AI stopped to prevent a loop after requesting the same type of action repeatedly. Previous results were kept; you can ask it to continue.",
+            ),
+        ).toBeInTheDocument();
+        expect(
+            screen.queryByText(
+                "the assistant stopped after repeating the same action too many times",
+            ),
+        ).not.toBeInTheDocument();
+    });
+
     it("done: a follow-up composer continues the conversation", () => {
         const { onStart } = renderPanel({ phase: "done", answer: "the host is healthy" });
         const followUp = screen.getByPlaceholderText("Ask a follow-up question…");
@@ -207,6 +232,7 @@ describe("DiagnosePanel", () => {
                     tools: [],
                     phase: "done",
                     error: null,
+                    errorCode: null,
                     provenance: null,
                 },
             ],
@@ -231,6 +257,7 @@ describe("DiagnosePanel", () => {
                     tools: [],
                     phase: "done",
                     error: null,
+                    errorCode: null,
                     provenance: { model_id: "gpt-4o", marking_scheme: "lcxl-ai-provenance/1" },
                 },
             ],
@@ -257,6 +284,7 @@ describe("DiagnosePanel", () => {
                     tools: [],
                     phase: "done",
                     error: null,
+                    errorCode: null,
                     provenance: null,
                 },
             ],
@@ -278,6 +306,7 @@ describe("DiagnosePanel", () => {
                     tools: [],
                     phase: "error",
                     error: "collection failed",
+                    errorCode: null,
                     provenance: null,
                 },
             ],
@@ -366,6 +395,41 @@ describe("DiagnosePanel", () => {
         expect(exec.reject).toHaveBeenCalledWith(0);
     });
 
+    it("exec: a free-form preview shows the full shell, command, Critical risk, and blocklist warning", () => {
+        renderWithExec({
+            0: {
+                phase: "awaiting",
+                preview: {
+                    exec_request_id: "exec-freeform",
+                    shell: "powershell",
+                    command: "Restart-Service -Name Spooler -Force",
+                    cwd: null,
+                    timeout_ms: 30000,
+                    risk: "critical",
+                    impact: "Runs an owner-requested free-form command.",
+                    policy_note: null,
+                    requires_confirmation: true,
+                    executable: true,
+                    blocked_reason: null,
+                    execution_basis: "owner_blocklist_only",
+                },
+                execRequestId: "exec-freeform",
+                output: null,
+                error: null,
+            },
+        });
+
+        expect(screen.getAllByText("powershell")).toHaveLength(2);
+        expect(screen.getByText("Restart-Service -Name Spooler -Force")).toBeInTheDocument();
+        expect(screen.getByText("Critical risk")).toBeInTheDocument();
+        expect(
+            screen.getByText(
+                "Free-form command: only the blocklist was checked. Review every character before approving.",
+            ),
+        ).toBeInTheDocument();
+        expect(screen.getByText("Approve & run")).not.toHaveFocus();
+    });
+
     it("exec: a done result shows the exit code and stdout", () => {
         renderWithExec({
             0: {
@@ -404,7 +468,7 @@ describe("DiagnosePanel", () => {
         expect(screen.queryByText("Approve & run")).not.toBeInTheDocument();
     });
 
-    it("agentic: a pending exec approval shows the command with Approve / Reject", () => {
+    it("agentic: a pending free-form approval shows its Critical warning with Approve / Reject", () => {
         const onApproveExec = vi.fn();
         const onRejectExec = vi.fn();
         render(
@@ -419,12 +483,13 @@ describe("DiagnosePanel", () => {
                         command: "systemctl restart nginx",
                         cwd: null,
                         timeout_ms: 30000,
-                        risk: "high",
+                        risk: "critical",
                         impact: "Restarts the nginx service.",
                         policy_note: null,
                         requires_confirmation: true,
                         executable: true,
                         blocked_reason: null,
+                        execution_basis: "owner_blocklist_only",
                     },
                 }}
                 onStart={vi.fn()}
@@ -437,6 +502,13 @@ describe("DiagnosePanel", () => {
         );
         expect(screen.getByText("The AI wants to run a command")).toBeInTheDocument();
         expect(screen.getByText("systemctl restart nginx")).toBeInTheDocument();
+        expect(screen.getByText("Critical risk")).toBeInTheDocument();
+        expect(
+            screen.getByText(
+                "Free-form command: only the blocklist was checked. Review every character before approving.",
+            ),
+        ).toBeInTheDocument();
+        expect(screen.getByText("Approve & run")).not.toHaveFocus();
         fireEvent.click(screen.getByText("Approve & run"));
         expect(onApproveExec).toHaveBeenCalled();
         fireEvent.click(screen.getByText("Reject"));

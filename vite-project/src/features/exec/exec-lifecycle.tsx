@@ -1,8 +1,21 @@
 import { useTranslation } from "react-i18next"
-import { Loader2, Check, Ban, Square } from "lucide-react"
+import { Loader2, Check, Ban, Square, Terminal as TerminalIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import type { ExecEntry } from "./use-confirm-exec"
+
+function riskClass(risk: string): string {
+    switch (risk) {
+        case "low":
+            return "border-green-500/40 bg-green-500/20 text-green-300"
+        case "medium":
+            return "border-yellow-500/40 bg-yellow-500/20 text-yellow-300"
+        case "high":
+            return "border-orange-500/40 bg-orange-500/20 text-orange-300"
+        default:
+            return "border-red-500/40 bg-red-500/20 text-red-300"
+    }
+}
 
 /**
  * The shared sealed-execution lifecycle card for one row that has already been
@@ -45,10 +58,30 @@ export function ExecLifecycle({
         const p = entry.preview
         return (
             <div className="mt-2 flex flex-col gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
-                <div className="text-xs font-semibold text-amber-200">
-                    {t("pages.exec.confirmTitle")}
+                <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-amber-200">
+                        {t("pages.exec.confirmTitle")}
+                    </span>
+                    <Badge
+                        variant="outline"
+                        className={riskClass(p.risk)}
+                    >
+                        {t(`pages.exec.risk.${p.risk}`, p.risk)}
+                    </Badge>
                 </div>
+                <div className="flex items-center gap-1 text-[10px] uppercase text-white/50">
+                    <TerminalIcon className="h-3 w-3" />
+                    {p.shell}
+                </div>
+                <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-black/40 p-1.5 font-mono text-xs text-green-300">
+                    {p.command}
+                </pre>
                 <div className="text-xs text-white/80">{p.impact}</div>
+                {p.execution_basis === "owner_blocklist_only" && (
+                    <div className="rounded border border-red-500/50 bg-red-950/40 p-1.5 text-[11px] font-medium text-red-200">
+                        {t("pages.exec.freeformWarning")}
+                    </div>
+                )}
                 {p.policy_note && (
                     <div className="text-[10px] text-white/50">{p.policy_note}</div>
                 )}
@@ -57,6 +90,7 @@ export function ExecLifecycle({
                 </div>
                 <div className="mt-1 flex gap-2">
                     <Button
+                        type="button"
                         size="sm"
                         className="h-7 flex-1 bg-red-600 text-xs hover:bg-red-700"
                         onClick={onApprove}
@@ -65,6 +99,7 @@ export function ExecLifecycle({
                         {t("pages.exec.approve")}
                     </Button>
                     <Button
+                        type="button"
                         size="sm"
                         variant="ghost"
                         className="h-7 flex-1 text-xs"

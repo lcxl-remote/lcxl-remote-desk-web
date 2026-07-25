@@ -37,6 +37,8 @@ export type ExecPreview = {
     cwd: string | null;
     timeout_ms: number;
     risk: RiskLevel;
+    /** Server-authoritative admission basis; absent on an older server. */
+    execution_basis?: "template" | "owner_blocklist_only";
     impact: string;
     policy_note: string | null;
     requires_confirmation: boolean;
@@ -173,7 +175,7 @@ type UseConfirmExecProps = {
  * tracks the ExecPreview, and on user approval sends ResolveExec and backfills
  * the ExecResult — all keyed by the caller's row index so each row shows its own
  * state. The server is the source of truth: it classifies, mints the
- * `exec_request_id`, and only previews/executes whitelist templates. The host
+ * `exec_request_id`, and executes only server-admitted previews. The host
  * re-runs classification on the relayed command, so a control-end-reported
  * decision is never trusted.
  */

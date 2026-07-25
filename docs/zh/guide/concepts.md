@@ -50,7 +50,7 @@ flowchart LR
 
 ## AI 作为控制端
 
-除了浏览器，AI 模型还能**读取并分析**设备状态。服务端为会话内诊断编排一条严格流水线——**采集 → 脱敏 → 模型 → 渲染**——而只读 MCP 服务把相同的只读能力开放给本地 AI 助手。见 [AI 诊断](/zh/features/ai-diagnostics)与 [AI 安全模型](/zh/security/ai-security-model)。
+除了浏览器，AI 模型还能**读取并分析**设备状态。服务端为会话内诊断编排一条严格流水线——**采集 → 脱敏 → 模型 → 渲染**。在 owner 自己的设备上，Agent 还可请求命令，但被控端只会在 owner 确认完整命令后执行；MCP 服务仍保持只读。见 [AI 诊断](/zh/features/ai-diagnostics)与 [AI 安全模型](/zh/security/ai-security-model)。
 
 ## 下一步
 
