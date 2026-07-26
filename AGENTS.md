@@ -4,7 +4,11 @@
 
 ## 项目概述
 
-`lcxl-remote-desk` 是一个 **AI 原生（AI-Native）** 的开源 WebRTC 远程桌面解决方案，把 AI 当作与浏览器并列的一等控制端。后端使用 Rust (Actix-Web)，前端使用 React + TypeScript (Vite)。除了浏览器远程控制，它还内置了一个**只读的设备诊断 AI Agent**（模型无关：OpenAI 兼容 / Anthropic），并能以一个**只读 MCP 服务**把设备的只读能力开放给外部 AI 助手。`server` 二进制文件支持多种运行模式：完整模式 (`default`)、仅信令模式 (`signaling`)、仅被控端模式 (`desk-server`)、系统服务守护进程模式 (`service-daemon`)、会话工作进程模式 (`session-worker`)，以及只读 MCP stdio 模式 (`mcp-stdio`)。
+`lcxl-remote-desk` 是一个 **AI 原生（AI-Native）** 的开源 WebRTC 远程桌面解决方案，把 AI 当作与浏览器并列的一等控制端。后端使用 Rust (Actix-Web)，前端使用 React + TypeScript (Vite)。除了浏览器远程控制，它还内置了一个**设备诊断 AI Agent**（模型无关：OpenAI 兼容 / Anthropic）——既能读取设备状态排障，也能在**设备 owner 逐条明确确认**后执行命令（见 `agent-protocol/src/exec.rs` 与 `signal/src/agent_exec.rs`）；同时以一个**只读 MCP 服务**把设备的只读能力开放给外部 AI 助手。
+
+> **"AI 只读"是已作废的旧描述**：诊断 Agent 早已不是只读（owner 确认后可执行）。**只读的是 MCP 服务**（静态白名单，不含 exec / write / control 工具）。写文档或对外文案时不要再复述"只读诊断 AI Agent"。
+
+`server` 二进制文件支持多种运行模式：完整模式 (`default`)、仅信令模式 (`signaling`)、仅被控端模式 (`desk-server`)、系统服务守护进程模式 (`service-daemon`)、会话工作进程模式 (`session-worker`)，以及只读 MCP stdio 模式 (`mcp-stdio`)。
 
 ## 构建与运行
 
@@ -92,7 +96,7 @@ sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev \
 
 - **服务端是唯一可信源**：`request_id` / `target` / `actor` / `scope` / `caller` / 最终 `risk` / `approval_id` 全部由服务端注入与校验，控制端永远无法自报——浏览器侧请求体 `AgentRequestData` 在结构上就不含这些字段（见 `agent-protocol/src/lib.rs`）。
 - **能力协议面向设备、与控制端无关**：`agent-protocol` 是纯协议 crate（wire 类型 + `DeviceAgent` trait），描述「对设备能做什么」，不关心调用来自浏览器 / android / MCP。读操作的权限点由输入**派生**（`OperationInput::capability()`），杜绝能力、采集分发、审计三者漂移。
-- **默认只给建议**：`ExecutionMode` 默认 `SuggestOnly`（模型只能建议命令、不能执行）；更高风险动作需服务端中介的显式确认。
+- **默认只给建议，执行须 owner 逐条确认**：`ExecutionMode` 默认 `SuggestOnly`（模型只能建议命令、不能执行）。要真正执行必须走服务端中介的确认闭环（`agent-protocol/src/exec.rs`：suggest → confirm → execute → backfill）——服务端做风险分级与黑名单硬拒，把批准的命令冻结成 `ExecPlan`（program + argv，参数已绑定、无 shell 元字符），**worker 只按 argv 逐字执行、从不重新解析命令字符串**，每次真实执行都由服务端铸出 `approval_id`。
 - **脱敏 fail-closed**：诊断编排器（`server/src/diagnose/mod.rs`）按 **采集 → 脱敏 → 模型 → 渲染** 运行；脱敏失败会在调用模型**之前**中止。证据在到达模型 trait 之前一定已脱敏。
 - **API Key 是服务端密钥**：AI 模型 api_key 绝不回传浏览器、不进任何 `/settings` 公开 DTO、不写日志。审计只记录无内容的摘要（计数 / 大小 / token 用量 / provider / adapter），绝不留存原始输出、截图或 prompt。
 - **模型无关**：`server/src/diagnose/model/` 用 adapter 隔离 wire 协议（`openai.rs` = OpenAI 兼容、`anthropic.rs` = Anthropic Messages），按调用解析 provider。新增供应商 = 新增一个 adapter，不改编排器。

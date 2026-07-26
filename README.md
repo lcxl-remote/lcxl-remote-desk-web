@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README_CN.md)
 
-LCXL Remote Desk Web is an **AI-native**, open-source high-performance remote desktop. It treats AI as a **first-class control plane alongside the browser**: beyond browser-based remote control, it ships a built-in read-only diagnostic AI agent that reads the device's current state to troubleshoot issues, and exposes those read capabilities to external AI assistants via a read-only [MCP](https://modelcontextprotocol.io/) server. The AI layer is security-first and model-agnostic (OpenAI-compatible and Anthropic APIs): the server is the sole authority on permissions, the model defaults to suggesting rather than executing, data is strictly redacted before transmission (failing closed — blocking the request on redaction failure), every call is audited, and API keys stay server-side only. The backend is written in Rust; the frontend with React + Vite + Tailwind CSS.
+LCXL Remote Desk Web is an **AI-native**, open-source high-performance remote desktop. It treats AI as a **first-class control plane alongside the browser**: beyond browser-based remote control, it ships a built-in diagnostic AI agent that reads the device's current state to troubleshoot issues and may **execute commands once the device owner explicitly confirms each one**; external AI assistants, by contrast, only ever get read capabilities through a **read-only** [MCP](https://modelcontextprotocol.io/) server. The AI layer is security-first and model-agnostic (OpenAI-compatible and Anthropic APIs): the server is the sole authority on permissions, the model defaults to suggesting rather than executing (execution requires per-command owner confirmation, and the server seals an argv-level plan the worker never re-parses), data is strictly redacted before transmission (failing closed — blocking the request on redaction failure), every call is audited, and API keys stay server-side only. The backend is written in Rust; the frontend with React + Vite + Tailwind CSS.
 
 > [!WARNING]
 > **Disclaimer**: This project is currently in the early development stage. The codebase may be unstable, contain unfixed bugs, or have incomplete features.
@@ -13,8 +13,9 @@ LCXL Remote Desk Web is an **AI-native**, open-source high-performance remote de
 ## Key Features
 
 - **AI Diagnostics**: You can ask troubleshooting questions in plain language. The system automatically collects read-only state data (e.g., system info, processes, ports, logs), redacts sensitive information locally, and sends it to the AI model for analysis and suggested fixes. Supports OpenAI and Anthropic APIs.
-- **Read-Only MCP Server**: Running `--startup-mode mcp-stdio` exposes the device's read capabilities to local AI assistants over the Model Context Protocol. The toolset is restricted to a static whitelist with no execution or write permissions.
-- **Secure Access Control**: The server strictly controls all authorizations. The AI provides suggestions by default, and high-risk actions require manual confirmation. Evidence redaction operates strictly to prevent data leaks, and API keys are stored solely on the server.
+- **Owner-Confirmed Command Execution**: On their own device, the diagnostic agent goes beyond suggesting — it can request to run a command in a supported shell, but nothing executes until the **device owner explicitly confirms that exact command**. The server classifies risk, hard-denies blocklisted commands, and seals an argv-level plan; the desk server independently re-validates it before execution, and the result is backfilled and audited.
+- **Read-Only MCP Server**: Running `--startup-mode mcp-stdio` exposes the device's read capabilities to local AI assistants over the Model Context Protocol. The toolset is restricted to a static whitelist with no execution or write permissions — **the MCP surface stays read-only regardless of the execution capability above**.
+- **Secure Access Control**: The server strictly controls all authorizations. The AI provides suggestions by default, and any execution requires per-command manual confirmation. Evidence redaction operates strictly to prevent data leaks, and API keys are stored solely on the server.
 - **High-Performance Streaming**: A WebRTC-based connection supporting AV1 / H.264 / VP8 / VP9 software and hardware encoding, combined with Opus audio for ultra-low latency.
 - **Remote Terminal**: A built-in xterm.js terminal supporting full shell interactions.
 - **File Management**: Supports file uploads, downloads, deletions, and a Recycle Bin mechanism.
@@ -148,21 +149,25 @@ The ServiceDaemon (running as SYSTEM) manages the WebRTC connection, signaling, 
 
 In addition to manual control, LCXL Remote Desk allows AI models to read and analyze the device's status.
 
-**In-Client Diagnostics.** When a user asks a question during a session (e.g., "Why is this system slow?"), the server orchestrates a pipeline: collect state, redact data, call the model, and render the response.
+**In-Client Diagnostics.** When a user asks a question during a session (e.g., "Why is this system slow?"), the server orchestrates a pipeline: collect state, redact data, call the model, and render the response. If the model proposes a command, it only runs after the owner-confirmation loop closes.
 
 ```mermaid
 graph LR
     user[User question] --> orch[Server Orchestrator]
-    orch -->|read-only| evidence[Device Evidence]
+    orch -->|read-only collection| evidence[Device Evidence]
     evidence -->|Strict Redaction| model[AI Model]
     model -->|stream| diag[Structured Diagnosis<br/>findings + suggested commands]
+    model -.proposed command.-> confirm{Per-command<br/>owner confirmation}
+    confirm -->|confirmed| exec[Sealed argv plan<br/>re-validated, then executed]
+    exec -->|result backfill| orch
+    confirm -->|declined / timeout| diag
     orch -.audit.-> audit[(Audit Trail)]
 ```
 
 - **Read-Only Data Collection**: Gathers system info, processes, ports, logs, and screenshots.
 - **Model Agnostic**: Compatible with both OpenAI and Anthropic endpoints.
-- **Suggest-Only Defaults**: The model proposes fixes, but execution requires explicit user confirmation.
-- **Flexible Deployment**: Diagnostic logic is centralized in the `desk-diagnose-core` crate. Nodes can act as evidence collectors that send redacted data to a central server for inference, enabling secure API key management for fleet deployments.
+- **Suggest-Only Defaults**: The model proposes fixes; execution requires the owner to confirm the exact command. The server does risk classification and blocklist denial, then seals an argv-level plan that the desk server re-validates field-for-field (`risk <= max_risk`) before running — **the worker never re-parses a command string**.
+- **Flexible Deployment**: Diagnostic logic is centralized in the `desk-diagnose-core` crate. Nodes can act as evidence collectors and execution points that send redacted data to a central server for inference, enabling secure API key management for fleet deployments.
 
 **MCP Server.** Running `--startup-mode mcp-stdio` turns the device into an MCP server, offering a static whitelist of read-only tools to local AI assistants. To maintain security, screen capturing and control execution tools are completely excluded in this mode.
 
@@ -188,7 +193,7 @@ graph LR
 - [x] Privacy screen and whiteboard
 - [x] AI system diagnostics (OpenAI / Anthropic support)
 - [x] Read-only MCP server integration
-- [ ] AI command execution with safety guardrails
+- [x] AI command execution with safety guardrails (per-command owner confirmation + server-sealed plan + edge re-validation)
 - [ ] Mobile interface optimizations
 - [ ] Role-Based Access Control (RBAC) and multi-user management
 - [ ] Session recording support
