@@ -40,6 +40,91 @@ unsafe extern "C" {
     unsafe fn CGWindowLevelForKey(key: i32) -> i32;
 }
 
+/// `NSApplicationActivationPolicyRegular`.
+#[cfg(target_os = "macos")]
+const NS_APPLICATION_ACTIVATION_POLICY_REGULAR: isize = 0;
+
+/// `NSApplicationActivationPolicyAccessory`.
+#[cfg(target_os = "macos")]
+const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: isize = 1;
+
+/// Put the process into, or take it out of, the activation policy the privacy
+/// overlay needs.
+///
+/// Native full screen moves an application onto a Space of its own. Windows
+/// belonging to a *regular* application — one with a Dock icon — are not
+/// carried onto that Space no matter how high their window level or how
+/// permissive their collection behaviour, so the overlay is left behind and the
+/// real desktop is on the display for as long as anything is full screen. The
+/// windows of an *accessory* application are carried onto it.
+///
+/// The policy is a property of the process, so it is adopted only while the
+/// privacy screen is up and restored as soon as it comes down. Restoring it
+/// does not activate the application or move focus. The overlay window must be
+/// created *after* the policy is adopted: an existing window keeps the
+/// behaviour of the policy it was born under.
+///
+/// AppKit is main-thread only, and the caller depends on the change having
+/// taken effect before it creates the window, so the work is dispatched and
+/// awaited rather than posted through Tauri's asynchronous runtime message.
+#[cfg(target_os = "macos")]
+pub(crate) fn set_overlay_activation_policy(
+    app: &tauri::AppHandle,
+    accessory: bool,
+) -> Result<(), String> {
+    use std::sync::mpsc;
+
+    let requested = if accessory {
+        NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY
+    } else {
+        NS_APPLICATION_ACTIVATION_POLICY_REGULAR
+    };
+
+    let (tx, rx) = mpsc::channel::<Result<isize, String>>();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(apply_activation_policy_on_main_thread(requested));
+    })
+    .map_err(|error| {
+        format!(
+            "Failed to dispatch activation policy change to main thread: {}",
+            error
+        )
+    })?;
+
+    let applied = rx
+        .recv_timeout(MAIN_THREAD_TIMEOUT)
+        .map_err(|error| format!("Activation policy change did not complete: {}", error))??;
+
+    if applied != requested {
+        return Err(format!(
+            "Activation policy is {} after requesting {}",
+            applied, requested
+        ));
+    }
+    log::info!("Application activation policy set to {}", applied);
+    Ok(())
+}
+
+/// Runs on the main thread. Returns the policy actually in force afterwards so
+/// the caller can reject a silently refused change.
+#[cfg(target_os = "macos")]
+fn apply_activation_policy_on_main_thread(policy: isize) -> Result<isize, String> {
+    use objc2::runtime::AnyObject;
+
+    unsafe {
+        let app: *mut AnyObject = objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+        if app.is_null() {
+            return Err("NSApplication is unavailable".to_string());
+        }
+        let accepted: bool = objc2::msg_send![app, setActivationPolicy: policy];
+        let current: isize = objc2::msg_send![app, activationPolicy];
+        if !accepted && current != policy {
+            return Err(format!("setActivationPolicy: {} was refused", policy));
+        }
+        Ok(current)
+    }
+}
+
 /// Raise the privacy overlay above the menu bar and Dock and show it without
 /// activating the application.
 ///

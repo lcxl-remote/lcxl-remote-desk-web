@@ -44,6 +44,12 @@ enum LoopControl {
 /// Behind a trait so the show transaction and its rollback can be exercised
 /// without a window server or Accessibility approval.
 trait PrivateScreenOps {
+    /// Put the process into whatever state the overlay window has to be born
+    /// into. On macOS the overlay is evicted from a full-screen Space unless
+    /// the process is an accessory application at the moment it is created.
+    fn adopt_overlay_activation_policy(&self) -> Result<(), String>;
+    /// Undo `adopt_overlay_activation_policy`. Safe to call when it never ran.
+    fn restore_activation_policy(&self);
     /// Create and position the overlay window without making it visible.
     fn prepare_overlay(&self) -> Result<(), String>;
     /// Start intercepting local input. `on_local_escape` fires once the local
@@ -67,23 +73,22 @@ fn enter_private_screen(
     ops: &impl PrivateScreenOps,
     on_local_escape: LocalEscapeCallback,
 ) -> Result<(), String> {
-    ops.prepare_overlay()?;
+    let outcome = (|| {
+        // The window has to be created after the policy is adopted: a window
+        // that already exists keeps the behaviour of the policy it was born
+        // under.
+        ops.adopt_overlay_activation_policy()?;
+        ops.prepare_overlay()?;
+        ops.start_input_interception(on_local_escape)?;
+        ops.register_escape_hotkey()?;
+        ops.present_overlay()
+    })();
 
-    if let Err(error) = ops.start_input_interception(on_local_escape) {
-        ops.close_overlay();
-        return Err(error);
-    }
-
-    if let Err(error) = ops.register_escape_hotkey() {
-        ops.stop_input_interception();
-        ops.close_overlay();
-        return Err(error);
-    }
-
-    if let Err(error) = ops.present_overlay() {
-        ops.unregister_escape_hotkey();
-        ops.stop_input_interception();
-        ops.close_overlay();
+    if let Err(error) = outcome {
+        // Roll back through the ordinary teardown rather than a bespoke
+        // unwind, so the two can never drift apart. Every step tolerates
+        // having nothing to undo.
+        leave_private_screen(ops);
         return Err(error);
     }
 
@@ -96,6 +101,9 @@ fn leave_private_screen(ops: &impl PrivateScreenOps) {
     ops.unregister_escape_hotkey();
     ops.stop_input_interception();
     ops.close_overlay();
+    // Last, so the process only returns to its normal presence once the
+    // overlay it was adopted for is gone.
+    ops.restore_activation_policy();
 }
 
 /// The single owner of the privacy screen's state.
@@ -262,6 +270,26 @@ struct TauriPrivateScreenOps {
 }
 
 impl PrivateScreenOps for TauriPrivateScreenOps {
+    fn adopt_overlay_activation_policy(&self) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            crate::overlay_window::set_overlay_activation_policy(&self.app_handle, true)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(())
+        }
+    }
+
+    fn restore_activation_policy(&self) {
+        #[cfg(target_os = "macos")]
+        if let Err(error) =
+            crate::overlay_window::set_overlay_activation_policy(&self.app_handle, false)
+        {
+            log::warn!("Failed to restore the application activation policy: {error}");
+        }
+    }
+
     fn prepare_overlay(&self) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         {
@@ -477,6 +505,8 @@ mod tests {
     /// A step of the platform lifecycle, recorded in call order.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Step {
+        AdoptPolicy,
+        RestorePolicy,
         Prepare,
         StartInterception,
         StopInterception,
@@ -514,6 +544,14 @@ mod tests {
     }
 
     impl PrivateScreenOps for RecordingOps {
+        fn adopt_overlay_activation_policy(&self) -> Result<(), String> {
+            self.record(Step::AdoptPolicy)
+        }
+
+        fn restore_activation_policy(&self) {
+            let _ = self.record(Step::RestorePolicy);
+        }
+
         fn prepare_overlay(&self) -> Result<(), String> {
             self.record(Step::Prepare)
         }
@@ -588,6 +626,7 @@ mod tests {
         assert_eq!(
             ops.steps(),
             vec![
+                Step::AdoptPolicy,
                 Step::Prepare,
                 Step::StartInterception,
                 Step::RegisterHotkey,
@@ -607,7 +646,15 @@ mod tests {
         assert!(error.contains("StartInterception"));
         assert_eq!(
             ops.steps(),
-            vec![Step::Prepare, Step::StartInterception, Step::Close]
+            vec![
+                Step::AdoptPolicy,
+                Step::Prepare,
+                Step::StartInterception,
+                Step::UnregisterHotkey,
+                Step::StopInterception,
+                Step::Close,
+                Step::RestorePolicy,
+            ]
         );
     }
 
@@ -622,11 +669,14 @@ mod tests {
         assert_eq!(
             ops.steps(),
             vec![
+                Step::AdoptPolicy,
                 Step::Prepare,
                 Step::StartInterception,
                 Step::RegisterHotkey,
+                Step::UnregisterHotkey,
                 Step::StopInterception,
                 Step::Close,
+                Step::RestorePolicy,
             ]
         );
     }
@@ -642,6 +692,7 @@ mod tests {
         assert_eq!(
             ops.steps(),
             vec![
+                Step::AdoptPolicy,
                 Step::Prepare,
                 Step::StartInterception,
                 Step::RegisterHotkey,
@@ -649,8 +700,22 @@ mod tests {
                 Step::UnregisterHotkey,
                 Step::StopInterception,
                 Step::Close,
+                Step::RestorePolicy,
             ]
         );
+    }
+
+    /// The activation policy is process-wide, so a show that cannot even adopt
+    /// it must not go on to build anything.
+    #[test]
+    fn activation_policy_failure_stops_before_the_window_exists() {
+        let ops = RecordingOps::failing(Step::AdoptPolicy);
+
+        enter_private_screen(&ops, noop_escape()).unwrap_err();
+
+        assert!(!ops.steps().contains(&Step::Prepare));
+        assert!(!ops.steps().contains(&Step::StartInterception));
+        assert_eq!(*ops.steps().last().unwrap(), Step::RestorePolicy);
     }
 
     #[test]
@@ -833,6 +898,7 @@ mod tests {
         assert_eq!(
             core.ops.steps(),
             vec![
+                Step::AdoptPolicy,
                 Step::Prepare,
                 Step::StartInterception,
                 Step::RegisterHotkey,
@@ -840,6 +906,7 @@ mod tests {
                 Step::UnregisterHotkey,
                 Step::StopInterception,
                 Step::Close,
+                Step::RestorePolicy,
             ]
         );
     }

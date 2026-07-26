@@ -18,6 +18,8 @@ Press `Ctrl` + `Alt` + `L` on the controlled machine to leave the privacy screen
 The overlay is deliberately excluded from screen capture — that is what lets the remote operator keep seeing the real desktop. The exclusion applies to *every* capture path on the host, including macOS Screen Sharing, Apple Remote Desktop and `screencapture`. Looking at the controlled machine through any of them shows the real desktop with no overlay, which is the feature working, not a fault. The only way to confirm the overlay is to look at the machine's physical display.
 :::
 
+On macOS the desktop client's own Dock icon disappears while the privacy screen is up and comes back when it is dismissed. This is required, not cosmetic: macOS does not carry the windows of an application that has a Dock icon onto the Space a full-screen application owns, so without it the overlay would silently vanish for as long as anything on the controlled machine is full screen. The tray icon stays throughout.
+
 ### Current limitations
 
 - **The overlay covers the primary monitor only.** Input interception is session-wide, so on a multi-monitor machine all local keyboard and mouse input is blocked while the secondary monitors keep showing their real contents. The client logs a warning when it detects more than one attached monitor.
