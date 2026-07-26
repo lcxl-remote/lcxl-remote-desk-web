@@ -1,5 +1,6 @@
 import { useRef, useCallback, useState } from 'react';
 import type { RefObject } from 'react';
+import { computeVideoContentRect } from './video-content-rect';
 
 export type WhiteboardTool = 'pen' | 'text';
 
@@ -43,18 +44,11 @@ export function useDeskWhiteboard({ videoRef, whiteboardChannel, isConnected, ha
         const video = videoRef.current;
         if (!video) return null;
         const rect = video.getBoundingClientRect();
-        const videoWidth = video.videoWidth;
-        const videoHeight = video.videoHeight;
-        if (!videoWidth || !videoHeight) return null;
+        const content = computeVideoContentRect(rect.width, rect.height, video.videoWidth, video.videoHeight);
+        if (!content) return null;
 
-        const scale = Math.min(rect.width / videoWidth, rect.height / videoHeight);
-        const renderedWidth = videoWidth * scale;
-        const renderedHeight = videoHeight * scale;
-        const offsetX = (rect.width - renderedWidth) / 2;
-        const offsetY = (rect.height - renderedHeight) / 2;
-
-        let x = (clientX - rect.left - offsetX) / renderedWidth;
-        let y = (clientY - rect.top - offsetY) / renderedHeight;
+        let x = (clientX - rect.left - content.offsetX) / content.width;
+        let y = (clientY - rect.top - content.offsetY) / content.height;
         x = Math.max(0, Math.min(1, x));
         y = Math.max(0, Math.min(1, y));
         return { x, y };

@@ -794,6 +794,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                         <WhiteboardCanvas
                             elements={whiteboard.elements}
                             isActive={whiteboard.isActive}
+                            videoRef={videoRef}
                             onPointerDown={whiteboard.handlePointerDown}
                             onPointerMove={whiteboard.handlePointerMove}
                             onPointerUp={whiteboard.handlePointerUp}
