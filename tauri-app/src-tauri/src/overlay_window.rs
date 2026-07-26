@@ -89,6 +89,18 @@ fn raise_overlay_on_main_thread(window: &WebviewWindow) -> Result<i32, String> {
 
     let level = unsafe { CGWindowLevelForKey(K_CG_SCREEN_SAVER_WINDOW_LEVEL_KEY) };
     unsafe {
+        // Paint the window itself opaque black. What the privacy screen
+        // promises is that the desktop underneath cannot be seen, and that
+        // promise must not depend on a web page rendering successfully: a
+        // failed load, a blank render or a webview that never got sized would
+        // otherwise leave the real desktop on display. The page draws its own
+        // matching background on top of this.
+        let _: () = objc2::msg_send![ns_window, setOpaque: true];
+        let black: *mut AnyObject = objc2::msg_send![objc2::class!(NSColor), blackColor];
+        if !black.is_null() {
+            let _: () = objc2::msg_send![ns_window, setBackgroundColor: black];
+        }
+
         let _: () = objc2::msg_send![ns_window, setLevel: level as isize];
         let _: () = objc2::msg_send![ns_window, orderFrontRegardless];
     }
@@ -107,8 +119,79 @@ fn raise_overlay_on_main_thread(window: &WebviewWindow) -> Result<i32, String> {
         "Privacy overlay ordered front without activation, NSApp.isActive={}",
         app_active
     );
+    unsafe { log_overlay_compositing_state(ns_window) };
 
     Ok(level)
+}
+
+/// Log the AppKit state that decides whether the overlay actually paints.
+///
+/// Frame, visibility and page load can all look correct while the physical
+/// display still shows the desktop — the window can be fully transparent, sit
+/// on another Space, be occluded, or host a webview that was never sized. Only
+/// scalar and pointer-returning messages are used so no Objective-C struct
+/// return is involved.
+///
+/// # Safety
+///
+/// `ns_window` must be a live `NSWindow` and this must run on the main thread.
+#[cfg(target_os = "macos")]
+unsafe fn log_overlay_compositing_state(ns_window: *mut objc2::runtime::AnyObject) {
+    use objc2::runtime::AnyObject;
+
+    unsafe {
+        let level: isize = objc2::msg_send![ns_window, level];
+        let is_visible: bool = objc2::msg_send![ns_window, isVisible];
+        let is_opaque: bool = objc2::msg_send![ns_window, isOpaque];
+        let alpha: f64 = objc2::msg_send![ns_window, alphaValue];
+        // NSWindowOcclusionStateVisible is bit 1; zero means fully occluded.
+        let occlusion: usize = objc2::msg_send![ns_window, occlusionState];
+        let style_mask: usize = objc2::msg_send![ns_window, styleMask];
+        let collection_behavior: usize = objc2::msg_send![ns_window, collectionBehavior];
+        // NSWindowSharingNone is 0, which is what content protection sets.
+        let sharing_type: usize = objc2::msg_send![ns_window, sharingType];
+        let on_active_space: bool = objc2::msg_send![ns_window, isOnActiveSpace];
+        let screen: *mut AnyObject = objc2::msg_send![ns_window, screen];
+
+        log::info!(
+            "Privacy overlay window state level={level} visible={is_visible} opaque={is_opaque} \
+             alpha={alpha} occlusion={occlusion:#x} style_mask={style_mask:#x} \
+             collection_behavior={collection_behavior:#x} sharing_type={sharing_type} \
+             on_active_space={on_active_space} has_screen={}",
+            !screen.is_null()
+        );
+
+        let content_view: *mut AnyObject = objc2::msg_send![ns_window, contentView];
+        if content_view.is_null() {
+            log::warn!("Privacy overlay has no content view");
+            return;
+        }
+        let content_hidden: bool = objc2::msg_send![content_view, isHidden];
+        let content_alpha: f64 = objc2::msg_send![content_view, alphaValue];
+        let subviews: *mut AnyObject = objc2::msg_send![content_view, subviews];
+        let subview_count: usize = if subviews.is_null() {
+            0
+        } else {
+            objc2::msg_send![subviews, count]
+        };
+
+        log::info!(
+            "Privacy overlay content view hidden={content_hidden} alpha={content_alpha} \
+             subviews={subview_count}"
+        );
+
+        if subview_count > 0 {
+            let webview: *mut AnyObject = objc2::msg_send![subviews, objectAtIndex: 0usize];
+            if !webview.is_null() {
+                let hidden: bool = objc2::msg_send![webview, isHidden];
+                let webview_alpha: f64 = objc2::msg_send![webview, alphaValue];
+                let opaque: bool = objc2::msg_send![webview, isOpaque];
+                log::info!(
+                    "Privacy overlay webview hidden={hidden} alpha={webview_alpha} opaque={opaque}"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
