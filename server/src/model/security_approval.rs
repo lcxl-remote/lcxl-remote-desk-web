@@ -130,37 +130,55 @@ pub enum SecurityApprovalCommand {
 pub type SecurityApprovalSender = std::sync::mpsc::Sender<SecurityApprovalCommand>;
 pub type SecurityApprovalReceiver = std::sync::mpsc::Receiver<SecurityApprovalCommand>;
 
-/// Check a security permission from settings.
+/// What the host decided about one permission request.
+///
+/// Deciding and persisting are separate so that the two roles that ask this
+/// question can commit a remembered answer their own way: the daemon owns the
+/// settings directly, while a session worker holds only a copy of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecurityDecision {
+    /// Whether this one request goes ahead.
+    pub approved: bool,
+    /// Whether the answer should become the host's standing policy for this
+    /// capability. Already accounts for a capped session, which can never widen
+    /// the owner's global — a caller that sees `true` may commit it as-is.
+    pub remember: bool,
+}
+
+/// Decide a security permission from settings, without persisting anything.
 /// - `Some(true)` → allow
 /// - `Some(false)` → deny
 /// - `None` → ask the user via the Host Control Hub; deny if no UI is available.
 ///
-/// If the user checks "remember", the corresponding `settings.security.allow_*`
-/// field is updated and persisted here rather than in the hub —
-/// **unless `suppress_remember` is set**. A capped grant / code-session connection
-/// passes `suppress_remember = true`: its prompt fires because the meet of the
-/// owner's per-code ceiling and the global landed on `None`, and letting the local
-/// user's "remember" widen the owner's **global** `allow_*` would leak a
-/// per-session decision into the owner's own future sessions and every other code
-/// (capabilities are the owner's to configure, not to grant ad-hoc through a
-/// borrowed session's prompt). The approval is still honored for this one request;
-/// only the global persistence is skipped. An owner session (`suppress_remember =
-/// false`) keeps the original remember-to-global behavior.
-pub async fn check_security_permission(
+/// A capped grant / code-session connection passes `suppress_remember = true`:
+/// its prompt fires because the meet of the owner's per-code ceiling and the
+/// global landed on `None`, and letting the local user's "remember" widen the
+/// owner's **global** `allow_*` would leak a per-session decision into the
+/// owner's own future sessions and every other code (capabilities are the
+/// owner's to configure, not to grant ad-hoc through a borrowed session's
+/// prompt). The approval is still honored for this one request; only the
+/// standing policy is left alone, which shows up as `remember: false`.
+pub async fn decide_security_permission(
     settings: &SharedSettings,
     hub: &Arc<HostControlHub>,
     permission: Option<bool>,
     permission_type: SecurityPermissionType,
     from_connection_id: Option<String>,
     suppress_remember: bool,
-) -> bool {
+) -> SecurityDecision {
     match permission {
-        Some(true) => true,
-        Some(false) => false,
+        Some(true) => SecurityDecision {
+            approved: true,
+            remember: false,
+        },
+        Some(false) => SecurityDecision {
+            approved: false,
+            remember: false,
+        },
         None => {
             let req = ApprovalRequest {
                 req_id: crate::host_control::new_req_id(),
-                permission_type: permission_type.clone(),
+                permission_type,
                 from_connection_id,
             };
             // Bound the wait by the host's configured approval timeout (0 = never,
@@ -176,45 +194,86 @@ pub async fn check_security_permission(
                      (per-code ceiling stays authoritative)"
                 );
             }
-            if response.remember && !suppress_remember {
-                let mut settings_write = settings.write().await;
-                match permission_type {
-                    SecurityPermissionType::RemoteControl => {
-                        settings_write.security.allow_remote_control = Some(response.approved);
-                    }
-                    SecurityPermissionType::ClipboardSync => {
-                        settings_write.security.allow_clipboard_sync = Some(response.approved);
-                    }
-                    SecurityPermissionType::PrivateScreen => {
-                        settings_write.security.allow_private_screen = Some(response.approved);
-                    }
-                    SecurityPermissionType::Whiteboard => {
-                        settings_write.security.allow_whiteboard = Some(response.approved);
-                    }
-                    SecurityPermissionType::Terminal => {
-                        settings_write.security.allow_terminal = Some(response.approved);
-                    }
-                    SecurityPermissionType::FileBrowse => {
-                        settings_write.security.allow_file_browse = Some(response.approved);
-                    }
-                    SecurityPermissionType::FileDelete => {
-                        settings_write.security.allow_file_delete = Some(response.approved);
-                    }
-                    SecurityPermissionType::FileTransfer => {
-                        settings_write.security.allow_file_transfer = Some(response.approved);
-                    }
-                }
-                // Any path that persists security settings normalizes an unset
-                // approval timeout to the finite default, so a save never drops
-                // it to a value that reloads as the 30s default by omission.
-                settings_write.security.normalize();
-                if let Err(e) = settings_write.save() {
-                    log::error!("Failed to save security settings: {}", e);
-                }
+            SecurityDecision {
+                approved: response.approved,
+                remember: response.remember && !suppress_remember,
             }
-            response.approved
         }
     }
+}
+
+/// Make a remembered answer the host's standing policy for one capability.
+///
+/// Failures are logged rather than returned: the request the user just answered
+/// is honored either way, and there is no caller that could do anything useful
+/// with a persistence error at this point.
+pub async fn persist_remembered_decision(
+    settings: &SharedSettings,
+    permission_type: &SecurityPermissionType,
+    approved: bool,
+) {
+    let mut settings_write = settings.write().await;
+    match permission_type {
+        SecurityPermissionType::RemoteControl => {
+            settings_write.security.allow_remote_control = Some(approved);
+        }
+        SecurityPermissionType::ClipboardSync => {
+            settings_write.security.allow_clipboard_sync = Some(approved);
+        }
+        SecurityPermissionType::PrivateScreen => {
+            settings_write.security.allow_private_screen = Some(approved);
+        }
+        SecurityPermissionType::Whiteboard => {
+            settings_write.security.allow_whiteboard = Some(approved);
+        }
+        SecurityPermissionType::Terminal => {
+            settings_write.security.allow_terminal = Some(approved);
+        }
+        SecurityPermissionType::FileBrowse => {
+            settings_write.security.allow_file_browse = Some(approved);
+        }
+        SecurityPermissionType::FileDelete => {
+            settings_write.security.allow_file_delete = Some(approved);
+        }
+        SecurityPermissionType::FileTransfer => {
+            settings_write.security.allow_file_transfer = Some(approved);
+        }
+    }
+    // Any path that persists security settings normalizes an unset approval
+    // timeout to the finite default, so a save never drops it to a value that
+    // reloads as the 30s default by omission.
+    settings_write.security.normalize();
+    if let Err(e) = settings_write.save() {
+        log::error!("Failed to save security settings: {}", e);
+    }
+}
+
+/// Decide a permission and commit a remembered answer in one step.
+///
+/// The shape every gate currently uses. It writes the standing policy through
+/// whichever `Settings` handle the caller holds, which is correct in the daemon
+/// and merely tolerated in a worker, where that handle is a copy.
+pub async fn check_security_permission(
+    settings: &SharedSettings,
+    hub: &Arc<HostControlHub>,
+    permission: Option<bool>,
+    permission_type: SecurityPermissionType,
+    from_connection_id: Option<String>,
+    suppress_remember: bool,
+) -> bool {
+    let decision = decide_security_permission(
+        settings,
+        hub,
+        permission,
+        permission_type.clone(),
+        from_connection_id,
+        suppress_remember,
+    )
+    .await;
+    if decision.remember {
+        persist_remembered_decision(settings, &permission_type, decision.approved).await;
+    }
+    decision.approved
 }
 
 #[cfg(test)]
@@ -422,6 +481,104 @@ mod tests {
         assert!(approved);
         // ...but the global is untouched (no leak into the owner's future sessions).
         assert_eq!(settings.read().await.security.allow_terminal, before);
+    }
+
+    /// Deciding is the half that a session worker can run: it holds a copy of
+    /// the settings, so a write there would push a stale snapshot onto disk.
+    /// Asking must therefore leave the stored policy exactly as it was.
+    #[tokio::test]
+    async fn deciding_a_permission_does_not_touch_the_stored_policy() {
+        let settings = shared_settings_for_test();
+        let before = settings.read().await.security.allow_terminal;
+        let hub = Arc::new(HostControlHub::new_local());
+        spawn_responder(
+            &hub,
+            ApprovalResponse {
+                approved: true,
+                remember: true,
+            },
+        );
+
+        let decision = decide_security_permission(
+            &settings,
+            &hub,
+            None,
+            SecurityPermissionType::Terminal,
+            None,
+            false,
+        )
+        .await;
+
+        assert!(decision.approved);
+        assert!(decision.remember, "the user asked to remember this");
+        assert_eq!(
+            settings.read().await.security.allow_terminal,
+            before,
+            "deciding must not write the policy"
+        );
+    }
+
+    /// Committing is the other half, and it is what actually moves the policy.
+    #[tokio::test]
+    async fn persisting_a_remembered_answer_writes_the_policy() {
+        let settings = shared_settings_for_test();
+
+        persist_remembered_decision(&settings, &SecurityPermissionType::FileDelete, false).await;
+
+        assert_eq!(
+            settings.read().await.security.allow_file_delete,
+            Some(false)
+        );
+    }
+
+    /// A capped session's "remember" must never reach a caller as something to
+    /// commit — the suppression has to be decided here, not left to each gate.
+    #[tokio::test]
+    async fn a_capped_session_never_reports_a_remembered_answer() {
+        let settings = shared_settings_for_test();
+        let hub = Arc::new(HostControlHub::new_local());
+        spawn_responder(
+            &hub,
+            ApprovalResponse {
+                approved: true,
+                remember: true,
+            },
+        );
+
+        let decision = decide_security_permission(
+            &settings,
+            &hub,
+            None,
+            SecurityPermissionType::Terminal,
+            None,
+            true,
+        )
+        .await;
+
+        assert!(decision.approved, "the request itself is still honored");
+        assert!(!decision.remember);
+    }
+
+    /// An already-configured capability answers without a prompt, so there is
+    /// nothing to remember and no policy write to make.
+    #[tokio::test]
+    async fn a_configured_capability_reports_nothing_to_remember() {
+        let settings = shared_settings_for_test();
+        let hub = Arc::new(HostControlHub::new_local());
+
+        for (configured, expected) in [(Some(true), true), (Some(false), false)] {
+            let decision = decide_security_permission(
+                &settings,
+                &hub,
+                configured,
+                SecurityPermissionType::RemoteControl,
+                None,
+                false,
+            )
+            .await;
+            assert_eq!(decision.approved, expected);
+            assert!(!decision.remember);
+        }
     }
 
     // U-21: None + hub returns deny without remember → settings unchanged.
