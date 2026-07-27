@@ -896,7 +896,17 @@ export function useFileTransfer(deskId: string | undefined) {
                 transferredBytes: file.size,
             });
             removeTransferAfterDelay(transferId, 60000);
-            activeTransfers.current.watch(transferId, () => {});
+            // Releasing the entry is the callback's job — the registry keeps it
+            // registered while the callback runs precisely so the release goes
+            // through the same single exit as every other ending. An empty
+            // callback would leave the entry live forever with its timer spent,
+            // which is both a leak and a way for a late reply to be accepted
+            // long after this upload stopped meaning anything. No outcome: the
+            // row already reads "completed" and silence is not a reason to
+            // contradict it.
+            activeTransfers.current.watch(transferId, () => {
+                settleTransfer(transferId);
+            });
 
         } catch (err) {
             settleTransfer(transferId, {

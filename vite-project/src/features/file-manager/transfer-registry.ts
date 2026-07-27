@@ -61,9 +61,11 @@ export class TransferRegistry {
      * Unknown ids are ignored.
      *
      * The transfer is still registered when `onInactive` runs, so the callback
-     * is what must `settle` it — that way the owner's own teardown runs
+     * is what should `settle` it — that way the owner's own teardown runs
      * through the same single exit as every other ending, instead of the
-     * registry quietly dropping the entry and leaving a sink open.
+     * registry quietly dropping the entry and leaving a sink open. A callback
+     * that returns without settling does not get to leak the entry, though: a
+     * spent timer cannot fire again, so nothing else would ever release it.
      */
     watch(transferId: string, onInactive: () => void): void {
         const entry = this.entries.get(transferId);
@@ -120,6 +122,14 @@ export class TransferRegistry {
             // entry is no longer armed while its owner tears it down.
             entry.timer = null;
             entry.onInactive?.();
+            // Settling is the callback's job, but an entry surviving its own
+            // spent watchdog is a leak with nothing left to collect it — and
+            // one that keeps answering `touch`, so a late reply could still act
+            // on a transfer nobody owns. Drop it here rather than trust every
+            // caller to remember.
+            if (this.entries.get(transferId) === entry) {
+                this.entries.delete(transferId);
+            }
         }, this.timeoutMs);
     }
 

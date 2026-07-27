@@ -198,4 +198,57 @@ describe('TransferRegistry', () => {
         expect(registry.activeCount).toBe(0);
         expect(vi.getTimerCount()).toBe(0);
     });
+
+    // The loop above ends every transfer explicitly, which is the path a host
+    // that answers takes. A host that goes quiet leaves the watchdog to end it
+    // instead, and that path has to clear just as completely — an upload whose
+    // completion is never acknowledged is otherwise one stranded entry each.
+    it('leaves nothing behind when the watchdog is what ends the transfer', () => {
+        const registry = new TransferRegistry();
+        for (let i = 0; i < 500; i++) {
+            const id = `t${i}`;
+            registry.start(id);
+            registry.watch(id, () => {
+                registry.settle(id);
+            });
+        }
+
+        vi.advanceTimersByTime(TRANSFER_INACTIVITY_TIMEOUT_MS);
+
+        expect(registry.activeCount).toBe(0);
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    // Callers settle inside the callback so their own teardown runs, but a
+    // caller that forgets must not be able to leak: the timer is spent, so
+    // nothing else would ever release the entry, and it would go on answering
+    // `touch` for a transfer nobody owns.
+    it('releases an entry its callback left behind', () => {
+        const registry = new TransferRegistry();
+        registry.start('t1');
+        registry.watch('t1', () => {});
+
+        vi.advanceTimersByTime(TRANSFER_INACTIVITY_TIMEOUT_MS * 10);
+
+        expect(registry.activeCount).toBe(0);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(registry.touch('t1')).toBe(false);
+    });
+
+    // The callback still owns the release when it takes it, and the backstop
+    // must not turn one ending into two.
+    it('lets the callback do the settling when it does', () => {
+        const registry = new TransferRegistry();
+        let settledByCallback = false;
+        registry.start('t1');
+        registry.watch('t1', () => {
+            settledByCallback = registry.settle('t1');
+        });
+
+        vi.advanceTimersByTime(TRANSFER_INACTIVITY_TIMEOUT_MS);
+
+        expect(settledByCallback).toBe(true);
+        expect(registry.settle('t1')).toBe(false);
+        expect(registry.activeCount).toBe(0);
+    });
 });
