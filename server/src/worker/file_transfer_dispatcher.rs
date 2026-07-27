@@ -99,7 +99,11 @@ pub(crate) use metrics::{
 
 /// Per-transfer in-flight upload state (browser uploading to host).
 struct UploadState {
-    file: tokio::fs::File,
+    /// Boxed rather than held as a [`tokio::fs::File`] so a test can put a
+    /// writer that fails in its place. A write or flush that fails partway is
+    /// what turns a filesystem problem into an answer the browser can act on,
+    /// and there is no portable way to make a real file do it on demand.
+    file: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
     file_path: PathBuf,
     total_chunks: u64,
     received_chunks: u64,

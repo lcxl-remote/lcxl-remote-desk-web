@@ -1,4 +1,5 @@
 use super::*;
+use crate::worker::file_transfer_dispatcher::download::DownloadPlan;
 use desk_ipc_protocol::dual_transport::{EventReceiver, inprocess};
 use desk_ipc_protocol::message::MediaCodec;
 use desk_signal_facade::model::security_settings::SecuritySettings;
@@ -1288,6 +1289,311 @@ async fn cancel_download_stops_emitting_chunks() {
     // on the first loop iteration and returns before any chunk
     // or TransferComplete is emitted.
     assert_no_message(&mut rx).await;
+}
+
+/// A cancel can be the very next frame after the request that started the
+/// download, and the download runs on a task of its own that has not
+/// necessarily begun.
+///
+/// Both frames go through the real command path here. A download that is only
+/// registered once its task gets as far as opening the file would leave this
+/// cancel with nothing to mark, and the peer that asked for the transfer to stop
+/// would receive the whole file and be told it completed.
+#[tokio::test]
+async fn a_cancel_arriving_before_the_stream_starts_is_still_honoured() {
+    let tmp = TempDir::new().unwrap();
+    let file_path = tmp.path().join("big.bin");
+    tokio::fs::write(&file_path, vec![b'x'; FILE_TRANSFER_CHUNK_SIZE_TX * 20])
+        .await
+        .unwrap();
+    // A short lane so the download parks on backpressure instead of running to
+    // completion while the test is still sending the cancel.
+    let (d, mut rx) = dispatcher_with_file_cap(Some(true), 4);
+    d.start_connection(&start_payload("c1")).await;
+
+    let transfer_id = "00000000-0000-0000-0000-0000000000c1".to_string();
+    d.handle_command(FileTransferPayload {
+        connection_id: "c1".into(),
+        data: serde_json::to_vec(&FileTransferMessage::DownloadRequest(DownloadRequest {
+            transfer_id: transfer_id.clone(),
+            file_path: file_path.to_string_lossy().to_string(),
+        }))
+        .unwrap(),
+        is_text: true,
+        transfer_id: None,
+    })
+    .await;
+    d.handle_command(FileTransferPayload {
+        connection_id: "c1".into(),
+        data: serde_json::to_vec(&FileTransferMessage::TransferCancel(TransferCancel {
+            transfer_id: transfer_id.clone(),
+        }))
+        .unwrap(),
+        is_text: true,
+        transfer_id: None,
+    })
+    .await;
+
+    // Whatever chunks escaped before the cancel took effect are fine; being told
+    // the transfer finished is not.
+    while let Ok(Some(payload)) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await
+    {
+        if !payload.is_text {
+            continue;
+        }
+        let message: FileTransferMessage = serde_json::from_slice(&payload.data).unwrap();
+        assert!(
+            !matches!(message, FileTransferMessage::TransferComplete(_)),
+            "a cancelled download must not report completion"
+        );
+    }
+}
+
+/// A source that yields `ok_reads` chunks and then fails, standing in for a file
+/// that becomes unreadable partway — a disconnected mount, a failing disk.
+struct FailingReader {
+    ok_reads: usize,
+}
+
+impl tokio::io::AsyncRead for FailingReader {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if self.ok_reads == 0 {
+            return std::task::Poll::Ready(Err(std::io::Error::other("injected read failure")));
+        }
+        self.ok_reads -= 1;
+        let filled = buf.remaining().min(64);
+        buf.put_slice(&vec![b'x'; filled]);
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+/// A sink that accepts `ok_writes` writes and then fails, and whose flush fails
+/// once `flush_fails` is set. Stands in for a target that runs out of room or
+/// goes away mid-upload.
+struct FailingWriter {
+    ok_writes: usize,
+    flush_fails: bool,
+}
+
+impl tokio::io::AsyncWrite for FailingWriter {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if self.ok_writes == 0 {
+            return std::task::Poll::Ready(Err(std::io::Error::other("injected write failure")));
+        }
+        self.ok_writes -= 1;
+        std::task::Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if self.flush_fails {
+            return std::task::Poll::Ready(Err(std::io::Error::other("injected flush failure")));
+        }
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+/// Register an upload the dispatcher will write into, with a writer of the
+/// test's choosing.
+async fn arm_upload(
+    d: &FileTransferDispatcher,
+    connection_id: &str,
+    transfer_id: &str,
+    file_path: PathBuf,
+    file: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+    total_chunks: u64,
+    expected_bytes: u64,
+) {
+    d.start_activity(
+        connection_id,
+        transfer_id,
+        FileTransferDirection::Upload,
+        "payload.bin",
+        expected_bytes,
+    )
+    .await;
+    d.inner.lock().await.upload_states.insert(
+        TransferKey::new(connection_id, transfer_id),
+        UploadState {
+            file,
+            file_path,
+            total_chunks,
+            received_chunks: 0,
+            expected_bytes,
+            received_bytes: 0,
+            metrics: Default::default(),
+        },
+    );
+}
+
+/// A read that fails after the transfer has already been announced. The browser
+/// is holding a half-written file and still waiting for the rest, so the failure
+/// has to reach it rather than end the loop quietly.
+#[tokio::test]
+async fn a_download_whose_read_fails_mid_stream_reports_why() {
+    let (d, mut rx) = dispatcher();
+    d.start_connection(&start_payload("c1")).await;
+    let transfer_id = "00000000-0000-0000-0000-0000000000e1";
+    d.start_activity(
+        "c1",
+        transfer_id,
+        FileTransferDirection::Download,
+        "payload.bin",
+        4096,
+    )
+    .await;
+
+    let result = d
+        .stream_download(
+            "c1",
+            transfer_id,
+            FailingReader { ok_reads: 1 },
+            DownloadPlan {
+                file_name: "payload.bin".into(),
+                file_size: 4096,
+                chunk_size: FILE_TRANSFER_CHUNK_SIZE_TX,
+                total_chunks: 2,
+            },
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "the read failure is surfaced to the caller"
+    );
+    let reported = drain_transfer_errors(&mut rx).await;
+    assert_eq!(
+        reported,
+        vec![DeskErrorCode::SYSTEM_ERROR],
+        "the browser is told the read failed, exactly once"
+    );
+    assert!(
+        d.inner.lock().await.activities.is_empty(),
+        "the transfer is over"
+    );
+}
+
+/// A write that fails partway through an upload. Without an answer the browser
+/// keeps streaming chunks at a host that has already given up on the file.
+#[tokio::test]
+async fn an_upload_whose_write_fails_mid_stream_reports_why() {
+    let tmp = TempDir::new().unwrap();
+    let file_path = tmp.path().join("partial.bin");
+    tokio::fs::write(&file_path, b"partial").await.unwrap();
+    let (d, mut rx) = dispatcher();
+    d.start_connection(&start_payload("c1")).await;
+    let transfer_id = "00000000-0000-0000-0000-0000000000e2";
+    arm_upload(
+        &d,
+        "c1",
+        transfer_id,
+        file_path.clone(),
+        Box::new(FailingWriter {
+            ok_writes: 0,
+            flush_fails: false,
+        }),
+        2,
+        8,
+    )
+    .await;
+
+    d.handle_command(FileTransferPayload {
+        connection_id: "c1".into(),
+        data: build_binary_chunk(transfer_id, 0, b"abcd"),
+        is_text: false,
+        transfer_id: None,
+    })
+    .await;
+
+    let reported = drain_transfer_errors(&mut rx).await;
+    assert_eq!(reported, vec![DeskErrorCode::SYSTEM_ERROR]);
+    assert!(
+        !file_path.exists(),
+        "the partial file is removed with the transfer"
+    );
+    assert!(
+        d.inner.lock().await.activities.is_empty(),
+        "the transfer is over"
+    );
+}
+
+/// The last chunk lands but the flush fails, so nothing is durable. Reporting
+/// success here would tell the user a file arrived that is not on disk.
+#[tokio::test]
+async fn an_upload_whose_final_flush_fails_reports_why() {
+    let tmp = TempDir::new().unwrap();
+    let file_path = tmp.path().join("unflushed.bin");
+    tokio::fs::write(&file_path, b"unflushed").await.unwrap();
+    let (d, mut rx) = dispatcher();
+    d.start_connection(&start_payload("c1")).await;
+    let transfer_id = "00000000-0000-0000-0000-0000000000e3";
+    arm_upload(
+        &d,
+        "c1",
+        transfer_id,
+        file_path.clone(),
+        Box::new(FailingWriter {
+            ok_writes: 1,
+            flush_fails: true,
+        }),
+        1,
+        4,
+    )
+    .await;
+
+    d.handle_command(FileTransferPayload {
+        connection_id: "c1".into(),
+        data: build_binary_chunk(transfer_id, 0, b"abcd"),
+        is_text: false,
+        transfer_id: None,
+    })
+    .await;
+
+    let reported = drain_transfer_errors(&mut rx).await;
+    assert_eq!(reported, vec![DeskErrorCode::SYSTEM_ERROR]);
+    assert!(
+        !file_path.exists(),
+        "a file that was never flushed is not left behind"
+    );
+}
+
+/// Every `TransferError` the lane carries, in order. Chunks and progress
+/// messages are ignored; what matters is what the browser is told went wrong.
+async fn drain_transfer_errors(
+    rx: &mut Box<dyn EventReceiver<FileTransferPayload>>,
+) -> Vec<DeskErrorCode> {
+    let mut codes = Vec::new();
+    while let Ok(Some(payload)) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await
+    {
+        if !payload.is_text {
+            continue;
+        }
+        if let Ok(FileTransferMessage::TransferError(e)) =
+            serde_json::from_slice::<FileTransferMessage>(&payload.data)
+        {
+            codes.push(e.error_code);
+        }
+    }
+    codes
 }
 
 /// Download for a non-existent file emits TransferError, not panic.

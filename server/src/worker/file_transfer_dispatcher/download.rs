@@ -2,11 +2,11 @@ use super::*;
 
 /// What one download announces to the browser and streams against, settled
 /// before the first chunk goes out.
-struct DownloadPlan {
-    file_name: String,
-    file_size: u64,
-    chunk_size: usize,
-    total_chunks: u64,
+pub(super) struct DownloadPlan {
+    pub(super) file_name: String,
+    pub(super) file_size: u64,
+    pub(super) chunk_size: usize,
+    pub(super) total_chunks: u64,
 }
 
 impl FileTransferDispatcher {
@@ -97,42 +97,31 @@ impl FileTransferDispatcher {
             return Ok(());
         }
 
-        // Registered before the first chunk and released once below, whichever
-        // way the stream ends: a cancel is only recorded while this holds, so
-        // the release is also what guarantees no cancel outlives its reader.
-        self.inner
-            .lock()
-            .await
-            .live_downloads
-            .insert(TransferKey::new(&connection_id, &req.transfer_id));
         let plan = DownloadPlan {
             file_name,
             file_size,
             chunk_size,
             total_chunks,
         };
-        let outcome = self
-            .stream_download(&connection_id, &req.transfer_id, file, plan)
-            .await;
-        {
-            let mut inner = self.inner.lock().await;
-            let key = TransferKey::new(&connection_id, &req.transfer_id);
-            inner.live_downloads.remove(&key);
-            inner.cancelled_transfers.remove(&key);
-        }
-        outcome
+        self.stream_download(&connection_id, &req.transfer_id, file, plan)
+            .await
     }
 
     /// Stream one download's chunks over the file lane.
     ///
-    /// Split from [`Self::serve_download`] so the registration that bounds
-    /// `cancelled_transfers` has a single release point: every way out of the
-    /// stream returns through here.
-    async fn stream_download(
+    /// Split from [`Self::serve_download`] so the announcement and the chunk loop
+    /// read as one piece; the registration that bounds `cancelled_transfers` is
+    /// taken and released by the caller that spawned this.
+    ///
+    /// Generic over the source so a test can hand it a reader that fails partway.
+    /// A read that fails mid-stream leaves the browser with half a file and no
+    /// reason to stop waiting for the rest, so it is a path worth pinning, and a
+    /// real file cannot be made to do it on demand.
+    pub(super) async fn stream_download<R: tokio::io::AsyncRead + Unpin>(
         &self,
         connection_id: &str,
         transfer_id: &str,
-        mut file: tokio::fs::File,
+        mut file: R,
         plan: DownloadPlan,
     ) -> std::io::Result<()> {
         let DownloadPlan {

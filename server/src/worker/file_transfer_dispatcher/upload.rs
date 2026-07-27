@@ -37,8 +37,24 @@ impl FileTransferDispatcher {
                 let dispatcher = self.clone();
                 let connection_id = payload.connection_id.clone();
                 let transfer_id = req.transfer_id.clone();
+                let key = TransferKey::new(&connection_id, &transfer_id);
+                // Registered before this handler returns, not inside the task
+                // below. A `TransferCancel` can be the very next frame on this
+                // lane, and it is only recorded for a download that is
+                // registered — so registering later would let a cancel that
+                // arrives while the task is still opening the file be dropped,
+                // and the whole file would go out to a peer that asked for it to
+                // stop. The task releases this on its way out, whichever way it
+                // leaves, so nothing accumulates.
+                self.inner.lock().await.live_downloads.insert(key.clone());
                 tokio::spawn(async move {
-                    if let Err(e) = dispatcher.serve_download(connection_id.clone(), req).await {
+                    let outcome = dispatcher.serve_download(connection_id.clone(), req).await;
+                    {
+                        let mut inner = dispatcher.inner.lock().await;
+                        inner.live_downloads.remove(&key);
+                        inner.cancelled_transfers.remove(&key);
+                    }
+                    if let Err(e) = outcome {
                         error!("[FileTransferDispatcher] download error: {e}");
                         dispatcher
                             .finish_activity(
@@ -368,7 +384,7 @@ impl FileTransferDispatcher {
             }
         };
         let state = UploadState {
-            file,
+            file: Box::new(file),
             file_path: file_path.clone(),
             total_chunks: req.total_chunks,
             received_chunks: 0,
