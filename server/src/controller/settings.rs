@@ -251,13 +251,18 @@ pub async fn update_turn_settings(
     let params = request_json.into_inner();
     let mut settings = settings.write().await;
 
-    settings.turn.realm = params.realm;
-    settings.turn.interfaces = params.interfaces;
-    settings.turn.enable_turn = params.enable_turn;
-    settings.turn.relay_min_port = params.relay_min_port;
-    settings.turn.relay_max_port = params.relay_max_port;
+    let mut candidate = settings.clone();
+    candidate.turn.realm = params.realm;
+    candidate.turn.interfaces = params.interfaces;
+    candidate.turn.enable_turn = params.enable_turn;
+    candidate.turn.relay_min_port = params.relay_min_port;
+    candidate.turn.relay_max_port = params.relay_max_port;
 
-    commit_turn_settings(&settings, control.as_ref().map(|c| c.get_ref()))?;
+    commit_turn_settings(
+        &mut settings,
+        candidate,
+        control.as_ref().map(|c| c.get_ref()),
+    )?;
     info!("Update turn settings successfully");
     Ok(HttpResponse::Ok().finish())
 }
@@ -269,17 +274,26 @@ pub async fn update_turn_settings(
 /// validating against the old one — a disagreement that never healed, because
 /// nothing else was watching the file.
 ///
+/// The caller edits a copy and hands it over; `live` only takes the new values
+/// once they are on disk. Editing the live settings first would leave a failed
+/// write with three different answers in play — the process on the new values,
+/// the file on the old ones, and the relay still serving the old ones — and
+/// nothing would ever reconcile them. Nobody publishes a value it could not
+/// store.
+///
 /// Success means "saved, and the new state has been published". It deliberately
 /// does not mean the runtime has already converged: rebinding sockets can fail
 /// and be retried, and holding the request open for that would report a
 /// transient bind failure as a failed save.
 fn commit_turn_settings(
-    settings: &Settings,
+    live: &mut Settings,
+    candidate: Settings,
     control: Option<&TurnRuntimeControl>,
 ) -> Result<(), AWError> {
-    settings.save()?;
+    candidate.save()?;
+    *live = candidate;
     match control {
-        Some(control) => control.apply(&settings.turn),
+        Some(control) => control.apply(&live.turn),
         // No runtime control in this process (the daemon's local API serves the
         // settings pages but hosts no relay); saving is the whole job.
         None => log::debug!("no TURN runtime in this process; settings saved only"),
@@ -389,10 +403,15 @@ pub async fn regenerate_turn_secret(
 ) -> Result<HttpResponse, AWError> {
     let mut settings = settings.write().await;
     let new_secret = uuid::Uuid::new_v4().to_string().replace("-", "");
-    settings.turn.static_auth_secret = Some(new_secret);
+    let mut candidate = settings.clone();
+    candidate.turn.static_auth_secret = Some(new_secret);
     // The secret is what the running server validates credentials against, so
     // this write restarts the runtime like any other.
-    commit_turn_settings(&settings, control.as_ref().map(|c| c.get_ref()))?;
+    commit_turn_settings(
+        &mut settings,
+        candidate,
+        control.as_ref().map(|c| c.get_ref()),
+    )?;
     info!("Regenerate TURN static_auth_secret successfully");
     Ok(HttpResponse::Ok().finish())
 }
@@ -897,6 +916,59 @@ mod tests {
 
         supervisor.shutdown().await;
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// A write nobody could store must not be visible either.
+    ///
+    /// Editing the live settings before persisting them left a failed save with
+    /// three answers in play — the process on the new values, the file on the
+    /// old ones, and the relay still serving the old ones — and nothing that
+    /// would ever reconcile them. For the rotation endpoint that is permanent:
+    /// the process would hand out credentials signed with a secret the running
+    /// server never received and the file never recorded.
+    #[actix_web::test]
+    async fn a_turn_write_that_cannot_be_saved_changes_nothing() {
+        let mut settings = Settings::default();
+        settings.turn.realm = "before".into();
+        // A regular file where a directory would have to be: the save fails on
+        // its first step, before anything is written anywhere.
+        let blocker =
+            std::env::temp_dir().join(format!("lrd-turn-blocked-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        settings.args.config_file_path = blocker.join("config.toml").to_string_lossy().into_owned();
+        let shared = web::Data::new(SharedSettings::from(settings));
+
+        let app = test::init_service(
+            App::new()
+                .app_data(shared.clone())
+                .service(update_turn_settings),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/settings/turn")
+            .set_json(&TurnSettings {
+                realm: "after".into(),
+                ..TurnSettings::default()
+            })
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        // A business failure answers 200 and carries the verdict in the body, so
+        // the status on its own says nothing.
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(
+            body["success"], false,
+            "a write that could not be stored must be reported as failed"
+        );
+
+        assert_eq!(
+            shared.read().await.turn.realm,
+            "before",
+            "the process must still agree with the file it failed to write"
+        );
+
+        let _ = std::fs::remove_file(&blocker);
     }
 
     /// Wait until a runtime is (or is no longer) published.
