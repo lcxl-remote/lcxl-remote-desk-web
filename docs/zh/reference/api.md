@@ -42,3 +42,5 @@ Kubb 的版本被精确钉死，且以 `npx --no-install` 调用，因此生成�
 `DeskErrorCode`（`utils/src/error.rs`）由 `desk_error_codes!` 宏统一声明，宏同时产出常量与 `ALL` 名值表。该表以带 `x-enum-varnames` 的 int32 enum 形式发布进规范，于是生成的客户端提供具名成员 `deskErrorCodeEnum`——前端据此分支，不必再手写数值镜像。
 
 该类型不被任何请求 / 响应体引用（`RestResponse.code` 在 wire 上就是一个裸整数），只有 `server/src/openapi.rs` 里的显式注册才能让它进入规范。新增错误码 = 在宏清单里加一行 + 重新生成。
+
+前端的「码 → 文案」映射统一走 `src/lib/desk-error-i18n.ts`，各个领域各自维护一张只含自己会收到的码的小表。未命中的码怎么兜底由调用方决定：显示后端 `message`，或显示一句本地化的通用提示。每次构建前都会跑 `verify-error-codes` 检查，把写成裸数字的错误码拦下来，确保生成的常量是唯一来源。

@@ -39,7 +39,9 @@ cd vite-project && npm run build                       # 类型检查 + 构建
 - **kubb 在 `vite-project/package.json` 里精确钉死（不是 caret）**：生成的 client 是 committed 的，换个 patch 版本就会重排 import、增删 per-tag 的 barrel `index.ts`，把上百个文件标成 modified。升级 kubb = 改版本 + 重新生成 + 目视确认 diff 只是格式化差异，作为独立提交。
 - 脚本用 `npx --no-install kubb generate`：依赖没装好时直接失败，而不是让 npx 下载一个没被钉死的生成器。所以 regen 前先 `cd vite-project && npm ci`。
 - **`.gitea/workflows/openapi-client.yaml` 会重新生成并断言工作树干净**。改了 API 却忘记 regen 时，这是唯一会报错的地方 —— `npm run build` 只跑 tsc + vite，不会重新生成，而一个改掉的数值能一路静默地继续发出去。该 workflow 刻意不设 path filter，并覆盖 `tags: ['v*']`（release 由 tag 直接触发且只 build 不 regen）。
-- **错误码走 OpenAPI，不要手写数值镜像**：`DeskErrorCode`（`utils/src/error.rs`）由 `desk_error_codes!` 宏统一声明，宏同时产出 `ALL` 名值表，再导出成带 `x-enum-varnames` 的 int32 enum，并在 `server/src/openapi.rs` 的 `ExtraSchemas` 注册（该类型不被任何 body 引用，只靠这一处显式注册才会进 spec）。前端用生成的 `deskErrorCodeEnum` 常量。新增错误码 = 在宏清单里加一行 + regen。
+- **错误码走 OpenAPI，不要手写数值镜像**：`DeskErrorCode`（`utils/src/error.rs`）由 `desk_error_codes!` 宏统一声明，宏同时产出 `ALL` 名值表，再导出成带 `x-enum-varnames` 的 int32 enum，并在 `server/src/openapi.rs` 的 `ExtraSchemas` 注册（该类型不被任何 body 引用，只靠这一处显式注册才会进 spec）。前端一律用生成的 `deskErrorCodeEnum` 常量。新增错误码 = 在宏清单里加一行 + regen。
+  - `prebuild` 跑 `scripts/verify-error-codes.cjs`：按生成的枚举成员名判定，拒绝「把码值与数字字面量比较」与「声明一个同名数字常量」两种写法。名单从生成物读取而非硬编码，所以扫描器自身不会漂移；若某个字面量确实不是错误码，在上一行写 `verify-error-codes: allow`。
+  - 码→文案的映射统一走 `src/lib/desk-error-i18n.ts`（各域自带小表），**fallback 策略由调用方指定**：`deskErrorMessage` 回退到后端 message（agent 面板、文件管理），`deskErrorKeyOr` 回退到本地化的 generic key（manager-link banner —— 它另起一行显示后端 message，回退到 message 会把同一句英文印两遍）。**不要再新增孤立映射器**。
 
 ### Linux 系统依赖
 

@@ -42,3 +42,5 @@ Generated files under `vite-project/src/services/` are produced by Kubb — do n
 `DeskErrorCode` (`utils/src/error.rs`) is declared through the `desk_error_codes!` macro, which emits both the constants and an `ALL` name/value table. That table is published in the spec as an int32 enum carrying `x-enum-varnames`, so the generated client exposes `deskErrorCodeEnum` with named members — frontends branch on those instead of mirroring the numbers by hand.
 
 Nothing references the type in a request or response body (`RestResponse.code` is a bare integer on the wire), so it reaches the spec only through the explicit registration in `server/src/openapi.rs`. Adding a code means adding one line to the macro and regenerating.
+
+The frontend maps codes to text through `src/lib/desk-error-i18n.ts`, where each area keeps a small table of the codes it can receive. The fallback for an unmapped code is the caller's choice: show the backend `message`, or show a localized generic line. A `verify-error-codes` check runs before every build and rejects a code written as a bare number, so the generated constants stay the only source.
