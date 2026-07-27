@@ -3,7 +3,7 @@
 * Do not edit manually.
 */
 
-import type { GetTurnSessionQueryResponse, GetTurnSessionQueryParams, GetTurnSession404 } from "../../types.ts";
+import type { GetTurnSessionQueryResponse, GetTurnSessionQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryResult } from "@tanstack/react-query";
 import { getTurnSession } from "../../clients.ts";
@@ -16,7 +16,7 @@ export type GetTurnSessionSuspenseQueryKey = ReturnType<typeof getTurnSessionSus
 export function getTurnSessionSuspenseQueryOptions(params: GetTurnSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
 
         const queryKey = getTurnSessionSuspenseQueryKey(params)
-        return queryOptions<GetTurnSessionQueryResponse, ResponseErrorConfig<GetTurnSession404>, GetTurnSessionQueryResponse, typeof queryKey>({
+        return queryOptions<GetTurnSessionQueryResponse, ResponseErrorConfig<Error>, GetTurnSessionQueryResponse, typeof queryKey>({
          
          queryKey,
          queryFn: async ({ signal }) => {
@@ -32,7 +32,7 @@ export function getTurnSessionSuspenseQueryOptions(params: GetTurnSessionQueryPa
  */
 export function useGetTurnSessionSuspense<TData = GetTurnSessionQueryResponse, TQueryKey extends QueryKey = GetTurnSessionSuspenseQueryKey>(params: GetTurnSessionQueryParams, options: 
 {
-  query?: Partial<UseSuspenseQueryOptions<GetTurnSessionQueryResponse, ResponseErrorConfig<GetTurnSession404>, TData, TQueryKey>> & { client?: QueryClient },
+  query?: Partial<UseSuspenseQueryOptions<GetTurnSessionQueryResponse, ResponseErrorConfig<Error>, TData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }
 }
  = {}) {
@@ -46,7 +46,7 @@ export function useGetTurnSessionSuspense<TData = GetTurnSessionQueryResponse, T
           ...getTurnSessionSuspenseQueryOptions(params, config),
           ...resolvedOptions,
           queryKey,
-         } as unknown as UseSuspenseQueryOptions, queryClient) as UseSuspenseQueryResult<TData, ResponseErrorConfig<GetTurnSession404>> & { queryKey: TQueryKey }
+         } as unknown as UseSuspenseQueryOptions, queryClient) as UseSuspenseQueryResult<TData, ResponseErrorConfig<Error>> & { queryKey: TQueryKey }
 
          query.queryKey = queryKey as TQueryKey
 

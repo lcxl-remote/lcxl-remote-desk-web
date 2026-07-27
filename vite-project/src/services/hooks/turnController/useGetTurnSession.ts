@@ -3,7 +3,7 @@
 * Do not edit manually.
 */
 
-import type { GetTurnSessionQueryResponse, GetTurnSessionQueryParams, GetTurnSession404 } from "../../types.ts";
+import type { GetTurnSessionQueryResponse, GetTurnSessionQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
 import { getTurnSession } from "../../clients.ts";
@@ -16,7 +16,7 @@ export type GetTurnSessionQueryKey = ReturnType<typeof getTurnSessionQueryKey>
 export function getTurnSessionQueryOptions(params: GetTurnSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
 
         const queryKey = getTurnSessionQueryKey(params)
-        return queryOptions<GetTurnSessionQueryResponse, ResponseErrorConfig<GetTurnSession404>, GetTurnSessionQueryResponse, typeof queryKey>({
+        return queryOptions<GetTurnSessionQueryResponse, ResponseErrorConfig<Error>, GetTurnSessionQueryResponse, typeof queryKey>({
          
          queryKey,
          queryFn: async ({ signal }) => {
@@ -32,7 +32,7 @@ export function getTurnSessionQueryOptions(params: GetTurnSessionQueryParams, co
  */
 export function useGetTurnSession<TData = GetTurnSessionQueryResponse, TQueryData = GetTurnSessionQueryResponse, TQueryKey extends QueryKey = GetTurnSessionQueryKey>(params: GetTurnSessionQueryParams, options: 
 {
-  query?: Partial<QueryObserverOptions<GetTurnSessionQueryResponse, ResponseErrorConfig<GetTurnSession404>, TData, TQueryData, TQueryKey>> & { client?: QueryClient },
+  query?: Partial<QueryObserverOptions<GetTurnSessionQueryResponse, ResponseErrorConfig<Error>, TData, TQueryData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }
 }
  = {}) {
@@ -46,7 +46,7 @@ export function useGetTurnSession<TData = GetTurnSessionQueryResponse, TQueryDat
           ...getTurnSessionQueryOptions(params, config),
           ...resolvedOptions,
           queryKey,
-         } as unknown as QueryObserverOptions, queryClient) as UseQueryResult<TData, ResponseErrorConfig<GetTurnSession404>> & { queryKey: TQueryKey }
+         } as unknown as QueryObserverOptions, queryClient) as UseQueryResult<TData, ResponseErrorConfig<Error>> & { queryKey: TQueryKey }
 
          query.queryKey = queryKey as TQueryKey
 

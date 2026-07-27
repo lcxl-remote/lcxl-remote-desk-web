@@ -3,7 +3,7 @@
 * Do not edit manually.
 */
 
-import type { GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404 } from "../../types.ts";
+import type { GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
 import { getTurnSessionStatistics } from "../../clients.ts";
@@ -16,7 +16,7 @@ export type GetTurnSessionStatisticsQueryKey = ReturnType<typeof getTurnSessionS
 export function getTurnSessionStatisticsQueryOptions(params: GetTurnSessionStatisticsQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
 
         const queryKey = getTurnSessionStatisticsQueryKey(params)
-        return queryOptions<GetTurnSessionStatisticsQueryResponse, ResponseErrorConfig<GetTurnSessionStatistics404>, GetTurnSessionStatisticsQueryResponse, typeof queryKey>({
+        return queryOptions<GetTurnSessionStatisticsQueryResponse, ResponseErrorConfig<Error>, GetTurnSessionStatisticsQueryResponse, typeof queryKey>({
          
          queryKey,
          queryFn: async ({ signal }) => {
@@ -32,7 +32,7 @@ export function getTurnSessionStatisticsQueryOptions(params: GetTurnSessionStati
  */
 export function useGetTurnSessionStatistics<TData = GetTurnSessionStatisticsQueryResponse, TQueryData = GetTurnSessionStatisticsQueryResponse, TQueryKey extends QueryKey = GetTurnSessionStatisticsQueryKey>(params: GetTurnSessionStatisticsQueryParams, options: 
 {
-  query?: Partial<QueryObserverOptions<GetTurnSessionStatisticsQueryResponse, ResponseErrorConfig<GetTurnSessionStatistics404>, TData, TQueryData, TQueryKey>> & { client?: QueryClient },
+  query?: Partial<QueryObserverOptions<GetTurnSessionStatisticsQueryResponse, ResponseErrorConfig<Error>, TData, TQueryData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }
 }
  = {}) {
@@ -46,7 +46,7 @@ export function useGetTurnSessionStatistics<TData = GetTurnSessionStatisticsQuer
           ...getTurnSessionStatisticsQueryOptions(params, config),
           ...resolvedOptions,
           queryKey,
-         } as unknown as QueryObserverOptions, queryClient) as UseQueryResult<TData, ResponseErrorConfig<GetTurnSessionStatistics404>> & { queryKey: TQueryKey }
+         } as unknown as QueryObserverOptions, queryClient) as UseQueryResult<TData, ResponseErrorConfig<Error>> & { queryKey: TQueryKey }
 
          query.queryKey = queryKey as TQueryKey
 

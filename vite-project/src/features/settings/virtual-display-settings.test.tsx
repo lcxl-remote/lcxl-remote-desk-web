@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { render, screen, fireEvent, waitFor } from "@testing-library/react"
+import { deskErrorCodeEnum } from "@/services"
 
 // i18n: real en-US locale so assertions match what users see.
 vi.mock("react-i18next", () => import("@/test-utils/i18n-mock").then((m) => m.reactI18nextMock()))
@@ -270,7 +271,7 @@ describe("VirtualDisplaySettings — exclusive controls", () => {
             }
             if (url.endsWith("/api/desk/settings/virtual-display")) {
                 // Simulate a non-zero code: backend reachable but returned an error.
-                return { code: 5, data: null }
+                return { code: deskErrorCodeEnum.INVALID_PARAMS, data: null }
             }
             return { code: 0, data: null }
         })

@@ -1,6 +1,7 @@
 import { renderHook, act, cleanup } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { useFileTransfer } from './use-file-transfer';
+import { deskErrorCodeEnum } from '@/services';
 import {
     CHUNK,
     installSignalingStubs,
@@ -73,7 +74,7 @@ describe('useFileTransfer upload accept gating (W1/W7)', () => {
         expect(reqB.type).toBe('upload_request');
         const tidB = reqB.transfer_id;
 
-        act(() => dc.onmessage?.({ data: JSON.stringify({ type: 'transfer_error', transfer_id: tidB, error_code: 1, message: 'no such dir' }) }));
+        act(() => dc.onmessage?.({ data: JSON.stringify({ type: 'transfer_error', transfer_id: tidB, error_code: deskErrorCodeEnum.SYSTEM_ERROR, message: 'no such dir' }) }));
         await flush();
         // No new binary frames, and the upload promise settled (the gate
         // rejected the waiter rather than hanging forever).

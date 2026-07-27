@@ -9,7 +9,8 @@
 //
 // Three shapes are rejected:
 //
-//   1. Comparing a `code` / `error_code` / `errorCode` against a numeric literal.
+//   1. Comparing a `code` / `error_code` / `errorCode` against a numeric literal,
+//      including a `case <number>:` inside a `switch` on one of those names.
 //   2. Declaring `const NAME = <number>` where NAME is one of the generated code
 //      names — the mirror pattern, regardless of how it is commented.
 //   3. Declaring `const NAME = <number>` under a comment naming `DeskErrorCode`,
@@ -31,6 +32,10 @@ const ALLOW_MARKER = "verify-error-codes: allow";
 // `(?<![\w$])` before the bare `code` alternative keeps `exit_code`, `keyCode`
 // and friends out; `error_code` / `errorCode` are matched in full.
 const NUMERIC_COMPARISON = /(?<![\w$])(?:error_code|errorCode|code)\s*(?:===|!==|==|!=)\s*-?\d+/;
+// `switch (code) { case 4: ... }` — the arm is a comparison with the subject
+// spelled somewhere above it, so the subject is what identifies it.
+const CODE_SWITCH = /(?<![\w$])switch\s*\(\s*(?:error_code|errorCode|code)\b/;
+const NUMERIC_CASE = /^(\s*)case\s+-?\d+\s*:/;
 const NUMERIC_CONST = /^\s*(?:export\s+)?const\s+([A-Z][A-Z0-9_]*)\s*(?::\s*number\s*)?=\s*-?\d+\s*;?\s*$/;
 const MENTIONS_ERROR_CODE = /DeskErrorCode/;
 // How far above a constant a `DeskErrorCode` comment still counts as labelling it.
@@ -74,6 +79,8 @@ const violations = [];
 
 function checkFile(file) {
     const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
+    // Indentation of the `switch` on a code, while one is open.
+    let switchIndent = null;
     lines.forEach((line, index) => {
         if (index > 0 && lines[index - 1].includes(ALLOW_MARKER)) return;
 
@@ -85,6 +92,23 @@ function checkFile(file) {
                 why: "compares an error code against a numeric literal",
             });
             return;
+        }
+
+        const openedSwitch = CODE_SWITCH.test(line);
+        if (openedSwitch) switchIndent = line.length - line.trimStart().length;
+        if (switchIndent !== null) {
+            // The switch ends at the first brace closing back to its own column.
+            if (!openedSwitch && new RegExp(`^\\s{0,${switchIndent}}\\}`).test(line)) {
+                switchIndent = null;
+            } else if (NUMERIC_CASE.test(line)) {
+                violations.push({
+                    file,
+                    line: index + 1,
+                    text: line.trim(),
+                    why: "matches an error code against a numeric literal",
+                });
+                return;
+            }
         }
 
         const declaration = NUMERIC_CONST.exec(line);

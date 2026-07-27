@@ -3,6 +3,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { DiagnosePanel } from "./diagnose-panel";
 import type { DiagnoseState } from "./use-desk-diagnose";
 import type { ExecEntry } from "../exec/use-confirm-exec";
+import { deskErrorCodeEnum } from "@/services";
 
 // i18n: real en-US locale; i18n.language is the tag forwarded to onStart so the
 // AI answers in the UI language.
@@ -261,7 +262,7 @@ describe("DiagnosePanel", () => {
                 }),
             ],
             error: "the assistant stopped after repeating the same action too many times",
-            errorCode: 70,
+            errorCode: deskErrorCodeEnum.AGENT_SAME_TOOL_REPEAT_LIMIT,
         });
         expect(
             screen.getByText("CPU usage is concentrated in process 4242."),

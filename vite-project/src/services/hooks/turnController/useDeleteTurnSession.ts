@@ -3,7 +3,7 @@
 * Do not edit manually.
 */
 
-import type { DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417 } from "../../types.ts";
+import type { DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
 import { deleteTurnSession } from "../../clients.ts";
@@ -16,7 +16,7 @@ export type DeleteTurnSessionMutationKey = ReturnType<typeof deleteTurnSessionMu
 export function deleteTurnSessionMutationOptions<TContext = unknown>(config: Partial<RequestConfig> & { client?: Client } = {}) {
 
         const mutationKey = deleteTurnSessionMutationKey()
-        return mutationOptions<DeleteTurnSessionMutationResponse, ResponseErrorConfig<DeleteTurnSession417>, {params: DeleteTurnSessionQueryParams}, TContext>({
+        return mutationOptions<DeleteTurnSessionMutationResponse, ResponseErrorConfig<Error>, {params: DeleteTurnSessionQueryParams}, TContext>({
           mutationKey,
           mutationFn: async({ params }) => {
             return deleteTurnSession(params, config)
@@ -31,7 +31,7 @@ export function deleteTurnSessionMutationOptions<TContext = unknown>(config: Par
  */
 export function useDeleteTurnSession<TContext>(options: 
 {
-  mutation?: UseMutationOptions<DeleteTurnSessionMutationResponse, ResponseErrorConfig<DeleteTurnSession417>, {params: DeleteTurnSessionQueryParams}, TContext> & { client?: QueryClient },
+  mutation?: UseMutationOptions<DeleteTurnSessionMutationResponse, ResponseErrorConfig<Error>, {params: DeleteTurnSessionQueryParams}, TContext> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client },
 }
  = {}) {
@@ -40,13 +40,13 @@ export function useDeleteTurnSession<TContext>(options:
           const { client: queryClient, ...mutationOptions } = mutation;
           const mutationKey = mutationOptions.mutationKey ?? deleteTurnSessionMutationKey()
 
-          const baseOptions = deleteTurnSessionMutationOptions(config) as UseMutationOptions<DeleteTurnSessionMutationResponse, ResponseErrorConfig<DeleteTurnSession417>, {params: DeleteTurnSessionQueryParams}, TContext>
+          const baseOptions = deleteTurnSessionMutationOptions(config) as UseMutationOptions<DeleteTurnSessionMutationResponse, ResponseErrorConfig<Error>, {params: DeleteTurnSessionQueryParams}, TContext>
           
 
-          return useMutation<DeleteTurnSessionMutationResponse, ResponseErrorConfig<DeleteTurnSession417>, {params: DeleteTurnSessionQueryParams}, TContext>({
+          return useMutation<DeleteTurnSessionMutationResponse, ResponseErrorConfig<Error>, {params: DeleteTurnSessionQueryParams}, TContext>({
             ...baseOptions,
             mutationKey,
             ...mutationOptions,
-          }, queryClient) as UseMutationResult<DeleteTurnSessionMutationResponse, ResponseErrorConfig<DeleteTurnSession417>, {params: DeleteTurnSessionQueryParams}, TContext>
+          }, queryClient) as UseMutationResult<DeleteTurnSessionMutationResponse, ResponseErrorConfig<Error>, {params: DeleteTurnSessionQueryParams}, TContext>
       
 }

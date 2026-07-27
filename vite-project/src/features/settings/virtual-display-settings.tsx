@@ -643,15 +643,15 @@ function errorMessage(
     t: TFunction,
 ): string {
     switch (code) {
-        case 4:
+        case deskErrorCodeEnum.PERMISSION_ERROR:
             return t(
                 "pages.virtualDisplay.error.permissionError",
             )
-        case 8:
+        case deskErrorCodeEnum.PRECONDITION_FAILED:
             return t(
                 "pages.virtualDisplay.error.preconditionFailed",
             )
-        case 11:
+        case deskErrorCodeEnum.FILE_PATH_NOT_FOUND:
             return t(
                 "pages.virtualDisplay.error.fileNotFound",
             )

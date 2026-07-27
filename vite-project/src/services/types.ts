@@ -692,6 +692,7 @@ export const deskErrorCodeEnum = {
     AI_EXEC_SHELL_UNSUPPORTED: 71,
     ACCOUNT_PENDING_DELETION: 62,
     ACCOUNT_STILL_ORG_OWNER: 63,
+    ACCOUNT_IS_PLATFORM_ADMIN: 72,
     CONNECTION_UNREACHABLE: 64,
     CONNECTION_NOT_SIGNALING: 65,
     CONNECTION_AUTH_FAILED: 66,
@@ -3441,6 +3442,48 @@ export type RestResponseTurnRuntimeInfo = {
     success: boolean;
 };
 
+export type RestResponseTurnSession = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        channels: number[];
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        expires: number;
+        /**
+         * @type array
+        */
+        permissions: number[];
+        /**
+         * @minLength 0
+         * @type integer,null, int32
+        */
+        port?: number | null;
+        /**
+         * @type string
+        */
+        username: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 /**
  * @description Byte/packet counters for one traffic class in both directions.
 */
@@ -5624,21 +5667,16 @@ export type GetTurnSessionQueryParams = {
 };
 
 /**
- * @description Turn server session
+ * @description Session enumeration is not supported by this implementation; the reason is carried in RestResponse.code
 */
-export type GetTurnSession200 = TurnSession;
-
-/**
- * @description Session enumeration is not supported
-*/
-export type GetTurnSession404 = any;
+export type GetTurnSession200 = RestResponseTurnSession;
 
 export type GetTurnSessionQueryResponse = GetTurnSession200;
 
 export type GetTurnSessionQuery = {
     Response: GetTurnSession200;
     QueryParams: GetTurnSessionQueryParams;
-    Errors: GetTurnSession404;
+    Errors: any;
 };
 
 export type DeleteTurnSessionQueryParams = {
@@ -5653,21 +5691,16 @@ export type DeleteTurnSessionQueryParams = {
 };
 
 /**
- * @description Deleted turn server session
+ * @description Closing an individual session is not supported by this implementation; the reason is carried in RestResponse.code
 */
 export type DeleteTurnSession200 = any;
-
-/**
- * @description Expectation failed
-*/
-export type DeleteTurnSession417 = any;
 
 export type DeleteTurnSessionMutationResponse = DeleteTurnSession200;
 
 export type DeleteTurnSessionMutation = {
     Response: DeleteTurnSession200;
     QueryParams: DeleteTurnSessionQueryParams;
-    Errors: DeleteTurnSession417;
+    Errors: any;
 };
 
 export type GetTurnSessionStatisticsQueryParams = {
@@ -5686,17 +5719,12 @@ export type GetTurnSessionStatisticsQueryParams = {
 */
 export type GetTurnSessionStatistics200 = RestResponseTurnSessionStatistics;
 
-/**
- * @description Turn server session not found
-*/
-export type GetTurnSessionStatistics404 = any;
-
 export type GetTurnSessionStatisticsQueryResponse = GetTurnSessionStatistics200;
 
 export type GetTurnSessionStatisticsQuery = {
     Response: GetTurnSessionStatistics200;
     QueryParams: GetTurnSessionStatisticsQueryParams;
-    Errors: GetTurnSessionStatistics404;
+    Errors: any;
 };
 
 export type GetTurnUsageQueryParams = {
