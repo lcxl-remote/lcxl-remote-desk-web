@@ -73,33 +73,52 @@ impl TurnUsageCollector {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            let Some(statistics) = self.current_statistics() else {
-                // No runtime is serving; there is nothing to account for, and no
-                // reason to touch the database.
-                continue;
-            };
-            let db = desk_signal::db::get_db();
-            if let Err(e) = self.flush_once(db, chrono::Utc::now(), &statistics).await {
+            if let Err(e) = self
+                .tick(desk_signal::db::get_db(), chrono::Utc::now())
+                .await
+            {
                 log::warn!("TURN usage collector flush failed: {}", e);
             }
         }
     }
 
-    /// The counters to read this pass, dropping the baseline when the runtime
-    /// behind them has been replaced: a fresh runtime starts from zero, and
-    /// diffing it against the retired runtime's totals would swallow everything
-    /// the new one relays until it exceeds them.
-    fn current_statistics(&mut self) -> Option<Arc<RwLock<Statistics>>> {
-        let resolved = self.source.resolve()?;
-        let same = self
-            .current
-            .as_ref()
-            .is_some_and(|held| Arc::ptr_eq(held, &resolved));
+    /// One tick: adopt a replacement runtime if there is one, and account for
+    /// whatever is serving now.
+    ///
+    /// A runtime that has just been replaced is read one last time before its
+    /// counters are let go. A fresh runtime starts from zero, so carrying the
+    /// retired one's totals forward as the baseline would swallow everything the
+    /// new one relays until it exceeded them — and simply dropping them loses the
+    /// retired runtime's last stretch, which a settings change or a secret
+    /// rotation produces as a matter of course rather than as a failure.
+    async fn tick(
+        &mut self,
+        db: &DatabaseConnection,
+        now: DateTimeUtc,
+    ) -> Result<(), sea_orm::DbErr> {
+        let resolved = self.source.resolve();
+        let same = match (&self.current, &resolved) {
+            (Some(held), Some(next)) => Arc::ptr_eq(held, next),
+            (None, None) => true,
+            _ => false,
+        };
         if !same {
+            if let Some(retiring) = self.current.clone() {
+                // Measured against the baseline still in place, which is the one
+                // describing this runtime. A failure here returns before the
+                // baseline is dropped, so the next tick retries the same stretch
+                // rather than losing it.
+                self.flush_once(db, now, &retiring).await?;
+            }
             self.baseline.clear();
-            self.current = Some(resolved.clone());
+            self.current = resolved.clone();
         }
-        Some(resolved)
+        let Some(statistics) = resolved else {
+            // No runtime is serving; there is nothing to account for, and no
+            // reason to touch the database.
+            return Ok(());
+        };
+        self.flush_once(db, now, &statistics).await
     }
 
     /// One collection pass. Computes per-connection deltas, groups them by
@@ -272,10 +291,7 @@ mod tests {
         db: &DatabaseConnection,
         now: DateTimeUtc,
     ) -> Result<(), sea_orm::DbErr> {
-        let statistics = collector
-            .current_statistics()
-            .expect("the test source always resolves");
-        collector.flush_once(db, now, &statistics).await
+        collector.tick(db, now).await
     }
 
     #[tokio::test]
@@ -339,7 +355,7 @@ mod tests {
             TurnUsageCollector::new(StatisticsSource::Runtime(runtime_rx), map.clone());
 
         // Nothing is serving: no counters to read, and no database work.
-        assert!(collector.current_statistics().is_none());
+        assert!(collector.tick(&db, now()).await.is_ok());
 
         // A runtime comes up and relays a lot.
         let first = loopback_runtime().await;
@@ -357,6 +373,43 @@ mod tests {
             total_relay_received(&db).await,
             1_007,
             "the new runtime's traffic must be added, not compared away"
+        );
+
+        first.server.close().await.unwrap();
+        second.server.close().await.unwrap();
+    }
+
+    /// Replacing a runtime is a settings change or a secret rotation, not a
+    /// crash. Whatever the outgoing one relayed after its last pass is real
+    /// traffic, and it only reaches the hourly bucket if it is read before its
+    /// counters are let go for the successor's.
+    #[tokio::test]
+    async fn the_traffic_a_retiring_runtime_relayed_last_is_still_collected() {
+        let db = memory_db().await;
+        let map: Arc<ConnectionDeviceMap> = Arc::new(ConnectionDeviceMap::default());
+        let (runtime_tx, runtime_rx) = watch::channel(None);
+        let mut collector =
+            TurnUsageCollector::new(StatisticsSource::Runtime(runtime_rx), map.clone());
+
+        let first = loopback_runtime().await;
+        record(&first, "conn-1", "127.0.0.1:5100", 1_000);
+        runtime_tx.send_replace(Some(first.clone()));
+        collector.tick(&db, now()).await.unwrap();
+        assert_eq!(total_relay_received(&db).await, 1_000);
+
+        // Relayed after that pass and before the runtime was replaced.
+        record(&first, "conn-1", "127.0.0.1:5100", 40);
+        let second = loopback_runtime().await;
+        record(&second, "conn-1", "127.0.0.1:5100", 7);
+        runtime_tx.send_replace(Some(second.clone()));
+
+        collector.tick(&db, now()).await.unwrap();
+
+        assert_eq!(
+            total_relay_received(&db).await,
+            1_047,
+            "the retiring runtime's last 40 bytes must be collected, not dropped \
+             with its counters"
         );
 
         first.server.close().await.unwrap();
