@@ -18,6 +18,7 @@ import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { useToast } from "@/hooks/use-toast"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
+import { deskErrorCodeEnum } from "@/services/types"
 import { ServiceUninstallDialog } from "@/features/layout/service-uninstall-dialog"
 
 interface DriverStatus {
@@ -135,7 +136,7 @@ export function VirtualDisplaySettings() {
         try {
             const resp = await fetch("/api/virtual-display/driver/status")
             const body = await resp.json()
-            if (body?.code === 0 && body.data) {
+            if (body?.code === deskErrorCodeEnum.SUCCESS && body.data) {
                 setStatus(body.data as DriverStatus)
             } else {
                 setStatus(null)
@@ -152,7 +153,7 @@ export function VirtualDisplaySettings() {
         try {
             const resp = await fetch("/api/desk/settings/virtual-display")
             const body = await resp.json()
-            if (body?.code === 0 && body.data) {
+            if (body?.code === deskErrorCodeEnum.SUCCESS && body.data) {
                 setSettings(body.data as VirtualDisplaySettings)
                 setSettingsLoadFailed(false)
             } else {
@@ -198,7 +199,7 @@ export function VirtualDisplaySettings() {
                 method: "POST",
             })
             const body = await resp.json()
-            if (body?.code === 0) {
+            if (body?.code === deskErrorCodeEnum.SUCCESS) {
                 toast({
                     title: t("pages.system.settings.success"),
                     description: t(
@@ -225,7 +226,7 @@ export function VirtualDisplaySettings() {
                 method: "POST",
             })
             const body = await resp.json()
-            if (body?.code === 0) {
+            if (body?.code === deskErrorCodeEnum.SUCCESS) {
                 toast({
                     title: t("pages.system.settings.success"),
                     description: t(
@@ -270,7 +271,7 @@ export function VirtualDisplaySettings() {
                 body: JSON.stringify(payload),
             })
             const body = await resp.json()
-            if (body?.code === 0) {
+            if (body?.code === deskErrorCodeEnum.SUCCESS) {
                 setSettings(body.data as VirtualDisplaySettings)
                 setSettingsLoadFailed(false)
                 toast({

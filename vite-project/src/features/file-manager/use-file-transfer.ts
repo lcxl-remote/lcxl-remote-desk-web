@@ -36,6 +36,27 @@ import {
     openStreamingWritable,
 } from './file-save';
 
+/**
+ * A signaling request the host answered with an error frame.
+ *
+ * The host sends a numeric `DeskErrorCode` plus raw English text; rejecting with
+ * a plain `Error` would keep only the text, forcing callers to display the
+ * backend's English or match on it. Carrying the code lets them localize.
+ *
+ * Still an `Error` subclass, so existing `instanceof Error` / `error.message`
+ * handling is unaffected.
+ */
+export class SignalingError extends Error {
+    /** `DeskErrorCode` from the response frame. */
+    readonly code: number;
+
+    constructor(message: string, code: number) {
+        super(message);
+        this.name = 'SignalingError';
+        this.code = code;
+    }
+}
+
 // --- Transfer state ---
 
 export interface TransferProgress {
@@ -436,8 +457,9 @@ export function useFileTransfer(deskId: string | undefined) {
                         clearTimeout(pending.timeout);
                         pendingRequests.current.delete(signaling.request_id);
                         if (signaling.response_state?.error_code) {
-                            pending.reject(new Error(
+                            pending.reject(new SignalingError(
                                 signaling.response_state.message || "File operation failed",
+                                signaling.response_state.error_code,
                             ));
                         } else {
                             pending.resolve(signaling_data);

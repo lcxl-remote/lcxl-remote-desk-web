@@ -9,7 +9,8 @@ import { useQuerySettings } from "@/services/hooks/settingsController/useQuerySe
 import { useUpdateSettings } from "@/services/hooks/settingsController/useUpdateSettings"
 import { useVerifyConnection } from "@/services/hooks/connectionController/useVerifyConnection"
 import type { ConnectionVerifyResult } from "@/services/types"
-import { CONNECTION_INSECURE_TRANSPORT } from "@/features/auth/init/wizard-logic"
+import { deskErrorCodeEnum } from "@/services/types"
+import { deskErrorMessage, type ErrorCodeKeyMap } from "@/lib/desk-error-i18n"
 import { mergeSystemSettings } from "@/features/settings/settings-payload"
 import { ManagerLinkBanner } from "@/features/settings/manager-link-banner"
 
@@ -20,6 +21,14 @@ import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, For
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { useToast } from "@/hooks/use-toast"
+
+// Verify failures the status row can phrase better than the backend can. A
+// public target refused over plaintext is actionable ("use wss:// or turn the
+// switch off"), so it gets its own line; everything else keeps showing the
+// backend message, which usually names the actual transport failure.
+const VERIFY_CODE_TO_KEY: ErrorCodeKeyMap = {
+    [deskErrorCodeEnum.CONNECTION_INSECURE_TRANSPORT]: "pages.deskConnection.status.insecureTransport",
+}
 
 // Outbound connection settings let a desk-server reach a standalone signaling
 // server or an enterprise manager. They live in the Desk (host) section because
@@ -421,10 +430,13 @@ function ConnectionStatusRow({
                 // A public target refused over plaintext gets a localized, actionable
                 // hint ("use wss:// or turn off the switch") instead of the raw
                 // backend message; other failures show the backend message as-is.
-                reason =
-                    state.result.error_code === CONNECTION_INSECURE_TRANSPORT
-                        ? t("pages.deskConnection.status.insecureTransport")
-                        : state.result.message
+                reason = deskErrorMessage(
+                    t,
+                    VERIFY_CODE_TO_KEY,
+                    state.result.error_code,
+                    state.result.message,
+                    "",
+                )
             }
             break
         default:

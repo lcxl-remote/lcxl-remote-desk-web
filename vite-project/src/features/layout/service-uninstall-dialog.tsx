@@ -11,6 +11,7 @@ import {
     DialogTitle,
 } from "@/components/ui/dialog"
 import { useToast } from "@/hooks/use-toast"
+import { deskErrorCodeEnum } from "@/services/types"
 
 /**
  * Shared "uninstall service" confirmation dialog. Uninstalling the
@@ -34,7 +35,7 @@ export function ServiceUninstallDialog(props: ServiceUninstallDialogProps) {
         try {
             const resp = await fetch("/api/service/uninstall", { method: "POST" })
             const body = await resp.json().catch(() => null)
-            if (body?.code === 0) {
+            if (body?.code === deskErrorCodeEnum.SUCCESS) {
                 toast({
                     title: t("pages.system.settings.success"),
                     description: t(

@@ -14,6 +14,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { useToast } from "@/hooks/use-toast"
+import { deskErrorCodeEnum } from "@/services/types"
 
 /**
  * Shared "install service" confirmation dialog. Used by both the
@@ -59,7 +60,7 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
             fetch("/api/virtual-display/driver/status")
                 .then((r) => r.json())
                 .then((body) => {
-                    if (body && typeof body === "object" && body.code === 0 && body.data) {
+                    if (body && typeof body === "object" && body.code === deskErrorCodeEnum.SUCCESS && body.data) {
                         setDriverStatus(body.data as DriverStatus)
                     } else {
                         setDriverStatus(null)
@@ -86,7 +87,7 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
             })
             const body = await resp.json().catch(() => null)
             const code = body?.code
-            if (code === 0) {
+            if (code === deskErrorCodeEnum.SUCCESS) {
                 toast({
                     title: t("pages.system.settings.success"),
                     description: t(
@@ -94,7 +95,7 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
                     ),
                 })
                 onOpenChange(false)
-            } else if (code === 5) {
+            } else if (code === deskErrorCodeEnum.INVALID_PARAMS) {
                 toast({
                     variant: "destructive",
                     title: t("pages.system.settings.error"),

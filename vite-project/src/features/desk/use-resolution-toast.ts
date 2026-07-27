@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
+import { deskErrorCodeEnum } from "@/services/types";
 
 /**
  * Toast phases driven by the adaptive-resolution round-trip.
@@ -222,8 +223,9 @@ export function useResolutionToast(
                 return;
             }
             clearWatchdog();
-            const errorCode = message.response_state?.error_code ?? 0;
-            if (errorCode === 0) {
+            const errorCode =
+                message.response_state?.error_code ?? deskErrorCodeEnum.SUCCESS;
+            if (errorCode === deskErrorCodeEnum.SUCCESS) {
                 const data = message.signaling_data ?? {};
                 setResolutionToast({
                     phase: "success",

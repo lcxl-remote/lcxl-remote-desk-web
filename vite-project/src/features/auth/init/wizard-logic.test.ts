@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import type { ConnectionVerifyResult } from "@/services/types"
+import { deskErrorCodeEnum } from "@/services/types"
 import {
-    CONNECTION_INSECURE_TRANSPORT,
     SECURITY_CAPABILITIES,
     buildSecurityPayload,
     isInsecureConnection,
@@ -85,7 +85,7 @@ describe("isInsecureTransportRefused", () => {
     it("flags a public-plaintext refusal by its error code", () => {
         expect(
             isInsecureTransportRefused(
-                result({ reached: false, error_code: CONNECTION_INSECURE_TRANSPORT }),
+                result({ reached: false, error_code: deskErrorCodeEnum.CONNECTION_INSECURE_TRANSPORT }),
             ),
         ).toBe(true)
     })

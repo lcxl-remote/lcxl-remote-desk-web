@@ -661,7 +661,7 @@ export default {
   'pages.fileManager.deleteDoubleConfirm.title': '再次确认永久删除',
   'pages.fileManager.deleteDoubleConfirm.description': '永久删除操作不可逆，确定要继续吗？',
   'pages.fileManager.deleteSuccess': '删除成功',
-  'pages.fileManager.deleteFailed': '删除失败: {{error}}',
+  'pages.fileManager.deleteFailed': '删除失败',
   'pages.fileManager.daemonMappedDriveHint.title': '映射的网络驱动器在此模式下不可见',
   'pages.fileManager.daemonMappedDriveHint.description': '服务模式下，工作进程跑在用户提权后的 token 上，与资源管理器映射网络驱动器时使用的 token 属于不同的登录会话，因此 GetLogicalDriveStringsW 看不到 Z: 之类的映射盘。可使用 UNC 路径（如 \\\\server\\share）直接访问，或在 HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System 下创建 DWORD 值 EnableLinkedConnections=1 并重启系统，让两个 token 共享映射盘。',
   'common.name': '名称',
@@ -771,6 +771,8 @@ export default {
   'pages.agentError.copilotSubjectMismatch': '该 Copilot 会话属于另一个会话，请重新发起提问。',
   'pages.agentError.sameToolRepeatLimit':
     '为避免循环执行，AI 在重复请求同一类操作后已停止。此前结果已保留，你可以让它继续。',
+  'pages.fileError.permissionDenied':
+    '设备所有者未允许此操作。请在被控端的安全设置中开启对应权限，或等待对方确认授权。',
   'pages.deskTerminal.completion.title': 'AI 补全',
   'pages.deskTerminal.completion.toggleHint': 'AI 命令补全 —— 按 Tab 采纳灰字提示',
   'pages.deskTerminal.completion.acceptHint': 'Tab',

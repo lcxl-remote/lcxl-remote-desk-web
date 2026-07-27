@@ -39,6 +39,17 @@ import { formatBytes } from "@/lib/utils"
 import { useFileTransfer, type TransferProgress } from "./use-file-transfer"
 import { useRestrictedSession } from "@/features/desk/restricted-session"
 import { useToast } from "@/hooks/use-toast"
+import { deskErrorCodeEnum } from "@/services/types"
+import { deskErrorMessage, errorCodeOf, type ErrorCodeKeyMap } from "@/lib/desk-error-i18n"
+
+// File browse / delete rejections the host phrases as raw English. Only the
+// permission refusal gets a localized line: it is the one outcome whose backend
+// text ("File delete access denied") carries no detail worth keeping. Everything
+// else — an IO failure, a path that vanished — arrives as SYSTEM_ERROR with the
+// real cause in the message, so it falls through and keeps that detail.
+const FILE_ERROR_CODE_TO_KEY: ErrorCodeKeyMap = {
+    [deskErrorCodeEnum.PERMISSION_ERROR]: "pages.fileError.permissionDenied",
+}
 
 function formatRemainingTime(seconds: number): string {
     const s = Math.round(seconds);
@@ -104,7 +115,13 @@ export default function FileList() {
             if (generation === listGeneration.current) {
                 toast({
                     title: t("pages.fileManager.error"),
-                    description: error instanceof Error ? error.message : t("common.unknownError"),
+                    description: deskErrorMessage(
+                        t,
+                        FILE_ERROR_CODE_TO_KEY,
+                        errorCodeOf(error),
+                        error instanceof Error ? error.message : null,
+                        t("common.unknownError"),
+                    ),
                     variant: "destructive",
                 })
             }
@@ -211,9 +228,18 @@ export default function FileList() {
             setDeleteDoubleConfirmOpen(false)
             setFileToDelete(null)
         } catch (error) {
+            // The title states what failed and the description says why. Putting
+            // the reason in both (the old `删除失败: {{error}}` template) printed
+            // it twice, since the toast renders the two lines separately.
             toast({
                 title: t("pages.fileManager.deleteFailed"),
-                description: error instanceof Error ? error.message : t("common.unknownError"),
+                description: deskErrorMessage(
+                    t,
+                    FILE_ERROR_CODE_TO_KEY,
+                    errorCodeOf(error),
+                    error instanceof Error ? error.message : null,
+                    t("common.unknownError"),
+                ),
                 variant: "destructive",
             })
         } finally {

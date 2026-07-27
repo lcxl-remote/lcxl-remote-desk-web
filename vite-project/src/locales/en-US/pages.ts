@@ -663,7 +663,7 @@ export default {
   'pages.fileManager.deleteDoubleConfirm.title': 'Final Confirmation',
   'pages.fileManager.deleteDoubleConfirm.description': 'This operation is irreversible. Are you absolutely sure?',
   'pages.fileManager.deleteSuccess': 'Deleted successfully',
-  'pages.fileManager.deleteFailed': 'Delete failed: {{error}}',
+  'pages.fileManager.deleteFailed': 'Delete failed',
   'pages.fileManager.daemonMappedDriveHint.title': 'Mapped network drives are not visible in service mode',
   'pages.fileManager.daemonMappedDriveHint.description': 'In service mode the worker process runs on the user\'s elevated token, which lives in a different logon session from the one Explorer uses when mapping network drives. As a result, GetLogicalDriveStringsW cannot see drives like Z:. You can still access them via UNC paths such as \\\\server\\share, or create a DWORD value EnableLinkedConnections = 1 under HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System and reboot so the two tokens share the same mapped drives.',
   'common.name': 'Name',
@@ -778,6 +778,8 @@ export default {
     'This copilot conversation belongs to a different session. Start a new question.',
   'pages.agentError.sameToolRepeatLimit':
     'The AI stopped to prevent a loop after requesting the same type of action repeatedly. Previous results were kept; you can ask it to continue.',
+  'pages.fileError.permissionDenied':
+    'The device owner has not allowed this operation. Enable the matching permission in the host\'s security settings, or wait for them to approve the request.',
   'pages.deskTerminal.completion.title': 'AI Completion',
   'pages.deskTerminal.completion.toggleHint': 'AI command completion — press Tab to accept the ghost text',
   'pages.deskTerminal.completion.acceptHint': 'Tab',

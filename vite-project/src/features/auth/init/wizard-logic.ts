@@ -2,13 +2,7 @@
 // and the final security payload can be unit tested without rendering the form.
 
 import type { ConnectionVerifyResult, SecuritySettings } from "@/services/types"
-
-/**
- * `DeskErrorCode::CONNECTION_INSECURE_TRANSPORT` — the probe refused a public
- * target dialed over a plaintext scheme while `require_secure_signaling` is on.
- * Mirrors the backend constant in `web/utils/src/error.rs`.
- */
-export const CONNECTION_INSECURE_TRANSPORT = 68
+import { deskErrorCodeEnum } from "@/services/types"
 
 export const SECURITY_CAPABILITIES = [
     "allow_remote_control",
@@ -65,7 +59,7 @@ export function isInsecureConnection(
 export function isInsecureTransportRefused(
     result: ConnectionVerifyResult | null | undefined,
 ): boolean {
-    return result?.error_code === CONNECTION_INSECURE_TRANSPORT
+    return result?.error_code === deskErrorCodeEnum.CONNECTION_INSECURE_TRANSPORT
 }
 
 /**

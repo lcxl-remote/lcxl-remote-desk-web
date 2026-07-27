@@ -10,6 +10,7 @@ import {
     SIGNALING_TYPE_CODE_RESOLVE_EXEC,
 } from './constants';
 import type { ExecPreview } from '../exec/use-confirm-exec';
+import { deskErrorCodeEnum } from '@/services/types';
 import type {
     ExecControlPayload,
     ExecStateReplyPayload,
@@ -108,7 +109,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
     // Fetch the shared session snapshot and, when it advances and no live turn owns
     // the view, rebuild the transcript from it — rehydrating history and surfacing
     // an automation answer the request-scoped stream never delivered. Best-effort:
-    // a network blip or a uniform not-accessible (`code !== 0`) is left for a later
+    // a network blip or a uniform not-accessible (a non-`SUCCESS` code) is left for a later
     // tick, when the device may have reconnected or the session may have appeared.
     const fetchSnapshot = useCallback(async () => {
         if (!deskId) return;
@@ -134,7 +135,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         } catch {
             return;
         }
-        if (!body || body.success === false || body.code !== 0 || !body.data) return;
+        if (!body || body.success === false || body.code !== deskErrorCodeEnum.SUCCESS || !body.data) return;
         const snapshot = body.data;
         // Never regress to an older snapshot. An active snapshot is not a settled
         // transcript yet. While a live request owns the panel, only its matching
@@ -294,7 +295,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                 code?: number;
                 data?: { sessions?: DiagnoseSessionSummary[] };
             };
-            if (body.success === false || body.code !== 0 || !body.data?.sessions) {
+            if (body.success === false || body.code !== deskErrorCodeEnum.SUCCESS || !body.data?.sessions) {
                 throw new Error('history response failed');
             }
             setHistorySessions(body.data.sessions);
