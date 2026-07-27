@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::model::settings::StartupMode;
+
 /// Login params
 #[derive(Serialize, Deserialize, ToSchema, Default)]
 pub struct LoginParams {
@@ -46,7 +48,9 @@ pub struct LoginResult {
     #[serde(rename = "targetConnectionId")]
     #[schema(rename = "targetConnectionId")]
     pub target_connection_id: Option<String>,
-    pub startup_mode: Option<String>,
+    /// Startup mode of the server. Typed rather than free-form so the generated
+    /// client gets the exact set of mode names to compare against.
+    pub startup_mode: Option<StartupMode>,
 }
 
 /// Password params

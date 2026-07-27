@@ -78,9 +78,8 @@ pub async fn query_server_info(
     let (startup_mode, initialized) = {
         let settings = settings.read().await;
         let mode = settings.args.startup_mode.clone();
-        let mode_str = mode.as_ref().to_string();
         let init = !settings.user.login_password.is_empty();
-        (mode_str, init)
+        (mode, init)
     };
 
     let service_installed = desk_utils::permission::is_service_installed("LcxlDeskService");

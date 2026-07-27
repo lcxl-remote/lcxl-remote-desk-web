@@ -114,8 +114,9 @@ pub struct MacosAutologin {
 /// Server information
 #[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
 pub struct ServerInfo {
-    /// Startup mode of the server
-    pub startup_mode: String,
+    /// Startup mode of the server. Typed rather than free-form so the generated
+    /// client gets the exact set of mode names to compare against.
+    pub startup_mode: StartupMode,
     /// Current API version supported by the server
     pub api_version: i32,
     /// Indicates whether the system is initialized (e.g., admin password set)
@@ -188,6 +189,46 @@ impl From<&sysinfo::System> for SystemInfo {
             cpus,
             startup_mode: StartupMode::Default,
             is_admin: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `startup_mode` carries a typed enum, but the JSON it produces is the
+    /// same kebab-case name the field held when it was a free-form string.
+    /// Clients compare against these exact spellings, so pin every one of them.
+    #[test]
+    fn startup_mode_serializes_as_the_kebab_case_mode_name() {
+        for (mode, expected) in [
+            (StartupMode::Default, "default"),
+            (StartupMode::Signaling, "signaling"),
+            (StartupMode::DeskServer, "desk-server"),
+            (StartupMode::ServiceDaemon, "service-daemon"),
+            (StartupMode::SessionWorker, "session-worker"),
+            (StartupMode::McpStdio, "mcp-stdio"),
+        ] {
+            let info = ServerInfo {
+                startup_mode: mode.clone(),
+                api_version: 1,
+                initialized: true,
+                service_installed: false,
+                is_admin: false,
+                server_binary_available: false,
+                default_install_path: String::new(),
+                background_start: None,
+                macos_permissions: None,
+            };
+            assert_eq!(
+                serde_json::to_value(&info).unwrap()["startup_mode"],
+                serde_json::Value::String(expected.to_string()),
+                "{mode:?} must stay on the wire as {expected}",
+            );
+            // The strum name the field used to be built from must agree, so no
+            // client sees a spelling different from before the field was typed.
+            assert_eq!(mode.as_ref(), expected);
         }
     }
 }

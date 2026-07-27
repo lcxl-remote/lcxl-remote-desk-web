@@ -33,7 +33,7 @@ pub async fn login_account(
     let params = requst_json.into_inner();
     let startup_mode = {
         let settings = settings.read().await;
-        settings.args.startup_mode.as_ref().to_string()
+        settings.args.startup_mode.clone()
     };
 
     // Device-code redemption no longer logs in as a full account. An anonymous
@@ -216,7 +216,7 @@ pub async fn login_tauri(
     // Check system is initialized
     let (startup_mode, initialized, username) = {
         let settings = settings.read().await;
-        let mode = settings.args.startup_mode.as_ref().to_string();
+        let mode = settings.args.startup_mode.clone();
         let init = !settings.user.login_password.is_empty();
         let name = settings.user.login_user_name.clone();
         (mode, init, name)

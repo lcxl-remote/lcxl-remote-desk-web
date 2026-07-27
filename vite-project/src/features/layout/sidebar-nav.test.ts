@@ -41,12 +41,12 @@ describe('buildNavItems', () => {
         );
     });
 
-    // Guards the spelling that regressed: `startup_mode` is a bare string on
-    // the wire, so a snake_case literal silently matched nothing and every
-    // desk-server showed the full menu.
-    it('does not treat a snake_case mode string as a desk-server', () => {
+    // The spellings the backend actually emits. A snake_case literal used to
+    // match nothing here, so every desk-server showed the full menu; the field
+    // is typed now, but the wire values are still what the gating turns on.
+    it('turns on the kebab-case mode names the backend emits', () => {
         expect(startupModeEnum['desk-server']).toBe('desk-server');
-        expect(urls({ access: 'admin', startupMode: 'desk_server' })).toContain('/desk/list');
+        expect(startupModeEnum['service-daemon']).toBe('service-daemon');
     });
 
     it('scopes a redeemed device code to its one device', () => {
@@ -72,8 +72,11 @@ describe('startupModeLabel', () => {
         expect(startupModeLabel(startupModeEnum['service-daemon'])).toBe('Service Daemon');
     });
 
-    it('falls back to an empty badge for an unknown mode', () => {
+    // `session-worker` and `mcp-stdio` never serve a console, so they have no
+    // badge text to show.
+    it('falls back to an empty badge for a mode with no console', () => {
         expect(startupModeLabel(undefined)).toBe('');
-        expect(startupModeLabel('session-worker')).toBe('');
+        expect(startupModeLabel(startupModeEnum['session-worker'])).toBe('');
+        expect(startupModeLabel(startupModeEnum['mcp-stdio'])).toBe('');
     });
 });

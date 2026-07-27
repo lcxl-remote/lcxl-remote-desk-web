@@ -1,6 +1,7 @@
 import { BarChart3, LifeBuoy, Monitor, Settings } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 import { startupModeEnum } from "@/services/types"
+import type { StartupMode } from "@/services/types"
 
 export type NavItem = {
     /** i18n key, resolved by the sidebar. */
@@ -15,8 +16,8 @@ export type NavContext = {
     access?: string | null
     /** The device a redeemed code is scoped to, when there is one. */
     targetConnectionId?: string | null
-    /** `ServerInfo.startup_mode`, a bare string on the wire. */
-    startupMode?: string | null
+    /** `ServerInfo.startup_mode`. */
+    startupMode?: StartupMode | null
 }
 
 /**
@@ -44,8 +45,6 @@ export function buildNavItems({
             : []
     }
 
-    // Compared against the generated enum rather than a literal so the
-    // kebab-case spelling cannot drift from what the backend emits.
     const isDeskServer = startupMode === startupModeEnum["desk-server"]
     const items: NavItem[] = []
 
@@ -73,7 +72,7 @@ export function buildNavItems({
 }
 
 /** The badge next to the product name; empty for modes that serve no console. */
-export function startupModeLabel(startupMode?: string | null): string {
+export function startupModeLabel(startupMode?: StartupMode | null): string {
     switch (startupMode) {
         case startupModeEnum.signaling:
             return "Signaling"
