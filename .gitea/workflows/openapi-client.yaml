@@ -1,0 +1,86 @@
+name: OpenAPI Client Freshness
+
+# The typed frontend client under `vite-project/src/services` is generated from
+# the server's OpenAPI spec and committed. Nothing in the build regenerates it —
+# `npm run build` only runs tsc and vite — so a backend change that alters the
+# spec leaves the client stale and TypeScript still compiles against the old
+# shape. Worse, a renamed constant or a changed numeric value produces no error
+# at all: the old value simply keeps being shipped.
+#
+# This job closes that hole by regenerating the client from the current sources
+# and failing if the result differs from what is committed.
+#
+# Deliberately unfiltered by path: the spec is assembled from route registration,
+# model derives, the schema registration in `server/src/openapi.rs`, the shared
+# crates and the generator config, so almost any Rust change can move it. Tag
+# pushes are included because the release workflow builds the frontend straight
+# from a tag without ever regenerating.
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  client-is-fresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libpipewire-0.3-dev pkg-config libclang-dev libasound2-dev libssl-dev libvpx-dev cmake libx11-dev libxcb1-dev libxcb-randr0-dev libxext-dev
+
+      - name: Configure crates.io mirror
+        run: |
+          mkdir -p ~/.cargo
+          cat > ~/.cargo/config.toml << 'EOF'
+          [source.crates-io]
+          replace-with = 'aliyun'
+
+          [source.aliyun]
+          registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
+          EOF
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.90.0
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: vite-project/package-lock.json
+
+      # `npm ci` installs the exact generator the lockfile pins. `update_openapi`
+      # then calls kubb through `npx --no-install`, so a broken install fails here
+      # instead of quietly generating with whatever version npx would fetch.
+      - name: Install frontend dependencies
+        working-directory: vite-project
+        run: npm ci
+
+      - name: Regenerate the client
+        working-directory: vite-project
+        run: ./update_openapi.sh
+
+      # `--untracked-files=all` matters: adding a schema or a tag creates *new*
+      # files, which `git diff --exit-code` would not see.
+      - name: Assert the committed client is up to date
+        run: |
+          set -e
+          changes="$(git status --porcelain --untracked-files=all -- vite-project/src/services)"
+          if [ -n "$changes" ]; then
+            echo "::error::The committed OpenAPI client is stale. Run vite-project/update_openapi.sh and commit the result."
+            echo "$changes"
+            git --no-pager diff -- vite-project/src/services
+            exit 1
+          fi
+          echo "Generated client matches the committed one."

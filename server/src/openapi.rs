@@ -8,6 +8,7 @@ use desk_signal_facade::model::{
     terminal::{TerminalInputData, TerminalOutputData, TerminalResizeData},
 };
 use desk_turn::model::{TurnInterface, TurnSettings};
+use desk_utils::error::DeskErrorCode;
 use utoipa::OpenApi;
 
 use crate::controller::virtual_display::VirtualDisplayDriverStatusResponse;
@@ -46,5 +47,9 @@ use desk_input_injection::model::data_channel::{KeyboardEventData, MouseEventDat
     TraversalMode,
     VirtualDisplaySettings,
     VirtualDisplayDriverStatusResponse,
+    // Not referenced by any body: `RestResponse.code` is a bare `i32` on the
+    // wire. Publishing the enum anyway is what lets the generated client expose
+    // named constants instead of the numbers being mirrored by hand.
+    DeskErrorCode,
 )))]
 pub struct ExtraSchemas;

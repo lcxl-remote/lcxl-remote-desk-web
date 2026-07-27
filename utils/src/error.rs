@@ -30,46 +30,76 @@ pub fn format_debug_backtrace<E: fmt::Debug>(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DeskErrorCode(i32);
 
-impl DeskErrorCode {
-    pub const SUCCESS: DeskErrorCode = DeskErrorCode(0);
-    pub const SYSTEM_ERROR: DeskErrorCode = DeskErrorCode(1);
-    pub const INVALID_STATE: DeskErrorCode = DeskErrorCode(2);
-    pub const NOT_IMPLEMENTED_YET: DeskErrorCode = DeskErrorCode(3);
-    pub const PERMISSION_ERROR: DeskErrorCode = DeskErrorCode(4);
-    pub const INVALID_PARAMS: DeskErrorCode = DeskErrorCode(5);
-    pub const UNKNOWN_SIGNALING_TYPE: DeskErrorCode = DeskErrorCode(6);
+/// Declare every `DeskErrorCode` in one place.
+///
+/// The macro emits two projections that must never drift apart: the associated
+/// constants callers already use, and the `ALL` name/value table the OpenAPI
+/// schema — and therefore the generated TypeScript client — is built from. A
+/// constant written by hand outside this macro still compiles, but stays
+/// invisible to the client, so every code belongs in the invocation below.
+macro_rules! desk_error_codes {
+    ($(
+        $(#[$meta:meta])*
+        $name:ident = $value:literal
+    ),* $(,)?) => {
+        impl DeskErrorCode {
+            $(
+                $(#[$meta])*
+                pub const $name: DeskErrorCode = DeskErrorCode($value);
+            )*
+
+            /// Every declared code as `(name, value)`, in declaration order.
+            ///
+            /// The OpenAPI schema turns this into a parallel `enum` /
+            /// `x-enum-varnames` pair and the client generator matches the two
+            /// by index, so the projections must keep equal length and order.
+            pub const ALL: &'static [(&'static str, i32)] = &[
+                $((stringify!($name), $value),)*
+            ];
+        }
+    };
+}
+
+desk_error_codes! {
+    SUCCESS = 0,
+    SYSTEM_ERROR = 1,
+    INVALID_STATE = 2,
+    NOT_IMPLEMENTED_YET = 3,
+    PERMISSION_ERROR = 4,
+    INVALID_PARAMS = 5,
+    UNKNOWN_SIGNALING_TYPE = 6,
     /// The requested feature/backend is structurally unavailable in the
     /// current process or desktop context (e.g. Windows.Graphics.Capture
     /// under the SYSTEM token / Winlogon desktop, where RuntimeBroker is
     /// not running). Callers may transparently fall back to an
     /// alternative implementation instead of surfacing this as a hard
     /// error.
-    pub const FEATURE_UNAVAILABLE: DeskErrorCode = DeskErrorCode(7);
+    FEATURE_UNAVAILABLE = 7,
     /// The request is structurally valid but rejected because a
     /// hard precondition is unmet (e.g. the caller asked the daemon
     /// to enable the virtual display but the IDD driver is not
     /// staged). Use this when the right resolution is "make the
     /// precondition true and retry," not "fix the request body."
-    pub const PRECONDITION_FAILED: DeskErrorCode = DeskErrorCode(8);
+    PRECONDITION_FAILED = 8,
 
-    pub const FILE_PATH_NOT_FOUND: DeskErrorCode = DeskErrorCode(11);
-    pub const CLIENT_ID_NOT_FOUND: DeskErrorCode = DeskErrorCode(12);
+    FILE_PATH_NOT_FOUND = 11,
+    CLIENT_ID_NOT_FOUND = 12,
     /// Optimistic-concurrency conflict: a write supplied an `expected_revision`
     /// that no longer matches the current persisted revision (another writer or
     /// instance committed in between). The caller should re-read the current
     /// revision/value — returned in the response payload — and retry. This is a
     /// business-level outcome carried in the `RestResponse.code`, never an HTTP
     /// status code.
-    pub const REVISION_CONFLICT: DeskErrorCode = DeskErrorCode(13);
+    REVISION_CONFLICT = 13,
     /// A fleet (multi-device) request resolved to zero diagnosable targets after
     /// applying the caller's policy visibility. Returned uniformly whether the
     /// selector matched nothing or every match was policy-invisible, so it leaks
     /// no information about devices the caller cannot see. Carried in
     /// `RestResponse.code`, never an HTTP status.
-    pub const NO_VISIBLE_TARGETS: DeskErrorCode = DeskErrorCode(14);
+    NO_VISIBLE_TARGETS = 14,
 
     // ---- Fleet batch execution (write path) ----
     /// A batch approval no longer matches the previewed plan: the draft fingerprint
@@ -77,33 +107,33 @@ impl DeskErrorCode {
     /// (policy / template / guardrail) drifted between preview and the approval /
     /// execution attempt. The whole batch is stale and must be re-previewed; never
     /// a partial silent drop. Carried in `RestResponse.code`, never an HTTP status.
-    pub const FLEET_APPROVAL_STALE: DeskErrorCode = DeskErrorCode(15);
+    FLEET_APPROVAL_STALE = 15,
     /// A high-risk batch did not satisfy the guardrail (blast-radius cap exceeded,
     /// or the required two-person review was not met). Carried in
     /// `RestResponse.code`, never an HTTP status.
-    pub const FLEET_HIGH_RISK_BLOCKED: DeskErrorCode = DeskErrorCode(16);
+    FLEET_HIGH_RISK_BLOCKED = 16,
     /// A batch execution preview resolved to zero executable targets (every device
     /// was not-executable / blocked / denied), so no execution task is created.
     /// Carried in `RestResponse.code`, never an HTTP status.
-    pub const FLEET_NOT_EXECUTABLE: DeskErrorCode = DeskErrorCode(17);
+    FLEET_NOT_EXECUTABLE = 17,
     /// An approve / execute action was attempted on a dry-run task, which has no
     /// execution path by construction. Carried in `RestResponse.code`, never an
     /// HTTP status.
-    pub const FLEET_DRY_RUN_NOT_APPROVABLE: DeskErrorCode = DeskErrorCode(18);
+    FLEET_DRY_RUN_NOT_APPROVABLE = 18,
     /// The approver lacks `shell.exec.confirmed` on at least one covered device, so
     /// the whole approval fails (the approved set must equal exactly the previewed
     /// draft set — never silently narrowed). Distinct from a stale approval.
     /// Carried in `RestResponse.code`, never an HTTP status.
-    pub const FLEET_APPROVAL_FORBIDDEN: DeskErrorCode = DeskErrorCode(19);
+    FLEET_APPROVAL_FORBIDDEN = 19,
     /// A device lookup in the owner-scoped personal API found no live device with
     /// the given id owned by the requesting user. Returned uniformly whether the
     /// device does not exist, was soft-deleted, or belongs to another owner, so a
     /// personal user cannot probe other owners' device ids. Carried in
     /// `RestResponse.code`, never an HTTP status.
-    pub const DEVICE_NOT_FOUND: DeskErrorCode = DeskErrorCode(20);
+    DEVICE_NOT_FOUND = 20,
 
-    pub const NOT_ALLOW_DELETE_FILE: DeskErrorCode = DeskErrorCode(21);
-    pub const FILE_CHANGED: DeskErrorCode = DeskErrorCode(22);
+    NOT_ALLOW_DELETE_FILE = 21,
+    FILE_CHANGED = 22,
 
     // ---- Login / registration anti-abuse (auth hardening) ----
     /// Authentication failed. Returned uniformly for every credential-rejection
@@ -112,76 +142,76 @@ impl DeskErrorCode {
     /// The login path equalizes its work (a dummy password verify on the failure
     /// branch) so timing does not distinguish these cases either. Carried in
     /// `RestResponse.code`, never an HTTP status.
-    pub const ILLEGAL_CREDENTIALS: DeskErrorCode = DeskErrorCode(30);
+    ILLEGAL_CREDENTIALS = 30,
     /// The target account or client IP is temporarily locked after too many
     /// failed login attempts. The lock has a TTL and (for the username dimension)
     /// can be cleared by an administrator. Carried in `RestResponse.code`, never
     /// an HTTP status.
-    pub const ACCOUNT_LOCKED: DeskErrorCode = DeskErrorCode(31);
+    ACCOUNT_LOCKED = 31,
     /// A rate limit was exceeded (e.g. registration attempts per IP, or
     /// verification-email resends per address). The caller should slow down and
     /// retry later. Carried in `RestResponse.code`, never an HTTP status.
-    pub const TOO_MANY_ATTEMPTS: DeskErrorCode = DeskErrorCode(32);
+    TOO_MANY_ATTEMPTS = 32,
     /// A human-verification (CAPTCHA) challenge is now required before the request
     /// can proceed — typically after the login failure count crosses the soft
     /// threshold. The client should render the challenge and resubmit with a
     /// token. Carried in `RestResponse.code`, never an HTTP status.
-    pub const CAPTCHA_REQUIRED: DeskErrorCode = DeskErrorCode(33);
+    CAPTCHA_REQUIRED = 33,
     /// A supplied human-verification token was missing, malformed, or rejected by
     /// the verifier (including fail-closed when the verifier is unreachable).
     /// Carried in `RestResponse.code`, never an HTTP status.
-    pub const CAPTCHA_FAILED: DeskErrorCode = DeskErrorCode(34);
+    CAPTCHA_FAILED = 34,
     /// The account exists but its email address has not been verified, so the
     /// requested action is refused. Surfaced only by the explicit verification /
     /// resend flows; the ordinary login path stays generic (`ILLEGAL_CREDENTIALS`)
     /// to avoid account-state enumeration. Carried in `RestResponse.code`, never
     /// an HTTP status.
-    pub const EMAIL_NOT_VERIFIED: DeskErrorCode = DeskErrorCode(35);
+    EMAIL_NOT_VERIFIED = 35,
     /// Registration was refused because the (canonicalized) email or username is
     /// already taken. Returned with generic wording so it cannot be used to probe
     /// which addresses are registered. Carried in `RestResponse.code`, never an
     /// HTTP status.
-    pub const EMAIL_ALREADY_REGISTERED: DeskErrorCode = DeskErrorCode(36);
+    EMAIL_ALREADY_REGISTERED = 36,
     /// The supplied password did not meet the configured strength policy (length,
     /// character classes, upper bound). Carried in `RestResponse.code`, never an
     /// HTTP status.
-    pub const WEAK_PASSWORD: DeskErrorCode = DeskErrorCode(37);
+    WEAK_PASSWORD = 37,
     /// A single-use token (email verification or password reset) was invalid,
     /// already consumed, or expired. Returned uniformly for all three so it
     /// reveals nothing about token existence. Carried in `RestResponse.code`,
     /// never an HTTP status.
-    pub const INVALID_OR_EXPIRED_TOKEN: DeskErrorCode = DeskErrorCode(38);
+    INVALID_OR_EXPIRED_TOKEN = 38,
 
     /// A request was throttled by a per-subject quota (e.g. too many terminal
     /// copilot asks in the window). Carried in `RestResponse.code` / streamed in a
     /// terminal AI error event, never an HTTP status; the client backs off and
     /// retries.
-    pub const RATE_LIMITED: DeskErrorCode = DeskErrorCode(39);
+    RATE_LIMITED = 39,
 
     // ---- Organization (multi-tenant) ----
     /// An organization-scoped request referenced an org the caller cannot access:
     /// the org does not exist, was soft-deleted, or the caller is not a member.
     /// Returned uniformly for all three so a non-member cannot probe which org ids
     /// exist. Carried in `RestResponse.code`, never an HTTP status.
-    pub const ORG_NOT_FOUND: DeskErrorCode = DeskErrorCode(40);
+    ORG_NOT_FOUND = 40,
     /// The caller is a member of the organization but lacks the in-org role
     /// required for the action (e.g. a plain member attempting an org-admin write,
     /// or demoting/removing the last remaining owner). Carried in
     /// `RestResponse.code`, never an HTTP status.
-    pub const ORG_PERMISSION_ERROR: DeskErrorCode = DeskErrorCode(41);
+    ORG_PERMISSION_ERROR = 41,
     /// An org admin tried to invite a user id that does not reference an existing
     /// user. Carried in `RestResponse.code`, never an HTTP status.
-    pub const USER_NOT_FOUND: DeskErrorCode = DeskErrorCode(42);
+    USER_NOT_FOUND = 42,
     /// An accept/decline referenced no pending invite for the caller in that org
     /// (never invited, already responded, or revoked). Also returned to an org
     /// admin revoking a non-existent invite. Carried in `RestResponse.code`.
-    pub const INVITE_NOT_FOUND: DeskErrorCode = DeskErrorCode(43);
+    INVITE_NOT_FOUND = 43,
     /// An invite targets a user who is already a member of the organization.
     /// Carried in `RestResponse.code`, never an HTTP status.
-    pub const ALREADY_ORG_MEMBER: DeskErrorCode = DeskErrorCode(44);
+    ALREADY_ORG_MEMBER = 44,
     /// An invite already exists and is pending for this `(org, user)` pair.
     /// Carried in `RestResponse.code`, never an HTTP status.
-    pub const INVITE_ALREADY_PENDING: DeskErrorCode = DeskErrorCode(45);
+    INVITE_ALREADY_PENDING = 45,
 
     // ---- Per-user device registration quota ----
     /// A new device registration was refused because the owner already holds the
@@ -193,7 +223,7 @@ impl DeskErrorCode {
     /// personal devices REST surface also branches on it. It is a fatal
     /// registration outcome: the host stops auto-reconnecting and surfaces a
     /// cleanup prompt. Never an HTTP status.
-    pub const DEVICE_QUOTA_EXCEEDED: DeskErrorCode = DeskErrorCode(46);
+    DEVICE_QUOTA_EXCEEDED = 46,
     /// A token-authenticated desk-server registration handshake arrived without a
     /// non-empty `client_id`. Such a connection would otherwise bypass the device
     /// quota entirely (it neither registers a device nor counts against the cap),
@@ -201,7 +231,7 @@ impl DeskErrorCode {
     /// host can show "missing device identity" rather than "device limit reached."
     /// Delivered in a signaling `Error(-1)` frame; also a fatal registration
     /// outcome that stops auto-reconnect. Never an HTTP status.
-    pub const DEVICE_CLIENT_ID_REQUIRED: DeskErrorCode = DeskErrorCode(47);
+    DEVICE_CLIENT_ID_REQUIRED = 47,
 
     /// A new API token could not be created because the user already holds the
     /// maximum number of non-expired tokens (enabled or disabled both occupy a
@@ -210,7 +240,7 @@ impl DeskErrorCode {
     /// client (e.g. the mobile host) treats it as a stop signal and prompts the
     /// user to remove a token or supply an existing one. Carried in
     /// `RestResponse.code`, never an HTTP status.
-    pub const API_TOKEN_QUOTA_EXCEEDED: DeskErrorCode = DeskErrorCode(48);
+    API_TOKEN_QUOTA_EXCEEDED = 48,
 
     /// A subscription plan could not be physically deleted because one or more
     /// subscription segments still reference it (deleting the row would orphan
@@ -218,24 +248,24 @@ impl DeskErrorCode {
     /// disable the plan (`enabled = false`) instead, which stops new
     /// subscriptions while preserving history. Carried in `RestResponse.code`,
     /// never an HTTP status.
-    pub const PLAN_IN_USE: DeskErrorCode = DeskErrorCode(49);
+    PLAN_IN_USE = 49,
 
     /// The terminal copilot is turned off for this deployment (the fleet-wide
     /// enable flag is unset), so a copilot ask is refused. The control end maps
     /// this code to a localized message; the backend never sends a localized
     /// string. Rides the agent-error wire, not an HTTP status.
-    pub const TERMINAL_COPILOT_DISABLED: DeskErrorCode = DeskErrorCode(50);
+    TERMINAL_COPILOT_DISABLED = 50,
     /// No AI model provider is configured on the manager (provider / model /
     /// base URL / API key unset), so an agentic ask cannot dial a model. The
     /// control end maps this code to a localized "configure a model" message.
     /// Rides the agent-error wire, not an HTTP status.
-    pub const AI_MODEL_NOT_CONFIGURED: DeskErrorCode = DeskErrorCode(51);
+    AI_MODEL_NOT_CONFIGURED = 51,
     /// The caller explicitly requested a model that is not in its resolution
     /// subject's gated catalog (its own tier plus the platform tier when the
     /// platform-fallback switch is on) — an out-of-catalog / disabled / archived
     /// model id. The request is rejected fail-closed rather than silently
     /// downgraded to a default. Rides the agent-error wire, not an HTTP status.
-    pub const AI_MODEL_NOT_AUTHORIZED: DeskErrorCode = DeskErrorCode(54);
+    AI_MODEL_NOT_AUTHORIZED = 54,
 
     /// A priced subscription plan has no recurring-price row matching the
     /// account's currency (neither an org-scoped override nor the platform
@@ -243,95 +273,95 @@ impl DeskErrorCode {
     /// price in that currency (or switch the plan to `free`). Carried in
     /// `RestResponse.code`; self-healing subscribe paths log a warning and skip.
     /// Never an HTTP status.
-    pub const PLAN_NO_PRICE: DeskErrorCode = DeskErrorCode(52);
+    PLAN_NO_PRICE = 52,
     /// A plan price row cannot be deleted because it is the required platform
     /// price (in the account default currency) of an enabled or default priced
     /// plan; removing it would drop the plan's default subscription back to
     /// `PLAN_NO_PRICE`. The admin must first disable the plan, switch it to
     /// `free`, or add a replacement price. Carried in `RestResponse.code`, never
     /// an HTTP status.
-    pub const PLAN_PRICE_REQUIRED: DeskErrorCode = DeskErrorCode(53);
+    PLAN_PRICE_REQUIRED = 53,
     /// A billing account cannot be switched to `prepaid` settlement because it still
     /// carries outstanding payable `point_debt`. Prepaid accounts are never billed by
     /// settlement, so the residual debt would strand forever; the admin must settle or
     /// absorb it before switching. Carried in `RestResponse.code`, never an HTTP status.
-    pub const SETTLEMENT_DEBT_OUTSTANDING: DeskErrorCode = DeskErrorCode(55);
+    SETTLEMENT_DEBT_OUTSTANDING = 55,
 
     /// No billing account exists for the referenced subject. Carried in
     /// `RestResponse.code`, never an HTTP status.
-    pub const BILLING_ACCOUNT_NOT_FOUND: DeskErrorCode = DeskErrorCode(56);
+    BILLING_ACCOUNT_NOT_FOUND = 56,
 
     /// The agentic terminal copilot exhausted its per-turn step budget before
     /// producing an answer (the loop's step circuit-breaker tripped). The control
     /// end maps this code to a localized "ran out of steps" message. Rides the
     /// agent-error wire, not an HTTP status.
-    pub const COPILOT_STEP_LIMIT_EXCEEDED: DeskErrorCode = DeskErrorCode(57);
+    COPILOT_STEP_LIMIT_EXCEEDED = 57,
     /// The terminal copilot's response was truncated before it completed. The
     /// control end maps this code to a localized message. Rides the agent-error
     /// wire, not an HTTP status.
-    pub const COPILOT_RESPONSE_TRUNCATED: DeskErrorCode = DeskErrorCode(58);
+    COPILOT_RESPONSE_TRUNCATED = 58,
     /// The model violated the copilot response contract (unparseable / malformed
     /// tool or answer envelope). The control end maps this code to a localized
     /// message. Rides the agent-error wire, not an HTTP status.
-    pub const COPILOT_PROTOCOL_VIOLATION: DeskErrorCode = DeskErrorCode(59);
+    COPILOT_PROTOCOL_VIOLATION = 59,
     /// Another copilot turn is already in progress for this conversation, so the
     /// new ask is refused. The control end maps this code to a localized message.
     /// Rides the agent-error wire, not an HTTP status.
-    pub const COPILOT_TURN_BUSY: DeskErrorCode = DeskErrorCode(60);
+    COPILOT_TURN_BUSY = 60,
     /// The copilot conversation belongs to a different session subject than the
     /// caller (a stale or cross-session continuation). The control end maps this
     /// code to a localized message. Rides the agent-error wire, not an HTTP status.
-    pub const COPILOT_SUBJECT_MISMATCH: DeskErrorCode = DeskErrorCode(61);
+    COPILOT_SUBJECT_MISMATCH = 61,
     /// The agent stopped a turn because the model requested the same tool more
     /// times than the per-turn repeat circuit breaker permits. The control end
     /// maps this code to a localized loop-prevention message. Rides the
     /// agent-error wire, not an HTTP status.
-    pub const AGENT_SAME_TOOL_REPEAT_LIMIT: DeskErrorCode = DeskErrorCode(70);
+    AGENT_SAME_TOOL_REPEAT_LIMIT = 70,
     /// The model requested a shell that the target did not report as usable by
     /// the AI executor. The model receives the target's verified shell list and
     /// may retry with one of those values; the control end may localize this code
     /// if it surfaces the tool error.
-    pub const AI_EXEC_SHELL_UNSUPPORTED: DeskErrorCode = DeskErrorCode(71);
+    AI_EXEC_SHELL_UNSUPPORTED = 71,
     /// The account is in a self-deletion state (`email_pending` / `grace` /
     /// `deleting` / `deleted`) and the requested mutating action is refused while
     /// the deletion is pending. The user must cancel the deletion first. Carried
     /// in `RestResponse.code` (business error, HTTP stays 200).
-    pub const ACCOUNT_PENDING_DELETION: DeskErrorCode = DeskErrorCode(62);
+    ACCOUNT_PENDING_DELETION = 62,
     /// The account cannot be deleted because it still owns one or more
     /// organizations; ownership must be transferred or the organizations disbanded
     /// first. Carried in `RestResponse.code` (business error, HTTP stays 200).
-    pub const ACCOUNT_STILL_ORG_OWNER: DeskErrorCode = DeskErrorCode(63);
+    ACCOUNT_STILL_ORG_OWNER = 63,
 
     /// A connection-verify probe could not reach the target at all (DNS failure,
     /// connection refused, TLS handshake failure). Carried inside the
     /// `ConnectionVerifyResult` for display.
-    pub const CONNECTION_UNREACHABLE: DeskErrorCode = DeskErrorCode(64);
+    CONNECTION_UNREACHABLE = 64,
     /// A connection-verify probe reached an endpoint but it did not identify
     /// itself as a desk signaling endpoint (missing probe marker header), so it is
     /// not usable as a signaling / manager target.
-    pub const CONNECTION_NOT_SIGNALING: DeskErrorCode = DeskErrorCode(65);
+    CONNECTION_NOT_SIGNALING = 65,
     /// A connection-verify probe reached the signaling endpoint but the API token
     /// was rejected (or absent).
-    pub const CONNECTION_AUTH_FAILED: DeskErrorCode = DeskErrorCode(66);
+    CONNECTION_AUTH_FAILED = 66,
     /// A connection-verify target was refused before dialing: an unsupported URL
     /// scheme, or an address blocked by the SSRF guard.
-    pub const CONNECTION_TARGET_BLOCKED: DeskErrorCode = DeskErrorCode(67);
+    CONNECTION_TARGET_BLOCKED = 67,
     /// A connection-verify target resolved to a public address dialed over a
     /// plaintext scheme (`ws://` / `http://`) while `require_secure_signaling` is
     /// on. Distinct from `CONNECTION_TARGET_BLOCKED` so the wizard can prompt the
     /// user to use TLS (`wss://`) or, deliberately, disable the switch — rather
     /// than showing an opaque "blocked".
-    pub const CONNECTION_INSECURE_TRANSPORT: DeskErrorCode = DeskErrorCode(68);
+    CONNECTION_INSECURE_TRANSPORT = 68,
     /// The host is explicitly refusing all remote access until a locally
     /// authenticated user unlocks it. This is a security state, not an offline
     /// or retryable transport failure.
-    pub const REMOTE_ACCESS_LOCKED: DeskErrorCode = DeskErrorCode(69);
+    REMOTE_ACCESS_LOCKED = 69,
 
-    pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
+    ACTION_NEED_RETRY = 1001,
 
-    pub const REMOTE_DESK_OFFLINE: DeskErrorCode = DeskErrorCode(10003);
-    pub const TIMEOUT: DeskErrorCode = DeskErrorCode(10004);
-    pub const SESSION_NOT_FOUND: DeskErrorCode = DeskErrorCode(10005);
+    REMOTE_DESK_OFFLINE = 10003,
+    TIMEOUT = 10004,
+    SESSION_NOT_FOUND = 10005,
 
     /// The device's owning manager instance is not reachable for cross-instance
     /// proxying: its presence aged to stale, the instance is not live in the
@@ -339,30 +369,32 @@ impl DeskErrorCode {
     /// hop could not connect. The request never reached the device, so it is
     /// safe for the client to retry. Carried in `RestResponse.code`, never an
     /// HTTP status (rule: business errors stay HTTP 200).
-    pub const MANAGER_NODE_UNREACHABLE: DeskErrorCode = DeskErrorCode(10007);
+    MANAGER_NODE_UNREACHABLE = 10007,
     /// A cross-instance proxied write (delete file / update settings) failed
     /// after the request was already dispatched toward the device, so the
     /// outcome is unknown — it may or may not have taken effect. The client must
     /// NOT auto-retry; it should prompt the user to refresh and confirm. Carried
     /// in `RestResponse.code`, never an HTTP status.
-    pub const REMOTE_DESK_OUTCOME_UNKNOWN: DeskErrorCode = DeskErrorCode(10008);
+    REMOTE_DESK_OUTCOME_UNKNOWN = 10008,
 
-    pub const GENERATE_LOCAL_DESCRIPTION_FAILED: DeskErrorCode = DeskErrorCode(10001);
-    pub const BLANK_SIGNALING_DATA: DeskErrorCode = DeskErrorCode(10002);
-    pub const AUTO_START_ERROR: DeskErrorCode = DeskErrorCode(10006);
+    GENERATE_LOCAL_DESCRIPTION_FAILED = 10001,
+    BLANK_SIGNALING_DATA = 10002,
+    AUTO_START_ERROR = 10006,
 
     // for windows platform
     /// windows error code
-    pub const WINDOWS_ERROR: DeskErrorCode = DeskErrorCode(100001);
+    WINDOWS_ERROR = 100001,
 
     // for linux platform
     /// linux error code
-    pub const LINUX_ERROR: DeskErrorCode = DeskErrorCode(200001);
+    LINUX_ERROR = 200001,
 
     // for mac platform
     /// mac error code
-    pub const MAC_ERROR: DeskErrorCode = DeskErrorCode(300001);
+    MAC_ERROR = 300001,
+}
 
+impl DeskErrorCode {
     pub fn new(code: i32) -> Self {
         DeskErrorCode(code)
     }
@@ -371,6 +403,46 @@ impl DeskErrorCode {
         self.0
     }
 }
+
+/// Description carried into the generated spec, so a reader of the schema knows
+/// what the bare integer means without going back to the Rust source.
+const DESK_ERROR_CODE_DESCRIPTION: &str = "Business error code carried in `RestResponse.code`, \
+in signaling error frames and on the agent-error wire. It is never an HTTP status: \
+transport-level failures are expressed by the status line, business outcomes by this value.";
+
+impl utoipa::PartialSchema for DeskErrorCode {
+    /// Describe the code as a named integer enum.
+    ///
+    /// `enum` carries the values and the `x-enum-varnames` extension carries the
+    /// matching names; both come from `ALL` in the same order, because client
+    /// generators pair the two arrays by index.
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::ObjectBuilder::new()
+            .schema_type(utoipa::openapi::Type::Integer)
+            .format(Some(utoipa::openapi::SchemaFormat::KnownFormat(
+                utoipa::openapi::KnownFormat::Int32,
+            )))
+            .description(Some(DESK_ERROR_CODE_DESCRIPTION))
+            .enum_values(Some(
+                Self::ALL
+                    .iter()
+                    .map(|(_, code)| *code)
+                    .collect::<Vec<i32>>(),
+            ))
+            .extensions(Some(utoipa::openapi::extensions::Extensions::from_iter([
+                (
+                    "x-enum-varnames",
+                    Self::ALL
+                        .iter()
+                        .map(|(name, _)| *name)
+                        .collect::<Vec<&'static str>>(),
+                ),
+            ])))
+            .into()
+    }
+}
+
+impl utoipa::ToSchema for DeskErrorCode {}
 
 impl Display for DeskErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -590,5 +662,106 @@ mod tests {
             DeskErrorCode::REMOTE_ACCESS_LOCKED.code(),
             DeskErrorCode::REMOTE_DESK_OFFLINE.code()
         );
+    }
+
+    /// `ALL` is the table the OpenAPI schema is projected from, so an entry that
+    /// disagrees with its constant would ship a wrong value to every client.
+    #[test]
+    fn all_entries_agree_with_their_constants() {
+        let lookup = |name: &str| {
+            DeskErrorCode::ALL
+                .iter()
+                .find(|(entry, _)| *entry == name)
+                .unwrap_or_else(|| panic!("{name} missing from DeskErrorCode::ALL"))
+                .1
+        };
+        assert_eq!(lookup("SUCCESS"), DeskErrorCode::SUCCESS.code());
+        assert_eq!(
+            lookup("REVISION_CONFLICT"),
+            DeskErrorCode::REVISION_CONFLICT.code()
+        );
+        assert_eq!(
+            lookup("PERMISSION_ERROR"),
+            DeskErrorCode::PERMISSION_ERROR.code()
+        );
+        assert_eq!(lookup("MAC_ERROR"), DeskErrorCode::MAC_ERROR.code());
+    }
+
+    /// Client generators pair `x-enum-varnames` with `enum` by index after
+    /// de-duplicating the names, so a repeated name would silently shift every
+    /// later pairing. Repeated values would collapse two codes into one member.
+    #[test]
+    fn all_names_and_values_are_unique() {
+        let mut names: Vec<&str> = DeskErrorCode::ALL.iter().map(|(name, _)| *name).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "duplicate error-code name");
+
+        let mut values: Vec<i32> = DeskErrorCode::ALL.iter().map(|(_, code)| *code).collect();
+        values.sort_unstable();
+        values.dedup();
+        assert_eq!(values.len(), total, "duplicate error-code value");
+    }
+
+    /// The schema must describe an int32 enum whose two parallel arrays line up:
+    /// this is exactly what the client generator consumes.
+    #[test]
+    fn schema_is_an_int32_enum_with_aligned_varnames() {
+        use utoipa::PartialSchema;
+
+        let schema = serde_json::to_value(DeskErrorCode::schema()).expect("schema serializes");
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["format"], "int32");
+
+        let values = schema["enum"].as_array().expect("enum array");
+        let names = schema["x-enum-varnames"]
+            .as_array()
+            .expect("x-enum-varnames array");
+        assert_eq!(
+            values.len(),
+            names.len(),
+            "enum and x-enum-varnames must stay the same length"
+        );
+        assert_eq!(values.len(), DeskErrorCode::ALL.len());
+
+        for (index, (name, code)) in DeskErrorCode::ALL.iter().enumerate() {
+            assert_eq!(names[index], *name, "name order drifted at {index}");
+            assert_eq!(values[index], *code, "value order drifted at {index}");
+        }
+    }
+
+    /// The platform codes are the sparse high values; a generator that collapsed
+    /// the enum into an index range would drop them, so assert them explicitly.
+    #[test]
+    fn schema_keeps_sparse_platform_codes() {
+        use utoipa::PartialSchema;
+
+        let schema = serde_json::to_value(DeskErrorCode::schema()).expect("schema serializes");
+        let values = schema["enum"].as_array().expect("enum array");
+        let names = schema["x-enum-varnames"]
+            .as_array()
+            .expect("x-enum-varnames array");
+
+        for (name, code) in [
+            ("WINDOWS_ERROR", 100001),
+            ("LINUX_ERROR", 200001),
+            ("MAC_ERROR", 300001),
+        ] {
+            let index = names
+                .iter()
+                .position(|entry| entry == name)
+                .unwrap_or_else(|| panic!("{name} missing from x-enum-varnames"));
+            assert_eq!(values[index], code, "{name} paired with the wrong value");
+        }
+    }
+
+    /// The component name is what the generated client's symbol is derived from,
+    /// so renaming it would rename every consumer's import.
+    #[test]
+    fn schema_component_name_is_stable() {
+        use utoipa::ToSchema;
+
+        assert_eq!(DeskErrorCode::name(), "DeskErrorCode");
     }
 }

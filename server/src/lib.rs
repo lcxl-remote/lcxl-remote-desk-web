@@ -1167,6 +1167,43 @@ mod tests {
         }
     }
 
+    /// `DeskErrorCode` is referenced by no request or response body, so route
+    /// collection alone would drop it. It reaches the spec only through the
+    /// explicit `ExtraSchemas` registration, and it is what lets the generated
+    /// client expose named constants instead of the numbers being mirrored by
+    /// hand — if the component disappears, every consumer silently falls back to
+    /// bare integers.
+    #[test]
+    fn build_openapi_publishes_the_error_code_enum() {
+        use desk_utils::error::DeskErrorCode;
+
+        let api = build_openapi();
+        let schema = api
+            .components
+            .as_ref()
+            .expect("components")
+            .schemas
+            .get("DeskErrorCode")
+            .expect("DeskErrorCode component");
+        let schema = serde_json::to_value(schema).expect("schema serializes");
+
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["format"], "int32");
+
+        // The generator pairs the two arrays by index, so their order is part of
+        // the contract, not an implementation detail.
+        let values = schema["enum"].as_array().expect("enum array");
+        let names = schema["x-enum-varnames"]
+            .as_array()
+            .expect("x-enum-varnames array");
+        assert_eq!(values.len(), DeskErrorCode::ALL.len());
+        assert_eq!(names.len(), DeskErrorCode::ALL.len());
+        for (index, (name, code)) in DeskErrorCode::ALL.iter().enumerate() {
+            assert_eq!(names[index], *name);
+            assert_eq!(values[index], *code);
+        }
+    }
+
     #[test]
     fn signaling_openapi_parameters_are_queries() {
         use utoipa::openapi::path::ParameterIn;
