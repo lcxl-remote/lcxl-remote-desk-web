@@ -195,8 +195,8 @@ pub fn rewrite_mdns_candidate_with_ip(
 /// The connection state is cloned under a brief read lock, the guard is dropped,
 /// and only then is `request_peer_with_callback` awaited — so a slow desk server
 /// can never serialize the whole map or risk a lock held across a 30s round trip.
-/// Shared by the file / settings / sysinfo / terminal proxy controllers (and the
-/// manager's owner-local handling), so all of them get the same no-lock behavior.
+/// Shared by the settings / terminal proxy controllers (and the manager's
+/// owner-local handling), so all of them get the same no-lock behavior.
 ///
 /// Returns the peer's response model. A connection absent from the local map
 /// yields `REMOTE_DESK_OFFLINE` (`not_found_msg`); a peer error_code in the
