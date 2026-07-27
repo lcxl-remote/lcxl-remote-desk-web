@@ -188,6 +188,26 @@ impl PersistedRemoteAccessState {
     }
 }
 
+/// Whether a read error proves the state file is absent rather than merely
+/// unreadable.
+///
+/// The distinction decides the failure direction: a file that might exist but
+/// cannot be read could be holding a lock, so it fails closed; a file that
+/// provably does not exist is an uninitialized install, and locking a fresh
+/// device out of itself would be worse than starting unlocked.
+///
+/// A path whose parent component is not a directory is one such proof, but the
+/// platforms disagree on how to say it: Unix reports `NotADirectory` while
+/// Windows collapses it into `NotFound`. Matching only `NotFound` therefore
+/// made the very same misconfiguration start unlocked on Windows and
+/// recovery-locked on Unix.
+fn proves_absence(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteAccessStateStore {
     path: PathBuf,
@@ -221,7 +241,7 @@ impl RemoteAccessStateStore {
                 );
                 RemoteAccessState::recovery_locked()
             }),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(error) if proves_absence(&error) => {
                 let initial = RemoteAccessState::unlocked(1);
                 if let Err(error) = self.persist(&initial) {
                     log::warn!(
@@ -250,7 +270,7 @@ impl RemoteAccessStateStore {
             Ok(contents) => self
                 .parse(&contents)
                 .unwrap_or_else(|_| RemoteAccessState::recovery_locked()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => RemoteAccessState::unlocked(0),
+            Err(error) if proves_absence(&error) => RemoteAccessState::unlocked(0),
             Err(_) => RemoteAccessState::recovery_locked(),
         }
     }
@@ -931,6 +951,71 @@ mod tests {
         let store = RemoteAccessStateStore::new(blocking_file.join(STATE_FILE_NAME));
 
         assert_eq!(store.load_or_initialize(), RemoteAccessState::unlocked(0));
+        // The read-only CLI view reads the same condition the same way.
+        assert_eq!(store.load_read_only(), RemoteAccessState::unlocked(0));
+    }
+
+    /// The failure direction hangs entirely on this classification, and the
+    /// kind a blocked path yields differs per platform (`NotADirectory` on
+    /// Unix, `NotFound` on Windows), so pin both spellings explicitly instead
+    /// of relying on whichever one the host happens to produce.
+    #[test]
+    fn only_a_proven_absence_skips_the_recovery_lock() {
+        for kind in [io::ErrorKind::NotFound, io::ErrorKind::NotADirectory] {
+            assert!(
+                proves_absence(&io::Error::new(kind, "test")),
+                "{kind:?} proves the state file is absent",
+            );
+        }
+        // Anything that leaves open the possibility of an existing locked
+        // state must fail closed instead.
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::Other,
+        ] {
+            assert!(
+                !proves_absence(&io::Error::new(kind, "test")),
+                "{kind:?} does not prove the state file is absent",
+            );
+        }
+    }
+
+    /// A state file that exists but cannot be read may be holding a lock, so
+    /// the recovery lock still engages — the absence classification must not
+    /// widen into "any read error is a fresh install".
+    #[test]
+    #[cfg(unix)]
+    fn unreadable_existing_state_still_fails_closed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(STATE_FILE_NAME);
+        fs::write(
+            &path,
+            "format_version = 1\nstate_version = 7\nlocked = false\n",
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Root ignores the permission bits, so there is nothing to assert there.
+        if fs::read_to_string(&path).is_ok() {
+            return;
+        }
+
+        assert_eq!(
+            store_at(&path).load_or_initialize().mode,
+            RemoteAccessMode::RecoveryLocked
+        );
+        assert_eq!(
+            store_at(&path).load_read_only().mode,
+            RemoteAccessMode::RecoveryLocked
+        );
+    }
+
+    #[cfg(unix)]
+    fn store_at(path: &Path) -> RemoteAccessStateStore {
+        RemoteAccessStateStore::new(path.to_path_buf())
     }
 
     fn coordinator(

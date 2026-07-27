@@ -1792,6 +1792,19 @@ export type LoginParams = {
     username: string;
 };
 
+export const startupModeEnum = {
+    default: "default",
+    signaling: "signaling",
+    "desk-server": "desk-server",
+    "service-daemon": "service-daemon",
+    "session-worker": "session-worker",
+    "mcp-stdio": "mcp-stdio"
+} as const;
+
+export type StartupModeEnumKey = (typeof startupModeEnum)[keyof typeof startupModeEnum];
+
+export type StartupMode = StartupModeEnumKey;
+
 /**
  * @description Login result
 */
@@ -1805,10 +1818,7 @@ export type LoginResult = {
      * @type string
     */
     currentAuthority: string;
-    /**
-     * @type string,null
-    */
-    startup_mode?: string | null;
+    startup_mode?: (null | StartupMode);
     /**
      * @type string
     */
@@ -2950,10 +2960,10 @@ export type RestResponseServerInfo = {
         */
         service_installed: boolean;
         /**
-         * @description Startup mode of the server
+         * @description Startup mode of the server. Typed rather than free-form so the generated\nclient gets the exact set of mode names to compare against.
          * @type string
         */
-        startup_mode: string;
+        startup_mode: StartupMode;
     };
     /**
      * @type string,null
@@ -2999,19 +3009,6 @@ export type RestResponseSupportSessionStatus = {
     */
     success: boolean;
 };
-
-export const startupModeEnum = {
-    default: "default",
-    signaling: "signaling",
-    "desk-server": "desk-server",
-    "service-daemon": "service-daemon",
-    "session-worker": "session-worker",
-    "mcp-stdio": "mcp-stdio"
-} as const;
-
-export type StartupModeEnumKey = (typeof startupModeEnum)[keyof typeof startupModeEnum];
-
-export type StartupMode = StartupModeEnumKey;
 
 export type RestResponseSystemInfo = {
     /**
@@ -3704,10 +3701,10 @@ export type ServerInfo = {
     */
     service_installed: boolean;
     /**
-     * @description Startup mode of the server
+     * @description Startup mode of the server. Typed rather than free-form so the generated\nclient gets the exact set of mode names to compare against.
      * @type string
     */
-    startup_mode: string;
+    startup_mode: StartupMode;
 };
 
 /**
