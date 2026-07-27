@@ -340,6 +340,12 @@ desk_error_codes! {
     /// organizations; ownership must be transferred or the organizations disbanded
     /// first. Carried in `RestResponse.code` (business error, HTTP stays 200).
     ACCOUNT_STILL_ORG_OWNER = 63,
+    /// The account cannot be deleted because it is a platform administrator.
+    /// Deleting it would leave a tombstone that still counts as an administrator,
+    /// so the server would report itself initialized with nobody able to sign in
+    /// and no way to bootstrap again. The role must be handed to another account
+    /// first. Carried in `RestResponse.code` (business error, HTTP stays 200).
+    ACCOUNT_IS_PLATFORM_ADMIN = 72,
 
     /// A connection-verify probe could not reach the target at all (DNS failure,
     /// connection refused, TLS handshake failure). Carried inside the

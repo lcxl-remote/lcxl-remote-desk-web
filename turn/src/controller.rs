@@ -23,8 +23,13 @@ pub async fn get_turn_info(
 pub async fn get_turn_session(
     _query: web::Query<TurnQueryParams>,
 ) -> Result<HttpResponse, DeskTurnError> {
-    // Session iteration is not easily supported in webrtc::turn, mock a response or return not found.
-    Ok(HttpResponse::NotFound().finish())
+    // `webrtc::turn` exposes no way to enumerate sessions. That is a property of
+    // this build, not of the request, so it answers in the envelope every other
+    // endpoint answers in rather than as a transport-level failure.
+    Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+        DeskErrorCode::FEATURE_UNAVAILABLE,
+        "Session enumeration is not supported by this TURN implementation".to_string(),
+    )))
 }
 
 pub async fn get_turn_session_statistics(
@@ -55,14 +60,25 @@ pub async fn get_turn_session_statistics(
 
     // A runtime is up but has never seen this address: absent statistics, not an
     // absent service.
-    Ok(HttpResponse::NotFound().finish())
+    Ok(
+        HttpResponse::Ok().json(RestResponse::<TurnSessionStatistics>::failed_with_data(
+            DeskErrorCode::SESSION_NOT_FOUND,
+            Some("No TURN session statistics for that address".to_string()),
+            None,
+        )),
+    )
 }
 
 pub async fn delete_turn_session(
     _query: web::Query<TurnQueryParams>,
 ) -> Result<HttpResponse, DeskTurnError> {
-    // webrtc::turn doesn't have an API to force-close a specific session easily.
-    Ok(HttpResponse::ExpectationFailed().finish())
+    // `webrtc::turn` has no way to force-close one session. Same reasoning as
+    // the enumeration placeholder: the caller is told in the envelope.
+    Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+        DeskErrorCode::FEATURE_UNAVAILABLE,
+        "Closing an individual TURN session is not supported by this TURN implementation"
+            .to_string(),
+    )))
 }
 
 pub async fn get_turn_metrics(
@@ -181,24 +197,19 @@ mod tests {
         assert_eq!(res.status(), 503);
         assert_eq!(res.headers().get("content-type").unwrap(), "text/plain");
 
-        // Placeholders: unchanged, because the TURN library supports neither
-        // operation whether or not a relay is running.
-        let res = test::call_service(
-            &app,
-            test::TestRequest::get()
-                .uri(&format!("/session{QUERY}"))
-                .to_request(),
-        )
-        .await;
-        assert_eq!(res.status(), 404);
-        let res = test::call_service(
-            &app,
-            test::TestRequest::delete()
-                .uri(&format!("/session{QUERY}"))
-                .to_request(),
-        )
-        .await;
-        assert_eq!(res.status(), 417);
+        // Placeholders: the TURN library supports neither operation whether or
+        // not a relay is running. Unsupported is a business answer, so it comes
+        // back in the envelope with a 200 like every other JSON endpoint here.
+        for req in [
+            test::TestRequest::get().uri(&format!("/session{QUERY}")),
+            test::TestRequest::delete().uri(&format!("/session{QUERY}")),
+        ] {
+            let res = test::call_service(&app, req.to_request()).await;
+            assert_eq!(res.status(), 200);
+            let body: Value = test::read_body_json(res).await;
+            assert_eq!(body["success"], false);
+            assert_eq!(body["code"], DeskErrorCode::FEATURE_UNAVAILABLE.code());
+        }
     }
 
     /// With a relay up, the same endpoints report it — and the two placeholders
@@ -223,7 +234,8 @@ mod tests {
         assert_eq!(body["data"]["interfaces"].as_array().unwrap().len(), 1);
 
         // An address the runtime has never seen: absent statistics, not an
-        // absent service — the two must not collapse into one answer.
+        // absent service — the two must not collapse into one answer, and
+        // neither is a transport failure.
         let res = test::call_service(
             &app,
             test::TestRequest::get()
@@ -231,7 +243,10 @@ mod tests {
                 .to_request(),
         )
         .await;
-        assert_eq!(res.status(), 404);
+        assert_eq!(res.status(), 200);
+        let body: Value = test::read_body_json(res).await;
+        assert_eq!(body["success"], false);
+        assert_eq!(body["code"], DeskErrorCode::SESSION_NOT_FOUND.code());
 
         // Once it has seen it, the counters come back in the success envelope.
         // Written the way the socket wrapper writes them: the per-address table
@@ -272,7 +287,13 @@ mod tests {
                 .to_request(),
         )
         .await;
-        assert_eq!(res.status(), 404, "session enumeration stays unsupported");
+        assert_eq!(res.status(), 200);
+        let body: Value = test::read_body_json(res).await;
+        assert_eq!(
+            body["success"], false,
+            "session enumeration stays unsupported"
+        );
+        assert_eq!(body["code"], DeskErrorCode::FEATURE_UNAVAILABLE.code());
 
         supervisor.shutdown().await;
         // The relay is gone; the same endpoint now reports the reason rather

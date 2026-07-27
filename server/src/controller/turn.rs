@@ -25,8 +25,9 @@ pub async fn get_turn_info(view: web::Data<TurnRuntimeView>) -> Result<HttpRespo
     summary = "Get turn server session",
     params(TurnQueryParams),
     responses(
-        (status = 200, description = "Turn server session", body = TurnSession),
-        (status = 404, description = "Session enumeration is not supported"),
+        (status = 200, description = "Session enumeration is not supported by this \
+         implementation; the reason is carried in RestResponse.code",
+         body = RestResponse<TurnSession>),
     ),
 )]
 #[get("/session")]
@@ -44,7 +45,6 @@ pub async fn get_turn_session(
     responses(
         (status = 200, description = "Turn server session statistics, or the reason there are none",
          body = RestResponse<TurnSessionStatistics>),
-        (status = 404, description = "Turn server session not found"),
     ),
 )]
 #[get("/session/statistics")]
@@ -61,8 +61,8 @@ pub async fn get_turn_session_statistics(
     summary = "Delete turn server session",
     params(TurnQueryParams),
     responses(
-        (status = 200, description = "Deleted turn server session"),
-        (status = 417, description = "Expectation failed"),
+        (status = 200, description = "Closing an individual session is not supported by this \
+         implementation; the reason is carried in RestResponse.code"),
     ),
 )]
 #[delete("/session")]
