@@ -404,7 +404,16 @@ desk_error_codes! {
 }
 
 impl DeskErrorCode {
-    pub fn new(code: i32) -> Self {
+    /// Turn an integer that arrived over the wire back into the typed code.
+    ///
+    /// This is the decode entry point, not a way to mint a code: every code this
+    /// build knows is declared in `desk_error_codes!` above, and a caller that
+    /// needs a new one adds a line there instead of calling this. The name has
+    /// to carry that rule because the type cannot — the argument is a plain
+    /// `i32` either way, and an unrecognized value is wrapped rather than
+    /// rejected on purpose, since a peer on a newer build may report a code this
+    /// one has never heard of.
+    pub fn from_wire(code: i32) -> Self {
         DeskErrorCode(code)
     }
 
@@ -772,5 +781,29 @@ mod tests {
         use utoipa::ToSchema;
 
         assert_eq!(DeskErrorCode::name(), "DeskErrorCode");
+    }
+
+    /// Decoding a declared code off the wire must land on the same value the
+    /// constant carries, so a receiver can compare against the constant instead
+    /// of the integer.
+    #[test]
+    fn a_declared_code_survives_the_wire() {
+        let decoded = DeskErrorCode::from_wire(DeskErrorCode::REVISION_CONFLICT.code());
+
+        assert_eq!(decoded, DeskErrorCode::REVISION_CONFLICT);
+    }
+
+    /// A peer on a newer build may report a code this one never declared. The
+    /// value is kept verbatim rather than rejected or folded into a catch-all,
+    /// because dropping it would lose the error the peer was reporting.
+    #[test]
+    fn an_undeclared_code_is_kept_verbatim() {
+        let unknown = 999_999;
+        assert!(
+            !DeskErrorCode::ALL.iter().any(|(_, code)| *code == unknown),
+            "the test's placeholder became a real code; pick another"
+        );
+
+        assert_eq!(DeskErrorCode::from_wire(unknown).code(), unknown);
     }
 }

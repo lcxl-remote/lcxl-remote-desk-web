@@ -626,7 +626,7 @@ fn error_frame(code: i32, msg: &str) -> String {
         SignalingType::Error,
         None,
         Some("conn-1".to_string()),
-        DeskErrorCode::new(code),
+        DeskErrorCode::from_wire(code),
         msg,
     )
     .unwrap();

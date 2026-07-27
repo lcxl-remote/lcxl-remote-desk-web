@@ -228,7 +228,7 @@ where
         && response_state.error_code != 0
     {
         return DeskSignalFacadeError::custom_error(
-            DeskErrorCode::new(response_state.error_code),
+            DeskErrorCode::from_wire(response_state.error_code),
             &response_state.message.clone().unwrap_or_default(),
         );
     }
