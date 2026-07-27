@@ -865,15 +865,18 @@ impl WorkerManager {
     }
 
     /// Record what the worker reported after a security policy was published to
-    /// it.
+    /// it, and report whether it is asking to be resynchronized.
     ///
-    /// A worker asking to be resynchronized is holding a policy the daemon
-    /// never published — deliberately stricter than either side intended, so
-    /// nothing is permitted that should not be, but it stays that way until the
-    /// daemon publishes again. That is worth saying out loud, because the
-    /// symptom on the host is prompts for capabilities the operator has already
-    /// allowed, with nothing else to explain it.
-    pub async fn note_policy_applied(&self, payload: &SecurityPolicyAppliedPayload) {
+    /// A worker that asks is holding a policy the daemon never published —
+    /// deliberately stricter than either side intended, so nothing is permitted
+    /// that should not be. It cannot climb out on its own: the local tightening
+    /// moved its sequence past what was published, so only a fresh publication
+    /// resets it, and until one arrives the symptom on the host is prompts for
+    /// capabilities the operator has already allowed with nothing to explain
+    /// them. The caller republishes — reaching the policy is the settings
+    /// coordinator's job, and it is the coordinator that owns this manager.
+    #[must_use = "a worker asking for a resync stays degraded until the policy is republished"]
+    pub async fn note_policy_applied(&self, payload: &SecurityPolicyAppliedPayload) -> bool {
         if let Some(waiter) = self
             .policy_acks
             .lock()
@@ -889,6 +892,7 @@ impl WorkerManager {
                     seq, payload.operation_id
                 );
                 self.policy_applied_seq.store(*seq, Ordering::Release);
+                false
             }
             PolicyApplyOutcome::NeedsResync { seq } => {
                 error!(
@@ -897,6 +901,7 @@ impl WorkerManager {
                      one republished",
                     payload.operation_id, seq
                 );
+                true
             }
         }
     }
@@ -1103,3 +1108,6 @@ mod tests;
 
 #[cfg(test)]
 mod bridge_tests;
+
+#[cfg(test)]
+mod policy_tests;

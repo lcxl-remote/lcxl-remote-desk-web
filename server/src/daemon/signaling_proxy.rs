@@ -741,7 +741,17 @@ pub async fn run_signaling_proxy(
                 );
             }
             WorkerToService::SecurityPolicyApplied(payload) => {
-                worker_mgr.note_policy_applied(&payload).await;
+                if worker_mgr.note_policy_applied(&payload).await {
+                    // The worker could not reconcile what it received and fell
+                    // back to the stricter reading of the two. That is a safe
+                    // place to sit but not one it can leave: the tightening
+                    // pushed its own sequence past the daemon's, so every
+                    // policy it already has looks stale to it. Restating the
+                    // current one is what it is waiting for, and the mirror
+                    // takes the first policy after a contradiction whatever the
+                    // sequences say, so this converges in one round.
+                    settings_coordinator.republish().await;
+                }
             }
             // A user answered a worker-side prompt with "remember this". Only
             // the daemon can store it, and it applies the same staleness rule it
