@@ -218,6 +218,78 @@ where
 }
 
 #[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use crate::model::{TurnInterface, TurnTransport};
+
+    struct AllowAll;
+    impl AuthHandler for AllowAll {
+        fn auth_handle(
+            &self,
+            _username: &str,
+            _realm: &str,
+            _src_addr: SocketAddr,
+        ) -> Result<Vec<u8>, turn::Error> {
+            Ok(vec![0u8; 16])
+        }
+    }
+
+    fn udp(listen: String) -> TurnInterface {
+        TurnInterface {
+            transport: TurnTransport::UDP,
+            listen,
+            external: "127.0.0.1:3478".to_string(),
+        }
+    }
+
+    /// Every configured UDP interface has to be bound, not just the first.
+    ///
+    /// Proven by conflict rather than by counting: the second interface names a
+    /// port this test already holds, so the start can only fail if that bind was
+    /// really attempted. A loop that stopped after the first interface would
+    /// report success here.
+    #[tokio::test]
+    async fn every_udp_interface_is_bound() {
+        let occupied = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let taken = occupied.local_addr().unwrap();
+
+        let settings = TurnSettings {
+            interfaces: vec![udp("127.0.0.1:0".to_string()), udp(taken.to_string())],
+            ..TurnSettings::default()
+        };
+        let result = startup_turn_server(
+            settings,
+            Arc::new(AllowAll),
+            Arc::new(RwLock::new(Statistics::default())),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "the second interface must be bound too, and its port is taken"
+        );
+    }
+
+    /// The first interface is bound for real as well, so a start that succeeds
+    /// has actually taken a socket rather than skipping the loop entirely.
+    #[tokio::test]
+    async fn a_single_interface_starts_and_closes() {
+        let settings = TurnSettings {
+            interfaces: vec![udp("127.0.0.1:0".to_string())],
+            ..TurnSettings::default()
+        };
+        let state = startup_turn_server(
+            settings,
+            Arc::new(AllowAll),
+            Arc::new(RwLock::new(Statistics::default())),
+        )
+        .await
+        .expect("an ephemeral port must be bindable");
+        state.server.close().await.expect("close");
+    }
+}
+
+#[cfg(test)]
 mod classify_tests {
     use super::*;
 
