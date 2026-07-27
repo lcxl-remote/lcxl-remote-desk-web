@@ -51,6 +51,14 @@ const FILE_ERROR_CODE_TO_KEY: ErrorCodeKeyMap = {
     [deskErrorCodeEnum.PERMISSION_ERROR]: "pages.fileError.permissionDenied",
 }
 
+// Transfer failures the user can act on, and which the host's English does not
+// explain on its own. Anything else — a vanished path, an OS write error —
+// keeps the host's message, which names the actual file or errno.
+const TRANSFER_ERROR_CODE_TO_KEY: ErrorCodeKeyMap = {
+    [deskErrorCodeEnum.PERMISSION_ERROR]: "pages.fileError.transferDenied",
+    [deskErrorCodeEnum.TIMEOUT]: "pages.fileError.transferStalled",
+}
+
 function formatRemainingTime(seconds: number): string {
     const s = Math.round(seconds);
     if (s < 60) return `0:${s.toString().padStart(2, '0')}`;
@@ -334,7 +342,13 @@ export default function FileList() {
                                         {transfer.status === 'transferring' && `${transfer.progress}%`}
                                         {transfer.status === 'connecting' && t('pages.fileManager.connecting')}
                                         {transfer.status === 'completed' && t('pages.fileManager.completed')}
-                                        {transfer.status === 'error' && (transfer.errorMessage || t('pages.fileManager.error'))}
+                                        {transfer.status === 'error' && deskErrorMessage(
+                                            t,
+                                            TRANSFER_ERROR_CODE_TO_KEY,
+                                            transfer.errorCode,
+                                            transfer.errorMessage,
+                                            t('pages.fileManager.error'),
+                                        )}
                                     </span>
                                 </div>
                                 {(transfer.status === 'transferring' || transfer.status === 'connecting') && (

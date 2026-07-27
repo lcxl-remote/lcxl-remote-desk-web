@@ -773,6 +773,10 @@ export default {
     '为避免循环执行，AI 在重复请求同一类操作后已停止。此前结果已保留，你可以让它继续。',
   'pages.fileError.permissionDenied':
     '设备所有者未允许此操作。请在被控端的安全设置中开启对应权限，或等待对方确认授权。',
+  'pages.fileError.transferDenied':
+    '设备所有者拒绝了文件传输。请在被控端的安全设置中开启文件传输，或等待对方确认授权。',
+  'pages.fileError.transferStalled':
+    '被控端已停止响应，本次传输已中止。请确认设备仍在线后重试。',
   'pages.deskTerminal.completion.title': 'AI 补全',
   'pages.deskTerminal.completion.toggleHint': 'AI 命令补全 —— 按 Tab 采纳灰字提示',
   'pages.deskTerminal.completion.acceptHint': 'Tab',

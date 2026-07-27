@@ -780,6 +780,10 @@ export default {
     'The AI stopped to prevent a loop after requesting the same type of action repeatedly. Previous results were kept; you can ask it to continue.',
   'pages.fileError.permissionDenied':
     'The device owner has not allowed this operation. Enable the matching permission in the host\'s security settings, or wait for them to approve the request.',
+  'pages.fileError.transferDenied':
+    'The device owner refused the file transfer. Enable file transfer in the host\'s security settings, or wait for them to approve the request.',
+  'pages.fileError.transferStalled':
+    'The host stopped responding, so the transfer was abandoned. Check that the device is still online and try again.',
   'pages.deskTerminal.completion.title': 'AI Completion',
   'pages.deskTerminal.completion.toggleHint': 'AI command completion — press Tab to accept the ghost text',
   'pages.deskTerminal.completion.acceptHint': 'Tab',

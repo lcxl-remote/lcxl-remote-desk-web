@@ -35,6 +35,8 @@ import {
     fallbackBlobSaver,
     openStreamingWritable,
 } from './file-save';
+import { TransferRegistry } from './transfer-registry';
+import { deskErrorCodeEnum } from '@/services/types';
 
 /**
  * A signaling request the host answered with an error frame.
@@ -70,6 +72,12 @@ export interface TransferProgress {
     speed: number; // bytes per second
     remainingSeconds: number; // estimated remaining seconds
     errorMessage?: string;
+    /**
+     * `DeskErrorCode` for a failed transfer, from the host's `transfer_error`
+     * or minted locally for a client-side failure. The view localizes from
+     * this and falls back to `errorMessage` for codes it has no text for.
+     */
+    errorCode?: number;
 }
 
 // Lightweight per-download progress metadata. The actual file bytes go
@@ -95,7 +103,11 @@ export function useFileTransfer(deskId: string | undefined) {
     // buffered fallback), keyed by transfer_id so interleaved chunks of
     // concurrent downloads route to the correct sink.
     const downloadSinks = useRef<Map<string, DownloadSink>>(new Map());
-    const cancelledTransfers = useRef<Set<string>>(new Set());
+    // The transfers this tab started and has not yet settled. Inbound messages
+    // are matched against it, so a reply for an id we already gave up on
+    // cannot resurrect the row, and a transfer that stops receiving data is
+    // ended by its watchdog rather than sitting on the screen forever.
+    const activeTransfers = useRef(new TransferRegistry());
     // Gate that holds an upload's chunk loop until the host accepts.
     const acceptGate = useRef(createAcceptGate());
     // Track transfer speed state for EMA smoothing
@@ -189,16 +201,57 @@ export function useFileTransfer(deskId: string | undefined) {
         }
     }, []);
 
+    /**
+     * The one way a transfer ends.
+     *
+     * Nine paths reach here — host completion, host error, the inactivity
+     * watchdog, a local write failure, cancel, manual remove, disconnect,
+     * unmount, and a failed start — and each of them used to clean up a
+     * different subset: the cancelled-id set kept download ids forever,
+     * completion left the speed state behind, and closing the connection
+     * abandoned open sinks. Routing them all through one idempotent call is
+     * what makes the watchdog safe to add on top.
+     *
+     * Returns whether this call is the one that ended the transfer; a second
+     * caller for the same id gets `false` and must not touch the row again.
+     */
+    const settleTransfer = useCallback((
+        transferId: string,
+        outcome?: { status: 'completed' | 'error'; errorMessage?: string; errorCode?: number },
+    ): boolean => {
+        if (!activeTransfers.current.settle(transferId)) return false;
+        // Reject rather than clear: an upload still parked on the gate has to
+        // be woken, or its `await` never returns and the row stays
+        // "connecting" for the life of the tab.
+        acceptGate.current.reject(transferId, outcome?.errorMessage ?? 'Transfer ended');
+        void cleanupDownload(transferId);
+        if (outcome) {
+            updateTransfer(transferId, {
+                status: outcome.status,
+                errorMessage: outcome.errorMessage,
+                errorCode: outcome.errorCode,
+                ...(outcome.status === 'completed' ? { progress: 100 } : {}),
+            });
+            removeTransferAfterDelay(transferId);
+        }
+        return true;
+    }, [cleanupDownload, updateTransfer, removeTransferAfterDelay]);
+
     // Handle a download write/finalize failure: mark error, release the
     // sink, and ask the host to stop sending. Best-effort throughout.
-    const failDownload = useCallback((transferId: string, message: string) => {
-        updateTransfer(transferId, { status: 'error', errorMessage: message });
+    const failDownload = useCallback((transferId: string, message: string, errorCode?: number) => {
+        if (!settleTransfer(transferId, { status: 'error', errorMessage: message, errorCode })) {
+            return;
+        }
         sendControlBestEffort({ type: 'transfer_cancel', transfer_id: transferId });
-        void cleanupDownload(transferId);
-        removeTransferAfterDelay(transferId);
-    }, [updateTransfer, sendControlBestEffort, cleanupDownload, removeTransferAfterDelay]);
+    }, [settleTransfer, sendControlBestEffort]);
 
     const handleControlMessage = useCallback(async (msg: FileTransferMessage) => {
+        // Every inbound message names a transfer. Only ones this tab started
+        // and has not settled are acted on: a reply for anything else would
+        // build state for a transfer nobody is waiting on, which is how a
+        // timed-out row used to come back to life as `transferring`.
+        if (!activeTransfers.current.touch(msg.transfer_id)) return;
         switch (msg.type) {
             case 'download_response': {
                 const resp = msg as DownloadResponse;
@@ -233,12 +286,10 @@ export function useFileTransfer(deskId: string | undefined) {
                     // The host normally refuses via `transfer_error`, not
                     // `accepted:false`; this branch is kept for protocol
                     // completeness.
-                    acceptGate.current.reject(resp.transfer_id, resp.message || 'Upload rejected');
-                    updateTransfer(resp.transfer_id, {
+                    settleTransfer(resp.transfer_id, {
                         status: 'error',
                         errorMessage: resp.message || 'Upload rejected',
                     });
-                    removeTransferAfterDelay(resp.transfer_id);
                 }
                 break;
             }
@@ -255,32 +306,24 @@ export function useFileTransfer(deskId: string | undefined) {
                         failDownload(complete.transfer_id, e instanceof Error ? e.message : 'Save failed');
                         break;
                     }
+                    // The sink is already closed; drop it before settling so
+                    // the shared cleanup does not abort a finalized stream.
                     downloadSinks.current.delete(complete.transfer_id);
-                    downloadMetas.current.delete(complete.transfer_id);
                 }
-                updateTransfer(complete.transfer_id, {
-                    status: 'completed',
-                    progress: 100,
-                });
-                removeTransferAfterDelay(complete.transfer_id, 60000);
+                settleTransfer(complete.transfer_id, { status: 'completed' });
                 break;
             }
             case 'transfer_error': {
                 const error = msg as TransferError;
-                // Wake an upload still waiting for acceptance, and stop
-                // one that has already started streaming chunks.
-                acceptGate.current.reject(error.transfer_id, error.message);
-                cancelledTransfers.current.add(error.transfer_id);
-                void cleanupDownload(error.transfer_id);
-                updateTransfer(error.transfer_id, {
+                settleTransfer(error.transfer_id, {
                     status: 'error',
                     errorMessage: error.message,
+                    errorCode: error.error_code,
                 });
-                removeTransferAfterDelay(error.transfer_id);
                 break;
             }
         }
-    }, [updateTransfer, removeTransferAfterDelay, failDownload, cleanupDownload]);
+    }, [updateTransfer, settleTransfer, failDownload]);
 
     // Handle incoming DataChannel messages
     const setupDataChannelHandlers = useCallback((dc: RTCDataChannel) => {
@@ -305,6 +348,7 @@ export function useFileTransfer(deskId: string | undefined) {
                 const parsed = parseBinaryChunk(event.data);
                 if (!parsed) return;
 
+                if (!activeTransfers.current.touch(parsed.transferId)) return;
                 const meta = downloadMetas.current.get(parsed.transferId);
                 const sink = downloadSinks.current.get(parsed.transferId);
                 if (!meta || !sink) return;
@@ -586,6 +630,17 @@ export function useFileTransfer(deskId: string | undefined) {
 
     // Close WebRTC and WebSocket connections
     const closeConnection = useCallback(() => {
+        // End every transfer still in flight. Without this the connection went
+        // away while their sinks stayed open, their watchdogs stayed armed and
+        // their rows stayed on screen mid-progress.
+        for (const transferId of activeTransfers.current.settleAll()) {
+            void cleanupDownload(transferId);
+            updateTransfer(transferId, {
+                status: 'error',
+                errorMessage: 'File manager connection closed',
+            });
+            removeTransferAfterDelay(transferId);
+        }
         // Wake every pending upload waiter before tearing down.
         acceptGate.current.rejectAll('Connection closed');
         for (const pending of pendingRequests.current.values()) {
@@ -641,6 +696,7 @@ export function useFileTransfer(deskId: string | undefined) {
         }
 
         // Add transfer to list
+        activeTransfers.current.start(transferId);
         setTransfers(prev => [...prev, {
             transferId,
             fileName,
@@ -663,21 +719,29 @@ export function useFileTransfer(deskId: string | undefined) {
             };
             dc.send(JSON.stringify(request));
             updateTransfer(transferId, { status: 'transferring' });
+            // Nothing in the protocol announces a host that refuses the
+            // request, answers and then stops sending, or stalls mid-file.
+            // From here on, silence itself ends the transfer.
+            activeTransfers.current.watch(transferId, () => {
+                failDownload(
+                    transferId,
+                    'The host stopped responding',
+                    deskErrorCodeEnum.TIMEOUT,
+                );
+            });
         } catch (err) {
-            // Release the streaming writable we opened up-front.
-            void cleanupDownload(transferId);
-            updateTransfer(transferId, {
+            settleTransfer(transferId, {
                 status: 'error',
                 errorMessage: err instanceof Error ? err.message : 'Connection failed',
             });
-            removeTransferAfterDelay(transferId);
         }
-    }, [ensureConnection, updateTransfer, removeTransferAfterDelay, cleanupDownload]);
+    }, [ensureConnection, updateTransfer, settleTransfer, failDownload]);
 
     // Upload a file
     const uploadFile = useCallback(async (targetDir: string, file: File) => {
         const transferId = uuidv4();
 
+        activeTransfers.current.start(transferId);
         setTransfers(prev => [...prev, {
             transferId,
             fileName: file.name,
@@ -722,8 +786,10 @@ export function useFileTransfer(deskId: string | undefined) {
 
             while (true) {
                 // Check if this upload has been cancelled
-                if (cancelledTransfers.current.has(transferId)) {
-                    cancelledTransfers.current.delete(transferId);
+                // Leaving the registry is what cancellation means: whoever
+                // ended this transfer — the user, the host, a disconnect —
+                // settled it there.
+                if (!activeTransfers.current.isActive(transferId)) {
                     reader.cancel();
                     return;
                 }
@@ -748,8 +814,7 @@ export function useFileTransfer(deskId: string | undefined) {
                 let offset = 0;
                 while (offset + chunkSize <= combined.length) {
                     // Check cancellation before each chunk send
-                    if (cancelledTransfers.current.has(transferId)) {
-                        cancelledTransfers.current.delete(transferId);
+                    if (!activeTransfers.current.isActive(transferId)) {
                         reader.cancel();
                         return;
                     }
@@ -802,52 +867,39 @@ export function useFileTransfer(deskId: string | undefined) {
             };
             dc.send(JSON.stringify(complete));
 
+            // Sending the last chunk is not the same as the host having kept
+            // the file: it still verifies the byte count and can answer
+            // `transfer_error`. Show success, but stay registered so that
+            // verdict is not discarded as an unknown id — and let silence
+            // release the entry if the host never answers at all.
             updateTransfer(transferId, {
                 status: 'completed',
                 progress: 100,
                 transferredBytes: file.size,
             });
             removeTransferAfterDelay(transferId, 60000);
+            activeTransfers.current.watch(transferId, () => {});
 
         } catch (err) {
-            acceptGate.current.clear(transferId);
-            updateTransfer(transferId, {
+            settleTransfer(transferId, {
                 status: 'error',
                 errorMessage: err instanceof Error ? err.message : 'Upload failed',
             });
-            removeTransferAfterDelay(transferId);
         }
-    }, [ensureConnection, updateTransfer, computeSpeedInfo, removeTransferAfterDelay]);
+    }, [ensureConnection, updateTransfer, computeSpeedInfo, removeTransferAfterDelay, settleTransfer]);
 
     // Cancel an active transfer (download or upload)
     const cancelTransfer = useCallback((transferId: string) => {
         // Send cancel message to server
         sendControlBestEffort({ type: 'transfer_cancel', transfer_id: transferId });
-
-        // Stop an in-flight upload loop and wake one still awaiting accept.
-        cancelledTransfers.current.add(transferId);
-        acceptGate.current.reject(transferId, 'Cancelled');
-
-        // Release any download sink / local state.
-        void cleanupDownload(transferId);
-
-        // Update UI
-        updateTransfer(transferId, {
-            status: 'error',
-            errorMessage: 'Cancelled',
-        });
-        removeTransferAfterDelay(transferId, 60000);
-    }, [updateTransfer, removeTransferAfterDelay, sendControlBestEffort, cleanupDownload]);
+        settleTransfer(transferId, { status: 'error', errorMessage: 'Cancelled' });
+    }, [sendControlBestEffort, settleTransfer]);
 
     // Manually remove a transfer from the list
     const removeTransfer = useCallback((transferId: string) => {
+        settleTransfer(transferId);
         setTransfers(prev => prev.filter(t => t.transferId !== transferId));
-        // Release any open download sink / writable and wake an upload
-        // still waiting on the gate.
-        cancelledTransfers.current.add(transferId);
-        acceptGate.current.reject(transferId, 'Removed');
-        void cleanupDownload(transferId);
-    }, [cleanupDownload]);
+    }, [settleTransfer]);
 
     return {
         transfers,
