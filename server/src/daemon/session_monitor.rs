@@ -150,7 +150,7 @@ pub fn get_active_session_id() -> u32 {
                 session.State
             );
             if session.State == WTSActive && session.SessionId != 0 {
-                // Session 0 是系统服务 Session，跳过
+                // Session 0 hosts system services, never a user desktop.
                 active_session_id = Some(session.SessionId);
                 break;
             }

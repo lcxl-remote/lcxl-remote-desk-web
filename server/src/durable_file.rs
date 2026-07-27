@@ -28,6 +28,13 @@ pub enum FileMode {
     /// different users read the same file: a host writing its configuration as
     /// SYSTEM / root must not narrow it out of reach of a later run as the
     /// desktop user.
+    ///
+    /// Permissions only. Ownership follows whoever wrote the replacement, which
+    /// an in-place write would have left alone — so on unix a privileged writer
+    /// takes over a file a less privileged one created, and a mode that only
+    /// granted the owner would stop reaching them. That is not a case this host
+    /// has: the two identities only diverge under the Windows service, and
+    /// `ReplaceFileW` carries the target's ACL across on its own.
     Preserve,
 }
 

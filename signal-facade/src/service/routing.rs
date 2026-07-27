@@ -120,7 +120,7 @@ pub fn classify_unmatched_forward(
     }
 }
 
-// ====== 通用工具函数 ======
+// ====== Shared helpers ======
 
 pub fn parse_ip_from_peer_addr(addr: &str) -> Option<IpAddr> {
     if let Ok(sock) = addr.parse::<SocketAddr>() {

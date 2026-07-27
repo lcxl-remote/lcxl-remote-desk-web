@@ -974,11 +974,13 @@ impl WorkerSession {
                                             instance_id, display_name,
                                         );
                                         // Log the full GDI layout right after a
-                                        // new IDD
-                                        // monitor attaches, so we can see if
-                                        // Windows put it at primary by
-                                        // default (the suspected cause of
-                                        // "虚拟屏排第一 / Tauri 弹窗跑到虚拟屏").
+                                        // new IDD monitor attaches, so it is
+                                        // visible whether Windows made it the
+                                        // primary by default — the suspected
+                                        // reason the virtual display sorts
+                                        // first and the Tauri prompt opens on
+                                        // it instead of the screen the local
+                                        // user is watching.
                                         desk_virtual_display::log_active_displays_for_diagnostics(
                                             &format!("post-attach virtual={display_name}")
                                         );

@@ -1261,9 +1261,10 @@ impl HostControlHub {
 
     /// Forwarder-only: spawn a task that watches the upstream connection-state
     /// and denies every locally-held pending oneshot whenever the upstream link
-    /// transitions from connected → disconnected. Critical for plan section
-    /// "阶段 6 链路异常兜底" — without this, ws drops would leave business code
-    /// blocked on `request_approval` until the next reconnect.
+    /// transitions from connected → disconnected. Without it a dropped websocket
+    /// leaves business code blocked on `request_approval` until the next
+    /// reconnect — the prompt it is waiting for went to a peer that is no longer
+    /// there, so nothing would ever answer it.
     fn spawn_forwarder_disconnect_watcher(&self) {
         let Some(upstream) = self.inner.upstream.clone() else {
             return;
