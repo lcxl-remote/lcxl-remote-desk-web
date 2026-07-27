@@ -18,6 +18,7 @@ The frontend client (`vite-project/src/services/`) is generated from the OpenAPI
 
 ```bash
 cd vite-project
+npm ci        # installs the exact Kubb version the lockfile pins
 # Windows:
 .\update_openapi.ps1
 # Linux/macOS:
@@ -26,6 +27,18 @@ cd vite-project
 
 The scripts use the `dump-openapi` subcommand to export the spec from the route registration offline — no DB / Redis / HTTP needed. The spec is passed to Kubb through a temporary file and deleted afterward; generated `openapi.json` files are not tracked in the repository.
 
+Kubb is pinned to an exact version and invoked as `npx --no-install`, so the generator can neither drift across patch releases nor be silently downloaded when dependencies are missing — the committed client stays reproducible from the lockfile. Run `npm ci` first if the regeneration fails to find Kubb.
+
 ::: tip
 Generated files under `vite-project/src/services/` are produced by Kubb — do not edit them by hand.
 :::
+
+::: warning Regeneration is not optional
+`npm run build` only runs tsc and vite; it never regenerates the client. A backend change that alters the spec therefore leaves a stale client that still compiles — and a changed numeric value produces no error at all, it just keeps being sent. CI regenerates on every push and fails if the result differs from what is committed.
+:::
+
+## Error Codes
+
+`DeskErrorCode` (`utils/src/error.rs`) is declared through the `desk_error_codes!` macro, which emits both the constants and an `ALL` name/value table. That table is published in the spec as an int32 enum carrying `x-enum-varnames`, so the generated client exposes `deskErrorCodeEnum` with named members — frontends branch on those instead of mirroring the numbers by hand.
+
+Nothing references the type in a request or response body (`RestResponse.code` is a bare integer on the wire), so it reaches the spec only through the explicit registration in `server/src/openapi.rs`. Adding a code means adding one line to the macro and regenerating.

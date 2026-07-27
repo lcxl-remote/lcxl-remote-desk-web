@@ -34,6 +34,13 @@ cd vite-project && npm run build                       # 类型检查 + 构建
 # (脚本把离线 spec 写入系统临时文件，交给 Kubb 后自动删除；仓库不跟踪 openapi.json)
 ```
 
+### 前端客户端生成 (Kubb) 的硬性约定
+
+- **kubb 在 `vite-project/package.json` 里精确钉死（不是 caret）**：生成的 client 是 committed 的，换个 patch 版本就会重排 import、增删 per-tag 的 barrel `index.ts`，把上百个文件标成 modified。升级 kubb = 改版本 + 重新生成 + 目视确认 diff 只是格式化差异，作为独立提交。
+- 脚本用 `npx --no-install kubb generate`：依赖没装好时直接失败，而不是让 npx 下载一个没被钉死的生成器。所以 regen 前先 `cd vite-project && npm ci`。
+- **`.gitea/workflows/openapi-client.yaml` 会重新生成并断言工作树干净**。改了 API 却忘记 regen 时，这是唯一会报错的地方 —— `npm run build` 只跑 tsc + vite，不会重新生成，而一个改掉的数值能一路静默地继续发出去。该 workflow 刻意不设 path filter，并覆盖 `tags: ['v*']`（release 由 tag 直接触发且只 build 不 regen）。
+- **错误码走 OpenAPI，不要手写数值镜像**：`DeskErrorCode`（`utils/src/error.rs`）由 `desk_error_codes!` 宏统一声明，宏同时产出 `ALL` 名值表，再导出成带 `x-enum-varnames` 的 int32 enum，并在 `server/src/openapi.rs` 的 `ExtraSchemas` 注册（该类型不被任何 body 引用，只靠这一处显式注册才会进 spec）。前端用生成的 `deskErrorCodeEnum` 常量。新增错误码 = 在宏清单里加一行 + regen。
+
 ### Linux 系统依赖
 
 ```bash

@@ -18,6 +18,7 @@ cargo run -p lcxl-remote-desk-server -- dump-openapi --out openapi.json
 
 ```bash
 cd vite-project
+npm ci        # 装上 lockfile 钉死的那个 Kubb 版本
 # Windows:
 .\update_openapi.ps1
 # Linux/macOS:
@@ -26,6 +27,18 @@ cd vite-project
 
 脚本走 `dump-openapi` 子命令，从路由注册离线导出规范——不连 DB / Redis / HTTP。规范通过临时文件交给 Kubb，生成结束后自动删除；仓库不再跟踪生成的 `openapi.json`。
 
+Kubb 的版本被精确钉死，且以 `npx --no-install` 调用，因此生成器既不会跨 patch 版本漂移，也不会在依赖缺失时被悄悄下载——committed 的客户端始终能从 lockfile 复现。若重新生成时提示找不到 Kubb，先跑 `npm ci`。
+
 ::: tip
 `vite-project/src/services/` 下的文件由 Kubb 生成——请勿手动修改。
 :::
+
+::: warning 重新生成不是可选步骤
+`npm run build` 只跑 tsc 和 vite，从不重新生成客户端。所以后端改动了规范之后，陈旧的客户端照样能编译通过——而一个改掉的数值根本不会报错，只会继续被发出去。CI 每次 push 都会重新生成，并在结果与 committed 版本不一致时失败。
+:::
+
+## 错误码
+
+`DeskErrorCode`（`utils/src/error.rs`）由 `desk_error_codes!` 宏统一声明，宏同时产出常量与 `ALL` 名值表。该表以带 `x-enum-varnames` 的 int32 enum 形式发布进规范，于是生成的客户端提供具名成员 `deskErrorCodeEnum`——前端据此分支，不必再手写数值镜像。
+
+该类型不被任何请求 / 响应体引用（`RestResponse.code` 在 wire 上就是一个裸整数），只有 `server/src/openapi.rs` 里的显式注册才能让它进入规范。新增错误码 = 在宏清单里加一行 + 重新生成。
