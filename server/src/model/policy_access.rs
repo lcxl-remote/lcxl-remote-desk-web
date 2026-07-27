@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use desk_ipc_protocol::message::{RememberSecurityDecisionPayload, WorkerToService};
+use desk_signal_facade::model::policy_snapshot::CapabilityState;
 use desk_signal_facade::model::security_settings::{SecurityPermissionType, SecuritySettings};
 use tokio::sync::mpsc;
 
@@ -102,19 +103,19 @@ impl PolicyAccess {
         (Self::mirrored(Arc::clone(&mirror), tx), mirror, rx)
     }
 
-    /// The host global for one capability, before any per-connection ceiling.
-    pub fn permission(&self, capability: SecurityPermissionType) -> Option<bool> {
+    /// The host global for one capability, before any per-connection ceiling,
+    /// together with the stamp that value carries.
+    ///
+    /// There is deliberately no way to ask for one without the other. A gate
+    /// that read the setting, waited, and then read the stamp would decide from
+    /// a policy that no longer exists and file the answer under the one that
+    /// replaced it: an operator's fresh "always deny" would be prompted past,
+    /// and a remembered approval would pass the upstream compare-and-set that
+    /// exists precisely to reject it.
+    pub fn capability(&self, capability: SecurityPermissionType) -> CapabilityState {
         match &self.role {
-            PolicyRole::Authoritative(coordinator) => coordinator.permission(capability),
-            PolicyRole::Mirrored { mirror, .. } => mirror.permission(capability),
-        }
-    }
-
-    /// The stamp a decision about this capability should be cached under.
-    pub fn changed_at(&self, capability: SecurityPermissionType) -> u64 {
-        match &self.role {
-            PolicyRole::Authoritative(coordinator) => coordinator.changed_at(capability),
-            PolicyRole::Mirrored { mirror, .. } => mirror.changed_at(capability),
+            PolicyRole::Authoritative(coordinator) => coordinator.capability(capability),
+            PolicyRole::Mirrored { mirror, .. } => mirror.capability(capability),
         }
     }
 
@@ -219,11 +220,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            access.permission(SecurityPermissionType::Terminal),
+            access
+                .capability(SecurityPermissionType::Terminal)
+                .permission,
             Some(false)
         );
         assert_eq!(
-            access.changed_at(SecurityPermissionType::Terminal),
+            access
+                .capability(SecurityPermissionType::Terminal)
+                .generation,
             coordinator.seq()
         );
     }
@@ -236,14 +241,21 @@ mod tests {
         )));
         let (tx, _rx) = mpsc::unbounded_channel();
         let access = PolicyAccess::mirrored(Arc::clone(&mirror), tx);
-        assert_eq!(access.permission(SecurityPermissionType::Whiteboard), None);
+        assert_eq!(
+            access
+                .capability(SecurityPermissionType::Whiteboard)
+                .permission,
+            None
+        );
 
         let mut published = PolicySnapshot::new(SecuritySettings::default());
         published.set_capability(SecurityPermissionType::Whiteboard, Some(false));
         mirror.apply(published);
 
         assert_eq!(
-            access.permission(SecurityPermissionType::Whiteboard),
+            access
+                .capability(SecurityPermissionType::Whiteboard)
+                .permission,
             Some(false)
         );
     }
@@ -279,7 +291,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let coordinator = coordinator_at(&dir.path().join("config"));
         let access = PolicyAccess::authoritative(Arc::clone(&coordinator));
-        let generation = access.changed_at(SecurityPermissionType::ClipboardSync);
+        let generation = access
+            .capability(SecurityPermissionType::ClipboardSync)
+            .generation;
 
         access
             .remember(SecurityPermissionType::ClipboardSync, true, generation)

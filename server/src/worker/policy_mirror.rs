@@ -15,7 +15,7 @@
 use std::sync::RwLock;
 
 use desk_ipc_protocol::message::PolicyApplyOutcome;
-use desk_signal_facade::model::policy_snapshot::PolicySnapshot;
+use desk_signal_facade::model::policy_snapshot::{CapabilityState, PolicySnapshot};
 use desk_signal_facade::model::security_settings::{SecurityPermissionType, SecuritySettings};
 
 use crate::model::security_approval::meet_permission;
@@ -51,19 +51,19 @@ impl PolicyMirror {
         self.state.read().expect("policy mirror").held.clone()
     }
 
-    /// The configured value of one capability.
-    pub fn permission(&self, capability: SecurityPermissionType) -> Option<bool> {
-        capability.read(self.state.read().expect("policy mirror").held.security())
-    }
-
-    /// When the capability last changed. A decision cached at an earlier
-    /// sequence predates the current policy and has to be taken again.
-    pub fn changed_at(&self, capability: SecurityPermissionType) -> u64 {
+    /// One capability's setting and its stamp, taken under a single read so an
+    /// arriving policy cannot land between them.
+    pub fn capability(&self, capability: SecurityPermissionType) -> CapabilityState {
         self.state
             .read()
             .expect("policy mirror")
             .held
-            .changed_at(capability)
+            .capability(capability)
+    }
+
+    /// The configured value of one capability.
+    pub fn permission(&self, capability: SecurityPermissionType) -> Option<bool> {
+        self.capability(capability).permission
     }
 
     pub fn security(&self) -> SecuritySettings {
@@ -272,6 +272,71 @@ mod tests {
             mirror.permission(SecurityPermissionType::Terminal),
             Some(true)
         );
+    }
+
+    /// A capability's value and the stamp it carries have to describe one
+    /// policy. Read separately, a gate can hold the setting from before a change
+    /// and the stamp from after it — and then decide from a permission the
+    /// operator has revoked while filing the answer under the revocation, which
+    /// is exactly what makes the answer look current and pass the host's
+    /// compare-and-set. The mirror is written from the transport reader task and
+    /// read from the gates, so the two really do run at once.
+    #[test]
+    fn a_capability_and_its_stamp_are_read_from_the_same_policy() {
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let mirror = Arc::new(PolicyMirror::new(policy(terminal(None))));
+        // What each stamp means, recorded before it can be observed.
+        let published: Arc<Mutex<HashMap<u64, Option<bool>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        {
+            let held = mirror.snapshot();
+            published
+                .lock()
+                .unwrap()
+                .insert(held.changed_at(SecurityPermissionType::Terminal), None);
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let writer = {
+            let (mirror, published, stop) = (
+                Arc::clone(&mirror),
+                Arc::clone(&published),
+                Arc::clone(&stop),
+            );
+            std::thread::spawn(move || {
+                let mut next = policy(terminal(None));
+                for round in 0..60_000u32 {
+                    let value = Some(round.is_multiple_of(2));
+                    next.set(terminal(value));
+                    published
+                        .lock()
+                        .unwrap()
+                        .insert(next.changed_at(SecurityPermissionType::Terminal), value);
+                    mirror.apply(next.clone());
+                }
+                stop.store(true, Ordering::Release);
+            })
+        };
+
+        let mut observed = 0u32;
+        while !stop.load(Ordering::Acquire) {
+            let state = mirror.capability(SecurityPermissionType::Terminal);
+            let expected = published.lock().unwrap().get(&state.generation).copied();
+            assert_eq!(
+                expected,
+                Some(state.permission),
+                "stamp {} was published as {:?} but read alongside {:?}",
+                state.generation,
+                expected,
+                state.permission
+            );
+            observed += 1;
+        }
+        writer.join().unwrap();
+        assert!(observed > 0, "the reader never got to look");
     }
 
     /// A contradiction on one capability must not drag the others down with it.

@@ -356,11 +356,14 @@ impl DeskSession {
     /// Resolve and cache FileBrowse for one controller connection.
     pub async fn file_browse_permission(&mut self, connection_id: &str) -> bool {
         let capability = SecurityPermissionType::FileBrowse;
-        let generation = self.policy.changed_at(capability);
         let ceiling = self.connection_ceilings.get(connection_id).await;
+        // Value and stamp from one read: a decision taken from the old setting
+        // must not be cached — or remembered — under the one that replaced it.
+        let state = self.policy.capability(capability);
+        let generation = state.generation;
         let effective = crate::model::security_approval::effective_permission(
             ceiling.as_ref(),
-            self.policy.permission(capability),
+            state.permission,
             |settings| settings.allow_file_browse,
         );
         if effective == Some(false) {
@@ -378,6 +381,7 @@ impl DeskSession {
             &self.policy,
             &self.host_control_hub,
             effective,
+            generation,
             capability,
             Some(connection_id.to_string()),
             ceiling.is_some(),
@@ -400,11 +404,12 @@ impl DeskSession {
     /// Resolve and cache FileDelete for one controller connection.
     pub async fn file_delete_permission(&mut self, connection_id: &str) -> bool {
         let capability = SecurityPermissionType::FileDelete;
-        let generation = self.policy.changed_at(capability);
         let ceiling = self.connection_ceilings.get(connection_id).await;
+        let state = self.policy.capability(capability);
+        let generation = state.generation;
         let effective = crate::model::security_approval::effective_permission(
             ceiling.as_ref(),
-            self.policy.permission(capability),
+            state.permission,
             |settings| settings.allow_file_delete,
         );
         if effective == Some(false) {
@@ -420,6 +425,7 @@ impl DeskSession {
             &self.policy,
             &self.host_control_hub,
             effective,
+            generation,
             capability,
             Some(connection_id.to_string()),
             ceiling.is_some(),
@@ -527,13 +533,15 @@ impl DeskSession {
                     signaling_model.get_data_with_type::<EnablePrivateScreenData>()?
                 {
                     if data.enable {
-                        let global_private_screen = self
+                        let private_screen = self
                             .policy
-                            .permission(SecurityPermissionType::PrivateScreen);
+                            .capability(SecurityPermissionType::PrivateScreen);
                         let allow_private_screen = self
-                            .effective_permission(from_connection_id, global_private_screen, |c| {
-                                c.allow_private_screen
-                            })
+                            .effective_permission(
+                                from_connection_id,
+                                private_screen.permission,
+                                |c| c.allow_private_screen,
+                            )
                             .await;
                         // A capped grant / code-session (it has a per-connection
                         // ceiling) must not persist its prompt to the host global.
@@ -546,6 +554,7 @@ impl DeskSession {
                             &self.policy,
                             &self.host_control_hub,
                             allow_private_screen,
+                            private_screen.generation,
                             SecurityPermissionType::PrivateScreen,
                             Some(from_connection_id.to_string()),
                             suppress_remember,

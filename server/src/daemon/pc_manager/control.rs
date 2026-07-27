@@ -93,16 +93,15 @@ pub async fn handle_require_control(
         .await
         .access_ceiling
         .clone();
-    let allow_control = effective_permission(
-        access_ceiling.as_ref(),
-        policy.permission(SecurityPermissionType::RemoteControl),
-        |c| c.allow_remote_control,
-    );
-    let allow_clipboard = effective_permission(
-        access_ceiling.as_ref(),
-        policy.permission(SecurityPermissionType::ClipboardSync),
-        |c| c.allow_clipboard_sync,
-    );
+    // Each capability is read where it is decided, not once up front. Control is
+    // settled first and its prompt can stand for as long as the host's approval
+    // timeout allows, which is ample room for the operator to change what
+    // clipboard sync is set to; a value read before that wait would decide the
+    // clipboard question against a policy that no longer exists.
+    let control = policy.capability(SecurityPermissionType::RemoteControl);
+    let allow_control = effective_permission(access_ceiling.as_ref(), control.permission, |c| {
+        c.allow_remote_control
+    });
 
     let control_approved =
         if should_short_circuit_control(control_data.accept, currently_has_control) {
@@ -115,6 +114,7 @@ pub async fn handle_require_control(
                 policy,
                 host_control_hub,
                 allow_control,
+                control.generation,
                 SecurityPermissionType::RemoteControl,
                 Some(from_connection_id.to_string()),
                 // Capped grant / code-session: honor the prompt but never widen the
@@ -161,10 +161,16 @@ pub async fn handle_require_control(
         );
         true
     } else {
+        let clipboard = policy.capability(SecurityPermissionType::ClipboardSync);
+        let allow_clipboard =
+            effective_permission(access_ceiling.as_ref(), clipboard.permission, |c| {
+                c.allow_clipboard_sync
+            });
         check_security_permission(
             policy,
             host_control_hub,
             allow_clipboard,
+            clipboard.generation,
             SecurityPermissionType::ClipboardSync,
             Some(from_connection_id.to_string()),
             access_ceiling.is_some(),

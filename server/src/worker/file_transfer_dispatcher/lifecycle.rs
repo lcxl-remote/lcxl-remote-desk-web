@@ -86,8 +86,8 @@ impl FileTransferDispatcher {
     /// capability — so the user answers once and both callers receive it.
     async fn permission_for(&self, connection_id: &str) -> bool {
         let capability = SecurityPermissionType::FileTransfer;
-        let generation = self.policy.changed_at(capability);
         {
+            let generation = self.policy.capability(capability).generation;
             let inner = self.inner.lock().await;
             if let Some(cached) = inner.permission_cache.get(connection_id)
                 && cached.is_current(generation)
@@ -96,17 +96,21 @@ impl FileTransferDispatcher {
             }
         }
         // Meet the connection's grant ceiling with the global so a redeemed-grant
-        // session is capped; owner connections carry no ceiling.
+        // session is capped; owner connections carry no ceiling. The global and
+        // its stamp are read together, after the ceiling, so the answer is
+        // decided and filed under the same policy.
         let ceiling = self.connection_ceilings.get(connection_id).await;
+        let state = self.policy.capability(capability);
         let allow_transfer = crate::model::security_approval::effective_permission(
             ceiling.as_ref(),
-            self.policy.permission(capability),
+            state.permission,
             |c| c.allow_file_transfer,
         );
         let resolved = resolve_permission(
             &self.policy,
             &self.hub,
             allow_transfer,
+            state.generation,
             capability,
             Some(connection_id.to_string()),
             // Capped grant / code-session: honor the prompt but never persist it to
@@ -171,7 +175,7 @@ impl FileTransferDispatcher {
                 if let Some(state) = inner.upload_states.remove(&key) {
                     paths.push(state.file_path);
                 } else {
-                    inner.cancelled_transfers.insert(key.clone());
+                    inner.cancel_download(&key);
                 }
                 if inner.activities.remove(&key) {
                     finished.push(FileTransferFinishedPayload {
@@ -217,6 +221,7 @@ impl FileTransferDispatcher {
                 })
                 .collect::<Vec<_>>();
             inner.active_connections.clear();
+            inner.live_downloads.clear();
             inner.cancelled_transfers.clear();
             inner.permission_cache.clear();
             (paths, finished)
@@ -378,6 +383,38 @@ impl FileTransferDispatcher {
         .await;
     }
 
+    /// Tell the browser one transfer has ended, and why.
+    ///
+    /// The browser keeps a transfer on screen until it hears an ending. A host
+    /// that abandons one without saying so leaves it there until the watchdog
+    /// gives up, which turns a precise filesystem error into a generic timeout.
+    /// Emitting can itself fail when the lane is what broke — nothing more can
+    /// be done about that, and the browser's own transport timeout covers it.
+    pub(super) async fn fail_transfer(
+        &self,
+        connection_id: &str,
+        transfer_id: &str,
+        error_code: DeskErrorCode,
+        message: String,
+    ) {
+        if let Err(e) = self
+            .emit_text(
+                connection_id,
+                FileTransferMessage::TransferError(TransferError {
+                    transfer_id: transfer_id.to_string(),
+                    error_code,
+                    message,
+                }),
+            )
+            .await
+        {
+            debug!(
+                "[FileTransferDispatcher] {connection_id}: could not report the end of \
+                 {transfer_id}: {e}"
+            );
+        }
+    }
+
     /// Every transfer currently in flight on a connection.
     pub(super) async fn active_keys_for(&self, connection_id: &str) -> Vec<TransferKey> {
         self.inner
@@ -407,7 +444,7 @@ impl FileTransferDispatcher {
         {
             let mut inner = self.inner.lock().await;
             for key in &keys {
-                inner.cancelled_transfers.insert(key.clone());
+                inner.cancel_download(key);
             }
         }
         // For uploads: release the file handle and remove the partial

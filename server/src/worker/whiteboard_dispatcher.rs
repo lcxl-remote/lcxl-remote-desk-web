@@ -120,8 +120,8 @@ impl WhiteboardDispatcher {
     /// does not hold the `inner` mutex.
     async fn permission_for(&self, connection_id: &str) -> bool {
         let capability = SecurityPermissionType::Whiteboard;
-        let generation = self.policy.changed_at(capability);
         {
+            let generation = self.policy.capability(capability).generation;
             let inner = self.inner.lock().await;
             if let Some(cached) = inner.permission_cache.get(connection_id)
                 && cached.is_current(generation)
@@ -130,14 +130,16 @@ impl WhiteboardDispatcher {
             }
         }
         let ceiling = self.connection_ceilings.get(connection_id).await;
+        // Value and stamp together, after the ceiling: deciding from one policy
+        // and filing under another is what lets a revoked capability be granted.
+        let state = self.policy.capability(capability);
         let allow_whiteboard =
-            effective_permission(ceiling.as_ref(), self.policy.permission(capability), |c| {
-                c.allow_whiteboard
-            });
+            effective_permission(ceiling.as_ref(), state.permission, |c| c.allow_whiteboard);
         let resolved = resolve_permission(
             &self.policy,
             &self.hub,
             allow_whiteboard,
+            state.generation,
             capability,
             Some(connection_id.to_string()),
             // Capped grant / code-session: honor the prompt but never persist it to

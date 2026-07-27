@@ -15,7 +15,7 @@
 use std::sync::{OnceLock, RwLock as StdRwLock};
 
 use desk_ipc_protocol::message::{ServiceToWorker, SetLocalePayload};
-use desk_signal_facade::model::policy_snapshot::PolicySnapshot;
+use desk_signal_facade::model::policy_snapshot::{CapabilityState, PolicySnapshot};
 use desk_signal_facade::model::security_settings::{SecurityPermissionType, SecuritySettings};
 use desk_utils::error::DeskErrorCode;
 use tokio::sync::Mutex as TokioMutex;
@@ -135,15 +135,21 @@ impl SettingsCoordinator {
         self.policy.read().expect("settings coordinator").seq()
     }
 
-    pub fn permission(&self, capability: SecurityPermissionType) -> Option<bool> {
-        capability.read(self.policy.read().expect("settings coordinator").security())
-    }
-
-    pub fn changed_at(&self, capability: SecurityPermissionType) -> u64 {
+    /// One capability's setting and its stamp, taken under a single read so a
+    /// concurrent commit cannot land between them.
+    pub fn capability(&self, capability: SecurityPermissionType) -> CapabilityState {
         self.policy
             .read()
             .expect("settings coordinator")
-            .changed_at(capability)
+            .capability(capability)
+    }
+
+    pub fn permission(&self, capability: SecurityPermissionType) -> Option<bool> {
+        self.capability(capability).permission
+    }
+
+    pub fn changed_at(&self, capability: SecurityPermissionType) -> u64 {
+        self.capability(capability).generation
     }
 
     pub fn approval_timeout(&self) -> Option<u32> {

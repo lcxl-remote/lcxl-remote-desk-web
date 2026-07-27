@@ -126,11 +126,15 @@ pub async fn handle_manager_terminal_start(
 ) -> Result<(), DeskError> {
     let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
 
-    let global_terminal = desk_session
+    // Value and stamp together: the answer is filed under the same reading of
+    // the policy it was decided from.
+    let terminal = desk_session
         .policy
-        .permission(SecurityPermissionType::Terminal);
+        .capability(SecurityPermissionType::Terminal);
     let allow_terminal = desk_session
-        .effective_permission(from_connection_id, global_terminal, |c| c.allow_terminal)
+        .effective_permission(from_connection_id, terminal.permission, |c| {
+            c.allow_terminal
+        })
         .await;
     // Capped grant / code-session: honor the prompt but never persist it to the
     // owner's global allow_terminal.
@@ -143,6 +147,7 @@ pub async fn handle_manager_terminal_start(
         &desk_session.policy,
         &desk_session.host_control_hub,
         allow_terminal,
+        terminal.generation,
         SecurityPermissionType::Terminal,
         Some(from_connection_id.to_string()),
         suppress_remember,
@@ -409,16 +414,16 @@ pub async fn handle_list_terminals(
     // session whose ceiling denies (or does not grant) `terminal` must not be able
     // to enumerate open terminals. Gate on meet(ceiling.terminal, global);
     // connection-less (HTTP-API / owner) requests use the global verbatim.
-    let global_terminal = desk_session
+    let terminal = desk_session
         .policy
-        .permission(SecurityPermissionType::Terminal);
+        .capability(SecurityPermissionType::Terminal);
     let allow_terminal = match from_connection_id.as_deref() {
         Some(cid) => {
             desk_session
-                .effective_permission(cid, global_terminal, |c| c.allow_terminal)
+                .effective_permission(cid, terminal.permission, |c| c.allow_terminal)
                 .await
         }
-        None => global_terminal,
+        None => terminal.permission,
     };
     // Capped grant / code-session: honor the prompt but never persist it to the
     // owner's global allow_terminal. Connection-less (HTTP-API / owner) requests
@@ -431,6 +436,7 @@ pub async fn handle_list_terminals(
         &desk_session.policy,
         &desk_session.host_control_hub,
         allow_terminal,
+        terminal.generation,
         SecurityPermissionType::Terminal,
         from_connection_id.clone(),
         suppress_remember,

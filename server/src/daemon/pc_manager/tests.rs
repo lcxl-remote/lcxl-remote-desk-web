@@ -3696,6 +3696,9 @@ async fn tearing_down_a_connection_denies_its_pending_approval() {
                 &policy,
                 &hub,
                 None,
+                policy
+                    .capability(SecurityPermissionType::RemoteControl)
+                    .generation,
                 SecurityPermissionType::RemoteControl,
                 Some("conn-gone".to_string()),
                 false,

@@ -196,20 +196,26 @@ pub async fn decide_security_permission(
 
 /// Settle one permission request against the host policy.
 ///
-/// The single shape every gate uses: read the capability's stamp, decide,
-/// commit a remembered answer wherever this role commits it, and report whether
-/// the answer may be cached. A gate that caches under the returned stamp gets
-/// invalidation for free — the next read compares stamps and treats a change as
-/// a miss.
+/// The single shape every gate uses: decide, commit a remembered answer
+/// wherever this role commits it, and report whether the answer may be cached.
+/// A gate that caches under the returned stamp gets invalidation for free — the
+/// next read compares stamps and treats a change as a miss.
+///
+/// `permission` and `decided_at` must come from one [`PolicyAccess::capability`]
+/// read, `permission` narrowed by the connection's ceiling if it has one. The
+/// stamp is what the remembered answer is offered to the host under, so a stamp
+/// belonging to a different reading of the policy would let an answer taken
+/// before a change be committed as though it were taken after.
 pub async fn resolve_permission(
     policy: &PolicyAccess,
     hub: &Arc<HostControlHub>,
     permission: Option<bool>,
+    decided_at: u64,
     permission_type: SecurityPermissionType,
     from_connection_id: Option<String>,
     suppress_remember: bool,
 ) -> ResolvedPermission {
-    let generation = policy.changed_at(permission_type);
+    let generation = decided_at;
     let decision = decide_security_permission(
         policy,
         hub,
@@ -224,7 +230,7 @@ pub async fn resolve_permission(
             .remember(permission_type, decision.approved, generation)
             .await;
     }
-    let moved = policy.changed_at(permission_type) != generation;
+    let moved = policy.capability(permission_type).generation != generation;
     if moved {
         log::info!(
             "[security] {permission_type:?} changed while the user was answering; honoring the \
@@ -245,6 +251,7 @@ pub async fn check_security_permission(
     policy: &PolicyAccess,
     hub: &Arc<HostControlHub>,
     permission: Option<bool>,
+    decided_at: u64,
     permission_type: SecurityPermissionType,
     from_connection_id: Option<String>,
     suppress_remember: bool,
@@ -253,6 +260,7 @@ pub async fn check_security_permission(
         policy,
         hub,
         permission,
+        decided_at,
         permission_type,
         from_connection_id,
         suppress_remember,
@@ -392,6 +400,9 @@ mod tests {
                 &policy,
                 &hub,
                 Some(true),
+                policy
+                    .capability(SecurityPermissionType::RemoteControl)
+                    .generation,
                 SecurityPermissionType::RemoteControl,
                 None,
                 false,
@@ -413,6 +424,9 @@ mod tests {
                 &policy,
                 &hub,
                 Some(false),
+                policy
+                    .capability(SecurityPermissionType::RemoteControl)
+                    .generation,
                 SecurityPermissionType::RemoteControl,
                 None,
                 false,
@@ -437,11 +451,16 @@ mod tests {
             },
         );
 
-        let generation = policy.changed_at(SecurityPermissionType::Terminal);
+        let generation = policy
+            .capability(SecurityPermissionType::Terminal)
+            .generation;
         let approved = check_security_permission(
             &policy,
             &hub,
             None,
+            policy
+                .capability(SecurityPermissionType::Terminal)
+                .generation,
             SecurityPermissionType::Terminal,
             None,
             false,
@@ -474,6 +493,9 @@ mod tests {
             &policy,
             &hub,
             None,
+            policy
+                .capability(SecurityPermissionType::Terminal)
+                .generation,
             SecurityPermissionType::Terminal,
             None,
             true,
@@ -582,6 +604,9 @@ mod tests {
             &policy,
             &hub,
             None,
+            policy
+                .capability(SecurityPermissionType::FileBrowse)
+                .generation,
             SecurityPermissionType::FileBrowse,
             None,
             false,
@@ -605,7 +630,9 @@ mod tests {
                     remember: true,
                 },
             );
-            let _ = check_security_permission(&policy, &hub, None, *capability, None, false).await;
+            let stamp = policy.capability(*capability).generation;
+            let _ = check_security_permission(&policy, &hub, None, stamp, *capability, None, false)
+                .await;
             assert_eq!(
                 remembered(&mut rx),
                 Some((*capability, true, 0)),
@@ -657,6 +684,9 @@ mod tests {
             &policy,
             &hub,
             None,
+            policy
+                .capability(SecurityPermissionType::FileTransfer)
+                .generation,
             SecurityPermissionType::FileTransfer,
             Some("conn-1".to_string()),
             false,
@@ -688,6 +718,9 @@ mod tests {
             &policy,
             &hub,
             None,
+            policy
+                .capability(SecurityPermissionType::Whiteboard)
+                .generation,
             SecurityPermissionType::Whiteboard,
             Some("conn-1".to_string()),
             false,
@@ -697,7 +730,11 @@ mod tests {
         assert!(resolved.approved);
         assert_eq!(
             resolved.cacheable_at,
-            Some(policy.changed_at(SecurityPermissionType::Whiteboard))
+            Some(
+                policy
+                    .capability(SecurityPermissionType::Whiteboard)
+                    .generation
+            )
         );
     }
 
@@ -737,6 +774,9 @@ mod tests {
             &policy,
             &hub,
             None,
+            policy
+                .capability(SecurityPermissionType::FileBrowse)
+                .generation,
             SecurityPermissionType::FileBrowse,
             Some("conn-1".to_string()),
             false,
@@ -745,6 +785,9 @@ mod tests {
             &policy,
             &hub,
             None,
+            policy
+                .capability(SecurityPermissionType::FileBrowse)
+                .generation,
             SecurityPermissionType::FileBrowse,
             Some("conn-1".to_string()),
             false,
@@ -793,6 +836,9 @@ mod tests {
             &policy,
             &hub,
             None,
+            policy
+                .capability(SecurityPermissionType::FileBrowse)
+                .generation,
             SecurityPermissionType::FileBrowse,
             Some("conn-1".to_string()),
             false,
@@ -801,6 +847,9 @@ mod tests {
             &policy,
             &hub,
             None,
+            policy
+                .capability(SecurityPermissionType::FileBrowse)
+                .generation,
             SecurityPermissionType::FileBrowse,
             Some("conn-2".to_string()),
             false,

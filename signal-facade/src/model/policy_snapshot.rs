@@ -22,6 +22,18 @@ use wincode::{SchemaRead, SchemaWrite};
 
 use crate::model::security_settings::{SecurityPermissionType, SecuritySettings};
 
+/// What one capability is set to, and the stamp that setting carries.
+///
+/// The two travel together so a gate cannot end up holding one from before a
+/// policy change and the other from after it — see [`PolicySnapshot::capability`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityState {
+    /// The configured value: `Some(true)` allow, `Some(false)` deny, `None` ask.
+    pub permission: Option<bool>,
+    /// The sequence at which this capability last changed value.
+    pub generation: u64,
+}
+
 /// The sequence number at which each capability last changed value.
 ///
 /// Named fields rather than an array indexed by capability: an array silently
@@ -113,6 +125,20 @@ impl PolicySnapshot {
     /// policy and has to be decided again.
     pub fn changed_at(&self, capability: SecurityPermissionType) -> u64 {
         self.generations.of(capability)
+    }
+
+    /// One capability's setting together with the stamp it carries.
+    ///
+    /// The pair has to come from the same policy. A gate that read the value,
+    /// let the policy move, and then read the stamp would decide from the old
+    /// setting and file the answer under the new one — caching an approval the
+    /// operator has since revoked, and offering it to the upstream compare-and-
+    /// set as though it had been taken under the revocation.
+    pub fn capability(&self, capability: SecurityPermissionType) -> CapabilityState {
+        CapabilityState {
+            permission: capability.read(&self.security),
+            generation: self.generations.of(capability),
+        }
     }
 
     /// Adopt `security` as the policy.
