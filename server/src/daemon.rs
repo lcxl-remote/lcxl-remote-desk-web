@@ -72,6 +72,14 @@ pub async fn run_service_daemon_inner(
     let settings = Settings::new(&args).map_err(|e| format!("Failed to load settings: {e}"))?;
     let shared_settings = Arc::new(SharedSettings::from(settings.clone()));
     let shared_settings_data = web::Data::from(shared_settings.clone());
+    // The host's authoritative security policy and single durable commit path
+    // for it and the locale. Built before anything can change the settings.
+    let settings_coordinator = Arc::new(
+        crate::model::settings_coordinator::SettingsCoordinator::from_settings(
+            shared_settings.clone(),
+        )
+        .await,
+    );
 
     // Initialize telemetry for ServiceDaemon mode
     let _guard =
@@ -161,9 +169,11 @@ pub async fn run_service_daemon_inner(
         let link_state = Arc::clone(&manager_link_state);
         let support_state = Arc::clone(&support_link_state);
         let link_gate = Arc::clone(&manager_link_gate);
+        let coordinator = Arc::clone(&settings_coordinator);
         tokio::spawn(async move {
             if let Err(e) = local_api::run_local_api(
                 settings,
+                coordinator,
                 bridge,
                 hub,
                 link_state,
@@ -198,11 +208,12 @@ pub async fn run_service_daemon_inner(
     // same PCs).
     let pc_registry = PcRegistry::new();
     pc_registry.set_host_activity(host_control_hub.host_activity());
+    pc_registry.set_host_control_hub(&host_control_hub);
 
     let (worker_mgr, worker_rx) =
         worker_manager::WorkerManager::new(shared_settings_data.clone(), pc_registry.clone());
     worker_mgr.bind_remote_access_gate(host_control_hub.remote_access_gate());
-    let _ = host_control_hub.install_locale_worker_manager(worker_mgr.clone());
+    settings_coordinator.bind_worker_manager(worker_mgr.clone());
 
     // Allow the per-connection file-transfer writer task to push a
     // `FileTransferSendFailed` back to the worker on a daemon-side
@@ -282,9 +293,11 @@ pub async fn run_service_daemon_inner(
         let support_link_state = Arc::clone(&support_link_state);
         let manager_link_gate = Arc::clone(&manager_link_gate);
         let exec_ledger = exec_ledger.clone();
+        let coordinator = Arc::clone(&settings_coordinator);
         actix_web::rt::spawn(async move {
             if let Err(e) = signaling_proxy::run_signaling_proxy(
                 settings,
+                coordinator,
                 worker_mgr,
                 host_control_hub,
                 worker_rx,
@@ -437,9 +450,11 @@ async fn open_exec_ledger(
 ///   so there is nothing for the monitor to detect; and watchdog-driven
 ///   restarts would tear down the actix-rt System the same task is
 ///   running on.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_inprocess_daemon(
     args: crate::model::settings::Args,
     settings: web::Data<SharedSettings>,
+    settings_coordinator: Arc<crate::model::settings_coordinator::SettingsCoordinator>,
     host_control_hub: Arc<crate::host_control::HostControlHub>,
     own_turn_endpoints: crate::daemon::pc_manager::OwnTurnEndpoints,
     manager_link_state: Arc<crate::daemon::manager_link_state::ManagerLinkState>,
@@ -459,10 +474,11 @@ pub async fn start_inprocess_daemon(
     // never relays through itself, and follows the relay if it moves.
     let pc_registry = PcRegistry::new().with_own_turn_endpoints(own_turn_endpoints);
     pc_registry.set_host_activity(host_control_hub.host_activity());
+    pc_registry.set_host_control_hub(&host_control_hub);
     let (worker_mgr, worker_rx) =
         worker_manager::WorkerManager::new(settings.clone(), pc_registry.clone());
     worker_mgr.bind_remote_access_gate(host_control_hub.remote_access_gate());
-    let _ = host_control_hub.install_locale_worker_manager(worker_mgr.clone());
+    settings_coordinator.bind_worker_manager(worker_mgr.clone());
     if let Some(coordinator) = host_control_hub.remote_access_coordinator() {
         coordinator.attach_runtime(
             pc_registry.clone(),
@@ -504,6 +520,7 @@ pub async fn start_inprocess_daemon(
     actix_web::rt::spawn(async move {
         if let Err(e) = signaling_proxy::run_signaling_proxy(
             proxy_settings,
+            settings_coordinator,
             worker_mgr,
             proxy_hub,
             worker_rx,

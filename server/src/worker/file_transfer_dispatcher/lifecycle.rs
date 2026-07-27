@@ -3,7 +3,7 @@ use super::*;
 impl FileTransferDispatcher {
     pub fn new(
         file_sender: Arc<dyn EventSender<FileTransferPayload>>,
-        settings: Arc<SharedSettings>,
+        policy: Arc<PolicyAccess>,
         hub: Arc<HostControlHub>,
         connection_ceilings: ConnectionCeilingStore,
         activity_sender: mpsc::UnboundedSender<WorkerToService>,
@@ -11,7 +11,7 @@ impl FileTransferDispatcher {
         Self {
             inner: Arc::new(TokioMutex::new(DispatcherInner::new())),
             file_sender,
-            settings,
+            policy,
             hub,
             connection_ceilings,
             activity_sender,
@@ -76,49 +76,60 @@ impl FileTransferDispatcher {
 
     /// Resolve the `allow_file_transfer` decision for a connection.
     ///
-    /// Returns the cached value if a previous command on the same
-    /// connection already established one. Otherwise calls
-    /// [`check_security_permission`] (which prompts the user via Tauri
-    /// when the saved preference is `None`) and stores the result.
+    /// A cached answer is reused only while the capability it was decided under
+    /// is still the one in force; an operator changing `allow_file_transfer`
+    /// makes every cached answer a miss without anything having to reach in and
+    /// clear this map.
     ///
-    /// Race tolerance: two concurrent commands on a fresh connection
-    /// can both miss the cache and call into `check_security_permission`.
-    /// Tauri dedups identical pending requests by req-id, so the user
-    /// sees one prompt; the two callers receive the same answer and
-    /// race to write the same value into the cache. Either ordering
-    /// is correct.
+    /// Two concurrent commands on a fresh connection can both miss the cache.
+    /// They share one dialog — the hub keys in-flight prompts by connection and
+    /// capability — so the user answers once and both callers receive it.
     async fn permission_for(&self, connection_id: &str) -> bool {
+        let capability = SecurityPermissionType::FileTransfer;
+        let generation = self.policy.changed_at(capability);
         {
             let inner = self.inner.lock().await;
-            if let Some(&v) = inner.permission_cache.get(connection_id) {
-                return v;
+            if let Some(cached) = inner.permission_cache.get(connection_id)
+                && cached.is_current(generation)
+            {
+                return cached.approved;
             }
         }
-        let global_transfer = self.settings.read().await.security.allow_file_transfer;
         // Meet the connection's grant ceiling with the global so a redeemed-grant
         // session is capped; owner connections carry no ceiling.
         let ceiling = self.connection_ceilings.get(connection_id).await;
         let allow_transfer = crate::model::security_approval::effective_permission(
             ceiling.as_ref(),
-            global_transfer,
+            self.policy.permission(capability),
             |c| c.allow_file_transfer,
         );
-        let approved = check_security_permission(
-            &self.settings,
+        let resolved = resolve_permission(
+            &self.policy,
             &self.hub,
             allow_transfer,
-            SecurityPermissionType::FileTransfer,
+            capability,
             Some(connection_id.to_string()),
             // Capped grant / code-session: honor the prompt but never persist it to
             // the owner's global allow_file_transfer.
             ceiling.is_some(),
         )
         .await;
-        let mut inner = self.inner.lock().await;
-        inner
-            .permission_cache
-            .insert(connection_id.to_string(), approved);
-        approved
+        if let Some(decided_at) = resolved.cacheable_at {
+            let mut inner = self.inner.lock().await;
+            // The connection can end while the prompt is up, and `stop_connection`
+            // clears this cache. Writing the answer afterwards would leave an
+            // entry behind for a connection that is already gone.
+            if inner.active_connections.contains(connection_id) {
+                inner.permission_cache.insert(
+                    connection_id.to_string(),
+                    CachedDecision {
+                        approved: resolved.approved,
+                        decided_at,
+                    },
+                );
+            }
+        }
+        resolved.approved
     }
 
     /// Add a connection to the active set. Subsequent file-lane

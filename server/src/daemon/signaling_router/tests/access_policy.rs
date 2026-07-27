@@ -67,8 +67,6 @@ pub(super) fn classify_worker_owned_types() {
         SignalingType::ResizeTerminal,
         SignalingType::CloseTerminal,
         SignalingType::ListTerminal,
-        SignalingType::ManagerQuerySettings,
-        SignalingType::ManagerUpdateSettings,
         SignalingType::ChangeDisplaySettings,
         SignalingType::AgentRequest,
     ] {
@@ -76,6 +74,20 @@ pub(super) fn classify_worker_owned_types() {
             classify(t),
             RouteOwnership::Worker,
             "{t:?} should be worker-owned",
+        );
+    }
+
+    // The system settings plane moved to the daemon: it holds the values a
+    // change commits against, so reading or writing them anywhere else would
+    // report or overwrite a policy that has already moved.
+    for t in [
+        SignalingType::ManagerQuerySettings,
+        SignalingType::ManagerUpdateSettings,
+    ] {
+        assert_eq!(
+            classify(t),
+            RouteOwnership::Daemon,
+            "{t:?} should be daemon-owned",
         );
     }
 }

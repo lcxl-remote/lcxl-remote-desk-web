@@ -18,22 +18,55 @@ pub(super) async fn handle_manager_system_info_inbound(
     Ok(())
 }
 
+/// Report the host's system settings to a manager.
+///
+/// Answered here rather than in the worker: the daemon holds the settings a
+/// change is committed against, so reading them anywhere else would let a
+/// manager see values that were superseded before it asked.
 pub(super) async fn handle_manager_query_settings_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    let payload = ManagerRequestRefPayload {
-        request_id: model.request_id.clone(),
-        connection_id: optional_from_connection_id(model),
+    let remote_settings = {
+        let settings = ctx.settings.read().await;
+        RemoteSystemSettings {
+            enable_ipv6: settings.system.enable_ipv6,
+            port: settings.system.port,
+            listen_addr_ipv4: settings.system.listen_addr_ipv4.clone(),
+            listen_addr_ipv6: settings.system.listen_addr_ipv6.clone(),
+            locale: settings.system.locale.clone(),
+            signaling_url: settings.system.signaling_url.clone(),
+            signaling_token: settings.system.signaling_token.clone(),
+            manager_url: settings.system.manager_url.clone(),
+            auto_start: settings.system.auto_start,
+            manager_api_token: settings.system.manager_api_token.clone(),
+        }
     };
-    if let Err(e) = ctx
-        .worker_mgr
-        .send_to_worker(ServiceToWorker::ManagerQuerySettingsRequest(payload))
-        .await
-    {
-        log::warn!("[router] failed to send typed ManagerQuerySettingsRequest: {e}");
-    }
+    emit_success_response(ctx, model, Some(&remote_settings));
     Ok(())
+}
+
+/// Apply a manager-pushed `RemoteSystemSettings` onto the local `SystemSettings`.
+///
+/// `auto_start` is intentionally NOT copied: it is node-local OS state (a
+/// LaunchAgent on macOS, an OS-service / login entry elsewhere) and may only be
+/// changed via this node's own `/settings` endpoint, never pushed from a remote
+/// manager — otherwise a manager-wide settings update could silently toggle a
+/// host's unattended auto-start. The protocol field is left untouched; we simply
+/// don't act on it here.
+fn apply_remote_system_settings(
+    system: &mut crate::model::settings::SystemSettings,
+    remote: RemoteSystemSettings,
+) {
+    system.enable_ipv6 = remote.enable_ipv6;
+    system.port = remote.port;
+    system.listen_addr_ipv4 = remote.listen_addr_ipv4;
+    system.listen_addr_ipv6 = remote.listen_addr_ipv6;
+    system.locale = remote.locale;
+    system.signaling_url = remote.signaling_url;
+    system.signaling_token = remote.signaling_token;
+    system.manager_url = remote.manager_url;
+    system.manager_api_token = remote.manager_api_token;
 }
 
 pub(super) async fn handle_manager_file_list_inbound(
@@ -102,35 +135,74 @@ pub(super) async fn handle_manager_file_delete_inbound(
     Ok(())
 }
 
+/// Apply a manager's system-settings update.
+///
+/// One update can move the locale alongside ordinary fields, and they commit
+/// together: splitting them would put a second write between the two and leave
+/// a crash in the middle with half the change on disk. The manager is told
+/// which way it went — a parse failure and a failed write are different things
+/// to a caller deciding whether to retry, and silence would leave it guessing.
 pub(super) async fn handle_manager_update_settings_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
     let connection_id = optional_from_connection_id(model);
-    let settings = match model.get_data::<RemoteSystemSettings>() {
+    let remote = match model.get_data::<RemoteSystemSettings>() {
         Ok(s) => s,
         Err(e) => {
             log::warn!(
                 "[router] ManagerUpdateSettings payload parse failed for {connection_id:?}: \
-                 {e}; dropping (request_id={})",
+                 {e}; rejecting (request_id={})",
                 model.request_id,
+            );
+            emit_error_response(
+                ctx,
+                model,
+                DeskErrorCode::INVALID_PARAMS,
+                "unreadable system settings payload",
             );
             return Ok(());
         }
     };
-    let payload = ManagerUpdateSettingsRequestPayload {
-        request_id: model.request_id.clone(),
-        connection_id,
-        settings,
-    };
-    if let Err(e) = ctx
-        .worker_mgr
-        .send_to_worker(ServiceToWorker::ManagerUpdateSettingsRequest(payload))
+    match ctx
+        .settings_coordinator
+        .commit(move |settings| {
+            apply_remote_system_settings(&mut settings.system, remote);
+            Ok(())
+        })
         .await
     {
-        log::warn!("[router] failed to send typed ManagerUpdateSettingsRequest: {e}");
+        Ok(outcome) => {
+            if let Some(locale) = outcome.locale_changed_to {
+                announce_locale(ctx, &locale).await;
+            }
+            emit_success_response(ctx, model, Option::<&()>::None);
+        }
+        Err(error) => {
+            log::warn!(
+                "[router] ManagerUpdateSettings could not be applied for {connection_id:?}: \
+                 {error} (request_id={})",
+                model.request_id,
+            );
+            emit_error_response(
+                ctx,
+                model,
+                DeskErrorCode::SYSTEM_ERROR,
+                "failed to apply system settings",
+            );
+        }
     }
     Ok(())
+}
+
+/// Tell the local shell the host now runs in a different locale, so its own UI
+/// follows. The worker is told by the coordinator as part of the commit.
+async fn announce_locale(ctx: &RouterContext, locale: &str) {
+    let _ = ctx.host_control_hub.send_command(
+        crate::host_control::HostControlMessage::GlobalLocaleChanged {
+            locale: locale.to_string(),
+        },
+    );
 }
 
 // ---- Terminal-plane typed-IPC dispatch helpers ----

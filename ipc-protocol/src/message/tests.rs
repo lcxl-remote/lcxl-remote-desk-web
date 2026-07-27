@@ -6,7 +6,6 @@ use desk_signal_facade::model::private_screen::PrivateScreenStateChangedData;
 use desk_signal_facade::model::security_settings::{SecurityPermissionType, SecuritySettings};
 use desk_signal_facade::model::signal::SignalingType;
 use desk_signal_facade::model::system_info::SystemInfo;
-use desk_signal_facade::model::system_settings::RemoteSystemSettings;
 use desk_signal_facade::model::terminal::{
     StartTerminalSession, TerminalInputData, TerminalList, TerminalOutputData, TerminalResizeData,
 };
@@ -743,42 +742,6 @@ fn manager_file_list_request_round_trips_wincode() {
     }
 }
 
-/// `ManagerUpdateSettingsRequest` ferries `RemoteSystemSettings`
-/// over the wincode derive. Round-trip a
-/// non-default payload so a reorder/strip in the facade struct
-/// trips here rather than silently corrupting persisted settings.
-#[test]
-fn manager_update_settings_request_round_trips_wincode() {
-    let settings = RemoteSystemSettings {
-        enable_ipv6: true,
-        port: 8443,
-        listen_addr_ipv4: "0.0.0.0".to_string(),
-        listen_addr_ipv6: "::".to_string(),
-        locale: Some("zh-CN".to_string()),
-        signaling_url: Some("wss://signal.example".to_string()),
-        signaling_token: Some("tok".to_string()),
-        manager_url: Some("https://mgr.example".to_string()),
-        auto_start: Some(true),
-        manager_api_token: Some("mtok".to_string()),
-    };
-    let msg = ServiceToWorker::ManagerUpdateSettingsRequest(ManagerUpdateSettingsRequestPayload {
-        request_id: "req-upd".to_string(),
-        connection_id: Some("conn-upd".to_string()),
-        settings,
-    });
-    match wincode_round_trip(&msg) {
-        ServiceToWorker::ManagerUpdateSettingsRequest(p) => {
-            assert_eq!(p.request_id, "req-upd");
-            assert!(p.settings.enable_ipv6);
-            assert_eq!(p.settings.port, 8443);
-            assert_eq!(p.settings.locale.as_deref(), Some("zh-CN"));
-            assert_eq!(p.settings.auto_start, Some(true));
-            assert_eq!(p.settings.manager_api_token.as_deref(), Some("mtok"));
-        }
-        other => panic!("unexpected: {other:?}"),
-    }
-}
-
 /// Body-less manager response envelopes are distinct from request
 /// envelopes at the type level; round-trip pins the variant tag.
 #[test]
@@ -1176,16 +1139,8 @@ fn service_to_worker_all_variants_round_trip() {
             connection_id: "c".to_string(),
             request: DeleteFileRequest::default(),
         }),
-        ServiceToWorker::ManagerQuerySettingsRequest(ManagerRequestRefPayload {
-            request_id: "r4".to_string(),
-            connection_id: None,
-        }),
-        ServiceToWorker::ManagerUpdateSettingsRequest(ManagerUpdateSettingsRequestPayload {
-            request_id: "r5".to_string(),
-            connection_id: Some("c".to_string()),
-            settings: RemoteSystemSettings::default(),
-        }),
         ServiceToWorker::SetLocale(SetLocalePayload {
+            operation_id: "op-locale".to_string(),
             locale: "en-US".to_string(),
         }),
         ServiceToWorker::StartTerminalRequest(StartTerminalRequestPayload {
@@ -1289,6 +1244,56 @@ fn a_published_policy_keeps_its_ordering_across_the_wire() {
                 snapshot.seq(),
                 "the capability stamp has to survive, not just the policy"
             );
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// A remembered answer is only safe to apply against the policy it was given
+/// under, so the stamp has to arrive with it. A payload that lost the stamp
+/// would be indistinguishable from one answering the current policy.
+#[test]
+fn a_remembered_answer_carries_the_policy_it_was_given_under() {
+    let upstream = WorkerToService::RememberSecurityDecision(RememberSecurityDecisionPayload {
+        capability: SecurityPermissionType::PrivateScreen,
+        approved: false,
+        expected_generation: 12,
+    });
+    match wincode_round_trip(&upstream) {
+        WorkerToService::RememberSecurityDecision(payload) => {
+            assert_eq!(payload.capability, SecurityPermissionType::PrivateScreen);
+            assert!(!payload.approved);
+            assert_eq!(payload.expected_generation, 12);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// A locale acknowledgement that lost its operation id could be mistaken for
+/// the answer to a later change, which is how a stale ack used to roll the
+/// locale back.
+#[test]
+fn a_locale_instruction_and_its_acknowledgement_stay_paired() {
+    let instruction = ServiceToWorker::SetLocale(SetLocalePayload {
+        operation_id: "op-9".to_string(),
+        locale: "en-US".to_string(),
+    });
+    match wincode_round_trip(&instruction) {
+        ServiceToWorker::SetLocale(payload) => {
+            assert_eq!(payload.operation_id, "op-9");
+            assert_eq!(payload.locale, "en-US");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    let ack = WorkerToService::LocaleApplied(LocaleAppliedPayload {
+        operation_id: "op-9".to_string(),
+        locale: "en-US".to_string(),
+    });
+    match wincode_round_trip(&ack) {
+        WorkerToService::LocaleApplied(payload) => {
+            assert_eq!(payload.operation_id, "op-9");
+            assert_eq!(payload.locale, "en-US");
         }
         other => panic!("unexpected: {other:?}"),
     }
@@ -1435,16 +1440,8 @@ fn worker_to_service_all_variants_round_trip() {
             request_id: "r".to_string(),
             connection_id: Some("c".to_string()),
         }),
-        WorkerToService::ManagerQuerySettingsResponse(ManagerQuerySettingsResponsePayload {
-            request_id: "r".to_string(),
-            connection_id: None,
-            settings: RemoteSystemSettings::default(),
-        }),
-        WorkerToService::ManagerUpdateSettingsResponse(ManagerResponseRefPayload {
-            request_id: "r".to_string(),
-            connection_id: Some("c".to_string()),
-        }),
         WorkerToService::LocaleApplied(LocaleAppliedPayload {
+            operation_id: "op-locale".to_string(),
             locale: "en-US".to_string(),
         }),
         WorkerToService::SecurityPolicyApplied(SecurityPolicyAppliedPayload {
@@ -1453,6 +1450,11 @@ fn worker_to_service_all_variants_round_trip() {
                 seq: 7,
                 generations: PolicyGenerations::default(),
             },
+        }),
+        WorkerToService::RememberSecurityDecision(RememberSecurityDecisionPayload {
+            capability: SecurityPermissionType::FileTransfer,
+            approved: true,
+            expected_generation: 4,
         }),
         WorkerToService::TerminalStarted(TerminalStartedPayload {
             request_id: "r".to_string(),

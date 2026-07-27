@@ -37,7 +37,7 @@
 //! The daemon's DC router gates browser→worker forwarding on
 //! `accept_control` (see `pc_manager::route_is_permitted`). On top of
 //! that the worker re-checks the finer-grained
-//! `check_security_permission(allow_file_transfer, FileTransfer)` gate
+//! `resolve_permission(allow_file_transfer, FileTransfer)` gate
 //! once per connection — see `permission_for` and the
 //! `DispatcherInner::permission_cache` field. The cache mirrors the
 //! legacy per-DC behaviour: each connection prompts at most once
@@ -83,8 +83,8 @@ use tokio::sync::{Mutex as TokioMutex, mpsc};
 
 use crate::host_control::HostControlHub;
 use crate::model::file_transfer::*;
-use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
-use crate::model::settings::SharedSettings;
+use crate::model::policy_access::{CachedDecision, PolicyAccess};
+use crate::model::security_approval::{SecurityPermissionType, resolve_permission};
 use crate::worker::connection_ceiling::ConnectionCeilingStore;
 
 mod download;
@@ -136,7 +136,7 @@ struct DispatcherInner {
     /// connection only triggers the Tauri approval prompt at most once,
     /// regardless of how many DownloadRequest / UploadRequest /
     /// chunk frames flow over its `file_transfer_event` DC.
-    permission_cache: HashMap<String, bool>,
+    permission_cache: HashMap<String, CachedDecision>,
     activities: HashSet<TransferKey>,
 }
 
@@ -164,11 +164,10 @@ pub struct FileTransferDispatcher {
     /// sender ↔ `serve_download` loop applies end-to-end backpressure
     /// without spilling file bytes onto the event lane.
     file_sender: Arc<dyn EventSender<FileTransferPayload>>,
-    /// Shared settings used by the permission gate to read
-    /// `security.allow_file_transfer` and (when the user picks
-    /// "remember") to persist the choice via `Settings::save()`.
-    settings: Arc<SharedSettings>,
-    /// Host-control hub used by `check_security_permission` to surface
+    /// The host security policy as this worker reaches it: the daemon's
+    /// published copy, and where a "remember" answer is sent to be stored.
+    policy: Arc<PolicyAccess>,
+    /// Host-control hub used by the permission gate to surface
     /// the approval prompt in the Tauri shell. In portable mode this is
     /// the daemon's hub directly (shared in-process); in named-pipe
     /// mode it's the worker's Forwarder hub that bridges back to the

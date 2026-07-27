@@ -48,60 +48,67 @@ pub struct InitParams {
 pub async fn init_system(
     request_json: web::Json<InitParams>,
     settings: web::Data<SharedSettings>,
+    coordinator: web::Data<crate::model::settings_coordinator::SettingsCoordinator>,
     manager_link_gate: web::Data<Arc<ManagerLinkGate>>,
     host_control_hub: Option<web::Data<Option<Arc<HostControlHub>>>>,
 ) -> Result<HttpResponse, DeskError> {
-    let mut settings = settings.write().await;
-
-    // Check if system is already initialized string is not empty
-    if !settings.user.login_password.is_empty() {
-        return Err(DeskError::new_custom_error(
-            desk_utils::error::DeskErrorCode::SYSTEM_ERROR,
-            "System is already initialized",
-        ));
-    }
-
     let params = request_json.into_inner();
-    settings.user.login_user_name = params.username;
-    settings.user.login_password = params.password;
-    settings.system.telemetry_consent = Some(params.telemetry_consent);
-    settings.system.host_access_indicator_enabled = params.host_access_indicator_enabled;
+    coordinator
+        .commit_with_effect(
+            move |settings| {
+                // Checked inside the commit so two first-run requests arriving
+                // together cannot both pass the check and each write an account.
+                if !settings.user.login_password.is_empty() {
+                    return Err(DeskError::new_custom_error(
+                        desk_utils::error::DeskErrorCode::SYSTEM_ERROR,
+                        "System is already initialized",
+                    ));
+                }
+                settings.user.login_user_name = params.username;
+                settings.user.login_password = params.password;
+                settings.system.telemetry_consent = Some(params.telemetry_consent);
+                settings.system.host_access_indicator_enabled =
+                    params.host_access_indicator_enabled;
 
-    // Persist an optional manager target in one shot (skipping the manager step
-    // leaves these untouched). Empty strings are treated as "not provided".
-    if let Some(url) = params.manager_url.filter(|u| !u.trim().is_empty()) {
-        settings.system.manager_url = Some(url);
-    }
-    if let Some(token) = params.manager_api_token.filter(|t| !t.trim().is_empty()) {
-        settings.system.manager_api_token = Some(token);
-    }
+                // Persist an optional manager target in one shot (skipping the
+                // manager step leaves these untouched). Empty strings are
+                // treated as "not provided".
+                if let Some(url) = params.manager_url.filter(|u| !u.trim().is_empty()) {
+                    settings.system.manager_url = Some(url);
+                }
+                if let Some(token) = params.manager_api_token.filter(|t| !t.trim().is_empty()) {
+                    settings.system.manager_api_token = Some(token);
+                }
 
-    // Persist optional initial security settings; normalize an unset approval
-    // timeout to the finite default. When omitted, `settings.security` keeps its
-    // default (all capabilities prompt, 30s approval timeout).
-    if let Some(mut security) = params.security {
-        security.normalize();
-        settings.security = security;
-    }
+                // Optional initial security settings. When omitted,
+                // `settings.security` keeps its default (all capabilities
+                // prompt, 30s approval timeout).
+                if let Some(security) = params.security {
+                    settings.security = security;
+                }
+                Ok(())
+            },
+            // Sync the shared manager-link gate while the settings are still
+            // locked, so the proxy's reconnect loop brings the manager link up
+            // (and does not immediately tear it down) after first-run
+            // initialization configures a manager.
+            |settings| {
+                manager_link_gate.set(manager_link_should_connect(
+                    &settings.system.manager_url,
+                    &settings.system.manager_api_token,
+                    settings.system.manager_enabled,
+                ));
+            },
+        )
+        .await?;
 
-    settings.save()?;
     if let Some(hub) = host_control_hub
         .as_ref()
         .and_then(|data| data.get_ref().as_ref())
     {
         hub.host_activity()
-            .set_indicator_enabled(settings.system.host_access_indicator_enabled);
+            .set_indicator_enabled(settings.read().await.system.host_access_indicator_enabled);
     }
-
-    // Sync the shared manager-link gate to the freshly persisted config while
-    // still holding the settings write lock, so the proxy's reconnect loop brings
-    // the manager link up (and does not immediately tear it down) after first-run
-    // initialization configures a manager.
-    manager_link_gate.set(manager_link_should_connect(
-        &settings.system.manager_url,
-        &settings.system.manager_api_token,
-        settings.system.manager_enabled,
-    ));
 
     info!("System initialized successfully");
     Ok(HttpResponse::Ok().json(desk_utils::rest::RestResponse::succeed()))
@@ -114,7 +121,23 @@ mod tests {
     use actix_web::{App, test, web};
     use std::env;
 
-    async fn create_test_settings() -> SharedSettings {
+    /// The settings plus the coordinator the handler commits through, sharing
+    /// one `SharedSettings` exactly as the running host does.
+    async fn create_test_settings() -> (
+        web::Data<SharedSettings>,
+        web::Data<crate::model::settings_coordinator::SettingsCoordinator>,
+    ) {
+        let shared = Arc::new(build_test_settings().await);
+        let coordinator = Arc::new(
+            crate::model::settings_coordinator::SettingsCoordinator::from_settings(Arc::clone(
+                &shared,
+            ))
+            .await,
+        );
+        (web::Data::from(shared), web::Data::from(coordinator))
+    }
+
+    async fn build_test_settings() -> SharedSettings {
         let mut settings = Settings::default();
         // Ensure it's not "initialized"
         settings.user.login_password = "".to_string();
@@ -135,10 +158,11 @@ mod tests {
 
     #[actix_web::test]
     async fn test_init_system_success() {
-        let settings = web::Data::new(create_test_settings().await);
+        let (settings, coordinator) = create_test_settings().await;
         let app = test::init_service(
             App::new()
                 .app_data(settings.clone())
+                .app_data(coordinator.clone())
                 .app_data(test_gate())
                 .service(init_system),
         )
@@ -168,7 +192,7 @@ mod tests {
 
     #[actix_web::test]
     async fn test_init_system_already_initialized() {
-        let settings = create_test_settings().await;
+        let (settings, coordinator) = create_test_settings().await;
         {
             let mut s = settings.write().await;
             s.user.login_password = "already_set".to_string();
@@ -176,7 +200,8 @@ mod tests {
 
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(settings))
+                .app_data(settings.clone())
+                .app_data(coordinator.clone())
                 .app_data(test_gate())
                 .service(init_system),
         )
@@ -206,11 +231,12 @@ mod tests {
 
     #[actix_web::test]
     async fn test_init_system_persists_manager_and_security_and_gate() {
-        let settings = web::Data::new(create_test_settings().await);
+        let (settings, coordinator) = create_test_settings().await;
         let gate = Arc::new(ManagerLinkGate::new(false));
         let app = test::init_service(
             App::new()
                 .app_data(settings.clone())
+                .app_data(coordinator.clone())
                 .app_data(web::Data::new(gate.clone()))
                 .service(init_system),
         )

@@ -8,9 +8,9 @@ use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileLi
 use desk_signal_facade::model::image_capture::DisplayInfo;
 use desk_signal_facade::model::policy_snapshot::{PolicyGenerations, PolicySnapshot};
 use desk_signal_facade::model::private_screen::PrivateScreenStateChangedData;
+use desk_signal_facade::model::security_settings::SecurityPermissionType;
 use desk_signal_facade::model::signal::SignalingType;
 use desk_signal_facade::model::system_info::SystemInfo;
-use desk_signal_facade::model::system_settings::RemoteSystemSettings;
 use desk_signal_facade::model::terminal::{
     StartTerminalSession, TerminalInputData, TerminalList, TerminalOutputData, TerminalResizeData,
 };
@@ -560,7 +560,7 @@ pub struct FileTransferFinishedPayload {
 // ---------- Manager plane (typed) ----------
 
 /// Shared envelope for body-less manager *requests*
-/// (`ManagerSystemInfoRequest`, `ManagerQuerySettingsRequest`).
+/// (`ManagerSystemInfoRequest`).
 /// Carries the `request_id` so the worker can echo it back on the
 /// matching response payload, and the `connection_id` so the daemon
 /// can pick the right outbound signaling websocket when it ferries
@@ -605,16 +605,11 @@ pub struct ManagerFileDeleteRequestPayload {
     pub request: DeleteFileRequest,
 }
 
-/// Payload for [`ServiceToWorker::ManagerUpdateSettingsRequest`].
-#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
-pub struct ManagerUpdateSettingsRequestPayload {
-    pub request_id: String,
-    pub connection_id: Option<String>,
-    pub settings: RemoteSystemSettings,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct SetLocalePayload {
+    /// Identifies this instruction so its acknowledgement cannot be mistaken
+    /// for one belonging to an earlier locale change.
+    pub operation_id: String,
     pub locale: String,
 }
 
@@ -652,8 +647,24 @@ pub struct SecurityPolicyAppliedPayload {
     pub outcome: PolicyApplyOutcome,
 }
 
+/// Payload for [`WorkerToService::RememberSecurityDecision`].
+///
+/// A worker cannot store the host policy — the settings it holds are a startup
+/// copy — so a user's "remember this" travels back to the daemon, which owns
+/// it. The generation is the capability's stamp from when the prompt went out;
+/// the daemon refuses the answer if the capability has moved since, so a slow
+/// answer can never undo a decision the operator made in the meantime.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct RememberSecurityDecisionPayload {
+    pub capability: SecurityPermissionType,
+    pub approved: bool,
+    pub expected_generation: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct LocaleAppliedPayload {
+    /// Echoes the [`SetLocalePayload::operation_id`] this is answering.
+    pub operation_id: String,
     pub locale: String,
 }
 
@@ -676,14 +687,6 @@ pub struct ManagerFileListResponsePayload {
     pub request_id: String,
     pub connection_id: Option<String>,
     pub response: FileListResponse,
-}
-
-/// Payload for [`WorkerToService::ManagerQuerySettingsResponse`].
-#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
-pub struct ManagerQuerySettingsResponsePayload {
-    pub request_id: String,
-    pub connection_id: Option<String>,
-    pub settings: RemoteSystemSettings,
 }
 
 // ---------- Terminal plane (typed) ----------

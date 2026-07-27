@@ -126,7 +126,9 @@ pub async fn handle_manager_terminal_start(
 ) -> Result<(), DeskError> {
     let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
 
-    let global_terminal = { desk_session.settings.read().await.security.allow_terminal };
+    let global_terminal = desk_session
+        .policy
+        .permission(SecurityPermissionType::Terminal);
     let allow_terminal = desk_session
         .effective_permission(from_connection_id, global_terminal, |c| c.allow_terminal)
         .await;
@@ -138,7 +140,7 @@ pub async fn handle_manager_terminal_start(
         .await
         .is_some();
     let approved = check_security_permission(
-        &desk_session.settings,
+        &desk_session.policy,
         &desk_session.host_control_hub,
         allow_terminal,
         SecurityPermissionType::Terminal,
@@ -407,7 +409,9 @@ pub async fn handle_list_terminals(
     // session whose ceiling denies (or does not grant) `terminal` must not be able
     // to enumerate open terminals. Gate on meet(ceiling.terminal, global);
     // connection-less (HTTP-API / owner) requests use the global verbatim.
-    let global_terminal = { desk_session.settings.read().await.security.allow_terminal };
+    let global_terminal = desk_session
+        .policy
+        .permission(SecurityPermissionType::Terminal);
     let allow_terminal = match from_connection_id.as_deref() {
         Some(cid) => {
             desk_session
@@ -424,7 +428,7 @@ pub async fn handle_list_terminals(
         None => false,
     };
     let approved = check_security_permission(
-        &desk_session.settings,
+        &desk_session.policy,
         &desk_session.host_control_hub,
         allow_terminal,
         SecurityPermissionType::Terminal,

@@ -28,8 +28,10 @@ pub const SERVICE_API_PORT: u16 = 8082;
 /// `ready_tx`, when supplied, is fired exactly once after the HTTP server has
 /// successfully bound its listening socket. Workers should not be spawned until
 /// the signal arrives so their forwarder ws clients connect on the first try.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_local_api(
     settings: Arc<SharedSettings>,
+    settings_coordinator: Arc<crate::model::settings_coordinator::SettingsCoordinator>,
     tauri_bridge: Arc<TauriIpcBridge>,
     host_control_hub: Arc<host_control::HostControlHub>,
     manager_link_state: Arc<super::manager_link_state::ManagerLinkState>,
@@ -65,6 +67,7 @@ pub async fn run_local_api(
     }
 
     let settings_data = web::Data::from(settings.clone());
+    let settings_coordinator_data = web::Data::from(settings_coordinator);
     let connection_map = web::Data::new(SharedConnectionMap::from(BTreeMap::new()));
     let tauri_is_admin_data = web::Data::new(Arc::clone(&tauri_bridge.tauri_is_admin));
 
@@ -93,6 +96,7 @@ pub async fn run_local_api(
             tauri_bridge.tauri_login_token.clone(),
         )
         .with_settings(settings_data.clone())
+        .with_settings_coordinator(settings_coordinator_data.clone().into_inner())
         .with_tauri_is_admin(Arc::clone(&tauri_bridge.tauri_is_admin)),
     );
 
@@ -115,6 +119,7 @@ pub async fn run_local_api(
             .map(|app| app.wrap(Logger::default()))
             // App-level `app_data` (previously mounted inside `configure_api_routes`).
             .app_data(rc.settings.clone())
+            .app_data(settings_coordinator_data.clone())
             .app_data(rc.tauri_login_token.clone())
             .app_data(rc.connection_map.clone())
             .app_data(rc.host_control_hub.clone())

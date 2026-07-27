@@ -54,7 +54,7 @@ pub(super) async fn dispatch_typed_signaling<T>(
 /// `Manager*Response`).
 ///
 /// Also accepts an `Option<&T>` body so empty-body requests
-/// (`ManagerSystemInfoRequest` / `ManagerQuerySettingsRequest`) can
+/// (`ManagerSystemInfoRequest`) can
 /// share this helper without serialising a synthetic placeholder.
 ///
 /// `connection_id` is `Option<String>` because retained non-file manager
@@ -199,19 +199,6 @@ pub(super) fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerT
                 },
             ))
         }
-        SignalingType::ManagerQuerySettings => {
-            let settings = model
-                .get_data_with_type::<RemoteSystemSettings>()
-                .ok()
-                .flatten()?;
-            Some(WorkerToService::ManagerQuerySettingsResponse(
-                ManagerQuerySettingsResponsePayload {
-                    request_id: model.request_id.clone(),
-                    connection_id: model.to_connection_id.clone(),
-                    settings,
-                },
-            ))
-        }
         SignalingType::ManagerFileList => {
             let response = model
                 .get_data_with_type::<FileListResponse>()
@@ -225,23 +212,16 @@ pub(super) fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerT
                 },
             ))
         }
-        // ManagerFileDelete / ManagerUpdateSettings responses carry
-        // an empty body (`&()`), so a successful round-trip omits
-        // signaling_data; `request_id` alone is enough to correlate
-        // back to either an originating internal request or the browser PC named by
-        // `to_connection_id`.
+        // The ManagerFileDelete response carries an empty body (`&()`), so a
+        // successful round-trip omits signaling_data; `request_id` alone is
+        // enough to correlate back to either an originating internal request or
+        // the browser PC named by `to_connection_id`.
         SignalingType::ManagerFileDelete => Some(WorkerToService::ManagerFileDeleteResponse(
             ManagerResponseRefPayload {
                 request_id: model.request_id.clone(),
                 connection_id: model.to_connection_id.clone(),
             },
         )),
-        SignalingType::ManagerUpdateSettings => Some(
-            WorkerToService::ManagerUpdateSettingsResponse(ManagerResponseRefPayload {
-                request_id: model.request_id.clone(),
-                connection_id: model.to_connection_id.clone(),
-            }),
-        ),
         // Terminal-plane responses and notifications. The
         // worker's terminal handlers always set the target browser in
         // `to_connection_id` (either via `success_response` for

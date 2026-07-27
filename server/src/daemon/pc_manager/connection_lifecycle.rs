@@ -27,6 +27,20 @@ pub async fn cleanup_pc(
     if let Some(activity) = registry.host_activity() {
         activity.remove_connection(connection_id);
     }
+    // Deny anything this connection was still waiting on an answer for. Without
+    // this the dialog outlives the controller that raised it, and a user who
+    // answers it afterwards approves work for a connection that is already gone
+    // — an approval that would then be cached and honored for whatever
+    // reconnects.
+    if let Some(hub) = registry.host_control_hub() {
+        let cancelled = hub.cancel_pending_for_connection(connection_id);
+        if !cancelled.is_empty() {
+            log::info!(
+                "[pc_manager] cancelled {} pending approval(s) for {connection_id} (reason: {reason})",
+                cancelled.len()
+            );
+        }
+    }
     // Prune the grant reverse-index on every teardown path (idempotent for
     // connections that carry no grant) so a directed teardown can never reach a
     // stale connection id.

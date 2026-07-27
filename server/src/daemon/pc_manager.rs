@@ -54,7 +54,7 @@ use crate::model::data_channel::SignalRequestControlData;
 use crate::model::security_approval::{
     SecurityPermissionType, check_security_permission, effective_permission,
 };
-use crate::model::settings::{Settings, SharedSettings};
+use crate::model::settings::Settings;
 use crate::service::signaling::{should_short_circuit_clipboard, should_short_circuit_control};
 use desk_capture_engine::audio_encoder::audio_encoder_factory::list_audio_encoder;
 use desk_capture_engine::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
@@ -353,6 +353,11 @@ pub struct PcRegistry {
     inner: Arc<RwLock<HashMap<String, Arc<RwLock<PeerConnectionContext>>>>>,
     worker_mgr: Arc<tokio::sync::OnceCell<WorkerManager>>,
     host_activity: Arc<tokio::sync::OnceCell<crate::host_activity::HostActivityRegistry>>,
+    /// The hub that owns pending approval prompts, so tearing a connection down
+    /// can cancel the ones it raised. Weak because the hub outlives the
+    /// registry it installed itself into and holding it strongly would make the
+    /// pair immortal.
+    host_control_hub: Arc<tokio::sync::OnceCell<std::sync::Weak<HostControlHub>>>,
     /// Counts in-flight `RequestRemote` handlers that have not yet
     /// registered a [`PeerConnectionContext`]. Used by
     /// [`crate::daemon::pc_manager::cleanup_pc`] to suppress N→0
@@ -466,6 +471,16 @@ impl PcRegistry {
         if self.host_activity.set(registry).is_err() {
             log::debug!("[pc_manager] host activity registry already installed; ignoring");
         }
+    }
+
+    pub fn set_host_control_hub(&self, hub: &Arc<HostControlHub>) {
+        if self.host_control_hub.set(Arc::downgrade(hub)).is_err() {
+            log::debug!("[pc_manager] host control hub already installed; ignoring");
+        }
+    }
+
+    pub(crate) fn host_control_hub(&self) -> Option<Arc<HostControlHub>> {
+        self.host_control_hub.get().and_then(|hub| hub.upgrade())
     }
 
     fn host_activity(&self) -> Option<crate::host_activity::HostActivityRegistry> {

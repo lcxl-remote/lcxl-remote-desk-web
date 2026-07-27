@@ -6,10 +6,11 @@ use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaReceiver, framed, inprocess},
     message::{
         FileTransferPayload, MediaCapabilities, PolicyApplyOutcome, SecurityPolicyAppliedPayload,
-        ServiceToWorker, WorkerInitPayload, WorkerToService,
+        ServiceToWorker, UpdateSecurityPolicyPayload, WorkerInitPayload, WorkerToService,
     },
     transport::{read_message, write_message},
 };
+use desk_signal_facade::model::policy_snapshot::PolicySnapshot;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -80,6 +81,8 @@ pub struct WorkerManager {
             >,
         >,
     >,
+    /// Publications awaiting the worker's confirmation, keyed by operation id.
+    policy_acks: Arc<StdMutex<HashMap<String, oneshot::Sender<SecurityPolicyAppliedPayload>>>>,
 }
 
 struct WorkerManagerInner {
@@ -236,6 +239,7 @@ impl WorkerManager {
                 crate::daemon::remote_access::RemoteAccessGate::startup_locked(),
             )),
             remote_access_acks: Arc::new(StdMutex::new(HashMap::new())),
+            policy_acks: Arc::new(StdMutex::new(HashMap::new())),
         };
         (mgr, rx)
     }
@@ -807,6 +811,59 @@ impl WorkerManager {
         }
     }
 
+    /// Send the security policy to the active worker and follow up on whether it
+    /// arrived.
+    ///
+    /// Returns as soon as the message is queued. The acknowledgement is awaited
+    /// on a background task instead of here because the caller is a settings
+    /// commit that has already made the policy durable: the operator's change is
+    /// applied whether or not a worker is listening, and a worker that starts
+    /// later reads the same values out of its Init payload. What the follow-up
+    /// buys is that a worker which never confirms — or confirms while asking to
+    /// be resynchronized — says so in the log rather than silently enforcing an
+    /// older policy.
+    pub async fn publish_security_policy(&self, snapshot: PolicySnapshot, timeout: Duration) {
+        let seq = snapshot.seq();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+        self.policy_acks
+            .lock()
+            .unwrap()
+            .insert(operation_id.clone(), tx);
+        if let Err(error) = self
+            .send_to_worker(ServiceToWorker::UpdateSecurityPolicy(
+                UpdateSecurityPolicyPayload {
+                    operation_id: operation_id.clone(),
+                    snapshot,
+                },
+            ))
+            .await
+        {
+            self.policy_acks.lock().unwrap().remove(&operation_id);
+            debug!(
+                "[worker_manager] security policy {seq} has no worker to reach ({error}); a \
+                 worker starting later picks it up from its own configuration"
+            );
+            return;
+        }
+        let acks = Arc::clone(&self.policy_acks);
+        tokio::spawn(async move {
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) => {
+                    acks.lock().unwrap().remove(&operation_id);
+                }
+                Err(_) => {
+                    acks.lock().unwrap().remove(&operation_id);
+                    error!(
+                        "[worker_manager] the worker did not confirm security policy {seq} \
+                         within {timeout:?}; it may still be enforcing an older one"
+                    );
+                }
+            }
+        });
+    }
+
     /// Record what the worker reported after a security policy was published to
     /// it.
     ///
@@ -817,6 +874,14 @@ impl WorkerManager {
     /// symptom on the host is prompts for capabilities the operator has already
     /// allowed, with nothing else to explain it.
     pub async fn note_policy_applied(&self, payload: &SecurityPolicyAppliedPayload) {
+        if let Some(waiter) = self
+            .policy_acks
+            .lock()
+            .unwrap()
+            .remove(&payload.operation_id)
+        {
+            let _ = waiter.send(payload.clone());
+        }
         match &payload.outcome {
             PolicyApplyOutcome::Applied { seq, .. } => {
                 debug!(

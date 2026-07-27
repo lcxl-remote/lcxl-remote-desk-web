@@ -22,7 +22,7 @@ use super::*;
 pub async fn handle_require_control(
     registry: &PcRegistry,
     outbound: &OutboundSink,
-    settings: &SharedSettings,
+    policy: &Arc<crate::model::policy_access::PolicyAccess>,
     host_control_hub: &Arc<HostControlHub>,
     model: &SignalingModel,
 ) -> Result<ControlOutcome, DeskError> {
@@ -95,12 +95,12 @@ pub async fn handle_require_control(
         .clone();
     let allow_control = effective_permission(
         access_ceiling.as_ref(),
-        settings.read().await.security.allow_remote_control,
+        policy.permission(SecurityPermissionType::RemoteControl),
         |c| c.allow_remote_control,
     );
     let allow_clipboard = effective_permission(
         access_ceiling.as_ref(),
-        settings.read().await.security.allow_clipboard_sync,
+        policy.permission(SecurityPermissionType::ClipboardSync),
         |c| c.allow_clipboard_sync,
     );
 
@@ -112,7 +112,7 @@ pub async fn handle_require_control(
             true
         } else {
             check_security_permission(
-                settings,
+                policy,
                 host_control_hub,
                 allow_control,
                 SecurityPermissionType::RemoteControl,
@@ -162,7 +162,7 @@ pub async fn handle_require_control(
         true
     } else {
         check_security_permission(
-            settings,
+            policy,
             host_control_hub,
             allow_clipboard,
             SecurityPermissionType::ClipboardSync,

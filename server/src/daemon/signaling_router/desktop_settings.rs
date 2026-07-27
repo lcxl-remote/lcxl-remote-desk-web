@@ -84,6 +84,39 @@ pub(super) fn emit_error_response(
     }
 }
 
+/// Emit a success response to the browser, optionally carrying a body. The
+/// counterpart to [`emit_error_response`] for routes the daemon answers itself
+/// rather than forwarding to the worker.
+pub(super) fn emit_success_response<T: serde::Serialize>(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+    data: Option<&T>,
+) {
+    match SignalingModel::success_response(
+        &model.request_id,
+        model.signaling_type,
+        None,
+        model.from_connection_id.clone(),
+        data,
+    ) {
+        Ok(reply) => match serde_json::to_string(&reply) {
+            Ok(text) => {
+                let _ = ctx.outbound_tx.send(text);
+            }
+            Err(e) => log::warn!(
+                "[router] failed to serialise {:?} response: {e} (request_id={})",
+                model.signaling_type,
+                model.request_id,
+            ),
+        },
+        Err(e) => log::warn!(
+            "[router] failed to build {:?} response: {e} (request_id={})",
+            model.signaling_type,
+            model.request_id,
+        ),
+    }
+}
+
 /// Synthesise an `Applied(width, height, refresh_hz)` success response
 /// for a `ChangeDisplaySettings` request whose target already matches
 /// the supervisor's cached mode. Used by the idempotent short-circuit:

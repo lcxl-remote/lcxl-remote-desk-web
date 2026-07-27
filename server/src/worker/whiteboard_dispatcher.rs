@@ -25,7 +25,7 @@
 //! The daemon's DC router gates browser→worker forwarding on
 //! `accept_control` (`pc_manager::route_is_permitted`). On top of that coarse
 //! gate the dispatcher runs a per-connection
-//! `check_security_permission(meet(ceiling.whiteboard, global.allow_whiteboard))`
+//! `resolve_permission(meet(ceiling.whiteboard, global.allow_whiteboard))`
 //! — the single active `allow_whiteboard` enforcement point (the daemon router
 //! only checks `accept_control`, not the whiteboard capability). The decision is
 //! cached per connection; the approval prompt (when the effective value is
@@ -42,10 +42,10 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::host_control::HostControlHub;
 use crate::host_control::bridge::bridge_whiteboard_to_hub;
+use crate::model::policy_access::{CachedDecision, PolicyAccess};
 use crate::model::security_approval::{
-    SecurityPermissionType, check_security_permission, effective_permission,
+    SecurityPermissionType, effective_permission, resolve_permission,
 };
-use crate::model::settings::SharedSettings;
 use crate::worker::connection_ceiling::ConnectionCeilingStore;
 
 struct DispatcherInner {
@@ -53,16 +53,17 @@ struct DispatcherInner {
     active_connections: HashSet<String>,
     /// Per-connection cached `allow_whiteboard` decision (mirrors
     /// `FileTransferDispatcher`'s cache) so the approval prompt fires at most
-    /// once per connection.
-    permission_cache: HashMap<String, bool>,
+    /// once per connection, tagged with the policy it was decided under.
+    permission_cache: HashMap<String, CachedDecision>,
 }
 
 /// Worker-side whiteboard dispatcher. Cheap to clone (`Arc` inside).
 #[derive(Clone)]
 pub struct WhiteboardDispatcher {
     inner: Arc<TokioMutex<DispatcherInner>>,
-    /// Shared settings read by the permission gate for `allow_whiteboard`.
-    settings: Arc<SharedSettings>,
+    /// The host security policy as this worker reaches it, read by the
+    /// permission gate for `allow_whiteboard`.
+    policy: Arc<PolicyAccess>,
     /// Host-control hub used by `check_security_permission` for the approval
     /// prompt.
     hub: Arc<HostControlHub>,
@@ -78,7 +79,7 @@ impl WhiteboardDispatcher {
     /// once (same shape as the legacy `DeskSession::new`).
     pub fn new(
         host_control_hub: Arc<HostControlHub>,
-        settings: Arc<SharedSettings>,
+        policy: Arc<PolicyAccess>,
         connection_ceilings: ConnectionCeilingStore,
     ) -> Self {
         let sender = bridge_whiteboard_to_hub(Arc::clone(&host_control_hub));
@@ -88,7 +89,7 @@ impl WhiteboardDispatcher {
                 active_connections: HashSet::new(),
                 permission_cache: HashMap::new(),
             })),
-            settings,
+            policy,
             hub: host_control_hub,
             connection_ceilings,
         }
@@ -99,7 +100,7 @@ impl WhiteboardDispatcher {
     #[cfg(test)]
     fn from_sender(
         sender: std::sync::mpsc::Sender<WhiteboardCommand>,
-        settings: Arc<SharedSettings>,
+        policy: Arc<PolicyAccess>,
     ) -> Self {
         Self {
             inner: Arc::new(TokioMutex::new(DispatcherInner {
@@ -107,42 +108,60 @@ impl WhiteboardDispatcher {
                 active_connections: HashSet::new(),
                 permission_cache: HashMap::new(),
             })),
-            settings,
+            policy,
             hub: Arc::new(HostControlHub::new_local()),
             connection_ceilings: ConnectionCeilingStore::new(),
         }
     }
 
     /// Resolve the `allow_whiteboard` decision for a connection, meeting its grant
-    /// ceiling with the host global. Cached per connection. The approval await
+    /// ceiling with the host global. Cached per connection, and the cached
+    /// answer expires as soon as `allow_whiteboard` moves. The approval await
     /// does not hold the `inner` mutex.
     async fn permission_for(&self, connection_id: &str) -> bool {
+        let capability = SecurityPermissionType::Whiteboard;
+        let generation = self.policy.changed_at(capability);
         {
             let inner = self.inner.lock().await;
-            if let Some(&v) = inner.permission_cache.get(connection_id) {
-                return v;
+            if let Some(cached) = inner.permission_cache.get(connection_id)
+                && cached.is_current(generation)
+            {
+                return cached.approved;
             }
         }
-        let global_whiteboard = self.settings.read().await.security.allow_whiteboard;
         let ceiling = self.connection_ceilings.get(connection_id).await;
         let allow_whiteboard =
-            effective_permission(ceiling.as_ref(), global_whiteboard, |c| c.allow_whiteboard);
-        let approved = check_security_permission(
-            &self.settings,
+            effective_permission(ceiling.as_ref(), self.policy.permission(capability), |c| {
+                c.allow_whiteboard
+            });
+        let resolved = resolve_permission(
+            &self.policy,
             &self.hub,
             allow_whiteboard,
-            SecurityPermissionType::Whiteboard,
+            capability,
             Some(connection_id.to_string()),
             // Capped grant / code-session: honor the prompt but never persist it to
             // the owner's global allow_whiteboard.
             ceiling.is_some(),
         )
         .await;
-        let mut inner = self.inner.lock().await;
-        inner
-            .permission_cache
-            .insert(connection_id.to_string(), approved);
-        approved
+        if let Some(decided_at) = resolved.cacheable_at {
+            let mut inner = self.inner.lock().await;
+            // The connection can end while the prompt is up, and its teardown
+            // clears this cache. Writing the answer afterwards would put an
+            // entry back for a connection that no longer exists, ready for
+            // whatever reuses the id.
+            if inner.active_connections.contains(connection_id) {
+                inner.permission_cache.insert(
+                    connection_id.to_string(),
+                    CachedDecision {
+                        approved: resolved.approved,
+                        decided_at,
+                    },
+                );
+            }
+        }
+        resolved.approved
     }
 
     /// Add a connection to the active set so subsequent IPC
@@ -281,12 +300,13 @@ mod tests {
     fn dispatcher_with_whiteboard(
         allow_whiteboard: Option<bool>,
     ) -> (WhiteboardDispatcher, std_mpsc::Receiver<WhiteboardCommand>) {
-        use crate::model::settings::Settings;
+        use desk_signal_facade::model::security_settings::SecuritySettings;
         let (tx, rx) = std_mpsc::channel::<WhiteboardCommand>();
-        let mut settings = Settings::default();
-        settings.security.allow_whiteboard = allow_whiteboard;
-        let shared = Arc::new(SharedSettings::from(settings));
-        (WhiteboardDispatcher::from_sender(tx, shared), rx)
+        let (policy, _mirror, _upstream) = PolicyAccess::for_test(SecuritySettings {
+            allow_whiteboard,
+            ..SecuritySettings::default()
+        });
+        (WhiteboardDispatcher::from_sender(tx, policy), rx)
     }
 
     fn start_payload(connection_id: &str) -> StartMediaPayload {

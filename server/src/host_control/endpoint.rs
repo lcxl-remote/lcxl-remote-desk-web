@@ -79,6 +79,10 @@ pub struct EndpointState {
     /// Shared settings is installed by production servers. Keeping it optional
     /// lets protocol-only endpoint tests construct minimal state.
     pub settings: Option<web::Data<SharedSettings>>,
+    /// The host's durable commit path, installed alongside the settings. The
+    /// native shell changes the locale through it rather than writing the
+    /// settings itself, so its change reaches the worker like any other.
+    pub settings_coordinator: Option<Arc<crate::model::settings_coordinator::SettingsCoordinator>>,
     /// Native REST bearer token → owning WS session. Tokens are never
     /// broadcast and are revoked when that exact session disconnects.
     native_bridge_sessions: Arc<Mutex<HashMap<String, UpstreamSessionId>>>,
@@ -97,8 +101,17 @@ impl EndpointState {
             next_session_id: Arc::new(AtomicU64::new(1)),
             tauri_is_admin: None,
             settings: None,
+            settings_coordinator: None,
             native_bridge_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn with_settings_coordinator(
+        mut self,
+        coordinator: Arc<crate::model::settings_coordinator::SettingsCoordinator>,
+    ) -> Self {
+        self.settings_coordinator = Some(coordinator);
+        self
     }
 
     pub fn with_tauri_is_admin(mut self, override_data: TauriIsAdminOverride) -> Self {
@@ -186,40 +199,32 @@ async fn put_native_locale(
     let Some(locale) = crate::locale::canonicalize(&payload.locale) else {
         return HttpResponse::BadRequest().body("unsupported locale");
     };
-    let Some(settings) = state.settings.as_ref() else {
+    let Some(coordinator) = state.settings_coordinator.as_ref() else {
         return HttpResponse::ServiceUnavailable().finish();
     };
 
-    let locale = {
-        let mut settings = settings.write().await;
-        match crate::locale::LocaleCoordinator::commit(&mut settings, Some(locale)) {
-            Ok(locale) => locale,
-            Err(error) => {
-                warn!("[NativeLocale] failed to persist locale: {error}");
-                return HttpResponse::InternalServerError().finish();
-            }
-        }
-    };
-
-    if let Some(worker_manager) = state.hub.locale_worker_manager() {
-        let result = worker_manager
-            .send_to_worker(desk_ipc_protocol::message::ServiceToWorker::SetLocale(
-                desk_ipc_protocol::message::SetLocalePayload {
-                    locale: locale.to_string(),
-                },
-            ))
-            .await;
-        if let Err(error) = result {
-            debug!("[NativeLocale] no live worker to notify: {error}");
-        }
+    // The commit persists the locale, applies it process-wide and tells the
+    // worker; only the local shell still has to be told separately.
+    if let Err(error) = coordinator
+        .commit(|settings| {
+            settings.system.locale = Some(locale.to_string());
+            Ok(())
+        })
+        .await
+    {
+        warn!("[NativeLocale] failed to persist locale: {error}");
+        return HttpResponse::InternalServerError().finish();
     }
+
     let _ = state
         .hub
         .send_command(HostControlMessage::GlobalLocaleChanged {
             locale: locale.to_string(),
         });
 
-    HttpResponse::Ok().json(NativeLocaleResponse { locale })
+    HttpResponse::Ok().json(NativeLocaleResponse {
+        locale: locale.to_string(),
+    })
 }
 
 /// Actix handler for `/ws/tauri_ipc`.

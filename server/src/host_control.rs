@@ -118,6 +118,10 @@ pub enum HubMode {
     Forwarder,
 }
 
+/// Identifies one question: this controller, this capability. Two gates that
+/// arrive with the same pair are asking the same thing.
+type SharedPromptKey = (String, SecurityPermissionType);
+
 /// One in-flight approval awaiting user response.
 struct PendingEntry {
     response_tx: oneshot::Sender<ApprovalResponse>,
@@ -164,6 +168,11 @@ struct HubInner {
     pending_acks: Mutex<HashMap<String, oneshot::Sender<()>>>,
     /// Aggregator-only: req_id → which upstream forwarder session originated it.
     pending_routes: Mutex<HashMap<String, UpstreamSessionId>>,
+    /// One in-flight prompt per (connection, capability), with everyone else
+    /// asking the same question queued behind it. Without this, two commands
+    /// arriving together on a fresh connection each mint their own request id
+    /// and the user is shown two identical dialogs for one decision.
+    shared_prompts: Mutex<HashMap<SharedPromptKey, Vec<oneshot::Sender<ApprovalResponse>>>>,
     /// Aggregator-only: per-forwarder-session outbound mpsc, used for directional
     /// dispatch (e.g. SecurityApprovalSubmit → exactly the originating worker).
     /// Populated by `endpoint::run_ws_session` on `Ready { role: Forwarder }`.
@@ -179,7 +188,42 @@ struct HubInner {
     remote_access_gate: crate::daemon::remote_access::RemoteAccessGate,
     remote_access_coordinator:
         std::sync::OnceLock<Arc<crate::daemon::remote_access::RemoteAccessCoordinator>>,
-    locale_worker_manager: std::sync::OnceLock<crate::daemon::worker_manager::WorkerManager>,
+}
+
+/// Owns one shared prompt while it is being asked.
+///
+/// Settling hands the answer to everyone queued behind it. Dropping without
+/// settling — the asking task was cancelled — drops their channels instead,
+/// which they read as a denial rather than waiting for an answer that will
+/// never come.
+struct SharedPromptGuard {
+    hub: HostControlHub,
+    key: SharedPromptKey,
+}
+
+impl SharedPromptGuard {
+    fn take(&self) -> Vec<oneshot::Sender<ApprovalResponse>> {
+        self.hub
+            .inner
+            .shared_prompts
+            .lock()
+            .unwrap()
+            .remove(&self.key)
+            .unwrap_or_default()
+    }
+
+    fn settle(&self, response: ApprovalResponse) {
+        for waiter in self.take() {
+            let _ = waiter.send(response);
+        }
+    }
+}
+
+impl Drop for SharedPromptGuard {
+    fn drop(&mut self) {
+        // A no-op after `settle`, which already removed the entry.
+        let _ = self.take();
+    }
 }
 
 /// The unified host control hub.
@@ -220,13 +264,13 @@ impl HostControlHub {
             pending_replay: Mutex::new(HashMap::new()),
             pending_acks: Mutex::new(HashMap::new()),
             pending_routes: Mutex::new(HashMap::new()),
+            shared_prompts: Mutex::new(HashMap::new()),
             forwarder_sessions: Mutex::new(HashMap::new()),
             upstream,
             tauri_client_count: AtomicUsize::new(0),
             host_activity,
             remote_access_gate: crate::daemon::remote_access::RemoteAccessGate::startup_locked(),
             remote_access_coordinator: std::sync::OnceLock::new(),
-            locale_worker_manager: std::sync::OnceLock::new(),
         };
         let hub = Self {
             inner: Arc::new(inner),
@@ -263,17 +307,6 @@ impl HostControlHub {
         &self,
     ) -> Option<Arc<crate::daemon::remote_access::RemoteAccessCoordinator>> {
         self.inner.remote_access_coordinator.get().cloned()
-    }
-
-    pub fn install_locale_worker_manager(
-        &self,
-        worker_manager: crate::daemon::worker_manager::WorkerManager,
-    ) -> Result<(), crate::daemon::worker_manager::WorkerManager> {
-        self.inner.locale_worker_manager.set(worker_manager)
-    }
-
-    pub fn locale_worker_manager(&self) -> Option<crate::daemon::worker_manager::WorkerManager> {
-        self.inner.locale_worker_manager.get().cloned()
     }
 
     /// Subscribe to outgoing host-control commands. Used by the ws endpoint to
@@ -370,6 +403,58 @@ impl HostControlHub {
     /// The two sources share the same broadcast → Tauri path and are disambiguated
     /// at submit time: routes registered via `register_upstream_request` win the
     /// directional dispatch, otherwise the local oneshot is resolved.
+    /// Ask the user, reusing an answer already being asked for.
+    ///
+    /// A controller that opens a file manager and starts a transfer in the same
+    /// breath reaches two gates at once, both on the same capability and the
+    /// same connection. They are one question, so the first caller raises the
+    /// dialog and the rest wait on its answer instead of stacking dialogs the
+    /// user has to dismiss one by one.
+    ///
+    /// Requests with no originating connection are not shared: without a
+    /// connection there is nothing to key them by, and they are rare enough
+    /// (host-initiated paths) that the duplicate dialog never arises.
+    pub async fn request_approval_shared(
+        &self,
+        req: ApprovalRequest,
+        approval_timeout: Option<Duration>,
+    ) -> ApprovalResponse {
+        let Some(connection_id) = req.from_connection_id.clone() else {
+            return self.request_approval(req, approval_timeout).await;
+        };
+        let key = (connection_id, req.permission_type);
+        let follower = {
+            let mut shared = self.inner.shared_prompts.lock().unwrap();
+            match shared.get_mut(&key) {
+                Some(waiters) => {
+                    let (tx, rx) = oneshot::channel();
+                    waiters.push(tx);
+                    Some(rx)
+                }
+                None => {
+                    shared.insert(key.clone(), Vec::new());
+                    None
+                }
+            }
+        };
+        if let Some(rx) = follower {
+            // A closed channel means the asking task went away before it could
+            // answer, which is not a reason to let the command through.
+            return rx.await.unwrap_or_else(|_| ApprovalResponse::deny());
+        }
+
+        // From here the entry belongs to this task. The guard hands the answer
+        // to everyone waiting, and — should this task be dropped mid-prompt —
+        // drops their senders instead, which the arm above reads as a denial.
+        let guard = SharedPromptGuard {
+            hub: self.clone(),
+            key,
+        };
+        let response = self.request_approval(req, approval_timeout).await;
+        guard.settle(response);
+        response
+    }
+
     pub async fn request_approval(
         &self,
         req: ApprovalRequest,

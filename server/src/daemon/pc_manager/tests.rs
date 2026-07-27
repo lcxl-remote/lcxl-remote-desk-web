@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::settings::{StartupMode, SystemSettings, TraversalMode};
+use crate::model::settings::{SharedSettings, StartupMode, SystemSettings, TraversalMode};
 use desk_ipc_protocol::message::MediaCodec;
 use desk_signal_facade::model::signal::{LcxlRTCIceServer, RemoteSessionPurpose};
 use desk_turn::model::TurnSettings;
@@ -3627,14 +3627,25 @@ async fn no_setcap_after_clear_under_concurrency() {
 /// auto-allow without user prompt; `Some(false)` means auto-deny;
 /// `None` would route to the host_control_hub which our test
 /// fixture cannot drive without a Tauri shell.
+/// Settings plus the daemon-role policy handle built from them, which is how
+/// the daemon really runs: the gate reads the coordinator, not the settings.
 fn settings_with_security(
     allow_control: Option<bool>,
     allow_clipboard: Option<bool>,
-) -> Arc<crate::model::settings::SharedSettings> {
+) -> (
+    Arc<crate::model::settings::SharedSettings>,
+    Arc<crate::model::policy_access::PolicyAccess>,
+) {
     let mut s = Settings::default();
     s.security.allow_remote_control = allow_control;
     s.security.allow_clipboard_sync = allow_clipboard;
-    Arc::new(crate::model::settings::SharedSettings::from(s))
+    let security = s.security.clone();
+    let shared = Arc::new(crate::model::settings::SharedSettings::from(s));
+    let coordinator = Arc::new(
+        crate::model::settings_coordinator::SettingsCoordinator::new(Arc::clone(&shared), security),
+    );
+    let policy = crate::model::policy_access::PolicyAccess::authoritative(coordinator);
+    (shared, policy)
 }
 
 fn require_control_model(
@@ -3659,6 +3670,60 @@ fn require_control_model(
     )
 }
 
+/// A dialog raised for a controller must not outlive it. Left standing, a user
+/// who answers it after the controller is gone approves work for a connection
+/// that no longer exists — and that answer would be cached against a
+/// connection id something else can take.
+#[tokio::test]
+async fn tearing_down_a_connection_denies_its_pending_approval() {
+    let registry = PcRegistry::new();
+    let (settings, policy) = settings_with_security(None, None);
+    let hub = Arc::new(HostControlHub::new_local());
+    registry.set_host_control_hub(&hub);
+    let (worker_mgr, _worker_rx) = WorkerManager::new(
+        actix_web::web::Data::from(Arc::clone(&settings)),
+        registry.clone(),
+    );
+
+    // A dialog is up and nobody answers it.
+    hub.mark_tauri_connected();
+    let mut outbound = hub.subscribe_outbound();
+    let asking = {
+        let policy = Arc::clone(&policy);
+        let hub = Arc::clone(&hub);
+        tokio::spawn(async move {
+            crate::model::security_approval::check_security_permission(
+                &policy,
+                &hub,
+                None,
+                SecurityPermissionType::RemoteControl,
+                Some("conn-gone".to_string()),
+                false,
+            )
+            .await
+        })
+    };
+    // Wait until the request has actually been registered, so the teardown
+    // below cannot race ahead of it.
+    loop {
+        match outbound.recv().await.expect("the hub is alive") {
+            crate::host_control::HostControlMessage::SecurityApprovalRequest { req_id, .. } => {
+                hub.notify_approval_ack(&req_id);
+                break;
+            }
+            _ => continue,
+        }
+    }
+
+    cleanup_pc(&registry, &worker_mgr, None, "conn-gone", "controller left").await;
+
+    let approved = tokio::time::timeout(std::time::Duration::from_secs(2), asking)
+        .await
+        .expect("the pending approval must be resolved, not left hanging")
+        .expect("task");
+    assert!(!approved, "a cancelled approval fails closed");
+}
+
 /// Auto-allow happy path: settings.security.allow_remote_control =
 /// Some(true) + browser asks for both control and clipboard. State
 /// flips, daemon emits AcceptControl back through outbound.
@@ -3666,7 +3731,7 @@ fn require_control_model(
 async fn handle_require_control_auto_allows_and_emits_accept() {
     let registry = PcRegistry::new();
     let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
-    let settings = settings_with_security(Some(true), Some(true));
+    let (settings, policy) = settings_with_security(Some(true), Some(true));
     let hub = Arc::new(HostControlHub::new_local());
 
     let request_remote = RequestRemoteModel {
@@ -3680,7 +3745,7 @@ async fn handle_require_control_auto_allows_and_emits_accept() {
         .expect("seed pc");
 
     let model = require_control_model("conn-rc", true, true);
-    handle_require_control(&registry, &outbound_tx, &settings, &hub, &model)
+    handle_require_control(&registry, &outbound_tx, &policy, &hub, &model)
         .await
         .expect("handle ok");
 
@@ -3708,7 +3773,7 @@ async fn handle_require_control_auto_allows_and_emits_accept() {
 async fn handle_require_control_auto_denies_and_emits_deny() {
     let registry = PcRegistry::new();
     let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
-    let settings = settings_with_security(Some(false), None);
+    let (settings, policy) = settings_with_security(Some(false), None);
     let hub = Arc::new(HostControlHub::new_local());
 
     let request_remote = RequestRemoteModel {
@@ -3722,7 +3787,7 @@ async fn handle_require_control_auto_denies_and_emits_deny() {
         .expect("seed pc");
 
     let model = require_control_model("conn-deny", true, false);
-    handle_require_control(&registry, &outbound_tx, &settings, &hub, &model)
+    handle_require_control(&registry, &outbound_tx, &policy, &hub, &model)
         .await
         .expect("handle ok");
 
@@ -3752,7 +3817,7 @@ async fn handle_require_control_meets_ceiling_and_denies_when_ceiling_denies() {
     let registry = PcRegistry::new();
     let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
     // Host global would allow both control and clipboard...
-    let settings = settings_with_security(Some(true), Some(true));
+    let (settings, policy) = settings_with_security(Some(true), Some(true));
     let hub = Arc::new(HostControlHub::new_local());
 
     let request_remote = RequestRemoteModel {
@@ -3777,7 +3842,7 @@ async fn handle_require_control_meets_ceiling_and_denies_when_ceiling_denies() {
     }
 
     let model = require_control_model("conn-cap", true, true);
-    handle_require_control(&registry, &outbound_tx, &settings, &hub, &model)
+    handle_require_control(&registry, &outbound_tx, &policy, &hub, &model)
         .await
         .expect("handle ok");
 
@@ -3803,7 +3868,7 @@ async fn handle_require_control_meets_ceiling_and_denies_when_ceiling_denies() {
 async fn handle_require_control_release_emits_close_and_resets_state() {
     let registry = PcRegistry::new();
     let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
-    let settings = settings_with_security(Some(true), Some(true));
+    let (settings, policy) = settings_with_security(Some(true), Some(true));
     let hub = Arc::new(HostControlHub::new_local());
 
     let request_remote = RequestRemoteModel {
@@ -3825,7 +3890,7 @@ async fn handle_require_control_release_emits_close_and_resets_state() {
     }
 
     let model = require_control_model("conn-release", false, false);
-    handle_require_control(&registry, &outbound_tx, &settings, &hub, &model)
+    handle_require_control(&registry, &outbound_tx, &policy, &hub, &model)
         .await
         .expect("handle ok");
 
@@ -3857,7 +3922,7 @@ async fn handle_require_control_release_does_not_prompt_when_ask_mode() {
     let registry = PcRegistry::new();
     let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
     // None = "ask the user" — the path that previously triggered the dialog.
-    let settings = settings_with_security(None, None);
+    let (settings, policy) = settings_with_security(None, None);
     let hub = Arc::new(HostControlHub::new_local());
 
     let request_remote = RequestRemoteModel {
@@ -3882,7 +3947,7 @@ async fn handle_require_control_release_does_not_prompt_when_ask_mode() {
     let model_ref = &model;
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        handle_require_control(&registry, &outbound_tx, &settings, &hub, model_ref),
+        handle_require_control(&registry, &outbound_tx, &policy, &hub, model_ref),
     )
     .await
     .expect("release must not block on the approval hub")
@@ -3916,7 +3981,7 @@ async fn handle_require_control_regrant_short_circuits() {
     // path would route to the hub — but the short-circuit fires
     // first because state is already accepted. If the
     // short-circuit broke, this test would hang on the hub call.
-    let settings = settings_with_security(None, None);
+    let (settings, policy) = settings_with_security(None, None);
     let hub = Arc::new(HostControlHub::new_local());
 
     let request_remote = RequestRemoteModel {
@@ -3941,7 +4006,7 @@ async fn handle_require_control_regrant_short_circuits() {
     // never complete in this test fixture) fails loudly.
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        handle_require_control(&registry, &outbound_tx, &settings, &hub, &model),
+        handle_require_control(&registry, &outbound_tx, &policy, &hub, &model),
     )
     .await
     .expect("handle_require_control must short-circuit, not block on hub")
@@ -3961,11 +4026,11 @@ async fn handle_require_control_regrant_short_circuits() {
 async fn handle_require_control_unknown_connection_errors() {
     let registry = PcRegistry::new();
     let (outbound_tx, _) = broadcast::channel::<String>(8);
-    let settings = settings_with_security(Some(true), Some(true));
+    let (_settings, policy) = settings_with_security(Some(true), Some(true));
     let hub = Arc::new(HostControlHub::new_local());
 
     let model = require_control_model("ghost", true, true);
-    let result = handle_require_control(&registry, &outbound_tx, &settings, &hub, &model).await;
+    let result = handle_require_control(&registry, &outbound_tx, &policy, &hub, &model).await;
     assert!(result.is_err(), "unknown connection must surface an error");
 }
 

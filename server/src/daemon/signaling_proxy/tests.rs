@@ -9,28 +9,6 @@ use desk_signal_facade::model::signal::{RequestRemoteModel, SignalingModel, Sign
 const RR_AUDIENCE: &str = "host-client-abc";
 const RR_NOW: &str = "2026-01-01T00:00:00Z";
 
-#[tokio::test]
-async fn worker_locale_ack_converges_daemon_and_broadcasts_to_tauri_shells() {
-    let settings = web::Data::new(SharedSettings::from(Settings::default()));
-    let hub = HostControlHub::new_local();
-    let mut outbound = hub.subscribe_outbound();
-
-    apply_worker_locale_ack(&settings, &hub, "en-US")
-        .await
-        .unwrap();
-
-    assert_eq!(
-        settings.read().await.system.locale.as_deref(),
-        Some("en-US")
-    );
-    assert_eq!(crate::locale::current_locale(), "en-US");
-    assert!(matches!(
-        outbound.try_recv(),
-        Ok(crate::host_control::HostControlMessage::GlobalLocaleChanged { locale })
-            if locale == "en-US"
-    ));
-}
-
 /// Read the one lifecycle frame that was emitted.
 fn expect_lifecycle(rx: &mut tokio::sync::broadcast::Receiver<String>) -> ExecLifecyclePayload {
     let text = rx.try_recv().expect("no lifecycle frame was sent");
@@ -552,6 +530,12 @@ async fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
     let (outbound_tx, _) = broadcast::channel::<String>(16);
     let shared = SharedSettings::from(Settings::default());
     let settings = web::Data::new(shared);
+    let settings_coordinator = Arc::new(
+        crate::model::settings_coordinator::SettingsCoordinator::from_settings(
+            settings.clone().into_inner(),
+        )
+        .await,
+    );
     let pc_registry = PcRegistry::new();
     let (worker_mgr, _rx) = WorkerManager::new(settings.clone(), pc_registry.clone());
     let ctx = RouterContext {
@@ -564,6 +548,10 @@ async fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
         pc_registry,
         outbound_tx: outbound_tx.clone(),
         settings,
+        policy: crate::model::policy_access::PolicyAccess::authoritative(Arc::clone(
+            &settings_coordinator,
+        )),
+        settings_coordinator,
         host_control_hub: Arc::new(HostControlHub::new_local()),
         worker_mgr,
         virtual_display: None,

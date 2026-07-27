@@ -268,43 +268,24 @@ fn outbound_dispatch_routes_manager_system_info_response_to_typed_variant() {
 /// Empty-body responses (`ManagerFileDelete`,
 /// `ManagerUpdateSettings`) ride
 /// `WorkerToService::ManagerResponseRefPayload` — only the
-/// `request_id` + `connection_id` matter. Verify both variants
-/// route to the right enum tag.
+/// `request_id` + `connection_id` matter.
 #[test]
 fn outbound_dispatch_routes_empty_body_manager_responses_to_typed_variants() {
-    for (signaling_type, expected_variant) in [
-        (
-            SignalingType::ManagerFileDelete,
-            "ManagerFileDeleteResponse",
-        ),
-        (
-            SignalingType::ManagerUpdateSettings,
-            "ManagerUpdateSettingsResponse",
-        ),
-    ] {
-        let model = SignalingModel::success_response(
-            "req-empty",
-            signaling_type,
-            None,
-            Some("conn-empty".to_string()),
-            Some(&()),
-        )
-        .expect("build response");
-        let text = serde_json::to_string(&model).expect("serialise");
-        let routed = build_outbound_payload_from_desk_text(text).expect("typed route");
-        match (expected_variant, routed) {
-            ("ManagerFileDeleteResponse", WorkerToService::ManagerFileDeleteResponse(p))
-            | (
-                "ManagerUpdateSettingsResponse",
-                WorkerToService::ManagerUpdateSettingsResponse(p),
-            ) => {
-                assert_eq!(p.request_id, "req-empty");
-                assert_eq!(p.connection_id.as_deref(), Some("conn-empty"));
-            }
-            (expected, other) => {
-                panic!("expected {expected}, got {other:?}");
-            }
+    let model = SignalingModel::success_response(
+        "req-empty",
+        SignalingType::ManagerFileDelete,
+        None,
+        Some("conn-empty".to_string()),
+        Some(&()),
+    )
+    .expect("build response");
+    let text = serde_json::to_string(&model).expect("serialise");
+    match build_outbound_payload_from_desk_text(text).expect("typed route") {
+        WorkerToService::ManagerFileDeleteResponse(p) => {
+            assert_eq!(p.request_id, "req-empty");
+            assert_eq!(p.connection_id.as_deref(), Some("conn-empty"));
         }
+        other => panic!("expected ManagerFileDeleteResponse, got {other:?}"),
     }
 }
 
@@ -705,4 +686,36 @@ fn dedup_capture_keys_preserves_order() {
 
     let distinct = dedup_capture_keys(&steps, |id| keys.get(id).cloned());
     assert_eq!(distinct, vec![key_attached, key_other]);
+}
+
+/// The security policy is applied ahead of the loop this guard protects, so a
+/// revocation made while the host is locked always lands. The locale has to be
+/// let through explicitly: the daemon persisted it before sending, and nothing
+/// re-sends it on unlock, so dropping it would strand the worker in the old
+/// language for good.
+#[test]
+fn a_locked_host_still_accepts_the_instructions_about_itself() {
+    for msg in [
+        ServiceToWorker::Shutdown,
+        ServiceToWorker::SetLocale(desk_ipc_protocol::message::SetLocalePayload {
+            operation_id: "op".to_string(),
+            locale: "en-US".to_string(),
+        }),
+    ] {
+        assert!(
+            crate::worker::session::survives_remote_access_lock(&msg),
+            "{msg:?} must not be dropped while locked"
+        );
+    }
+}
+
+/// Remote work is exactly what a lock exists to stop.
+#[test]
+fn a_locked_host_drops_remote_work() {
+    let msg =
+        ServiceToWorker::WhiteboardCommand(desk_ipc_protocol::message::OpaqueConnectionPayload {
+            connection_id: "c1".to_string(),
+            data: b"{}".to_vec(),
+        });
+    assert!(!crate::worker::session::survives_remote_access_lock(&msg));
 }

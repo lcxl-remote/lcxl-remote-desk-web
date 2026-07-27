@@ -136,6 +136,24 @@ with that code's capability ceiling and live approval.
 - `allow_file_transfer` — file upload / download.
 - `approval_timeout` — how long an approval prompt waits, in seconds. **Default `30`** — after which the host **server authoritatively cancels (denies) the request** rather than leaving it pending forever, enforced server-side even if the approval UI is closed or unreachable. Set to `0` to never time out (the prompt waits indefinitely). "Never" is stored as the value `0`, so it survives a restart.
 
+### When a change takes effect
+
+A capability change applies to sessions that are already running — there is no
+need to disconnect the controller or restart the host. The new setting is in
+force from that connection's **next** request for the capability.
+
+What it does *not* do is retract an ability the controller already holds.
+Setting `allow_remote_control` to `false` while someone is controlling the
+desktop stops the next control request, but does not end the control they were
+granted; the same goes for a transfer already in progress. To cut a session off
+immediately, disconnect it (or use
+[remote access lock](/features/remote-access-lock), which cancels everything
+outright).
+
+A "remember my choice" answer given while the setting was being changed is
+discarded rather than applied — the change you just made stands, and the request
+the user answered is still honored on its own.
+
 ## AI Settings
 
 AI provider, base URL, model, and API key are configured via the **management console**, not the TOML file. API keys are strictly server-side secrets. See [AI Diagnostics](/features/ai-diagnostics).

@@ -134,7 +134,7 @@ impl Settings {
         if configured_locale.as_deref() != settings.system.locale.as_deref()
             && settings.system.locale.is_some()
         {
-            settings.save_with_locale_change()?;
+            settings.save()?;
         }
         let locale = crate::locale::set_global_locale(
             settings
@@ -170,20 +170,10 @@ impl Settings {
     }
 
     pub fn save(&self) -> Result<(), DeskError> {
-        self.save_inner(false)
+        self.save_inner()
     }
 
-    /// Persist an intentional locale change.
-    ///
-    /// All ordinary saves preserve the locale already committed on disk. This
-    /// prevents a stale `Settings` clone in another process (notably a session
-    /// worker) from rolling back a newer shell/manager locale while saving an
-    /// unrelated field.
-    pub(crate) fn save_with_locale_change(&self) -> Result<(), DeskError> {
-        self.save_inner(true)
-    }
-
-    fn save_inner(&self, allow_locale_change: bool) -> Result<(), DeskError> {
+    fn save_inner(&self) -> Result<(), DeskError> {
         let mut config_file_path = PathBuf::from(self.args.config_file_path.as_str());
         config_file_path.set_extension("toml");
         let parent_path = if let Some(parent_path) = config_file_path.parent() {
@@ -202,8 +192,11 @@ impl Settings {
             fs::create_dir_all(parent_path)?;
         }
 
-        // Coordinate the locale read/modify/write across daemon and worker
-        // processes. The lock file is intentionally stable and retained.
+        // One process writes this file at a time. The daemon owns the security
+        // policy and the locale, and a session worker no longer writes either,
+        // so there is nothing left to merge — but the lock still keeps two
+        // concurrent saves from interleaving. The lock file is intentionally
+        // stable and retained.
         let mut lock_path = config_file_path.clone();
         lock_path.set_extension("locale.lock");
         let lock_file = std::fs::File::options()
@@ -213,14 +206,7 @@ impl Settings {
             .open(lock_path)?;
         lock_file.lock()?;
 
-        let mut persisted = self.clone();
-        if !allow_locale_change
-            && let Ok(contents) = fs::read_to_string(&config_file_path)
-            && let Ok(on_disk) = toml::from_str::<Settings>(&contents)
-        {
-            persisted.system.locale = on_disk.system.locale;
-        }
-        let toml_str = toml::to_string(&persisted)?;
+        let toml_str = toml::to_string(self)?;
 
         // Only the path is logged: the serialized TOML carries secrets
         // (api_key, signaling/manager tokens, session key) and would bypass the
@@ -264,31 +250,23 @@ mod tests {
         settings
     }
 
+    /// A save writes what the caller holds, locale included. The daemon is the
+    /// only writer of the locale now, so there is no second process whose stale
+    /// copy this would have to defend against — the previous read-back-and-keep
+    /// behaviour would instead make a genuine change silently not stick.
     #[test]
-    fn ordinary_save_cannot_roll_back_committed_locale() {
+    fn a_save_persists_the_locale_it_carries() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config");
-        let committed = settings_at(&path, "en-US");
-        committed.save_with_locale_change().unwrap();
+        settings_at(&path, "en-US").save().unwrap();
 
-        let mut stale = settings_at(&path, "zh-CN");
-        stale.log.log_level = "debug".to_string();
-        stale.save().unwrap();
+        let mut next = settings_at(&path, "zh-CN");
+        next.log.log_level = "debug".to_string();
+        next.save().unwrap();
 
-        let loaded = Settings::load_readonly(&stale.args).unwrap();
-        assert_eq!(loaded.system.locale.as_deref(), Some("en-US"));
+        let loaded = Settings::load_readonly(&next.args).unwrap();
+        assert_eq!(loaded.system.locale.as_deref(), Some("zh-CN"));
         assert_eq!(loaded.log.log_level, "debug");
-    }
-
-    #[test]
-    fn explicit_locale_save_updates_persisted_locale() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config");
-        let settings = settings_at(&path, "en-US");
-        settings.save_with_locale_change().unwrap();
-
-        let loaded = Settings::load_readonly(&settings.args).unwrap();
-        assert_eq!(loaded.system.locale.as_deref(), Some("en-US"));
     }
 
     /// STUN stopped being separately switchable, so configuration files written
@@ -353,7 +331,7 @@ enable_turn = false
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("config");
             let committed = settings_at(&path, "en-US");
-            committed.save_with_locale_change().unwrap();
+            committed.save().unwrap();
             let before = std::fs::read_to_string(path.with_extension("toml")).unwrap();
 
             // An unwritable directory stands in for the disk filling up: the
@@ -392,7 +370,7 @@ enable_turn = false
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config");
         let committed = settings_at(&path, "en-US");
-        committed.save_with_locale_change().unwrap();
+        committed.save().unwrap();
         crate::locale::set_global_locale("en-US").unwrap();
 
         let stale = settings_at(&path, "zh-CN");

@@ -37,7 +37,10 @@ use tokio::sync::mpsc;
 use webrtc_mdns::{config::Config as MdnsConfig, conn::DnsConn};
 
 use crate::host_control::HostControlHub;
-use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
+use crate::model::policy_access::{CachedDecision, PolicyAccess};
+use crate::model::security_approval::{
+    SecurityPermissionType, check_security_permission, resolve_permission,
+};
 use crate::service::file_manager::{handle_manager_file_delete, handle_manager_file_list};
 use crate::service::terminal::{
     RunningTerminal, force_kill_terminal_process, handle_list_terminals,
@@ -238,10 +241,16 @@ pub struct DeskSession {
     /// owner sessions carry no ceiling and use the global verbatim. Shared (Arc)
     /// with the worker session loop that populates it on `SetConnectionCeiling`.
     pub connection_ceilings: ConnectionCeilingStore,
-    /// Cached file-browse decisions keyed by controller connection.
-    pub file_browse_permissions: HashMap<String, bool>,
-    /// Cached file-delete decisions keyed by controller connection.
-    pub file_delete_permissions: HashMap<String, bool>,
+    /// The host security policy as this process reaches it. In a worker that is
+    /// the daemon's published copy, never the settings clone this session also
+    /// holds.
+    pub policy: Arc<PolicyAccess>,
+    /// Cached file-browse decisions keyed by controller connection, each tagged
+    /// with the policy it was decided under.
+    pub file_browse_permissions: HashMap<String, CachedDecision>,
+    /// Cached file-delete decisions keyed by controller connection, tagged the
+    /// same way.
+    pub file_delete_permissions: HashMap<String, CachedDecision>,
     /// Connections for which FileManagerOpened was already emitted.
     pub opened_file_managers: HashSet<String>,
     /// Direct worker event lane used for authoritative file activity facts.
@@ -249,12 +258,14 @@ pub struct DeskSession {
 }
 
 impl DeskSession {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         settings: web::Data<SharedSettings>,
         session: DeskSessionSender,
         user: CurrentUser,
         host_control_hub: Arc<HostControlHub>,
         connection_ceilings: ConnectionCeilingStore,
+        policy: Arc<PolicyAccess>,
         worker_event_sender: mpsc::UnboundedSender<WorkerToService>,
     ) -> Result<Self, DeskError> {
         let desk_settings = settings.read().await.clone().desk;
@@ -319,6 +330,7 @@ impl DeskSession {
             whiteboard_cmd_sender,
             host_control_hub,
             connection_ceilings,
+            policy,
             file_browse_permissions: HashMap::new(),
             file_delete_permissions: HashMap::new(),
             opened_file_managers: HashSet::new(),
@@ -343,66 +355,88 @@ impl DeskSession {
 
     /// Resolve and cache FileBrowse for one controller connection.
     pub async fn file_browse_permission(&mut self, connection_id: &str) -> bool {
-        let global = self.settings.read().await.security.allow_file_browse;
+        let capability = SecurityPermissionType::FileBrowse;
+        let generation = self.policy.changed_at(capability);
         let ceiling = self.connection_ceilings.get(connection_id).await;
         let effective = crate::model::security_approval::effective_permission(
             ceiling.as_ref(),
-            global,
+            self.policy.permission(capability),
             |settings| settings.allow_file_browse,
         );
         if effective == Some(false) {
             self.file_browse_permissions.remove(connection_id);
             return false;
         }
-        if self.file_browse_permissions.get(connection_id) == Some(&true) {
-            return true;
+        // Only approvals are cached: a denial is the user declining this one
+        // request, and the next one asks again.
+        if let Some(cached) = self.file_browse_permissions.get(connection_id)
+            && cached.is_current(generation)
+        {
+            return cached.approved;
         }
-        let approved = check_security_permission(
-            &self.settings,
+        let resolved = resolve_permission(
+            &self.policy,
             &self.host_control_hub,
             effective,
-            SecurityPermissionType::FileBrowse,
+            capability,
             Some(connection_id.to_string()),
             ceiling.is_some(),
         )
         .await;
-        if approved {
-            self.file_browse_permissions
-                .insert(connection_id.to_string(), true);
+        if let Some(decided_at) = resolved.cacheable_at
+            && resolved.approved
+        {
+            self.file_browse_permissions.insert(
+                connection_id.to_string(),
+                CachedDecision {
+                    approved: true,
+                    decided_at,
+                },
+            );
         }
-        approved
+        resolved.approved
     }
 
     /// Resolve and cache FileDelete for one controller connection.
     pub async fn file_delete_permission(&mut self, connection_id: &str) -> bool {
-        let global = self.settings.read().await.security.allow_file_delete;
+        let capability = SecurityPermissionType::FileDelete;
+        let generation = self.policy.changed_at(capability);
         let ceiling = self.connection_ceilings.get(connection_id).await;
         let effective = crate::model::security_approval::effective_permission(
             ceiling.as_ref(),
-            global,
+            self.policy.permission(capability),
             |settings| settings.allow_file_delete,
         );
         if effective == Some(false) {
             self.file_delete_permissions.remove(connection_id);
             return false;
         }
-        if self.file_delete_permissions.get(connection_id) == Some(&true) {
-            return true;
+        if let Some(cached) = self.file_delete_permissions.get(connection_id)
+            && cached.is_current(generation)
+        {
+            return cached.approved;
         }
-        let approved = check_security_permission(
-            &self.settings,
+        let resolved = resolve_permission(
+            &self.policy,
             &self.host_control_hub,
             effective,
-            SecurityPermissionType::FileDelete,
+            capability,
             Some(connection_id.to_string()),
             ceiling.is_some(),
         )
         .await;
-        if approved {
-            self.file_delete_permissions
-                .insert(connection_id.to_string(), true);
+        if let Some(decided_at) = resolved.cacheable_at
+            && resolved.approved
+        {
+            self.file_delete_permissions.insert(
+                connection_id.to_string(),
+                CachedDecision {
+                    approved: true,
+                    decided_at,
+                },
+            );
         }
-        approved
+        resolved.approved
     }
 
     /// Emit the authoritative open fact once per controller connection.
@@ -493,8 +527,9 @@ impl DeskSession {
                     signaling_model.get_data_with_type::<EnablePrivateScreenData>()?
                 {
                     if data.enable {
-                        let global_private_screen =
-                            { self.settings.read().await.security.allow_private_screen };
+                        let global_private_screen = self
+                            .policy
+                            .permission(SecurityPermissionType::PrivateScreen);
                         let allow_private_screen = self
                             .effective_permission(from_connection_id, global_private_screen, |c| {
                                 c.allow_private_screen
@@ -508,7 +543,7 @@ impl DeskSession {
                             .await
                             .is_some();
                         let approved = check_security_permission(
-                            &self.settings,
+                            &self.policy,
                             &self.host_control_hub,
                             allow_private_screen,
                             SecurityPermissionType::PrivateScreen,
@@ -583,44 +618,6 @@ impl DeskSession {
                     )
                     .await?;
             }
-            SignalingType::ManagerQuerySettings => {
-                let remote_settings = {
-                    let settings = self.settings.read().await;
-                    desk_signal_facade::model::system_settings::RemoteSystemSettings {
-                        enable_ipv6: settings.system.enable_ipv6,
-                        port: settings.system.port,
-                        listen_addr_ipv4: settings.system.listen_addr_ipv4.clone(),
-                        listen_addr_ipv6: settings.system.listen_addr_ipv6.clone(),
-                        locale: settings.system.locale.clone(),
-                        signaling_url: settings.system.signaling_url.clone(),
-                        signaling_token: settings.system.signaling_token.clone(),
-                        manager_url: settings.system.manager_url.clone(),
-                        auto_start: settings.system.auto_start,
-                        manager_api_token: settings.system.manager_api_token.clone(),
-                    }
-                };
-                self.session
-                    .send_response(
-                        &signaling_model.request_id,
-                        SignalingType::ManagerQuerySettings,
-                        signaling_model.from_connection_id.clone(),
-                        &remote_settings,
-                    )
-                    .await?;
-            }
-            SignalingType::ManagerUpdateSettings => {
-                let remote_settings = signaling_model
-                    .get_data::<desk_signal_facade::model::system_settings::RemoteSystemSettings>()?;
-                apply_manager_system_settings(&self.settings, remote_settings).await?;
-                self.session
-                    .send_response(
-                        &signaling_model.request_id,
-                        SignalingType::ManagerUpdateSettings,
-                        signaling_model.from_connection_id.clone(),
-                        &(),
-                    )
-                    .await?;
-            }
             other => {
                 error!("Unknown / unrouted signaling type at worker DeskSession: {other}");
                 self.session
@@ -657,124 +654,6 @@ pub fn should_short_circuit_control(asked: bool, currently_accepted: bool) -> bo
 /// it was previously denied.
 pub fn should_short_circuit_clipboard(asked: bool, currently_accepted: bool) -> bool {
     asked && currently_accepted
-}
-
-/// Apply a manager-pushed `RemoteSystemSettings` onto the local `SystemSettings`.
-///
-/// `auto_start` is intentionally NOT copied: it is node-local OS state (a
-/// LaunchAgent on macOS, an OS-service / login entry elsewhere) and may only be
-/// changed via this node's own `/settings` endpoint, never pushed from a remote
-/// manager — otherwise a manager-wide settings update could silently toggle a
-/// host's unattended auto-start. The protocol field is left untouched; we simply
-/// don't act on it here.
-fn apply_remote_system_settings(
-    system: &mut crate::model::settings::SystemSettings,
-    remote: desk_signal_facade::model::system_settings::RemoteSystemSettings,
-) {
-    system.enable_ipv6 = remote.enable_ipv6;
-    system.port = remote.port;
-    system.listen_addr_ipv4 = remote.listen_addr_ipv4;
-    system.listen_addr_ipv6 = remote.listen_addr_ipv6;
-    system.locale = remote.locale;
-    system.signaling_url = remote.signaling_url;
-    system.signaling_token = remote.signaling_token;
-    system.manager_url = remote.manager_url;
-    system.manager_api_token = remote.manager_api_token;
-}
-
-async fn apply_manager_system_settings(
-    settings: &web::Data<SharedSettings>,
-    mut remote: desk_signal_facade::model::system_settings::RemoteSystemSettings,
-) -> Result<(), DeskError> {
-    remote.locale = match remote.locale.as_deref() {
-        Some(locale) => {
-            let Some(locale) = crate::locale::canonicalize(locale) else {
-                return DeskError::custom_error(
-                    DeskErrorCode::INVALID_PARAMS,
-                    "unsupported locale",
-                );
-            };
-            Some(locale.to_string())
-        }
-        None => None,
-    };
-    let mut settings = settings.write().await;
-    let previous_locale = settings.system.locale.clone();
-    apply_remote_system_settings(&mut settings.system, remote);
-    let requested_locale = settings.system.locale.clone();
-    settings.system.locale = previous_locale;
-    crate::locale::LocaleCoordinator::commit(&mut settings, requested_locale.as_deref())?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod apply_remote_settings_tests {
-    // SystemSettings has a private field, so cross-module struct-literal init is
-    // impossible; the tests build via Default then assign the public fields.
-    #![allow(clippy::field_reassign_with_default)]
-    use super::*;
-    use crate::model::settings::SystemSettings;
-    use desk_signal_facade::model::system_settings::RemoteSystemSettings;
-
-    /// A manager push updates the regular fields but must NOT change the
-    /// node-local `auto_start`, whichever way it was set locally.
-    #[test]
-    fn remote_update_preserves_local_auto_start() {
-        for local in [Some(true), Some(false), None] {
-            let mut system = SystemSettings::default();
-            system.auto_start = local;
-            system.port = 1;
-            let remote = RemoteSystemSettings {
-                enable_ipv6: true,
-                port: 9090,
-                listen_addr_ipv4: "1.2.3.4".to_string(),
-                listen_addr_ipv6: "::1".to_string(),
-                locale: Some("zh-CN".to_string()),
-                signaling_url: Some("ws://s".to_string()),
-                signaling_token: Some("tok".to_string()),
-                manager_url: Some("ws://m".to_string()),
-                // Even if the manager sends a flipped auto_start, it is ignored.
-                auto_start: Some(!local.unwrap_or(false)),
-                manager_api_token: Some("mtok".to_string()),
-            };
-
-            apply_remote_system_settings(&mut system, remote);
-
-            // Regular field applied...
-            assert_eq!(system.port, 9090);
-            assert_eq!(system.manager_url.as_deref(), Some("ws://m"));
-            // ...but auto_start untouched.
-            assert_eq!(system.auto_start, local);
-        }
-    }
-
-    #[tokio::test]
-    async fn manager_locale_push_persists_and_converges_live_worker_locale() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut settings = crate::model::settings::Settings::default();
-        settings.args.config_file_path = dir.path().join("config").to_string_lossy().into_owned();
-        settings.system.locale = Some("zh-CN".to_string());
-        settings.save_with_locale_change().unwrap();
-        let args = settings.args.clone();
-        let shared = web::Data::new(SharedSettings::from(settings));
-        let mut remote = RemoteSystemSettings::default();
-        remote.locale = Some("en-US".to_string());
-
-        apply_manager_system_settings(&shared, remote)
-            .await
-            .unwrap();
-
-        assert_eq!(shared.read().await.system.locale.as_deref(), Some("en-US"));
-        assert_eq!(crate::locale::current_locale(), "en-US");
-        assert_eq!(
-            crate::model::settings::Settings::load_readonly(&args)
-                .unwrap()
-                .system
-                .locale
-                .as_deref(),
-            Some("en-US")
-        );
-    }
 }
 
 #[cfg(test)]

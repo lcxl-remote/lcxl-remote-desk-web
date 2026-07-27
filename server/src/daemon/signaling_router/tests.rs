@@ -5,6 +5,12 @@ async fn make_ctx() -> RouterContext {
     let shared =
         crate::model::settings::SharedSettings::from(crate::model::settings::Settings::default());
     let settings = web::Data::new(shared);
+    let settings_coordinator = Arc::new(
+        crate::model::settings_coordinator::SettingsCoordinator::from_settings(
+            settings.clone().into_inner(),
+        )
+        .await,
+    );
     let pc_registry = PcRegistry::new();
     let (worker_mgr, _) = WorkerManager::new(settings.clone(), pc_registry.clone());
     let host_control_hub = Arc::new(HostControlHub::new_local());
@@ -21,6 +27,10 @@ async fn make_ctx() -> RouterContext {
         pc_registry,
         outbound_tx,
         settings,
+        policy: crate::model::policy_access::PolicyAccess::authoritative(Arc::clone(
+            &settings_coordinator,
+        )),
+        settings_coordinator,
         host_control_hub,
         worker_mgr,
         virtual_display: None,

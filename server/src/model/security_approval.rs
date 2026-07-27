@@ -4,7 +4,7 @@ use std::sync::Arc;
 use utoipa::ToSchema;
 
 use crate::host_control::{ApprovalRequest, HostControlHub};
-use crate::model::settings::SharedSettings;
+use crate::model::policy_access::PolicyAccess;
 
 /// The three-state capability ordering `Some(false) < None < Some(true)` used to
 /// combine a per-connection capability ceiling with the host global. `meet` picks
@@ -120,7 +120,25 @@ pub struct SecurityDecision {
     pub remember: bool,
 }
 
-/// Decide a security permission from settings, without persisting anything.
+/// A settled permission request, and whether the answer outlives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedPermission {
+    /// Whether this one request goes ahead.
+    pub approved: bool,
+    /// The capability stamp to cache this answer under, when it is safe to
+    /// cache at all.
+    ///
+    /// `None` means the operator changed this capability while the user was
+    /// answering. The user's answer still settles the request in front of them
+    /// — they did just consent to it — but it must not become the standing
+    /// answer for the next one, which belongs to the newer policy. Re-asking
+    /// instead is worse than it sounds: the newer policy may well be "prompt"
+    /// again, and a run of unrelated changes would then produce a run of
+    /// dialogs, with a host configured to wait forever never getting out of it.
+    pub cacheable_at: Option<u64>,
+}
+
+/// Decide a security permission from the policy, without committing anything.
 /// - `Some(true)` → allow
 /// - `Some(false)` → deny
 /// - `None` → ask the user via the Host Control Hub; deny if no UI is available.
@@ -134,7 +152,7 @@ pub struct SecurityDecision {
 /// prompt). The approval is still honored for this one request; only the
 /// standing policy is left alone, which shows up as `remember: false`.
 pub async fn decide_security_permission(
-    settings: &SharedSettings,
+    policy: &PolicyAccess,
     hub: &Arc<HostControlHub>,
     permission: Option<bool>,
     permission_type: SecurityPermissionType,
@@ -158,10 +176,9 @@ pub async fn decide_security_permission(
             };
             // Bound the wait by the host's configured approval timeout (0 = never,
             // None = the finite default; never fail open to an unbounded wait).
-            let approval_timeout = crate::host_control::server_approval_timeout(
-                settings.read().await.security.approval_timeout,
-            );
-            let response = hub.request_approval(req, approval_timeout).await;
+            let approval_timeout =
+                crate::host_control::server_approval_timeout(policy.approval_timeout());
+            let response = hub.request_approval_shared(req, approval_timeout).await;
 
             if response.remember && suppress_remember {
                 log::info!(
@@ -177,42 +194,24 @@ pub async fn decide_security_permission(
     }
 }
 
-/// Make a remembered answer the host's standing policy for one capability.
+/// Settle one permission request against the host policy.
 ///
-/// Failures are logged rather than returned: the request the user just answered
-/// is honored either way, and there is no caller that could do anything useful
-/// with a persistence error at this point.
-pub async fn persist_remembered_decision(
-    settings: &SharedSettings,
-    permission_type: &SecurityPermissionType,
-    approved: bool,
-) {
-    let mut settings_write = settings.write().await;
-    permission_type.write(&mut settings_write.security, Some(approved));
-    // Any path that persists security settings normalizes an unset approval
-    // timeout to the finite default, so a save never drops it to a value that
-    // reloads as the 30s default by omission.
-    settings_write.security.normalize();
-    if let Err(e) = settings_write.save() {
-        log::error!("Failed to save security settings: {}", e);
-    }
-}
-
-/// Decide a permission and commit a remembered answer in one step.
-///
-/// The shape every gate currently uses. It writes the standing policy through
-/// whichever `Settings` handle the caller holds, which is correct in the daemon
-/// and merely tolerated in a worker, where that handle is a copy.
-pub async fn check_security_permission(
-    settings: &SharedSettings,
+/// The single shape every gate uses: read the capability's stamp, decide,
+/// commit a remembered answer wherever this role commits it, and report whether
+/// the answer may be cached. A gate that caches under the returned stamp gets
+/// invalidation for free — the next read compares stamps and treats a change as
+/// a miss.
+pub async fn resolve_permission(
+    policy: &PolicyAccess,
     hub: &Arc<HostControlHub>,
     permission: Option<bool>,
     permission_type: SecurityPermissionType,
     from_connection_id: Option<String>,
     suppress_remember: bool,
-) -> bool {
+) -> ResolvedPermission {
+    let generation = policy.changed_at(permission_type);
     let decision = decide_security_permission(
-        settings,
+        policy,
         hub,
         permission,
         permission_type,
@@ -221,16 +220,51 @@ pub async fn check_security_permission(
     )
     .await;
     if decision.remember {
-        persist_remembered_decision(settings, &permission_type, decision.approved).await;
+        policy
+            .remember(permission_type, decision.approved, generation)
+            .await;
     }
-    decision.approved
+    let moved = policy.changed_at(permission_type) != generation;
+    if moved {
+        log::info!(
+            "[security] {permission_type:?} changed while the user was answering; honoring the \
+             answer for this request only"
+        );
+    }
+    ResolvedPermission {
+        approved: decision.approved,
+        cacheable_at: (!moved).then_some(generation),
+    }
+}
+
+/// Settle one permission request and report only the verdict.
+///
+/// For the gates that hold no cache — there is nothing for them to do with the
+/// stamp.
+pub async fn check_security_permission(
+    policy: &PolicyAccess,
+    hub: &Arc<HostControlHub>,
+    permission: Option<bool>,
+    permission_type: SecurityPermissionType,
+    from_connection_id: Option<String>,
+    suppress_remember: bool,
+) -> bool {
+    resolve_permission(
+        policy,
+        hub,
+        permission,
+        permission_type,
+        from_connection_id,
+        suppress_remember,
+    )
+    .await
+    .approved
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::host_control::{ApprovalResponse, HostControlHub, HostControlMessage};
-    use crate::model::settings::Settings;
     use std::time::Duration;
 
     /// Full 9-cell truth table of `meet_permission` under
@@ -297,18 +331,32 @@ mod tests {
         );
     }
 
-    fn shared_settings_for_test() -> SharedSettings {
-        let mut s = Settings::default();
-        // Point persistence at a unique scratch path so the in-test `save()` does not
-        // collide between parallel cargo-test threads. The save call itself logs and
-        // ignores errors, so even if the path is unwritable the assertions still hold.
-        let dir = std::env::temp_dir().join("lcxl-rd-test-settings");
-        let _ = std::fs::create_dir_all(&dir);
-        s.args.config_file_path = dir
-            .join(format!("settings-{}.toml", uuid::Uuid::new_v4()))
-            .to_string_lossy()
-            .into_owned();
-        SharedSettings::from(s)
+    /// A worker-role policy handle plus the upstream a remembered answer would
+    /// travel on, so a test can assert on both the verdict and what was sent
+    /// back to the host.
+    fn policy_for_test() -> (
+        Arc<PolicyAccess>,
+        Arc<crate::worker::policy_mirror::PolicyMirror>,
+        tokio::sync::mpsc::UnboundedReceiver<desk_ipc_protocol::message::WorkerToService>,
+    ) {
+        PolicyAccess::for_test(SecuritySettings::default())
+    }
+
+    /// The capability a remembered answer names, or `None` when nothing was
+    /// sent back to the host.
+    fn remembered(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<desk_ipc_protocol::message::WorkerToService>,
+    ) -> Option<(SecurityPermissionType, bool, u64)> {
+        match rx.try_recv().ok()? {
+            desk_ipc_protocol::message::WorkerToService::RememberSecurityDecision(payload) => {
+                Some((
+                    payload.capability,
+                    payload.approved,
+                    payload.expected_generation,
+                ))
+            }
+            other => panic!("unexpected upstream message: {other:?}"),
+        }
     }
 
     /// Spawn a helper that subscribes to outbound commands from the hub and
@@ -335,13 +383,13 @@ mod tests {
     // U-18: explicit allow short-circuits — no hub call.
     #[tokio::test]
     async fn u18_check_with_some_true_returns_true() {
-        let settings = shared_settings_for_test();
+        let (policy, _mirror, _rx) = policy_for_test();
         let hub = Arc::new(HostControlHub::new_local());
         // No subscriber/responder — would block forever if the hub were consulted.
         let approved = tokio::time::timeout(
             Duration::from_millis(200),
             check_security_permission(
-                &settings,
+                &policy,
                 &hub,
                 Some(true),
                 SecurityPermissionType::RemoteControl,
@@ -357,12 +405,12 @@ mod tests {
     // U-19: explicit deny short-circuits — no hub call.
     #[tokio::test]
     async fn u19_check_with_some_false_returns_false() {
-        let settings = shared_settings_for_test();
+        let (policy, _mirror, _rx) = policy_for_test();
         let hub = Arc::new(HostControlHub::new_local());
         let approved = tokio::time::timeout(
             Duration::from_millis(200),
             check_security_permission(
-                &settings,
+                &policy,
                 &hub,
                 Some(false),
                 SecurityPermissionType::RemoteControl,
@@ -375,10 +423,11 @@ mod tests {
         assert!(!approved);
     }
 
-    // U-20: None + hub returns {approved=true, remember=true} → settings updated.
+    /// A worker cannot store the policy, so a remembered answer has to leave the
+    /// process — carrying the stamp the host judges it against.
     #[tokio::test]
-    async fn u20_check_with_remember_writes_settings() {
-        let settings = shared_settings_for_test();
+    async fn u20_check_with_remember_sends_the_answer_to_the_host() {
+        let (policy, _mirror, mut rx) = policy_for_test();
         let hub = Arc::new(HostControlHub::new_local());
         spawn_responder(
             &hub,
@@ -388,8 +437,9 @@ mod tests {
             },
         );
 
+        let generation = policy.changed_at(SecurityPermissionType::Terminal);
         let approved = check_security_permission(
-            &settings,
+            &policy,
             &hub,
             None,
             SecurityPermissionType::Terminal,
@@ -397,18 +447,20 @@ mod tests {
             false,
         )
         .await;
+
         assert!(approved);
-        let s = settings.read().await;
-        assert_eq!(s.security.allow_terminal, Some(true));
+        assert_eq!(
+            remembered(&mut rx),
+            Some((SecurityPermissionType::Terminal, true, generation))
+        );
     }
 
     /// A capped grant / code-session (`suppress_remember = true`) that the local
     /// user approves *with* remember is honored for this request but must NOT widen
     /// the host global — the owner's per-code ceiling stays the only authority.
     #[tokio::test]
-    async fn capped_session_remember_does_not_write_global() {
-        let settings = shared_settings_for_test();
-        let before = settings.read().await.security.allow_terminal;
+    async fn capped_session_remember_does_not_reach_the_host() {
+        let (policy, _mirror, mut rx) = policy_for_test();
         let hub = Arc::new(HostControlHub::new_local());
         spawn_responder(
             &hub,
@@ -419,7 +471,7 @@ mod tests {
         );
 
         let approved = check_security_permission(
-            &settings,
+            &policy,
             &hub,
             None,
             SecurityPermissionType::Terminal,
@@ -427,19 +479,18 @@ mod tests {
             true,
         )
         .await;
+
         // Honored for this one request...
         assert!(approved);
-        // ...but the global is untouched (no leak into the owner's future sessions).
-        assert_eq!(settings.read().await.security.allow_terminal, before);
+        // ...but nothing is proposed as the host's standing policy.
+        assert_eq!(remembered(&mut rx), None);
     }
 
-    /// Deciding is the half that a session worker can run: it holds a copy of
-    /// the settings, so a write there would push a stale snapshot onto disk.
-    /// Asking must therefore leave the stored policy exactly as it was.
+    /// Deciding is the half a gate can run without committing anything: nothing
+    /// leaves the process until the caller acts on `remember`.
     #[tokio::test]
-    async fn deciding_a_permission_does_not_touch_the_stored_policy() {
-        let settings = shared_settings_for_test();
-        let before = settings.read().await.security.allow_terminal;
+    async fn deciding_a_permission_commits_nothing() {
+        let (policy, _mirror, mut rx) = policy_for_test();
         let hub = Arc::new(HostControlHub::new_local());
         spawn_responder(
             &hub,
@@ -450,7 +501,7 @@ mod tests {
         );
 
         let decision = decide_security_permission(
-            &settings,
+            &policy,
             &hub,
             None,
             SecurityPermissionType::Terminal,
@@ -461,31 +512,14 @@ mod tests {
 
         assert!(decision.approved);
         assert!(decision.remember, "the user asked to remember this");
-        assert_eq!(
-            settings.read().await.security.allow_terminal,
-            before,
-            "deciding must not write the policy"
-        );
-    }
-
-    /// Committing is the other half, and it is what actually moves the policy.
-    #[tokio::test]
-    async fn persisting_a_remembered_answer_writes_the_policy() {
-        let settings = shared_settings_for_test();
-
-        persist_remembered_decision(&settings, &SecurityPermissionType::FileDelete, false).await;
-
-        assert_eq!(
-            settings.read().await.security.allow_file_delete,
-            Some(false)
-        );
+        assert_eq!(remembered(&mut rx), None, "deciding must not commit");
     }
 
     /// A capped session's "remember" must never reach a caller as something to
     /// commit — the suppression has to be decided here, not left to each gate.
     #[tokio::test]
     async fn a_capped_session_never_reports_a_remembered_answer() {
-        let settings = shared_settings_for_test();
+        let (policy, _mirror, _rx) = policy_for_test();
         let hub = Arc::new(HostControlHub::new_local());
         spawn_responder(
             &hub,
@@ -496,7 +530,7 @@ mod tests {
         );
 
         let decision = decide_security_permission(
-            &settings,
+            &policy,
             &hub,
             None,
             SecurityPermissionType::Terminal,
@@ -513,12 +547,12 @@ mod tests {
     /// nothing to remember and no policy write to make.
     #[tokio::test]
     async fn a_configured_capability_reports_nothing_to_remember() {
-        let settings = shared_settings_for_test();
+        let (policy, _mirror, _rx) = policy_for_test();
         let hub = Arc::new(HostControlHub::new_local());
 
         for (configured, expected) in [(Some(true), true), (Some(false), false)] {
             let decision = decide_security_permission(
-                &settings,
+                &policy,
                 &hub,
                 configured,
                 SecurityPermissionType::RemoteControl,
@@ -531,11 +565,10 @@ mod tests {
         }
     }
 
-    // U-21: None + hub returns deny without remember → settings unchanged.
+    // U-21: None + hub returns deny without remember → nothing committed.
     #[tokio::test]
-    async fn u21_check_without_remember_does_not_write_settings() {
-        let settings = shared_settings_for_test();
-        let before = settings.read().await.security.allow_file_browse;
+    async fn u21_check_without_remember_commits_nothing() {
+        let (policy, _mirror, mut rx) = policy_for_test();
         let hub = Arc::new(HostControlHub::new_local());
         spawn_responder(
             &hub,
@@ -546,7 +579,7 @@ mod tests {
         );
 
         let approved = check_security_permission(
-            &settings,
+            &policy,
             &hub,
             None,
             SecurityPermissionType::FileBrowse,
@@ -555,42 +588,15 @@ mod tests {
         )
         .await;
         assert!(!approved);
-        let after = settings.read().await.security.allow_file_browse;
-        assert_eq!(before, after);
+        assert_eq!(remembered(&mut rx), None);
     }
 
-    // U-6: parametric test that every permission type routes to the correct settings field.
+    /// Every capability must travel back under its own name. A gate that
+    /// reported the wrong one would silently change a different setting.
     #[tokio::test]
-    async fn u6_remember_writes_correct_field_per_type() {
-        type Getter = fn(&Settings) -> Option<bool>;
-        let cases: [(SecurityPermissionType, Getter); 8] = [
-            (SecurityPermissionType::RemoteControl, |s| {
-                s.security.allow_remote_control
-            }),
-            (SecurityPermissionType::ClipboardSync, |s| {
-                s.security.allow_clipboard_sync
-            }),
-            (SecurityPermissionType::PrivateScreen, |s| {
-                s.security.allow_private_screen
-            }),
-            (SecurityPermissionType::Whiteboard, |s| {
-                s.security.allow_whiteboard
-            }),
-            (SecurityPermissionType::Terminal, |s| {
-                s.security.allow_terminal
-            }),
-            (SecurityPermissionType::FileBrowse, |s| {
-                s.security.allow_file_browse
-            }),
-            (SecurityPermissionType::FileDelete, |s| {
-                s.security.allow_file_delete
-            }),
-            (SecurityPermissionType::FileTransfer, |s| {
-                s.security.allow_file_transfer
-            }),
-        ];
-        for (perm, getter) in cases {
-            let settings = shared_settings_for_test();
+    async fn u6_remember_names_the_capability_that_was_asked_about() {
+        for capability in SecurityPermissionType::ALL {
+            let (policy, _mirror, mut rx) = policy_for_test();
             let hub = Arc::new(HostControlHub::new_local());
             spawn_responder(
                 &hub,
@@ -599,9 +605,209 @@ mod tests {
                     remember: true,
                 },
             );
-            let _ = check_security_permission(&settings, &hub, None, perm, None, false).await;
-            let s = settings.read().await;
-            assert_eq!(getter(&s), Some(true), "field mismatch for {:?}", perm);
+            let _ = check_security_permission(&policy, &hub, None, *capability, None, false).await;
+            assert_eq!(
+                remembered(&mut rx),
+                Some((*capability, true, 0)),
+                "wrong capability reported for {capability:?}"
+            );
         }
+    }
+
+    /// The case the stamp exists for: the operator changed this capability while
+    /// the user was answering. The answer settles the request in front of the
+    /// user but must not be cached, or the next command would be decided by a
+    /// policy the operator has already replaced.
+    #[tokio::test]
+    async fn an_answer_given_under_a_replaced_policy_is_not_cacheable() {
+        let (policy, mirror, _rx) = policy_for_test();
+        let hub = Arc::new(HostControlHub::new_local());
+        let mut rx = hub.subscribe_outbound();
+        hub.mark_tauri_connected();
+        {
+            let hub = Arc::clone(&hub);
+            let mirror = Arc::clone(&mirror);
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(HostControlMessage::SecurityApprovalRequest { req_id, .. }) => {
+                            // The operator revokes the capability while the
+                            // dialog is still up.
+                            let mut published = mirror.snapshot();
+                            published
+                                .set_capability(SecurityPermissionType::FileTransfer, Some(false));
+                            mirror.apply(published);
+                            hub.submit_approval(
+                                &req_id,
+                                ApprovalResponse {
+                                    approved: true,
+                                    remember: false,
+                                },
+                            );
+                            return;
+                        }
+                        Ok(_) => continue,
+                        Err(_) => return,
+                    }
+                }
+            });
+        }
+
+        let resolved = resolve_permission(
+            &policy,
+            &hub,
+            None,
+            SecurityPermissionType::FileTransfer,
+            Some("conn-1".to_string()),
+            false,
+        )
+        .await;
+
+        assert!(resolved.approved, "the user did consent to this request");
+        assert_eq!(
+            resolved.cacheable_at, None,
+            "the answer belongs to a policy that no longer exists"
+        );
+    }
+
+    /// The ordinary case: nothing moved, so the answer is cacheable under the
+    /// stamp it was decided at.
+    #[tokio::test]
+    async fn an_answer_given_under_a_stable_policy_is_cacheable() {
+        let (policy, _mirror, _rx) = policy_for_test();
+        let hub = Arc::new(HostControlHub::new_local());
+        spawn_responder(
+            &hub,
+            ApprovalResponse {
+                approved: true,
+                remember: false,
+            },
+        );
+
+        let resolved = resolve_permission(
+            &policy,
+            &hub,
+            None,
+            SecurityPermissionType::Whiteboard,
+            Some("conn-1".to_string()),
+            false,
+        )
+        .await;
+
+        assert!(resolved.approved);
+        assert_eq!(
+            resolved.cacheable_at,
+            Some(policy.changed_at(SecurityPermissionType::Whiteboard))
+        );
+    }
+
+    /// Two gates hitting the same capability on the same connection are one
+    /// question. Answering it once has to settle both, or the user is made to
+    /// dismiss a dialog per command.
+    #[tokio::test]
+    async fn concurrent_gates_share_one_prompt() {
+        let (policy, _mirror, _rx) = policy_for_test();
+        let hub = Arc::new(HostControlHub::new_local());
+        let prompts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let mut rx = hub.subscribe_outbound();
+            hub.mark_tauri_connected();
+            let hub = Arc::clone(&hub);
+            let prompts = Arc::clone(&prompts);
+            tokio::spawn(async move {
+                while let Ok(message) = rx.recv().await {
+                    if let HostControlMessage::SecurityApprovalRequest { req_id, .. } = message {
+                        prompts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        // Give the second caller time to arrive before the
+                        // answer lands, so it must queue rather than race ahead.
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        hub.submit_approval(
+                            &req_id,
+                            ApprovalResponse {
+                                approved: true,
+                                remember: false,
+                            },
+                        );
+                    }
+                }
+            });
+        }
+
+        let first = check_security_permission(
+            &policy,
+            &hub,
+            None,
+            SecurityPermissionType::FileBrowse,
+            Some("conn-1".to_string()),
+            false,
+        );
+        let second = check_security_permission(
+            &policy,
+            &hub,
+            None,
+            SecurityPermissionType::FileBrowse,
+            Some("conn-1".to_string()),
+            false,
+        );
+        let (a, b) = tokio::join!(first, second);
+
+        assert!(a && b, "both callers get the one answer");
+        assert_eq!(
+            prompts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the user must be asked once"
+        );
+    }
+
+    /// Different connections are different questions even for the same
+    /// capability — sharing them would let one controller's answer admit
+    /// another.
+    #[tokio::test]
+    async fn different_connections_are_asked_separately() {
+        let (policy, _mirror, _rx) = policy_for_test();
+        let hub = Arc::new(HostControlHub::new_local());
+        let prompts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let mut rx = hub.subscribe_outbound();
+            hub.mark_tauri_connected();
+            let hub = Arc::clone(&hub);
+            let prompts = Arc::clone(&prompts);
+            tokio::spawn(async move {
+                while let Ok(message) = rx.recv().await {
+                    if let HostControlMessage::SecurityApprovalRequest { req_id, .. } = message {
+                        prompts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        hub.submit_approval(
+                            &req_id,
+                            ApprovalResponse {
+                                approved: true,
+                                remember: false,
+                            },
+                        );
+                    }
+                }
+            });
+        }
+
+        let first = check_security_permission(
+            &policy,
+            &hub,
+            None,
+            SecurityPermissionType::FileBrowse,
+            Some("conn-1".to_string()),
+            false,
+        );
+        let second = check_security_permission(
+            &policy,
+            &hub,
+            None,
+            SecurityPermissionType::FileBrowse,
+            Some("conn-2".to_string()),
+            false,
+        );
+        let (a, b) = tokio::join!(first, second);
+
+        assert!(a && b);
+        assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

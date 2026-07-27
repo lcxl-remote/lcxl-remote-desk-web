@@ -121,15 +121,6 @@ pub enum ServiceToWorker {
     /// [`WorkerToService::ManagerFileDeleteResponse`] (empty body).
     ManagerFileDeleteRequest(ManagerFileDeleteRequestPayload),
 
-    /// Browser → worker request for [`RemoteSystemSettings`]. Worker
-    /// replies via [`WorkerToService::ManagerQuerySettingsResponse`].
-    ManagerQuerySettingsRequest(ManagerRequestRefPayload),
-
-    /// Browser → worker update of [`RemoteSystemSettings`]. Worker
-    /// persists the new values and replies via
-    /// [`WorkerToService::ManagerUpdateSettingsResponse`] (empty body).
-    ManagerUpdateSettingsRequest(ManagerUpdateSettingsRequestPayload),
-
     // ---------- Terminal plane (typed) ----------
     /// Browser → worker request to launch a new PTY-backed terminal
     /// session. Worker replies via
@@ -253,7 +244,9 @@ pub enum ServiceToWorker {
     ExecCancel(ExecCancelPayload),
 
     /// Daemon → worker notification that the host-wide locale changed.
-    /// The worker applies and persists it, then acknowledges with
+    ///
+    /// The daemon has already persisted it; the worker applies it to its own
+    /// process and settings copy and acknowledges with
     /// [`WorkerToService::LocaleApplied`].
     SetLocale(SetLocalePayload),
 
@@ -356,15 +349,6 @@ pub enum WorkerToService {
     /// [`ServiceToWorker::ManagerFileDeleteRequest`] (empty body —
     /// `request_id` correlates with the original request).
     ManagerFileDeleteResponse(ManagerResponseRefPayload),
-
-    /// Worker → daemon response to
-    /// [`ServiceToWorker::ManagerQuerySettingsRequest`].
-    ManagerQuerySettingsResponse(ManagerQuerySettingsResponsePayload),
-
-    /// Worker → daemon response to
-    /// [`ServiceToWorker::ManagerUpdateSettingsRequest`] (empty
-    /// body — settings persistence happens on the worker side).
-    ManagerUpdateSettingsResponse(ManagerResponseRefPayload),
 
     // ---------- Terminal plane (typed) ----------
     /// Worker → daemon success reply for
@@ -476,6 +460,11 @@ pub enum WorkerToService {
     /// policy arrived. The daemon compares this against what it published to
     /// tell a converged worker from one that is still behind.
     SecurityPolicyApplied(SecurityPolicyAppliedPayload),
+
+    /// Worker → daemon: a user answered a prompt with "remember this". Only the
+    /// daemon can store it, so the worker forwards the answer along with the
+    /// capability's stamp from when the prompt went out.
+    RememberSecurityDecision(RememberSecurityDecisionPayload),
 }
 
 mod agent;

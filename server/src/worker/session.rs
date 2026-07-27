@@ -1,6 +1,7 @@
 use crate::worker::agent::LocalDeviceAgent;
 use crate::{
     host_control::{HostControlHub, UpstreamForwarder, upstream::spawn_upstream_ws_task},
+    model::policy_access::PolicyAccess,
     model::settings::{Args, Settings, SharedSettings, StartupMode},
     service::signaling::{DeskSession, DeskSessionMessage, DeskSessionSender},
     worker::{
@@ -26,12 +27,12 @@ use desk_ipc_protocol::{
         AgentResponsePayload, DesktopChangedPayload, ExecCancelPayload, ExecHeartbeatPayload,
         ExecResultIpcPayload, ExecSpawnReportPayload, FileTransferPayload, HeartbeatPayload,
         ListTerminalResponsePayload, LocaleAppliedPayload, ManagerFileListResponsePayload,
-        ManagerQuerySettingsResponsePayload, ManagerResponseRefPayload,
-        ManagerSystemInfoResponsePayload, PrivateScreenStateChangedPayload,
-        RemoteAccessStateAppliedPayload, ReplyFromTerminalPayload, SecurityPolicyAppliedPayload,
-        ServiceToWorker, SignalingErrorPayload, StopMediaPayload, TerminalClosedPayload,
-        TerminalStartedPayload, VirtualDisplayAttachOutcome, VirtualDisplayAttachResultPayload,
-        WorkerInitPayload, WorkerToService,
+        ManagerResponseRefPayload, ManagerSystemInfoResponsePayload,
+        PrivateScreenStateChangedPayload, RemoteAccessStateAppliedPayload,
+        ReplyFromTerminalPayload, SecurityPolicyAppliedPayload, ServiceToWorker,
+        SignalingErrorPayload, StopMediaPayload, TerminalClosedPayload, TerminalStartedPayload,
+        VirtualDisplayAttachOutcome, VirtualDisplayAttachResultPayload, WorkerInitPayload,
+        WorkerToService,
     },
     transport::{read_message, write_message},
 };
@@ -43,9 +44,28 @@ use desk_signal_facade::model::private_screen::{
 };
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use desk_signal_facade::model::system_info::SystemInfo;
-use desk_signal_facade::model::system_settings::RemoteSystemSettings;
 use desk_signal_facade::model::terminal::{TerminalList, TerminalOutputData};
 use desk_virtual_display::VirtualDisplayController;
+
+/// Whether a daemon command still applies while remote access is locked.
+///
+/// A locked host refuses remote work, but not the instructions that describe
+/// the host itself. The locale is already persisted by the time it arrives, so
+/// dropping it would leave the worker rendering in a language the host has
+/// stopped using — permanently, because nothing re-sends it on unlock.
+///
+/// The security policy is absent from this decision on purpose: it is applied
+/// on the transport reader task, ahead of the loop this guards, so an operator
+/// revoking a capability during a lock is never subject to it.
+pub(crate) fn survives_remote_access_lock(msg: &ServiceToWorker) -> bool {
+    matches!(
+        msg,
+        ServiceToWorker::Shutdown
+            | ServiceToWorker::Init(_)
+            | ServiceToWorker::SetRemoteAccessState(_)
+            | ServiceToWorker::SetLocale(_)
+    )
+}
 
 /// How often a running command reports that it is still running.
 ///

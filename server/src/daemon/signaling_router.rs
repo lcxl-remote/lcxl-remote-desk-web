@@ -50,9 +50,9 @@ use desk_agent_protocol::{
 use desk_ipc_protocol::message::{
     AgentRequestPayload, CloseTerminalPayload, EnablePrivateScreenPayload, ExecCancelPayload,
     ExecPlanPayload, ListTerminalRequestPayload, ManagerFileDeleteRequestPayload,
-    ManagerFileListRequestPayload, ManagerRequestRefPayload, ManagerUpdateSettingsRequestPayload,
-    ResizeTerminalPayload, SendDataToTerminalPayload, ServiceToWorker,
-    SetVirtualDisplayModePayload, StartTerminalRequestPayload, UpdateDeskSettingsPayload,
+    ManagerFileListRequestPayload, ManagerRequestRefPayload, ResizeTerminalPayload,
+    SendDataToTerminalPayload, ServiceToWorker, SetVirtualDisplayModePayload,
+    StartTerminalRequestPayload, UpdateDeskSettingsPayload,
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams};
@@ -299,6 +299,14 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // Heartbeat is a WS keepalive — not for the worker.
         SignalingType::Heartbeat => RouteOwnership::Daemon,
 
+        // The system settings a manager reads and writes. Answered against the
+        // daemon's own settings, which are the ones a change is committed
+        // against — a worker holds a startup copy and could report or overwrite
+        // values that have since moved.
+        SignalingType::ManagerQuerySettings | SignalingType::ManagerUpdateSettings => {
+            RouteOwnership::Daemon
+        }
+
         // ---- Worker-bound: user-session resources ----
         // Each of these rides a dedicated typed `ServiceToWorker::*`
         // IPC variant — see `route` below for the per-type dispatch
@@ -321,8 +329,6 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::ResizeTerminal
         | SignalingType::CloseTerminal
         | SignalingType::ListTerminal
-        | SignalingType::ManagerQuerySettings
-        | SignalingType::ManagerUpdateSettings
         | SignalingType::ChangeDisplaySettings
         // AI agent capability request: control end → daemon → worker.
         // The daemon two-phase-parses + stamps trusted fields, then
@@ -382,6 +388,13 @@ pub struct RouterContext {
     pub pc_registry: PcRegistry,
     pub outbound_tx: broadcast::Sender<String>,
     pub settings: web::Data<SharedSettings>,
+    /// The host's durable commit path for the security policy and the locale.
+    /// The manager settings plane writes through it, so a remote update lands
+    /// in exactly the same place as one made on the host itself.
+    pub settings_coordinator: Arc<crate::model::settings_coordinator::SettingsCoordinator>,
+    /// What the daemon-side permission gates read. Backed by the coordinator,
+    /// so a gate and a settings update can never disagree about the policy.
+    pub policy: Arc<crate::model::policy_access::PolicyAccess>,
     pub host_control_hub: Arc<HostControlHub>,
     /// handle_request_remote reads `worker_capabilities` from
     /// here to populate the Init reply, and handle_offer issues
@@ -800,11 +813,10 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         }
         SignalingType::RequireControl => {
             promote_desktop_resources(model, ctx, "control request").await?;
-            let settings: &SharedSettings = &ctx.settings;
             let outcome = pc_manager::handle_require_control(
                 &ctx.pc_registry,
                 &ctx.outbound_tx,
-                settings,
+                &ctx.policy,
                 &ctx.host_control_hub,
                 model,
             )

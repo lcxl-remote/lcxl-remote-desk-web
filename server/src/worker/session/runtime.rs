@@ -77,8 +77,10 @@ impl WorkerSession {
             );
             let _ = crate::locale::set_global_locale(crate::locale::DEFAULT_LOCALE);
         }
-        // The worker's copy of the host security policy. The daemon publishes
-        // to it; nothing here writes the policy back.
+        // The worker's copy of the host security policy. The daemon publishes to
+        // it; nothing here writes the policy back. The settings this worker also
+        // holds are a startup copy and are never consulted for permissions —
+        // they do not receive the daemon's updates.
         let policy_mirror = Arc::new(PolicyMirror::new(PolicySnapshot::new(
             settings.security.clone(),
         )));
@@ -160,6 +162,11 @@ impl WorkerSession {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WorkerToService>();
         let writer_task = spawn_event_forwarder_task(writer_rx, Arc::clone(&event_tx));
 
+        // What every permission gate in this worker reads: the mirror the daemon
+        // publishes to, with remembered answers travelling back on the same
+        // event lane everything else uses.
+        let policy = PolicyAccess::mirrored(Arc::clone(&policy_mirror), writer_tx.clone());
+
         // Build the media producer when the caller supplied a media
         // transport. In named-pipe mode this is the secondary pipe; in
         // in-process mode it's an mpsc-backed `MediaSender`. Either way the
@@ -224,7 +231,7 @@ impl WorkerSession {
         let exec_registry = crate::worker::exec_registry::ExecRegistry::new();
         let file_transfer_dispatcher = FileTransferDispatcher::new(
             file_sender,
-            shared_settings.clone(),
+            Arc::clone(&policy),
             Arc::clone(&host_control_hub),
             connection_ceilings.clone(),
             writer_tx.clone(),
@@ -235,7 +242,7 @@ impl WorkerSession {
         // flow through a single Tauri overlay manager.
         let whiteboard_dispatcher = WhiteboardDispatcher::new(
             Arc::clone(&host_control_hub),
-            shared_settings.clone(),
+            Arc::clone(&policy),
             connection_ceilings.clone(),
         );
         if writer_tx
@@ -252,6 +259,7 @@ impl WorkerSession {
             CurrentUser::new_admin("worker_node"),
             host_control_hub,
             connection_ceilings.clone(),
+            Arc::clone(&policy),
             writer_tx.clone(),
         )
         .await
@@ -427,12 +435,7 @@ impl WorkerSession {
                     match msg_result {
                         Some(Some(msg)) => {
                             if remote_access_locked.load(Ordering::Acquire)
-                                && !matches!(
-                                    &msg,
-                                    ServiceToWorker::Shutdown
-                                        | ServiceToWorker::Init(_)
-                                        | ServiceToWorker::SetRemoteAccessState(_)
-                                )
+                                && !survives_remote_access_lock(&msg)
                             {
                                 warn!("Dropping worker command while remote access is locked");
                                 continue;
@@ -696,16 +699,6 @@ impl WorkerSession {
                                     )
                                     .await;
                                 }
-                                ServiceToWorker::ManagerQuerySettingsRequest(payload) => {
-                                    dispatch_typed_signaling_with_request_id(
-                                        &mut desk_session,
-                                        SignalingType::ManagerQuerySettings,
-                                        payload.request_id,
-                                        payload.connection_id,
-                                        Option::<&()>::None,
-                                    )
-                                    .await;
-                                }
                                 ServiceToWorker::ManagerFileListRequest(payload) => {
                                     dispatch_typed_signaling_with_request_id(
                                         &mut desk_session,
@@ -726,45 +719,12 @@ impl WorkerSession {
                                     )
                                     .await;
                                 }
-                                ServiceToWorker::ManagerUpdateSettingsRequest(payload) => {
-                                    let requested_locale = payload.settings.locale.clone();
-                                    dispatch_typed_signaling_with_request_id(
-                                        &mut desk_session,
-                                        SignalingType::ManagerUpdateSettings,
-                                        payload.request_id,
-                                        payload.connection_id,
-                                        Some(&payload.settings),
-                                    )
-                                    .await;
-                                    if let Some(locale) = requested_locale
-                                        && let Some(locale) = crate::locale::canonicalize(&locale)
-                                    {
-                                        let converged = {
-                                            let settings = shared_settings_data.read().await;
-                                            settings.system.locale.as_deref() == Some(locale)
-                                                && Settings::load_readonly(&settings.args)
-                                                    .ok()
-                                                    .and_then(|saved| saved.system.locale)
-                                                    .as_deref()
-                                                    == Some(locale)
-                                        };
-                                        if converged {
-                                            let _ = event_tx
-                                                .send(WorkerToService::LocaleApplied(
-                                                    LocaleAppliedPayload {
-                                                        locale: locale.to_string(),
-                                                    },
-                                                ))
-                                                .await;
-                                        } else {
-                                            warn!(
-                                                "Manager locale update did not converge durably; \
-                                                 suppressing LocaleApplied({locale})"
-                                            );
-                                        }
-                                    }
-                                }
                                 ServiceToWorker::SetLocale(payload) => {
+                                    // The daemon has already persisted this; the
+                                    // worker only brings its own process and
+                                    // settings copy in line. Writing the file here
+                                    // would push this worker's startup snapshot of
+                                    // everything else back over the daemon's.
                                     let result = async {
                                         let locale = crate::locale::canonicalize(&payload.locale)
                                             .ok_or_else(|| {
@@ -773,13 +733,8 @@ impl WorkerSession {
                                                     payload.locale
                                                 )
                                             })?;
-                                        {
-                                            let mut settings = shared_settings_data.write().await;
-                                            settings.system.locale = Some(locale.to_string());
-                                            settings
-                                                .save_with_locale_change()
-                                                .map_err(|error| error.to_string())?;
-                                        }
+                                        shared_settings_data.write().await.system.locale =
+                                            Some(locale.to_string());
                                         crate::locale::set_global_locale(locale)?;
                                         Ok::<_, String>(locale.to_string())
                                     }
@@ -788,7 +743,10 @@ impl WorkerSession {
                                         Ok(locale) => {
                                             let _ = event_tx
                                                 .send(WorkerToService::LocaleApplied(
-                                                    LocaleAppliedPayload { locale },
+                                                    LocaleAppliedPayload {
+                                                        operation_id: payload.operation_id,
+                                                        locale,
+                                                    },
                                                 ))
                                                 .await;
                                         }

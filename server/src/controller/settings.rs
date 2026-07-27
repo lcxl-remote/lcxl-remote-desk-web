@@ -15,6 +15,7 @@ use crate::model::settings::{
     CollectionPolicySettingsUpdate, LogSettings, Settings, SharedSettings, SystemSettings,
     TurnClientSettings,
 };
+use crate::model::settings_coordinator::SettingsCoordinator;
 use crate::service::auto_start::update_auto_start_status;
 use crate::service::turn_runtime::TurnRuntimeControl;
 use desk_signal_facade::model::security_settings::SecuritySettings;
@@ -71,18 +72,11 @@ pub async fn query_settings(settings: web::Data<SharedSettings>) -> Result<HttpR
 pub async fn update_settings(
     requst_json: web::Json<SystemSettings>,
     settings: web::Data<SharedSettings>,
+    coordinator: web::Data<SettingsCoordinator>,
     manager_link_gate: web::Data<Arc<ManagerLinkGate>>,
     host_control_hub: Option<web::Data<Option<Arc<HostControlHub>>>>,
 ) -> Result<HttpResponse, AWError> {
-    let mut params = requst_json.into_inner();
-    let mut settings = settings.write().await;
-    let previous_locale = settings.system.locale.clone();
-    if let Some(locale) = params.locale.as_deref() {
-        let Some(locale) = crate::locale::canonicalize(locale) else {
-            return Ok(HttpResponse::BadRequest().body("unsupported locale"));
-        };
-        params.locale = Some(locale.to_string());
-    }
+    let params = requst_json.into_inner();
 
     // Apply the auto-start change to the OS first. On macOS the LaunchAgent is
     // the single source of truth, so a failure must surface as a business error
@@ -90,7 +84,7 @@ pub async fn update_settings(
     // Linux keep the prior behavior via the same call; config_file_path is only
     // consumed on macOS to write an absolute --config-file-path into the plist.)
     if let Some(auto_start_enable) = params.auto_start {
-        let config_file_path = settings.args.config_file_path.clone();
+        let config_file_path = settings.read().await.args.config_file_path.clone();
         if let Err(e) =
             update_auto_start_status(auto_start_enable, std::path::Path::new(&config_file_path))
         {
@@ -102,60 +96,48 @@ pub async fn update_settings(
         }
     }
 
-    // The console form omits the auto-generated internal fields; carry them over
-    // from the current settings so a full replace doesn't wipe client_id and the
-    // signaling/IPC/session secrets.
-    params.preserve_internal_fields(&settings.system);
-    settings.system = params;
-    // save new settings to file
-    let locale_changed = settings.system.locale != previous_locale;
-    let applied_locale = if locale_changed {
-        let requested_locale = settings.system.locale.clone();
-        settings.system.locale = previous_locale;
-        Some(crate::locale::LocaleCoordinator::commit(
-            &mut settings,
-            requested_locale.as_deref(),
-        )?)
-    } else {
-        settings.save()?;
-        None
-    };
-    if let Some(hub) = host_control_hub
+    let outcome = coordinator
+        .commit_with_effect(
+            move |settings| {
+                // The console form omits the auto-generated internal fields;
+                // carry them over from the current settings so a full replace
+                // doesn't wipe client_id and the signaling/IPC/session secrets.
+                let mut params = params;
+                params.preserve_internal_fields(&settings.system);
+                settings.system = params;
+                Ok(())
+            },
+            // Re-sync the shared manager-link gate while the settings are still
+            // locked, so the proxy's reconnect loop cannot observe the new
+            // settings before the gate value catches up. Disabling the manager
+            // connection here tears down the current upstream; re-enabling lets
+            // the reconnect loop bring it back.
+            |settings| {
+                manager_link_gate.set(manager_link_should_connect(
+                    &settings.system.manager_url,
+                    &settings.system.manager_api_token,
+                    settings.system.manager_enabled,
+                ));
+            },
+        )
+        .await?;
+
+    let hub = host_control_hub
         .as_ref()
-        .and_then(|data| data.get_ref().as_ref())
-    {
+        .and_then(|data| data.get_ref().as_ref());
+    if let Some(hub) = hub {
         hub.host_activity()
-            .set_indicator_enabled(settings.system.host_access_indicator_enabled);
-    }
-    // Re-sync the shared manager-link gate to the freshly persisted config while
-    // still holding the settings write lock, so the proxy's reconnect loop cannot
-    // observe the new settings before the gate value catches up. Disabling the
-    // manager connection here tears down the current upstream; re-enabling lets
-    // the reconnect loop bring it back.
-    manager_link_gate.set(manager_link_should_connect(
-        &settings.system.manager_url,
-        &settings.system.manager_api_token,
-        settings.system.manager_enabled,
-    ));
-    info!("Update system settings successfully, {:?}", settings.system);
-    drop(settings);
-    if let Some(locale) = applied_locale
-        && let Some(hub) = host_control_hub
-            .as_ref()
-            .and_then(|data| data.get_ref().as_ref())
-    {
-        if let Some(worker_manager) = hub.locale_worker_manager() {
-            let _ = worker_manager
-                .send_to_worker(desk_ipc_protocol::message::ServiceToWorker::SetLocale(
-                    desk_ipc_protocol::message::SetLocalePayload {
-                        locale: locale.clone(),
-                    },
-                ))
-                .await;
+            .set_indicator_enabled(settings.read().await.system.host_access_indicator_enabled);
+        if let Some(locale) = outcome.locale_changed_to {
+            let _ = hub.send_command(
+                crate::host_control::HostControlMessage::GlobalLocaleChanged { locale },
+            );
         }
-        let _ = hub
-            .send_command(crate::host_control::HostControlMessage::GlobalLocaleChanged { locale });
     }
+    info!(
+        "Update system settings successfully, {:?}",
+        settings.read().await.system
+    );
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -443,19 +425,21 @@ pub async fn query_security_settings(
 #[post("/security-settings")]
 pub async fn update_security_settings(
     request_json: web::Json<SecuritySettings>,
-    settings: web::Data<SharedSettings>,
+    coordinator: web::Data<SettingsCoordinator>,
 ) -> Result<HttpResponse, AWError> {
-    let mut params = request_json.into_inner();
-    // Collapse an omitted (`None`) approval timeout to the finite default so an
-    // unattended host never keeps inbound control requests hanging; "never" is
-    // carried explicitly as the present value `Some(0)`.
-    params.normalize();
-    let mut settings = settings.write().await;
-    settings.security = params;
-    settings.save()?;
+    let params = request_json.into_inner();
+    // The commit normalizes an omitted (`None`) approval timeout to the finite
+    // default, so an unattended host never keeps inbound control requests
+    // hanging; "never" is carried explicitly as the present value `Some(0)`.
+    coordinator
+        .commit(move |settings| {
+            settings.security = params;
+            Ok(())
+        })
+        .await?;
     info!(
         "Update security settings successfully, {:?}",
-        settings.security
+        coordinator.security()
     );
     Ok(HttpResponse::Ok().finish())
 }
@@ -768,13 +752,17 @@ mod tests {
     #[actix_web::test]
     #[allow(clippy::field_reassign_with_default)]
     async fn update_settings_syncs_manager_link_gate() {
-        let shared = web::Data::new(settings_with_temp_path());
+        let shared = Arc::new(settings_with_temp_path());
+        let coordinator = web::Data::from(Arc::new(
+            SettingsCoordinator::from_settings(Arc::clone(&shared)).await,
+        ));
         // Gate starts enabled; the update must drive it from the persisted config.
         let gate = Arc::new(ManagerLinkGate::new(true));
         let gate_data = web::Data::new(gate.clone());
         let app = test::init_service(
             App::new()
-                .app_data(shared)
+                .app_data(web::Data::from(shared))
+                .app_data(coordinator)
                 .app_data(gate_data)
                 .service(update_settings),
         )

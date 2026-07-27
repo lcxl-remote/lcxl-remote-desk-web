@@ -64,29 +64,10 @@ pub fn manager_link_should_connect(
     url_ok && token_ok && manager_enabled != Some(false)
 }
 
-async fn apply_worker_locale_ack(
-    settings: &web::Data<SharedSettings>,
-    host_control_hub: &HostControlHub,
-    locale: &str,
-) -> Result<(), String> {
-    let locale = crate::locale::canonicalize(locale)
-        .ok_or_else(|| format!("worker acknowledged unsupported locale {locale:?}"))?;
-    {
-        let mut settings = settings.write().await;
-        settings.system.locale = Some(locale.to_string());
-    }
-    crate::locale::set_global_locale(locale)?;
-    let _ = host_control_hub.send_command(
-        crate::host_control::HostControlMessage::GlobalLocaleChanged {
-            locale: locale.to_string(),
-        },
-    );
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn run_signaling_proxy(
     settings: web::Data<SharedSettings>,
+    settings_coordinator: Arc<crate::model::settings_coordinator::SettingsCoordinator>,
     worker_mgr: WorkerManager,
     host_control_hub: Arc<HostControlHub>,
     mut worker_rx: WorkerMessageReceiver,
@@ -180,6 +161,10 @@ pub async fn run_signaling_proxy(
         pc_registry: pc_registry.clone(),
         outbound_tx: outbound_tx.clone(),
         settings: settings.clone(),
+        policy: crate::model::policy_access::PolicyAccess::authoritative(Arc::clone(
+            &settings_coordinator,
+        )),
+        settings_coordinator: Arc::clone(&settings_coordinator),
         host_control_hub: host_control_hub.clone(),
         worker_mgr: worker_mgr.clone(),
         // Some(...) only in service-daemon mode; in-process and
@@ -487,6 +472,14 @@ pub async fn run_signaling_proxy(
                     caps.is_admin,
                 );
                 worker_mgr.set_worker_capabilities(caps);
+                // A fresh worker starts from the policy serialized into its Init
+                // payload: the right values, but at sequence zero, which cannot
+                // be compared with what the daemon has been counting. Restating
+                // the current policy puts both sides back on one numbering.
+                // Keyed off `Capabilities` rather than `Ready` because only the
+                // named-pipe handshake sends `Ready` — an in-process worker
+                // announces itself here.
+                settings_coordinator.republish().await;
                 // Keep-PC: every Capabilities arrival is the
                 // signal the worker is ready to accept media work.
                 // Re-issue cached `StartMedia` + `ForceKeyframe` for
@@ -738,35 +731,30 @@ pub async fn run_signaling_proxy(
                     Option::<&()>::None,
                 );
             }
-            WorkerToService::ManagerQuerySettingsResponse(payload) => {
-                send_manager_response(
-                    &outbound_tx,
-                    "ManagerQuerySettings",
-                    &payload.request_id,
-                    &payload.connection_id,
-                    SignalingType::ManagerQuerySettings,
-                    Some(&payload.settings),
-                );
-            }
-            WorkerToService::ManagerUpdateSettingsResponse(payload) => {
-                send_manager_response(
-                    &outbound_tx,
-                    "ManagerUpdateSettings",
-                    &payload.request_id,
-                    &payload.connection_id,
-                    SignalingType::ManagerUpdateSettings,
-                    Option::<&()>::None,
-                );
-            }
+            // Confirmation only. The daemon committed the locale before telling
+            // the worker, so treating this as a value to write back would let a
+            // slow acknowledgement undo a newer change that overtook it.
             WorkerToService::LocaleApplied(payload) => {
-                if let Err(error) =
-                    apply_worker_locale_ack(&settings, &host_control_hub, &payload.locale).await
-                {
-                    warn!("[SignalingProxy] failed to apply worker locale: {error}");
-                }
+                debug!(
+                    "[SignalingProxy] worker is running in {} (operation {})",
+                    payload.locale, payload.operation_id
+                );
             }
             WorkerToService::SecurityPolicyApplied(payload) => {
                 worker_mgr.note_policy_applied(&payload).await;
+            }
+            // A user answered a worker-side prompt with "remember this". Only
+            // the daemon can store it, and it applies the same staleness rule it
+            // applies to its own prompts, so both roles converge on one decision.
+            WorkerToService::RememberSecurityDecision(payload) => {
+                settings_coordinator
+                    .remember(
+                        payload.capability,
+                        payload.approved,
+                        payload.expected_generation,
+                    )
+                    .await
+                    .report(payload.capability);
             }
             // Route typed terminal events back to the matching browser connection.
             // Each `Terminal*` variant rebuilds the matching outbound

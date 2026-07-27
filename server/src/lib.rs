@@ -514,6 +514,16 @@ pub async fn run_with_hub(
     // Initialize settings
     let shared_settings = Arc::new(SharedSettings::from(settings.clone()));
 
+    // The host's authoritative security policy, and the only path that commits
+    // it or the locale durably. Every mode builds one; the modes with no worker
+    // simply have nobody to publish to.
+    let settings_coordinator = Arc::new(
+        crate::model::settings_coordinator::SettingsCoordinator::from_settings(
+            shared_settings.clone(),
+        )
+        .await,
+    );
+
     // determine startup mode
     let startup_mode = settings.args.startup_mode.clone();
 
@@ -553,6 +563,7 @@ pub async fn run_with_hub(
     info!("Server static file path: {:?}", static_file_path);
     let secret_key = Key::generate();
     let shared_settings_data = web::Data::from(shared_settings.clone());
+    let settings_coordinator_data = web::Data::from(settings_coordinator.clone());
 
     // The TauriLoginToken is shared between the HTTP `/login_tauri` route (which
     // verifies + consumes) and the host-control `/ws/tauri_ipc` endpoint (which
@@ -585,7 +596,8 @@ pub async fn run_with_hub(
                     ipc_token,
                     shared_tauri_login_token.clone(),
                 )
-                .with_settings(shared_settings.clone().into()),
+                .with_settings(shared_settings.clone().into())
+                .with_settings_coordinator(settings_coordinator.clone()),
             ))
         } else {
             None
@@ -744,6 +756,7 @@ pub async fn run_with_hub(
             let proxy_link_state = manager_link_state.clone();
             let proxy_support_state = support_link_state.clone();
             let proxy_link_gate = manager_link_gate.clone();
+            let daemon_coordinator = settings_coordinator.clone();
             // This node's own bundled-TURN endpoints, read from the same live
             // runtime the local signaling issues TURN credentials from, so the
             // daemon's PC manager never relays through itself — including after
@@ -755,6 +768,7 @@ pub async fn run_with_hub(
                 if let Err(e) = daemon::start_inprocess_daemon(
                     args_clone,
                     settings_clone,
+                    daemon_coordinator,
                     session_hub,
                     own_turn_endpoints,
                     proxy_link_state,
@@ -835,6 +849,7 @@ pub async fn run_with_hub(
                 })
             })
             .app_data(shared_settings_data.clone())
+            .app_data(settings_coordinator_data.clone())
             .app_data(tauri_login_token.clone())
             .app_data(connection_map.clone())
             .app_data(conn_device_map.clone())

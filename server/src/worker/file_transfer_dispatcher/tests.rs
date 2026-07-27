@@ -1,7 +1,7 @@
 use super::*;
-use crate::model::settings::Settings;
 use desk_ipc_protocol::dual_transport::{EventReceiver, inprocess};
 use desk_ipc_protocol::message::MediaCodec;
+use desk_signal_facade::model::security_settings::SecuritySettings;
 use tempfile::TempDir;
 
 // ============== ft-metrics helpers ==============
@@ -207,6 +207,98 @@ fn dispatcher() -> (
     dispatcher_with_setting(Some(true))
 }
 
+/// A dispatcher plus the mirror the daemon would publish to, so a test can move
+/// the policy underneath a running gate.
+fn dispatcher_with_mirror(
+    allow_file_transfer: Option<bool>,
+) -> (
+    FileTransferDispatcher,
+    Arc<crate::worker::policy_mirror::PolicyMirror>,
+) {
+    let (policy, mirror, _upstream) =
+        crate::model::policy_access::PolicyAccess::for_test(SecuritySettings {
+            allow_file_transfer,
+            ..SecuritySettings::default()
+        });
+    let (file_tx, _file_rx) = inprocess::make_event_inprocess_with_cap::<FileTransferPayload>(16);
+    (
+        FileTransferDispatcher::new(
+            file_tx,
+            policy,
+            Arc::new(HostControlHub::new_local()),
+            ConnectionCeilingStore::new(),
+            mpsc::unbounded_channel().0,
+        ),
+        mirror,
+    )
+}
+
+/// The symptom this whole distribution exists for: a capability set to "always
+/// deny" has to take effect on a worker that already cached an approval for it.
+#[tokio::test]
+async fn a_published_denial_expires_a_cached_approval() {
+    let (d, mirror) = dispatcher_with_mirror(Some(true));
+    d.start_connection(&start_payload("c1")).await;
+    let payload = FileTransferPayload {
+        connection_id: "c1".into(),
+        data: br#"{"type":"transfer_complete","transfer_id":"t"}"#.to_vec(),
+        is_text: true,
+        transfer_id: None,
+    };
+    d.handle_command(payload.clone()).await;
+    assert_eq!(
+        d.inner
+            .lock()
+            .await
+            .permission_cache
+            .get("c1")
+            .map(|c| c.approved),
+        Some(true),
+        "the allow is cached to begin with"
+    );
+
+    let mut published = mirror.snapshot();
+    published.set_capability(SecurityPermissionType::FileTransfer, Some(false));
+    mirror.apply(published);
+
+    d.handle_command(payload).await;
+    assert_eq!(
+        d.inner
+            .lock()
+            .await
+            .permission_cache
+            .get("c1")
+            .map(|c| c.approved),
+        Some(false),
+        "the cached approval must not survive the operator's denial"
+    );
+}
+
+/// Changing one capability must leave answers about the others alone, or every
+/// unrelated settings edit would re-prompt the user across the board.
+#[tokio::test]
+async fn a_change_to_another_capability_leaves_the_cache_alone() {
+    let (d, mirror) = dispatcher_with_mirror(Some(true));
+    d.start_connection(&start_payload("c1")).await;
+    let payload = FileTransferPayload {
+        connection_id: "c1".into(),
+        data: br#"{"type":"transfer_complete","transfer_id":"t"}"#.to_vec(),
+        is_text: true,
+        transfer_id: None,
+    };
+    d.handle_command(payload).await;
+    let cached = *d.inner.lock().await.permission_cache.get("c1").unwrap();
+
+    let mut published = mirror.snapshot();
+    published.set_capability(SecurityPermissionType::Whiteboard, Some(false));
+    mirror.apply(published);
+
+    assert!(
+        cached.is_current(d.policy.changed_at(SecurityPermissionType::FileTransfer)),
+        "a whiteboard change must not invalidate a file-transfer answer"
+    );
+}
+
 fn dispatcher_with_setting(
     allow_file_transfer: Option<bool>,
 ) -> (
@@ -231,16 +323,18 @@ fn dispatcher_with_file_cap(
     FileTransferDispatcher,
     Box<dyn EventReceiver<FileTransferPayload>>,
 ) {
-    let mut settings = Settings::default();
-    settings.security.allow_file_transfer = allow_file_transfer;
-    let shared = Arc::new(SharedSettings::from(settings));
+    let (policy, _mirror, _upstream) =
+        crate::model::policy_access::PolicyAccess::for_test(SecuritySettings {
+            allow_file_transfer,
+            ..SecuritySettings::default()
+        });
     let hub = Arc::new(HostControlHub::new_local());
     let (file_tx, file_rx) =
         inprocess::make_event_inprocess_with_cap::<FileTransferPayload>(file_cap);
     (
         FileTransferDispatcher::new(
             file_tx,
-            shared,
+            policy,
             hub,
             ConnectionCeilingStore::new(),
             mpsc::unbounded_channel().0,
@@ -253,16 +347,18 @@ fn dispatcher_with_activity_sender() -> (
     FileTransferDispatcher,
     mpsc::UnboundedReceiver<WorkerToService>,
 ) {
-    let mut settings = Settings::default();
-    settings.security.allow_file_transfer = Some(true);
-    let shared = Arc::new(SharedSettings::from(settings));
+    let (policy, _mirror, _upstream) =
+        crate::model::policy_access::PolicyAccess::for_test(SecuritySettings {
+            allow_file_transfer: Some(true),
+            ..SecuritySettings::default()
+        });
     let hub = Arc::new(HostControlHub::new_local());
     let (file_tx, _file_rx) = inprocess::make_event_inprocess_with_cap::<FileTransferPayload>(16);
     let (activity_tx, activity_rx) = mpsc::unbounded_channel();
     (
         FileTransferDispatcher::new(
             file_tx,
-            shared,
+            policy,
             hub,
             ConnectionCeilingStore::new(),
             activity_tx,
@@ -559,7 +655,10 @@ async fn handle_command_refuses_when_permission_denied() {
         assert!(g.activities.is_empty(), "a refused command starts nothing");
         assert!(g.upload_states.is_empty());
         // Cache is populated so subsequent commands short-circuit.
-        assert_eq!(g.permission_cache.get("c1").copied(), Some(false));
+        assert_eq!(
+            g.permission_cache.get("c1").map(|c| c.approved),
+            Some(false)
+        );
     }
 }
 
@@ -679,7 +778,10 @@ async fn handle_command_refuses_when_ceiling_denies_file_transfer() {
     tokio::task::yield_now().await;
     expect_only_transfer_error(&mut rx, "t", DeskErrorCode::PERMISSION_ERROR).await;
     let g = d.inner.lock().await;
-    assert_eq!(g.permission_cache.get("c1").copied(), Some(false));
+    assert_eq!(
+        g.permission_cache.get("c1").map(|c| c.approved),
+        Some(false)
+    );
 }
 
 /// Permission gate: when `allow_file_transfer` is `Some(true)`, the
@@ -696,7 +798,7 @@ async fn handle_command_caches_allowed_permission() {
     };
     d.handle_command(payload).await;
     let g = d.inner.lock().await;
-    assert_eq!(g.permission_cache.get("c1").copied(), Some(true));
+    assert_eq!(g.permission_cache.get("c1").map(|c| c.approved), Some(true));
 }
 
 /// Permission cache is wiped on `stop_connection` so a future
