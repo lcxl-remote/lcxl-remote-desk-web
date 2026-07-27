@@ -269,7 +269,6 @@ pub async fn update_turn_settings(
 
     settings.turn.realm = params.realm;
     settings.turn.interfaces = params.interfaces;
-    settings.turn.enable_stun = params.enable_stun;
     settings.turn.enable_turn = params.enable_turn;
     settings.turn.relay_min_port = params.relay_min_port;
     settings.turn.relay_max_port = params.relay_max_port;

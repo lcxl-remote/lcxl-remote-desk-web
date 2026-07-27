@@ -219,10 +219,13 @@ pub struct TurnSettings {
     /// REST API.
     pub static_auth_secret: Option<String>,
 
-    /// enable stun server
-    pub enable_stun: bool,
-
-    /// enable turn server
+    /// Run the TURN service on this host.
+    ///
+    /// The switch covers the whole runtime, STUN included: both are served by
+    /// one server, and there is no half-lifecycle that keeps STUN alive without
+    /// TURN. Turning it off is the host-side counterpart of the manager's
+    /// cluster-wide kill switch — without it a host would have no way to stop
+    /// relaying at all.
     pub enable_turn: bool,
 
     /// Minimum port for TURN relay
@@ -234,7 +237,15 @@ pub struct TurnSettings {
 
 impl TurnSettings {
     /// `turn:{external}?transport=...` URLs for every configured interface.
+    ///
+    /// Empty while the service is switched off: the interfaces stay configured
+    /// so the operator can switch it back on, but advertising a relay nobody is
+    /// serving only makes peers spend their ICE budget on candidates that can
+    /// never connect.
     fn turn_urls(&self) -> Vec<String> {
+        if !self.enable_turn {
+            return Vec::new();
+        }
         self.interfaces
             .iter()
             .map(|interface| {
@@ -403,6 +414,22 @@ mod rest_ice_server_tests {
         );
     }
 
+    /// Switching the service off has to stop it being advertised too. A peer
+    /// handed these URLs would gather relay candidates against a host that is
+    /// not listening, and spend its whole ICE budget failing to reach them.
+    #[test]
+    fn a_disabled_service_advertises_nothing() {
+        let off = TurnSettings {
+            enable_turn: false,
+            ..settings(Some("s"), true)
+        };
+        assert!(off.get_rest_ice_servers("host-1", 60).is_none());
+        assert!(
+            off.get_ice_servers("conn-1", "client-1").urls.is_empty(),
+            "the caller drops an entry with no URLs, so this is what keeps it out"
+        );
+    }
+
     #[test]
     fn some_with_secret_and_interface() {
         let ice = settings(Some("s"), true)
@@ -443,10 +470,27 @@ impl Default for TurnSettings {
             interfaces: vec![],
             static_credentials: HashMap::new(),
             static_auth_secret: None,
-            enable_stun: true,
-            enable_turn: false,
+            // On by default: a host that configured TURN interfaces expects them
+            // to be served, and NAT traversal succeeds far more often with a
+            // relay available. Operators who do not want to relay turn it off.
+            enable_turn: true,
             relay_min_port: 50000,
             relay_max_port: 50050,
         }
+    }
+}
+
+#[cfg(test)]
+mod turn_settings_tests {
+    use super::*;
+
+    /// A host that has not said anything about TURN gets it: the switch is read
+    /// at startup, so this default decides whether a fresh install relays at
+    /// all. `#[serde(default)]` on the struct means an absent key lands here
+    /// too, which is what a configuration file written before the switch
+    /// existed looks like.
+    #[test]
+    fn turn_is_on_unless_the_operator_says_otherwise() {
+        assert!(TurnSettings::default().enable_turn);
     }
 }

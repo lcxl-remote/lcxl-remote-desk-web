@@ -12,7 +12,7 @@ import type { TurnSettings } from "@/services/types"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form"
+import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -39,7 +39,6 @@ const turnInterfaceSchema = z.object({
 const turnSettingsSchema = z.object({
     realm: z.string().min(1, "Realm is required"),
     interfaces: z.array(turnInterfaceSchema),
-    enable_stun: z.boolean(),
     enable_turn: z.boolean(),
     relay_min_port: z.number().min(1).max(65535),
     relay_max_port: z.number().min(1).max(65535),
@@ -60,8 +59,7 @@ export function TurnSettings() {
         defaultValues: {
             realm: "localhost",
             interfaces: [],
-            enable_stun: true,
-            enable_turn: false,
+            enable_turn: true,
             relay_min_port: 50000,
             relay_max_port: 50050,
         },
@@ -79,8 +77,7 @@ export function TurnSettings() {
             form.reset({
                 realm: data.realm || "localhost",
                 interfaces: data.interfaces || [],
-                enable_stun: data.enable_stun ?? true,
-                enable_turn: data.enable_turn ?? false,
+                enable_turn: data.enable_turn ?? true,
                 relay_min_port: data.relay_min_port || 50000,
                 relay_max_port: data.relay_max_port || 50050,
             })
@@ -206,26 +203,14 @@ export function TurnSettings() {
                             <div className="space-y-4 rounded-md border p-4">
                                 <FormField
                                     control={form.control}
-                                    name="enable_stun"
-                                    render={({ field }) => (
-                                        <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
-                                            <div className="space-y-0.5">
-                                                <FormLabel>{t("pages.turn.settings.enableStun")}</FormLabel>
-                                            </div>
-                                            <FormControl>
-                                                <Switch checked={field.value} onCheckedChange={field.onChange} />
-                                            </FormControl>
-                                        </FormItem>
-                                    )}
-                                />
-
-                                <FormField
-                                    control={form.control}
                                     name="enable_turn"
                                     render={({ field }) => (
                                         <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
-                                            <div className="space-y-0.5">
+                                            <div className="space-y-0.5 pr-4">
                                                 <FormLabel>{t("pages.turn.settings.enableTurn")}</FormLabel>
+                                                <FormDescription>
+                                                    {t("pages.turn.settings.enableTurn.description")}
+                                                </FormDescription>
                                             </div>
                                             <FormControl>
                                                 <Switch checked={field.value} onCheckedChange={field.onChange} />

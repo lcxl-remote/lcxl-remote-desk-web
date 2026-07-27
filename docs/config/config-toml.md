@@ -47,7 +47,7 @@ This host-local preference is not remotely configurable by manager. See
 - `realm` — TURN server realm for authentication.
 - `interfaces` — network interface configuration (`udp` / `tcp` protocols, listen and external addresses).
 - `static_auth_secret` — static authentication secret.
-- `enable_stun` / `enable_turn` — toggle STUN and TURN relay respectively.
+- `enable_turn` — run the TURN service on this host (default `true`). One service provides both TURN relay and STUN, so turning it off stops both; connections then rely on whatever relay the signaling server offers.
 - `relay_min_port` / `relay_max_port` — relay port allocation range.
 - `[turn.static_credentials]` — optional static username / password credential table.
 

@@ -63,6 +63,7 @@ use crate::{
         },
     },
     model::turn::TurnAuthHandler,
+    service::turn_lifecycle::{TurnStartup, turn_startup},
 };
 use actix_server::Server;
 use actix_service::fn_service;
@@ -605,15 +606,13 @@ pub async fn run_with_hub(
     let conn_device_map: web::Data<desk_signal::turn_usage::ConnectionDeviceMap> =
         web::Data::new(desk_signal::turn_usage::ConnectionDeviceMap::default());
 
-    //start turn server if mode is Default or Signaling
-    let turn_api_state =
-        if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
+    let turn_settings = {
+        let settings = shared_settings.read().await;
+        settings.turn.clone()
+    };
+    let turn_api_state = match turn_startup(&startup_mode, &turn_settings) {
+        TurnStartup::Start => {
             log::info!("Starting turn server");
-            let turn_settings = {
-                let settings = shared_settings.read().await;
-                settings.turn.clone()
-            };
-
             let auth_handler = Arc::new(TurnAuthHandler::new(
                 turn_settings.clone(),
                 connection_map.clone(),
@@ -635,9 +634,16 @@ pub async fn run_with_hub(
                     None
                 }
             }
-        } else {
+        }
+        // Deliberate, so not an error — but worth saying out loud, because a
+        // host with no relay of its own falls back to whatever the signaling
+        // server offers and traverses fewer NATs.
+        TurnStartup::DisabledBySettings => {
+            warn!("TURN service is disabled in settings; this host will not relay");
             None
-        };
+        }
+        TurnStartup::UnsupportedMode => None,
+    };
 
     // For Default / DeskServer modes that don't yet have a hub injected, fall back
     // to a Local hub so business code never sees a None. Approvals deny-fast when

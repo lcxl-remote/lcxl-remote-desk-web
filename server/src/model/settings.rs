@@ -284,6 +284,55 @@ mod tests {
         assert_eq!(loaded.system.locale.as_deref(), Some("en-US"));
     }
 
+    /// STUN stopped being separately switchable, so configuration files written
+    /// earlier still carry an `enable_stun` key. Loading one must ignore the
+    /// stale key rather than fail — a rejected `[turn]` section would silently
+    /// put the host back on default TURN settings.
+    #[test]
+    fn a_config_carrying_the_removed_stun_switch_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        std::fs::write(
+            path.with_extension("toml"),
+            r#"
+[turn]
+realm = "example.org"
+enable_stun = false
+enable_turn = false
+"#,
+        )
+        .unwrap();
+
+        let args = Args {
+            config_file_path: path.to_string_lossy().into_owned(),
+            ..Args::default()
+        };
+        let loaded = Settings::load_readonly(&args).unwrap();
+
+        assert_eq!(loaded.turn.realm, "example.org");
+        assert!(
+            !loaded.turn.enable_turn,
+            "the switch that survived must still apply"
+        );
+    }
+
+    /// The TURN switch decides whether a host relays, and it is read at startup,
+    /// so a configuration that never mentions it has to land on "on".
+    #[test]
+    fn a_config_without_a_turn_section_enables_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        std::fs::write(path.with_extension("toml"), "[system]\nport = 8080\n").unwrap();
+
+        let args = Args {
+            config_file_path: path.to_string_lossy().into_owned(),
+            ..Args::default()
+        };
+        let loaded = Settings::load_readonly(&args).unwrap();
+
+        assert!(loaded.turn.enable_turn);
+    }
+
     #[test]
     fn ordinary_save_does_not_change_the_process_locale() {
         let dir = tempfile::tempdir().unwrap();

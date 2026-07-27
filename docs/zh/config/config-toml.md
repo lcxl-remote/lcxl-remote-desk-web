@@ -41,7 +41,7 @@
 - `realm`——用于鉴权的 TURN 服务 realm。
 - `interfaces`——网络接口配置（`udp` / `tcp` 协议、监听与外部地址）。
 - `static_auth_secret`——静态鉴权密钥。
-- `enable_stun` / `enable_turn`——分别开关 STUN 与 TURN 中继。
+- `enable_turn`——是否在本机运行 TURN 服务（默认 `true`）。TURN 中继与 STUN 由同一个服务提供，关闭后两者都不再提供，连接只能依赖信令服务器提供的中继。
 - `relay_min_port` / `relay_max_port`——中继端口分配范围。
 - `[turn.static_credentials]`——可选的静态用户名 / 密码凭据表。
 

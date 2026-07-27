@@ -3341,14 +3341,8 @@ export type RestResponseTurnSettings = {
     */
     data?: {
         /**
-         * @description enable stun server
+         * @description Run the TURN service on this host.\n\nThe switch covers the whole runtime, STUN included: both are served by\none server, and there is no half-lifecycle that keeps STUN alive without\nTURN. Turning it off is the host-side counterpart of the manager\'s\ncluster-wide kill switch — without it a host would have no way to stop\nrelaying at all.
          * @default true
-         * @type boolean | undefined
-        */
-        enable_stun?: boolean;
-        /**
-         * @description enable turn server
-         * @default false
          * @type boolean | undefined
         */
         enable_turn?: boolean;
@@ -4171,14 +4165,8 @@ export type TurnSessionStatistics = {
 */
 export type TurnSettings = {
     /**
-     * @description enable stun server
+     * @description Run the TURN service on this host.\n\nThe switch covers the whole runtime, STUN included: both are served by\none server, and there is no half-lifecycle that keeps STUN alive without\nTURN. Turning it off is the host-side counterpart of the manager\'s\ncluster-wide kill switch — without it a host would have no way to stop\nrelaying at all.
      * @default true
-     * @type boolean | undefined
-    */
-    enable_stun?: boolean;
-    /**
-     * @description enable turn server
-     * @default false
      * @type boolean | undefined
     */
     enable_turn?: boolean;
