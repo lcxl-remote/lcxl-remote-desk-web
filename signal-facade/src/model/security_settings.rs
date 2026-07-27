@@ -116,9 +116,124 @@ impl SecuritySettings {
     }
 }
 
+/// Declares the capability dimensions once and derives everything that has to
+/// agree with them: the permission type, the full list, the i18n keys and the
+/// accessors into [`SecuritySettings`].
+///
+/// Keeping them in one list is a correctness requirement rather than tidiness.
+/// A capability missing from the list is one whose policy changes go unnoticed
+/// wherever the list drives the work — which reads downstream as "nothing
+/// changed" and can leave a cached approval in force after the operator revoked
+/// it. Adding a dimension here updates every dependent site at once.
+macro_rules! security_capabilities {
+    ($($variant:ident => $field:ident, $i18n_key:literal;)+) => {
+        /// One capability dimension of [`SecuritySettings`] — the subject of a
+        /// permission request and the unit that policy changes are tracked in.
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema,
+            SchemaWrite, SchemaRead,
+        )]
+        pub enum SecurityPermissionType {
+            $($variant,)+
+        }
+
+        impl SecurityPermissionType {
+            /// Every capability dimension, in declaration order.
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
+
+            /// Returns the i18n key for this permission type
+            pub fn i18n_key(&self) -> &'static str {
+                match self {
+                    $(Self::$variant => $i18n_key,)+
+                }
+            }
+
+            /// This capability's configured value in a policy.
+            pub fn read(&self, security: &SecuritySettings) -> Option<bool> {
+                match self {
+                    $(Self::$variant => security.$field,)+
+                }
+            }
+
+            /// Overwrite this capability's configured value in a policy.
+            pub fn write(&self, security: &mut SecuritySettings, value: Option<bool>) {
+                match self {
+                    $(Self::$variant => security.$field = value,)+
+                }
+            }
+        }
+    };
+}
+
+security_capabilities! {
+    RemoteControl => allow_remote_control, "security.permission.remoteControl";
+    ClipboardSync => allow_clipboard_sync, "security.permission.clipboardSync";
+    PrivateScreen => allow_private_screen, "security.permission.privateScreen";
+    Whiteboard => allow_whiteboard, "security.permission.whiteboard";
+    Terminal => allow_terminal, "security.permission.terminal";
+    FileBrowse => allow_file_browse, "security.permission.fileBrowse";
+    FileDelete => allow_file_delete, "security.permission.fileDelete";
+    FileTransfer => allow_file_transfer, "security.permission.fileTransfer";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The declaration list is what makes a capability visible to everything
+    /// that iterates the dimensions. A field that exists in the struct but not
+    /// in the list would be configurable and yet invisible to that machinery.
+    #[test]
+    fn every_capability_field_is_declared() {
+        let mut settings = SecuritySettings::all_prompt();
+        for capability in SecurityPermissionType::ALL {
+            capability.write(&mut settings, Some(true));
+        }
+
+        // Written through the list, read back off the struct: a field missing
+        // from the list stays at its all-prompt `None`.
+        let SecuritySettings {
+            allow_remote_control,
+            allow_clipboard_sync,
+            allow_private_screen,
+            allow_whiteboard,
+            allow_terminal,
+            allow_file_browse,
+            allow_file_delete,
+            allow_file_transfer,
+            approval_timeout: _,
+        } = settings;
+        for (name, value) in [
+            ("allow_remote_control", allow_remote_control),
+            ("allow_clipboard_sync", allow_clipboard_sync),
+            ("allow_private_screen", allow_private_screen),
+            ("allow_whiteboard", allow_whiteboard),
+            ("allow_terminal", allow_terminal),
+            ("allow_file_browse", allow_file_browse),
+            ("allow_file_delete", allow_file_delete),
+            ("allow_file_transfer", allow_file_transfer),
+        ] {
+            assert_eq!(value, Some(true), "{name} is missing from the declaration");
+        }
+    }
+
+    /// Reading and writing have to address the same field, or a decision about
+    /// one capability would be stored against another.
+    #[test]
+    fn read_and_write_address_the_same_field() {
+        for capability in SecurityPermissionType::ALL {
+            let mut settings = SecuritySettings::all_prompt();
+            capability.write(&mut settings, Some(false));
+
+            assert_eq!(capability.read(&settings), Some(false));
+            let others = SecurityPermissionType::ALL
+                .iter()
+                .filter(|other| *other != capability)
+                .filter(|other| other.read(&settings).is_some())
+                .count();
+            assert_eq!(others, 0, "{capability:?} wrote another capability's field");
+        }
+    }
 
     #[test]
     fn default_approval_timeout_is_thirty_seconds() {

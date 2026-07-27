@@ -7,6 +7,7 @@ pub mod desk_settings;
 pub mod files;
 pub mod image_capture;
 pub mod os;
+pub mod policy_snapshot;
 pub mod private_screen;
 pub mod probe;
 pub mod remote_access;

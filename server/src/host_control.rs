@@ -136,7 +136,7 @@ impl ReplaySnapshot {
     fn to_message(&self) -> HostControlMessage {
         HostControlMessage::SecurityApprovalRequest {
             req_id: self.req_id.clone(),
-            permission_type: self.permission_type.clone(),
+            permission_type: self.permission_type,
             from_connection_id: self.from_connection_id.clone(),
         }
     }
@@ -434,10 +434,10 @@ impl HostControlHub {
 
         let (tx, rx) = oneshot::channel();
         let mut rx = rx;
-        let permission_type = req.permission_type.clone();
+        let permission_type = req.permission_type;
         let snapshot = ReplaySnapshot {
             req_id: req.req_id.clone(),
-            permission_type: permission_type.clone(),
+            permission_type,
             from_connection_id: req.from_connection_id.clone(),
         };
 
@@ -1005,7 +1005,7 @@ impl HostControlHub {
         self.register_upstream_request(
             req_id.clone(),
             upstream_id,
-            permission_type.clone(),
+            permission_type,
             from_connection_id.clone(),
         );
         let _ = self.send_command(HostControlMessage::SecurityApprovalRequest {

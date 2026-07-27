@@ -1,5 +1,5 @@
 use desk_signal_facade::model::security_settings::SecuritySettings;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::Arc;
 use utoipa::ToSchema;
 
@@ -48,34 +48,9 @@ pub fn effective_permission(
     }
 }
 
-/// Type of security permission being requested
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub enum SecurityPermissionType {
-    RemoteControl,
-    ClipboardSync,
-    PrivateScreen,
-    Whiteboard,
-    Terminal,
-    FileBrowse,
-    FileDelete,
-    FileTransfer,
-}
-
-impl SecurityPermissionType {
-    /// Returns the i18n key for this permission type
-    pub fn i18n_key(&self) -> &'static str {
-        match self {
-            Self::RemoteControl => "security.permission.remoteControl",
-            Self::ClipboardSync => "security.permission.clipboardSync",
-            Self::PrivateScreen => "security.permission.privateScreen",
-            Self::Whiteboard => "security.permission.whiteboard",
-            Self::Terminal => "security.permission.terminal",
-            Self::FileBrowse => "security.permission.fileBrowse",
-            Self::FileDelete => "security.permission.fileDelete",
-            Self::FileTransfer => "security.permission.fileTransfer",
-        }
-    }
-}
+/// The capability dimensions live with the settings they select, so that the
+/// list, the fields and the policy distribution built on them cannot disagree.
+pub use desk_signal_facade::model::security_settings::SecurityPermissionType;
 
 /// The user's response to a security approval request
 #[derive(Debug, Clone)]
@@ -213,32 +188,7 @@ pub async fn persist_remembered_decision(
     approved: bool,
 ) {
     let mut settings_write = settings.write().await;
-    match permission_type {
-        SecurityPermissionType::RemoteControl => {
-            settings_write.security.allow_remote_control = Some(approved);
-        }
-        SecurityPermissionType::ClipboardSync => {
-            settings_write.security.allow_clipboard_sync = Some(approved);
-        }
-        SecurityPermissionType::PrivateScreen => {
-            settings_write.security.allow_private_screen = Some(approved);
-        }
-        SecurityPermissionType::Whiteboard => {
-            settings_write.security.allow_whiteboard = Some(approved);
-        }
-        SecurityPermissionType::Terminal => {
-            settings_write.security.allow_terminal = Some(approved);
-        }
-        SecurityPermissionType::FileBrowse => {
-            settings_write.security.allow_file_browse = Some(approved);
-        }
-        SecurityPermissionType::FileDelete => {
-            settings_write.security.allow_file_delete = Some(approved);
-        }
-        SecurityPermissionType::FileTransfer => {
-            settings_write.security.allow_file_transfer = Some(approved);
-        }
-    }
+    permission_type.write(&mut settings_write.security, Some(approved));
     // Any path that persists security settings normalizes an unset approval
     // timeout to the finite default, so a save never drops it to a value that
     // reloads as the 30s default by omission.
@@ -265,7 +215,7 @@ pub async fn check_security_permission(
         settings,
         hub,
         permission,
-        permission_type.clone(),
+        permission_type,
         from_connection_id,
         suppress_remember,
     )
@@ -649,8 +599,7 @@ mod tests {
                     remember: true,
                 },
             );
-            let _ =
-                check_security_permission(&settings, &hub, None, perm.clone(), None, false).await;
+            let _ = check_security_permission(&settings, &hub, None, perm, None, false).await;
             let s = settings.read().await;
             assert_eq!(getter(&s), Some(true), "field mismatch for {:?}", perm);
         }
