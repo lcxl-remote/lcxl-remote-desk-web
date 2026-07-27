@@ -256,6 +256,16 @@ pub enum ServiceToWorker {
     /// The worker applies and persists it, then acknowledges with
     /// [`WorkerToService::LocaleApplied`].
     SetLocale(SetLocalePayload),
+
+    // ---------- Security policy (event pipe) ----------
+    /// Daemon → worker: the host security policy, as the daemon now holds it.
+    ///
+    /// The daemon is the only writer; a worker mirrors what arrives here and
+    /// decides permission requests from the mirror. Ordering is carried in the
+    /// snapshot rather than assumed from delivery: the worker keeps the
+    /// higher-sequence policy and answers on
+    /// [`WorkerToService::SecurityPolicyApplied`] with what it ended up holding.
+    UpdateSecurityPolicy(UpdateSecurityPolicyPayload),
 }
 
 /// Messages sent from Worker process to Service Core (daemon) over the
@@ -460,6 +470,12 @@ pub enum WorkerToService {
     /// Worker confirms that its live process locale and settings snapshot have
     /// converged to the host-wide locale.
     LocaleApplied(LocaleAppliedPayload),
+
+    // ---------- Security policy (event pipe) ----------
+    /// Worker → daemon: what the worker ended up holding after a published
+    /// policy arrived. The daemon compares this against what it published to
+    /// tell a converged worker from one that is still behind.
+    SecurityPolicyApplied(SecurityPolicyAppliedPayload),
 }
 
 mod agent;

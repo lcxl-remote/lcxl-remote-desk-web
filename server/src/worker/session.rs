@@ -9,6 +9,7 @@ use crate::{
         file_transfer_dispatcher::FileTransferDispatcher,
         input_dispatcher::InputDispatcher,
         media_producer::MediaProducer,
+        policy_mirror::PolicyMirror,
         shared_capture::CaptureKey,
         virtual_display::{
             RestartStep, VirtualDisplayState, resolve_attach_with_backoff, run_set_mode,
@@ -27,15 +28,16 @@ use desk_ipc_protocol::{
         ListTerminalResponsePayload, LocaleAppliedPayload, ManagerFileListResponsePayload,
         ManagerQuerySettingsResponsePayload, ManagerResponseRefPayload,
         ManagerSystemInfoResponsePayload, PrivateScreenStateChangedPayload,
-        RemoteAccessStateAppliedPayload, ReplyFromTerminalPayload, ServiceToWorker,
-        SignalingErrorPayload, StopMediaPayload, TerminalClosedPayload, TerminalStartedPayload,
-        VirtualDisplayAttachOutcome, VirtualDisplayAttachResultPayload, WorkerInitPayload,
-        WorkerToService,
+        RemoteAccessStateAppliedPayload, ReplyFromTerminalPayload, SecurityPolicyAppliedPayload,
+        ServiceToWorker, SignalingErrorPayload, StopMediaPayload, TerminalClosedPayload,
+        TerminalStartedPayload, VirtualDisplayAttachOutcome, VirtualDisplayAttachResultPayload,
+        WorkerInitPayload, WorkerToService,
     },
     transport::{read_message, write_message},
 };
 use desk_server_user::model::CurrentUser;
 use desk_signal_facade::model::files::FileListResponse;
+use desk_signal_facade::model::policy_snapshot::PolicySnapshot;
 use desk_signal_facade::model::private_screen::{
     EnablePrivateScreenData, PrivateScreenStateChangedData,
 };

@@ -77,6 +77,11 @@ impl WorkerSession {
             );
             let _ = crate::locale::set_global_locale(crate::locale::DEFAULT_LOCALE);
         }
+        // The worker's copy of the host security policy. The daemon publishes
+        // to it; nothing here writes the policy back.
+        let policy_mirror = Arc::new(PolicyMirror::new(PolicySnapshot::new(
+            settings.security.clone(),
+        )));
         let shared_settings = Arc::new(SharedSettings::from(settings));
         let shared_settings_data = web::Data::from(shared_settings.clone());
         let remote_access_locked = Arc::new(AtomicBool::new(init_payload.remote_access_locked));
@@ -290,23 +295,48 @@ impl WorkerSession {
         // `None` from `recv()` means the transport closed (peer disconnected
         // or in-process channel dropped); the main loop sees that as
         // `Some(None)` on the mpsc and breaks cleanly.
+        //
+        // Security-policy updates are applied here rather than forwarded. The
+        // main loop parks on approval prompts — several gates await one inline
+        // — and a policy change is often exactly what should resolve the prompt
+        // that is blocking it, so routing the change through the same queue
+        // would make it wait on its own effect. Applying it on this task keeps
+        // the mirror current no matter what the main loop is doing, and it also
+        // means a policy change is not subject to the main loop's locked-state
+        // filter: an operator revoking a capability while remote access is
+        // locked must not have that revocation discarded.
         let (service_msg_tx, mut service_msg_rx) =
             mpsc::unbounded_channel::<Option<ServiceToWorker>>();
-        tokio::spawn(async move {
-            loop {
-                match event_rx.recv().await {
-                    Some(msg) => {
-                        if service_msg_tx.send(Some(msg)).is_err() {
+        {
+            let policy_mirror = Arc::clone(&policy_mirror);
+            let event_tx = Arc::clone(&event_tx);
+            tokio::spawn(async move {
+                loop {
+                    match event_rx.recv().await {
+                        Some(ServiceToWorker::UpdateSecurityPolicy(payload)) => {
+                            let outcome = policy_mirror.apply(payload.snapshot);
+                            let _ = event_tx
+                                .send(WorkerToService::SecurityPolicyApplied(
+                                    SecurityPolicyAppliedPayload {
+                                        operation_id: payload.operation_id,
+                                        outcome,
+                                    },
+                                ))
+                                .await;
+                        }
+                        Some(msg) => {
+                            if service_msg_tx.send(Some(msg)).is_err() {
+                                break;
+                            }
+                        }
+                        None => {
+                            let _ = service_msg_tx.send(None);
                             break;
                         }
                     }
-                    None => {
-                        let _ = service_msg_tx.send(None);
-                        break;
-                    }
                 }
-            }
-        });
+            });
+        }
 
         // File-lane drain task: hands inbound `FileTransferPayload`
         // frames straight to the dispatcher. Runs independent of the
@@ -417,6 +447,16 @@ impl WorkerSession {
                                 }
                                 ServiceToWorker::Init(_) => {
                                     warn!("Received duplicate Init, ignoring");
+                                }
+                                ServiceToWorker::UpdateSecurityPolicy(_) => {
+                                    // Applied on the transport reader task, ahead of this
+                                    // loop, so a policy change is never queued behind the
+                                    // approval prompt it would resolve. Arriving here means
+                                    // that interception was bypassed and the mirror is stale.
+                                    error!(
+                                        "Security policy update reached the main loop; \
+                                         the policy mirror was not updated"
+                                    );
                                 }
                                 ServiceToWorker::SetRemoteAccessState(payload) => {
                                     let current_version =

@@ -765,6 +765,9 @@ pub async fn run_signaling_proxy(
                     warn!("[SignalingProxy] failed to apply worker locale: {error}");
                 }
             }
+            WorkerToService::SecurityPolicyApplied(payload) => {
+                worker_mgr.note_policy_applied(&payload).await;
+            }
             // Route typed terminal events back to the matching browser connection.
             // Each `Terminal*` variant rebuilds the matching outbound
             // `SignalingType::*` model and writes it onto the

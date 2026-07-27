@@ -5,7 +5,8 @@ use actix_web::web;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaReceiver, framed, inprocess},
     message::{
-        FileTransferPayload, MediaCapabilities, ServiceToWorker, WorkerInitPayload, WorkerToService,
+        FileTransferPayload, MediaCapabilities, PolicyApplyOutcome, SecurityPolicyAppliedPayload,
+        ServiceToWorker, WorkerInitPayload, WorkerToService,
     },
     transport::{read_message, write_message},
 };
@@ -51,6 +52,10 @@ pub struct WorkerManager {
     /// for the post-attach `RefreshCapabilities` round-trip to update
     /// the cache before letting `RequestRemote` assemble the Init reply).
     capabilities_version: Arc<AtomicU64>,
+    /// The security policy sequence the worker last confirmed holding. Compared
+    /// against what the daemon published to tell a converged worker from one
+    /// that is lagging or has asked to be resynchronized.
+    policy_applied_seq: Arc<AtomicU64>,
     /// Watch channel mirroring [`Self::capabilities_version`] so awaiters
     /// can use `recv.changed().await` instead of polling. The sender side
     /// is wrapped in `Arc` because `WorkerManager` is `Clone` and
@@ -224,6 +229,7 @@ impl WorkerManager {
             pc_registry,
             worker_capabilities: Arc::new(StdMutex::new(None)),
             capabilities_version: Arc::new(AtomicU64::new(0)),
+            policy_applied_seq: Arc::new(AtomicU64::new(0)),
             capabilities_version_tx: Arc::new(cap_version_tx),
             is_inprocess: Arc::new(AtomicBool::new(false)),
             remote_access_gate: Arc::new(StdRwLock::new(
@@ -799,6 +805,41 @@ impl WorkerManager {
         if let Some(worker) = inner.active_worker.as_mut() {
             worker.last_heartbeat_at = Instant::now();
         }
+    }
+
+    /// Record what the worker reported after a security policy was published to
+    /// it.
+    ///
+    /// A worker asking to be resynchronized is holding a policy the daemon
+    /// never published — deliberately stricter than either side intended, so
+    /// nothing is permitted that should not be, but it stays that way until the
+    /// daemon publishes again. That is worth saying out loud, because the
+    /// symptom on the host is prompts for capabilities the operator has already
+    /// allowed, with nothing else to explain it.
+    pub async fn note_policy_applied(&self, payload: &SecurityPolicyAppliedPayload) {
+        match &payload.outcome {
+            PolicyApplyOutcome::Applied { seq, .. } => {
+                debug!(
+                    "[worker_manager] worker applied security policy {} (operation {})",
+                    seq, payload.operation_id
+                );
+                self.policy_applied_seq.store(*seq, Ordering::Release);
+            }
+            PolicyApplyOutcome::NeedsResync { seq } => {
+                error!(
+                    "[worker_manager] worker could not reconcile security policy for operation \
+                     {}; it is holding a locally tightened policy at {} and needs the current \
+                     one republished",
+                    payload.operation_id, seq
+                );
+            }
+        }
+    }
+
+    /// The policy sequence the worker last confirmed holding, or zero if it has
+    /// confirmed none.
+    pub fn policy_applied_seq(&self) -> u64 {
+        self.policy_applied_seq.load(Ordering::Acquire)
     }
 
     /// Take a snapshot of the active worker's identity + last

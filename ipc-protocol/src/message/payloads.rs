@@ -6,6 +6,7 @@ use desk_signal_facade::model::audio_capture::AudioDevice;
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
 use desk_signal_facade::model::image_capture::DisplayInfo;
+use desk_signal_facade::model::policy_snapshot::{PolicyGenerations, PolicySnapshot};
 use desk_signal_facade::model::private_screen::PrivateScreenStateChangedData;
 use desk_signal_facade::model::signal::SignalingType;
 use desk_signal_facade::model::system_info::SystemInfo;
@@ -615,6 +616,40 @@ pub struct ManagerUpdateSettingsRequestPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct SetLocalePayload {
     pub locale: String,
+}
+
+/// Payload for [`ServiceToWorker::UpdateSecurityPolicy`].
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct UpdateSecurityPolicyPayload {
+    /// Identifies this publication so the daemon can match the worker's
+    /// acknowledgement to it rather than to some later one.
+    pub operation_id: String,
+    pub snapshot: PolicySnapshot,
+}
+
+/// What a worker did with a published policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+#[serde(tag = "type", content = "payload")]
+pub enum PolicyApplyOutcome {
+    /// The worker now holds exactly this policy. The generations travel back in
+    /// full rather than as a digest so a divergence names the capabilities it
+    /// is about.
+    Applied {
+        seq: u64,
+        generations: PolicyGenerations,
+    },
+    /// The worker could not reconcile what arrived with what it held and fell
+    /// back to the stricter reading of the two. This is a degraded state, not a
+    /// successful application: the daemon must republish rather than record the
+    /// worker as caught up.
+    NeedsResync { seq: u64 },
+}
+
+/// Payload for [`WorkerToService::SecurityPolicyApplied`].
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct SecurityPolicyAppliedPayload {
+    pub operation_id: String,
+    pub outcome: PolicyApplyOutcome,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]

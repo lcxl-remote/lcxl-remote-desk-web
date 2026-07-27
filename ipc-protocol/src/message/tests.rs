@@ -1,7 +1,9 @@
 use super::*;
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
+use desk_signal_facade::model::policy_snapshot::{PolicyGenerations, PolicySnapshot};
 use desk_signal_facade::model::private_screen::PrivateScreenStateChangedData;
+use desk_signal_facade::model::security_settings::{SecurityPermissionType, SecuritySettings};
 use desk_signal_facade::model::signal::SignalingType;
 use desk_signal_facade::model::system_info::SystemInfo;
 use desk_signal_facade::model::system_settings::RemoteSystemSettings;
@@ -1242,6 +1244,10 @@ fn service_to_worker_all_variants_round_trip() {
             plan: sample_exec_plan(),
             audit_source_request_id: Some("frame-req".to_string()),
         }),
+        ServiceToWorker::UpdateSecurityPolicy(UpdateSecurityPolicyPayload {
+            operation_id: "op-policy".to_string(),
+            snapshot: PolicySnapshot::new(SecuritySettings::default()),
+        }),
     ];
     for case in &cases {
         let decoded = wincode_round_trip(case);
@@ -1252,6 +1258,68 @@ fn service_to_worker_all_variants_round_trip() {
             std::mem::discriminant(&decoded),
             "variant {case:?} did not round-trip to the same discriminant"
         );
+    }
+}
+
+/// A published policy has to arrive with its ordering intact. The sequence and
+/// the per-capability stamps are what the receiving side uses to decide whether
+/// to adopt it and what to invalidate; a snapshot that arrived without them
+/// would be indistinguishable from an initial one.
+#[test]
+fn a_published_policy_keeps_its_ordering_across_the_wire() {
+    let mut snapshot = PolicySnapshot::new(SecuritySettings::default());
+    snapshot.set(SecuritySettings {
+        allow_terminal: Some(false),
+        ..SecuritySettings::default()
+    });
+
+    let published = ServiceToWorker::UpdateSecurityPolicy(UpdateSecurityPolicyPayload {
+        operation_id: "op-1".to_string(),
+        snapshot: snapshot.clone(),
+    });
+    match wincode_round_trip(&published) {
+        ServiceToWorker::UpdateSecurityPolicy(payload) => {
+            assert_eq!(payload.operation_id, "op-1");
+            assert_eq!(payload.snapshot, snapshot);
+            assert_eq!(payload.snapshot.seq(), snapshot.seq());
+            assert_eq!(
+                payload
+                    .snapshot
+                    .changed_at(SecurityPermissionType::Terminal),
+                snapshot.seq(),
+                "the capability stamp has to survive, not just the policy"
+            );
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// The outcome is what distinguishes a converged worker from one holding a
+/// locally tightened policy. A `NeedsResync` that decoded as `Applied` would
+/// report the exact opposite of the truth and stop the daemon republishing.
+#[test]
+fn policy_apply_outcomes_round_trip() {
+    for outcome in [
+        PolicyApplyOutcome::Applied {
+            seq: 3,
+            generations: PolicyGenerations {
+                allow_terminal: 3,
+                ..PolicyGenerations::default()
+            },
+        },
+        PolicyApplyOutcome::NeedsResync { seq: 9 },
+    ] {
+        let applied = WorkerToService::SecurityPolicyApplied(SecurityPolicyAppliedPayload {
+            operation_id: "op-2".to_string(),
+            outcome: outcome.clone(),
+        });
+        match wincode_round_trip(&applied) {
+            WorkerToService::SecurityPolicyApplied(payload) => {
+                assert_eq!(payload.operation_id, "op-2");
+                assert_eq!(payload.outcome, outcome);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }
 
@@ -1378,6 +1446,13 @@ fn worker_to_service_all_variants_round_trip() {
         }),
         WorkerToService::LocaleApplied(LocaleAppliedPayload {
             locale: "en-US".to_string(),
+        }),
+        WorkerToService::SecurityPolicyApplied(SecurityPolicyAppliedPayload {
+            operation_id: "op-policy".to_string(),
+            outcome: PolicyApplyOutcome::Applied {
+                seq: 7,
+                generations: PolicyGenerations::default(),
+            },
         }),
         WorkerToService::TerminalStarted(TerminalStartedPayload {
             request_id: "r".to_string(),

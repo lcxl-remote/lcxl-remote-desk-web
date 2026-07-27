@@ -8,6 +8,7 @@ pub mod exec_registry;
 pub mod file_transfer_dispatcher;
 pub mod input_dispatcher;
 pub mod media_producer;
+pub mod policy_mirror;
 pub mod session;
 pub mod shared_capture;
 pub mod virtual_display;
