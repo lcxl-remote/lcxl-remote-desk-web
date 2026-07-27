@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::durable_file::{FileMode, durable_atomic_write};
 use crate::error::DeskError;
 
 mod ai_policy;
@@ -225,7 +226,13 @@ impl Settings {
         // (api_key, signaling/manager tokens, session key) and would bypass the
         // per-field `Debug` redaction if printed in full.
         debug!("Saving config to: {}", config_file_path.display());
-        fs::write(&config_file_path, toml_str)?;
+        // Replaced rather than truncated in place, so a failed save leaves the
+        // previous configuration on disk instead of an empty or partial file —
+        // every caller that reports failure relies on that. `Preserve` keeps the
+        // file reachable by whichever role wrote it first: the daemon runs as
+        // SYSTEM / root while a portable host runs as the desktop user, and both
+        // read this same path.
+        durable_atomic_write(&config_file_path, toml_str.as_bytes(), FileMode::Preserve)?;
         Ok(())
     }
 }
@@ -331,6 +338,53 @@ enable_turn = false
         let loaded = Settings::load_readonly(&args).unwrap();
 
         assert!(loaded.turn.enable_turn);
+    }
+
+    /// Callers treat a failed `save` as "nothing changed" — the settings
+    /// controllers report the error and leave the live values alone. That only
+    /// holds if the file on disk is still the previous configuration rather
+    /// than the empty file a truncating write would leave behind.
+    #[test]
+    fn a_failed_save_leaves_the_previous_configuration_on_disk() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config");
+            let committed = settings_at(&path, "en-US");
+            committed.save_with_locale_change().unwrap();
+            let before = std::fs::read_to_string(path.with_extension("toml")).unwrap();
+
+            // An unwritable directory stands in for the disk filling up: the
+            // replacement cannot be created, so the save has to fail.
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+            // Root ignores directory permissions, so the save would succeed and
+            // the assertion below would prove nothing.
+            let ignores_permissions = std::fs::File::create(dir.path().join("probe")).is_ok();
+
+            let outcome = if ignores_permissions {
+                None
+            } else {
+                let mut changed = settings_at(&path, "en-US");
+                changed.log.log_level = "trace".to_string();
+                Some(changed.save())
+            };
+
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            if let Some(outcome) = outcome {
+                assert!(
+                    outcome.is_err(),
+                    "an unwritable directory must fail the save"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(path.with_extension("toml")).unwrap(),
+                    before,
+                    "the configuration file must survive a failed save intact"
+                );
+            }
+        }
     }
 
     #[test]

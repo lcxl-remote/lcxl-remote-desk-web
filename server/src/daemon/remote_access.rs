@@ -1,5 +1,5 @@
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::durable_file::{FileMode, durable_atomic_write};
 use crate::host_activity::HostActivityRegistry;
 use crate::host_control::{CentralSyncState, HostRemoteAccessMode, HostRemoteAccessStatus};
 
@@ -279,12 +280,16 @@ impl RemoteAccessStateStore {
         let persisted = PersistedRemoteAccessState::from_runtime(state)?;
         let contents = toml::to_string_pretty(&persisted)
             .context("failed to serialize remote-access state")?;
-        durable_atomic_write(&self.path, contents.as_bytes()).with_context(|| {
-            format!(
-                "failed to persist remote-access state at {}",
-                self.path.display()
-            )
-        })
+        // The daemon owns this file outright, so each write puts it back to
+        // owner-only rather than keeping whatever it happens to find.
+        durable_atomic_write(&self.path, contents.as_bytes(), FileMode::OwnerOnly).with_context(
+            || {
+                format!(
+                    "failed to persist remote-access state at {}",
+                    self.path.display()
+                )
+            },
+        )
     }
 
     fn parse(&self, contents: &str) -> Result<RemoteAccessState> {
@@ -768,89 +773,6 @@ impl RemoteAccessGate {
         self.locked.store(loaded.is_locked(), Ordering::Release);
         *current = loaded;
     }
-}
-
-fn durable_atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(STATE_FILE_NAME);
-    let temporary = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
-
-    let result = (|| {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temporary)?;
-        file.write_all(contents)?;
-        file.flush()?;
-        file.sync_all()?;
-        drop(file);
-
-        replace_file(&temporary, path)?;
-        sync_parent_directory(parent)
-    })();
-
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
-#[cfg(unix)]
-fn replace_file(temporary: &Path, target: &Path) -> io::Result<()> {
-    fs::rename(temporary, target)
-}
-
-#[cfg(target_os = "windows")]
-fn replace_file(temporary: &Path, target: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt as _;
-    use windows::Win32::Storage::FileSystem::{
-        MOVEFILE_WRITE_THROUGH, MoveFileExW, REPLACEFILE_WRITE_THROUGH, ReplaceFileW,
-    };
-    use windows::core::PCWSTR;
-
-    let temporary_wide: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
-    let target_wide: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
-    let temporary_ptr = PCWSTR(temporary_wide.as_ptr());
-    let target_ptr = PCWSTR(target_wide.as_ptr());
-
-    let result = unsafe {
-        if target.exists() {
-            ReplaceFileW(
-                target_ptr,
-                temporary_ptr,
-                PCWSTR::null(),
-                REPLACEFILE_WRITE_THROUGH,
-                None,
-                None,
-            )
-        } else {
-            MoveFileExW(temporary_ptr, target_ptr, MOVEFILE_WRITE_THROUGH)
-        }
-    };
-    result.map_err(io::Error::other)
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-fn replace_file(temporary: &Path, target: &Path) -> io::Result<()> {
-    fs::rename(temporary, target)
-}
-
-#[cfg(unix)]
-fn sync_parent_directory(parent: &Path) -> io::Result<()> {
-    fs::File::open(parent)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 pub mod controller;
 pub mod daemon;
 pub mod diagnose;
+pub mod durable_file;
 pub mod error;
 pub mod exec;
 pub mod exec_shells;
