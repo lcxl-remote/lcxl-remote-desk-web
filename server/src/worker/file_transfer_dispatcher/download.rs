@@ -1,5 +1,14 @@
 use super::*;
 
+/// What one download announces to the browser and streams against, settled
+/// before the first chunk goes out.
+struct DownloadPlan {
+    file_name: String,
+    file_size: u64,
+    chunk_size: usize,
+    total_chunks: u64,
+}
+
 impl FileTransferDispatcher {
     pub(super) async fn serve_download(
         &self,
@@ -26,7 +35,23 @@ impl FileTransferDispatcher {
             }
             return Ok(());
         }
-        let metadata = tokio::fs::metadata(&path).await?;
+        // A file can pass the check above and still be unreadable a moment
+        // later — removed, or on a mount whose permissions changed. Reporting
+        // it is what lets the browser show why; returning the error alone would
+        // leave the transfer on screen until the watchdog gives up on it.
+        let metadata = match tokio::fs::metadata(&path).await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                self.fail_transfer(
+                    &connection_id,
+                    &req.transfer_id,
+                    DeskErrorCode::SYSTEM_ERROR,
+                    format!("Could not read {}: {error}", req.file_path),
+                )
+                .await;
+                return Ok(());
+            }
+        };
         let file_size = metadata.len();
         let file_name = path
             .file_name()
@@ -35,7 +60,19 @@ impl FileTransferDispatcher {
             .to_string();
         let chunk_size = FILE_TRANSFER_CHUNK_SIZE_TX;
         let total_chunks = file_size.div_ceil(chunk_size as u64);
-        let mut file = tokio::fs::File::open(&path).await?;
+        let file = match tokio::fs::File::open(&path).await {
+            Ok(file) => file,
+            Err(error) => {
+                self.fail_transfer(
+                    &connection_id,
+                    &req.transfer_id,
+                    DeskErrorCode::SYSTEM_ERROR,
+                    format!("Could not open {}: {error}", req.file_path),
+                )
+                .await;
+                return Ok(());
+            }
+        };
 
         if !self
             .start_activity(
@@ -60,12 +97,56 @@ impl FileTransferDispatcher {
             return Ok(());
         }
 
+        // Registered before the first chunk and released once below, whichever
+        // way the stream ends: a cancel is only recorded while this holds, so
+        // the release is also what guarantees no cancel outlives its reader.
+        self.inner
+            .lock()
+            .await
+            .live_downloads
+            .insert(TransferKey::new(&connection_id, &req.transfer_id));
+        let plan = DownloadPlan {
+            file_name,
+            file_size,
+            chunk_size,
+            total_chunks,
+        };
+        let outcome = self
+            .stream_download(&connection_id, &req.transfer_id, file, plan)
+            .await;
+        {
+            let mut inner = self.inner.lock().await;
+            let key = TransferKey::new(&connection_id, &req.transfer_id);
+            inner.live_downloads.remove(&key);
+            inner.cancelled_transfers.remove(&key);
+        }
+        outcome
+    }
+
+    /// Stream one download's chunks over the file lane.
+    ///
+    /// Split from [`Self::serve_download`] so the registration that bounds
+    /// `cancelled_transfers` has a single release point: every way out of the
+    /// stream returns through here.
+    async fn stream_download(
+        &self,
+        connection_id: &str,
+        transfer_id: &str,
+        mut file: tokio::fs::File,
+        plan: DownloadPlan,
+    ) -> std::io::Result<()> {
+        let DownloadPlan {
+            file_name,
+            file_size,
+            chunk_size,
+            total_chunks,
+        } = plan;
         if let Err(e) = self
             .emit_text(
-                &connection_id,
+                connection_id,
                 FileTransferMessage::DownloadResponse(DownloadResponse {
-                    transfer_id: req.transfer_id.clone(),
-                    file_name: file_name.clone(),
+                    transfer_id: transfer_id.to_string(),
+                    file_name,
                     file_size,
                     chunk_size,
                     total_chunks,
@@ -75,14 +156,10 @@ impl FileTransferDispatcher {
         {
             warn!(
                 "[FileTransferDispatcher] {}: download {} aborted before open: {e}",
-                connection_id, req.transfer_id
+                connection_id, transfer_id
             );
-            self.finish_activity(
-                &connection_id,
-                &req.transfer_id,
-                FileTransferOutcome::Failed,
-            )
-            .await;
+            self.finish_activity(connection_id, transfer_id, FileTransferOutcome::Failed)
+                .await;
             return Ok(());
         }
         let mut buf = vec![0u8; chunk_size];
@@ -90,7 +167,7 @@ impl FileTransferDispatcher {
         let mut window = DownloadWindow::default();
         info!(
             "[FileTransferDispatcher] download {} starting: {} chunks",
-            req.transfer_id, total_chunks
+            transfer_id, total_chunks
         );
         loop {
             // Check cancel flag before doing more IO.
@@ -98,19 +175,15 @@ impl FileTransferDispatcher {
                 let mut inner = self.inner.lock().await;
                 inner
                     .cancelled_transfers
-                    .remove(&TransferKey::new(&connection_id, &req.transfer_id))
+                    .remove(&TransferKey::new(connection_id, transfer_id))
             };
             if cancelled {
                 info!(
                     "[FileTransferDispatcher] download {} cancelled",
-                    req.transfer_id
+                    transfer_id
                 );
-                self.finish_activity(
-                    &connection_id,
-                    &req.transfer_id,
-                    FileTransferOutcome::Cancelled,
-                )
-                .await;
+                self.finish_activity(connection_id, transfer_id, FileTransferOutcome::Cancelled)
+                    .await;
                 return Ok(());
             }
             let iter_start = Instant::now();
@@ -118,12 +191,18 @@ impl FileTransferDispatcher {
             let n = match file.read(&mut buf).await {
                 Ok(value) => value,
                 Err(error) => {
-                    self.finish_activity(
-                        &connection_id,
-                        &req.transfer_id,
-                        FileTransferOutcome::Failed,
+                    // The browser has a half-written file and no reason yet to
+                    // stop waiting for the rest of it; say what went wrong
+                    // before the activity ends.
+                    self.fail_transfer(
+                        connection_id,
+                        transfer_id,
+                        DeskErrorCode::SYSTEM_ERROR,
+                        format!("Read failed at chunk {chunk_index}: {error}"),
                     )
                     .await;
+                    self.finish_activity(connection_id, transfer_id, FileTransferOutcome::Failed)
+                        .await;
                     return Err(error);
                 }
             };
@@ -132,26 +211,22 @@ impl FileTransferDispatcher {
                 break;
             }
             let build_start = Instant::now();
-            let chunk_bytes = build_binary_chunk(&req.transfer_id, chunk_index, &buf[..n]);
+            let chunk_bytes = build_binary_chunk(transfer_id, chunk_index, &buf[..n]);
             let build_elapsed = build_start.elapsed();
             // Fail-fast on file-lane closure: dropping `file` here
             // releases the OS handle promptly. Continuing to read
             // would just fill memory while no one drains.
             let emit_start = Instant::now();
             if let Err(e) = self
-                .emit_binary(&connection_id, &req.transfer_id, chunk_bytes)
+                .emit_binary(connection_id, transfer_id, chunk_bytes)
                 .await
             {
                 warn!(
                     "[FileTransferDispatcher] {}: download {} aborted at chunk {}: {e}",
-                    connection_id, req.transfer_id, chunk_index
+                    connection_id, transfer_id, chunk_index
                 );
-                self.finish_activity(
-                    &connection_id,
-                    &req.transfer_id,
-                    FileTransferOutcome::Failed,
-                )
-                .await;
+                self.finish_activity(connection_id, transfer_id, FileTransferOutcome::Failed)
+                    .await;
                 return Ok(());
             }
             let emit_elapsed = emit_start.elapsed();
@@ -163,7 +238,7 @@ impl FileTransferDispatcher {
                 iter_start.elapsed(),
             );
             if window.is_full() {
-                if let Some(line) = window.flush_line(&req.transfer_id, "ft-metrics") {
+                if let Some(line) = window.flush_line(transfer_id, "ft-metrics") {
                     info!("{line}");
                 }
                 window.reset();
@@ -175,39 +250,31 @@ impl FileTransferDispatcher {
         }
         // Flush any trailing partial window so a small file or the
         // last few chunks of a large file still surface in the log.
-        if let Some(line) = window.flush_line(&req.transfer_id, "ft-metrics") {
+        if let Some(line) = window.flush_line(transfer_id, "ft-metrics") {
             info!("{line}");
         }
         if let Err(e) = self
             .emit_text(
-                &connection_id,
+                connection_id,
                 FileTransferMessage::TransferComplete(TransferComplete {
-                    transfer_id: req.transfer_id.clone(),
+                    transfer_id: transfer_id.to_string(),
                 }),
             )
             .await
         {
             warn!(
                 "[FileTransferDispatcher] {}: TransferComplete emit failed for {}: {e}",
-                connection_id, req.transfer_id
+                connection_id, transfer_id
             );
-            self.finish_activity(
-                &connection_id,
-                &req.transfer_id,
-                FileTransferOutcome::Failed,
-            )
-            .await;
+            self.finish_activity(connection_id, transfer_id, FileTransferOutcome::Failed)
+                .await;
             return Ok(());
         }
-        self.finish_activity(
-            &connection_id,
-            &req.transfer_id,
-            FileTransferOutcome::Completed,
-        )
-        .await;
+        self.finish_activity(connection_id, transfer_id, FileTransferOutcome::Completed)
+            .await;
         info!(
             "[FileTransferDispatcher] download {} completed: {} bytes, {} chunks",
-            req.transfer_id, file_size, chunk_index
+            transfer_id, file_size, chunk_index
         );
         Ok(())
     }

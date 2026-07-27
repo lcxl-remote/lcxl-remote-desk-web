@@ -126,7 +126,7 @@ impl FileTransferDispatcher {
                 let key = TransferKey::new(&payload.connection_id, &cancel.transfer_id);
                 let removed_upload = {
                     let mut inner = self.inner.lock().await;
-                    inner.cancelled_transfers.insert(key.clone());
+                    inner.cancel_download(&key);
                     inner.upload_states.remove(&key)
                 };
                 if let Some(state) = removed_upload {
@@ -199,6 +199,13 @@ impl FileTransferDispatcher {
             if let Some(failed) = failed {
                 let _ = tokio::fs::remove_file(failed.file_path).await;
             }
+            self.fail_transfer(
+                &connection_id,
+                &transfer_id,
+                DeskErrorCode::SYSTEM_ERROR,
+                format!("Write failed at chunk {chunk_index}: {error}"),
+            )
+            .await;
             self.finish_activity(&connection_id, &transfer_id, FileTransferOutcome::Failed)
                 .await;
             return;
@@ -236,6 +243,13 @@ impl FileTransferDispatcher {
                 connection_id, transfer_id
             );
             let _ = tokio::fs::remove_file(file_path).await;
+            self.fail_transfer(
+                &connection_id,
+                &transfer_id,
+                DeskErrorCode::SYSTEM_ERROR,
+                format!("Failed to flush upload: {error}"),
+            )
+            .await;
             self.finish_activity(&connection_id, &transfer_id, FileTransferOutcome::Failed)
                 .await;
             return;
@@ -334,6 +348,16 @@ impl FileTransferDispatcher {
         let file = match tokio::fs::File::create(&file_path).await {
             Ok(file) => file,
             Err(error) => {
+                // The browser is about to start sending chunks at a host that
+                // has nowhere to put them. Say so now rather than let it stream
+                // a whole file into a transfer that was never going to land.
+                self.fail_transfer(
+                    &connection_id,
+                    &req.transfer_id,
+                    DeskErrorCode::SYSTEM_ERROR,
+                    format!("Could not create {}: {error}", file_path.display()),
+                )
+                .await;
                 self.finish_activity(
                     &connection_id,
                     &req.transfer_id,

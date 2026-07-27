@@ -128,6 +128,17 @@ impl TransferKey {
 
 struct DispatcherInner {
     upload_states: HashMap<TransferKey, UploadState>,
+    /// Downloads whose streaming loop is running and can therefore still act on
+    /// a cancel. Registered by `serve_download` and released by it on the way
+    /// out, whichever way it leaves.
+    live_downloads: HashSet<TransferKey>,
+    /// Cancels a running download loop has not picked up yet.
+    ///
+    /// Bounded by [`DispatcherInner::live_downloads`]: only a download that is
+    /// streaming right now can be marked, and the loop clears whatever is left
+    /// when it stops. Marking anything else would leave an entry with no reader
+    /// and nothing to collect it — and a peer chooses the ids it cancels, so
+    /// "anything else" is as much as it cares to send.
     cancelled_transfers: HashSet<TransferKey>,
     active_connections: HashSet<String>,
     /// Per-connection cached `allow_file_transfer` decision. Mirrors the
@@ -144,10 +155,22 @@ impl DispatcherInner {
     fn new() -> Self {
         Self {
             upload_states: HashMap::new(),
+            live_downloads: HashSet::new(),
             cancelled_transfers: HashSet::new(),
             active_connections: HashSet::new(),
             permission_cache: HashMap::new(),
             activities: HashSet::new(),
+        }
+    }
+
+    /// Ask a running download to stop.
+    ///
+    /// Only a download that is streaming right now reads this, so anything
+    /// else — an upload, a transfer that already ended, an id that named
+    /// nothing — is recorded nowhere rather than kept forever.
+    fn cancel_download(&mut self, key: &TransferKey) {
+        if self.live_downloads.contains(key) {
+            self.cancelled_transfers.insert(key.clone());
         }
     }
 }

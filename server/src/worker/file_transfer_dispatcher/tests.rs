@@ -294,7 +294,11 @@ async fn a_change_to_another_capability_leaves_the_cache_alone() {
     mirror.apply(published);
 
     assert!(
-        cached.is_current(d.policy.changed_at(SecurityPermissionType::FileTransfer)),
+        cached.is_current(
+            d.policy
+                .capability(SecurityPermissionType::FileTransfer)
+                .generation
+        ),
         "a whiteboard change must not invalidate a file-transfer answer"
     );
 }
@@ -1302,13 +1306,24 @@ async fn download_missing_file_emits_transfer_error() {
     assert!(matches!(parsed, FileTransferMessage::TransferError(_)));
 }
 
-/// Binary chunk shorter than the 40-byte header is silently
-/// dropped (no panic, no IPC). Defends against a malformed
-/// browser payload.
+/// A binary chunk shorter than the 40-byte header carries no transfer id, so it
+/// cannot be answered on its own. Every transfer the connection has open is
+/// failed instead: the sender has already lost the guarantee that the rest of
+/// its stream arrives intact, and leaving those transfers unanswered strands
+/// them on the browser's progress bar until the watchdog fires.
 #[tokio::test]
-async fn binary_chunk_too_short_drops_silently() {
+async fn a_truncated_binary_chunk_fails_the_connection_transfers() {
     let (d, mut rx) = dispatcher();
     d.start_connection(&start_payload("c1")).await;
+    d.start_activity(
+        "c1",
+        "in-flight",
+        FileTransferDirection::Download,
+        "photo.png",
+        10,
+    )
+    .await;
+
     d.handle_command(FileTransferPayload {
         connection_id: "c1".into(),
         data: vec![0u8; 10],
@@ -1316,7 +1331,13 @@ async fn binary_chunk_too_short_drops_silently() {
         transfer_id: None,
     })
     .await;
-    assert_no_message(&mut rx).await;
+
+    tokio::task::yield_now().await;
+    expect_only_transfer_error(&mut rx, "in-flight", DeskErrorCode::INVALID_PARAMS).await;
+    assert!(
+        d.inner.lock().await.activities.is_empty(),
+        "the failed transfer is no longer active"
+    );
 }
 
 /// Binary chunk for an unknown transfer_id is dropped without
@@ -1445,9 +1466,9 @@ async fn handle_send_failed_aborts_only_targeted_upload() {
                 .contains_key(&TransferKey::new("c1", &id_b))
         );
         assert!(
-            inner
-                .cancelled_transfers
-                .contains(&TransferKey::new("c1", &id_a))
+            inner.cancelled_transfers.is_empty(),
+            "an upload has no streaming loop to read a cancel, so recording one \
+             would leave an entry nothing ever collects"
         );
     }
     // TransferError emitted for id_a only.
@@ -1517,14 +1538,8 @@ async fn handle_send_failed_without_transfer_id_aborts_all_uploads() {
             "all uploads must be cleared"
         );
         assert!(
-            inner
-                .cancelled_transfers
-                .contains(&TransferKey::new("c1", &id_a))
-        );
-        assert!(
-            inner
-                .cancelled_transfers
-                .contains(&TransferKey::new("c1", &id_b))
+            inner.cancelled_transfers.is_empty(),
+            "uploads have no streaming loop to read a cancel"
         );
     }
     // Two TransferError messages, one per aborted transfer.
@@ -1546,15 +1561,20 @@ async fn handle_send_failed_without_transfer_id_aborts_all_uploads() {
     assert_no_message(&mut rx).await;
 }
 
-/// Cancel flag is set even when the targeted transfer is a
-/// download (no upload_states entry). serve_download polls the
-/// flag on each loop iteration, so this is how a daemon-side
-/// send failure aborts a download already in flight.
+/// Cancel flag is set when the targeted transfer is a download already in
+/// flight. `serve_download` polls the flag on each loop iteration, so this is
+/// how a daemon-side send failure aborts one.
 #[tokio::test]
 async fn handle_send_failed_for_download_sets_cancel_flag() {
     let (d, mut rx) = dispatcher();
     d.start_connection(&start_payload("c1")).await;
     let tid = "00000000-0000-0000-0000-0000000000dd".to_string();
+    // Stands in for a streaming loop: `serve_download` registers itself here
+    // for exactly as long as it can still act on a cancel.
+    {
+        let mut inner = d.inner.lock().await;
+        inner.live_downloads.insert(TransferKey::new("c1", &tid));
+    }
     d.handle_send_failed(FileTransferSendFailedPayload {
         connection_id: "c1".into(),
         transfer_id: Some(tid.clone()),
@@ -1574,4 +1594,162 @@ async fn handle_send_failed_for_download_sets_cancel_flag() {
     let p = rx.recv().await.expect("TransferError emit");
     let parsed: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
     assert!(matches!(parsed, FileTransferMessage::TransferError(_)));
+}
+
+/// A host that cannot create the file has to say so. The browser is about to
+/// stream a whole file at it, and without a reply it keeps that transfer on
+/// screen until the watchdog turns a precise filesystem error into a timeout.
+#[tokio::test]
+async fn an_upload_that_cannot_open_its_target_reports_why() {
+    let tmp = TempDir::new().unwrap();
+    // A directory where the upload wants to put a file: creating over it fails
+    // on every platform, without depending on who the test runs as.
+    tokio::fs::create_dir(tmp.path().join("taken"))
+        .await
+        .unwrap();
+    let (d, mut rx) = dispatcher();
+    d.start_connection(&start_payload("c1")).await;
+    let transfer_id = "00000000-0000-0000-0000-0000000000f1".to_string();
+
+    d.handle_command(FileTransferPayload {
+        connection_id: "c1".into(),
+        data: serde_json::to_vec(&FileTransferMessage::UploadRequest(UploadRequest {
+            transfer_id: transfer_id.clone(),
+            target_dir: tmp.path().to_string_lossy().to_string(),
+            file_name: "taken".to_string(),
+            file_size: 4,
+            chunk_size: 4,
+            total_chunks: 1,
+        }))
+        .unwrap(),
+        is_text: true,
+        transfer_id: None,
+    })
+    .await;
+
+    let payload = rx.recv().await.expect("an answer");
+    match serde_json::from_slice::<FileTransferMessage>(&payload.data).unwrap() {
+        FileTransferMessage::TransferError(e) => {
+            assert_eq!(e.transfer_id, transfer_id);
+            assert_eq!(e.error_code, DeskErrorCode::SYSTEM_ERROR);
+        }
+        other => panic!("expected the failure to be reported, got {other:?}"),
+    }
+    let inner = d.inner.lock().await;
+    assert!(inner.activities.is_empty(), "the transfer is over");
+}
+
+/// The same for the other direction: a file that passes the existence check and
+/// then refuses to open leaves the browser with nothing to show unless the host
+/// says what happened.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_download_that_cannot_open_its_file_reports_why() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tmp = TempDir::new().unwrap();
+    let file_path = tmp.path().join("locked.bin");
+    tokio::fs::write(&file_path, b"body").await.unwrap();
+    tokio::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o000))
+        .await
+        .unwrap();
+    if tokio::fs::File::open(&file_path).await.is_ok() {
+        // Running as a user that ignores the mode (root in a container); the
+        // path this test is about cannot be reached here.
+        return;
+    }
+    let (d, mut rx) = dispatcher();
+    d.start_connection(&start_payload("c1")).await;
+    let transfer_id = "00000000-0000-0000-0000-0000000000f2".to_string();
+
+    d.serve_download(
+        "c1".into(),
+        DownloadRequest {
+            transfer_id: transfer_id.clone(),
+            file_path: file_path.to_string_lossy().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let payload = rx.recv().await.expect("an answer");
+    match serde_json::from_slice::<FileTransferMessage>(&payload.data).unwrap() {
+        FileTransferMessage::TransferError(e) => {
+            assert_eq!(e.transfer_id, transfer_id);
+            assert_eq!(e.error_code, DeskErrorCode::SYSTEM_ERROR);
+        }
+        other => panic!("expected the failure to be reported, got {other:?}"),
+    }
+}
+
+/// A peer picks the ids it cancels, so a cancel that names nothing must cost
+/// nothing. Recording one per frame would let a connection that is allowed to
+/// transfer files grow the worker's memory for as long as it stays open.
+#[tokio::test]
+async fn cancels_for_transfers_that_are_not_streaming_leave_nothing_behind() {
+    let (d, mut rx) = dispatcher();
+    d.start_connection(&start_payload("c1")).await;
+
+    for i in 0..500u32 {
+        let cancel = FileTransferMessage::TransferCancel(TransferCancel {
+            transfer_id: format!("00000000-0000-0000-0000-{i:012}"),
+        });
+        d.handle_command(FileTransferPayload {
+            connection_id: "c1".into(),
+            data: serde_json::to_vec(&cancel).unwrap(),
+            is_text: true,
+            transfer_id: None,
+        })
+        .await;
+    }
+
+    let inner = d.inner.lock().await;
+    assert!(
+        inner.cancelled_transfers.is_empty(),
+        "500 cancels for transfers that never existed left {} entries behind",
+        inner.cancelled_transfers.len()
+    );
+    drop(inner);
+    assert_no_message(&mut rx).await;
+}
+
+/// A download that ends on its own must not leave its cancel behind either: the
+/// marker outliving its only reader is the same leak arriving by a slower route.
+#[tokio::test]
+async fn a_download_clears_its_own_cancel_when_it_stops() {
+    let tmp = TempDir::new().unwrap();
+    let file_path = tmp.path().join("small.bin");
+    tokio::fs::write(&file_path, b"body").await.unwrap();
+    let (d, mut rx) = dispatcher();
+    d.start_connection(&start_payload("c1")).await;
+    let transfer_id = "00000000-0000-0000-0000-0000000000ee".to_string();
+    // Cancelled before it starts, so the loop returns on its first check.
+    {
+        let mut inner = d.inner.lock().await;
+        inner
+            .cancelled_transfers
+            .insert(TransferKey::new("c1", &transfer_id));
+    }
+
+    d.serve_download(
+        "c1".into(),
+        DownloadRequest {
+            transfer_id: transfer_id.clone(),
+            file_path: file_path.to_string_lossy().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let inner = d.inner.lock().await;
+    assert!(
+        inner.live_downloads.is_empty(),
+        "the registration is released"
+    );
+    assert!(
+        inner.cancelled_transfers.is_empty(),
+        "the cancel is gone with the loop that was reading it"
+    );
+    drop(inner);
+    let _ = rx.recv().await.expect("DownloadResponse");
 }
