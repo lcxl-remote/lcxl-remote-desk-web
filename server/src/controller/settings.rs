@@ -817,7 +817,7 @@ mod tests {
         use crate::model::settings::StartupMode;
         use crate::service::turn_runtime::HostTurnDriver;
         use desk_turn::model::{TurnInterface, TurnTransport};
-        use desk_turn::runtime::{TurnIntent, TurnRuntimeView};
+        use desk_turn::runtime::{TurnIntent, TurnPosture, TurnRuntimeView};
         use desk_turn::supervisor::{BackoffConfig, DesiredState, spawn};
         use std::time::Duration;
 
@@ -829,7 +829,8 @@ mod tests {
         let connection_map = web::Data::new(desk_signal::model::SharedConnectionMap::from(
             std::collections::BTreeMap::new(),
         ));
-        let (intent_tx, intent_rx) = tokio::sync::watch::channel(TurnIntent::NotConfigured);
+        let (posture_tx, posture_rx) =
+            tokio::sync::watch::channel(TurnPosture::new(TurnIntent::NotConfigured));
         let supervisor = spawn(
             Arc::new(HostTurnDriver::new(connection_map)),
             DesiredState {
@@ -841,11 +842,11 @@ mod tests {
                 max: Duration::from_millis(20),
             },
         );
-        let view = TurnRuntimeView::new(supervisor.clone(), intent_rx);
+        let view = TurnRuntimeView::new(supervisor.clone(), posture_rx);
         let control = web::Data::new(TurnRuntimeControl::new(
             StartupMode::Default,
             supervisor.clone(),
-            intent_tx,
+            posture_tx,
             0,
         ));
 

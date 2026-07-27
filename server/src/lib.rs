@@ -608,7 +608,7 @@ pub async fn run_with_hub(
     };
     let initial_turn_revision = 1;
     let startup_plan = turn_plan(&startup_mode, &turn_settings, initial_turn_revision);
-    match startup_plan.intent {
+    match startup_plan.posture.intent {
         TurnIntent::Run => info!("Starting turn server"),
         // Deliberate, so not an error — but worth saying out loud, because a
         // host with no relay of its own falls back to whatever the signaling
@@ -623,7 +623,17 @@ pub async fn run_with_hub(
         }
         TurnIntent::Unsupported => {}
     }
-    let (turn_intent_tx, turn_intent_rx) = tokio::sync::watch::channel(startup_plan.intent);
+    // Say which configured entries are unusable, whatever the intent: a host
+    // whose interfaces were all rejected reports "not configured", and without
+    // this the operator would be told nothing about the entries they wrote.
+    for rejected in &startup_plan.posture.rejected_interfaces {
+        error!(
+            "TURN interface #{} is not served: {}",
+            rejected.index, rejected.detail
+        );
+    }
+    let (turn_posture_tx, turn_posture_rx) =
+        tokio::sync::watch::channel(startup_plan.posture.clone());
     let turn_supervisor = desk_turn::supervisor::spawn(
         Arc::new(HostTurnDriver::new(connection_map.clone())),
         startup_plan.desired,
@@ -631,12 +641,12 @@ pub async fn run_with_hub(
     );
     let turn_runtime_view = web::Data::new(TurnRuntimeView::new(
         turn_supervisor.clone(),
-        turn_intent_rx,
+        turn_posture_rx,
     ));
     let turn_control = web::Data::new(TurnRuntimeControl::new(
         startup_mode.clone(),
         turn_supervisor.clone(),
-        turn_intent_tx,
+        turn_posture_tx,
         initial_turn_revision,
     ));
     // Held as app data so it is dropped exactly when the HTTP server stops.

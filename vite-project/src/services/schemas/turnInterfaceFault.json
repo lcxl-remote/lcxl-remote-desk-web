@@ -1,0 +1,1 @@
+{"type":"string","description":"Why a configured interface is not served.","enum":["transport-not-served","listen-not-an-address","external-not-an-address","external-not-dialable"],"x-readme-ref-name":"TurnInterfaceFault"}

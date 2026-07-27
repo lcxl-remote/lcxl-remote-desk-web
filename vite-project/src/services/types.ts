@@ -2217,6 +2217,73 @@ export type RedeemCodeResult = {
     target_connection_id: string;
 };
 
+export const turnInterfaceFaultEnum = {
+    "transport-not-served": "transport-not-served",
+    "listen-not-an-address": "listen-not-an-address",
+    "external-not-an-address": "external-not-an-address",
+    "external-not-dialable": "external-not-dialable"
+} as const;
+
+export type TurnInterfaceFaultEnumKey = (typeof turnInterfaceFaultEnum)[keyof typeof turnInterfaceFaultEnum];
+
+/**
+ * @description Why a configured interface is not served.
+*/
+export type TurnInterfaceFault = TurnInterfaceFaultEnumKey;
+
+export const turnTransportEnum = {
+    tcp: "tcp",
+    udp: "udp"
+} as const;
+
+export type TurnTransportEnumKey = (typeof turnTransportEnum)[keyof typeof turnTransportEnum];
+
+export type TurnTransport = TurnTransportEnumKey;
+
+export type TurnInterface = {
+    /**
+     * @description external address\n\nspecify the node external address and port.\nfor the case of exposing the service to the outside,\nyou need to manually specify the server external IP\naddress and service listening port.
+     * @type string
+    */
+    external: string;
+    /**
+     * @description turn server listen address
+     * @type string
+    */
+    listen: string;
+    /**
+     * @type string
+    */
+    transport: TurnTransport;
+};
+
+/**
+ * @description A configured interface that will not be served, and what to change.
+*/
+export type RejectedTurnInterface = {
+    /**
+     * @description What is wrong and what a working entry looks like.
+     * @type string
+    */
+    detail: string;
+    /**
+     * @description Why a configured interface is not served.
+     * @type string
+    */
+    fault: TurnInterfaceFault;
+    /**
+     * @description Position in the configured interface list, so an operator can find the\nentry even when several look alike.
+     * @minLength 0
+     * @type integer
+    */
+    index: number;
+    /**
+     * @description The entry as configured, echoed back unrepaired.
+     * @type object
+    */
+    interface: TurnInterface;
+};
+
 export const remoteSessionPurposeEnum = {
     remote_desktop: "remote_desktop",
     file_manager: "file_manager"
@@ -3304,32 +3371,6 @@ export type RestResponseTurnClientSettings = {
     success: boolean;
 };
 
-export const turnTransportEnum = {
-    tcp: "tcp",
-    udp: "udp"
-} as const;
-
-export type TurnTransportEnumKey = (typeof turnTransportEnum)[keyof typeof turnTransportEnum];
-
-export type TurnTransport = TurnTransportEnumKey;
-
-export type TurnInterface = {
-    /**
-     * @description external address\n\nspecify the node external address and port.\nfor the case of exposing the service to the outside,\nyou need to manually specify the server external IP\naddress and service listening port.
-     * @type string
-    */
-    external: string;
-    /**
-     * @description turn server listen address
-     * @type string
-    */
-    listen: string;
-    /**
-     * @type string
-    */
-    transport: TurnTransport;
-};
-
 export const turnRuntimeStateEnum = {
     running: "running",
     disabled: "disabled",
@@ -3365,6 +3406,11 @@ export type RestResponseTurnRuntimeInfo = {
          * @type string,null
         */
         last_error?: string | null;
+        /**
+         * @description Configured interfaces this host refuses to serve, and why.\n\nReported in every state, because it is exactly when the runtime is *not*\nrunning that the reason matters most — a host whose every interface was\nrejected reports [`TurnRuntimeState::NotConfigured`], which on its own\nwould read as \"you configured nothing\" to an operator who configured\nthree.
+         * @type array
+        */
+        rejected_interfaces: RejectedTurnInterface[];
         /**
          * @description Build identifier of this TURN implementation.
          * @type string
@@ -4202,6 +4248,11 @@ export type TurnRuntimeInfo = {
      * @type string,null
     */
     last_error?: string | null;
+    /**
+     * @description Configured interfaces this host refuses to serve, and why.\n\nReported in every state, because it is exactly when the runtime is *not*\nrunning that the reason matters most — a host whose every interface was\nrejected reports [`TurnRuntimeState::NotConfigured`], which on its own\nwould read as \"you configured nothing\" to an operator who configured\nthree.
+     * @type array
+    */
+    rejected_interfaces: RejectedTurnInterface[];
     /**
      * @description Build identifier of this TURN implementation.
      * @type string

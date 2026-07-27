@@ -45,7 +45,7 @@ This host-local preference is not remotely configurable by manager. See
 ## TURN Server `[turn]`
 
 - `realm` — TURN server realm for authentication.
-- `interfaces` — network interface configuration (`udp` / `tcp` protocols, listen and external addresses).
+- `interfaces` — the addresses this host relays on (see [Interface addresses](#interface-addresses)).
 - `static_auth_secret` — static authentication secret.
 - `enable_turn` — run the TURN service on this host (default `true`). One service provides both TURN relay and STUN, so turning it off stops both; connections then rely on whatever relay the signaling server offers.
 - `relay_min_port` / `relay_max_port` — relay port allocation range.
@@ -61,6 +61,37 @@ With `enable_turn = true` but no `interfaces` configured, nothing is started (th
 service has no address to serve on); the runtime status endpoint reports this as
 `not-configured`, which is deliberately distinct from having switched the service
 off.
+
+### Interface addresses
+
+Each entry has a `transport`, a `listen` address (what this host binds) and an
+`external` address (what peers are told to dial):
+
+```toml
+[[turn.interfaces]]
+transport = "udp"
+listen = "0.0.0.0:3478"
+external = "203.0.113.7:3478"
+
+[[turn.interfaces]]          # IPv6 literals need their brackets
+transport = "udp"
+listen = "[::]:3478"
+external = "[2001:db8::1]:3478"
+```
+
+Both addresses are `IP:port` pairs. Host names are **not** resolved — write the
+address itself. An `external` value additionally has to be something a peer can
+dial, so a wildcard address (`0.0.0.0`, `::`) or a zero port is rejected.
+
+Only UDP is relayed. A `tcp` entry is neither listened on nor advertised, rather
+than advertised and left unanswered.
+
+An entry that fails any of these is reported and skipped; the remaining entries
+are served normally. Each rejection is logged at startup and listed in the
+runtime status endpoint's `rejected_interfaces`, naming the entry, the field and
+what a working value looks like. If **every** entry is rejected there is nothing
+to serve on, so the status is `not-configured` — with the rejections attached,
+which is what distinguishes it from having configured no interfaces at all.
 
 ## Desktop `[desk]` {#desktop-desk}
 

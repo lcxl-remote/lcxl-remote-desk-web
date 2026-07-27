@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 
 use crate::model::{Statistics, TurnApiState, TurnInterface, TurnSettings, TurnTransport};
-use crate::runtime::{TurnIntent, TurnRuntimeView};
+use crate::runtime::{TurnIntent, TurnPosture, TurnRuntimeView};
 use crate::service::startup_turn_server;
 use crate::supervisor::{
     BackoffConfig, DesiredState, StartedRuntime, TurnRuntimeDriver, TurnRuntimeHandle,
@@ -103,7 +103,7 @@ pub fn loopback_params(secret: &str) -> TurnRuntimeParams {
     }
 }
 
-/// A supervisor driving loopback runtimes, plus a view onto it. The intent
+/// A supervisor driving loopback runtimes, plus a view onto it. The posture
 /// sender is returned so a test can move the host between "meant to run" and
 /// the reasons it is not.
 pub fn loopback_supervisor(
@@ -112,9 +112,9 @@ pub fn loopback_supervisor(
 ) -> (
     TurnSupervisorHandle,
     TurnRuntimeView,
-    watch::Sender<TurnIntent>,
+    watch::Sender<TurnPosture>,
 ) {
-    let (intent_tx, intent_rx) = watch::channel(intent);
+    let (posture_tx, posture_rx) = watch::channel(TurnPosture::new(intent));
     let supervisor = spawn(
         Arc::new(LoopbackDriver),
         initial,
@@ -123,8 +123,8 @@ pub fn loopback_supervisor(
             max: Duration::from_millis(20),
         },
     );
-    let view = TurnRuntimeView::new(supervisor.clone(), intent_rx);
-    (supervisor, view, intent_tx)
+    let view = TurnRuntimeView::new(supervisor.clone(), posture_rx);
+    (supervisor, view, posture_tx)
 }
 
 /// Wait until a runtime is (or is no longer) published.

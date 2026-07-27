@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use desk_signal_facade::model::signal::{LcxlRTCIceServer, TurnProvider};
 use tokio::sync::watch;
 
+use crate::interface::RejectedTurnInterface;
 use crate::model::{SOFTWARE, TurnApiState, TurnRuntimeInfo, TurnRuntimeState};
 use crate::supervisor::TurnSupervisorHandle;
 
@@ -38,6 +39,30 @@ pub enum TurnIntent {
     NotConfigured,
 }
 
+/// What the host means to do about TURN, and what it thinks of the
+/// configuration it was given.
+///
+/// The two travel together because they are derived together: an interface the
+/// host refuses to serve is often *why* the intent is what it is, and splitting
+/// them across two channels would let a reader observe an intent and a set of
+/// rejections that were never computed from the same settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnPosture {
+    pub intent: TurnIntent,
+    /// Configured interfaces that will not be served, whatever the intent.
+    pub rejected_interfaces: Vec<RejectedTurnInterface>,
+}
+
+impl TurnPosture {
+    /// A posture with nothing to complain about.
+    pub fn new(intent: TurnIntent) -> Self {
+        Self {
+            intent,
+            rejected_interfaces: Vec::new(),
+        }
+    }
+}
+
 /// Read side of the TURN runtime: the live server plus why it is (not) there.
 ///
 /// Cheap to clone; every reader gets its own handle onto the same channels.
@@ -46,14 +71,14 @@ pub struct TurnRuntimeView {
     /// `None` on a host that never spawned a supervisor, which is exactly the
     /// hosts whose intent is [`TurnIntent::Unsupported`].
     supervisor: Option<TurnSupervisorHandle>,
-    intent: watch::Receiver<TurnIntent>,
+    posture: watch::Receiver<TurnPosture>,
 }
 
 impl TurnRuntimeView {
-    pub fn new(supervisor: TurnSupervisorHandle, intent: watch::Receiver<TurnIntent>) -> Self {
+    pub fn new(supervisor: TurnSupervisorHandle, posture: watch::Receiver<TurnPosture>) -> Self {
         Self {
             supervisor: Some(supervisor),
-            intent,
+            posture,
         }
     }
 
@@ -64,13 +89,13 @@ impl TurnRuntimeView {
     /// still has to answer them — with "this mode does not relay" rather than an
     /// error about a missing extractor.
     pub fn unsupported() -> Self {
-        let (tx, intent) = watch::channel(TurnIntent::Unsupported);
+        let (tx, posture) = watch::channel(TurnPosture::new(TurnIntent::Unsupported));
         // The sender is dropped on purpose: the value never changes, and a
         // receiver keeps reading the last value after its sender is gone.
         drop(tx);
         Self {
             supervisor: None,
-            intent,
+            posture,
         }
     }
 
@@ -87,18 +112,19 @@ impl TurnRuntimeView {
     /// Current runtime status, answering "is this host relaying, and if not,
     /// why" in one document.
     pub async fn info(&self) -> TurnRuntimeInfo {
+        // Copy out before any await: a `watch::Ref` is not Send.
+        let posture = self.posture.borrow().clone();
         if let Some(state) = self.runtime() {
             return TurnRuntimeInfo {
                 state: TurnRuntimeState::Running,
                 software: SOFTWARE.to_string(),
                 interfaces: state.settings.interfaces.clone(),
+                rejected_interfaces: posture.rejected_interfaces,
                 uptime_secs: Some(state.uptime.elapsed().as_secs()),
                 last_error: None,
             };
         }
-        // Copy out before any await: a `watch::Ref` is not Send.
-        let intent = *self.intent.borrow();
-        let (state, last_error) = match intent {
+        let (state, last_error) = match posture.intent {
             TurnIntent::Disabled => (TurnRuntimeState::Disabled, None),
             TurnIntent::Unsupported => (TurnRuntimeState::Unsupported, None),
             TurnIntent::NotConfigured => (TurnRuntimeState::NotConfigured, None),
@@ -116,6 +142,7 @@ impl TurnRuntimeView {
             state,
             software: SOFTWARE.to_string(),
             interfaces: Vec::new(),
+            rejected_interfaces: posture.rejected_interfaces,
             uptime_secs: None,
             last_error,
         }
@@ -162,6 +189,8 @@ impl TurnProvider for LiveTurnProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interface::plan_turn_interfaces;
+    use crate::model::{TurnInterface, TurnTransport};
     use crate::supervisor::{
         BackoffConfig, DesiredState, StartedRuntime, TurnRuntimeDriver, spawn,
     };
@@ -196,6 +225,71 @@ mod tests {
         }
     }
 
+    /// A host whose interfaces were all refused reports `not-configured` — and
+    /// on its own that reads as "you configured nothing" to an operator who
+    /// configured three. The rejections travel with the state so the answer says
+    /// which entries were dropped and why.
+    #[tokio::test]
+    async fn a_host_that_refused_its_interfaces_says_which_ones() {
+        let rejected = plan_turn_interfaces(&[TurnInterface {
+            transport: TurnTransport::UDP,
+            listen: "0.0.0.0:3478".into(),
+            external: "relay.example.com:3478".into(),
+        }])
+        .rejected;
+        let (supervisor, view, posture_tx) = loopback_supervisor(
+            TurnIntent::NotConfigured,
+            DesiredState {
+                revision: 1,
+                params: None,
+            },
+        );
+        posture_tx.send_replace(TurnPosture {
+            intent: TurnIntent::NotConfigured,
+            rejected_interfaces: rejected.clone(),
+        });
+
+        let info = view.info().await;
+        assert_eq!(info.state, TurnRuntimeState::NotConfigured);
+        assert_eq!(info.rejected_interfaces, rejected);
+        assert!(
+            !info.rejected_interfaces[0].detail.is_empty(),
+            "the report has to say what to change"
+        );
+        supervisor.shutdown().await;
+    }
+
+    /// A relay that is up while one entry was refused must report both: the
+    /// running state alone would leave the operator believing every address they
+    /// configured is being served.
+    #[tokio::test]
+    async fn a_running_host_still_reports_what_it_refused() {
+        let rejected = plan_turn_interfaces(&[TurnInterface {
+            transport: TurnTransport::TCP,
+            listen: "0.0.0.0:3478".into(),
+            external: "203.0.113.9:3478".into(),
+        }])
+        .rejected;
+        let (supervisor, view, posture_tx) = loopback_supervisor(
+            TurnIntent::Run,
+            DesiredState {
+                revision: 1,
+                params: Some(loopback_params("s")),
+            },
+        );
+        posture_tx.send_replace(TurnPosture {
+            intent: TurnIntent::Run,
+            rejected_interfaces: rejected.clone(),
+        });
+        wait_for_runtime(&view, true).await;
+
+        let info = view.info().await;
+        assert_eq!(info.state, TurnRuntimeState::Running);
+        assert_eq!(info.interfaces.len(), 1, "one interface is being served");
+        assert_eq!(info.rejected_interfaces, rejected);
+        supervisor.shutdown().await;
+    }
+
     /// A host with no supervisor at all still answers, rather than failing on a
     /// missing extractor.
     #[tokio::test]
@@ -215,7 +309,7 @@ mod tests {
                 Err("no socket for you".into())
             }
         }
-        let (_tx, rx) = watch::channel(TurnIntent::Run);
+        let (_tx, rx) = watch::channel(TurnPosture::new(TurnIntent::Run));
         let supervisor = spawn(
             Arc::new(AlwaysFails),
             DesiredState {

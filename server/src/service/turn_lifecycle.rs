@@ -13,26 +13,35 @@
 //! derivations would eventually disagree and restart the runtime on a save that
 //! changed nothing.
 
+use desk_turn::interface::plan_turn_interfaces;
 use desk_turn::model::TurnSettings;
-use desk_turn::runtime::TurnIntent;
+use desk_turn::runtime::{TurnIntent, TurnPosture};
 use desk_turn::supervisor::{DesiredState, TurnRuntimeParams};
 
 use crate::model::settings::StartupMode;
 
 /// What the host means to do about TURN, and what to hand the supervisor.
 pub struct TurnPlan {
-    pub intent: TurnIntent,
+    pub posture: TurnPosture,
     pub desired: DesiredState,
 }
 
 /// Decide what to run in `mode` under `settings`, tagged with `revision`.
 pub fn turn_plan(mode: &StartupMode, settings: &TurnSettings, revision: u64) -> TurnPlan {
-    let intent = turn_intent(mode, settings);
-    let params = match intent {
+    let posture = turn_posture(mode, settings);
+    let params = match posture.intent {
         TurnIntent::Run => Some(TurnRuntimeParams {
             realm: settings.realm.clone(),
             secret: settings.static_auth_secret.clone(),
-            interfaces: settings.interfaces.clone(),
+            // Only what will actually be served: an entry the runtime refuses to
+            // bind must not count towards "did the configuration change", or
+            // correcting a typo that leaves the entry just as unusable would
+            // restart a healthy relay for nothing.
+            interfaces: plan_turn_interfaces(&settings.interfaces)
+                .servable
+                .iter()
+                .map(|servable| servable.canonical())
+                .collect(),
             relay_min_port: settings.relay_min_port,
             relay_max_port: settings.relay_max_port,
             // A host has no control plane to tell about its runtime, so there is
@@ -43,29 +52,40 @@ pub fn turn_plan(mode: &StartupMode, settings: &TurnSettings, revision: u64) -> 
         TurnIntent::Disabled | TurnIntent::Unsupported | TurnIntent::NotConfigured => None,
     };
     TurnPlan {
-        intent,
+        posture,
         desired: DesiredState { revision, params },
     }
 }
 
-/// Why this host is or is not meant to relay.
+/// Why this host is or is not meant to relay, and which configured interfaces
+/// it will not serve.
 ///
 /// The order is deliberate. `Unsupported` wins over everything: a desk server or
 /// a worker would not have served TURN even with the switch on, so reporting it
 /// as "switched off" would invite an operator to look for a switch that changes
 /// nothing. `Disabled` wins over `NotConfigured` for the same reason — with the
 /// service off, a missing interface is not what needs fixing.
-pub fn turn_intent(mode: &StartupMode, settings: &TurnSettings) -> TurnIntent {
-    if !mode_hosts_turn(mode) {
-        return TurnIntent::Unsupported;
+///
+/// "Configured" means *servable*: an interface the host cannot bind is no more
+/// an address to serve on than a missing one, and treating it as one would put
+/// the supervisor into a retry loop against a start that can never succeed. The
+/// rejections travel with the posture so that case is still distinguishable from
+/// having configured nothing at all.
+pub fn turn_posture(mode: &StartupMode, settings: &TurnSettings) -> TurnPosture {
+    let plan = plan_turn_interfaces(&settings.interfaces);
+    let intent = if !mode_hosts_turn(mode) {
+        TurnIntent::Unsupported
+    } else if !settings.enable_turn {
+        TurnIntent::Disabled
+    } else if plan.servable.is_empty() {
+        TurnIntent::NotConfigured
+    } else {
+        TurnIntent::Run
+    };
+    TurnPosture {
+        intent,
+        rejected_interfaces: plan.rejected,
     }
-    if !settings.enable_turn {
-        return TurnIntent::Disabled;
-    }
-    if settings.interfaces.is_empty() {
-        return TurnIntent::NotConfigured;
-    }
-    TurnIntent::Run
 }
 
 /// Whether a startup mode runs an embedded signaling server, which is what the
@@ -83,6 +103,7 @@ pub fn mode_hosts_turn(mode: &StartupMode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use desk_turn::interface::TurnInterfaceFault;
     use desk_turn::model::{TurnInterface, TurnTransport};
 
     fn iface(listen: &str) -> TurnInterface {
@@ -91,6 +112,10 @@ mod tests {
             listen: listen.into(),
             external: "203.0.113.9:3478".into(),
         }
+    }
+
+    fn turn_intent(mode: &StartupMode, settings: &TurnSettings) -> TurnIntent {
+        turn_posture(mode, settings).intent
     }
 
     fn settings(enable_turn: bool, interfaces: usize) -> TurnSettings {
@@ -163,8 +188,78 @@ mod tests {
     fn a_default_configuration_wants_turn_but_has_nowhere_to_serve_it() {
         assert!(TurnSettings::default().enable_turn);
         let plan = turn_plan(&StartupMode::Default, &TurnSettings::default(), 1);
-        assert_eq!(plan.intent, TurnIntent::NotConfigured);
+        assert_eq!(plan.posture.intent, TurnIntent::NotConfigured);
         assert!(plan.desired.params.is_none());
+        assert!(plan.posture.rejected_interfaces.is_empty());
+    }
+
+    /// A host whose every interface is unservable has nowhere to serve, exactly
+    /// like one with no interfaces — the supervisor must not be told to start a
+    /// runtime that can only fail, forever.
+    ///
+    /// The two cases are still told apart, by the rejections travelling with the
+    /// posture: "you configured nothing" and "none of your three entries can be
+    /// bound" call for different actions.
+    #[test]
+    fn interfaces_that_cannot_be_bound_are_nowhere_to_serve() {
+        let settings = TurnSettings {
+            enable_turn: true,
+            interfaces: vec![
+                TurnInterface {
+                    transport: TurnTransport::TCP,
+                    listen: "0.0.0.0:3478".into(),
+                    external: "203.0.113.9:3478".into(),
+                },
+                TurnInterface {
+                    transport: TurnTransport::UDP,
+                    listen: "0.0.0.0:3478".into(),
+                    external: "relay.example.com:3478".into(),
+                },
+            ],
+            ..TurnSettings::default()
+        };
+
+        let plan = turn_plan(&StartupMode::Default, &settings, 1);
+        assert_eq!(plan.posture.intent, TurnIntent::NotConfigured);
+        assert!(
+            plan.desired.params.is_none(),
+            "a start that cannot succeed must not be attempted"
+        );
+        assert_eq!(
+            plan.posture
+                .rejected_interfaces
+                .iter()
+                .map(|r| r.fault)
+                .collect::<Vec<_>>(),
+            vec![
+                TurnInterfaceFault::TransportNotServed,
+                TurnInterfaceFault::ExternalNotAnAddress,
+            ],
+            "an operator who configured two entries must learn why neither is used"
+        );
+    }
+
+    /// A configuration that is partly wrong still relays on what is right, and
+    /// the runtime is only told about the entries it can bind — advertising the
+    /// rest would point peers at addresses nothing listens on.
+    #[test]
+    fn a_partly_wrong_configuration_serves_the_rest() {
+        let mut settings = settings(true, 1);
+        settings.interfaces.push(TurnInterface {
+            transport: TurnTransport::TCP,
+            listen: "0.0.0.0:3478".into(),
+            external: "203.0.113.9:3478".into(),
+        });
+
+        let plan = turn_plan(&StartupMode::Default, &settings, 1);
+        assert_eq!(plan.posture.intent, TurnIntent::Run);
+        let params = plan.desired.params.expect("the UDP entry is servable");
+        assert_eq!(
+            params.interfaces,
+            vec![iface("0.0.0.0:3478")],
+            "the TCP entry reaches neither the sockets nor the advertisement"
+        );
+        assert_eq!(plan.posture.rejected_interfaces.len(), 1);
     }
 
     /// Every configured interface reaches the runtime: dropping all but the
@@ -178,7 +273,7 @@ mod tests {
         settings.relay_max_port = 40100;
 
         let plan = turn_plan(&StartupMode::Signaling, &settings, 7);
-        assert_eq!(plan.intent, TurnIntent::Run);
+        assert_eq!(plan.posture.intent, TurnIntent::Run);
         assert_eq!(plan.desired.revision, 7);
         let params = plan.desired.params.expect("an enabled host runs a runtime");
         assert_eq!(params.realm, "relay.example");
@@ -211,6 +306,27 @@ mod tests {
             turn_plan(&StartupMode::Default, &added, 4).desired.params,
             a,
             "an added interface must reach a runtime"
+        );
+
+        // Editing an entry that stays unservable changes nothing the runtime
+        // could act on, so it must not tear down a working relay.
+        let mut unservable = base.clone();
+        unservable.interfaces.push(TurnInterface {
+            transport: TurnTransport::UDP,
+            listen: "0.0.0.0:3480".into(),
+            external: "typo.example.com:3478".into(),
+        });
+        let with_typo = turn_plan(&StartupMode::Default, &unservable, 5)
+            .desired
+            .params;
+        assert_eq!(with_typo, a, "an unservable entry is not a configuration");
+        unservable.interfaces.last_mut().unwrap().external = "still-a-hostname:3478".into();
+        assert_eq!(
+            turn_plan(&StartupMode::Default, &unservable, 6)
+                .desired
+                .params,
+            with_typo,
+            "correcting one unservable entry into another must not restart the relay"
         );
     }
 }

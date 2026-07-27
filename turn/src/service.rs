@@ -8,7 +8,6 @@ use async_trait::async_trait;
 use tokio::net::UdpSocket;
 use turn::{
     auth::AuthHandler,
-    relay::relay_range::RelayAddressGeneratorRanges,
     server::{
         Server,
         config::{ConnConfig, ServerConfig},
@@ -18,7 +17,9 @@ use webrtc_util::Conn;
 
 use crate::{
     error::DeskTurnError,
-    model::{Statistics, TurnApiState, TurnSettings, TurnTrafficClass, TurnTransport},
+    interface::plan_turn_interfaces,
+    model::{Statistics, TurnApiState, TurnSettings, TurnTrafficClass},
+    relay::FamilyPinnedRelay,
 };
 
 /// STUN magic cookie (RFC 5389 §6), located at bytes[4..8] of every STUN message.
@@ -147,51 +148,42 @@ where
 {
     log::info!("Starting turn server with realm {:?}", settings.realm);
 
-    let mut conn_configs = vec![];
-
-    for iface in &settings.interfaces {
-        if iface.transport == TurnTransport::UDP {
-            let bind_addr: SocketAddr = iface.listen.parse().map_err(|e| {
-                DeskTurnError::AnyhowError(anyhow::anyhow!("Invalid bind addr: {}", e))
-            })?;
-            let udp_socket =
-                Arc::new(UdpSocket::bind(bind_addr).await.map_err(|e| {
-                    DeskTurnError::AnyhowError(anyhow::anyhow!("Bind failed: {}", e))
-                })?);
-
-            log::info!("TURN UDP bind: {}", bind_addr);
-
-            let external_ip: std::net::IpAddr = iface
-                .external
-                .split(':')
-                .next()
-                .unwrap_or("0.0.0.0")
-                .parse()
-                .unwrap_or_else(|_| "0.0.0.0".parse().unwrap());
-
-            let tracked_conn = Arc::new(TrackedUdpConn {
-                inner: udp_socket,
-                statistics: statistics.clone(),
-            });
-
-            let relay_generator = Box::new(RelayAddressGeneratorRanges {
-                relay_address: external_ip,
-                min_port: settings.relay_min_port,
-                max_port: settings.relay_max_port,
-                max_retries: 10,
-                address: "0.0.0.0".to_owned(),
-                net: Arc::new(webrtc_util::vnet::net::Net::new(None)),
-            });
-
-            conn_configs.push(ConnConfig {
-                conn: tracked_conn,
-                relay_addr_generator: relay_generator,
-            });
-        }
+    let plan = plan_turn_interfaces(&settings.interfaces);
+    plan.report_rejections();
+    if plan.servable.is_empty() {
+        return Err(DeskTurnError::AnyhowError(anyhow::anyhow!(
+            "no servable TURN interface: {} configured, none usable",
+            settings.interfaces.len()
+        )));
     }
 
-    if conn_configs.is_empty() {
-        log::warn!("No valid UDP interfaces configured for TURN server.");
+    let mut conn_configs = vec![];
+    for servable in &plan.servable {
+        let udp_socket = Arc::new(
+            UdpSocket::bind(servable.listen)
+                .await
+                .map_err(|e| DeskTurnError::AnyhowError(anyhow::anyhow!("Bind failed: {}", e)))?,
+        );
+
+        log::info!(
+            "TURN UDP bind: {} advertising {}",
+            servable.listen,
+            servable.external
+        );
+
+        let tracked_conn = Arc::new(TrackedUdpConn {
+            inner: udp_socket,
+            statistics: statistics.clone(),
+        });
+
+        conn_configs.push(ConnConfig {
+            conn: tracked_conn,
+            relay_addr_generator: Box::new(FamilyPinnedRelay::new(
+                servable.external.ip(),
+                settings.relay_min_port,
+                settings.relay_max_port,
+            )),
+        });
     }
 
     let config = ServerConfig {
@@ -205,6 +197,14 @@ where
     let server = Server::new(config)
         .await
         .map_err(|e| DeskTurnError::AnyhowError(anyhow::anyhow!("Server start failed: {}", e)))?;
+
+    // Keep only what is being served: this state is what advertises the relay
+    // and what `/info` reports, and either one naming an interface the server
+    // never bound sends peers at an address nothing answers on.
+    let settings = TurnSettings {
+        interfaces: plan.servable.iter().map(|s| s.canonical()).collect(),
+        ..settings
+    };
 
     let api_state = Arc::new(TurnApiState {
         uptime: Instant::now(),
@@ -286,6 +286,210 @@ mod startup_tests {
         .await
         .expect("an ephemeral port must be bindable");
         state.server.close().await.expect("close");
+    }
+
+    /// A configuration whose every entry is unservable fails the start with a
+    /// reason, instead of substituting a wildcard address and reporting success.
+    ///
+    /// That substitution was the old behaviour, and it is worse than a failure:
+    /// the host advertised `turn:0.0.0.0:3478` to every peer while its logs said
+    /// the server had started.
+    #[tokio::test]
+    async fn a_configuration_with_nothing_servable_refuses_to_start() {
+        let settings = TurnSettings {
+            interfaces: vec![TurnInterface {
+                transport: TurnTransport::UDP,
+                listen: "127.0.0.1:0".to_string(),
+                external: "relay.example.com:3478".to_string(),
+            }],
+            ..TurnSettings::default()
+        };
+        let error = match startup_turn_server(
+            settings,
+            Arc::new(AllowAll),
+            Arc::new(RwLock::new(Statistics::default())),
+        )
+        .await
+        {
+            Ok(_) => panic!("an unresolvable external address is not a relay"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("no servable TURN interface"), "{error}");
+    }
+
+    /// What the runtime keeps is what it serves: an entry it refused to bind
+    /// must not survive into the state that issues ICE candidates, or peers
+    /// spend their ICE budget dialling a socket that was never opened.
+    #[tokio::test]
+    async fn the_runtime_only_carries_what_it_bound() {
+        let settings = TurnSettings {
+            static_auth_secret: Some("s3cret".into()),
+            interfaces: vec![
+                udp("127.0.0.1:0".to_string()),
+                TurnInterface {
+                    transport: TurnTransport::TCP,
+                    listen: "127.0.0.1:0".to_string(),
+                    external: "203.0.113.7:3478".to_string(),
+                },
+            ],
+            ..TurnSettings::default()
+        };
+        let state = startup_turn_server(
+            settings,
+            Arc::new(AllowAll),
+            Arc::new(RwLock::new(Statistics::default())),
+        )
+        .await
+        .expect("the UDP entry is servable");
+
+        assert_eq!(
+            state.settings.interfaces.len(),
+            1,
+            "the TCP entry was never bound and must not be kept"
+        );
+        assert_eq!(
+            state
+                .settings
+                .get_rest_ice_servers("peer", 600)
+                .expect("a running relay with a secret advertises itself")
+                .urls,
+            vec!["turn:127.0.0.1:3478?transport=udp".to_string()],
+            "only the bound interface is advertised"
+        );
+        state.server.close().await.expect("close");
+    }
+}
+
+/// A client allocating a relay over IPv6, end to end.
+///
+/// Parsing an IPv6 `external` is not the same as relaying over it: the relay
+/// socket is bound separately, and an IPv4 socket paired with an advertised IPv6
+/// address yields an allocation that succeeds and can carry nothing. Only moving
+/// bytes through the relay tells the two apart.
+#[cfg(test)]
+mod ipv6_relay_tests {
+    use super::*;
+    use crate::model::{TurnInterface, TurnTransport};
+    use std::net::{IpAddr, Ipv6Addr};
+    use std::time::Duration;
+    use turn::client::{Client, ClientConfig};
+
+    const USER: &str = "relay-user";
+    const PASS: &str = "relay-pass";
+    const REALM: &str = "localhost";
+
+    struct StaticCredential;
+    impl AuthHandler for StaticCredential {
+        fn auth_handle(
+            &self,
+            username: &str,
+            realm: &str,
+            _src_addr: SocketAddr,
+        ) -> Result<Vec<u8>, turn::Error> {
+            if username == USER {
+                Ok(turn::auth::generate_auth_key(username, realm, PASS))
+            } else {
+                Err(turn::Error::ErrFakeErr)
+            }
+        }
+    }
+
+    /// Whether this machine can carry IPv6 loopback traffic at all.
+    async fn ipv6_loopback_available() -> bool {
+        UdpSocket::bind("[::1]:0").await.is_ok()
+    }
+
+    #[tokio::test]
+    async fn a_client_relays_over_an_ipv6_allocation() {
+        if !ipv6_loopback_available().await {
+            eprintln!("skipping: no IPv6 loopback on this machine");
+            return;
+        }
+
+        // The advertised address must name the port peers dial, and the server
+        // binds it, so the port is chosen before the server starts. Taking it
+        // from an ephemeral bind that is then released keeps the test from
+        // colliding with whatever else the machine is running.
+        let port = {
+            let probe = UdpSocket::bind("[::1]:0").await.unwrap();
+            probe.local_addr().unwrap().port()
+        };
+        let server_addr = format!("[::1]:{port}");
+
+        let settings = TurnSettings {
+            realm: REALM.to_string(),
+            interfaces: vec![TurnInterface {
+                transport: TurnTransport::UDP,
+                listen: server_addr.clone(),
+                external: server_addr.clone(),
+            }],
+            relay_min_port: 51000,
+            relay_max_port: 51099,
+            ..TurnSettings::default()
+        };
+        let state = startup_turn_server(
+            settings,
+            Arc::new(StaticCredential),
+            Arc::new(RwLock::new(Statistics::default())),
+        )
+        .await
+        .expect("an IPv6 TURN server must start");
+
+        let client = Client::new(ClientConfig {
+            stun_serv_addr: server_addr.clone(),
+            turn_serv_addr: server_addr.clone(),
+            username: USER.to_string(),
+            password: PASS.to_string(),
+            realm: REALM.to_string(),
+            software: String::new(),
+            rto_in_ms: 0,
+            conn: Arc::new(UdpSocket::bind("[::1]:0").await.unwrap()),
+            vnet: None,
+        })
+        .await
+        .expect("client");
+        client.listen().await.expect("client listen");
+
+        let relayed = client.allocate().await.expect("an IPv6 allocation");
+        let relayed_addr = relayed.local_addr().expect("the relayed address");
+        assert!(
+            relayed_addr.is_ipv6(),
+            "an IPv6 interface must hand out an IPv6 relay, got {relayed_addr}"
+        );
+        assert_eq!(relayed_addr.ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
+
+        // The relay has to move bytes both ways. Sending is what fails when the
+        // relay socket is IPv4 behind an advertised IPv6 address: the peer is an
+        // IPv6 address the socket cannot reach.
+        let peer = UdpSocket::bind("[::1]:0").await.unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+        relayed
+            .send_to(b"ping", peer_addr)
+            .await
+            .expect("the relay must reach an IPv6 peer");
+
+        let mut buf = [0u8; 64];
+        let (n, from) = tokio::time::timeout(Duration::from_secs(5), peer.recv_from(&mut buf))
+            .await
+            .expect("the peer must receive the relayed datagram")
+            .unwrap();
+        assert_eq!(&buf[..n], b"ping");
+        assert_eq!(
+            from, relayed_addr,
+            "the peer sees the relay, not the client"
+        );
+
+        // And back: a permission for this peer now exists, so the return path is
+        // relayed too.
+        peer.send_to(b"pong", relayed_addr).await.unwrap();
+        let (n, _) = tokio::time::timeout(Duration::from_secs(5), relayed.recv_from(&mut buf))
+            .await
+            .expect("the client must receive the peer's reply")
+            .unwrap();
+        assert_eq!(&buf[..n], b"pong");
+
+        client.close().await.expect("client close");
+        state.server.close().await.expect("server close");
     }
 }
 

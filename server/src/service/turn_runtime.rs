@@ -13,7 +13,7 @@ use actix_web::web;
 use async_trait::async_trait;
 use desk_signal::model::SharedConnectionMap;
 use desk_turn::model::{Statistics, TurnApiState, TurnSettings};
-use desk_turn::runtime::TurnIntent;
+use desk_turn::runtime::TurnPosture;
 use desk_turn::service::startup_turn_server;
 use desk_turn::supervisor::{
     StartedRuntime, TurnRuntimeDriver, TurnRuntimeHandle, TurnRuntimeParams, TurnSupervisorHandle,
@@ -97,7 +97,7 @@ impl TurnRuntimeDriver for HostTurnDriver {
 pub struct TurnRuntimeControl {
     mode: StartupMode,
     supervisor: TurnSupervisorHandle,
-    intent_tx: watch::Sender<TurnIntent>,
+    posture_tx: watch::Sender<TurnPosture>,
     /// Monotonic tag for each published desired state. It orders the supervisor's
     /// view of "which save is this"; it is not a settings version.
     revision: AtomicU64,
@@ -107,13 +107,13 @@ impl TurnRuntimeControl {
     pub fn new(
         mode: StartupMode,
         supervisor: TurnSupervisorHandle,
-        intent_tx: watch::Sender<TurnIntent>,
+        posture_tx: watch::Sender<TurnPosture>,
         initial_revision: u64,
     ) -> Self {
         Self {
             mode,
             supervisor,
-            intent_tx,
+            posture_tx,
             revision: AtomicU64::new(initial_revision),
         }
     }
@@ -125,7 +125,7 @@ impl TurnRuntimeControl {
     pub fn apply(&self, settings: &TurnSettings) {
         let revision = self.revision.fetch_add(1, Ordering::SeqCst) + 1;
         let plan = turn_plan(&self.mode, settings, revision);
-        self.intent_tx.send_replace(plan.intent);
+        self.posture_tx.send_replace(plan.posture);
         self.supervisor.apply(plan.desired);
     }
 
@@ -162,7 +162,7 @@ impl Drop for TurnRuntimeStopGuard {
 mod tests {
     use super::*;
     use desk_turn::model::{TurnInterface, TurnTransport};
-    use desk_turn::runtime::TurnRuntimeView;
+    use desk_turn::runtime::{TurnIntent, TurnRuntimeView};
     use desk_turn::supervisor::{BackoffConfig, DesiredState, spawn};
     use std::collections::BTreeMap;
     use std::time::Duration;
@@ -190,7 +190,7 @@ mod tests {
     }
 
     fn control_and_view(mode: StartupMode) -> (TurnRuntimeControl, TurnRuntimeView) {
-        let (intent_tx, intent_rx) = watch::channel(TurnIntent::Unsupported);
+        let (posture_tx, posture_rx) = watch::channel(TurnPosture::new(TurnIntent::Unsupported));
         let supervisor = spawn(
             driver(),
             DesiredState {
@@ -202,9 +202,9 @@ mod tests {
                 max: Duration::from_millis(20),
             },
         );
-        let view = TurnRuntimeView::new(supervisor.clone(), intent_rx);
+        let view = TurnRuntimeView::new(supervisor.clone(), posture_rx);
         (
-            TurnRuntimeControl::new(mode, supervisor, intent_tx, 0),
+            TurnRuntimeControl::new(mode, supervisor, posture_tx, 0),
             view,
         )
     }

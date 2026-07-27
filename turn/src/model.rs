@@ -6,6 +6,7 @@ use turn::server::Server;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::error::DeskTurnError;
+use crate::interface::RejectedTurnInterface;
 
 #[rustfmt::skip]
 pub static SOFTWARE: &str = concat!(
@@ -159,6 +160,14 @@ pub struct TurnRuntimeInfo {
     /// The interfaces the running runtime serves; empty unless
     /// [`TurnRuntimeState::Running`].
     pub interfaces: Vec<TurnInterface>,
+    /// Configured interfaces this host refuses to serve, and why.
+    ///
+    /// Reported in every state, because it is exactly when the runtime is *not*
+    /// running that the reason matters most — a host whose every interface was
+    /// rejected reports [`TurnRuntimeState::NotConfigured`], which on its own
+    /// would read as "you configured nothing" to an operator who configured
+    /// three.
+    pub rejected_interfaces: Vec<RejectedTurnInterface>,
     /// Seconds since the running runtime started; `None` unless
     /// [`TurnRuntimeState::Running`].
     pub uptime_secs: Option<u64>,
@@ -270,29 +279,21 @@ pub struct TurnSettings {
 }
 
 impl TurnSettings {
-    /// `turn:{external}?transport=...` URLs for every configured interface.
+    /// `turn:{external}?transport=udp` URLs for every interface actually served.
     ///
     /// Empty while the service is switched off: the interfaces stay configured
     /// so the operator can switch it back on, but advertising a relay nobody is
     /// serving only makes peers spend their ICE budget on candidates that can
-    /// never connect.
+    /// never connect. The same reasoning excludes entries this host refuses to
+    /// bind — a TCP entry, or one whose address does not parse.
     fn turn_urls(&self) -> Vec<String> {
         if !self.enable_turn {
             return Vec::new();
         }
-        self.interfaces
+        crate::interface::plan_turn_interfaces(&self.interfaces)
+            .servable
             .iter()
-            .map(|interface| {
-                format!(
-                    "turn:{}?transport={}",
-                    interface.external,
-                    if interface.transport == TurnTransport::UDP {
-                        "udp"
-                    } else {
-                        "tcp"
-                    }
-                )
-            })
+            .map(|servable| servable.turn_url())
             .collect()
     }
 
