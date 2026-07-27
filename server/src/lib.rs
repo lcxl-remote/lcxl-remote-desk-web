@@ -135,12 +135,39 @@ pub struct ApiSurfaceOpts {
     pub include_signaling: bool,
     /// Register file management + device-code admin under `/api/desk`.
     pub include_device_code: bool,
-    /// Register the `/api/turn/*` management scope.
+    /// Register the TURN runtime-management endpoints (`/info`, `/session`,
+    /// `/session/statistics`, `/metrics`), which need a live TURN server.
     pub include_turn: bool,
+    /// Whether this process has an initialized local signal SQLite DB.
+    ///
+    /// Gates the routes whose handlers call `desk_signal::db::get_db()`, which
+    /// panics when the DB was never opened. Deliberately independent of
+    /// [`Self::include_turn`]: `/api/turn/usage` reads only the historical
+    /// rollups and stays available on a server with no TURN runtime, while the
+    /// ServiceDaemon has the DB but never a TURN runtime. Keep it in sync with
+    /// [`startup_mode_has_signal_db`], which decides where the DB is opened.
+    pub has_signal_db: bool,
     /// Register the `/api/model/*` scope (the collect-only token-usage view plus
-    /// the central-brain model-provider config) — modes with a local signal DB:
-    /// `Default` / `Signaling`.
+    /// the central-brain model-provider config) and the usage-retention windows
+    /// that govern it. Also DB-backed, so it may only be set where
+    /// [`Self::has_signal_db`] is.
     pub include_model_usage: bool,
+}
+
+/// Whether a startup mode opens the local signal SQLite DB.
+///
+/// Single source of truth shared by the DB bootstrap and by the route gate
+/// [`ApiSurfaceOpts::has_signal_db`]: the handlers behind that gate reach for
+/// `desk_signal::db::get_db()`, which panics when the DB was never opened, so
+/// the two conditions must never drift apart.
+///
+/// `ServiceDaemon` opens it in its own bootstrap (`daemon.rs`) before the local
+/// API comes up; `SessionWorker` and `McpStdio` serve no HTTP API at all.
+pub fn startup_mode_has_signal_db(mode: &StartupMode) -> bool {
+    match mode {
+        StartupMode::Default | StartupMode::Signaling | StartupMode::ServiceDaemon => true,
+        StartupMode::DeskServer | StartupMode::SessionWorker | StartupMode::McpStdio => false,
+    }
 }
 
 /// Single source of truth for the desk-server HTTP API surface: every
@@ -158,6 +185,16 @@ pub fn configure_api_surface(
     cfg: &mut utoipa_actix_web::service_config::ServiceConfig,
     opts: ApiSurfaceOpts,
 ) {
+    // Signaling (device-code lookup on handshake), device-code admin and the
+    // model views all reach `desk_signal::db::get_db()`, which panics instead of
+    // degrading when the DB was never opened. None of them may be registered
+    // where the process has no signal DB.
+    debug_assert!(
+        opts.has_signal_db
+            || !(opts.include_signaling || opts.include_device_code || opts.include_model_usage),
+        "signal-DB-backed routes requested without a signal DB: {opts:?}",
+    );
+
     // Public routes (no login required).
     cfg.service(login_account)
         .service(login_tauri)
@@ -250,15 +287,29 @@ pub fn configure_api_surface(
                     }),
             )
             .configure(move |cfg| {
-                if opts.include_turn {
+                // The `/turn` scope carries two unrelated capabilities: runtime
+                // management, which needs a live TURN server, and the usage
+                // history, which only reads the local signal DB. They are gated
+                // independently — a single flag for both would either hide the
+                // history wherever TURN is not running, or make `get_db()` a
+                // reachable panic on a pure desk-server.
+                if opts.include_turn || opts.has_signal_db {
                     cfg.service(
                         utoipa_actix_web::scope("/turn")
-                            .service(get_turn_info)
-                            .service(get_turn_session)
-                            .service(get_turn_session_statistics)
-                            .service(delete_turn_session)
-                            .service(get_turn_metrics)
-                            .service(get_turn_usage),
+                            .configure(move |cfg| {
+                                if opts.include_turn {
+                                    cfg.service(get_turn_info)
+                                        .service(get_turn_session)
+                                        .service(get_turn_session_statistics)
+                                        .service(delete_turn_session)
+                                        .service(get_turn_metrics);
+                                }
+                            })
+                            .configure(move |cfg| {
+                                if opts.has_signal_db {
+                                    cfg.service(get_turn_usage);
+                                }
+                            }),
                     );
                 }
             })
@@ -340,6 +391,7 @@ pub fn build_openapi() -> utoipa::openapi::OpenApi {
                     include_signaling: true,
                     include_device_code: true,
                     include_turn: true,
+                    has_signal_db: true,
                     include_model_usage: true,
                 },
             )
@@ -475,7 +527,7 @@ pub async fn run_with_hub(
     let telemetry_guard = telemetry::init_telemetry(shared_settings.clone(), &startup_mode).await?;
 
     // init desk_signal db
-    if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
+    if startup_mode_has_signal_db(&startup_mode) {
         let settings_dir = Path::new(&settings.args.config_file_path)
             .parent()
             .unwrap_or(Path::new("."))
@@ -713,6 +765,7 @@ pub async fn run_with_hub(
                 StartupMode::Default | StartupMode::Signaling
             ),
             include_turn: turn_api_state.is_some(),
+            has_signal_db: startup_mode_has_signal_db(&startup_mode),
             include_model_usage: matches!(
                 startup_mode,
                 StartupMode::Default | StartupMode::Signaling
@@ -1020,6 +1073,7 @@ mod tests {
                             include_signaling: true,
                             include_device_code: true,
                             include_turn: false,
+                            has_signal_db: true,
                             include_model_usage: true,
                         },
                     )
@@ -1109,40 +1163,109 @@ mod tests {
         .await;
     }
 
-    /// TURN management lives only in the portable server. With daemon opts
-    /// (`include_turn = false`) the `/api/turn/*` scope must NOT be registered.
-    /// Asserted at the spec level (an HTTP probe can't distinguish "route
-    /// absent" from the `/api` scope's anonymous-rejection 401).
-    #[test]
-    fn daemon_opts_exclude_turn_scope() {
+    /// The registered paths for a given surface, asserted at the spec level: an
+    /// HTTP probe cannot distinguish "route absent" from the `/api` scope's
+    /// anonymous-rejection 401.
+    fn registered_paths(opts: ApiSurfaceOpts) -> Vec<String> {
         use utoipa_actix_web::AppExt as _;
 
-        let (_app, daemon_api) = App::new()
+        let (_app, api) = App::new()
             .into_utoipa_app()
-            .configure(|cfg| {
-                configure_api_surface(
-                    cfg,
-                    ApiSurfaceOpts {
-                        include_signaling: true,
-                        include_device_code: true,
-                        include_turn: false,
-                        include_model_usage: true,
-                    },
-                )
-            })
+            .configure(|cfg| configure_api_surface(cfg, opts))
             .split_for_parts();
+        api.paths.paths.keys().cloned().collect()
+    }
 
-        assert!(
-            !daemon_api
-                .paths
-                .paths
-                .keys()
-                .any(|p| p.starts_with("/api/turn")),
-            "daemon opts must not register /api/turn/*; got {:?}",
-            daemon_api.paths.paths.keys().collect::<Vec<_>>(),
+    /// TURN *runtime management* lives only where a TURN server runs. With
+    /// daemon opts (`include_turn = false`) none of those endpoints may be
+    /// registered — but the usage history, which reads the signal DB rather
+    /// than the runtime, still is.
+    #[test]
+    fn daemon_opts_exclude_turn_runtime_endpoints() {
+        let paths = registered_paths(ApiSurfaceOpts {
+            include_signaling: true,
+            include_device_code: true,
+            include_turn: false,
+            has_signal_db: true,
+            include_model_usage: true,
+        });
+
+        let turn_paths: Vec<&String> = paths
+            .iter()
+            .filter(|p| p.starts_with("/api/turn"))
+            .collect();
+        assert_eq!(
+            turn_paths,
+            vec!["/api/turn/usage"],
+            "daemon opts must register the TURN usage history and nothing else \
+             under /api/turn; got {turn_paths:?}",
         );
-        // Sanity: the superset spec (portable / dump) does include it.
+        // Sanity: the superset spec (portable / dump) does include the runtime side.
         assert!(build_openapi().paths.paths.contains_key("/api/turn/info"));
+    }
+
+    /// `/api/turn/usage` only reads the local rollup tables, so its availability
+    /// follows the signal DB and never the TURN runtime. Both directions matter:
+    /// a server with no TURN must still show its history (otherwise the page
+    /// 404s), and a process without the DB must not register it at all
+    /// (`desk_signal::db::get_db()` panics when the DB was never opened).
+    #[test]
+    fn turn_usage_follows_the_signal_db_not_the_turn_runtime() {
+        // (label, include_turn, has_signal_db, expect_usage, expect_runtime)
+        let surfaces = [
+            ("Default with TURN running", true, true, true, true),
+            ("Default without TURN", false, true, true, false),
+            ("Signaling without TURN", false, true, true, false),
+            ("ServiceDaemon local API", false, true, true, false),
+            ("DeskServer", false, false, false, false),
+        ];
+
+        for (label, include_turn, has_signal_db, expect_usage, expect_runtime) in surfaces {
+            let paths = registered_paths(ApiSurfaceOpts {
+                include_signaling: has_signal_db,
+                include_device_code: has_signal_db,
+                include_turn,
+                has_signal_db,
+                include_model_usage: has_signal_db,
+            });
+
+            assert_eq!(
+                paths.iter().any(|p| p == "/api/turn/usage"),
+                expect_usage,
+                "{label}: /api/turn/usage registration",
+            );
+            assert_eq!(
+                paths.iter().any(|p| p == "/api/turn/info"),
+                expect_runtime,
+                "{label}: /api/turn/info registration",
+            );
+        }
+    }
+
+    /// The route gate and the DB bootstrap read the same table, so a mode can
+    /// never serve a `get_db()`-backed handler without having opened the DB.
+    #[test]
+    fn signal_db_modes_are_enumerated_exhaustively() {
+        for mode in [
+            StartupMode::Default,
+            StartupMode::Signaling,
+            StartupMode::ServiceDaemon,
+        ] {
+            assert!(
+                startup_mode_has_signal_db(&mode),
+                "{mode:?} opens the signal DB",
+            );
+        }
+        for mode in [
+            StartupMode::DeskServer,
+            StartupMode::SessionWorker,
+            StartupMode::McpStdio,
+        ] {
+            assert!(
+                !startup_mode_has_signal_db(&mode),
+                "{mode:?} never opens the signal DB",
+            );
+        }
     }
 
     /// The offline spec is a superset built through the same scope nesting as the
@@ -1270,6 +1393,7 @@ mod tests {
                             include_signaling: true,
                             include_device_code: true,
                             include_turn: false,
+                            has_signal_db: true,
                             include_model_usage: true,
                         },
                     )

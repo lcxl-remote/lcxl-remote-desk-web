@@ -1,6 +1,8 @@
 use crate::{
     ApiRouteConfig, ApiSurfaceOpts, api_json_config, configure_api_surface,
-    daemon::tauri_ipc::TauriIpcBridge, host_control, model::settings::SharedSettings,
+    daemon::tauri_ipc::TauriIpcBridge,
+    host_control,
+    model::settings::{SharedSettings, StartupMode},
     service::signaling::LocalNodeTokenValidator,
 };
 use actix_files;
@@ -137,7 +139,9 @@ pub async fn run_local_api(
             })
             // Single source of truth for the HTTP API surface. The daemon serves
             // signaling + file/device-code unconditionally; TURN management lives
-            // only in the portable server, so `include_turn = false`.
+            // only in the portable server, so `include_turn = false`. The signal
+            // DB is opened by the daemon bootstrap before this API comes up, so
+            // the DB-backed views (including the TURN usage history) are served.
             .configure(|cfg| {
                 configure_api_surface(
                     cfg,
@@ -145,6 +149,9 @@ pub async fn run_local_api(
                         include_signaling: true,
                         include_device_code: true,
                         include_turn: false,
+                        has_signal_db: crate::startup_mode_has_signal_db(
+                            &StartupMode::ServiceDaemon,
+                        ),
                         include_model_usage: true,
                     },
                 )
