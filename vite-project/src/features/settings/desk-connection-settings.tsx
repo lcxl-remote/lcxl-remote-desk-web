@@ -137,6 +137,10 @@ export function DeskConnectionSettings() {
                           reached: false,
                           auth_ok: false,
                           secure: false,
+                          // Client-side sentinel, not a backend code: the request
+                          // itself threw, so no `DeskErrorCode` was ever returned.
+                          // It matches no entry in VERIFY_CODE_TO_KEY, so the
+                          // message below is what the row shows.
                           error_code: -1,
                           message: t("pages.deskConnection.verify.transportError"),
                       },
@@ -168,6 +172,10 @@ export function DeskConnectionSettings() {
                           reached: false,
                           auth_ok: false,
                           secure: false,
+                          // Client-side sentinel, not a backend code: the request
+                          // itself threw, so no `DeskErrorCode` was ever returned.
+                          // It matches no entry in VERIFY_CODE_TO_KEY, so the
+                          // message below is what the row shows.
                           error_code: -1,
                           message: t("pages.deskConnection.verify.transportError"),
                       },

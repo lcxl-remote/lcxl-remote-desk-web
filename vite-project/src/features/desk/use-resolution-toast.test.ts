@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, renderHook } from "@testing-library/react";
+import { deskErrorCodeEnum } from "@/services/types";
 import {
     DEFAULT_FAILURE_AUTOCLEAR_MS,
     DEFAULT_RESOLUTION_WATCHDOG_MS,
@@ -20,7 +21,7 @@ function makeApplied(reqId: string, w: number, h: number): ResolutionEchoMessage
         signaling_type: CHANGE_DISPLAY_SETTINGS,
         request_id: reqId,
         signaling_data: { width: w, height: h },
-        response_state: { error_code: 0 },
+        response_state: { error_code: deskErrorCodeEnum.SUCCESS },
     };
 }
 
@@ -113,7 +114,7 @@ describe("useResolutionToast", () => {
         const { result, emit } = renderToast();
         act(() => result.current.registerSent("r-bad", 1280, 720));
 
-        emit(makeFailed("r-bad", 7, "auto change throttled"));
+        emit(makeFailed("r-bad", deskErrorCodeEnum.FEATURE_UNAVAILABLE, "auto change throttled"));
         expect(result.current.resolutionToast).toEqual({
             phase: "failed",
             reason: "auto change throttled",
@@ -257,7 +258,7 @@ describe("useResolutionToast", () => {
         const failedEcho: ResolutionEchoMessage = {
             signaling_type: CHANGE_DISPLAY_SETTINGS,
             request_id: "r-loop",
-            response_state: { error_code: 7 },
+            response_state: { error_code: deskErrorCodeEnum.FEATURE_UNAVAILABLE },
         };
         emit(failedEcho);
         const t1CallsAfterEcho = t1.mock.calls.length;

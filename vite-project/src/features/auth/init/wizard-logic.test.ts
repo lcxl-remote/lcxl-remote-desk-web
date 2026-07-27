@@ -28,7 +28,7 @@ function result(partial: Partial<ConnectionVerifyResult>): ConnectionVerifyResul
         reached: false,
         auth_ok: false,
         secure: false,
-        error_code: 0,
+        error_code: deskErrorCodeEnum.SUCCESS,
         message: "",
         ...partial,
     }
@@ -93,7 +93,7 @@ describe("isInsecureTransportRefused", () => {
     it("is not a refusal for a reachable-but-plaintext downgrade or other codes", () => {
         // A soft insecure warning (reached over plaintext) is NOT a hard refusal.
         expect(isInsecureTransportRefused(result({ reached: true, secure: false }))).toBe(false)
-        expect(isInsecureTransportRefused(result({ error_code: 64 }))).toBe(false)
+        expect(isInsecureTransportRefused(result({ error_code: deskErrorCodeEnum.CONNECTION_UNREACHABLE }))).toBe(false)
         expect(isInsecureTransportRefused(null)).toBe(false)
         expect(isInsecureTransportRefused(undefined)).toBe(false)
     })

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
+import { deskErrorCodeEnum } from '@/services/types';
 import {
     useDeskDiagnose,
     extractStreamingSummary,
@@ -769,7 +770,7 @@ describe('useDeskDiagnose', () => {
                     message: 'repeat limit',
                     retryable: false,
                     safe_for_model: true,
-                    error_code: 70,
+                    error_code: deskErrorCodeEnum.AGENT_SAME_TOOL_REPEAT_LIMIT,
                 },
             }),
         );
