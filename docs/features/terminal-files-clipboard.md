@@ -18,6 +18,11 @@ Manage files on the remote device directly from the browser:
 - **Download** files back to the controller.
 - **Delete** files, with a **recycle-bin** mechanism for recoverable deletions.
 
+A transfer the host refuses — file transfer is off in its security settings, or
+the owner declined the prompt — is reported as a refusal on the transfer row
+rather than sitting at 0%. If the host stops responding partway through, the
+transfer is abandoned after 30 seconds and can be retried.
+
 ## Clipboard Sync
 
 **Bidirectional** synchronization for text clipboards keeps copy/paste seamless between the controller and the remote device.
