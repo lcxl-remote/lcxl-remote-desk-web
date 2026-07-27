@@ -48,6 +48,13 @@ export interface TransferComplete {
 export interface TransferError {
     type: 'transfer_error';
     transfer_id: string;
+    /**
+     * `DeskErrorCode` naming the cause. Always present: the host sends it on
+     * every failure path so the browser can localize instead of showing the
+     * English `message`.
+     */
+    error_code: number;
+    /** Untranslated detail — a path, an OS error, a size mismatch. */
     message: string;
 }
 

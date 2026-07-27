@@ -9,6 +9,11 @@ impl FileTransferDispatcher {
                     "[FileTransferDispatcher] {}: control payload not UTF-8: {e}",
                     payload.connection_id
                 );
+                self.reject_unattributable_frame(
+                    &payload.connection_id,
+                    "control frame is not valid UTF-8",
+                )
+                .await;
                 return;
             }
         };
@@ -19,6 +24,11 @@ impl FileTransferDispatcher {
                     "[FileTransferDispatcher] {}: control JSON decode failed: {e}",
                     payload.connection_id
                 );
+                self.reject_unattributable_frame(
+                    &payload.connection_id,
+                    "control frame is not a known message",
+                )
+                .await;
                 return;
             }
         };
@@ -57,6 +67,13 @@ impl FileTransferDispatcher {
                     let is_complete = flush_error.is_none()
                         && state.received_chunks == state.total_chunks
                         && state.received_bytes == state.expected_bytes;
+                    // A flush failure is an OS-level write problem; equal
+                    // counts with unequal byte totals means the stream itself
+                    // did not arrive intact.
+                    let failure_code = match flush_error {
+                        Some(_) => DeskErrorCode::SYSTEM_ERROR,
+                        None => DeskErrorCode::INVALID_STATE,
+                    };
                     let failure_message = match flush_error {
                         Some(error) => format!("Failed to flush upload: {error}"),
                         None => format!(
@@ -87,6 +104,7 @@ impl FileTransferDispatcher {
                                 &payload.connection_id,
                                 FileTransferMessage::TransferError(TransferError {
                                     transfer_id: complete.transfer_id.clone(),
+                                    error_code: failure_code,
                                     message: failure_message,
                                 }),
                             )
@@ -147,6 +165,11 @@ impl FileTransferDispatcher {
                     payload.connection_id,
                     payload.data.len()
                 );
+                self.reject_unattributable_frame(
+                    &payload.connection_id,
+                    "binary chunk header is truncated",
+                )
+                .await;
                 return;
             }
         };
@@ -228,6 +251,7 @@ impl FileTransferDispatcher {
                     &connection_id,
                     FileTransferMessage::TransferError(TransferError {
                         transfer_id: transfer_id.clone(),
+                        error_code: DeskErrorCode::INVALID_STATE,
                         message,
                     }),
                 )
@@ -270,6 +294,7 @@ impl FileTransferDispatcher {
                     &connection_id,
                     FileTransferMessage::TransferError(TransferError {
                         transfer_id: req.transfer_id.clone(),
+                        error_code: DeskErrorCode::FILE_PATH_NOT_FOUND,
                         message: format!("Target directory not found: {}", req.target_dir),
                     }),
                 )
@@ -298,6 +323,7 @@ impl FileTransferDispatcher {
                 &connection_id,
                 FileTransferMessage::TransferError(TransferError {
                     transfer_id: req.transfer_id.clone(),
+                    error_code: DeskErrorCode::INVALID_STATE,
                     message: "Transfer id is already active on this connection".to_string(),
                 }),
             )

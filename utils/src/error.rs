@@ -30,7 +30,16 @@ pub fn format_debug_backtrace<E: fmt::Debug>(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// A business error code.
+///
+/// Serializes as the bare integer it wraps, so a wire field typed as this is
+/// indistinguishable from one typed `i32` — the type only keeps the Rust side
+/// from writing a literal. Deserialization accepts any integer rather than only
+/// the declared ones: a peer running a newer build may send a code this one has
+/// never heard of, and rejecting the whole frame over an unrecognized code
+/// would lose the error it was reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct DeskErrorCode(i32);
 
 /// Declare every `DeskErrorCode` in one place.

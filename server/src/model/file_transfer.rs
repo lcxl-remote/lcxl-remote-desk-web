@@ -1,3 +1,4 @@
+use desk_utils::error::DeskErrorCode;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -60,9 +61,20 @@ pub struct TransferComplete {
     pub transfer_id: String,
 }
 
+/// Terminal failure of one transfer.
+///
+/// Every path that abandons a transfer must send this — a host that merely
+/// drops the command leaves the browser waiting on a transfer that will never
+/// produce another byte.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TransferError {
     pub transfer_id: String,
+    /// Machine-readable cause. Required, and deliberately not an `Option`: the
+    /// browser localizes from this code, and a default would have to be
+    /// `SUCCESS` (0), which reads as "no error".
+    pub error_code: DeskErrorCode,
+    /// Human-readable detail, used when the code alone does not identify the
+    /// problem (a path, an OS error, a size mismatch). Not localized.
     pub message: String,
 }
 

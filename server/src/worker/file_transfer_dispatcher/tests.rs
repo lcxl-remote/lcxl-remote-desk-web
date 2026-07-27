@@ -507,14 +507,41 @@ async fn shutdown_clears_state() {
     assert!(g.permission_cache.is_empty());
 }
 
-/// Permission gate: when `allow_file_transfer` is `Some(false)`, the
-/// dispatcher silently drops commands for active connections (the
-/// liveness gate would otherwise let them through). Reproduces the
-/// portable-mode bug where the daemon's accept_control gate dropped
-/// every download — by moving the check here, an explicit deny still
-/// blocks but the daemon no longer affects file_transfer routing.
+/// Read the one message waiting on the file lane, or fail.
+async fn expect_message(
+    rx: &mut Box<dyn EventReceiver<FileTransferPayload>>,
+) -> FileTransferMessage {
+    let payload = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+        .await
+        .expect("file lane produced no message")
+        .expect("file lane closed");
+    serde_json::from_slice(&payload.data).expect("emitted payload is a file-transfer message")
+}
+
+/// Assert the lane carries exactly one `TransferError` for `transfer_id`
+/// with `error_code`, and nothing after it.
+async fn expect_only_transfer_error(
+    rx: &mut Box<dyn EventReceiver<FileTransferPayload>>,
+    transfer_id: &str,
+    error_code: DeskErrorCode,
+) {
+    match expect_message(rx).await {
+        FileTransferMessage::TransferError(error) => {
+            assert_eq!(error.transfer_id, transfer_id);
+            assert_eq!(error.error_code, error_code);
+            assert!(!error.message.is_empty(), "the reason must be reported");
+        }
+        other => panic!("expected TransferError, got {other:?}"),
+    }
+    assert_no_message(rx).await;
+}
+
+/// Permission gate: when `allow_file_transfer` is `Some(false)`, a command on
+/// an active connection is refused rather than dropped. The browser has
+/// already drawn the transfer and learns of the refusal only from this reply —
+/// dropping it silently pinned the progress bar at 0% forever.
 #[tokio::test]
-async fn handle_command_drops_when_permission_denied() {
+async fn handle_command_refuses_when_permission_denied() {
     let (d, mut rx) = dispatcher_with_setting(Some(false));
     d.start_connection(&start_payload("c1")).await;
     let payload = FileTransferPayload {
@@ -525,18 +552,111 @@ async fn handle_command_drops_when_permission_denied() {
     };
     d.handle_command(payload).await;
     tokio::task::yield_now().await;
+    expect_only_transfer_error(&mut rx, "t", DeskErrorCode::PERMISSION_ERROR).await;
+    // Refusing must not open the file or register any transfer state.
+    {
+        let g = d.inner.lock().await;
+        assert!(g.activities.is_empty(), "a refused command starts nothing");
+        assert!(g.upload_states.is_empty());
+        // Cache is populated so subsequent commands short-circuit.
+        assert_eq!(g.permission_cache.get("c1").copied(), Some(false));
+    }
+}
+
+/// A binary chunk carries its transfer id in the header, so a denied upload
+/// chunk is refused by id just like a control frame.
+#[tokio::test]
+async fn handle_command_refuses_denied_binary_chunk_by_header_id() {
+    let (d, mut rx) = dispatcher_with_setting(Some(false));
+    d.start_connection(&start_payload("c1")).await;
+    let transfer_id = "01234567-89ab-cdef-0123-456789abcdef";
+    d.handle_command(FileTransferPayload {
+        connection_id: "c1".into(),
+        data: build_binary_chunk(transfer_id, 0, b"payload"),
+        is_text: false,
+        transfer_id: None,
+    })
+    .await;
+    tokio::task::yield_now().await;
+    expect_only_transfer_error(&mut rx, transfer_id, DeskErrorCode::PERMISSION_ERROR).await;
+}
+
+/// The refusal repeats for every command, not just the first: the denial is
+/// cached, and a browser that retries must keep getting an answer.
+#[tokio::test]
+async fn every_denied_command_is_refused_not_just_the_first() {
+    let (d, mut rx) = dispatcher_with_setting(Some(false));
+    d.start_connection(&start_payload("c1")).await;
+    for transfer_id in ["t1", "t2"] {
+        d.handle_command(FileTransferPayload {
+            connection_id: "c1".into(),
+            data: format!(
+                r#"{{"type":"download_request","transfer_id":"{transfer_id}","file_path":"x"}}"#
+            )
+            .into_bytes(),
+            is_text: true,
+            transfer_id: None,
+        })
+        .await;
+        tokio::task::yield_now().await;
+        expect_only_transfer_error(&mut rx, transfer_id, DeskErrorCode::PERMISSION_ERROR).await;
+    }
+}
+
+/// A denied frame whose transfer id cannot be recovered cannot be answered on
+/// its own, so every transfer the connection has open is failed instead —
+/// leaving them unanswered is the same silent drop in another disguise.
+#[tokio::test]
+async fn denied_unattributable_frame_fails_the_connection_transfers() {
+    let (d, mut rx) = dispatcher_with_setting(Some(false));
+    d.start_connection(&start_payload("c1")).await;
+    d.start_activity(
+        "c1",
+        "in-flight",
+        FileTransferDirection::Download,
+        "photo.png",
+        10,
+    )
+    .await;
+
+    d.handle_command(FileTransferPayload {
+        connection_id: "c1".into(),
+        data: b"{ not json".to_vec(),
+        is_text: true,
+        transfer_id: None,
+    })
+    .await;
+    tokio::task::yield_now().await;
+    expect_only_transfer_error(&mut rx, "in-flight", DeskErrorCode::INVALID_PARAMS).await;
+    assert!(
+        d.inner.lock().await.activities.is_empty(),
+        "the failed transfer is no longer active"
+    );
+}
+
+/// The same protocol error with nothing in flight has nothing to answer, and
+/// must not invent a transfer to fail.
+#[tokio::test]
+async fn unattributable_frame_with_no_transfers_emits_nothing() {
+    let (d, mut rx) = dispatcher_with_setting(Some(true));
+    d.start_connection(&start_payload("c1")).await;
+    d.handle_command(FileTransferPayload {
+        connection_id: "c1".into(),
+        data: vec![0x00, 0x01],
+        is_text: false,
+        transfer_id: None,
+    })
+    .await;
+    tokio::task::yield_now().await;
     assert_no_message(&mut rx).await;
-    // Cache is populated so subsequent commands short-circuit.
-    let g = d.inner.lock().await;
-    assert_eq!(g.permission_cache.get("c1").copied(), Some(false));
 }
 
 /// Capability gate: a redeemed-grant connection whose ceiling denies
-/// file transfer is dropped even when the host global allows it — the ceiling
+/// file transfer is refused even when the host global allows it — the ceiling
 /// meets the global and can only tighten. Closes the file-transfer
 /// second-connection escape for a capped grant.
 #[tokio::test]
-async fn handle_command_drops_when_ceiling_denies_file_transfer() {
+async fn handle_command_refuses_when_ceiling_denies_file_transfer() {
     use desk_signal_facade::model::security_settings::SecuritySettings;
     let (d, mut rx) = dispatcher_with_setting(Some(true));
     d.connection_ceilings
@@ -557,7 +677,7 @@ async fn handle_command_drops_when_ceiling_denies_file_transfer() {
     };
     d.handle_command(payload).await;
     tokio::task::yield_now().await;
-    assert_no_message(&mut rx).await;
+    expect_only_transfer_error(&mut rx, "t", DeskErrorCode::PERMISSION_ERROR).await;
     let g = d.inner.lock().await;
     assert_eq!(g.permission_cache.get("c1").copied(), Some(false));
 }

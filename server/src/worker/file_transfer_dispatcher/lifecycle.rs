@@ -255,13 +255,44 @@ impl FileTransferDispatcher {
         // connection that has never requested control, so every
         // download/upload would be silently dropped at the daemon.
         // The daemon now passes file_transfer through unconditionally
-        // and we do the actual permission check here, mirroring Arch
-        // III's behavior in `service::file_transfer::handle_file_transfer_event`.
+        // and we do the actual permission check here.
         if !self.permission_for(&payload.connection_id).await {
-            warn!(
-                "[FileTransferDispatcher] {}: permission denied — dropping command",
-                payload.connection_id
-            );
+            // A denied command still has to be answered. The browser has
+            // already put the transfer on screen and has no other way to learn
+            // it was refused, so dropping the command here is what pinned the
+            // progress bar at 0% until the tab was closed.
+            match inbound_transfer_id(&payload) {
+                Some(transfer_id) => {
+                    warn!(
+                        "[FileTransferDispatcher] {}: permission denied — refusing transfer {}",
+                        payload.connection_id, transfer_id
+                    );
+                    if let Err(e) = self
+                        .emit_text(
+                            &payload.connection_id,
+                            FileTransferMessage::TransferError(TransferError {
+                                transfer_id: transfer_id.clone(),
+                                error_code: DeskErrorCode::PERMISSION_ERROR,
+                                message: "File transfer is not permitted on this connection"
+                                    .to_string(),
+                            }),
+                        )
+                        .await
+                    {
+                        warn!(
+                            "[FileTransferDispatcher] {}: failed to refuse transfer {}: {e}",
+                            payload.connection_id, transfer_id
+                        );
+                    }
+                }
+                None => {
+                    self.reject_unattributable_frame(
+                        &payload.connection_id,
+                        "permission denied and the frame carries no transfer id",
+                    )
+                    .await;
+                }
+            }
             return;
         }
         if payload.is_text {
@@ -316,21 +347,9 @@ impl FileTransferDispatcher {
         // Collect every transfer_id we need to abort. With a specific
         // transfer_id this is just `[id]`; with None we snapshot every
         // active upload + every active download for this connection.
-        let aborted_keys: Vec<TransferKey> = {
-            let mut inner = self.inner.lock().await;
-            let keys: Vec<TransferKey> = match transfer_id.as_deref() {
-                Some(tid) => vec![TransferKey::new(&connection_id, tid)],
-                None => inner
-                    .activities
-                    .iter()
-                    .filter(|key| key.connection_id == connection_id)
-                    .cloned()
-                    .collect(),
-            };
-            for key in &keys {
-                inner.cancelled_transfers.insert(key.clone());
-            }
-            keys
+        let aborted_keys = match transfer_id.as_deref() {
+            Some(tid) => vec![TransferKey::new(&connection_id, tid)],
+            None => self.active_keys_for(&connection_id).await,
         };
         warn!(
             "[FileTransferDispatcher] {}: send failure [{kind_label}] — aborting \
@@ -339,13 +358,54 @@ impl FileTransferDispatcher {
             aborted_keys.len(),
             error
         );
+        self.abort_transfers(
+            &connection_id,
+            aborted_keys,
+            DeskErrorCode::SYSTEM_ERROR,
+            &message,
+        )
+        .await;
+    }
+
+    /// Every transfer currently in flight on a connection.
+    pub(super) async fn active_keys_for(&self, connection_id: &str) -> Vec<TransferKey> {
+        self.inner
+            .lock()
+            .await
+            .activities
+            .iter()
+            .filter(|key| key.connection_id == connection_id)
+            .cloned()
+            .collect()
+    }
+
+    /// Tear down a set of transfers and tell the browser why.
+    ///
+    /// Shared by the daemon send-failure path and the protocol-error path,
+    /// which need the same three steps: stop the download loops, release and
+    /// delete partial uploads, then emit one `TransferError` per transfer. The
+    /// last step is what lets the browser settle — a transfer abandoned without
+    /// a reply stays on its progress bar forever.
+    pub(super) async fn abort_transfers(
+        &self,
+        connection_id: &str,
+        keys: Vec<TransferKey>,
+        error_code: DeskErrorCode,
+        message: &str,
+    ) {
+        {
+            let mut inner = self.inner.lock().await;
+            for key in &keys {
+                inner.cancelled_transfers.insert(key.clone());
+            }
+        }
         // For uploads: release the file handle and remove the partial
         // file so it doesn't orphan on disk. Mirrors the cleanup the
         // TransferCancel arm already does.
         let mut upload_paths_to_remove: Vec<std::path::PathBuf> = Vec::new();
         {
             let mut inner = self.inner.lock().await;
-            for key in &aborted_keys {
+            for key in &keys {
                 if let Some(state) = inner.upload_states.remove(key) {
                     upload_paths_to_remove.push(state.file_path.clone());
                 }
@@ -355,7 +415,7 @@ impl FileTransferDispatcher {
             if let Err(e) = tokio::fs::remove_file(&path).await {
                 debug!(
                     "[FileTransferDispatcher] failed to remove partial upload {} after \
-                     send failure: {e}",
+                     abort: {e}",
                     path.display()
                 );
             }
@@ -364,25 +424,26 @@ impl FileTransferDispatcher {
         // If the file lane itself is what's broken these emits may
         // fail too — that's expected; the browser's SCTP timeout will
         // eventually surface the disconnect on its own.
-        for key in &aborted_keys {
+        for key in &keys {
             if let Err(e) = self
                 .emit_text(
-                    &connection_id,
+                    connection_id,
                     FileTransferMessage::TransferError(TransferError {
                         transfer_id: key.transfer_id.clone(),
-                        message: message.clone(),
+                        error_code,
+                        message: message.to_string(),
                     }),
                 )
                 .await
             {
                 debug!(
-                    "[FileTransferDispatcher] {}: emit TransferError for {} after send \
-                     failure also failed: {e}",
+                    "[FileTransferDispatcher] {}: emit TransferError for {} after abort \
+                     also failed: {e}",
                     connection_id, key.transfer_id
                 );
             }
         }
-        for key in &aborted_keys {
+        for key in &keys {
             self.finish_activity(
                 &key.connection_id,
                 &key.transfer_id,
@@ -390,5 +451,33 @@ impl FileTransferDispatcher {
             )
             .await;
         }
+    }
+
+    /// Answer a frame whose `transfer_id` could not be recovered.
+    ///
+    /// Malformed JSON or a truncated binary header cannot be replied to
+    /// individually — there is no id to put in the reply. Dropping it silently
+    /// is what strands the sender, so every transfer the connection has open is
+    /// failed instead: those ids the browser *can* match, and a peer sending
+    /// unparseable frames has already lost the guarantee that the rest of its
+    /// stream will arrive intact.
+    pub(super) async fn reject_unattributable_frame(&self, connection_id: &str, reason: &str) {
+        let keys = self.active_keys_for(connection_id).await;
+        warn!(
+            "[FileTransferDispatcher] {}: unattributable file-transfer frame ({reason}) — \
+             failing {} in-flight transfer(s)",
+            connection_id,
+            keys.len(),
+        );
+        if keys.is_empty() {
+            return;
+        }
+        self.abort_transfers(
+            connection_id,
+            keys,
+            DeskErrorCode::INVALID_PARAMS,
+            &format!("File transfer protocol error: {reason}"),
+        )
+        .await;
     }
 }

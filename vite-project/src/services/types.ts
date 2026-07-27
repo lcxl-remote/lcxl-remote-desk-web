@@ -1408,8 +1408,17 @@ export type TransferComplete = {
     transfer_id: string;
 };
 
+/**
+ * @description Terminal failure of one transfer.\n\nEvery path that abandons a transfer must send this — a host that merely\ndrops the command leaves the browser waiting on a transfer that will never\nproduce another byte.
+*/
 export type TransferError = {
     /**
+     * @description Business error code carried in `RestResponse.code`, in signaling error frames and on the agent-error wire. It is never an HTTP status: transport-level failures are expressed by the status line, business outcomes by this value.
+     * @type integer, int32
+    */
+    error_code: DeskErrorCode;
+    /**
+     * @description Human-readable detail, used when the code alone does not identify the\nproblem (a path, an OS error, a size mismatch). Not localized.
      * @type string
     */
     message: string;

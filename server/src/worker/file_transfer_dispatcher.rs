@@ -76,6 +76,7 @@ use desk_ipc_protocol::message::{
     FileTransferSendErrorKind, FileTransferSendFailedPayload, FileTransferStartedPayload,
     StartMediaPayload, StopMediaPayload, WorkerToService,
 };
+use desk_utils::error::DeskErrorCode;
 use log::{debug, error, info, warn};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex as TokioMutex, mpsc};
@@ -195,6 +196,26 @@ fn transfer_id_of(msg: &FileTransferMessage) -> Option<&str> {
         FileTransferMessage::TransferComplete(m) => Some(&m.transfer_id),
         FileTransferMessage::TransferError(m) => Some(&m.transfer_id),
         FileTransferMessage::TransferCancel(m) => Some(&m.transfer_id),
+    }
+}
+
+/// The `transfer_id` an inbound command refers to, without acting on it.
+///
+/// The permission gate needs this to refuse a command with a `TransferError`
+/// the browser can match against its pending transfer. It parses and nothing
+/// else — no handler runs, so a refused command never opens a file, allocates
+/// transfer state, or writes a byte.
+///
+/// `None` means the frame is unattributable: not valid UTF-8, not a known
+/// message, or a binary chunk whose header is truncated. Such a frame cannot be
+/// answered on its own (see `reject_unattributable_frame`).
+fn inbound_transfer_id(payload: &FileTransferPayload) -> Option<String> {
+    if payload.is_text {
+        let text = std::str::from_utf8(&payload.data).ok()?;
+        let message: FileTransferMessage = serde_json::from_str(text).ok()?;
+        transfer_id_of(&message).map(str::to_owned)
+    } else {
+        parse_binary_chunk(&payload.data).map(|(transfer_id, _, _)| transfer_id.to_string())
     }
 }
 

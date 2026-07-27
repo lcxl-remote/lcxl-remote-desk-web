@@ -13,6 +13,7 @@ impl FileTransferDispatcher {
                     &connection_id,
                     FileTransferMessage::TransferError(TransferError {
                         transfer_id: req.transfer_id.clone(),
+                        error_code: DeskErrorCode::FILE_PATH_NOT_FOUND,
                         message: format!("File not found: {}", req.file_path),
                     }),
                 )
@@ -50,6 +51,7 @@ impl FileTransferDispatcher {
                 &connection_id,
                 FileTransferMessage::TransferError(TransferError {
                     transfer_id: req.transfer_id.clone(),
+                    error_code: DeskErrorCode::INVALID_STATE,
                     message: "Transfer id is already active on this connection".to_string(),
                 }),
             )
