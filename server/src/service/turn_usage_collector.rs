@@ -6,9 +6,26 @@
 //! sqlite hourly rollup. Collect-only: no billing, no owner, no node dimension.
 //!
 //! The counters belong to a TURN runtime, and a settings change replaces that
-//! runtime, so the collector resolves them per pass instead of holding one set
+//! runtime, so the collector follows the supervisor rather than holding one set
 //! forever. A holder would keep diffing counters nobody increments any more, and
 //! silently report zero usage for the relay that is actually running.
+//!
+//! Following it takes two signals, because "what is serving" and "whose counters
+//! still need collecting" are different questions:
+//!
+//! - The published runtime says what to account for **now**. It is cleared while
+//!   a teardown is under way, so an empty publication means only "not being
+//!   advertised" — a close that failed leaves it empty while its runtime keeps
+//!   relaying. The collector therefore never releases counters because of it.
+//! - The retirement queue says what may be **let go**, one entry per runtime that
+//!   actually stopped. That is the only thing that retires a set of counters, and
+//!   because it is a queue rather than a published value, two restarts between
+//!   two passes still deliver both.
+//!
+//! Each runtime carries its own baseline for as long as the collector holds it,
+//! so a runtime that comes back (the desired state swung back to a runtime whose
+//! close failed) resumes where it left off instead of being counted from zero all
+//! over again.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -19,6 +36,7 @@ use desk_signal::turn_usage::{
     ConnectionDeviceMap, TurnUsageDelta, truncate_to_hour, upsert_turn_usage,
 };
 use desk_turn::model::{Statistics, TurnApiState, TurnDirectionalCounters, TurnSessionStatistics};
+use desk_turn::supervisor::RetiredRuntimes;
 use sea_orm::DatabaseConnection;
 use tokio::sync::watch;
 
@@ -28,42 +46,90 @@ type DateTimeUtc = DateTime<Utc>;
 /// Default cadence between collection passes.
 pub const FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Where a pass reads its counters from, resolved each time.
-#[derive(Clone)]
+/// Where a pass reads its counters from.
 pub enum StatisticsSource {
-    /// Follow whatever runtime is serving; `None` while none is.
-    Runtime(watch::Receiver<Option<Arc<TurnApiState>>>),
-    /// A fixed set of counters, for tests that drive the accounting directly.
+    /// Follow a supervisor. Both halves come from the same one: the runtime it
+    /// publishes and the runtimes it retires describe one lifecycle, and pairing
+    /// either with another supervisor's would account for neither.
+    Supervisor {
+        runtime_rx: watch::Receiver<Option<Arc<TurnApiState>>>,
+        retired: RetiredRuntimes,
+    },
+    /// A fixed set of counters that never retires, for tests that drive the
+    /// accounting directly.
     Fixed(Arc<RwLock<Statistics>>),
 }
 
 impl StatisticsSource {
-    fn resolve(&self) -> Option<Arc<RwLock<Statistics>>> {
+    /// The counters filling right now, if any are being advertised.
+    fn serving(&self) -> Option<Arc<RwLock<Statistics>>> {
         match self {
-            Self::Runtime(rx) => rx.borrow().as_ref().map(|s| s.statistics.clone()),
+            Self::Supervisor { runtime_rx, .. } => {
+                runtime_rx.borrow().as_ref().map(|s| s.statistics.clone())
+            }
             Self::Fixed(stats) => Some(stats.clone()),
         }
+    }
+
+    /// Everything that has stopped serving since the last call, oldest first.
+    fn take_retired(&mut self) -> Vec<Arc<RwLock<Statistics>>> {
+        match self {
+            // `try_recv` also ends the iteration once the supervisor is gone,
+            // which is the right moment to stop expecting retirements.
+            Self::Supervisor { retired, .. } => {
+                std::iter::from_fn(|| retired.try_recv().ok()).collect()
+            }
+            Self::Fixed(_) => Vec::new(),
+        }
+    }
+}
+
+/// One runtime's counters and how much of them has already been written.
+struct Accounted {
+    statistics: Arc<RwLock<Statistics>>,
+    /// Per-connection cumulative counters already persisted; the next pass only
+    /// writes the difference. Node-local and droppable (a restart re-baselines).
+    baseline: HashMap<String, TurnSessionStatistics>,
+    /// Whether the supervisor has said this runtime stopped. Only that makes the
+    /// counters final, and only a final set may be let go once written.
+    retired: bool,
+}
+
+impl Accounted {
+    /// Starts with an empty baseline, which is what "nothing has been written for
+    /// these counters yet" means — true both for a runtime that just started and
+    /// for one the collector is meeting for the first time as it retires.
+    fn new(statistics: Arc<RwLock<Statistics>>, retired: bool) -> Self {
+        Self {
+            statistics,
+            baseline: HashMap::new(),
+            retired,
+        }
+    }
+
+    fn is(&self, statistics: &Arc<RwLock<Statistics>>) -> bool {
+        Arc::ptr_eq(&self.statistics, statistics)
     }
 }
 
 pub struct TurnUsageCollector {
     source: StatisticsSource,
-    /// The counters the current baseline was measured against, so a runtime swap
-    /// is detected by identity rather than guessed at from the values.
-    current: Option<Arc<RwLock<Statistics>>>,
+    /// Every runtime with counters still to write, in the order they were first
+    /// seen. An entry is kept by identity rather than by which one is current,
+    /// because the two signals are read separately: a pass can see a replacement
+    /// published before the retirement of the runtime it replaced has arrived.
+    /// Keying on identity means the outgoing runtime keeps its baseline through
+    /// that gap instead of being dropped and later re-counted from zero.
+    accounted: Vec<Accounted>,
     conn_device_map: Arc<ConnectionDeviceMap>,
-    /// Per-connection cumulative counters already persisted; the next pass only
-    /// flushes the difference. Node-local and droppable (a restart re-baselines).
-    baseline: HashMap<String, TurnSessionStatistics>,
 }
 
 impl TurnUsageCollector {
     pub fn new(source: StatisticsSource, conn_device_map: Arc<ConnectionDeviceMap>) -> Self {
         Self {
             source,
-            current: None,
+            accounted: Vec::new(),
             conn_device_map,
-            baseline: HashMap::new(),
         }
     }
 
@@ -73,69 +139,68 @@ impl TurnUsageCollector {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            if let Err(e) = self
-                .tick(desk_signal::db::get_db(), chrono::Utc::now())
-                .await
-            {
-                log::warn!("TURN usage collector flush failed: {}", e);
-            }
+            self.tick(desk_signal::db::get_db(), chrono::Utc::now())
+                .await;
         }
     }
 
-    /// One tick: adopt a replacement runtime if there is one, and account for
-    /// whatever is serving now.
+    /// One tick: take in what has retired, adopt whatever is serving, and write
+    /// what each of them has accumulated.
+    async fn tick(&mut self, db: &DatabaseConnection, now: DateTimeUtc) {
+        // Step 1: note what has stopped. A runtime already being accounted for
+        // keeps the baseline it has; one that came and went between two passes is
+        // met for the first time here, with an empty baseline — which is right,
+        // since nothing was ever written for it.
+        for statistics in self.source.take_retired() {
+            match self.accounted.iter_mut().find(|a| a.is(&statistics)) {
+                Some(entry) => entry.retired = true,
+                None => self.accounted.push(Accounted::new(statistics, true)),
+            }
+        }
+
+        // Step 2: start on whatever is serving, if it is not already tracked.
+        // Nothing is released here: an empty publication means a teardown is
+        // under way or has failed, not that any counters are finished.
+        if let Some(statistics) = self.source.serving()
+            && !self.accounted.iter().any(|a| a.is(&statistics))
+        {
+            self.accounted.push(Accounted::new(statistics, false));
+        }
+
+        // Step 3: write what each of them has accumulated. An entry is let go
+        // only once its runtime has stopped *and* everything it holds is stored:
+        // either condition alone would drop counters that still matter.
+        let mut kept = Vec::new();
+        for mut entry in std::mem::take(&mut self.accounted) {
+            let settled = Self::flush(db, now, &self.conn_device_map, &mut entry).await;
+            if !(entry.retired && settled) {
+                kept.push(entry);
+            }
+        }
+        self.accounted = kept;
+    }
+
+    /// One collection pass over one runtime's counters. Computes per-connection
+    /// deltas, groups them by resolved `device_code`, and upserts each into the
+    /// current hour bucket.
     ///
-    /// A runtime that has just been replaced is read one last time before its
-    /// counters are let go. A fresh runtime starts from zero, so carrying the
-    /// retired one's totals forward as the baseline would swallow everything the
-    /// new one relays until it exceeded them — and simply dropping them loses the
-    /// retired runtime's last stretch, which a settings change or a secret
-    /// rotation produces as a matter of course rather than as a failure.
-    async fn tick(
-        &mut self,
+    /// Returns whether everything those counters hold is now persisted. The
+    /// baseline advances only for connections whose upsert succeeded, so a failed
+    /// write is retried (re-added to the delta) next pass — and answering `false`
+    /// is what keeps a retired runtime's counters around long enough for that
+    /// retry to have something to read.
+    async fn flush(
         db: &DatabaseConnection,
         now: DateTimeUtc,
-    ) -> Result<(), sea_orm::DbErr> {
-        let resolved = self.source.resolve();
-        let same = match (&self.current, &resolved) {
-            (Some(held), Some(next)) => Arc::ptr_eq(held, next),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same {
-            if let Some(retiring) = self.current.clone() {
-                // Measured against the baseline still in place, which is the one
-                // describing this runtime. A failure here returns before the
-                // baseline is dropped, so the next tick retries the same stretch
-                // rather than losing it.
-                self.flush_once(db, now, &retiring).await?;
-            }
-            self.baseline.clear();
-            self.current = resolved.clone();
-        }
-        let Some(statistics) = resolved else {
-            // No runtime is serving; there is nothing to account for, and no
-            // reason to touch the database.
-            return Ok(());
-        };
-        self.flush_once(db, now, &statistics).await
-    }
-
-    /// One collection pass. Computes per-connection deltas, groups them by
-    /// resolved `device_code`, and upserts each into the current hour bucket.
-    /// Baseline advances only for connections whose upsert succeeded, so a
-    /// failed write is retried (re-added to the delta) next pass.
-    async fn flush_once(
-        &mut self,
-        db: &DatabaseConnection,
-        now: DateTimeUtc,
-        statistics: &Arc<RwLock<Statistics>>,
-    ) -> Result<(), sea_orm::DbErr> {
-        let snapshot = match statistics.read() {
+        conn_device_map: &ConnectionDeviceMap,
+        accounted: &mut Accounted,
+    ) -> bool {
+        let snapshot = match accounted.statistics.read() {
             Ok(stats) => stats.snapshot_by_connection(),
             Err(e) => {
+                // Unreadable, so what it holds is unknown rather than nothing.
                 log::warn!("TURN statistics lock poisoned, skipping flush: {}", e);
-                return Ok(());
+                return false;
             }
         };
 
@@ -145,11 +210,11 @@ impl TurnUsageCollector {
         let hour = truncate_to_hour(now);
         let mut per_device: HashMap<String, (TurnUsageDelta, Vec<String>)> = HashMap::new();
         for (conn_id, cur) in &snapshot {
-            let delta = delta_since(self.baseline.get(conn_id), cur);
+            let delta = delta_since(accounted.baseline.get(conn_id), cur);
             if delta.is_zero() {
                 continue;
             }
-            let device_code = self.resolve_device(conn_id).await;
+            let device_code = resolve_device(conn_device_map, conn_id).await;
             let entry = per_device
                 .entry(device_code)
                 .or_insert_with(|| (TurnUsageDelta::default(), Vec::new()));
@@ -164,36 +229,38 @@ impl TurnUsageCollector {
             entry.1.push(conn_id.clone());
         }
 
+        let mut settled = true;
         for (device_code, (delta, conn_ids)) in per_device {
             match upsert_turn_usage(db, &device_code, hour, &delta).await {
                 Ok(()) => {
                     // Advance the baseline for the contributing connections.
                     for conn_id in conn_ids {
                         if let Some(cur) = snapshot.get(&conn_id) {
-                            self.baseline.insert(conn_id, cur.clone());
+                            accounted.baseline.insert(conn_id, cur.clone());
                         }
                     }
                 }
                 Err(e) => {
                     // Leave the baseline untouched so this delta is retried.
                     log::warn!("upsert_turn_usage failed for device {}: {}", device_code, e);
+                    settled = false;
                 }
             }
         }
-        Ok(())
+        settled
     }
+}
 
-    /// Resolve a `connection_id` to its `device_code`, or fall back to the raw
-    /// `connection_id` when no binding exists (unresolved connections still get
-    /// collected, just keyed by their id).
-    async fn resolve_device(&self, conn_id: &str) -> String {
-        self.conn_device_map
-            .read()
-            .await
-            .get(conn_id)
-            .cloned()
-            .unwrap_or_else(|| conn_id.to_string())
-    }
+/// Resolve a `connection_id` to its `device_code`, or fall back to the raw
+/// `connection_id` when no binding exists (unresolved connections still get
+/// collected, just keyed by their id).
+async fn resolve_device(conn_device_map: &ConnectionDeviceMap, conn_id: &str) -> String {
+    conn_device_map
+        .read()
+        .await
+        .get(conn_id)
+        .cloned()
+        .unwrap_or_else(|| conn_id.to_string())
 }
 
 /// Signed difference of a current cumulative sample from its baseline, per
@@ -244,7 +311,12 @@ mod tests {
     use sea_orm::{ConnectionTrait, Database, Schema};
 
     async fn memory_db() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        // One connection: each `sqlite::memory:` connection gets a database of
+        // its own, so a pool that hands out a second one would answer from an
+        // empty schema.
+        let mut options = sea_orm::ConnectOptions::new("sqlite::memory:");
+        options.max_connections(1);
+        let db = Database::connect(options).await.unwrap();
         let schema = Schema::new(db.get_database_backend());
         let stmt = schema.create_table_from_entity(turn_usage::Entity);
         db.execute(&stmt).await.unwrap();
@@ -286,12 +358,30 @@ mod tests {
     }
 
     /// Drive one pass against the collector's own source, the way `run` does.
-    async fn flush(
-        collector: &mut TurnUsageCollector,
-        db: &DatabaseConnection,
-        now: DateTimeUtc,
-    ) -> Result<(), sea_orm::DbErr> {
-        collector.tick(db, now).await
+    async fn flush(collector: &mut TurnUsageCollector, db: &DatabaseConnection, now: DateTimeUtc) {
+        collector.tick(db, now).await;
+    }
+
+    /// The supervisor's two write ends, as a test holds them: what is published
+    /// as serving, and what is handed over as retired.
+    type SupervisorControls = (
+        watch::Sender<Option<Arc<TurnApiState>>>,
+        tokio::sync::mpsc::UnboundedSender<Arc<RwLock<Statistics>>>,
+    );
+
+    /// A collector wired the way production wires it, plus the two handles a test
+    /// uses to play supervisor: publish what is serving, and retire what stopped.
+    fn supervised(map: Arc<ConnectionDeviceMap>) -> (TurnUsageCollector, SupervisorControls) {
+        let (runtime_tx, runtime_rx) = watch::channel(None);
+        let (retired_tx, retired) = tokio::sync::mpsc::unbounded_channel();
+        let collector = TurnUsageCollector::new(
+            StatisticsSource::Supervisor {
+                runtime_rx,
+                retired,
+            },
+            map,
+        );
+        (collector, (runtime_tx, retired_tx))
     }
 
     #[tokio::test]
@@ -313,7 +403,7 @@ mod tests {
 
         let mut collector =
             TurnUsageCollector::new(StatisticsSource::Fixed(stats.clone()), map.clone());
-        flush(&mut collector, &db, now()).await.unwrap();
+        flush(&mut collector, &db, now()).await;
 
         let rows = query_turn_usage(
             &db,
@@ -330,7 +420,7 @@ mod tests {
         assert_eq!(rows[0].control_received_bytes, 9);
 
         // Second flush with no new traffic must be a no-op (baseline advanced).
-        flush(&mut collector, &db, now()).await.unwrap();
+        flush(&mut collector, &db, now()).await;
         let rows = query_turn_usage(
             &db,
             now() - chrono::Duration::hours(1),
@@ -350,25 +440,24 @@ mod tests {
     async fn a_replaced_runtime_re_baselines_instead_of_swallowing_its_traffic() {
         let db = memory_db().await;
         let map: Arc<ConnectionDeviceMap> = Arc::new(ConnectionDeviceMap::default());
-        let (runtime_tx, runtime_rx) = watch::channel(None);
-        let mut collector =
-            TurnUsageCollector::new(StatisticsSource::Runtime(runtime_rx), map.clone());
+        let (mut collector, (runtime_tx, retired_tx)) = supervised(map.clone());
 
         // Nothing is serving: no counters to read, and no database work.
-        assert!(collector.tick(&db, now()).await.is_ok());
+        collector.tick(&db, now()).await;
 
         // A runtime comes up and relays a lot.
         let first = loopback_runtime().await;
         record(&first, "conn-1", "127.0.0.1:5000", 1_000);
         runtime_tx.send_replace(Some(first.clone()));
-        flush(&mut collector, &db, now()).await.unwrap();
+        flush(&mut collector, &db, now()).await;
         assert_eq!(total_relay_received(&db).await, 1_000);
 
         // It is replaced; the fresh runtime's counters start from zero.
         let second = loopback_runtime().await;
         record(&second, "conn-1", "127.0.0.1:5000", 7);
+        retired_tx.send(first.statistics.clone()).unwrap();
         runtime_tx.send_replace(Some(second.clone()));
-        flush(&mut collector, &db, now()).await.unwrap();
+        flush(&mut collector, &db, now()).await;
         assert_eq!(
             total_relay_received(&db).await,
             1_007,
@@ -387,29 +476,197 @@ mod tests {
     async fn the_traffic_a_retiring_runtime_relayed_last_is_still_collected() {
         let db = memory_db().await;
         let map: Arc<ConnectionDeviceMap> = Arc::new(ConnectionDeviceMap::default());
-        let (runtime_tx, runtime_rx) = watch::channel(None);
-        let mut collector =
-            TurnUsageCollector::new(StatisticsSource::Runtime(runtime_rx), map.clone());
+        let (mut collector, (runtime_tx, retired_tx)) = supervised(map.clone());
 
         let first = loopback_runtime().await;
         record(&first, "conn-1", "127.0.0.1:5100", 1_000);
         runtime_tx.send_replace(Some(first.clone()));
-        collector.tick(&db, now()).await.unwrap();
+        collector.tick(&db, now()).await;
         assert_eq!(total_relay_received(&db).await, 1_000);
 
         // Relayed after that pass and before the runtime was replaced.
         record(&first, "conn-1", "127.0.0.1:5100", 40);
         let second = loopback_runtime().await;
         record(&second, "conn-1", "127.0.0.1:5100", 7);
+        retired_tx.send(first.statistics.clone()).unwrap();
         runtime_tx.send_replace(Some(second.clone()));
 
-        collector.tick(&db, now()).await.unwrap();
+        collector.tick(&db, now()).await;
 
         assert_eq!(
             total_relay_received(&db).await,
             1_047,
             "the retiring runtime's last 40 bytes must be collected, not dropped \
              with its counters"
+        );
+
+        first.server.close().await.unwrap();
+        second.server.close().await.unwrap();
+    }
+
+    /// Two restarts inside one flush interval. The middle runtime is never the
+    /// published one when anybody looks, so everything it relayed is only
+    /// reachable through its retirement — a signal that keeps every entry rather
+    /// than the latest.
+    #[tokio::test]
+    async fn a_runtime_nobody_saw_serving_is_still_collected() {
+        let db = memory_db().await;
+        let map: Arc<ConnectionDeviceMap> = Arc::new(ConnectionDeviceMap::default());
+        let (mut collector, (runtime_tx, retired_tx)) = supervised(map.clone());
+
+        let first = loopback_runtime().await;
+        record(&first, "conn-1", "127.0.0.1:5200", 1_000);
+        runtime_tx.send_replace(Some(first.clone()));
+        collector.tick(&db, now()).await;
+        assert_eq!(total_relay_received(&db).await, 1_000);
+
+        // Both restarts happen before the next pass, and each runtime relays
+        // something the collector has not written yet.
+        record(&first, "conn-1", "127.0.0.1:5200", 40);
+        let second = loopback_runtime().await;
+        record(&second, "conn-1", "127.0.0.1:5200", 300);
+        retired_tx.send(first.statistics.clone()).unwrap();
+        runtime_tx.send_replace(Some(second.clone()));
+
+        let third = loopback_runtime().await;
+        record(&third, "conn-1", "127.0.0.1:5200", 7);
+        retired_tx.send(second.statistics.clone()).unwrap();
+        runtime_tx.send_replace(Some(third.clone()));
+
+        collector.tick(&db, now()).await;
+
+        assert_eq!(
+            total_relay_received(&db).await,
+            1_347,
+            "both replaced runtimes count: the first's tail and everything the \
+             second relayed before anyone read it"
+        );
+
+        first.server.close().await.unwrap();
+        second.server.close().await.unwrap();
+        third.server.close().await.unwrap();
+    }
+
+    /// The two signals are read one after the other, so a pass can see the
+    /// replacement published and only learn on a later pass that the runtime it
+    /// replaced has retired.
+    ///
+    /// The outgoing runtime has to keep its baseline across that gap. Dropping it
+    /// on sight of the replacement loses whatever it relayed last, and then the
+    /// retirement — arriving to find nothing tracked — reads its counters from
+    /// zero and bills its whole lifetime a second time.
+    #[tokio::test]
+    async fn a_retirement_that_arrives_after_the_replacement_neither_loses_nor_repeats() {
+        let db = memory_db().await;
+        let map: Arc<ConnectionDeviceMap> = Arc::new(ConnectionDeviceMap::default());
+        let (mut collector, (runtime_tx, retired_tx)) = supervised(map.clone());
+
+        let first = loopback_runtime().await;
+        record(&first, "conn-1", "127.0.0.1:5500", 1_000);
+        runtime_tx.send_replace(Some(first.clone()));
+        collector.tick(&db, now()).await;
+        assert_eq!(total_relay_received(&db).await, 1_000);
+
+        // The replacement is published; the retirement has not arrived yet.
+        record(&first, "conn-1", "127.0.0.1:5500", 40);
+        let second = loopback_runtime().await;
+        record(&second, "conn-1", "127.0.0.1:5500", 7);
+        runtime_tx.send_replace(Some(second.clone()));
+        collector.tick(&db, now()).await;
+        assert_eq!(
+            total_relay_received(&db).await,
+            1_047,
+            "the runtime being replaced is still accounted for until it retires"
+        );
+
+        // Now it arrives.
+        retired_tx.send(first.statistics.clone()).unwrap();
+        collector.tick(&db, now()).await;
+        assert_eq!(
+            total_relay_received(&db).await,
+            1_047,
+            "a late retirement settles the runtime; it must not re-read it from zero"
+        );
+
+        first.server.close().await.unwrap();
+        second.server.close().await.unwrap();
+    }
+
+    /// A teardown clears the published runtime before closing it, and a close
+    /// that fails leaves it cleared while its runtime keeps relaying. The desired
+    /// state can then swing back and republish that same runtime.
+    ///
+    /// Nothing retired, so nothing may be re-counted: treating the empty
+    /// publication as the end of a runtime would drop its baseline and bill its
+    /// entire lifetime again the moment it reappeared.
+    #[tokio::test]
+    async fn a_publication_gap_does_not_recount_the_runtime_that_comes_back() {
+        let db = memory_db().await;
+        let map: Arc<ConnectionDeviceMap> = Arc::new(ConnectionDeviceMap::default());
+        let (mut collector, (runtime_tx, _retired_tx)) = supervised(map.clone());
+
+        let runtime = loopback_runtime().await;
+        record(&runtime, "conn-1", "127.0.0.1:5300", 1_000);
+        runtime_tx.send_replace(Some(runtime.clone()));
+        collector.tick(&db, now()).await;
+        assert_eq!(total_relay_received(&db).await, 1_000);
+
+        // The teardown starts, the close fails, and the runtime keeps relaying.
+        runtime_tx.send_replace(None);
+        record(&runtime, "conn-1", "127.0.0.1:5300", 40);
+        collector.tick(&db, now()).await;
+        assert_eq!(
+            total_relay_received(&db).await,
+            1_040,
+            "a runtime that is still relaying is still accounted for"
+        );
+
+        // The desired state swings back and the same runtime is republished.
+        runtime_tx.send_replace(Some(runtime.clone()));
+        collector.tick(&db, now()).await;
+        assert_eq!(
+            total_relay_received(&db).await,
+            1_040,
+            "the runtime came back, so its history must not be written again"
+        );
+
+        runtime.server.close().await.unwrap();
+    }
+
+    /// A retired runtime's counters are the only copy of what it relayed last. If
+    /// the write fails they have to stay reachable until one succeeds — letting
+    /// go on a failed write loses that stretch for good, because the runtime is
+    /// closed and nothing will ever report it again.
+    #[tokio::test]
+    async fn a_retired_runtime_is_held_until_its_last_stretch_is_written() {
+        let db = memory_db().await;
+        let map: Arc<ConnectionDeviceMap> = Arc::new(ConnectionDeviceMap::default());
+        let (mut collector, (runtime_tx, retired_tx)) = supervised(map.clone());
+
+        let first = loopback_runtime().await;
+        record(&first, "conn-1", "127.0.0.1:5400", 1_000);
+        runtime_tx.send_replace(Some(first.clone()));
+        collector.tick(&db, now()).await;
+        assert_eq!(total_relay_received(&db).await, 1_000);
+
+        record(&first, "conn-1", "127.0.0.1:5400", 40);
+        let second = loopback_runtime().await;
+        record(&second, "conn-1", "127.0.0.1:5400", 7);
+        retired_tx.send(first.statistics.clone()).unwrap();
+        runtime_tx.send_replace(Some(second.clone()));
+
+        // Every write in this pass fails: the rollup table is not there.
+        let unwritable = Database::connect("sqlite::memory:").await.unwrap();
+        collector.tick(&unwritable, now()).await;
+
+        // Writes work again; the runtime that retired is long closed, so the 40
+        // bytes exist nowhere but in the counters the collector kept.
+        collector.tick(&db, now()).await;
+
+        assert_eq!(
+            total_relay_received(&db).await,
+            1_047,
+            "the retried write must include the retired runtime's last stretch"
         );
 
         first.server.close().await.unwrap();
@@ -483,7 +740,7 @@ mod tests {
 
         let mut collector =
             TurnUsageCollector::new(StatisticsSource::Fixed(stats.clone()), map.clone());
-        flush(&mut collector, &db, now()).await.unwrap();
+        flush(&mut collector, &db, now()).await;
 
         let rows = query_turn_usage(
             &db,

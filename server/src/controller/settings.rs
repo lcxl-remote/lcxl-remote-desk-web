@@ -838,7 +838,8 @@ mod tests {
         ));
         let (posture_tx, posture_rx) =
             tokio::sync::watch::channel(TurnPosture::new(TurnIntent::NotConfigured));
-        let supervisor = spawn(
+        // Nothing here accounts for usage; the retirement queue is dropped.
+        let (supervisor, _retired) = spawn(
             Arc::new(HostTurnDriver::new(connection_map)),
             DesiredState {
                 revision: 0,

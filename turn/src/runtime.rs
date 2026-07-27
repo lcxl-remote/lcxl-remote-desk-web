@@ -310,7 +310,7 @@ mod tests {
             }
         }
         let (_tx, rx) = watch::channel(TurnPosture::new(TurnIntent::Run));
-        let supervisor = spawn(
+        let (supervisor, _retired) = spawn(
             Arc::new(AlwaysFails),
             DesiredState {
                 revision: 1,

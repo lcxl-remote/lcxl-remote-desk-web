@@ -647,7 +647,7 @@ pub async fn run_with_hub(
     }
     let (turn_posture_tx, turn_posture_rx) =
         tokio::sync::watch::channel(startup_plan.posture.clone());
-    let turn_supervisor = desk_turn::supervisor::spawn(
+    let (turn_supervisor, retired_turn_runtimes) = desk_turn::supervisor::spawn(
         Arc::new(HostTurnDriver::new(connection_map.clone())),
         startup_plan.desired,
         desk_turn::supervisor::BackoffConfig::default(),
@@ -671,13 +671,17 @@ pub async fn run_with_hub(
         // modes that can host TURN have both a runtime to account for and the
         // local DB the rollup lives in.
         let collector = crate::service::turn_usage_collector::TurnUsageCollector::new(
-            crate::service::turn_usage_collector::StatisticsSource::Runtime(
-                turn_supervisor.subscribe_runtime(),
-            ),
+            crate::service::turn_usage_collector::StatisticsSource::Supervisor {
+                runtime_rx: turn_supervisor.subscribe_runtime(),
+                retired: retired_turn_runtimes,
+            },
             conn_device_map.clone().into_inner(),
         );
         tokio::spawn(collector.run());
     }
+    // Anything else — a mode with no rollup to write to — drops the queue, and
+    // the supervisor stops holding retired counters for a reader that will never
+    // come.
 
     // For Default / DeskServer modes that don't yet have a hub injected, fall back
     // to a Local hub so business code never sees a None. Approvals deny-fast when

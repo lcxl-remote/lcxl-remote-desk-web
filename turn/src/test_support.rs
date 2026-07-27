@@ -115,7 +115,10 @@ pub fn loopback_supervisor(
     watch::Sender<TurnPosture>,
 ) {
     let (posture_tx, posture_rx) = watch::channel(TurnPosture::new(intent));
-    let supervisor = spawn(
+    // Nothing here accounts for usage, so the retirement queue is dropped: the
+    // supervisor then releases a retired runtime's counters with it instead of
+    // holding them for a reader that will never come.
+    let (supervisor, _retired) = spawn(
         Arc::new(LoopbackDriver),
         initial,
         BackoffConfig {

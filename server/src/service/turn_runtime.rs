@@ -191,7 +191,9 @@ mod tests {
 
     fn control_and_view(mode: StartupMode) -> (TurnRuntimeControl, TurnRuntimeView) {
         let (posture_tx, posture_rx) = watch::channel(TurnPosture::new(TurnIntent::Unsupported));
-        let supervisor = spawn(
+        // These exercise the control/view surface, not usage accounting, so the
+        // retirement queue is dropped rather than drained.
+        let (supervisor, _retired) = spawn(
             driver(),
             DesiredState {
                 revision: 0,

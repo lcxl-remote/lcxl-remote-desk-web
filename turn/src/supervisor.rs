@@ -39,22 +39,31 @@
 //!   whose lifetime is bounded (an embedded server, a test) must call it.
 //!
 //! - **The live runtime is published, not returned once.** Readers (the info
-//!   endpoint, the ICE provider, the usage collector) must never hold the
-//!   [`TurnApiState`] they saw at startup, because a configuration change
-//!   replaces it. They subscribe to [`TurnSupervisorHandle::subscribe_runtime`]
-//!   instead. The actor is the single writer, and it publishes so that a
-//!   non-empty snapshot always denotes a runtime that has **not** been closed:
-//!   the snapshot is cleared before a teardown and set only after a start
-//!   succeeds.
+//!   endpoint, the ICE provider) must never hold the [`TurnApiState`] they saw at
+//!   startup, because a configuration change replaces it. They subscribe to
+//!   [`TurnSupervisorHandle::subscribe_runtime`] instead. The actor is the single
+//!   writer, and it publishes so that a non-empty snapshot always denotes a
+//!   runtime that has **not** been closed: the snapshot is cleared before a
+//!   teardown and set only after a start succeeds.
+//!
+//! - **Accounting is told about retirements, not about publications.** "What is
+//!   serving now" and "whose counters still need collecting" are different
+//!   questions, and the published snapshot only answers the first. It is cleared
+//!   before a teardown, so a close that fails leaves it empty while its runtime
+//!   keeps relaying; and it keeps only the latest value, so two restarts between
+//!   two accounting passes hide the middle runtime completely. Retirements
+//!   therefore travel on their own queue ([`RetiredRuntimes`]), one entry per
+//!   runtime, sent only once a `close()` has actually succeeded — the moment its
+//!   counters are known both final and complete.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, mpsc, watch};
 
-use crate::model::{TurnApiState, TurnInterface};
+use crate::model::{Statistics, TurnApiState, TurnInterface};
 
 /// Parameters to start a TURN runtime in this process. Equality drives "needs
 /// restart": any field change yields a different value, so the actor tears down
@@ -127,6 +136,17 @@ pub struct StartedRuntime {
     pub handle: Arc<dyn TurnRuntimeHandle>,
     pub api_state: Arc<TurnApiState>,
 }
+
+/// Every runtime that has stopped serving, in the order they stopped, each
+/// carrying the counters it finished with.
+///
+/// A queue rather than a published value because each entry has to be handled
+/// individually: a runtime's counters are collected once, and skipping one loses
+/// everything it relayed. Whoever accounts for usage takes this and drains it;
+/// dropping it tells the supervisor nobody is accounting, and retired counters
+/// are then released as soon as their runtime closes instead of piling up
+/// unread.
+pub type RetiredRuntimes = mpsc::UnboundedReceiver<Arc<RwLock<Statistics>>>;
 
 /// Starts TURN runtimes. Abstracted for two reasons: the supervisor state
 /// machine stays testable without binding real UDP sockets, and each deployment
@@ -277,14 +297,15 @@ impl TurnSupervisorHandle {
     }
 }
 
-/// Spawn the supervisor: returns a stable handle and starts the watchdog +
-/// actor. The watchdog rebuilds the actor (reusing the same desired channel and
-/// shared state) if it panics, so a transient bug cannot permanently wedge TURN.
+/// Spawn the supervisor: returns a stable handle, the queue of retired runtimes,
+/// and starts the watchdog + actor. The watchdog rebuilds the actor (reusing the
+/// same desired channel and shared state) if it panics, so a transient bug cannot
+/// permanently wedge TURN.
 pub fn spawn(
     driver: Arc<dyn TurnRuntimeDriver>,
     initial: DesiredState,
     backoff: BackoffConfig,
-) -> TurnSupervisorHandle {
+) -> (TurnSupervisorHandle, RetiredRuntimes) {
     spawn_with_observer(driver, initial, backoff, None)
 }
 
@@ -295,11 +316,12 @@ pub fn spawn_with_observer(
     initial: DesiredState,
     backoff: BackoffConfig,
     observer: Option<Arc<dyn RuntimeObserver>>,
-) -> TurnSupervisorHandle {
+) -> (TurnSupervisorHandle, RetiredRuntimes) {
     let (desired_tx, _rx) = watch::channel(initial);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = watch::channel(false);
     let (runtime_tx, runtime_rx) = watch::channel(None);
+    let (retired_tx, retired_rx) = mpsc::unbounded_channel();
     let state = Arc::new(Mutex::new(SupervisorState::default()));
     let handle = TurnSupervisorHandle {
         desired_tx: desired_tx.clone(),
@@ -318,8 +340,9 @@ pub fn spawn_with_observer(
         shutdown_rx,
         finished_tx,
         runtime_tx,
+        retired_tx,
     ));
-    handle
+    (handle, retired_rx)
 }
 
 /// Supervise the actor task, rebuilding it on panic. Reuses the same
@@ -335,6 +358,7 @@ async fn watchdog(
     shutdown_rx: watch::Receiver<bool>,
     finished_tx: watch::Sender<bool>,
     runtime_tx: watch::Sender<Option<Arc<TurnApiState>>>,
+    retired_tx: mpsc::UnboundedSender<Arc<RwLock<Statistics>>>,
 ) {
     loop {
         let rx = desired_tx.subscribe();
@@ -346,6 +370,7 @@ async fn watchdog(
             observer.clone(),
             shutdown_rx.clone(),
             runtime_tx.clone(),
+            retired_tx.clone(),
         ));
         match actor.await {
             // Clean exit: shut down, or the desired channel was closed (all
@@ -374,6 +399,7 @@ async fn run_actor(
     observer: Option<Arc<dyn RuntimeObserver>>,
     mut shutdown_rx: watch::Receiver<bool>,
     runtime_tx: watch::Sender<Option<Arc<TurnApiState>>>,
+    retired_tx: mpsc::UnboundedSender<Arc<RwLock<Statistics>>>,
 ) {
     let mut delay = backoff.min;
     loop {
@@ -383,7 +409,16 @@ async fn run_actor(
             break;
         }
         let desired = desired_rx.borrow_and_update().clone();
-        match converge_once(&driver, &state, &desired, observer.as_ref(), &runtime_tx).await {
+        match converge_once(
+            &driver,
+            &state,
+            &desired,
+            observer.as_ref(),
+            &runtime_tx,
+            &retired_tx,
+        )
+        .await
+        {
             Ok(()) => {
                 delay = backoff.min;
                 // Park until the desired state changes or shutdown is requested.
@@ -414,7 +449,7 @@ async fn run_actor(
     }
 
     if *shutdown_rx.borrow() {
-        shutdown_runtime(&state, observer.as_ref(), backoff, &runtime_tx).await;
+        shutdown_runtime(&state, observer.as_ref(), backoff, &runtime_tx, &retired_tx).await;
     }
 }
 
@@ -426,6 +461,7 @@ async fn shutdown_runtime(
     observer: Option<&Arc<dyn RuntimeObserver>>,
     backoff: BackoffConfig,
     runtime_tx: &watch::Sender<Option<Arc<TurnApiState>>>,
+    retired_tx: &mpsc::UnboundedSender<Arc<RwLock<Statistics>>>,
 ) {
     let stop = DesiredState {
         revision: u64::MAX,
@@ -436,7 +472,7 @@ async fn shutdown_runtime(
         // A `None` desired state only ever closes, so no driver is needed; the
         // unreachable-driver guard makes that explicit rather than implicit.
         let driver: Arc<dyn TurnRuntimeDriver> = Arc::new(NoStartDriver);
-        match converge_once(&driver, state, &stop, observer, runtime_tx).await {
+        match converge_once(&driver, state, &stop, observer, runtime_tx, retired_tx).await {
             Ok(()) => return,
             Err(e) => {
                 log::warn!("turn supervisor shutdown close failed, retrying: {e}");
@@ -469,6 +505,7 @@ async fn converge_once(
     desired: &DesiredState,
     observer: Option<&Arc<dyn RuntimeObserver>>,
     runtime_tx: &watch::Sender<Option<Arc<TurnApiState>>>,
+    retired_tx: &mpsc::UnboundedSender<Arc<RwLock<Statistics>>>,
 ) -> Result<(), String> {
     let current = {
         let mut s = state.lock().await;
@@ -504,9 +541,11 @@ async fn converge_once(
     // forever. On failure we return Err and the actor retries this close.
     let existing = {
         let s = state.lock().await;
-        s.running.as_ref().map(|r| r.handle.clone())
+        s.running
+            .as_ref()
+            .map(|r| (r.handle.clone(), r.api_state.statistics.clone()))
     };
-    if let Some(handle) = existing {
+    if let Some((handle, statistics)) = existing {
         // Stop publishing the runtime before anything tears it down, so no reader
         // can pick up a state whose server is already closing. A close that fails
         // leaves the snapshot empty while the old runtime still serves: readers
@@ -524,9 +563,20 @@ async fn converge_once(
             .close()
             .await
             .map_err(|e| format!("failed to close TURN runtime: {e}"))?;
-        let mut s = state.lock().await;
-        s.running = None;
-        s.applied_revision = None;
+        {
+            let mut s = state.lock().await;
+            s.running = None;
+            s.applied_revision = None;
+        }
+        // The server is down, so these counters are final, and this is the last
+        // reference to them the supervisor holds. Hand them on before letting go:
+        // a close that failed took the early return above, so reaching here is
+        // what makes "final" true rather than merely likely.
+        //
+        // A send error means nobody is accounting for usage on this host, which
+        // is a legitimate configuration rather than a fault — the counters are
+        // simply dropped with the runtime.
+        let _ = retired_tx.send(statistics);
     }
 
     // Bump generation for the new lifecycle state (monotonic across rebuilds).
@@ -735,7 +785,7 @@ mod tests {
     async fn enable_starts_runtime() {
         let driver = FakeDriver::new();
         let starts = driver.starts.clone();
-        let h = spawn(
+        let (h, _retired) = spawn(
             driver,
             DesiredState {
                 revision: 1,
@@ -755,7 +805,7 @@ mod tests {
     async fn disable_stops_runtime() {
         let driver = FakeDriver::new();
         let closes = driver.closes.clone();
-        let h = spawn(
+        let (h, _retired) = spawn(
             driver,
             DesiredState {
                 revision: 1,
@@ -780,7 +830,7 @@ mod tests {
         let driver = FakeDriver::new();
         let starts = driver.starts.clone();
         let closes = driver.closes.clone();
-        let h = spawn(
+        let (h, _retired) = spawn(
             driver,
             DesiredState {
                 revision: 1,
@@ -807,7 +857,7 @@ mod tests {
     async fn adding_an_interface_restarts_runtime() {
         let driver = FakeDriver::new();
         let starts = driver.starts.clone();
-        let h = spawn(
+        let (h, _retired) = spawn(
             driver,
             DesiredState {
                 revision: 1,
@@ -837,7 +887,7 @@ mod tests {
         let driver = FakeDriver::new();
         driver.fail_starts.store(2, Ordering::SeqCst);
         let starts = driver.starts.clone();
-        let h = spawn(
+        let (h, _retired) = spawn(
             driver,
             DesiredState {
                 revision: 1,
@@ -860,7 +910,7 @@ mod tests {
         let driver = FakeDriver::new();
         // Fail a lot, so without interruption it would stay stuck.
         driver.fail_starts.store(1_000, Ordering::SeqCst);
-        let h = spawn(
+        let (h, _retired) = spawn(
             driver,
             DesiredState {
                 revision: 1,
@@ -888,7 +938,7 @@ mod tests {
         // rebuilt actor converges.
         driver.panic_starts.store(1, Ordering::SeqCst);
         let starts = driver.starts.clone();
-        let h = spawn(
+        let (h, _retired) = spawn(
             driver,
             DesiredState {
                 revision: 1,
@@ -909,7 +959,7 @@ mod tests {
         // send_replace retains the latest desired even if applied with no live
         // receiver. Here we apply several updates quickly; the final one wins.
         let driver = FakeDriver::new();
-        let h = spawn(
+        let (h, _retired) = spawn(
             driver,
             DesiredState {
                 revision: 1,
@@ -982,7 +1032,7 @@ mod tests {
         let observer: Arc<dyn RuntimeObserver> = Arc::new(RecObserver {
             order: order.clone(),
         });
-        let h = spawn_with_observer(
+        let (h, _retired) = spawn_with_observer(
             driver,
             DesiredState {
                 revision: 1,
@@ -1016,7 +1066,7 @@ mod tests {
         let starts = driver.starts.clone();
         let closes = driver.closes.clone();
         let close_failures = driver.close_failures.clone();
-        let h = spawn(
+        let (h, _retired) = spawn(
             driver,
             DesiredState {
                 revision: 1,
@@ -1066,7 +1116,7 @@ mod tests {
         let driver = FakeDriver::new();
         let closes = driver.closes.clone();
         let starts = driver.starts.clone();
-        let h = spawn(
+        let (h, _retired) = spawn(
             driver,
             DesiredState {
                 revision: 1,
@@ -1100,7 +1150,7 @@ mod tests {
     async fn shutdown_is_idempotent_and_safe_without_a_runtime() {
         let driver = FakeDriver::new();
         let closes = driver.closes.clone();
-        let h = spawn(
+        let (h, _retired) = spawn(
             driver,
             DesiredState {
                 revision: 1,
@@ -1122,7 +1172,7 @@ mod tests {
         let driver = FakeDriver::new();
         let closes = driver.closes.clone();
         let close_failures = driver.close_failures.clone();
-        let h = spawn(
+        let (h, _retired) = spawn(
             driver,
             DesiredState {
                 revision: 1,
@@ -1149,7 +1199,7 @@ mod tests {
     #[tokio::test]
     async fn the_published_runtime_is_the_one_that_is_serving() {
         let driver = FakeDriver::new();
-        let h = spawn(
+        let (h, _retired) = spawn(
             driver,
             DesiredState {
                 revision: 1,
@@ -1194,7 +1244,7 @@ mod tests {
         let driver = FakeDriver::new();
         let snapshot_slot = driver.snapshot.clone();
         let closed_while_published = driver.closed_while_published.clone();
-        let h = spawn(
+        let (h, _retired) = spawn(
             driver,
             DesiredState {
                 revision: 1,
@@ -1237,7 +1287,7 @@ mod tests {
         let driver = FakeDriver::new();
         let close_failures = driver.close_failures.clone();
         let starts = driver.starts.clone();
-        let h = spawn(
+        let (h, _retired) = spawn(
             driver,
             DesiredState {
                 revision: 1,
@@ -1275,6 +1325,101 @@ mod tests {
             1,
             "no restart happened: the runtime never went away"
         );
+        h.shutdown().await;
+    }
+
+    /// Every runtime that stops serving reaches the accounting queue, in order,
+    /// without anyone having to be watching when it happens.
+    ///
+    /// This is the difference between the queue and the published snapshot: the
+    /// snapshot keeps only the latest value, so a reader that looks once per
+    /// minute across two restarts sees the third runtime and never learns the
+    /// second existed. Everything the second relayed would go uncounted.
+    #[tokio::test]
+    async fn every_replaced_runtime_reaches_the_accounting_queue() {
+        let driver = FakeDriver::new();
+        let (h, mut retired) = spawn(
+            driver,
+            DesiredState {
+                revision: 1,
+                params: Some(params("a")),
+            },
+            fast_backoff(),
+        );
+        wait_until(&h, |s| s.running).await;
+        let first = h.runtime().expect("running").statistics.clone();
+
+        h.apply(DesiredState {
+            revision: 2,
+            params: Some(params("b")),
+        });
+        wait_until(&h, |s| s.applied_revision == Some(2)).await;
+        let second = h.runtime().expect("running").statistics.clone();
+
+        h.apply(DesiredState {
+            revision: 3,
+            params: Some(params("c")),
+        });
+        wait_until(&h, |s| s.applied_revision == Some(3)).await;
+
+        // Nothing read the queue between the two restarts, and both are still
+        // there — the second is not overwritten by the third.
+        let handed_over: Vec<_> = std::iter::from_fn(|| retired.try_recv().ok()).collect();
+        assert_eq!(
+            handed_over.len(),
+            2,
+            "both retired runtimes are handed over"
+        );
+        assert!(
+            Arc::ptr_eq(&handed_over[0], &first),
+            "the first runtime retires first"
+        );
+        assert!(
+            Arc::ptr_eq(&handed_over[1], &second),
+            "the runtime nobody observed is handed over too"
+        );
+        h.shutdown().await;
+    }
+
+    /// A close that fails clears the published snapshot while its runtime keeps
+    /// relaying. Retiring it there would tell accounting to let go of counters
+    /// that are still climbing, so the handover waits for the close to succeed.
+    #[tokio::test]
+    async fn a_runtime_whose_close_failed_is_not_retired() {
+        let driver = FakeDriver::new();
+        let close_failures = driver.close_failures.clone();
+        let (h, mut retired) = spawn(
+            driver,
+            DesiredState {
+                revision: 1,
+                params: Some(params("a")),
+            },
+            fast_backoff(),
+        );
+        wait_until(&h, |s| s.running).await;
+        let serving = h.runtime().expect("running").statistics.clone();
+
+        close_failures.store(1_000, Ordering::SeqCst);
+        h.apply(DesiredState {
+            revision: 2,
+            params: Some(params("b")),
+        });
+        wait_until(&h, |s| s.last_error.is_some()).await;
+
+        assert!(
+            h.runtime().is_none(),
+            "readers are told nothing is serving while the teardown is under way"
+        );
+        assert!(
+            retired.try_recv().is_err(),
+            "a runtime that is still relaying must not be retired"
+        );
+
+        // Let the close through: only now are its counters final.
+        close_failures.store(0, Ordering::SeqCst);
+        wait_until(&h, |s| s.applied_revision == Some(2)).await;
+        let handed_over = retired.try_recv().expect("the closed runtime is retired");
+        assert!(Arc::ptr_eq(&handed_over, &serving));
         h.shutdown().await;
     }
 
