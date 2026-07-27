@@ -9,7 +9,6 @@ pub(super) async fn run_pipe_server(
     session_id: u32,
     desktop_name: Option<String>,
     config_json: String,
-    config_file_path: Option<String>,
     mut cmd_rx: mpsc::UnboundedReceiver<ServiceToWorker>,
     msg_tx: mpsc::UnboundedSender<WorkerToService>,
     worker_mgr: WorkerManager,
@@ -79,9 +78,6 @@ pub(super) async fn run_pipe_server(
             // transport (single-pipe fallback).
             media_pipe_name: None,
             file_pipe_name: Some(file_socket_path.clone()),
-            // Carry the daemon's settings file path so worker-side
-            // `Settings::save()` writes back to the same file.
-            config_file_path,
             remote_access_locked: remote_access_state.is_locked(),
             remote_access_state_version: remote_access_state.state_version,
         }),

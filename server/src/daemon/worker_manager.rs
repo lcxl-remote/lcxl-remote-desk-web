@@ -294,13 +294,12 @@ impl WorkerManager {
 
         let (ipc_cmd_tx, ipc_cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
 
-        let (config_json, ipc_token, config_file_path) = {
+        let (config_json, ipc_token) = {
             let settings = self.settings.read().await;
             let json = serde_json::to_string(&*settings)
                 .map_err(|e| format!("Failed to serialize settings: {e}"))?;
             let token = settings.system.tauri_ipc_token.clone();
-            let path = settings.args.config_file_path.clone();
-            (json, token, path)
+            (json, token)
         };
 
         // Daemon-side host-upstream endpoint that the worker's Forwarder hub
@@ -314,11 +313,6 @@ impl WorkerManager {
         let pipe_name_c = pipe_name.clone();
         let desktop_c = desktop_name.clone();
         let config_c = config_json.clone();
-        let config_file_path_c = if config_file_path.is_empty() {
-            None
-        } else {
-            Some(config_file_path)
-        };
         let host_upstream_url_c = host_upstream_url.clone();
         let ipc_token_c = ipc_token.clone();
         let mgr_c = self.clone();
@@ -337,7 +331,6 @@ impl WorkerManager {
                 session_id,
                 desktop_c,
                 config_c,
-                config_file_path_c,
                 ipc_cmd_rx,
                 (*worker_msg_tx).clone(),
                 mgr_c,
@@ -418,12 +411,9 @@ impl WorkerManager {
         let pipe_name = format!("inprocess-{session_id}-{}", uuid::Uuid::new_v4());
         let (ipc_cmd_tx, mut ipc_cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
 
-        let (config_json, config_file_path) = {
+        let config_json = {
             let s = self.settings.read().await;
-            let json = serde_json::to_string(&*s)
-                .map_err(|e| format!("Failed to serialize settings: {e}"))?;
-            let path = s.args.config_file_path.clone();
-            (json, path)
+            serde_json::to_string(&*s).map_err(|e| format!("Failed to serialize settings: {e}"))?
         };
 
         let remote_access_state = self.remote_access_state();
@@ -446,15 +436,6 @@ impl WorkerManager {
             // `run_with_transports` is invoked directly (no `ipc_loop`
             // handshake which is where that check lives).
             file_pipe_name: None,
-            // In-process portable / DeskServer modes share the daemon's
-            // settings file path so worker-side `Settings::save()` (e.g.
-            // for a "remember" auth approval) writes back to the same
-            // file. See `WorkerInitPayload::config_file_path` docs.
-            config_file_path: if config_file_path.is_empty() {
-                None
-            } else {
-                Some(config_file_path)
-            },
             remote_access_locked: remote_access_state.is_locked(),
             remote_access_state_version: remote_access_state.state_version,
         };

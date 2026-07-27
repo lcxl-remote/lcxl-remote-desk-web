@@ -54,7 +54,6 @@ fn worker_init_payload_round_trip_with_host_upstream_fields() {
         host_upstream_url: Some("ws://127.0.0.1:8082/ws/host_upstream".to_string()),
         media_pipe_name: Some(r"\\.\pipe\lcxl-desk-ipc-7-uuid-media".to_string()),
         file_pipe_name: Some(r"\\.\pipe\lcxl-desk-file-ipc-7-uuid".to_string()),
-        config_file_path: Some(r"C:\ProgramData\lcxl\settings.toml".to_string()),
         remote_access_locked: true,
         remote_access_state_version: 8,
     };
@@ -66,7 +65,6 @@ fn worker_init_payload_round_trip_with_host_upstream_fields() {
     assert_eq!(decoded.host_upstream_url, original.host_upstream_url);
     assert_eq!(decoded.media_pipe_name, original.media_pipe_name);
     assert_eq!(decoded.file_pipe_name, original.file_pipe_name);
-    assert_eq!(decoded.config_file_path, original.config_file_path);
     assert!(decoded.remote_access_locked);
     assert_eq!(decoded.remote_access_state_version, 8);
 }
@@ -105,7 +103,6 @@ fn worker_init_payload_accepts_missing_optional_fields() {
     assert!(decoded.auth_token.is_none());
     assert!(decoded.media_pipe_name.is_none());
     assert!(decoded.file_pipe_name.is_none());
-    assert!(decoded.config_file_path.is_none());
 }
 
 // ============== IPC variants — wincode round-trips ==============
@@ -1057,7 +1054,6 @@ fn service_to_worker_all_variants_round_trip() {
             host_upstream_url: None,
             media_pipe_name: None,
             file_pipe_name: None,
-            config_file_path: None,
             remote_access_locked: false,
             remote_access_state_version: 1,
         }),

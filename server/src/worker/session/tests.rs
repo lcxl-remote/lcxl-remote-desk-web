@@ -16,7 +16,6 @@ fn payload_with(
         host_upstream_url,
         media_pipe_name: None,
         file_pipe_name: None,
-        config_file_path: None,
         remote_access_locked: false,
         remote_access_state_version: 1,
     }

@@ -41,15 +41,6 @@ impl WorkerSession {
                 // so set the mode explicitly to satisfy DeskServer-specific checks
                 // (e.g. TURN ICE server inclusion in signaling.rs).
                 s.args.startup_mode = StartupMode::DeskServer;
-                // Restore `config_file_path` from the Init payload so any
-                // worker-side `Settings::save()` (e.g. persisting a "remember"
-                // choice from a security approval dialog) writes back to the
-                // exact file the daemon loaded. Without this the worker's
-                // `args.config_file_path` is the empty string and `save()`
-                // fails with `FILE_PATH_NOT_FOUND`.
-                if let Some(p) = init_payload.config_file_path.as_deref() {
-                    s.args.config_file_path = p.to_owned();
-                }
                 s
             }
             Err(e) => {

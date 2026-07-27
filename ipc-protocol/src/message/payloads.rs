@@ -68,23 +68,6 @@ pub struct WorkerInitPayload {
     #[serde(default)]
     pub file_pipe_name: Option<String>,
 
-    /// Absolute path of the on-disk settings file the daemon is using.
-    ///
-    /// `Settings.args` carries `#[serde(skip)]`, so when the worker
-    /// deserializes `config_json` it cannot recover `args.config_file_path`
-    /// from the wire payload — and any worker-side `Settings::save()` call
-    /// (e.g. when the user picks "remember" on a security approval prompt)
-    /// would fall back to the default empty path and fail with
-    /// `FILE_PATH_NOT_FOUND`.
-    ///
-    /// The daemon fills this with `args.config_file_path.clone()` so the
-    /// worker writes back to the exact same on-disk file the daemon
-    /// loaded. `Option<String>` with `#[serde(default)]` keeps backwards
-    /// compatibility with older daemons whose Init payloads predate the
-    /// field.
-    #[serde(default)]
-    pub config_file_path: Option<String>,
-
     /// Daemon-authoritative admission state. The worker starts fail-closed and
     /// only opens its own dispatch gate after receiving this payload.
     pub remote_access_locked: bool,
