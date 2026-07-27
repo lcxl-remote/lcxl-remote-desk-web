@@ -3,6 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { Network } from 'lucide-react';
 
 import { useGetTurnUsage } from '@/services/hooks/turnUsageController/useGetTurnUsage';
+import { useGetTurnInfo } from '@/services/hooks/turnController/useGetTurnInfo';
+import { turnRuntimeStateEnum } from '@/services/types';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { TurnUsageChart, type TurnUsageRow } from '@/features/usage/turn-usage-chart';
 import {
@@ -64,8 +66,37 @@ export function TurnUsagePage() {
                             rows={rows}
                         />
                     )}
+                    {/* An empty history is normal on a host with no relay of its
+                        own, and used to be indistinguishable from a broken page.
+                        The runtime state says which it is. */}
+                    {!isLoading && !error && rows.length === 0 && <NoRelayHint />}
                 </CardContent>
             </Card>
         </div>
+    );
+}
+
+/**
+ * Why there is nothing to show.
+ *
+ * The history is kept whether or not this host relays, so an empty range on a
+ * host that has never had a relay is not a gap in the data — there was never
+ * any traffic to record, and saying so is more useful than an empty chart.
+ */
+function NoRelayHint() {
+    const { t } = useTranslation();
+    const { data } = useGetTurnInfo();
+    const state = data?.data?.state;
+    if (!state || state === turnRuntimeStateEnum.running) {
+        return null;
+    }
+    return (
+        <p className="text-muted-foreground text-sm text-center">
+            {t(
+                state === turnRuntimeStateEnum.unsupported
+                    ? 'pages.turnUsage.noRelay.unsupported'
+                    : 'pages.turnUsage.noRelay.notRelaying',
+            )}
+        </p>
     );
 }

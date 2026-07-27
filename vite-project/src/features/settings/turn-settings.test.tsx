@@ -12,6 +12,16 @@ const turnQuery: { data: { data: Record<string, unknown> } | undefined; isLoadin
 }
 const updateTurnSettings = vi.fn(async () => ({}))
 
+// The page always renders the runtime status card; these tests are about the
+// form, so the card is given a runtime that is up and has nothing to report.
+const turnInfo: { data: { data: Record<string, unknown> } | undefined; isLoading: boolean } = {
+    data: undefined,
+    isLoading: false,
+}
+
+vi.mock("@/services/hooks/turnController/useGetTurnInfo", () => ({
+    useGetTurnInfo: () => turnInfo,
+}))
 vi.mock("@/services/hooks/turnController/useQueryTurnSettings", () => ({
     useQueryTurnSettings: () => turnQuery,
 }))
@@ -40,6 +50,17 @@ beforeEach(() => {
     updateTurnSettings.mockClear()
     turnQuery.data = undefined
     turnQuery.isLoading = false
+    turnInfo.data = {
+        data: {
+            state: "running",
+            software: "test",
+            interfaces: [],
+            rejected_interfaces: [],
+            uptime_secs: 1,
+            last_error: null,
+        },
+    }
+    turnInfo.isLoading = false
 })
 
 describe("TurnSettings — the TURN service switch", () => {
@@ -77,5 +98,58 @@ describe("TurnSettings — the TURN service switch", () => {
         expect(payload).not.toHaveProperty("enable_stun")
         expect(payload.static_auth_secret).toBe("server-side-secret")
         expect(payload.realm).toBe("example.org")
+    })
+})
+
+describe("TurnSettings — saving is the confirmation", () => {
+    /// Saving restarts the relay and drops whatever it is carrying, and there is
+    /// deliberately no extra dialog in the way. The cost therefore has to be
+    /// stated where the action is taken, or the operator finds out by losing a
+    /// session.
+    it("states that saving interrupts relayed connections", () => {
+        turnQuery.data = { data: { ...SAVED } }
+        render(<TurnSettings />)
+
+        expect(screen.getByText(/restarts the TURN service immediately/i)).toBeInTheDocument()
+        expect(screen.getByText(/drops the connections currently being relayed/i)).toBeInTheDocument()
+    })
+})
+
+describe("TurnSettings — interface addresses", () => {
+    async function editExternal(value: string) {
+        turnQuery.data = { data: { ...SAVED } }
+        render(<TurnSettings />)
+        const external = await screen.findByDisplayValue("1.2.3.4:3478")
+        fireEvent.change(external, { target: { value } })
+        fireEvent.click(screen.getByRole("button", { name: /save settings/i }))
+    }
+
+    /// The server refuses an address it cannot bind or advertise. Catching it
+    /// here means the operator is told while looking at the field, instead of
+    /// saving an entry that is silently never served.
+    it("refuses an address the server would reject", async () => {
+        await editExternal("relay.example.com:3478")
+
+        expect(await screen.findByText(/peers can dial/i)).toBeInTheDocument()
+        expect(updateTurnSettings).not.toHaveBeenCalled()
+    })
+
+    /// A wildcard address parses but names nothing dialable — the exact value an
+    /// earlier build substituted when parsing failed.
+    it("refuses a wildcard external address", async () => {
+        await editExternal("0.0.0.0:3478")
+
+        expect(await screen.findByText(/wildcard address/i)).toBeInTheDocument()
+        expect(updateTurnSettings).not.toHaveBeenCalled()
+    })
+
+    /// IPv6 has to survive the form: brackets and all, it is a valid entry.
+    it("accepts a bracketed IPv6 address", async () => {
+        await editExternal("[2001:db8::1]:3478")
+
+        await waitFor(() => expect(updateTurnSettings).toHaveBeenCalledTimes(1))
+        const payload = (updateTurnSettings.mock.calls[0] as unknown as [{ data: Record<string, unknown> }])[0]
+            .data
+        expect((payload.interfaces as { external: string }[])[0].external).toBe("[2001:db8::1]:3478")
     })
 })

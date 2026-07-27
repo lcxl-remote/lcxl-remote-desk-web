@@ -93,6 +93,12 @@ what a working value looks like. If **every** entry is rejected there is nothing
 to serve on, so the status is `not-configured` — with the rejections attached,
 which is what distinguishes it from having configured no interfaces at all.
 
+The **TURN settings** page shows the same information as a runtime status card:
+whether the service is running, the interfaces it is actually serving, why it is
+not running when it is not, and any entry that was refused. The card is what to
+read after saving — the form shows the configuration, the card shows what became
+of it.
+
 ## Desktop `[desk]` {#desktop-desk}
 
 - `video_fps` — video frame rate (default `60`). Lowering reduces CPU and bandwidth usage.

@@ -1,4 +1,4 @@
-import { useEffect } from "react"
+import { useEffect, useMemo } from "react"
 import { useForm, useFieldArray } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
@@ -29,22 +29,59 @@ import {
     AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
 import { useToast } from "@/hooks/use-toast"
+import { TurnRuntimeStatus } from "@/features/settings/turn-runtime-status"
 
-const turnInterfaceSchema = z.object({
-    transport: z.enum(["tcp", "udp"]),
-    listen: z.string().min(1, "Listen address is required"),
-    external: z.string().min(1, "External address is required"),
-})
+/**
+ * `IP:port`, with IPv6 literals in brackets — the same shape the server binds
+ * and advertises. Checked here so a value that would be rejected at startup is
+ * caught while the operator is still looking at the field, rather than becoming
+ * an entry that is saved, silently unserved, and only explained on the status
+ * card.
+ */
+const SOCKET_ADDRESS = /^(\[[0-9a-fA-F:.]+\]|[0-9]{1,3}(\.[0-9]{1,3}){3}):([0-9]{1,5})$/
 
-const turnSettingsSchema = z.object({
-    realm: z.string().min(1, "Realm is required"),
-    interfaces: z.array(turnInterfaceSchema),
-    enable_turn: z.boolean(),
-    relay_min_port: z.number().min(1).max(65535),
-    relay_max_port: z.number().min(1).max(65535),
-})
+function parsePort(address: string): number | null {
+    const match = SOCKET_ADDRESS.exec(address)
+    if (!match) return null
+    const port = Number(match[3])
+    return port <= 65535 ? port : null
+}
 
-type TurnSettingsFormValues = z.infer<typeof turnSettingsSchema>
+type Translate = ReturnType<typeof useTranslation>["t"]
+
+/**
+ * Built per render rather than once at module scope: `FormMessage` renders the
+ * validation message verbatim, so the messages have to come from the translator
+ * the component already holds.
+ */
+const makeTurnSettingsSchema = (t: Translate) =>
+    z.object({
+        realm: z.string().min(1, t("pages.turn.settings.validation.realmRequired")),
+        interfaces: z.array(
+            z.object({
+                transport: z.enum(["tcp", "udp"]),
+                listen: z
+                    .string()
+                    .refine((value) => parsePort(value) !== null, {
+                        message: t("pages.turn.settings.validation.addressFormat"),
+                    }),
+                external: z.string().refine(
+                    (value) => {
+                        const port = parsePort(value)
+                        // A wildcard address or port zero parses but names
+                        // nothing a peer can dial, so the server refuses it too.
+                        return port !== null && port !== 0 && !/^(\[::\]|0\.0\.0\.0):/.test(value)
+                    },
+                    { message: t("pages.turn.settings.validation.externalDialable") },
+                ),
+            }),
+        ),
+        enable_turn: z.boolean(),
+        relay_min_port: z.number().min(1).max(65535),
+        relay_max_port: z.number().min(1).max(65535),
+    })
+
+type TurnSettingsFormValues = z.infer<ReturnType<typeof makeTurnSettingsSchema>>
 
 export function TurnSettings() {
     const { t } = useTranslation()
@@ -54,8 +91,9 @@ export function TurnSettings() {
     const { mutateAsync: updateTurnSettings, isPending: isUpdating } = useUpdateTurnSettings()
     const { mutateAsync: regenerateSecret, isPending: isRegenerating } = useRegenerateTurnSecret()
 
+    const schema = useMemo(() => makeTurnSettingsSchema(t), [t])
     const form = useForm<TurnSettingsFormValues>({
-        resolver: zodResolver(turnSettingsSchema),
+        resolver: zodResolver(schema),
         defaultValues: {
             realm: "localhost",
             interfaces: [],
@@ -145,6 +183,8 @@ export function TurnSettings() {
                     {t("pages.system.settings.alert.description")}
                 </AlertDescription>
             </Alert>
+
+            <TurnRuntimeStatus />
 
             <Card>
                 <CardHeader>
@@ -300,7 +340,13 @@ export function TurnSettings() {
                                 ))}
                             </div>
 
-                            <div className="flex justify-end">
+                            {/* Saving is the confirmation — no extra dialog — so
+                                the cost of the action is stated next to the
+                                button that performs it. */}
+                            <div className="flex flex-col items-end gap-2">
+                                <p className="text-sm text-muted-foreground text-right">
+                                    {t('pages.turn.settings.restartNotice')}
+                                </p>
                                 <Button type="submit" disabled={isUpdating}>
                                     {isUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t('pages.turn.settings.save')}
@@ -337,6 +383,8 @@ export function TurnSettings() {
                                 <AlertDialogTitle>{t("pages.system.settings.regenerateSecretConfirm")}</AlertDialogTitle>
                                 <AlertDialogDescription>
                                     {t("pages.system.settings.regenerateSecretDescription")}
+                                    {" "}
+                                    {t("pages.turn.settings.restartNotice")}
                                 </AlertDialogDescription>
                             </AlertDialogHeader>
                             <AlertDialogFooter>
