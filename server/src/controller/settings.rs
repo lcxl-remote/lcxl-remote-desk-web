@@ -12,10 +12,11 @@ use crate::daemon::signaling_proxy::manager_link_should_connect;
 use crate::host_control::{ApprovalResponse, HostControlHub};
 use crate::model::settings::{
     AiExecutionPolicyPublic, AiExecutionPolicyUpdate, CollectionPolicySettings,
-    CollectionPolicySettingsUpdate, LogSettings, SharedSettings, SystemSettings,
+    CollectionPolicySettingsUpdate, LogSettings, Settings, SharedSettings, SystemSettings,
     TurnClientSettings,
 };
 use crate::service::auto_start::update_auto_start_status;
+use crate::service::turn_runtime::TurnRuntimeControl;
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_turn::model::TurnSettings;
 
@@ -263,6 +264,7 @@ pub async fn query_turn_settings(
 pub async fn update_turn_settings(
     request_json: web::Json<TurnSettings>,
     settings: web::Data<SharedSettings>,
+    control: Option<web::Data<TurnRuntimeControl>>,
 ) -> Result<HttpResponse, AWError> {
     let params = request_json.into_inner();
     let mut settings = settings.write().await;
@@ -273,9 +275,34 @@ pub async fn update_turn_settings(
     settings.turn.relay_min_port = params.relay_min_port;
     settings.turn.relay_max_port = params.relay_max_port;
 
-    settings.save()?;
+    commit_turn_settings(&settings, control.as_ref().map(|c| c.get_ref()))?;
     info!("Update turn settings successfully");
     Ok(HttpResponse::Ok().finish())
+}
+
+/// Persist the TURN settings and make the running service match them.
+///
+/// Every endpoint that writes TURN settings goes through here. Saving without
+/// applying is what left a rotated secret on disk while the running server kept
+/// validating against the old one — a disagreement that never healed, because
+/// nothing else was watching the file.
+///
+/// Success means "saved, and the new state has been published". It deliberately
+/// does not mean the runtime has already converged: rebinding sockets can fail
+/// and be retried, and holding the request open for that would report a
+/// transient bind failure as a failed save.
+fn commit_turn_settings(
+    settings: &Settings,
+    control: Option<&TurnRuntimeControl>,
+) -> Result<(), AWError> {
+    settings.save()?;
+    match control {
+        Some(control) => control.apply(&settings.turn),
+        // No runtime control in this process (the daemon's local API serves the
+        // settings pages but hosts no relay); saving is the whole job.
+        None => log::debug!("no TURN runtime in this process; settings saved only"),
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -376,11 +403,14 @@ pub async fn update_telemetry_consent(
 #[post("/settings/turn/regenerate-secret")]
 pub async fn regenerate_turn_secret(
     settings: web::Data<SharedSettings>,
+    control: Option<web::Data<TurnRuntimeControl>>,
 ) -> Result<HttpResponse, AWError> {
     let mut settings = settings.write().await;
     let new_secret = uuid::Uuid::new_v4().to_string().replace("-", "");
     settings.turn.static_auth_secret = Some(new_secret);
-    settings.save()?;
+    // The secret is what the running server validates credentials against, so
+    // this write restarts the runtime like any other.
+    commit_turn_settings(&settings, control.as_ref().map(|c| c.get_ref()))?;
     info!("Regenerate TURN static_auth_secret successfully");
     Ok(HttpResponse::Ok().finish())
 }
@@ -775,5 +805,123 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());
         assert!(gate.should_connect(), "enabled + configured -> gate true");
+    }
+
+    /// Both endpoints that persist TURN settings must also make the running
+    /// service match them. The rotation endpoint is the one that used to save
+    /// and stop there, leaving the file and the live server disagreeing about
+    /// the secret forever — the running server kept rejecting every credential
+    /// signed with the new one.
+    #[actix_web::test]
+    async fn both_turn_write_endpoints_reach_the_running_service() {
+        use crate::model::settings::StartupMode;
+        use crate::service::turn_runtime::HostTurnDriver;
+        use desk_turn::model::{TurnInterface, TurnTransport};
+        use desk_turn::runtime::{TurnIntent, TurnRuntimeView};
+        use desk_turn::supervisor::{BackoffConfig, DesiredState, spawn};
+        use std::time::Duration;
+
+        let mut settings = Settings::default();
+        let tmp = std::env::temp_dir().join(format!("lrd-turn-{}.toml", uuid::Uuid::new_v4()));
+        settings.args.config_file_path = tmp.to_string_lossy().into_owned();
+        let shared = web::Data::new(SharedSettings::from(settings));
+
+        let connection_map = web::Data::new(desk_signal::model::SharedConnectionMap::from(
+            std::collections::BTreeMap::new(),
+        ));
+        let (intent_tx, intent_rx) = tokio::sync::watch::channel(TurnIntent::NotConfigured);
+        let supervisor = spawn(
+            Arc::new(HostTurnDriver::new(connection_map)),
+            DesiredState {
+                revision: 0,
+                params: None,
+            },
+            BackoffConfig {
+                min: Duration::from_millis(5),
+                max: Duration::from_millis(20),
+            },
+        );
+        let view = TurnRuntimeView::new(supervisor.clone(), intent_rx);
+        let control = web::Data::new(TurnRuntimeControl::new(
+            StartupMode::Default,
+            supervisor.clone(),
+            intent_tx,
+            0,
+        ));
+
+        let app = test::init_service(
+            App::new()
+                .app_data(shared.clone())
+                .app_data(control.clone())
+                .service(update_turn_settings)
+                .service(regenerate_turn_secret),
+        )
+        .await;
+
+        // Nothing is running yet: no interface has been configured.
+        assert!(view.runtime().is_none());
+
+        // Saving an interface starts the relay without restarting the process.
+        let payload = TurnSettings {
+            enable_turn: true,
+            interfaces: vec![TurnInterface {
+                transport: TurnTransport::UDP,
+                listen: "127.0.0.1:0".into(),
+                external: "203.0.113.11:3478".into(),
+            }],
+            ..TurnSettings::default()
+        };
+        let req = test::TestRequest::post()
+            .uri("/settings/turn")
+            .set_json(&payload)
+            .to_request();
+        assert!(test::call_service(&app, req).await.status().is_success());
+        let running = wait_for_runtime(&view, true)
+            .await
+            .expect("saving an interface must start the relay");
+        assert_eq!(running.settings.interfaces[0].external, "203.0.113.11:3478");
+        let before = running.settings.static_auth_secret.clone();
+
+        // Rotating the secret must reach the running server too, and the value
+        // it serves with must be the value that was persisted.
+        let req = test::TestRequest::post()
+            .uri("/settings/turn/regenerate-secret")
+            .to_request();
+        assert!(test::call_service(&app, req).await.status().is_success());
+        let mut rotated = None;
+        for _ in 0..200 {
+            match view.runtime() {
+                Some(current) if current.settings.static_auth_secret != before => {
+                    rotated = Some(current);
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+        let rotated = rotated.expect("a rotated secret must restart the running server");
+        let persisted = shared.read().await.turn.static_auth_secret.clone();
+        assert!(persisted.is_some());
+        assert_eq!(
+            rotated.settings.static_auth_secret, persisted,
+            "the server must validate against the secret that was saved"
+        );
+
+        supervisor.shutdown().await;
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Wait until a runtime is (or is no longer) published.
+    async fn wait_for_runtime(
+        view: &desk_turn::runtime::TurnRuntimeView,
+        present: bool,
+    ) -> Option<Arc<desk_turn::model::TurnApiState>> {
+        for _ in 0..200 {
+            let runtime = view.runtime();
+            if runtime.is_some() == present {
+                return runtime;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("runtime presence never became {present}");
     }
 }

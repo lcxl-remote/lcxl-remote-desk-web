@@ -27,7 +27,7 @@ export function getTurnInfoSuspenseQueryOptions(config: Partial<RequestConfig> &
 }
 
 /**
- * @summary Get turn server info
+ * @summary Get TURN runtime status
  * {@link /api/turn/info}
  */
 export function useGetTurnInfoSuspense<TData = GetTurnInfoQueryResponse, TQueryKey extends QueryKey = GetTurnInfoSuspenseQueryKey>(options: 

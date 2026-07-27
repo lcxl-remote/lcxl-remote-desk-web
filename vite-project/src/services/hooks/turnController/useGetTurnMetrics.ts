@@ -3,7 +3,7 @@
 * Do not edit manually.
 */
 
-import type { GetTurnMetricsQueryResponse, GetTurnMetrics417 } from "../../types.ts";
+import type { GetTurnMetricsQueryResponse, GetTurnMetrics503 } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
 import { getTurnMetrics } from "../../clients.ts";
@@ -16,7 +16,7 @@ export type GetTurnMetricsQueryKey = ReturnType<typeof getTurnMetricsQueryKey>
 export function getTurnMetricsQueryOptions(config: Partial<RequestConfig> & { client?: Client } = {}) {
 
         const queryKey = getTurnMetricsQueryKey()
-        return queryOptions<GetTurnMetricsQueryResponse, ResponseErrorConfig<GetTurnMetrics417>, GetTurnMetricsQueryResponse, typeof queryKey>({
+        return queryOptions<GetTurnMetricsQueryResponse, ResponseErrorConfig<GetTurnMetrics503>, GetTurnMetricsQueryResponse, typeof queryKey>({
          
          queryKey,
          queryFn: async ({ signal }) => {
@@ -32,7 +32,7 @@ export function getTurnMetricsQueryOptions(config: Partial<RequestConfig> & { cl
  */
 export function useGetTurnMetrics<TData = GetTurnMetricsQueryResponse, TQueryData = GetTurnMetricsQueryResponse, TQueryKey extends QueryKey = GetTurnMetricsQueryKey>(options: 
 {
-  query?: Partial<QueryObserverOptions<GetTurnMetricsQueryResponse, ResponseErrorConfig<GetTurnMetrics417>, TData, TQueryData, TQueryKey>> & { client?: QueryClient },
+  query?: Partial<QueryObserverOptions<GetTurnMetricsQueryResponse, ResponseErrorConfig<GetTurnMetrics503>, TData, TQueryData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }
 }
  = {}) {
@@ -46,7 +46,7 @@ export function useGetTurnMetrics<TData = GetTurnMetricsQueryResponse, TQueryDat
           ...getTurnMetricsQueryOptions(config),
           ...resolvedOptions,
           queryKey,
-         } as unknown as QueryObserverOptions, queryClient) as UseQueryResult<TData, ResponseErrorConfig<GetTurnMetrics417>> & { queryKey: TQueryKey }
+         } as unknown as QueryObserverOptions, queryClient) as UseQueryResult<TData, ResponseErrorConfig<GetTurnMetrics503>> & { queryKey: TQueryKey }
 
          query.queryKey = queryKey as TQueryKey
 

@@ -441,7 +441,7 @@ pub async fn start_inprocess_daemon(
     args: crate::model::settings::Args,
     settings: web::Data<SharedSettings>,
     host_control_hub: Arc<crate::host_control::HostControlHub>,
-    own_turn_endpoints: Arc<std::collections::HashSet<String>>,
+    own_turn_endpoints: crate::daemon::pc_manager::OwnTurnEndpoints,
     manager_link_state: Arc<crate::daemon::manager_link_state::ManagerLinkState>,
     support_link_state: Arc<crate::daemon::support_link_state::SupportLinkState>,
     manager_link_gate: Arc<crate::daemon::manager_link_gate::ManagerLinkGate>,
@@ -454,9 +454,9 @@ pub async fn start_inprocess_daemon(
 
     let exec_ledger = open_exec_ledger(&args.config_file_path).await?;
 
-    // Endpoints of this node's own bundled TURN (frozen at startup from the
-    // running `TurnApiState`; empty when no embedded TURN runs) so the PC
-    // manager never relays through itself.
+    // Endpoints of this node's own bundled TURN, read from the running runtime
+    // on each use (empty when no embedded TURN is serving) so the PC manager
+    // never relays through itself, and follows the relay if it moves.
     let pc_registry = PcRegistry::new().with_own_turn_endpoints(own_turn_endpoints);
     pc_registry.set_host_activity(host_control_hub.host_activity());
     let (worker_mgr, worker_rx) =

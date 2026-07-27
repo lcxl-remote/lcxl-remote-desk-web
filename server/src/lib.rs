@@ -62,8 +62,10 @@ use crate::{
             update_virtual_display_settings,
         },
     },
-    model::turn::TurnAuthHandler,
-    service::turn_lifecycle::{TurnStartup, turn_startup},
+    service::{
+        turn_lifecycle::{mode_hosts_turn, turn_plan},
+        turn_runtime::{HostTurnDriver, TurnRuntimeControl, TurnRuntimeStopGuard},
+    },
 };
 use actix_server::Server;
 use actix_service::fn_service;
@@ -95,7 +97,7 @@ use desk_signal::{
     },
     model::SharedConnectionMap,
 };
-use desk_turn::service::startup_turn_server;
+use desk_turn::runtime::{TurnIntent, TurnRuntimeView};
 use desk_utils::{error::DeskErrorCode, network::check_ipv6_available, rest::RestResponse};
 use error::DeskError;
 use log::{error, info, warn};
@@ -136,17 +138,16 @@ pub struct ApiSurfaceOpts {
     pub include_signaling: bool,
     /// Register file management + device-code admin under `/api/desk`.
     pub include_device_code: bool,
-    /// Register the TURN runtime-management endpoints (`/info`, `/session`,
-    /// `/session/statistics`, `/metrics`), which need a live TURN server.
-    pub include_turn: bool,
     /// Whether this process has an initialized local signal SQLite DB.
     ///
     /// Gates the routes whose handlers call `desk_signal::db::get_db()`, which
-    /// panics when the DB was never opened. Deliberately independent of
-    /// [`Self::include_turn`]: `/api/turn/usage` reads only the historical
-    /// rollups and stays available on a server with no TURN runtime, while the
-    /// ServiceDaemon has the DB but never a TURN runtime. Keep it in sync with
-    /// [`startup_mode_has_signal_db`], which decides where the DB is opened.
+    /// panics when the DB was never opened. This is the only condition on the
+    /// `/turn` scope: the TURN *runtime* endpoints are registered everywhere
+    /// (whether a relay is running is a runtime answer, not a route-table one),
+    /// while `/api/turn/usage` reads the historical rollups and needs the DB —
+    /// which the ServiceDaemon has and a pure desk-server does not. Keep it in
+    /// sync with [`startup_mode_has_signal_db`], which decides where the DB is
+    /// opened.
     pub has_signal_db: bool,
     /// Register the `/api/model/*` scope (the collect-only token-usage view plus
     /// the central-brain model-provider config) and the usage-retention windows
@@ -288,31 +289,27 @@ pub fn configure_api_surface(
                     }),
             )
             .configure(move |cfg| {
-                // The `/turn` scope carries two unrelated capabilities: runtime
-                // management, which needs a live TURN server, and the usage
-                // history, which only reads the local signal DB. They are gated
-                // independently — a single flag for both would either hide the
-                // history wherever TURN is not running, or make `get_db()` a
-                // reachable panic on a pure desk-server.
-                if opts.include_turn || opts.has_signal_db {
-                    cfg.service(
-                        utoipa_actix_web::scope("/turn")
-                            .configure(move |cfg| {
-                                if opts.include_turn {
-                                    cfg.service(get_turn_info)
-                                        .service(get_turn_session)
-                                        .service(get_turn_session_statistics)
-                                        .service(delete_turn_session)
-                                        .service(get_turn_metrics);
-                                }
-                            })
-                            .configure(move |cfg| {
-                                if opts.has_signal_db {
-                                    cfg.service(get_turn_usage);
-                                }
-                            }),
-                    );
-                }
+                // The `/turn` scope carries two unrelated capabilities. The
+                // runtime-management endpoints are always registered: whether a
+                // relay is running changes while the process runs, and a route
+                // table fixed at App construction cannot track that — they answer
+                // "not running, here is why" instead of vanishing. The usage
+                // history only reads the local signal DB, so it stays gated on
+                // having one, or `get_db()` becomes a reachable panic on a pure
+                // desk-server.
+                cfg.service(
+                    utoipa_actix_web::scope("/turn")
+                        .service(get_turn_info)
+                        .service(get_turn_session)
+                        .service(get_turn_session_statistics)
+                        .service(delete_turn_session)
+                        .service(get_turn_metrics)
+                        .configure(move |cfg| {
+                            if opts.has_signal_db {
+                                cfg.service(get_turn_usage);
+                            }
+                        }),
+                );
             })
             .configure(move |cfg| {
                 if opts.include_model_usage {
@@ -391,7 +388,6 @@ pub fn build_openapi() -> utoipa::openapi::OpenApi {
                 ApiSurfaceOpts {
                     include_signaling: true,
                     include_device_code: true,
-                    include_turn: true,
                     has_signal_db: true,
                     include_model_usage: true,
                 },
@@ -596,54 +592,69 @@ pub async fn run_with_hub(
 
     let connection_map = web::Data::new(SharedConnectionMap::from(BTreeMap::new()));
 
-    // Shared TURN byte-accounting state and the live connection→device binding
-    // map, both created here so the auth handler, the TURN runtime, the periodic
-    // usage collector, and the signaling handlers all share one instance. The
-    // portable server is single-process, so these are purely node-local.
-    let turn_statistics = Arc::new(std::sync::RwLock::new(
-        desk_turn::model::Statistics::default(),
-    ));
+    // The live connection→device binding map, shared by the signaling handlers
+    // (which record it) and the TURN usage collector (which resolves it). The
+    // portable server is single-process, so it is purely node-local.
     let conn_device_map: web::Data<desk_signal::turn_usage::ConnectionDeviceMap> =
         web::Data::new(desk_signal::turn_usage::ConnectionDeviceMap::default());
 
+    // The TURN runtime is supervised rather than started once: settings can
+    // change while the server runs, and every reader (ICE issuance, the info
+    // endpoint, usage accounting) resolves the runtime through the supervisor
+    // instead of holding whatever existed at startup.
     let turn_settings = {
         let settings = shared_settings.read().await;
         settings.turn.clone()
     };
-    let turn_api_state = match turn_startup(&startup_mode, &turn_settings) {
-        TurnStartup::Start => {
-            log::info!("Starting turn server");
-            let auth_handler = Arc::new(TurnAuthHandler::new(
-                turn_settings.clone(),
-                connection_map.clone(),
-                turn_statistics.clone(),
-            ));
-            match startup_turn_server(turn_settings, auth_handler, turn_statistics.clone()).await {
-                Ok(s) => {
-                    // Collect per-device TURN usage into the local sqlite rollup
-                    // for as long as the server runs.
-                    let collector = crate::service::turn_usage_collector::TurnUsageCollector::new(
-                        turn_statistics.clone(),
-                        conn_device_map.clone().into_inner(),
-                    );
-                    tokio::spawn(collector.run());
-                    Some(web::Data::from(s))
-                }
-                Err(e) => {
-                    error!("Failed to start turn server: {}", e);
-                    None
-                }
-            }
-        }
+    let initial_turn_revision = 1;
+    let startup_plan = turn_plan(&startup_mode, &turn_settings, initial_turn_revision);
+    match startup_plan.intent {
+        TurnIntent::Run => info!("Starting turn server"),
         // Deliberate, so not an error — but worth saying out loud, because a
         // host with no relay of its own falls back to whatever the signaling
         // server offers and traverses fewer NATs.
-        TurnStartup::DisabledBySettings => {
-            warn!("TURN service is disabled in settings; this host will not relay");
-            None
+        TurnIntent::Disabled => {
+            warn!("TURN service is disabled in settings; this host will not relay")
         }
-        TurnStartup::UnsupportedMode => None,
-    };
+        TurnIntent::NotConfigured => {
+            warn!(
+                "TURN service is enabled but no interface is configured; this host will not relay"
+            )
+        }
+        TurnIntent::Unsupported => {}
+    }
+    let (turn_intent_tx, turn_intent_rx) = tokio::sync::watch::channel(startup_plan.intent);
+    let turn_supervisor = desk_turn::supervisor::spawn(
+        Arc::new(HostTurnDriver::new(connection_map.clone())),
+        startup_plan.desired,
+        desk_turn::supervisor::BackoffConfig::default(),
+    );
+    let turn_runtime_view = web::Data::new(TurnRuntimeView::new(
+        turn_supervisor.clone(),
+        turn_intent_rx,
+    ));
+    let turn_control = web::Data::new(TurnRuntimeControl::new(
+        startup_mode.clone(),
+        turn_supervisor.clone(),
+        turn_intent_tx,
+        initial_turn_revision,
+    ));
+    // Held as app data so it is dropped exactly when the HTTP server stops.
+    let turn_stop_guard = web::Data::new(TurnRuntimeStopGuard::new(turn_supervisor.clone()));
+
+    if mode_hosts_turn(&startup_mode) {
+        // Collect per-device TURN usage into the local sqlite rollup for as long
+        // as the server runs, following the runtime across restarts. Only the
+        // modes that can host TURN have both a runtime to account for and the
+        // local DB the rollup lives in.
+        let collector = crate::service::turn_usage_collector::TurnUsageCollector::new(
+            crate::service::turn_usage_collector::StatisticsSource::Runtime(
+                turn_supervisor.subscribe_runtime(),
+            ),
+            conn_device_map.clone().into_inner(),
+        );
+        tokio::spawn(collector.run());
+    }
 
     // For Default / DeskServer modes that don't yet have a hub injected, fall back
     // to a Local hub so business code never sees a None. Approvals deny-fast when
@@ -722,13 +733,13 @@ pub async fn run_with_hub(
             let proxy_link_state = manager_link_state.clone();
             let proxy_support_state = support_link_state.clone();
             let proxy_link_gate = manager_link_gate.clone();
-            // Freeze this node's own bundled-TURN endpoints from the running
-            // `TurnApiState` (same snapshot the local signaling injects from;
-            // `None` -> empty when no embedded TURN started) so the daemon's PC
-            // manager never relays through itself.
-            let own_turn_endpoints = Arc::new(daemon::pc_manager::own_turn_endpoints(
-                turn_api_state.as_ref().map(|s| &s.settings),
-            ));
+            // This node's own bundled-TURN endpoints, read from the same live
+            // runtime the local signaling issues TURN credentials from, so the
+            // daemon's PC manager never relays through itself — including after
+            // a settings change moves or stops the relay.
+            let own_turn_endpoints = daemon::pc_manager::OwnTurnEndpoints::from_runtime(
+                turn_supervisor.subscribe_runtime(),
+            );
             actix_web::rt::spawn(async move {
                 if let Err(e) = daemon::start_inprocess_daemon(
                     args_clone,
@@ -752,7 +763,9 @@ pub async fn run_with_hub(
     let mut http_server = HttpServer::new(move || {
         let default_static_file_path = static_file_path.clone();
 
-        let turn_api_state = turn_api_state.clone();
+        let turn_runtime_view = turn_runtime_view.clone();
+        let turn_control = turn_control.clone();
+        let turn_stop_guard = turn_stop_guard.clone();
         let startup_mode = startup_mode.clone();
         let tauri_login_token = tauri_login_token.clone();
         let host_control_hub_data = host_control_hub_data.clone();
@@ -770,7 +783,6 @@ pub async fn run_with_hub(
                 startup_mode,
                 StartupMode::Default | StartupMode::Signaling
             ),
-            include_turn: turn_api_state.is_some(),
             has_signal_db: startup_mode_has_signal_db(&startup_mode),
             include_model_usage: matches!(
                 startup_mode,
@@ -820,11 +832,9 @@ pub async fn run_with_hub(
             .app_data(manager_link_state_data.clone())
             .app_data(support_link_state_data.clone())
             .app_data(manager_link_gate_data.clone())
-            .configure(|cfg| {
-                if let Some(turn_api_state) = &turn_api_state {
-                    cfg.app_data(turn_api_state.clone());
-                }
-            })
+            .app_data(turn_runtime_view.clone())
+            .app_data(turn_control.clone())
+            .app_data(turn_stop_guard.clone())
             .app_data(api_json_config()) // limit payload size + uniform error body
             .configure(|cfg| {
                 if let Some(state) = host_control_endpoint_state.clone() {
@@ -1078,7 +1088,6 @@ mod tests {
                         ApiSurfaceOpts {
                             include_signaling: true,
                             include_device_code: true,
-                            include_turn: false,
                             has_signal_db: true,
                             include_model_usage: true,
                         },
@@ -1182,32 +1191,36 @@ mod tests {
         api.paths.paths.keys().cloned().collect()
     }
 
-    /// TURN *runtime management* lives only where a TURN server runs. With
-    /// daemon opts (`include_turn = false`) none of those endpoints may be
-    /// registered — but the usage history, which reads the signal DB rather
-    /// than the runtime, still is.
+    /// TURN *runtime management* is registered on every surface, including the
+    /// daemon's — whether a relay is running changes while the process runs, so
+    /// a route table fixed at App construction cannot express it. The endpoints
+    /// answer "not running, here is why"; only the usage history, which reads
+    /// the signal DB, is gated.
     #[test]
-    fn daemon_opts_exclude_turn_runtime_endpoints() {
-        let paths = registered_paths(ApiSurfaceOpts {
+    fn daemon_opts_still_register_the_turn_runtime_endpoints() {
+        let mut turn_paths: Vec<String> = registered_paths(ApiSurfaceOpts {
             include_signaling: true,
             include_device_code: true,
-            include_turn: false,
             has_signal_db: true,
             include_model_usage: true,
-        });
+        })
+        .into_iter()
+        .filter(|p| p.starts_with("/api/turn"))
+        .collect();
+        turn_paths.sort();
 
-        let turn_paths: Vec<&String> = paths
-            .iter()
-            .filter(|p| p.starts_with("/api/turn"))
-            .collect();
         assert_eq!(
             turn_paths,
-            vec!["/api/turn/usage"],
-            "daemon opts must register the TURN usage history and nothing else \
-             under /api/turn; got {turn_paths:?}",
+            vec![
+                "/api/turn/info",
+                "/api/turn/metrics",
+                "/api/turn/session",
+                "/api/turn/session/statistics",
+                "/api/turn/usage",
+            ],
+            "the daemon surface must expose the runtime endpoints as well as the \
+             usage history; got {turn_paths:?}",
         );
-        // Sanity: the superset spec (portable / dump) does include the runtime side.
-        assert!(build_openapi().paths.paths.contains_key("/api/turn/info"));
     }
 
     /// `/api/turn/usage` only reads the local rollup tables, so its availability
@@ -1217,20 +1230,18 @@ mod tests {
     /// (`desk_signal::db::get_db()` panics when the DB was never opened).
     #[test]
     fn turn_usage_follows_the_signal_db_not_the_turn_runtime() {
-        // (label, include_turn, has_signal_db, expect_usage, expect_runtime)
+        // (label, has_signal_db, expect_usage)
         let surfaces = [
-            ("Default with TURN running", true, true, true, true),
-            ("Default without TURN", false, true, true, false),
-            ("Signaling without TURN", false, true, true, false),
-            ("ServiceDaemon local API", false, true, true, false),
-            ("DeskServer", false, false, false, false),
+            ("Default", true, true),
+            ("Signaling", true, true),
+            ("ServiceDaemon local API", true, true),
+            ("DeskServer", false, false),
         ];
 
-        for (label, include_turn, has_signal_db, expect_usage, expect_runtime) in surfaces {
+        for (label, has_signal_db, expect_usage) in surfaces {
             let paths = registered_paths(ApiSurfaceOpts {
                 include_signaling: has_signal_db,
                 include_device_code: has_signal_db,
-                include_turn,
                 has_signal_db,
                 include_model_usage: has_signal_db,
             });
@@ -1240,10 +1251,10 @@ mod tests {
                 expect_usage,
                 "{label}: /api/turn/usage registration",
             );
-            assert_eq!(
+            assert!(
                 paths.iter().any(|p| p == "/api/turn/info"),
-                expect_runtime,
-                "{label}: /api/turn/info registration",
+                "{label}: the runtime status endpoint must exist everywhere, so a \
+                 host with no relay can say so instead of 404ing",
             );
         }
     }
@@ -1398,7 +1409,6 @@ mod tests {
                         ApiSurfaceOpts {
                             include_signaling: true,
                             include_device_code: true,
-                            include_turn: false,
                             has_signal_db: true,
                             include_model_usage: true,
                         },

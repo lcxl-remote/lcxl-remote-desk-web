@@ -3,7 +3,7 @@
 * Do not edit manually.
 */
 
-import type { GetTurnMetricsQueryResponse, GetTurnMetrics417 } from "../../types.ts";
+import type { GetTurnMetricsQueryResponse, GetTurnMetrics503 } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryResult } from "@tanstack/react-query";
 import { getTurnMetrics } from "../../clients.ts";
@@ -16,7 +16,7 @@ export type GetTurnMetricsSuspenseQueryKey = ReturnType<typeof getTurnMetricsSus
 export function getTurnMetricsSuspenseQueryOptions(config: Partial<RequestConfig> & { client?: Client } = {}) {
 
         const queryKey = getTurnMetricsSuspenseQueryKey()
-        return queryOptions<GetTurnMetricsQueryResponse, ResponseErrorConfig<GetTurnMetrics417>, GetTurnMetricsQueryResponse, typeof queryKey>({
+        return queryOptions<GetTurnMetricsQueryResponse, ResponseErrorConfig<GetTurnMetrics503>, GetTurnMetricsQueryResponse, typeof queryKey>({
          
          queryKey,
          queryFn: async ({ signal }) => {
@@ -32,7 +32,7 @@ export function getTurnMetricsSuspenseQueryOptions(config: Partial<RequestConfig
  */
 export function useGetTurnMetricsSuspense<TData = GetTurnMetricsQueryResponse, TQueryKey extends QueryKey = GetTurnMetricsSuspenseQueryKey>(options: 
 {
-  query?: Partial<UseSuspenseQueryOptions<GetTurnMetricsQueryResponse, ResponseErrorConfig<GetTurnMetrics417>, TData, TQueryKey>> & { client?: QueryClient },
+  query?: Partial<UseSuspenseQueryOptions<GetTurnMetricsQueryResponse, ResponseErrorConfig<GetTurnMetrics503>, TData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }
 }
  = {}) {
@@ -46,7 +46,7 @@ export function useGetTurnMetricsSuspense<TData = GetTurnMetricsQueryResponse, T
           ...getTurnMetricsSuspenseQueryOptions(config),
           ...resolvedOptions,
           queryKey,
-         } as unknown as UseSuspenseQueryOptions, queryClient) as UseSuspenseQueryResult<TData, ResponseErrorConfig<GetTurnMetrics417>> & { queryKey: TQueryKey }
+         } as unknown as UseSuspenseQueryOptions, queryClient) as UseSuspenseQueryResult<TData, ResponseErrorConfig<GetTurnMetrics503>> & { queryKey: TQueryKey }
 
          query.queryKey = queryKey as TQueryKey
 

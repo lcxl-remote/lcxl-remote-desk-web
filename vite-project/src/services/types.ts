@@ -3330,6 +3330,129 @@ export type TurnInterface = {
     transport: TurnTransport;
 };
 
+export const turnRuntimeStateEnum = {
+    running: "running",
+    disabled: "disabled",
+    unsupported: "unsupported",
+    "not-configured": "not-configured",
+    failed: "failed"
+} as const;
+
+export type TurnRuntimeStateEnumKey = (typeof turnRuntimeStateEnum)[keyof typeof turnRuntimeStateEnum];
+
+/**
+ * @description Why this process is or is not relaying right now.\n\n\"Not relaying\" is an answer, not a failure, so the states name the reason\ninstead of collapsing into one error: an operator who switched TURN off, a\nstartup mode that never hosts it, and a host that cannot start the runtime\nneed different things done about them.
+*/
+export type TurnRuntimeState = TurnRuntimeStateEnumKey;
+
+export type RestResponseTurnRuntimeInfo = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Runtime status of the TURN service on this host.\n\nReports what is *running*, never what is configured — the configuration is\nserved by the settings endpoint, and conflating the two is how an operator\nends up believing a relay is up because it was saved.
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description The interfaces the running runtime serves; empty unless\n[`TurnRuntimeState::Running`].
+         * @type array
+        */
+        interfaces: TurnInterface[];
+        /**
+         * @description Why the last start attempt failed; `None` unless\n[`TurnRuntimeState::Failed`].
+         * @type string,null
+        */
+        last_error?: string | null;
+        /**
+         * @description Build identifier of this TURN implementation.
+         * @type string
+        */
+        software: string;
+        /**
+         * @description Why this process is or is not relaying right now.\n\n\"Not relaying\" is an answer, not a failure, so the states name the reason\ninstead of collapsing into one error: an operator who switched TURN off, a\nstartup mode that never hosts it, and a host that cannot start the runtime\nneed different things done about them.
+         * @type string
+        */
+        state: TurnRuntimeState;
+        /**
+         * @description Seconds since the running runtime started; `None` unless\n[`TurnRuntimeState::Running`].
+         * @minLength 0
+         * @type integer,null, int64
+        */
+        uptime_secs?: number | null;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+/**
+ * @description Byte/packet counters for one traffic class in both directions.
+*/
+export type TurnDirectionalCounters = {
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    received_bytes: number;
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    received_pkts: number;
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    send_bytes: number;
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    send_pkts: number;
+};
+
+export type RestResponseTurnSessionStatistics = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description Byte/packet counters for one traffic class in both directions.
+         * @type object
+        */
+        control: TurnDirectionalCounters;
+        /**
+         * @minLength 0
+         * @type integer
+        */
+        error_pkts: number;
+        /**
+         * @description Byte/packet counters for one traffic class in both directions.
+         * @type object
+        */
+        relay: TurnDirectionalCounters;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseTurnSettings = {
     /**
      * @type integer, int32
@@ -4066,55 +4189,35 @@ export type TurnClientSettings = {
 };
 
 /**
- * @description Byte/packet counters for one traffic class in both directions.
+ * @description Runtime status of the TURN service on this host.\n\nReports what is *running*, never what is configured — the configuration is\nserved by the settings endpoint, and conflating the two is how an operator\nends up believing a relay is up because it was saved.
 */
-export type TurnDirectionalCounters = {
+export type TurnRuntimeInfo = {
     /**
-     * @minLength 0
-     * @type integer
-    */
-    received_bytes: number;
-    /**
-     * @minLength 0
-     * @type integer
-    */
-    received_pkts: number;
-    /**
-     * @minLength 0
-     * @type integer
-    */
-    send_bytes: number;
-    /**
-     * @minLength 0
-     * @type integer
-    */
-    send_pkts: number;
-};
-
-export type TurnInfo = {
-    /**
+     * @description The interfaces the running runtime serves; empty unless\n[`TurnRuntimeState::Running`].
      * @type array
     */
     interfaces: TurnInterface[];
     /**
-     * @minLength 0
-     * @type integer
+     * @description Why the last start attempt failed; `None` unless\n[`TurnRuntimeState::Failed`].
+     * @type string,null
     */
-    port_allocated: number;
+    last_error?: string | null;
     /**
-     * @minLength 0
-     * @type integer
-    */
-    port_capacity: number;
-    /**
+     * @description Build identifier of this TURN implementation.
      * @type string
     */
     software: string;
     /**
-     * @minLength 0
-     * @type integer, int64
+     * @description Why this process is or is not relaying right now.\n\n\"Not relaying\" is an answer, not a failure, so the states name the reason\ninstead of collapsing into one error: an operator who switched TURN off, a\nstartup mode that never hosts it, and a host that cannot start the runtime\nneed different things done about them.
+     * @type string
     */
-    uptime: number;
+    state: TurnRuntimeState;
+    /**
+     * @description Seconds since the running runtime started; `None` unless\n[`TurnRuntimeState::Running`].
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    uptime_secs?: number | null;
 };
 
 export type TurnSession = {
@@ -5427,9 +5530,9 @@ export type CreateTokenMutation = {
 };
 
 /**
- * @description Turn server info
+ * @description TURN runtime status
 */
-export type GetTurnInfo200 = TurnInfo;
+export type GetTurnInfo200 = RestResponseTurnRuntimeInfo;
 
 export type GetTurnInfoQueryResponse = GetTurnInfo200;
 
@@ -5444,15 +5547,15 @@ export type GetTurnInfoQuery = {
 export type GetTurnMetrics200 = string;
 
 /**
- * @description Expectation failed
+ * @description No TURN runtime is serving on this host
 */
-export type GetTurnMetrics417 = any;
+export type GetTurnMetrics503 = string;
 
 export type GetTurnMetricsQueryResponse = GetTurnMetrics200;
 
 export type GetTurnMetricsQuery = {
     Response: GetTurnMetrics200;
-    Errors: GetTurnMetrics417;
+    Errors: GetTurnMetrics503;
 };
 
 export type GetTurnSessionQueryParams = {
@@ -5471,12 +5574,17 @@ export type GetTurnSessionQueryParams = {
 */
 export type GetTurnSession200 = TurnSession;
 
+/**
+ * @description Session enumeration is not supported
+*/
+export type GetTurnSession404 = any;
+
 export type GetTurnSessionQueryResponse = GetTurnSession200;
 
 export type GetTurnSessionQuery = {
     Response: GetTurnSession200;
     QueryParams: GetTurnSessionQueryParams;
-    Errors: any;
+    Errors: GetTurnSession404;
 };
 
 export type DeleteTurnSessionQueryParams = {
@@ -5520,9 +5628,9 @@ export type GetTurnSessionStatisticsQueryParams = {
 };
 
 /**
- * @description Turn server session statistics
+ * @description Turn server session statistics, or the reason there are none
 */
-export type GetTurnSessionStatistics200 = TurnSessionStatistics;
+export type GetTurnSessionStatistics200 = RestResponseTurnSessionStatistics;
 
 /**
  * @description Turn server session not found

@@ -195,7 +195,7 @@ mod ice;
 use ice::resolve_ice_timeouts;
 pub use ice::{
     DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS, DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS,
-    build_peer_connection, filter_ice_servers, own_turn_endpoints,
+    OwnTurnEndpoints, build_peer_connection, filter_ice_servers, own_turn_endpoints,
 };
 // =====================================================================
 // Per-connection PC context + registry
@@ -363,11 +363,12 @@ pub struct PcRegistry {
     /// covered).
     pending_requests: Arc<AtomicUsize>,
     /// External `host:port` endpoints of this node's own bundled TURN server,
-    /// frozen at daemon startup from the live `TurnApiState` (empty when no
-    /// embedded TURN runs). [`filter_ice_servers`] drops relay candidates that
-    /// point back at these so the node never relays through itself. Shared via
-    /// `Arc` so registry clones stay cheap and consistent.
-    own_turn_endpoints: Arc<HashSet<String>>,
+    /// resolved from the running runtime on each use (empty when no embedded
+    /// TURN is serving). [`filter_ice_servers`] drops relay candidates that
+    /// point back at these so the node never relays through itself. Reading it
+    /// live rather than freezing it at startup is what keeps the filter honest
+    /// across a settings change that moves or stops the relay.
+    own_turn_endpoints: OwnTurnEndpoints,
     /// Reverse index `grant_session_id -> {generation, connection_ids}` for every
     /// connection admitted under a redeemed grant (its `RequestRemoteAuthz` stamp
     /// carried a `grant_session_id`). Lets the daemon target a whole logical grant
@@ -437,12 +438,11 @@ impl PcRegistry {
         Self::default()
     }
 
-    /// Install the node's own bundled-TURN endpoints (see
+    /// Install the node's own bundled-TURN endpoint source (see
     /// [`PcRegistry::own_turn_endpoints`]). Builder-style so existing
     /// `PcRegistry::new()` call sites stay unchanged; the daemon entry point
-    /// chains this once at startup with the set derived from the live
-    /// `TurnApiState`.
-    pub fn with_own_turn_endpoints(mut self, own_turn_endpoints: Arc<HashSet<String>>) -> Self {
+    /// chains this once at startup with a view onto the live runtime.
+    pub fn with_own_turn_endpoints(mut self, own_turn_endpoints: OwnTurnEndpoints) -> Self {
         self.own_turn_endpoints = own_turn_endpoints;
         self
     }
@@ -753,7 +753,7 @@ impl PcRegistry {
         let filtered = filter_ice_servers(
             &request_remote.ice_servers,
             &local_settings.turn_client.traversal_mode,
-            &self.own_turn_endpoints,
+            &self.own_turn_endpoints.current(),
         );
 
         let pc = build_peer_connection(filtered.iter().map(Into::into).collect(), local_settings)

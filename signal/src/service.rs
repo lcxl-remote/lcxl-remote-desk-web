@@ -12,7 +12,6 @@ use desk_signal_facade::{
     },
     service::{DeviceCodeService, SignalingHandler},
 };
-use desk_turn::model::TurnSettings;
 use uuid::Uuid;
 
 use crate::error::DeskSignalError;
@@ -175,7 +174,7 @@ pub async fn handle_signaling(
     ws_session: Session,
     user: CurrentUser,
     ip: Option<String>,
-    turn: Option<TurnSettings>,
+    turn: Option<std::sync::Arc<dyn TurnProvider>>,
     conn_device_map: Option<Arc<crate::turn_usage::ConnectionDeviceMap>>,
     code_session: Option<desk_signal_facade::model::code_session::CodeSessionCookie>,
 ) -> Result<(), DeskSignalError> {
@@ -275,7 +274,7 @@ pub async fn handle_signaling(
         ws_session,
         user,
         ip,
-        turn.map(|v| std::sync::Arc::new(v) as std::sync::Arc<dyn TurnProvider>),
+        turn,
         device_code,
         auth_context,
         desk_server_version::SERVER_API_VERSION,

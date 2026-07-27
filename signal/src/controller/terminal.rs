@@ -11,7 +11,7 @@ use desk_signal_facade::model::{
     version::VersionInfo,
 };
 use desk_signal_facade::service::{RequestRemoteOutcome, TerminalStartAuthorizer};
-use desk_turn::model::TurnApiState;
+use desk_turn::runtime::{LiveTurnProvider, TurnRuntimeView};
 use log::{error, info};
 use std::sync::Arc;
 
@@ -38,7 +38,7 @@ pub async fn open_terminal_session(
     connection_map: web::Data<SharedConnectionMap>,
     session: Session,
     stream: web::Payload,
-    turn_api_state: Option<web::Data<TurnApiState>>,
+    turn_runtime: Option<web::Data<TurnRuntimeView>>,
 ) -> Result<HttpResponse, actix_web::Error> {
     // Resolve the browser identity with the same owner-vs-code-session adjudication
     // as the main signaling connection (shared resolver, no drift): the resulting
@@ -87,8 +87,9 @@ pub async fn open_terminal_session(
 
     let random_uuid = Uuid::new_v4();
     let connection_id = String::from(random_uuid);
-    let turn_provider = turn_api_state.as_ref().map(|state| {
-        std::sync::Arc::new(state.as_ref().settings.clone()) as std::sync::Arc<dyn TurnProvider>
+    let turn_provider = turn_runtime.as_ref().map(|view| {
+        std::sync::Arc::new(LiveTurnProvider::new(view.as_ref().clone()))
+            as std::sync::Arc<dyn TurnProvider>
     });
     // Handle signaling logic here
     let mut signaling_context = SignalingContext::init(

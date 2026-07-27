@@ -7,12 +7,12 @@ use desk_signal_facade::{
     model::{
         code_session::{CODE_SESSION_KEY, CodeSessionCookie},
         probe::{SIGNALING_PROBE_HEADER, SIGNALING_PROBE_HEADER_VALUE, is_probe_query},
-        signal::RemoteDeskTypeEnum,
+        signal::{RemoteDeskTypeEnum, TurnProvider},
         version::VersionInfo,
     },
     service::NodeTokenValidator,
 };
-use desk_turn::model::TurnApiState;
+use desk_turn::runtime::{LiveTurnProvider, TurnRuntimeView};
 use log::{error, info};
 
 use crate::{model::SharedConnectionMap, service::handle_signaling};
@@ -126,7 +126,7 @@ pub async fn open_signaling_handle(
     connection_map: web::Data<SharedConnectionMap>,
     session: Session,
     stream: web::Payload,
-    turn_api_state: Option<web::Data<TurnApiState>>,
+    turn_runtime: Option<web::Data<TurnRuntimeView>>,
     validator_opt: Option<web::Data<Arc<dyn NodeTokenValidator>>>,
     conn_device_map: Option<web::Data<crate::turn_usage::ConnectionDeviceMap>>,
 ) -> Result<HttpResponse, actix_web::Error> {
@@ -256,9 +256,13 @@ pub async fn open_signaling_handle(
         .connection_info()
         .realip_remote_addr()
         .map(|s| s.to_string());
-    let turn_settings = turn_api_state
-        .as_ref()
-        .map(|state| state.as_ref().settings.clone());
+    // A provider that resolves the runtime per call, so a connection opened
+    // before a settings change and one opened after both get credentials the
+    // server actually validates against.
+    let turn_provider = turn_runtime.as_ref().map(|view| {
+        std::sync::Arc::new(LiveTurnProvider::new(view.as_ref().clone()))
+            as std::sync::Arc<dyn TurnProvider>
+    });
 
     // start task but don't wait for it
     rt::spawn(async move {
@@ -270,7 +274,7 @@ pub async fn open_signaling_handle(
             session,
             user,
             ip,
-            turn_settings,
+            turn_provider,
             conn_device_map.map(|d| d.into_inner()),
             code_session,
         )

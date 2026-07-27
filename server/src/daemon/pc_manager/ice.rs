@@ -1,10 +1,12 @@
 //! ICE server filtering and daemon PeerConnection construction.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use desk_signal_facade::model::signal::{LcxlRTCIceServer, TurnTransport};
-use desk_turn::model::TurnSettings;
+use desk_turn::model::{TurnApiState, TurnSettings};
+use tokio::sync::watch;
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
@@ -20,12 +22,11 @@ use crate::model::settings::{Settings, SystemSettings, TraversalMode};
 /// itself, used to recognise (and drop) a relay candidate that would point
 /// back at our own bundled TURN.
 ///
-/// Sourced from the live `TurnApiState` produced when the embedded TURN
-/// server actually started (`None` when no embedded TURN is running — a
-/// non-`Default`/`Signaling` startup, or a `startup_turn_server` failure),
-/// so it stays in lock-step with the same `TurnApiState` the local signaling
-/// uses to inject TURN. `None` yields an empty set: nothing is treated as
-/// self-hosted, so no remote relay is ever dropped.
+/// Sourced from the running `TurnApiState` (`None` when no embedded TURN is
+/// running — a non-`Default`/`Signaling` startup, a service that was switched
+/// off, or a failed start), so it stays in lock-step with the same runtime the
+/// local signaling issues TURN credentials from. `None` yields an empty set:
+/// nothing is treated as self-hosted, so no remote relay is ever dropped.
 pub fn own_turn_endpoints(turn: Option<&TurnSettings>) -> HashSet<String> {
     turn.map(|t| {
         t.interfaces
@@ -34,6 +35,36 @@ pub fn own_turn_endpoints(turn: Option<&TurnSettings>) -> HashSet<String> {
             .collect()
     })
     .unwrap_or_default()
+}
+
+/// This node's own relay endpoints, resolved per call.
+///
+/// Freezing them at startup was safe only while the runtime itself was frozen.
+/// Now that a settings change replaces the relay, a stale set filters the wrong
+/// candidates in both directions: it keeps dropping an address this node no
+/// longer serves (so a peer's legitimate relay is discarded), and it fails to
+/// drop the address this node just started serving (so the node relays through
+/// itself, which on a co-located portable node can stall ICE gathering).
+#[derive(Clone, Default)]
+pub struct OwnTurnEndpoints {
+    runtime: Option<watch::Receiver<Option<Arc<TurnApiState>>>>,
+}
+
+impl OwnTurnEndpoints {
+    pub fn from_runtime(runtime: watch::Receiver<Option<Arc<TurnApiState>>>) -> Self {
+        Self {
+            runtime: Some(runtime),
+        }
+    }
+
+    /// The endpoints served right now; empty when nothing is.
+    pub fn current(&self) -> HashSet<String> {
+        let runtime = match &self.runtime {
+            Some(rx) => rx.borrow().clone(),
+            None => None,
+        };
+        own_turn_endpoints(runtime.as_ref().map(|state| &state.settings))
+    }
 }
 
 /// Extract the `external` (`host:port`) token from a `turn:host:port?...` URL.

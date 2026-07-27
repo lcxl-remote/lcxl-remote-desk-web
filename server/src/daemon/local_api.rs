@@ -122,6 +122,11 @@ pub async fn run_local_api(
             .app_data(manager_link_state_data.clone())
             .app_data(support_link_state_data.clone())
             .app_data(manager_link_gate_data.clone())
+            // The daemon hosts no TURN runtime, and says so rather than leaving
+            // the runtime endpoints without the state they extract.
+            .app_data(actix_web::web::Data::new(
+                desk_turn::runtime::TurnRuntimeView::unsupported(),
+            ))
             .app_data(api_json_config())
             .configure(move |cfg| {
                 if let Some(admin) = tauri_is_admin {
@@ -138,17 +143,17 @@ pub async fn run_local_api(
                 });
             })
             // Single source of truth for the HTTP API surface. The daemon serves
-            // signaling + file/device-code unconditionally; TURN management lives
-            // only in the portable server, so `include_turn = false`. The signal
-            // DB is opened by the daemon bootstrap before this API comes up, so
-            // the DB-backed views (including the TURN usage history) are served.
+            // signaling + file/device-code unconditionally. The signal DB is
+            // opened by the daemon bootstrap before this API comes up, so the
+            // DB-backed views (including the TURN usage history) are served. The
+            // TURN runtime endpoints are registered too, answering "this mode
+            // does not relay" from the unsupported runtime view mounted below.
             .configure(|cfg| {
                 configure_api_surface(
                     cfg,
                     ApiSurfaceOpts {
                         include_signaling: true,
                         include_device_code: true,
-                        include_turn: false,
                         has_signal_db: crate::startup_mode_has_signal_db(
                             &StartupMode::ServiceDaemon,
                         ),

@@ -124,13 +124,47 @@ pub struct TurnInterface {
     pub external: String,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct TurnInfo {
+/// Why this process is or is not relaying right now.
+///
+/// "Not relaying" is an answer, not a failure, so the states name the reason
+/// instead of collapsing into one error: an operator who switched TURN off, a
+/// startup mode that never hosts it, and a host that cannot start the runtime
+/// need different things done about them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum TurnRuntimeState {
+    /// A runtime is serving; `interfaces` and `uptime_secs` describe it.
+    Running,
+    /// Switched off by the operator.
+    Disabled,
+    /// This startup mode never hosts a TURN runtime.
+    Unsupported,
+    /// Switched on, but there is no interface to serve on.
+    NotConfigured,
+    /// Meant to run and could not; `last_error` says why, and the supervisor
+    /// keeps retrying.
+    Failed,
+}
+
+/// Runtime status of the TURN service on this host.
+///
+/// Reports what is *running*, never what is configured — the configuration is
+/// served by the settings endpoint, and conflating the two is how an operator
+/// ends up believing a relay is up because it was saved.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct TurnRuntimeInfo {
+    pub state: TurnRuntimeState,
+    /// Build identifier of this TURN implementation.
     pub software: String,
-    pub uptime: u64,
+    /// The interfaces the running runtime serves; empty unless
+    /// [`TurnRuntimeState::Running`].
     pub interfaces: Vec<TurnInterface>,
-    pub port_capacity: usize,
-    pub port_allocated: usize,
+    /// Seconds since the running runtime started; `None` unless
+    /// [`TurnRuntimeState::Running`].
+    pub uptime_secs: Option<u64>,
+    /// Why the last start attempt failed; `None` unless
+    /// [`TurnRuntimeState::Failed`].
+    pub last_error: Option<String>,
 }
 
 #[derive(Deserialize, IntoParams)]

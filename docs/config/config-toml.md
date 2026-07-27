@@ -51,6 +51,17 @@ This host-local preference is not remotely configurable by manager. See
 - `relay_min_port` / `relay_max_port` — relay port allocation range.
 - `[turn.static_credentials]` — optional static username / password credential table.
 
+The TURN service follows these settings while the server runs: saving the TURN
+settings page (or regenerating the secret) restarts the service immediately, with
+no server restart. **A restart drops the connections currently being relayed** —
+they reconnect through whatever candidates ICE can still find. Sessions that are
+not going through this relay are unaffected.
+
+With `enable_turn = true` but no `interfaces` configured, nothing is started (the
+service has no address to serve on); the runtime status endpoint reports this as
+`not-configured`, which is deliberately distinct from having switched the service
+off.
+
 ## Desktop `[desk]` {#desktop-desk}
 
 - `video_fps` — video frame rate (default `60`). Lowering reduces CPU and bandwidth usage.

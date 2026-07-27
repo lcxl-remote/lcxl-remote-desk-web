@@ -38,7 +38,14 @@
 //!   [`TurnSupervisorHandle::shutdown`] is the only way to stop them, and callers
 //!   whose lifetime is bounded (an embedded server, a test) must call it.
 //!
-//! [`TurnApiState`]: crate::model::TurnApiState
+//! - **The live runtime is published, not returned once.** Readers (the info
+//!   endpoint, the ICE provider, the usage collector) must never hold the
+//!   [`TurnApiState`] they saw at startup, because a configuration change
+//!   replaces it. They subscribe to [`TurnSupervisorHandle::subscribe_runtime`]
+//!   instead. The actor is the single writer, and it publishes so that a
+//!   non-empty snapshot always denotes a runtime that has **not** been closed:
+//!   the snapshot is cleared before a teardown and set only after a start
+//!   succeeds.
 
 use std::fmt;
 use std::sync::Arc;
@@ -47,7 +54,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::{Mutex, watch};
 
-use crate::model::TurnInterface;
+use crate::model::{TurnApiState, TurnInterface};
 
 /// Parameters to start a TURN runtime in this process. Equality drives "needs
 /// restart": any field change yields a different value, so the actor tears down
@@ -108,9 +115,17 @@ pub trait TurnRuntimeHandle: Send + Sync {
     /// the supervisor can retain the handle and retry rather than leak the socket
     /// ([`TurnApiState`] has no `Drop`; a dropped-but-not-closed handle would
     /// hold the UDP port forever and wedge any same-port restart).
-    ///
-    /// [`TurnApiState`]: crate::model::TurnApiState
     async fn close(&self) -> Result<(), String>;
+}
+
+/// What a driver hands back: the teardown handle plus the runtime itself, so the
+/// supervisor can publish the live [`TurnApiState`] to readers. The two travel
+/// together because the supervisor must guarantee they describe the same
+/// runtime — publishing a state whose handle has already been closed would hand
+/// callers a dead server.
+pub struct StartedRuntime {
+    pub handle: Arc<dyn TurnRuntimeHandle>,
+    pub api_state: Arc<TurnApiState>,
 }
 
 /// Starts TURN runtimes. Abstracted for two reasons: the supervisor state
@@ -119,8 +134,7 @@ pub trait TurnRuntimeHandle: Send + Sync {
 /// a managed node also enforces whatever its control plane decided.
 #[async_trait]
 pub trait TurnRuntimeDriver: Send + Sync {
-    async fn start(&self, params: &TurnRuntimeParams)
-    -> Result<Arc<dyn TurnRuntimeHandle>, String>;
+    async fn start(&self, params: &TurnRuntimeParams) -> Result<StartedRuntime, String>;
 }
 
 /// Optional lifecycle observer invoked **before** an existing runtime is torn
@@ -153,6 +167,10 @@ impl Default for BackoffConfig {
 
 struct RunningRuntime {
     handle: Arc<dyn TurnRuntimeHandle>,
+    /// The runtime the handle owns, republished whenever the actor reaffirms
+    /// this state so a reader can never be left looking at an empty snapshot
+    /// while the server is up.
+    api_state: Arc<TurnApiState>,
     params: TurnRuntimeParams,
     revision: u64,
 }
@@ -196,6 +214,9 @@ pub struct TurnSupervisorHandle {
     /// channel rather than a notification so a second `shutdown()` returns
     /// immediately instead of waiting for a signal that already fired.
     finished_rx: watch::Receiver<bool>,
+    /// The runtime currently serving, or `None` while none is. Written only by
+    /// the actor; see the module docs for the ordering guarantee.
+    runtime_rx: watch::Receiver<Option<Arc<TurnApiState>>>,
 }
 
 impl TurnSupervisorHandle {
@@ -203,6 +224,18 @@ impl TurnSupervisorHandle {
     /// if the actor is momentarily absent (panic/rebuild window).
     pub fn apply(&self, desired: DesiredState) {
         self.desired_tx.send_replace(desired);
+    }
+
+    /// The runtime serving right now, if any. A `Some` value is guaranteed not to
+    /// have been closed at the time it was published.
+    pub fn runtime(&self) -> Option<Arc<TurnApiState>> {
+        self.runtime_rx.borrow().clone()
+    }
+
+    /// Subscribe to runtime changes, for readers that must follow restarts
+    /// (ICE issuance, usage accounting) rather than freeze the startup value.
+    pub fn subscribe_runtime(&self) -> watch::Receiver<Option<Arc<TurnApiState>>> {
+        self.runtime_rx.clone()
     }
 
     /// Current read-only status.
@@ -218,6 +251,15 @@ impl TurnSupervisorHandle {
         }
     }
 
+    /// Ask the supervisor to stop, without waiting for it. Idempotent.
+    ///
+    /// For callers that cannot await — a `Drop` that fires when the server
+    /// owning this runtime goes away. The actor still closes the runtime on its
+    /// own task; only the confirmation is given up.
+    pub fn request_shutdown(&self) {
+        self.shutdown_tx.send_replace(true);
+    }
+
     /// Tear down any running runtime and stop the actor, returning once both are
     /// done. Idempotent.
     ///
@@ -227,7 +269,7 @@ impl TurnSupervisorHandle {
     /// refuses to close makes this wait; a caller that cannot wait forever
     /// should wrap it in `tokio::time::timeout` and accept the leak.
     pub async fn shutdown(&self) {
-        self.shutdown_tx.send_replace(true);
+        self.request_shutdown();
         let mut finished = self.finished_rx.clone();
         // `wait_for` checks the current value first, so a shutdown that already
         // completed returns without blocking.
@@ -257,12 +299,14 @@ pub fn spawn_with_observer(
     let (desired_tx, _rx) = watch::channel(initial);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = watch::channel(false);
+    let (runtime_tx, runtime_rx) = watch::channel(None);
     let state = Arc::new(Mutex::new(SupervisorState::default()));
     let handle = TurnSupervisorHandle {
         desired_tx: desired_tx.clone(),
         state: state.clone(),
         shutdown_tx,
         finished_rx,
+        runtime_rx,
     };
 
     tokio::spawn(watchdog(
@@ -273,6 +317,7 @@ pub fn spawn_with_observer(
         observer,
         shutdown_rx,
         finished_tx,
+        runtime_tx,
     ));
     handle
 }
@@ -289,6 +334,7 @@ async fn watchdog(
     observer: Option<Arc<dyn RuntimeObserver>>,
     shutdown_rx: watch::Receiver<bool>,
     finished_tx: watch::Sender<bool>,
+    runtime_tx: watch::Sender<Option<Arc<TurnApiState>>>,
 ) {
     loop {
         let rx = desired_tx.subscribe();
@@ -299,6 +345,7 @@ async fn watchdog(
             backoff,
             observer.clone(),
             shutdown_rx.clone(),
+            runtime_tx.clone(),
         ));
         match actor.await {
             // Clean exit: shut down, or the desired channel was closed (all
@@ -318,6 +365,7 @@ async fn watchdog(
     finished_tx.send_replace(true);
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_actor(
     mut desired_rx: watch::Receiver<DesiredState>,
     state: Arc<Mutex<SupervisorState>>,
@@ -325,6 +373,7 @@ async fn run_actor(
     backoff: BackoffConfig,
     observer: Option<Arc<dyn RuntimeObserver>>,
     mut shutdown_rx: watch::Receiver<bool>,
+    runtime_tx: watch::Sender<Option<Arc<TurnApiState>>>,
 ) {
     let mut delay = backoff.min;
     loop {
@@ -334,7 +383,7 @@ async fn run_actor(
             break;
         }
         let desired = desired_rx.borrow_and_update().clone();
-        match converge_once(&driver, &state, &desired, observer.as_ref()).await {
+        match converge_once(&driver, &state, &desired, observer.as_ref(), &runtime_tx).await {
             Ok(()) => {
                 delay = backoff.min;
                 // Park until the desired state changes or shutdown is requested.
@@ -365,7 +414,7 @@ async fn run_actor(
     }
 
     if *shutdown_rx.borrow() {
-        shutdown_runtime(&state, observer.as_ref(), backoff).await;
+        shutdown_runtime(&state, observer.as_ref(), backoff, &runtime_tx).await;
     }
 }
 
@@ -376,6 +425,7 @@ async fn shutdown_runtime(
     state: &Arc<Mutex<SupervisorState>>,
     observer: Option<&Arc<dyn RuntimeObserver>>,
     backoff: BackoffConfig,
+    runtime_tx: &watch::Sender<Option<Arc<TurnApiState>>>,
 ) {
     let stop = DesiredState {
         revision: u64::MAX,
@@ -386,7 +436,7 @@ async fn shutdown_runtime(
         // A `None` desired state only ever closes, so no driver is needed; the
         // unreachable-driver guard makes that explicit rather than implicit.
         let driver: Arc<dyn TurnRuntimeDriver> = Arc::new(NoStartDriver);
-        match converge_once(&driver, state, &stop, observer).await {
+        match converge_once(&driver, state, &stop, observer, runtime_tx).await {
             Ok(()) => return,
             Err(e) => {
                 log::warn!("turn supervisor shutdown close failed, retrying: {e}");
@@ -406,10 +456,7 @@ struct NoStartDriver;
 
 #[async_trait]
 impl TurnRuntimeDriver for NoStartDriver {
-    async fn start(
-        &self,
-        _params: &TurnRuntimeParams,
-    ) -> Result<Arc<dyn TurnRuntimeHandle>, String> {
+    async fn start(&self, _params: &TurnRuntimeParams) -> Result<StartedRuntime, String> {
         Err("the supervisor is shutting down and starts no runtime".to_string())
     }
 }
@@ -421,6 +468,7 @@ async fn converge_once(
     state: &Arc<Mutex<SupervisorState>>,
     desired: &DesiredState,
     observer: Option<&Arc<dyn RuntimeObserver>>,
+    runtime_tx: &watch::Sender<Option<Arc<TurnApiState>>>,
 ) -> Result<(), String> {
     let current = {
         let mut s = state.lock().await;
@@ -432,13 +480,21 @@ async fn converge_once(
         // Already converged; keep applied_revision in step with the running params'
         // revision (it does not change the runtime, only the recorded revision).
         let mut s = state.lock().await;
-        if let Some(running) = s.running.as_mut() {
+        let published = if let Some(running) = s.running.as_mut() {
             running.revision = desired.revision;
             s.applied_revision = Some(desired.revision);
+            s.running.as_ref().map(|r| r.api_state.clone())
         } else {
             s.applied_revision = None;
-        }
+            None
+        };
         s.last_error = None;
+        drop(s);
+        // Republish rather than assume: a close that failed cleared the snapshot
+        // while its runtime kept serving, and the desired state can swing back to
+        // that same runtime — which lands here and would otherwise leave readers
+        // permanently blind to a server that is up.
+        runtime_tx.send_replace(published);
         return Ok(());
     }
 
@@ -451,6 +507,13 @@ async fn converge_once(
         s.running.as_ref().map(|r| r.handle.clone())
     };
     if let Some(handle) = existing {
+        // Stop publishing the runtime before anything tears it down, so no reader
+        // can pick up a state whose server is already closing. A close that fails
+        // leaves the snapshot empty while the old runtime still serves: readers
+        // briefly see "unavailable" for a server that is up, which is the safe
+        // direction, and the reaffirm path above restores it if the desired state
+        // settles back on this runtime.
+        runtime_tx.send_replace(None);
         // Withdraw the node from the registry *before* the socket closes, so peers
         // never advertise an endpoint whose runtime has gone away. Best-effort and
         // idempotent (a retried close re-runs it harmlessly).
@@ -474,15 +537,20 @@ async fn converge_once(
 
     // Start the new runtime if desired.
     if let Some(params) = &desired.params {
-        let handle = driver.start(params).await?;
+        let started = driver.start(params).await?;
+        let api_state = started.api_state.clone();
         let mut s = state.lock().await;
         s.running = Some(RunningRuntime {
-            handle,
+            handle: started.handle,
+            api_state: started.api_state,
             params: params.clone(),
             revision: desired.revision,
         });
         s.applied_revision = Some(desired.revision);
         s.last_error = None;
+        drop(s);
+        // Only now, with the server actually up, may readers see it.
+        runtime_tx.send_replace(Some(api_state));
     } else {
         let mut s = state.lock().await;
         s.applied_revision = None;
@@ -494,15 +562,60 @@ async fn converge_once(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::TurnTransport;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::model::{Statistics, TurnSettings, TurnTransport};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// Accepts every credential: these tests exercise the lifecycle, never the
+    /// auth path.
+    struct AllowAll;
+    impl turn::auth::AuthHandler for AllowAll {
+        fn auth_handle(
+            &self,
+            _username: &str,
+            _realm: &str,
+            _src_addr: std::net::SocketAddr,
+        ) -> Result<Vec<u8>, turn::Error> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// A real runtime on an ephemeral loopback port.
+    ///
+    /// The supervisor publishes the live [`TurnApiState`], so a fake driver has
+    /// to hand back a real one — and `turn::Server` refuses to build without at
+    /// least one bound connection, so there is no socket-free shortcut. Binding
+    /// loopback is cheap and keeps the fakes honest: their `close()` really does
+    /// tear a server down.
+    async fn loopback_runtime() -> Arc<TurnApiState> {
+        let settings = TurnSettings {
+            interfaces: vec![TurnInterface {
+                transport: TurnTransport::UDP,
+                listen: "127.0.0.1:0".into(),
+                external: "127.0.0.1:3478".into(),
+            }],
+            ..TurnSettings::default()
+        };
+        crate::service::startup_turn_server(
+            settings,
+            Arc::new(AllowAll),
+            Arc::new(std::sync::RwLock::new(Statistics::default())),
+        )
+        .await
+        .expect("a loopback TURN runtime should start")
+    }
 
     /// Fake handle recording closes; can fail the first `close_failures` close
     /// attempts (shared with its driver so a test can inject failures after the
     /// handle is already running).
     struct FakeHandle {
+        state: Arc<TurnApiState>,
         closes: Arc<AtomicUsize>,
         close_failures: Arc<AtomicUsize>,
+        /// Filled by the test right after `spawn` (the receiver does not exist
+        /// before then), so a close can record what readers were seeing at the
+        /// instant the server went away.
+        snapshot: Arc<std::sync::OnceLock<watch::Receiver<Option<Arc<TurnApiState>>>>>,
+        closed_while_published: Arc<AtomicBool>,
     }
     #[async_trait]
     impl TurnRuntimeHandle for FakeHandle {
@@ -511,6 +624,16 @@ mod tests {
                 self.close_failures.fetch_sub(1, Ordering::SeqCst);
                 return Err("injected close failure".into());
             }
+            if let Some(rx) = self.snapshot.get()
+                && rx.borrow().is_some()
+            {
+                self.closed_while_published.store(true, Ordering::SeqCst);
+            }
+            self.state
+                .server
+                .close()
+                .await
+                .map_err(|e| format!("closing the loopback runtime failed: {e}"))?;
             self.closes.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -525,6 +648,8 @@ mod tests {
         close_failures: Arc<AtomicUsize>,
         fail_starts: AtomicUsize,
         panic_starts: AtomicUsize,
+        snapshot: Arc<std::sync::OnceLock<watch::Receiver<Option<Arc<TurnApiState>>>>>,
+        closed_while_published: Arc<AtomicBool>,
     }
     impl FakeDriver {
         fn new() -> Arc<Self> {
@@ -534,15 +659,14 @@ mod tests {
                 close_failures: Arc::new(AtomicUsize::new(0)),
                 fail_starts: AtomicUsize::new(0),
                 panic_starts: AtomicUsize::new(0),
+                snapshot: Arc::new(std::sync::OnceLock::new()),
+                closed_while_published: Arc::new(AtomicBool::new(false)),
             })
         }
     }
     #[async_trait]
     impl TurnRuntimeDriver for FakeDriver {
-        async fn start(
-            &self,
-            _params: &TurnRuntimeParams,
-        ) -> Result<Arc<dyn TurnRuntimeHandle>, String> {
+        async fn start(&self, _params: &TurnRuntimeParams) -> Result<StartedRuntime, String> {
             if self.panic_starts.load(Ordering::SeqCst) > 0 {
                 self.panic_starts.fetch_sub(1, Ordering::SeqCst);
                 panic!("injected start panic");
@@ -552,10 +676,17 @@ mod tests {
                 return Err("injected start failure".into());
             }
             self.starts.fetch_add(1, Ordering::SeqCst);
-            Ok(Arc::new(FakeHandle {
-                closes: self.closes.clone(),
-                close_failures: self.close_failures.clone(),
-            }))
+            let api_state = loopback_runtime().await;
+            Ok(StartedRuntime {
+                handle: Arc::new(FakeHandle {
+                    state: api_state.clone(),
+                    closes: self.closes.clone(),
+                    close_failures: self.close_failures.clone(),
+                    snapshot: self.snapshot.clone(),
+                    closed_while_published: self.closed_while_published.clone(),
+                }),
+                api_state,
+            })
         }
     }
 
@@ -810,12 +941,13 @@ mod tests {
 
         struct OrderHandle {
             order: Arc<StdMutex<Vec<&'static str>>>,
+            state: Arc<TurnApiState>,
         }
         #[async_trait]
         impl TurnRuntimeHandle for OrderHandle {
             async fn close(&self) -> Result<(), String> {
                 self.order.lock().unwrap().push("close");
-                Ok(())
+                self.state.server.close().await.map_err(|e| e.to_string())
             }
         }
         struct OrderDriver {
@@ -823,13 +955,15 @@ mod tests {
         }
         #[async_trait]
         impl TurnRuntimeDriver for OrderDriver {
-            async fn start(
-                &self,
-                _params: &TurnRuntimeParams,
-            ) -> Result<Arc<dyn TurnRuntimeHandle>, String> {
-                Ok(Arc::new(OrderHandle {
-                    order: self.order.clone(),
-                }))
+            async fn start(&self, _params: &TurnRuntimeParams) -> Result<StartedRuntime, String> {
+                let api_state = loopback_runtime().await;
+                Ok(StartedRuntime {
+                    handle: Arc::new(OrderHandle {
+                        order: self.order.clone(),
+                        state: api_state.clone(),
+                    }),
+                    api_state,
+                })
             }
         }
         struct RecObserver {
@@ -1007,6 +1141,141 @@ mod tests {
             "both failures used"
         );
         assert!(!h.status().await.running);
+    }
+
+    /// Readers follow the supervisor, so the published runtime must be the one
+    /// that is actually serving: present while up, gone once torn down, and the
+    /// very object the driver started (not a stale predecessor).
+    #[tokio::test]
+    async fn the_published_runtime_is_the_one_that_is_serving() {
+        let driver = FakeDriver::new();
+        let h = spawn(
+            driver,
+            DesiredState {
+                revision: 1,
+                params: Some(params("r")),
+            },
+            fast_backoff(),
+        );
+        wait_until(&h, |s| s.running).await;
+
+        let first = h.runtime().expect("a running runtime must be published");
+        // A reconfigure replaces it; the snapshot must move with it.
+        h.apply(DesiredState {
+            revision: 2,
+            params: Some(params("r2")),
+        });
+        wait_until(&h, |s| s.applied_revision == Some(2)).await;
+        let second = h.runtime().expect("the new runtime must be published");
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "readers must not be handed the runtime that was just closed"
+        );
+
+        // Switching off leaves nothing to publish.
+        h.apply(DesiredState {
+            revision: 3,
+            params: None,
+        });
+        wait_until(&h, |s| !s.running).await;
+        assert!(h.runtime().is_none());
+        h.shutdown().await;
+        assert!(
+            h.runtime().is_none(),
+            "shutdown leaves no runtime published"
+        );
+    }
+
+    /// The ordering that makes the snapshot trustworthy: nothing may observe a
+    /// runtime whose teardown has already begun. Asserted from inside `close()`,
+    /// which is the exact instant the server starts going away.
+    #[tokio::test]
+    async fn the_snapshot_is_cleared_before_a_runtime_closes() {
+        let driver = FakeDriver::new();
+        let snapshot_slot = driver.snapshot.clone();
+        let closed_while_published = driver.closed_while_published.clone();
+        let h = spawn(
+            driver,
+            DesiredState {
+                revision: 1,
+                params: Some(params("r")),
+            },
+            fast_backoff(),
+        );
+        // Hand the driver the receiver it could not have before spawn returned.
+        snapshot_slot
+            .set(h.subscribe_runtime())
+            .map_err(|_| ())
+            .expect("the slot is filled exactly once");
+        wait_until(&h, |s| s.running).await;
+
+        // Two teardowns: a restart and a switch-off.
+        h.apply(DesiredState {
+            revision: 2,
+            params: Some(params("r2")),
+        });
+        wait_until(&h, |s| s.applied_revision == Some(2)).await;
+        h.apply(DesiredState {
+            revision: 3,
+            params: None,
+        });
+        wait_until(&h, |s| !s.running).await;
+
+        assert!(
+            !closed_while_published.load(Ordering::SeqCst),
+            "a runtime was closed while still advertised to readers"
+        );
+        h.shutdown().await;
+    }
+
+    /// A close that fails clears the snapshot even though its runtime keeps
+    /// serving. If the desired state then swings back to that same runtime, the
+    /// actor takes the already-converged path — which must republish, or readers
+    /// stay blind to a server that is up.
+    #[tokio::test]
+    async fn a_reaffirmed_runtime_is_republished_after_a_failed_close() {
+        let driver = FakeDriver::new();
+        let close_failures = driver.close_failures.clone();
+        let starts = driver.starts.clone();
+        let h = spawn(
+            driver,
+            DesiredState {
+                revision: 1,
+                params: Some(params("a")),
+            },
+            fast_backoff(),
+        );
+        wait_until(&h, |s| s.running).await;
+        let original = h.runtime().expect("running");
+
+        // Make every close attempt fail, then ask for a different runtime: the
+        // supervisor clears the snapshot, fails the close, and retries.
+        close_failures.store(1_000, Ordering::SeqCst);
+        h.apply(DesiredState {
+            revision: 2,
+            params: Some(params("b")),
+        });
+        wait_until(&h, |s| s.last_error.is_some()).await;
+
+        // Swing back to the configuration that is still running.
+        close_failures.store(0, Ordering::SeqCst);
+        h.apply(DesiredState {
+            revision: 3,
+            params: Some(params("a")),
+        });
+        wait_until(&h, |s| s.applied_revision == Some(3)).await;
+
+        let republished = h.runtime().expect("the surviving runtime must reappear");
+        assert!(
+            Arc::ptr_eq(&original, &republished),
+            "the original runtime is still the one serving"
+        );
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            1,
+            "no restart happened: the runtime never went away"
+        );
+        h.shutdown().await;
     }
 
     /// The secret is a credential; a `{:?}` on the params reaches logs and panic

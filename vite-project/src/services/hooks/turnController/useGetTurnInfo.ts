@@ -27,7 +27,7 @@ export function getTurnInfoQueryOptions(config: Partial<RequestConfig> & { clien
 }
 
 /**
- * @summary Get turn server info
+ * @summary Get TURN runtime status
  * {@link /api/turn/info}
  */
 export function useGetTurnInfo<TData = GetTurnInfoQueryResponse, TQueryData = GetTurnInfoQueryResponse, TQueryKey extends QueryKey = GetTurnInfoQueryKey>(options: 

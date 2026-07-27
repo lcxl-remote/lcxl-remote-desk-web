@@ -2749,6 +2749,7 @@ dependencies = [
  "hmac",
  "log",
  "serde",
+ "serde_json",
  "sha1",
  "tokio",
  "turn",

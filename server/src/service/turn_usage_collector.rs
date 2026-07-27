@@ -4,6 +4,11 @@
 //! resolves each `connection_id` to a `device_code` via the live connection map
 //! (falling back to the raw `connection_id`), and folds the delta into the local
 //! sqlite hourly rollup. Collect-only: no billing, no owner, no node dimension.
+//!
+//! The counters belong to a TURN runtime, and a settings change replaces that
+//! runtime, so the collector resolves them per pass instead of holding one set
+//! forever. A holder would keep diffing counters nobody increments any more, and
+//! silently report zero usage for the relay that is actually running.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -13,8 +18,9 @@ use chrono::{DateTime, Utc};
 use desk_signal::turn_usage::{
     ConnectionDeviceMap, TurnUsageDelta, truncate_to_hour, upsert_turn_usage,
 };
-use desk_turn::model::{Statistics, TurnDirectionalCounters, TurnSessionStatistics};
+use desk_turn::model::{Statistics, TurnApiState, TurnDirectionalCounters, TurnSessionStatistics};
 use sea_orm::DatabaseConnection;
+use tokio::sync::watch;
 
 /// Hour-aligned UTC timestamp, matching the rollup's `hour_bucket` column type.
 type DateTimeUtc = DateTime<Utc>;
@@ -22,8 +28,29 @@ type DateTimeUtc = DateTime<Utc>;
 /// Default cadence between collection passes.
 pub const FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Where a pass reads its counters from, resolved each time.
+#[derive(Clone)]
+pub enum StatisticsSource {
+    /// Follow whatever runtime is serving; `None` while none is.
+    Runtime(watch::Receiver<Option<Arc<TurnApiState>>>),
+    /// A fixed set of counters, for tests that drive the accounting directly.
+    Fixed(Arc<RwLock<Statistics>>),
+}
+
+impl StatisticsSource {
+    fn resolve(&self) -> Option<Arc<RwLock<Statistics>>> {
+        match self {
+            Self::Runtime(rx) => rx.borrow().as_ref().map(|s| s.statistics.clone()),
+            Self::Fixed(stats) => Some(stats.clone()),
+        }
+    }
+}
+
 pub struct TurnUsageCollector {
-    statistics: Arc<RwLock<Statistics>>,
+    source: StatisticsSource,
+    /// The counters the current baseline was measured against, so a runtime swap
+    /// is detected by identity rather than guessed at from the values.
+    current: Option<Arc<RwLock<Statistics>>>,
     conn_device_map: Arc<ConnectionDeviceMap>,
     /// Per-connection cumulative counters already persisted; the next pass only
     /// flushes the difference. Node-local and droppable (a restart re-baselines).
@@ -31,12 +58,10 @@ pub struct TurnUsageCollector {
 }
 
 impl TurnUsageCollector {
-    pub fn new(
-        statistics: Arc<RwLock<Statistics>>,
-        conn_device_map: Arc<ConnectionDeviceMap>,
-    ) -> Self {
+    pub fn new(source: StatisticsSource, conn_device_map: Arc<ConnectionDeviceMap>) -> Self {
         Self {
-            statistics,
+            source,
+            current: None,
             conn_device_map,
             baseline: HashMap::new(),
         }
@@ -48,11 +73,33 @@ impl TurnUsageCollector {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
+            let Some(statistics) = self.current_statistics() else {
+                // No runtime is serving; there is nothing to account for, and no
+                // reason to touch the database.
+                continue;
+            };
             let db = desk_signal::db::get_db();
-            if let Err(e) = self.flush_once(db, chrono::Utc::now()).await {
+            if let Err(e) = self.flush_once(db, chrono::Utc::now(), &statistics).await {
                 log::warn!("TURN usage collector flush failed: {}", e);
             }
         }
+    }
+
+    /// The counters to read this pass, dropping the baseline when the runtime
+    /// behind them has been replaced: a fresh runtime starts from zero, and
+    /// diffing it against the retired runtime's totals would swallow everything
+    /// the new one relays until it exceeds them.
+    fn current_statistics(&mut self) -> Option<Arc<RwLock<Statistics>>> {
+        let resolved = self.source.resolve()?;
+        let same = self
+            .current
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(held, &resolved));
+        if !same {
+            self.baseline.clear();
+            self.current = Some(resolved.clone());
+        }
+        Some(resolved)
     }
 
     /// One collection pass. Computes per-connection deltas, groups them by
@@ -63,8 +110,9 @@ impl TurnUsageCollector {
         &mut self,
         db: &DatabaseConnection,
         now: DateTimeUtc,
+        statistics: &Arc<RwLock<Statistics>>,
     ) -> Result<(), sea_orm::DbErr> {
-        let snapshot = match self.statistics.read() {
+        let snapshot = match statistics.read() {
             Ok(stats) => stats.snapshot_by_connection(),
             Err(e) => {
                 log::warn!("TURN statistics lock poisoned, skipping flush: {}", e);
@@ -218,6 +266,18 @@ mod tests {
         assert_eq!(d.relay_sent_bytes, 0);
     }
 
+    /// Drive one pass against the collector's own source, the way `run` does.
+    async fn flush(
+        collector: &mut TurnUsageCollector,
+        db: &DatabaseConnection,
+        now: DateTimeUtc,
+    ) -> Result<(), sea_orm::DbErr> {
+        let statistics = collector
+            .current_statistics()
+            .expect("the test source always resolves");
+        collector.flush_once(db, now, &statistics).await
+    }
+
     #[tokio::test]
     async fn flush_resolves_device_and_advances_baseline() {
         let db = memory_db().await;
@@ -235,8 +295,9 @@ mod tests {
             s.record_recv(addr, 9, TurnTrafficClass::Control);
         }
 
-        let mut collector = TurnUsageCollector::new(stats.clone(), map.clone());
-        collector.flush_once(&db, now()).await.unwrap();
+        let mut collector =
+            TurnUsageCollector::new(StatisticsSource::Fixed(stats.clone()), map.clone());
+        flush(&mut collector, &db, now()).await.unwrap();
 
         let rows = query_turn_usage(
             &db,
@@ -253,7 +314,7 @@ mod tests {
         assert_eq!(rows[0].control_received_bytes, 9);
 
         // Second flush with no new traffic must be a no-op (baseline advanced).
-        collector.flush_once(&db, now()).await.unwrap();
+        flush(&mut collector, &db, now()).await.unwrap();
         let rows = query_turn_usage(
             &db,
             now() - chrono::Duration::hours(1),
@@ -263,6 +324,95 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(rows[0].relay_received_bytes, 100, "no double-counting");
+    }
+
+    /// A settings change replaces the runtime, and with it the counters. The
+    /// collector must re-baseline on the new instance: keeping the old baseline
+    /// would swallow everything the new relay carries until it happened to
+    /// exceed the retired runtime's totals.
+    #[tokio::test]
+    async fn a_replaced_runtime_re_baselines_instead_of_swallowing_its_traffic() {
+        let db = memory_db().await;
+        let map: Arc<ConnectionDeviceMap> = Arc::new(ConnectionDeviceMap::default());
+        let (runtime_tx, runtime_rx) = watch::channel(None);
+        let mut collector =
+            TurnUsageCollector::new(StatisticsSource::Runtime(runtime_rx), map.clone());
+
+        // Nothing is serving: no counters to read, and no database work.
+        assert!(collector.current_statistics().is_none());
+
+        // A runtime comes up and relays a lot.
+        let first = loopback_runtime().await;
+        record(&first, "conn-1", "127.0.0.1:5000", 1_000);
+        runtime_tx.send_replace(Some(first.clone()));
+        flush(&mut collector, &db, now()).await.unwrap();
+        assert_eq!(total_relay_received(&db).await, 1_000);
+
+        // It is replaced; the fresh runtime's counters start from zero.
+        let second = loopback_runtime().await;
+        record(&second, "conn-1", "127.0.0.1:5000", 7);
+        runtime_tx.send_replace(Some(second.clone()));
+        flush(&mut collector, &db, now()).await.unwrap();
+        assert_eq!(
+            total_relay_received(&db).await,
+            1_007,
+            "the new runtime's traffic must be added, not compared away"
+        );
+
+        first.server.close().await.unwrap();
+        second.server.close().await.unwrap();
+    }
+
+    /// A real TURN runtime on an ephemeral loopback port; the collector reads
+    /// counters off `TurnApiState`, so a stand-in would not exercise the path.
+    async fn loopback_runtime() -> Arc<desk_turn::model::TurnApiState> {
+        use desk_turn::model::{TurnInterface, TurnTransport};
+        let settings = desk_turn::model::TurnSettings {
+            interfaces: vec![TurnInterface {
+                transport: TurnTransport::UDP,
+                listen: "127.0.0.1:0".into(),
+                external: "127.0.0.1:3478".into(),
+            }],
+            ..Default::default()
+        };
+        let statistics = Arc::new(RwLock::new(Statistics::default()));
+        let auth = Arc::new(crate::model::turn::TurnAuthHandler::new(
+            settings.clone(),
+            actix_web::web::Data::new(desk_signal::model::SharedConnectionMap::from(
+                std::collections::BTreeMap::new(),
+            )),
+            statistics.clone(),
+        ));
+        desk_turn::service::startup_turn_server(settings, auth, statistics)
+            .await
+            .expect("a loopback TURN runtime should start")
+    }
+
+    /// Fold `bytes` of relayed traffic for `conn_id` into a runtime's counters.
+    fn record(
+        runtime: &Arc<desk_turn::model::TurnApiState>,
+        conn_id: &str,
+        addr: &str,
+        bytes: usize,
+    ) {
+        let addr = addr.parse().unwrap();
+        let mut stats = runtime.statistics.write().unwrap();
+        stats.record_binding(addr, conn_id);
+        stats.record_recv(addr, bytes, TurnTrafficClass::Relay);
+    }
+
+    async fn total_relay_received(db: &DatabaseConnection) -> i64 {
+        query_turn_usage(
+            db,
+            now() - chrono::Duration::hours(1),
+            now() + chrono::Duration::hours(1),
+            desk_signal::usage_query::Granularity::Hour,
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.relay_received_bytes)
+        .sum()
     }
 
     #[tokio::test]
@@ -278,8 +428,9 @@ mod tests {
             s.record_recv(addr, 70, TurnTrafficClass::Relay);
         }
 
-        let mut collector = TurnUsageCollector::new(stats.clone(), map.clone());
-        collector.flush_once(&db, now()).await.unwrap();
+        let mut collector =
+            TurnUsageCollector::new(StatisticsSource::Fixed(stats.clone()), map.clone());
+        flush(&mut collector, &db, now()).await.unwrap();
 
         let rows = query_turn_usage(
             &db,
