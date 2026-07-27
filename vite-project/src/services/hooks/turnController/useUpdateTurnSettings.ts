@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse } from "../../types.ts";
-import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { updateTurnSettings } from "../../clients.ts";
+import { mutationOptions, useMutation } from "@tanstack/react-query";
 
 export const updateTurnSettingsMutationKey = () => [{ url: '/api/desk/settings/turn' }] as const
 

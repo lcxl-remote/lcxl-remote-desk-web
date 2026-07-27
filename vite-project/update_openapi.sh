@@ -20,5 +20,8 @@ trap cleanup EXIT
 
 echo "Dumping OpenAPI spec (offline)..."
 cargo run -q -p lcxl-remote-desk-server -- dump-openapi --out "$spec_path"
+# `--no-install` keeps npx from silently fetching a kubb build that is not the
+# one pinned in the lockfile: the committed client must stay reproducible, and a
+# different generator version rewrites it wholesale.
 echo "Generating Kubb clients..."
-KUBB_OPENAPI_PATH="$spec_path" npx kubb generate
+KUBB_OPENAPI_PATH="$spec_path" npx --no-install kubb generate

@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { GetDiagnoseSessionQueryResponse, GetDiagnoseSessionQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryResult } from "@tanstack/react-query";
-import type { GetDiagnoseSessionQueryResponse, GetDiagnoseSessionQueryParams } from "../../types.ts";
-import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 import { getDiagnoseSession } from "../../clients.ts";
+import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 
 export const getDiagnoseSessionSuspenseQueryKey = (params: GetDiagnoseSessionQueryParams) => [{ url: '/api/my/diagnose-session' }, ...(params ? [params] : [])] as const
 
@@ -17,7 +17,7 @@ export function getDiagnoseSessionSuspenseQueryOptions(params: GetDiagnoseSessio
 
         const queryKey = getDiagnoseSessionSuspenseQueryKey(params)
         return queryOptions<GetDiagnoseSessionQueryResponse, ResponseErrorConfig<Error>, GetDiagnoseSessionQueryResponse, typeof queryKey>({
-
+         
          queryKey,
          queryFn: async ({ signal }) => {
             return getDiagnoseSession(params, { ...config, signal: config.signal ?? signal })
@@ -30,7 +30,7 @@ export function getDiagnoseSessionSuspenseQueryOptions(params: GetDiagnoseSessio
  * @summary Read an AI-diagnose conversation snapshot (browser view)
  * {@link /api/my/diagnose-session}
  */
-export function useGetDiagnoseSessionSuspense<TData = GetDiagnoseSessionQueryResponse, TQueryKey extends QueryKey = GetDiagnoseSessionSuspenseQueryKey>(params: GetDiagnoseSessionQueryParams, options:
+export function useGetDiagnoseSessionSuspense<TData = GetDiagnoseSessionQueryResponse, TQueryKey extends QueryKey = GetDiagnoseSessionSuspenseQueryKey>(params: GetDiagnoseSessionQueryParams, options: 
 {
   query?: Partial<UseSuspenseQueryOptions<GetDiagnoseSessionQueryResponse, ResponseErrorConfig<Error>, TData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }
@@ -40,7 +40,7 @@ export function useGetDiagnoseSessionSuspense<TData = GetDiagnoseSessionQueryRes
          const { query: queryConfig = {}, client: config = {} } = options ?? {}
          const { client: queryClient, ...resolvedOptions } = queryConfig
          const queryKey = resolvedOptions?.queryKey ?? getDiagnoseSessionSuspenseQueryKey(params)
-
+         
 
          const query = useSuspenseQuery({
           ...getDiagnoseSessionSuspenseQueryOptions(params, config),
@@ -51,5 +51,5 @@ export function useGetDiagnoseSessionSuspense<TData = GetDiagnoseSessionQueryRes
          query.queryKey = queryKey as TQueryKey
 
          return query
-
+         
 }

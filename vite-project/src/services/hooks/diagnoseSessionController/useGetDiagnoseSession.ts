@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { GetDiagnoseSessionQueryResponse, GetDiagnoseSessionQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { GetDiagnoseSessionQueryResponse, GetDiagnoseSessionQueryParams } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { getDiagnoseSession } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const getDiagnoseSessionQueryKey = (params: GetDiagnoseSessionQueryParams) => [{ url: '/api/my/diagnose-session' }, ...(params ? [params] : [])] as const
 
@@ -17,7 +17,7 @@ export function getDiagnoseSessionQueryOptions(params: GetDiagnoseSessionQueryPa
 
         const queryKey = getDiagnoseSessionQueryKey(params)
         return queryOptions<GetDiagnoseSessionQueryResponse, ResponseErrorConfig<Error>, GetDiagnoseSessionQueryResponse, typeof queryKey>({
-
+         
          queryKey,
          queryFn: async ({ signal }) => {
             return getDiagnoseSession(params, { ...config, signal: config.signal ?? signal })
@@ -30,7 +30,7 @@ export function getDiagnoseSessionQueryOptions(params: GetDiagnoseSessionQueryPa
  * @summary Read an AI-diagnose conversation snapshot (browser view)
  * {@link /api/my/diagnose-session}
  */
-export function useGetDiagnoseSession<TData = GetDiagnoseSessionQueryResponse, TQueryData = GetDiagnoseSessionQueryResponse, TQueryKey extends QueryKey = GetDiagnoseSessionQueryKey>(params: GetDiagnoseSessionQueryParams, options:
+export function useGetDiagnoseSession<TData = GetDiagnoseSessionQueryResponse, TQueryData = GetDiagnoseSessionQueryResponse, TQueryKey extends QueryKey = GetDiagnoseSessionQueryKey>(params: GetDiagnoseSessionQueryParams, options: 
 {
   query?: Partial<QueryObserverOptions<GetDiagnoseSessionQueryResponse, ResponseErrorConfig<Error>, TData, TQueryData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }
@@ -40,7 +40,7 @@ export function useGetDiagnoseSession<TData = GetDiagnoseSessionQueryResponse, T
          const { query: queryConfig = {}, client: config = {} } = options ?? {}
          const { client: queryClient, ...resolvedOptions } = queryConfig
          const queryKey = resolvedOptions?.queryKey ?? getDiagnoseSessionQueryKey(params)
-
+         
 
          const query = useQuery({
           ...getDiagnoseSessionQueryOptions(params, config),
@@ -51,5 +51,5 @@ export function useGetDiagnoseSession<TData = GetDiagnoseSessionQueryResponse, T
          query.queryKey = queryKey as TQueryKey
 
          return query
-
+         
 }

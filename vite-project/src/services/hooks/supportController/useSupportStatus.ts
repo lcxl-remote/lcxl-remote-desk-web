@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { SupportStatusQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { SupportStatusQueryResponse } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { supportStatus } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const supportStatusQueryKey = () => [{ url: '/api/desk/support/status' }] as const
 

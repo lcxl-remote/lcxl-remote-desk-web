@@ -22,8 +22,11 @@ try {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     $env:KUBB_OPENAPI_PATH = $specPath
+    # `--no-install` keeps npx from silently fetching a kubb build that is not
+    # the one pinned in the lockfile: the committed client must stay
+    # reproducible, and a different generator version rewrites it wholesale.
     Write-Host "Generating Kubb clients..."
-    npx kubb generate
+    npx --no-install kubb generate
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 finally {

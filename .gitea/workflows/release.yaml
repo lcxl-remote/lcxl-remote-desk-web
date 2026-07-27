@@ -18,7 +18,7 @@ jobs:
       - name: Build Frontend
         working-directory: vite-project
         run: |
-          npm install
+          npm ci
           npm run build
       - name: Upload Frontend Artifact
         uses: actions/upload-artifact@v4
