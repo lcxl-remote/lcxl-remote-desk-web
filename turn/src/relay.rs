@@ -95,19 +95,34 @@ impl RelayAddressGenerator for FamilyPinnedRelay {
             return self.advertise(conn);
         }
 
-        // Walk the whole range from a rotating start rather than sampling it:
-        // a range is often only a few ports wide, and a handful of random draws
-        // can miss the one port that is free.
-        let width = self.max_port - self.min_port + 1;
-        let start = self.cursor.fetch_add(1, Ordering::Relaxed) % width;
-        for offset in 0..width {
-            let port = self.min_port + (start + offset) % width;
+        let cursor = self.cursor.fetch_add(1, Ordering::Relaxed);
+        for port in walk_ports(self.min_port, self.max_port, cursor) {
             if let Ok(conn) = self.net.bind(SocketAddr::new(bind_ip, port)).await {
                 return self.advertise(conn);
             }
         }
         Err(turn::Error::ErrMaxRetriesExceeded)
     }
+}
+
+/// The ports one allocation walks, in order: the whole configured range, rotated
+/// so consecutive allocations do not all start at its first port. A range is
+/// often only a few ports wide, and sampling it at random can miss the one port
+/// that is free.
+///
+/// The arithmetic runs in `u32` rather than in the domain the ports live in: a
+/// range may be wider than half of `u16`, and `start + offset` then leaves that
+/// domain before the modulo brings it back. Each port that comes out is
+/// `min_port + (… % width)`, which is `max_port` at most, so narrowing it again
+/// is exact.
+fn walk_ports(min_port: u16, max_port: u16, cursor: u16) -> impl Iterator<Item = u16> {
+    let min = u32::from(min_port);
+    // A range whose ends are inverted is refused by `validate` before anything
+    // serves; saturating here keeps a caller that skipped it walking one port
+    // rather than panicking.
+    let width = u32::from(max_port).saturating_sub(min) + 1;
+    let start = u32::from(cursor) % width;
+    (0..width).map(move |offset| (min + (start + offset) % width) as u16)
 }
 
 #[cfg(test)]
@@ -190,5 +205,49 @@ mod tests {
             relay("203.0.113.7", 200, 100).validate(),
             Err(turn::Error::ErrMaxPortLessThanMinPort)
         ));
+    }
+
+    /// The widest range `validate` accepts, walked from a start near its end —
+    /// where `start + offset` runs past what a port can hold. Doing that in the
+    /// port's own width overflows: the walk panics in a debug build and, in a
+    /// release one, wraps and revisits ports it has already tried while never
+    /// reaching others.
+    #[test]
+    fn the_widest_range_is_walked_from_any_start() {
+        let ports: Vec<u16> = walk_ports(1, 65535, 65534).collect();
+
+        assert_eq!(ports.len(), 65535, "every port in the range is visited");
+        assert_eq!(ports[0], 65535, "the walk starts where the cursor points");
+        assert_eq!(ports[1], 1, "and wraps to the bottom of the range");
+    }
+
+    /// Exhaustion has to mean exhaustion: a walk that visited a port twice would
+    /// report the range full while something in it was still free.
+    #[test]
+    fn a_walk_visits_every_port_exactly_once() {
+        for (min, max, cursor) in [
+            (1u16, 65535u16, 40_000u16),
+            (49_000, 49_099, 7),
+            (80, 80, 0),
+        ] {
+            let ports: Vec<u16> = walk_ports(min, max, cursor).collect();
+            let mut unique = ports.clone();
+            unique.sort_unstable();
+            unique.dedup();
+
+            assert_eq!(unique.len(), ports.len(), "{min}..={max} revisited a port");
+            assert_eq!(*unique.first().unwrap(), min);
+            assert_eq!(*unique.last().unwrap(), max);
+        }
+    }
+
+    /// The rotation is the point of the cursor: two consecutive allocations must
+    /// not both begin by contending for the same port.
+    #[test]
+    fn consecutive_walks_begin_at_different_ports() {
+        let first = walk_ports(49_000, 49_099, 0).next().unwrap();
+        let second = walk_ports(49_000, 49_099, 1).next().unwrap();
+
+        assert_ne!(first, second);
     }
 }
