@@ -1,13 +1,10 @@
 
 import * as React from "react"
 import {
-    Monitor,
     Settings,
     LogOut,
     ChevronRight,
     ChevronDown,
-    BarChart3,
-    LifeBuoy,
 } from "lucide-react"
 import { useLocation, Link, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
@@ -15,6 +12,7 @@ import { useQueryServerInfo } from "@/services/hooks/systemController/useQuerySe
 import { useGetCurrentUser } from "@/services/hooks/userController/useGetCurrentUser"
 import { useLogoutAccount } from "@/services/hooks/authController/useLogoutAccount"
 import { clearAllGrants } from "@/features/desk/session-grant"
+import { buildNavItems, startupModeLabel } from "@/features/layout/sidebar-nav"
 import { Badge } from "@/components/ui/badge"
 
 import {
@@ -67,65 +65,12 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     const navItems: any[] = React.useMemo(() => {
         if (!user || !serverInfo) return [];
 
-        const isDeviceUser = user.access === "device_user";
-
-        let dynamicItems: any[] = [];
-
-        if (isDeviceUser) {
-            if (user.targetConnectionId) {
-                dynamicItems.push({
-                    title: "menu.desk_control",
-                    url: `/desk/${user.targetConnectionId}/control`,
-                    icon: Monitor,
-                });
-            }
-        } else {
-            if (serverInfo.startup_mode !== "desk_server") {
-                dynamicItems.push({
-                    title: "menu.desk",
-                    url: "/desk/list",
-                    icon: Monitor,
-                });
-            }
-
-            // Host-side "ask for remote help": a primary entry so non-technical
-            // users can reach it directly. Available whenever this node can act
-            // as a host (any mode except pure signaling).
-            if (serverInfo.startup_mode !== "signaling") {
-                dynamicItems.push({
-                    title: "menu.support",
-                    url: "/support",
-                    icon: LifeBuoy,
-                });
-            }
-
-            if (serverInfo.startup_mode !== "desk_server") {
-                dynamicItems.push({
-                    title: "menu.usage",
-                    url: "/usage",
-                    icon: BarChart3,
-                });
-            }
-
-            dynamicItems.push({
-                title: "menu.settings",
-                url: "/system",
-                icon: Settings,
-            });
-        }
-
-        return dynamicItems;
-
+        return buildNavItems({
+            access: user.access,
+            targetConnectionId: user.targetConnectionId,
+            startupMode: serverInfo.startup_mode,
+        });
     }, [user, serverInfo]);
-
-    const getModeLabel = () => {
-        switch (serverInfo?.startup_mode) {
-            case "signaling": return "Signaling";
-            case "desk_server": return "Desk Server";
-            case "default": return "Default";
-            default: return "";
-        }
-    };
 
     return (
         <Sidebar collapsible="icon" {...props}>
@@ -142,7 +87,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                                         LCXL Remote
                                         {serverInfo && (
                                             <Badge variant="outline" className="text-[10px] px-1 py-0 h-4">
-                                                {getModeLabel()}
+                                                {startupModeLabel(serverInfo.startup_mode)}
                                             </Badge>
                                         )}
                                     </span>

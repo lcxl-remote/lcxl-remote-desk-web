@@ -23,6 +23,7 @@ import { useLoginAccount } from "@/services/hooks/authController/useLoginAccount
 import { useRedeemCode } from "@/services/hooks/authController/useRedeemCode"
 import { useGetCurrentUser } from "@/services/hooks/userController/useGetCurrentUser"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
+import { startupModeEnum } from "@/services/types"
 import { saveSessionGrant, clearSessionGrant } from "@/features/desk/session-grant"
 import { ModeToggle } from "@/components/mode-toggle"
 import { LanguageToggle } from "@/components/language-toggle"
@@ -75,7 +76,7 @@ export default function LoginPage() {
 
                     // Navigate based on startup_mode
                     const startupMode = response.data?.startup_mode
-                    if (startupMode === "desk-server" || startupMode === "desk_server") {
+                    if (startupMode === startupModeEnum["desk-server"]) {
                         navigate("/system/settings")
                     } else {
                         navigate("/desk/list")
@@ -203,7 +204,7 @@ export default function LoginPage() {
                         setActiveTab(val);
                         form.setValue("type", val);
                     }} className="w-full">
-                        {serverInfo && serverInfo.startup_mode !== "desk_server" && (
+                        {serverInfo && serverInfo.startup_mode !== startupModeEnum["desk-server"] && (
                             <TabsList className="grid w-full grid-cols-2 mb-4">
                                 <TabsTrigger value="account">{t('pages.login.accountLogin.tab')}</TabsTrigger>
                                 <TabsTrigger value="device_code">{t('pages.login.deviceCode.tab')}</TabsTrigger>

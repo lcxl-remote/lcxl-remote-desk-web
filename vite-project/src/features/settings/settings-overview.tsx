@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo";
+import { startupModeEnum } from "@/services/types";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Settings, FileText, Server, Key, Shield, ShieldCheck, Network, Monitor, Bot, KeyRound, Link2 } from "lucide-react";
 
@@ -13,8 +14,8 @@ export function SettingsOverview() {
         return null;
     }
 
-    const isDeskServer = serverInfo.startup_mode === "desk_server" || serverInfo.startup_mode === "desk-server";
-    const isSignaling = serverInfo.startup_mode === "signaling";
+    const isDeskServer = serverInfo.startup_mode === startupModeEnum["desk-server"];
+    const isSignaling = serverInfo.startup_mode === startupModeEnum.signaling;
     // macOS-only ServerInfo field; non-null only on macOS. The IDD virtual
     // display is Windows-only, so its entry is hidden on macOS.
     const isMac = serverInfo.background_start != null;

@@ -54,7 +54,7 @@ describe("SettingsOverview AI settings placement", () => {
     })
 
     it("shows only the local AI policy card on a desk-server edge", () => {
-        const c = renderFor("desk_server")
+        const c = renderFor("desk-server")
         expect(aiModelLink(c)).toBeNull()
         expect(aiPolicyLink(c)).not.toBeNull()
     })
