@@ -759,7 +759,11 @@ export function useFileTransfer(deskId: string | undefined) {
             const dc = await ensureConnection();
 
             const chunkSize = FILE_TRANSFER_CHUNK_SIZE;
-            const totalChunks = Math.ceil(file.size / chunkSize) || 1;
+            // Exactly the number of chunks the loop below will send. An empty
+            // file sends none, and claiming one anyway made the host wait for
+            // a chunk that never came and then reject the finished upload as
+            // incomplete. The Android and iOS clients already declare zero.
+            const totalChunks = Math.ceil(file.size / chunkSize);
 
             // Send upload request
             const request: UploadRequest = {

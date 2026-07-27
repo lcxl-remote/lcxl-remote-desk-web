@@ -73,11 +73,53 @@ describe('useFileTransfer upload accept gating (W1/W7)', () => {
         expect(reqB.type).toBe('upload_request');
         const tidB = reqB.transfer_id;
 
-        act(() => dc.onmessage?.({ data: JSON.stringify({ type: 'transfer_error', transfer_id: tidB, message: 'no such dir' }) }));
+        act(() => dc.onmessage?.({ data: JSON.stringify({ type: 'transfer_error', transfer_id: tidB, error_code: 1, message: 'no such dir' }) }));
         await flush();
         // No new binary frames, and the upload promise settled (the gate
         // rejected the waiter rather than hanging forever).
         expect(dc.binarySent.length).toBe(binaryBefore);
         expect(settledB).toBe(true);
+
+        // --- Upload C: an empty file declares the zero chunks it sends ---
+        // Claiming one chunk anyway left the host waiting for bytes that were
+        // never coming, and it then rejected the upload as incomplete.
+        const binaryBeforeC = dc.binarySent.length;
+        const textBeforeC = dc.textSent.length;
+        act(() => {
+            void api.uploadFile('/dir', emptyFile('nothing.txt'));
+        });
+        await flush();
+
+        const reqC = parseSent(dc.textSent[textBeforeC]);
+        expect(reqC.type).toBe('upload_request');
+        expect(reqC.file_size).toBe(0);
+        expect(reqC.total_chunks).toBe(0);
+
+        act(() => dc.onmessage?.({ data: JSON.stringify({ type: 'upload_response', transfer_id: reqC.transfer_id, accepted: true }) }));
+        await flush();
+
+        // Nothing to send, so it goes straight to declaring itself done.
+        expect(dc.binarySent.length).toBe(binaryBeforeC);
+        const completeC = dc.textSent
+            .slice(textBeforeC)
+            .map(parseSent)
+            .find((m) => m.type === 'transfer_complete' && m.transfer_id === reqC.transfer_id);
+        expect(completeC).toBeTruthy();
     });
 });
+
+/** A zero-byte file, whose stream is done on the first read. */
+function emptyFile(name: string): File {
+    return {
+        name,
+        size: 0,
+        stream: () => ({
+            getReader: () => ({
+                async read() {
+                    return { done: true, value: undefined };
+                },
+                cancel() {},
+            }),
+        }),
+    } as unknown as File;
+}

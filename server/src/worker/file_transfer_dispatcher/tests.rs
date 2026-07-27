@@ -956,6 +956,53 @@ async fn upload_creates_file_and_completes_on_last_chunk() {
     assert_eq!(written[chunk_size], b'B');
 }
 
+/// An empty file is a normal file: it declares zero chunks, sends none, and
+/// must land on disk as an empty file rather than being rejected as an upload
+/// that never delivered its bytes.
+#[tokio::test]
+async fn upload_of_an_empty_file_completes_with_no_chunks() {
+    let tmp = TempDir::new().unwrap();
+    let (d, mut rx) = dispatcher();
+    d.start_connection(&start_payload("c1")).await;
+    let transfer_id = "00000000-0000-0000-0000-000000000009".to_string();
+    let req_msg = FileTransferMessage::UploadRequest(UploadRequest {
+        transfer_id: transfer_id.clone(),
+        target_dir: tmp.path().to_string_lossy().to_string(),
+        file_name: "empty.txt".to_string(),
+        file_size: 0,
+        chunk_size: 8,
+        total_chunks: 0,
+    });
+    d.handle_command(FileTransferPayload {
+        connection_id: "c1".into(),
+        data: serde_json::to_vec(&req_msg).unwrap(),
+        is_text: true,
+        transfer_id: None,
+    })
+    .await;
+    match expect_message(&mut rx).await {
+        FileTransferMessage::UploadResponse(response) => assert!(response.accepted),
+        other => panic!("expected UploadResponse, got {other:?}"),
+    }
+
+    // The controller sends no chunks at all, then says it is done.
+    let complete = FileTransferMessage::TransferComplete(TransferComplete {
+        transfer_id: transfer_id.clone(),
+    });
+    d.handle_command(FileTransferPayload {
+        connection_id: "c1".into(),
+        data: serde_json::to_vec(&complete).unwrap(),
+        is_text: true,
+        transfer_id: None,
+    })
+    .await;
+
+    // No failure is reported, and the empty file survives.
+    assert_no_message(&mut rx).await;
+    let written = tokio::fs::read(tmp.path().join("empty.txt")).await.unwrap();
+    assert!(written.is_empty());
+}
+
 #[tokio::test]
 async fn upload_rejects_controller_declared_size_mismatch() {
     let tmp = TempDir::new().unwrap();
