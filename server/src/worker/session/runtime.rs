@@ -313,24 +313,33 @@ impl WorkerSession {
         // means a policy change is not subject to the main loop's locked-state
         // filter: an operator revoking a capability while remote access is
         // locked must not have that revocation discarded.
+        //
+        // The acknowledgement goes onto the writer queue rather than straight
+        // onto the `EventSender`: that sender awaits when the bounded event
+        // transport is full, and this task must never wait on the outbound
+        // direction — a stalled peer would stop it draining the inbound one and
+        // strand every message behind it, `Shutdown` included. Sending on the
+        // unbounded queue cannot suspend, which is why nothing here is awaited
+        // except the receive itself.
         let (service_msg_tx, mut service_msg_rx) =
             mpsc::unbounded_channel::<Option<ServiceToWorker>>();
         {
             let policy_mirror = Arc::clone(&policy_mirror);
-            let event_tx = Arc::clone(&event_tx);
+            let ack_tx = writer_tx.clone();
             tokio::spawn(async move {
                 loop {
                     match event_rx.recv().await {
                         Some(ServiceToWorker::UpdateSecurityPolicy(payload)) => {
                             let outcome = policy_mirror.apply(payload.snapshot);
-                            let _ = event_tx
-                                .send(WorkerToService::SecurityPolicyApplied(
-                                    SecurityPolicyAppliedPayload {
-                                        operation_id: payload.operation_id,
-                                        outcome,
-                                    },
-                                ))
-                                .await;
+                            // An error means the writer queue is gone, i.e. the
+                            // session is tearing down and nobody is waiting for
+                            // the acknowledgement any more.
+                            let _ = ack_tx.send(WorkerToService::SecurityPolicyApplied(
+                                SecurityPolicyAppliedPayload {
+                                    operation_id: payload.operation_id,
+                                    outcome,
+                                },
+                            ));
                         }
                         Some(msg) => {
                             if service_msg_tx.send(Some(msg)).is_err() {
