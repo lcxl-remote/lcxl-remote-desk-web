@@ -9,6 +9,10 @@ export const SIGNALING_TYPE_CODE_INIT = 101;
 export const SIGNALING_TYPE_CODE_OFFER = 102;
 export const SIGNALING_TYPE_CODE_ANSWER = 103;
 export const SIGNALING_TYPE_CODE_CANID = 104;
+// The target host's own system information. Distinct from `/api/desk/sysinfo`,
+// which describes the server the browser is connected to — a manager or a
+// signaling server, whose properties say nothing about the machine on display.
+export const SIGNALING_TYPE_CODE_MANAGER_SYSTEM_INFO = 10003;
 export const SIGNALING_TYPE_CODE_MANAGER_FILE_LIST = 10005;
 export const SIGNALING_TYPE_CODE_MANAGER_FILE_DELETE = 10006;
 

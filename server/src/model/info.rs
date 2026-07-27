@@ -46,6 +46,7 @@ impl SystemInfo {
             total_swap: self.total_swap,
             used_swap: self.used_swap,
             cpus: self.cpus.clone(),
+            startup_mode: Some(self.startup_mode.clone()),
             is_admin: self.is_admin,
         }
     }

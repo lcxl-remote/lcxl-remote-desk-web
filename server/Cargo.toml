@@ -10,7 +10,9 @@ license.workspace = true
 
 desk-utils = { workspace = true }
 desk-turn = { workspace = true }
-desk-signal-facade = { workspace = true }
+# `clap`: the startup mode is declared in the facade but parsed from this
+# crate's command line, so the shared enum needs its `ValueEnum` impl here.
+desk-signal-facade = { workspace = true, features = ["clap"] }
 desk-signal = { workspace = true }
 desk-server-version = { workspace = true }
 desk-server-user = { workspace = true }

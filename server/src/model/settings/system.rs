@@ -1,43 +1,16 @@
 use clap::Parser;
 use desk_utils::error::DeskErrorCode;
 use serde::{Deserialize, Serialize};
-use strum_macros::AsRefStr;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::DeskError;
 
-#[derive(
-    clap::ValueEnum,
-    Clone,
-    Default,
-    Debug,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    AsRefStr,
-    ToSchema,
-)]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
-pub enum StartupMode {
-    /// Default mode, includes both signaling server and desk server (Portable)
-    #[default]
-    Default,
-    /// Signaling mode, include signaling server and turn server
-    Signaling,
-    /// Desk Server only
-    DeskServer,
-    /// System service daemon (SYSTEM / root) - manages Worker lifecycle
-    ServiceDaemon,
-    /// Session worker process - launched by ServiceDaemon in target desktop
-    SessionWorker,
-    /// Read-only MCP server over stdio (local AI assistant integration). stdin /
-    /// stdout carry the MCP JSON-RPC framing, so this mode must never log to
-    /// stdout (see `is_headless_startup_mode`).
-    McpStdio,
-}
+/// The startup mode lives in the shared signaling model, not here: a host
+/// reports it to control ends inside `SystemInfo`, and the manager reports its
+/// own the same way, so one declaration keeps the two from drifting. Re-exported
+/// under the settings path it has always been imported from.
+pub use desk_signal_facade::model::startup_mode::StartupMode;
 
 /// Command line arguments
 #[derive(Parser, Debug, Clone, Default, Serialize, Deserialize)]

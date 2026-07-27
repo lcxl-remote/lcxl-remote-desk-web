@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::model::startup_mode::StartupMode;
+
 /// CPU information
 #[derive(
     Serialize, Deserialize, Debug, Clone, ToSchema, wincode::SchemaWrite, wincode::SchemaRead,
@@ -49,6 +51,12 @@ pub struct SystemInfo {
     pub used_swap: u64,
     /// List of CPU information
     pub cpus: Vec<CpuInfo>,
+    /// How the reporting host was started. This is the *target's* mode, which
+    /// is the only way a control end can learn it: the server the browser is
+    /// connected to may be a manager or a plain signaling server, whose own mode
+    /// says nothing about the machine whose files and screen are on display.
+    /// `None` when the reporter did not state one.
+    pub startup_mode: Option<StartupMode>,
     /// Whether the system is running with administrative privileges
     pub is_admin: Option<bool>,
 }
@@ -91,6 +99,7 @@ mod wincode_tests {
                     usage: 7.3,
                 },
             ],
+            startup_mode: Some(StartupMode::ServiceDaemon),
             is_admin: Some(true),
         };
         let config = unbounded_config();
@@ -98,6 +107,7 @@ mod wincode_tests {
         let back: SystemInfo = wincode::config::deserialize(&bytes, config).expect("decode");
         assert_eq!(back.name.as_deref(), Some("alice-pc"));
         assert_eq!(back.total_memory, 32 * 1024 * 1024 * 1024);
+        assert_eq!(back.startup_mode, Some(StartupMode::ServiceDaemon));
         assert_eq!(back.is_admin, Some(true));
         assert_eq!(back.cpus.len(), 2);
         assert_eq!(back.cpus[0].name, "Core 0");

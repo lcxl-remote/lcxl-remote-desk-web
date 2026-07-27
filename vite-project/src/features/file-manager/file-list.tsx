@@ -33,13 +33,12 @@ import {
     BreadcrumbPage,
 } from "@/components/ui/breadcrumb"
 import { Progress } from "@/components/ui/progress"
-import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { Skeleton } from "@/components/ui/skeleton"
 import { formatBytes } from "@/lib/utils"
 import { useFileTransfer, type TransferProgress } from "./use-file-transfer"
 import { useRestrictedSession } from "@/features/desk/restricted-session"
 import { useToast } from "@/hooks/use-toast"
-import { deskErrorCodeEnum } from "@/services/types"
+import { deskErrorCodeEnum, startupModeEnum, type StartupMode } from "@/services/types"
 import { deskErrorMessage, errorCodeOf, type ErrorCodeKeyMap } from "@/lib/desk-error-i18n"
 
 // File browse / delete rejections the host phrases as raw English. Only the
@@ -81,9 +80,15 @@ export default function FileList() {
     const fileInputRef = useRef<HTMLInputElement>(null)
     const { toast } = useToast()
 
-    const { data: serverInfoResp } = useQueryServerInfo()
+    // The host's startup mode, asked of the host itself rather than of the
+    // server this browser is connected to: that server may be a manager or a
+    // signaling server, and its own mode says nothing about the machine whose
+    // drives are listed below. `null` until the host answers, and after a
+    // failure — the mode only decorates a hint, so not knowing it is not an
+    // error worth showing anyone.
+    const [hostStartupMode, setHostStartupMode] = useState<StartupMode | null>(null)
     const showDaemonMappedDriveHint =
-        currentPath === "" && serverInfoResp?.data?.startup_mode === "service-daemon"
+        currentPath === "" && hostStartupMode === startupModeEnum["service-daemon"]
 
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
     const [deleteDoubleConfirmOpen, setDeleteDoubleConfirmOpen] = useState(false)
@@ -97,6 +102,7 @@ export default function FileList() {
         removeTransfer,
         listFiles,
         deleteFile,
+        querySystemInfo,
         closeConnection,
     } = useFileTransfer(connectionId)
     const restricted = useRestrictedSession(connectionId)
@@ -143,6 +149,22 @@ export default function FileList() {
     useEffect(() => {
         void loadFiles()
     }, [loadFiles])
+
+    // Ask the host what it is, once per connection. A rejection is expected
+    // rather than exceptional — a session holding a capped grant may not query
+    // the host's system information at all — so it only leaves the mode unknown.
+    useEffect(() => {
+        if (!connectionId) return
+        let cancelled = false
+        void querySystemInfo()
+            .then(info => {
+                if (!cancelled) setHostStartupMode(info?.startup_mode ?? null)
+            })
+            .catch(() => {
+                if (!cancelled) setHostStartupMode(null)
+            })
+        return () => { cancelled = true }
+    }, [connectionId, querySystemInfo])
 
     useEffect(() => {
         return () => {

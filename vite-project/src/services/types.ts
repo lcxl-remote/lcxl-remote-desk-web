@@ -1812,6 +1812,9 @@ export const startupModeEnum = {
 
 export type StartupModeEnumKey = (typeof startupModeEnum)[keyof typeof startupModeEnum];
 
+/**
+ * @description The form a server process runs as: which subsystems it started, and\ntherefore what a peer can expect of it. A server reports its own mode, and a\nhost reports its mode to control ends, which is how one tells what the\n*target* machine is rather than what the server in between happens to be.
+*/
 export type StartupMode = StartupModeEnumKey;
 
 /**
@@ -3036,7 +3039,7 @@ export type RestResponseServerInfo = {
         */
         service_installed: boolean;
         /**
-         * @description Startup mode of the server. Typed rather than free-form so the generated\nclient gets the exact set of mode names to compare against.
+         * @description The form a server process runs as: which subsystems it started, and\ntherefore what a peer can expect of it. A server reports its own mode, and a\nhost reports its mode to control ends, which is how one tells what the\n*target* machine is rather than what the server in between happens to be.
          * @type string
         */
         startup_mode: StartupMode;
@@ -3127,7 +3130,7 @@ export type RestResponseSystemInfo = {
         */
         os_version?: string | null;
         /**
-         * @description Startup mode
+         * @description The form a server process runs as: which subsystems it started, and\ntherefore what a peer can expect of it. A server reports its own mode, and a\nhost reports its mode to control ends, which is how one tells what the\n*target* machine is rather than what the server in between happens to be.
          * @type string
         */
         startup_mode: StartupMode;
@@ -3873,7 +3876,7 @@ export type ServerInfo = {
     */
     service_installed: boolean;
     /**
-     * @description Startup mode of the server. Typed rather than free-form so the generated\nclient gets the exact set of mode names to compare against.
+     * @description The form a server process runs as: which subsystems it started, and\ntherefore what a peer can expect of it. A server reports its own mode, and a\nhost reports its mode to control ends, which is how one tells what the\n*target* machine is rather than what the server in between happens to be.
      * @type string
     */
     startup_mode: StartupMode;
@@ -4002,7 +4005,7 @@ export type SystemInfo = {
     */
     os_version?: string | null;
     /**
-     * @description Startup mode
+     * @description The form a server process runs as: which subsystems it started, and\ntherefore what a peer can expect of it. A server reports its own mode, and a\nhost reports its mode to control ends, which is how one tells what the\n*target* machine is rather than what the server in between happens to be.
      * @type string
     */
     startup_mode: StartupMode;

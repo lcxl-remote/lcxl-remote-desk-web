@@ -6,6 +6,7 @@ import {
     SIGNALING_TYPE_CODE_OFFER,
     SIGNALING_TYPE_CODE_ANSWER,
     SIGNALING_TYPE_CODE_CANID,
+    SIGNALING_TYPE_CODE_MANAGER_SYSTEM_INFO,
     SIGNALING_TYPE_CODE_MANAGER_FILE_LIST,
     SIGNALING_TYPE_CODE_MANAGER_FILE_DELETE,
     SIGNALING_TYPE_CODE_CLOSE_CONTROL,
@@ -36,7 +37,7 @@ import {
     openStreamingWritable,
 } from './file-save';
 import { TransferRegistry } from './transfer-registry';
-import { deskErrorCodeEnum } from '@/services/types';
+import { deskErrorCodeEnum, type SystemInfo } from '@/services/types';
 
 /**
  * A signaling request the host answered with an error frame.
@@ -497,6 +498,7 @@ export function useFileTransfer(deskId: string | undefined) {
                     if (pending && (
                         signaling_type === SIGNALING_TYPE_CODE_MANAGER_FILE_LIST
                         || signaling_type === SIGNALING_TYPE_CODE_MANAGER_FILE_DELETE
+                        || signaling_type === SIGNALING_TYPE_CODE_MANAGER_SYSTEM_INFO
                     )) {
                         clearTimeout(pending.timeout);
                         pendingRequests.current.delete(signaling.request_id);
@@ -626,6 +628,18 @@ export function useFileTransfer(deskId: string | undefined) {
 
     const deleteFile = useCallback((request: unknown) => (
         sendFileRequest<void>(SIGNALING_TYPE_CODE_MANAGER_FILE_DELETE, request)
+    ), [sendFileRequest]);
+
+    // The host's own system information. The server this browser is connected to
+    // may be a manager or a signaling server sitting between it and the host, so
+    // its `/api/desk/sysinfo` describes the wrong machine; only the host can say
+    // what it is. Rejects like any other request — callers that only use this to
+    // decorate the UI should treat a failure as "unknown" rather than an error.
+    //
+    // `Partial`: the response is the shared signaling document, whose fields a
+    // host fills as far as it can, so a reader must handle any of them missing.
+    const querySystemInfo = useCallback(() => (
+        sendFileRequest<Partial<SystemInfo>>(SIGNALING_TYPE_CODE_MANAGER_SYSTEM_INFO, null)
     ), [sendFileRequest]);
 
     // Close WebRTC and WebSocket connections
@@ -913,6 +927,7 @@ export function useFileTransfer(deskId: string | undefined) {
         removeTransfer,
         listFiles,
         deleteFile,
+        querySystemInfo,
         closeConnection,
     };
 }

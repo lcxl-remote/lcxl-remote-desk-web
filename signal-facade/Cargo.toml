@@ -6,9 +6,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# `StartupMode` doubles as a command-line value for the desk server, which is the
+# only crate that parses one. Everything else — the manager included — reads the
+# enum off the wire and must not pull clap in for it.
+clap = ["dep:clap"]
+
 [dependencies]
 desk-utils = { workspace = true }
 async-trait = { workspace = true }
+clap = { workspace = true, optional = true }
 
 actix-web = { workspace = true }
 actix-ws = { workspace = true }

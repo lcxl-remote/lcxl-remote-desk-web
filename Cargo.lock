@@ -2716,6 +2716,7 @@ dependencies = [
  "bytes",
  "bytestring",
  "chrono",
+ "clap",
  "desk-utils",
  "futures",
  "futures-util",
