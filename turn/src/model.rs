@@ -110,7 +110,7 @@ impl FromStr for TurnTransport {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, ToSchema)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, ToSchema)]
 pub struct TurnInterface {
     pub transport: TurnTransport,
     /// turn server listen address
