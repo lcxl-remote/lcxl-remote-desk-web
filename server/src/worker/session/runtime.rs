@@ -27,7 +27,7 @@ impl WorkerSession {
     pub async fn run_with_transports(
         &self,
         init_payload: WorkerInitPayload,
-        mut event_rx: Box<dyn EventReceiver<ServiceToWorker>>,
+        event_rx: Box<dyn EventReceiver<ServiceToWorker>>,
         event_tx: Arc<dyn EventSender<WorkerToService>>,
         media_sender: Option<Arc<dyn MediaSender>>,
         file_sender: Arc<dyn EventSender<FileTransferPayload>>,
@@ -295,56 +295,14 @@ impl WorkerSession {
         // or in-process channel dropped); the main loop sees that as
         // `Some(None)` on the mpsc and breaks cleanly.
         //
-        // Security-policy updates are applied here rather than forwarded. The
-        // main loop parks on approval prompts — several gates await one inline
-        // — and a policy change is often exactly what should resolve the prompt
-        // that is blocking it, so routing the change through the same queue
-        // would make it wait on its own effect. Applying it on this task keeps
-        // the mirror current no matter what the main loop is doing, and it also
-        // means a policy change is not subject to the main loop's locked-state
-        // filter: an operator revoking a capability while remote access is
-        // locked must not have that revocation discarded.
-        //
-        // The acknowledgement goes onto the writer queue rather than straight
-        // onto the `EventSender`: that sender awaits when the bounded event
-        // transport is full, and this task must never wait on the outbound
-        // direction — a stalled peer would stop it draining the inbound one and
-        // strand every message behind it, `Shutdown` included. Sending on the
-        // unbounded queue cannot suspend, which is why nothing here is awaited
-        // except the receive itself.
         let (service_msg_tx, mut service_msg_rx) =
             mpsc::unbounded_channel::<Option<ServiceToWorker>>();
-        {
-            let policy_mirror = Arc::clone(&policy_mirror);
-            let ack_tx = writer_tx.clone();
-            tokio::spawn(async move {
-                loop {
-                    match event_rx.recv().await {
-                        Some(ServiceToWorker::UpdateSecurityPolicy(payload)) => {
-                            let outcome = policy_mirror.apply(payload.snapshot);
-                            // An error means the writer queue is gone, i.e. the
-                            // session is tearing down and nobody is waiting for
-                            // the acknowledgement any more.
-                            let _ = ack_tx.send(WorkerToService::SecurityPolicyApplied(
-                                SecurityPolicyAppliedPayload {
-                                    operation_id: payload.operation_id,
-                                    outcome,
-                                },
-                            ));
-                        }
-                        Some(msg) => {
-                            if service_msg_tx.send(Some(msg)).is_err() {
-                                break;
-                            }
-                        }
-                        None => {
-                            let _ = service_msg_tx.send(None);
-                            break;
-                        }
-                    }
-                }
-            });
-        }
+        spawn_inbound_reader(
+            event_rx,
+            Arc::clone(&policy_mirror),
+            writer_tx.clone(),
+            service_msg_tx,
+        );
 
         // File-lane drain task: hands inbound `FileTransferPayload`
         // frames straight to the dispatcher. Runs independent of the
@@ -1469,4 +1427,57 @@ impl WorkerSession {
         info!("WorkerSession IPC loop exiting");
         Ok(())
     }
+}
+
+/// Drain the inbound event transport: apply security policy on the way past,
+/// forward everything else to the main loop.
+///
+/// Security-policy updates are applied here rather than forwarded. The main loop
+/// parks on approval prompts — several gates await one inline — and a policy
+/// change is often exactly what should resolve the prompt that is blocking it,
+/// so routing the change through the same queue would make it wait on its own
+/// effect. Applying it here keeps the mirror current no matter what the main
+/// loop is doing, and it also means a policy change is not subject to the main
+/// loop's locked-state filter: an operator revoking a capability while remote
+/// access is locked must not have that revocation discarded.
+///
+/// The acknowledgement goes onto the writer queue rather than straight onto the
+/// `EventSender`: that sender awaits when the bounded event transport is full,
+/// and this task must never wait on the outbound direction — a stalled peer
+/// would stop it draining the inbound one and strand every message behind it,
+/// `Shutdown` included. Sending on the unbounded queue cannot suspend, which is
+/// why nothing here is awaited except the receive itself.
+pub(super) fn spawn_inbound_reader(
+    mut event_rx: Box<dyn EventReceiver<ServiceToWorker>>,
+    policy_mirror: Arc<PolicyMirror>,
+    ack_tx: mpsc::UnboundedSender<WorkerToService>,
+    service_msg_tx: mpsc::UnboundedSender<Option<ServiceToWorker>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match event_rx.recv().await {
+                Some(ServiceToWorker::UpdateSecurityPolicy(payload)) => {
+                    let outcome = policy_mirror.apply(payload.snapshot);
+                    // An error means the writer queue is gone, i.e. the session
+                    // is tearing down and nobody is waiting for the
+                    // acknowledgement any more.
+                    let _ = ack_tx.send(WorkerToService::SecurityPolicyApplied(
+                        SecurityPolicyAppliedPayload {
+                            operation_id: payload.operation_id,
+                            outcome,
+                        },
+                    ));
+                }
+                Some(msg) => {
+                    if service_msg_tx.send(Some(msg)).is_err() {
+                        break;
+                    }
+                }
+                None => {
+                    let _ = service_msg_tx.send(None);
+                    break;
+                }
+            }
+        }
+    })
 }

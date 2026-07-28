@@ -400,11 +400,15 @@ mod tests {
         );
     }
 
-    /// A change that touches no capability still advances the sequence (the
-    /// settings did move) but must leave every stamp where it was, or the
-    /// workers would drop approvals that are still valid.
+    /// A setting outside the security policy moves nothing the workers track.
+    ///
+    /// The sequence numbers a policy, not the settings file, so a change the
+    /// policy cannot see is not a change to it: neither the sequence nor any
+    /// capability stamp moves. That matters because a moved stamp is how a
+    /// worker is told an approval the user already gave is no longer valid —
+    /// turning the log level up must not make anyone answer a prompt again.
     #[tokio::test]
-    async fn a_change_outside_the_policy_disturbs_no_capability() {
+    async fn a_change_outside_the_policy_disturbs_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let coordinator = coordinator_at(&dir.path().join("config"));
         coordinator
@@ -414,6 +418,7 @@ mod tests {
             })
             .await
             .unwrap();
+        let seq = coordinator.seq();
         let stamps: Vec<u64> = SecurityPermissionType::ALL
             .iter()
             .map(|c| coordinator.changed_at(*c))
@@ -432,6 +437,44 @@ mod tests {
             .map(|c| coordinator.changed_at(*c))
             .collect();
         assert_eq!(stamps, after);
+        assert_eq!(
+            coordinator.seq(),
+            seq,
+            "a setting the policy does not contain is not a policy change",
+        );
+    }
+
+    /// A security setting no capability reads — the timeout an unanswered
+    /// prompt gets — is a policy change, and the sequence has to say so: copies
+    /// need to see the new value. No stamp moves, because no capability's value
+    /// did, and the approvals already given are still the right answers.
+    #[tokio::test]
+    async fn a_policy_change_no_capability_reads_still_advances_the_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator = coordinator_at(&dir.path().join("config"));
+        let seq = coordinator.seq();
+        let stamps: Vec<u64> = SecurityPermissionType::ALL
+            .iter()
+            .map(|c| coordinator.changed_at(*c))
+            .collect();
+
+        coordinator
+            .commit(|settings| {
+                settings.security.approval_timeout = Some(45);
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert!(coordinator.seq() > seq, "copies have to be told");
+        let after: Vec<u64> = SecurityPermissionType::ALL
+            .iter()
+            .map(|c| coordinator.changed_at(*c))
+            .collect();
+        assert_eq!(
+            stamps, after,
+            "no capability changed value, so no approval is invalidated",
+        );
     }
 
     /// A rejected change must not be half-applied: the caller reports an error

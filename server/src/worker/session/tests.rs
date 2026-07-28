@@ -718,3 +718,114 @@ fn a_locked_host_drops_remote_work() {
         });
     assert!(!crate::worker::session::survives_remote_access_lock(&msg));
 }
+
+/// The one task that drains the daemon→worker transport.
+///
+/// Everything the daemon sends arrives through here, `Shutdown` included, so it
+/// must never be capable of waiting on anything except the next message. It also
+/// answers policy publications on the way past, and answering is the one thing
+/// in it that talks outward — which is where a wait would come from.
+mod inbound_reader {
+    use super::super::runtime::spawn_inbound_reader;
+    use crate::worker::policy_mirror::PolicyMirror;
+    use desk_ipc_protocol::dual_transport::inprocess;
+    use desk_ipc_protocol::message::{
+        ServiceToWorker, UpdateSecurityPolicyPayload, WorkerToService,
+    };
+    use desk_signal_facade::model::policy_snapshot::PolicySnapshot;
+    use desk_signal_facade::model::security_settings::SecuritySettings;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    fn published(allow_terminal: bool) -> UpdateSecurityPolicyPayload {
+        let security = SecuritySettings {
+            allow_terminal: Some(allow_terminal),
+            ..SecuritySettings::default()
+        };
+        UpdateSecurityPolicyPayload {
+            operation_id: "op-1".to_string(),
+            snapshot: PolicySnapshot::new(security),
+        }
+    }
+
+    /// Nothing is reading the acknowledgement, and it still does not matter.
+    ///
+    /// A worker acknowledges a policy while the daemon may be doing anything at
+    /// all — including not reading. If answering could block, the reader would
+    /// stop draining, and the message behind the policy is the one that ends the
+    /// session: the worker would keep running, keep enforcing, and keep holding
+    /// the desktop after the daemon had asked it to stop.
+    #[tokio::test]
+    async fn a_policy_answer_nobody_collects_does_not_strand_the_shutdown_behind_it() {
+        let (daemon_tx, worker_rx) = inprocess::make_event::<ServiceToWorker>();
+        let mirror = Arc::new(PolicyMirror::new(PolicySnapshot::new(
+            SecuritySettings::default(),
+        )));
+        let (ack_tx, mut ack_rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let (main_tx, mut main_rx) = mpsc::unbounded_channel::<Option<ServiceToWorker>>();
+        let reader = spawn_inbound_reader(worker_rx, Arc::clone(&mirror), ack_tx, main_tx);
+
+        daemon_tx
+            .send(ServiceToWorker::UpdateSecurityPolicy(published(false)))
+            .await
+            .expect("publish");
+        daemon_tx
+            .send(ServiceToWorker::Shutdown)
+            .await
+            .expect("shutdown");
+
+        let delivered = tokio::time::timeout(Duration::from_secs(2), main_rx.recv())
+            .await
+            .expect("the reader must keep draining while an answer goes uncollected")
+            .expect("the main-loop queue is open");
+        assert!(
+            matches!(delivered, Some(ServiceToWorker::Shutdown)),
+            "the message behind the policy is what has to get through",
+        );
+        assert_eq!(
+            mirror.snapshot().security().allow_terminal,
+            Some(false),
+            "the policy is applied here, not forwarded to a main loop that may be parked",
+        );
+        // Only now is the answer collected — long after it mattered.
+        match ack_rx.try_recv().expect("the answer is waiting") {
+            WorkerToService::SecurityPolicyApplied(applied) => {
+                assert_eq!(applied.operation_id, "op-1");
+            }
+            other => panic!("expected the policy answer, got {other:?}"),
+        }
+        drop(daemon_tx);
+        tokio::time::timeout(Duration::from_secs(2), reader)
+            .await
+            .expect("the reader ends with its transport")
+            .expect("the reader did not panic");
+    }
+
+    /// A closed transport is the other way this task ends, and the main loop
+    /// finds out by the `None` this forwards rather than by waiting forever.
+    #[tokio::test]
+    async fn a_closed_transport_is_reported_to_the_main_loop() {
+        let (daemon_tx, worker_rx) = inprocess::make_event::<ServiceToWorker>();
+        let mirror = Arc::new(PolicyMirror::new(PolicySnapshot::new(
+            SecuritySettings::default(),
+        )));
+        let (ack_tx, _ack_rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let (main_tx, mut main_rx) = mpsc::unbounded_channel::<Option<ServiceToWorker>>();
+        let reader = spawn_inbound_reader(worker_rx, mirror, ack_tx, main_tx);
+
+        drop(daemon_tx);
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), main_rx.recv())
+                .await
+                .expect("the closure is reported promptly")
+                .expect("the main-loop queue is open")
+                .is_none(),
+        );
+        tokio::time::timeout(Duration::from_secs(2), reader)
+            .await
+            .expect("the reader ends with its transport")
+            .expect("the reader did not panic");
+    }
+}
