@@ -1,5 +1,21 @@
 use super::*;
 
+/// Why a fully received upload could not be put in place.
+struct CommitFailure {
+    code: DeskErrorCode,
+    message: String,
+}
+
+/// What became of an upload request once the dispatcher tried to register it.
+enum Admission {
+    Accepted,
+    /// The connection ended, or its transfer was cancelled, while the staging
+    /// file was being created.
+    ConnectionGone,
+    /// Another transfer is already writing the same destination.
+    DestinationBusy,
+}
+
 impl FileTransferDispatcher {
     pub(super) async fn handle_text(&self, payload: FileTransferPayload) {
         let s = match std::str::from_utf8(&payload.data) {
@@ -78,65 +94,69 @@ impl FileTransferDispatcher {
                     inner.upload_states.remove(&key)
                 };
                 if let Some(upload) = upload {
-                    // The state lock, not the shared one, is what the flush runs
-                    // under: it can wait on the same disk a chunk write does.
+                    self.inner
+                        .lock()
+                        .await
+                        .upload_destinations
+                        .remove(&upload.destination);
+                    // The state lock, not the shared one, is what the commit
+                    // runs under: it waits on the same disk a chunk write does.
                     let mut state = upload.state.lock().await;
                     let received_chunks = state.received_chunks;
-                    let flush_error = state.file.flush().await.err();
-                    let is_complete = flush_error.is_none()
-                        && state.received_chunks == state.total_chunks
+                    let arrived_intact = state.received_chunks == state.total_chunks
                         && state.received_bytes == state.expected_bytes;
-                    // A flush failure is an OS-level write problem; equal
-                    // counts with unequal byte totals means the stream itself
-                    // did not arrive intact.
-                    let failure_code = match flush_error {
-                        Some(_) => DeskErrorCode::SYSTEM_ERROR,
-                        None => DeskErrorCode::INVALID_STATE,
+                    let outcome = if arrived_intact {
+                        Self::commit_upload(&upload, &mut state).await
+                    } else {
+                        // The stream itself did not arrive; nothing to put in
+                        // place. Distinct from a filesystem problem, and the
+                        // browser is told which it was.
+                        Err(CommitFailure {
+                            code: DeskErrorCode::INVALID_STATE,
+                            message: format!(
+                                "Upload size mismatch: expected {} bytes in {} chunks, received {} bytes in {} chunks",
+                                state.expected_bytes,
+                                state.total_chunks,
+                                state.received_bytes,
+                                state.received_chunks
+                            ),
+                        })
                     };
-                    let failure_message = match flush_error {
-                        Some(error) => format!("Failed to flush upload: {error}"),
-                        None => format!(
-                            "Upload size mismatch: expected {} bytes in {} chunks, received {} bytes in {} chunks",
-                            state.expected_bytes,
-                            state.total_chunks,
-                            state.received_bytes,
-                            state.received_chunks
-                        ),
-                    };
-                    let file_path = upload.file_path.clone();
-                    // Close the file before anything below removes it: a
-                    // platform can refuse to remove a file that is still open.
-                    state.file = Box::new(tokio::io::sink());
+                    if outcome.is_err() {
+                        Self::discard_partial(&upload, &mut state).await;
+                    }
                     drop(state);
                     info!(
                         "[FileTransferDispatcher] upload {} completed, received {} chunks",
                         complete.transfer_id, received_chunks
                     );
-                    if is_complete {
-                        self.finish_activity(
-                            &payload.connection_id,
-                            &complete.transfer_id,
-                            FileTransferOutcome::Completed,
-                        )
-                        .await;
-                    } else {
-                        let _ = tokio::fs::remove_file(file_path).await;
-                        let _ = self
-                            .emit_text(
+                    match outcome {
+                        Ok(()) => {
+                            self.finish_activity(
                                 &payload.connection_id,
-                                FileTransferMessage::TransferError(TransferError {
-                                    transfer_id: complete.transfer_id.clone(),
-                                    error_code: failure_code,
-                                    message: failure_message,
-                                }),
+                                &complete.transfer_id,
+                                FileTransferOutcome::Completed,
                             )
                             .await;
-                        self.finish_activity(
-                            &payload.connection_id,
-                            &complete.transfer_id,
-                            FileTransferOutcome::Failed,
-                        )
-                        .await;
+                        }
+                        Err(failure) => {
+                            let _ = self
+                                .emit_text(
+                                    &payload.connection_id,
+                                    FileTransferMessage::TransferError(TransferError {
+                                        transfer_id: complete.transfer_id.clone(),
+                                        error_code: failure.code,
+                                        message: failure.message,
+                                    }),
+                                )
+                                .await;
+                            self.finish_activity(
+                                &payload.connection_id,
+                                &complete.transfer_id,
+                                FileTransferOutcome::Failed,
+                            )
+                            .await;
+                        }
                     }
                 }
             }
@@ -279,58 +299,51 @@ impl FileTransferDispatcher {
         }
         // Last chunk. Claim the transfer so nothing else can reach it, then
         // finish it off. Failing to claim means a teardown got here first.
-        if self.inner.lock().await.upload_states.remove(&key).is_none() {
-            Self::discard_partial(&upload, &mut state).await;
-            return;
+        {
+            let mut inner = self.inner.lock().await;
+            if inner.upload_states.remove(&key).is_none() {
+                drop(inner);
+                Self::discard_partial(&upload, &mut state).await;
+                return;
+            }
+            inner.upload_destinations.remove(&upload.destination);
         }
-        let flush_result = state.file.flush().await;
         if let Some(line) = state.metrics.flush_line(&transfer_id, "ft-metrics") {
             info!("{line}");
         }
-        let file_path = upload.file_path.clone();
         let expected_bytes = state.expected_bytes;
         let received_bytes = state.received_bytes;
-        // Closed before any of the branches below removes it: a platform can
-        // refuse to remove a file that is still open.
-        state.file = Box::new(tokio::io::sink());
-        drop(state);
-        if let Err(error) = flush_result {
-            error!(
-                "[FileTransferDispatcher] {}: flush of completed upload {} failed: {error}",
-                connection_id, transfer_id
+        let outcome = if received_bytes == expected_bytes {
+            Self::commit_upload(&upload, &mut state).await
+        } else {
+            Err(CommitFailure {
+                code: DeskErrorCode::INVALID_STATE,
+                message: format!(
+                    "Upload size mismatch: expected {expected_bytes} bytes, received \
+                     {received_bytes} bytes"
+                ),
+            })
+        };
+        if let Err(failure) = outcome {
+            warn!(
+                "[FileTransferDispatcher] {connection_id}: upload {transfer_id} not put in \
+                 place: {}",
+                failure.message
             );
-            let _ = tokio::fs::remove_file(file_path).await;
+            Self::discard_partial(&upload, &mut state).await;
+            drop(state);
             self.fail_transfer(
                 &connection_id,
                 &transfer_id,
-                DeskErrorCode::SYSTEM_ERROR,
-                format!("Failed to flush upload: {error}"),
+                failure.code,
+                failure.message.clone(),
             )
             .await;
             self.finish_activity(&connection_id, &transfer_id, FileTransferOutcome::Failed)
                 .await;
             return;
         }
-        if received_bytes != expected_bytes {
-            let message = format!(
-                "Upload size mismatch: expected {expected_bytes} bytes, received {received_bytes} bytes"
-            );
-            warn!("[FileTransferDispatcher] {connection_id}: {message}");
-            let _ = tokio::fs::remove_file(file_path).await;
-            let _ = self
-                .emit_text(
-                    &connection_id,
-                    FileTransferMessage::TransferError(TransferError {
-                        transfer_id: transfer_id.clone(),
-                        error_code: DeskErrorCode::INVALID_STATE,
-                        message,
-                    }),
-                )
-                .await;
-            self.finish_activity(&connection_id, &transfer_id, FileTransferOutcome::Failed)
-                .await;
-            return;
-        }
+        drop(state);
         if let Err(error) = self
             .emit_text(
                 &connection_id,
@@ -353,7 +366,51 @@ impl FileTransferDispatcher {
         );
     }
 
-    /// Close a partial upload and remove what it wrote.
+    /// Put a fully received upload where the browser asked for it.
+    ///
+    /// The bytes reach stable storage, the handle is released, and only then
+    /// does the staging file take the destination's name — in one step, so a
+    /// reader sees either the file that was there before or the whole new one.
+    /// Anything that goes wrong leaves the destination exactly as it was; the
+    /// caller discards the staging file.
+    async fn commit_upload(
+        upload: &Upload,
+        state: &mut tokio::sync::MutexGuard<'_, UploadState>,
+    ) -> Result<(), CommitFailure> {
+        let system_error = |what: &str, error: std::io::Error| CommitFailure {
+            code: DeskErrorCode::SYSTEM_ERROR,
+            message: format!("Failed to {what} upload: {error}"),
+        };
+        state
+            .file
+            .flush()
+            .await
+            .map_err(|error| system_error("flush", error))?;
+        state
+            .file
+            .sync()
+            .await
+            .map_err(|error| system_error("store", error))?;
+        // Released before the rename: a platform can refuse to replace a file
+        // that is still open, and there is nothing left to write.
+        state.file = Box::new(tokio::io::sink());
+        let staging = upload.staging.clone();
+        let destination = upload.destination.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::durable_file::durable_replace(&staging, &destination)
+        })
+        .await
+        .map_err(|error| CommitFailure {
+            code: DeskErrorCode::SYSTEM_ERROR,
+            message: format!("Failed to put upload in place: {error}"),
+        })?
+        .map_err(|error| system_error("put in place", error))
+    }
+
+    /// Close a partial upload and remove the staging file it wrote.
+    ///
+    /// The destination is never touched: an upload that ends here never
+    /// arrived, so whatever the user already had is still the current file.
     ///
     /// Closing first is not cosmetic: a platform can refuse to remove a file
     /// that is still open, which is exactly the case teardown cannot handle on
@@ -364,10 +421,10 @@ impl FileTransferDispatcher {
         state: &mut tokio::sync::MutexGuard<'_, UploadState>,
     ) {
         state.file = Box::new(tokio::io::sink());
-        if let Err(error) = tokio::fs::remove_file(&upload.file_path).await {
+        if let Err(error) = tokio::fs::remove_file(&upload.staging).await {
             debug!(
-                "[FileTransferDispatcher] could not remove partial upload {}: {error}",
-                upload.file_path.display()
+                "[FileTransferDispatcher] could not remove staged upload {}: {error}",
+                upload.staging.display()
             );
         }
     }
@@ -398,7 +455,36 @@ impl FileTransferDispatcher {
             return Ok(());
         }
         let file_name = sanitized_file_name(&req.file_name);
-        let file_path = target_dir.join(&file_name);
+        // Resolve the directory so two spellings of it cannot each claim the
+        // same destination. Falls back to what was asked for if the platform
+        // cannot resolve it — the claim is then weaker, not absent.
+        let resolved_dir = tokio::fs::canonicalize(&target_dir)
+            .await
+            .unwrap_or_else(|_| target_dir.clone());
+        let destination = resolved_dir.join(&file_name);
+        // A destination that cannot be replaced is worth saying now. The bytes
+        // go to a staging file, so nothing here would fail until the rename at
+        // the very end — by which time the browser has streamed the whole file
+        // at a host that was never going to accept it.
+        if destination.is_dir() {
+            if let Err(error) = self
+                .emit_text(
+                    &connection_id,
+                    FileTransferMessage::TransferError(TransferError {
+                        transfer_id: req.transfer_id.clone(),
+                        error_code: DeskErrorCode::SYSTEM_ERROR,
+                        message: format!("{} is a directory", destination.display()),
+                    }),
+                )
+                .await
+            {
+                warn!(
+                    "[FileTransferDispatcher] {}: failed to emit TransferError for {}: {error}",
+                    connection_id, req.transfer_id
+                );
+            }
+            return Ok(());
+        }
         if !self
             .start_activity(
                 &connection_id,
@@ -421,7 +507,17 @@ impl FileTransferDispatcher {
             .ok();
             return Ok(());
         }
-        let file = match tokio::fs::File::create(&file_path).await {
+        // The bytes go to a file of our own in the same directory, never to the
+        // one the browser named. Unique, so two uploads cannot adopt each
+        // other's partial file, and `create_new` so an existing file is never
+        // the thing that gets opened.
+        let staging = resolved_dir.join(format!(".{file_name}.{}.part", uuid::Uuid::new_v4()));
+        let file = match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)
+            .await
+        {
             Ok(file) => file,
             Err(error) => {
                 // The browser is about to start sending chunks at a host that
@@ -431,7 +527,7 @@ impl FileTransferDispatcher {
                     &connection_id,
                     &req.transfer_id,
                     DeskErrorCode::SYSTEM_ERROR,
-                    format!("Could not create {}: {error}", file_path.display()),
+                    format!("Could not create {}: {error}", staging.display()),
                 )
                 .await;
                 self.finish_activity(
@@ -445,7 +541,8 @@ impl FileTransferDispatcher {
         };
         let upload = Arc::new(Upload {
             cancelled: AtomicBool::new(false),
-            file_path: file_path.clone(),
+            destination: destination.clone(),
+            staging: staging.clone(),
             state: TokioMutex::new(UploadState {
                 file: Box::new(file),
                 total_chunks: req.total_chunks,
@@ -456,19 +553,48 @@ impl FileTransferDispatcher {
             }),
         });
         let key = TransferKey::new(&connection_id, &req.transfer_id);
-        let state_inserted = {
+        // Claiming the destination and registering the transfer are one step:
+        // a claim taken without a transfer to release it would lock the file
+        // out for the life of the worker.
+        let admission = {
             let mut inner = self.inner.lock().await;
-            if inner.active_connections.contains(&connection_id) && inner.activities.contains(&key)
+            if !inner.active_connections.contains(&connection_id)
+                || !inner.activities.contains(&key)
             {
-                inner.upload_states.insert(key.clone(), upload);
-                true
+                Admission::ConnectionGone
+            } else if !inner.upload_destinations.insert(destination.clone()) {
+                Admission::DestinationBusy
             } else {
-                false
+                inner.upload_states.insert(key.clone(), upload);
+                Admission::Accepted
             }
         };
-        if !state_inserted {
-            let _ = tokio::fs::remove_file(&file_path).await;
-            return Ok(());
+        match admission {
+            Admission::Accepted => {}
+            Admission::ConnectionGone => {
+                let _ = tokio::fs::remove_file(&staging).await;
+                return Ok(());
+            }
+            Admission::DestinationBusy => {
+                let _ = tokio::fs::remove_file(&staging).await;
+                self.fail_transfer(
+                    &connection_id,
+                    &req.transfer_id,
+                    DeskErrorCode::INVALID_STATE,
+                    format!(
+                        "Another upload is already writing {}",
+                        destination.display()
+                    ),
+                )
+                .await;
+                self.finish_activity(
+                    &connection_id,
+                    &req.transfer_id,
+                    FileTransferOutcome::Failed,
+                )
+                .await;
+                return Ok(());
+            }
         }
         if let Err(error) = self
             .emit_text(

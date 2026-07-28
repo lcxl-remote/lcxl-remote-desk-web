@@ -211,9 +211,10 @@ impl FileTransferDispatcher {
                 .drain()
                 .map(|(_, upload)| {
                     upload.cancel();
-                    upload.file_path.clone()
+                    upload.staging.clone()
                 })
                 .collect::<Vec<_>>();
+            inner.upload_destinations.clear();
             let finished = inner
                 .activities
                 .drain()

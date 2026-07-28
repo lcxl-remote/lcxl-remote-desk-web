@@ -1249,7 +1249,22 @@ async fn upload_rejects_duplicate_id_within_one_connection() {
         }
         other => panic!("expected TransferError, got {other:?}"),
     }
-    assert!(tmp.path().join("first.bin").exists());
+    let inner = d.inner.lock().await;
+    assert_eq!(
+        inner.upload_states.len(),
+        1,
+        "the first transfer is the only one registered",
+    );
+    assert!(
+        inner
+            .upload_destinations
+            .contains(&tmp.path().canonicalize().unwrap().join("first.bin")),
+        "the accepted upload holds its destination",
+    );
+    assert!(
+        !tmp.path().join("first.bin").exists(),
+        "an accepted upload has not created its destination yet — the bytes are staged",
+    );
     assert!(!tmp.path().join("second.bin").exists());
 }
 
@@ -1411,14 +1426,26 @@ impl tokio::io::AsyncWrite for FailingWriter {
     }
 }
 
+#[async_trait::async_trait]
+impl UploadSink for FailingWriter {
+    async fn sync(&mut self) -> std::io::Result<()> {
+        if self.flush_fails {
+            return Err(std::io::Error::other("injected sync failure"));
+        }
+        Ok(())
+    }
+}
+
 /// Register an upload the dispatcher will write into, with a writer of the
 /// test's choosing.
+#[allow(clippy::too_many_arguments)]
 async fn arm_upload(
     d: &FileTransferDispatcher,
     connection_id: &str,
     transfer_id: &str,
-    file_path: PathBuf,
-    file: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+    destination: PathBuf,
+    staging: PathBuf,
+    file: Box<dyn UploadSink>,
     total_chunks: u64,
     expected_bytes: u64,
 ) {
@@ -1430,11 +1457,14 @@ async fn arm_upload(
         expected_bytes,
     )
     .await;
-    d.inner.lock().await.upload_states.insert(
+    let mut inner = d.inner.lock().await;
+    inner.upload_destinations.insert(destination.clone());
+    inner.upload_states.insert(
         TransferKey::new(connection_id, transfer_id),
         Arc::new(Upload {
             cancelled: AtomicBool::new(false),
-            file_path,
+            destination,
+            staging,
             state: TokioMutex::new(UploadState {
                 file,
                 total_chunks,
@@ -1499,8 +1529,12 @@ async fn a_download_whose_read_fails_mid_stream_reports_why() {
 #[tokio::test]
 async fn an_upload_whose_write_fails_mid_stream_reports_why() {
     let tmp = TempDir::new().unwrap();
-    let file_path = tmp.path().join("partial.bin");
-    tokio::fs::write(&file_path, b"partial").await.unwrap();
+    let destination = tmp.path().join("report.pdf");
+    tokio::fs::write(&destination, b"the file the user already had")
+        .await
+        .unwrap();
+    let staging = tmp.path().join(".report.pdf.part");
+    tokio::fs::write(&staging, b"partial").await.unwrap();
     let (d, mut rx) = dispatcher();
     d.start_connection(&start_payload("c1")).await;
     let transfer_id = "00000000-0000-0000-0000-0000000000e2";
@@ -1508,7 +1542,8 @@ async fn an_upload_whose_write_fails_mid_stream_reports_why() {
         &d,
         "c1",
         transfer_id,
-        file_path.clone(),
+        destination.clone(),
+        staging.clone(),
         Box::new(FailingWriter {
             ok_writes: 0,
             flush_fails: false,
@@ -1529,8 +1564,13 @@ async fn an_upload_whose_write_fails_mid_stream_reports_why() {
     let reported = drain_transfer_errors(&mut rx).await;
     assert_eq!(reported, vec![DeskErrorCode::SYSTEM_ERROR]);
     assert!(
-        !file_path.exists(),
-        "the partial file is removed with the transfer"
+        !staging.exists(),
+        "the staging file is removed with the transfer"
+    );
+    assert_eq!(
+        tokio::fs::read(&destination).await.unwrap(),
+        b"the file the user already had",
+        "an upload that failed must not have touched the file it was replacing",
     );
     assert!(
         d.inner.lock().await.activities.is_empty(),
@@ -1543,8 +1583,12 @@ async fn an_upload_whose_write_fails_mid_stream_reports_why() {
 #[tokio::test]
 async fn an_upload_whose_final_flush_fails_reports_why() {
     let tmp = TempDir::new().unwrap();
-    let file_path = tmp.path().join("unflushed.bin");
-    tokio::fs::write(&file_path, b"unflushed").await.unwrap();
+    let destination = tmp.path().join("report.pdf");
+    tokio::fs::write(&destination, b"the file the user already had")
+        .await
+        .unwrap();
+    let staging = tmp.path().join(".report.pdf.part");
+    tokio::fs::write(&staging, b"unflushed").await.unwrap();
     let (d, mut rx) = dispatcher();
     d.start_connection(&start_payload("c1")).await;
     let transfer_id = "00000000-0000-0000-0000-0000000000e3";
@@ -1552,7 +1596,8 @@ async fn an_upload_whose_final_flush_fails_reports_why() {
         &d,
         "c1",
         transfer_id,
-        file_path.clone(),
+        destination.clone(),
+        staging.clone(),
         Box::new(FailingWriter {
             ok_writes: 1,
             flush_fails: true,
@@ -1573,8 +1618,13 @@ async fn an_upload_whose_final_flush_fails_reports_why() {
     let reported = drain_transfer_errors(&mut rx).await;
     assert_eq!(reported, vec![DeskErrorCode::SYSTEM_ERROR]);
     assert!(
-        !file_path.exists(),
+        !staging.exists(),
         "a file that was never flushed is not left behind"
+    );
+    assert_eq!(
+        tokio::fs::read(&destination).await.unwrap(),
+        b"the file the user already had",
+        "the last step failing must not cost the user the file being replaced",
     );
 }
 
@@ -1616,6 +1666,13 @@ impl StalledWriter {
     }
 }
 
+#[async_trait::async_trait]
+impl UploadSink for StalledWriter {
+    async fn sync(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl tokio::io::AsyncWrite for StalledWriter {
     fn poll_write(
         self: std::pin::Pin<&mut Self>,
@@ -1652,20 +1709,195 @@ impl tokio::io::AsyncWrite for StalledWriter {
     }
 }
 
+/// Drive one whole upload through the real command path and return its
+/// destination.
+async fn upload_one_chunk(
+    d: &FileTransferDispatcher,
+    rx: &mut Box<dyn EventReceiver<FileTransferPayload>>,
+    target_dir: &std::path::Path,
+    transfer_id: &str,
+    file_name: &str,
+    body: &[u8],
+) {
+    d.handle_command(FileTransferPayload {
+        connection_id: "c1".into(),
+        data: serde_json::to_vec(&FileTransferMessage::UploadRequest(UploadRequest {
+            transfer_id: transfer_id.to_string(),
+            target_dir: target_dir.to_string_lossy().to_string(),
+            file_name: file_name.to_string(),
+            file_size: body.len() as u64,
+            chunk_size: body.len(),
+            total_chunks: 1,
+        }))
+        .unwrap(),
+        is_text: true,
+        transfer_id: None,
+    })
+    .await;
+    let _ = rx.recv().await.expect("UploadResponse");
+    d.handle_command(FileTransferPayload {
+        connection_id: "c1".into(),
+        data: build_binary_chunk(transfer_id, 0, body),
+        is_text: false,
+        transfer_id: None,
+    })
+    .await;
+}
+
+/// Uploading over a file the user already has is what the browser's file
+/// manager offers, so it has to work — and it has to be the whole new file or
+/// the whole old one, never a half-written mixture of the two.
+#[tokio::test]
+async fn an_upload_replaces_an_existing_file_in_one_step() {
+    let tmp = TempDir::new().unwrap();
+    let destination = tmp.path().join("report.pdf");
+    tokio::fs::write(&destination, b"old contents")
+        .await
+        .unwrap();
+    let (d, mut rx) = dispatcher();
+    d.start_connection(&start_payload("c1")).await;
+
+    upload_one_chunk(
+        &d,
+        &mut rx,
+        tmp.path(),
+        "00000000-0000-0000-0000-0000000000c1",
+        "report.pdf",
+        b"new contents",
+    )
+    .await;
+
+    assert_eq!(
+        tokio::fs::read(&destination).await.unwrap(),
+        b"new contents"
+    );
+    let mut left_behind = tokio::fs::read_dir(tmp.path()).await.unwrap();
+    let mut names = Vec::new();
+    while let Some(entry) = left_behind.next_entry().await.unwrap() {
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    assert_eq!(
+        names,
+        vec!["report.pdf".to_string()],
+        "the staging file is gone once it has taken the destination's name",
+    );
+    assert!(d.inner.lock().await.upload_destinations.is_empty());
+}
+
+/// Two transfers writing one file would each stage a copy and then rename over
+/// each other, leaving whichever finished last while both peers are told they
+/// succeeded. The second one to ask is refused instead.
+#[tokio::test]
+async fn a_second_upload_to_the_same_file_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let (d, mut rx) = dispatcher();
+    d.start_connection(&start_payload("c1")).await;
+    let request = |transfer_id: &str| FileTransferPayload {
+        connection_id: "c1".into(),
+        data: serde_json::to_vec(&FileTransferMessage::UploadRequest(UploadRequest {
+            transfer_id: transfer_id.to_string(),
+            target_dir: tmp.path().to_string_lossy().to_string(),
+            file_name: "contested.bin".to_string(),
+            file_size: 4,
+            chunk_size: 4,
+            total_chunks: 1,
+        }))
+        .unwrap(),
+        is_text: true,
+        transfer_id: None,
+    };
+
+    d.handle_command(request("00000000-0000-0000-0000-0000000000c2"))
+        .await;
+    let accepted = rx.recv().await.expect("UploadResponse");
+    assert!(matches!(
+        serde_json::from_slice::<FileTransferMessage>(&accepted.data).unwrap(),
+        FileTransferMessage::UploadResponse(_)
+    ));
+
+    d.handle_command(request("00000000-0000-0000-0000-0000000000c3"))
+        .await;
+    match serde_json::from_slice::<FileTransferMessage>(&rx.recv().await.expect("an answer").data)
+        .unwrap()
+    {
+        FileTransferMessage::TransferError(e) => {
+            assert_eq!(e.error_code, DeskErrorCode::INVALID_STATE);
+            assert!(
+                e.message.contains("Another upload"),
+                "the refusal says why, got {:?}",
+                e.message
+            );
+        }
+        other => panic!("expected the second to be refused, got {other:?}"),
+    }
+    assert_eq!(
+        d.inner.lock().await.upload_states.len(),
+        1,
+        "only the first transfer is registered",
+    );
+}
+
+/// A destination that cannot be replaced is worth saying up front. The bytes go
+/// to a staging file, so nothing would fail until the rename at the very end,
+/// and by then the browser has streamed the whole file at a host that was never
+/// going to accept it.
+#[tokio::test]
+async fn an_upload_onto_a_directory_is_refused_before_any_bytes_arrive() {
+    let tmp = TempDir::new().unwrap();
+    tokio::fs::create_dir(tmp.path().join("occupied"))
+        .await
+        .unwrap();
+    let (d, mut rx) = dispatcher();
+    d.start_connection(&start_payload("c1")).await;
+    let transfer_id = "00000000-0000-0000-0000-0000000000c4";
+
+    d.handle_command(FileTransferPayload {
+        connection_id: "c1".into(),
+        data: serde_json::to_vec(&FileTransferMessage::UploadRequest(UploadRequest {
+            transfer_id: transfer_id.to_string(),
+            target_dir: tmp.path().to_string_lossy().to_string(),
+            file_name: "occupied".to_string(),
+            file_size: 4,
+            chunk_size: 4,
+            total_chunks: 1,
+        }))
+        .unwrap(),
+        is_text: true,
+        transfer_id: None,
+    })
+    .await;
+
+    match serde_json::from_slice::<FileTransferMessage>(&rx.recv().await.expect("an answer").data)
+        .unwrap()
+    {
+        FileTransferMessage::TransferError(e) => {
+            assert_eq!(e.transfer_id, transfer_id);
+            assert_eq!(e.error_code, DeskErrorCode::SYSTEM_ERROR);
+        }
+        other => panic!("expected the refusal, got {other:?}"),
+    }
+    assert!(
+        d.inner.lock().await.activities.is_empty(),
+        "a refused request opens no transfer",
+    );
+}
+
 /// Arm an upload whose first chunk write never returns, and hand back the
 /// dispatcher once that write is actually in flight.
 async fn upload_stuck_mid_write(
     d: &FileTransferDispatcher,
     connection_id: &str,
     transfer_id: &str,
-    file_path: PathBuf,
+    destination: PathBuf,
+    staging: PathBuf,
 ) {
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     arm_upload(
         d,
         connection_id,
         transfer_id,
-        file_path,
+        destination,
+        staging,
         Box::new(StalledWriter::stuck(started_tx)),
         2,
         8,
@@ -1694,12 +1926,19 @@ async fn upload_stuck_mid_write(
 #[tokio::test]
 async fn a_connection_can_end_while_an_upload_write_is_stuck() {
     let tmp = TempDir::new().unwrap();
-    let file_path = tmp.path().join("stuck.bin");
-    tokio::fs::write(&file_path, b"partial").await.unwrap();
+    let staging = tmp.path().join(".stuck.bin.part");
+    tokio::fs::write(&staging, b"partial").await.unwrap();
     let (d, _rx) = dispatcher();
     d.start_connection(&start_payload("c1")).await;
     let transfer_id = "00000000-0000-0000-0000-0000000000e4";
-    upload_stuck_mid_write(&d, "c1", transfer_id, file_path.clone()).await;
+    upload_stuck_mid_write(
+        &d,
+        "c1",
+        transfer_id,
+        tmp.path().join("stuck.bin"),
+        staging.clone(),
+    )
+    .await;
 
     tokio::time::timeout(
         Duration::from_secs(2),
@@ -1721,12 +1960,19 @@ async fn a_connection_can_end_while_an_upload_write_is_stuck() {
 #[tokio::test]
 async fn a_shutdown_does_not_wait_for_a_stuck_upload_write() {
     let tmp = TempDir::new().unwrap();
-    let file_path = tmp.path().join("stuck.bin");
-    tokio::fs::write(&file_path, b"partial").await.unwrap();
+    let staging = tmp.path().join(".stuck.bin.part");
+    tokio::fs::write(&staging, b"partial").await.unwrap();
     let (d, _rx) = dispatcher();
     d.start_connection(&start_payload("c1")).await;
     let transfer_id = "00000000-0000-0000-0000-0000000000e5";
-    upload_stuck_mid_write(&d, "c1", transfer_id, file_path.clone()).await;
+    upload_stuck_mid_write(
+        &d,
+        "c1",
+        transfer_id,
+        tmp.path().join("stuck.bin"),
+        staging.clone(),
+    )
+    .await;
 
     tokio::time::timeout(Duration::from_secs(2), d.shutdown())
         .await
@@ -1748,8 +1994,9 @@ async fn a_shutdown_does_not_wait_for_a_stuck_upload_write() {
 #[tokio::test]
 async fn a_chunk_queued_behind_a_cancelled_write_is_not_written() {
     let tmp = TempDir::new().unwrap();
-    let file_path = tmp.path().join("queued.bin");
-    tokio::fs::write(&file_path, b"").await.unwrap();
+    let destination = tmp.path().join("queued.bin");
+    let staging = tmp.path().join(".queued.bin.part");
+    tokio::fs::write(&staging, b"").await.unwrap();
     let (d, _rx) = dispatcher();
     d.start_connection(&start_payload("c1")).await;
     let transfer_id = "00000000-0000-0000-0000-0000000000e6";
@@ -1760,7 +2007,8 @@ async fn a_chunk_queued_behind_a_cancelled_write_is_not_written() {
         &d,
         "c1",
         transfer_id,
-        file_path.clone(),
+        destination.clone(),
+        staging.clone(),
         Box::new(StalledWriter::gated(started_tx, release_rx, writes.clone())),
         3,
         12,
@@ -1821,8 +2069,12 @@ async fn a_chunk_queued_behind_a_cancelled_write_is_not_written() {
         "only the write that was already under way may reach the file",
     );
     assert!(
-        !file_path.exists(),
+        !staging.exists(),
         "a cancelled upload leaves nothing behind, whichever side removes it",
+    );
+    assert!(
+        !destination.exists(),
+        "a cancelled upload never reaches the file it was going to become",
     );
 }
 

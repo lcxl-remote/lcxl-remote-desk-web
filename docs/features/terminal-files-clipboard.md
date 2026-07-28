@@ -23,6 +23,16 @@ the owner declined the prompt — is reported as a refusal on the transfer row
 rather than sitting at 0%. If the host stops responding partway through, the
 transfer is abandoned after 30 seconds and can be retried.
 
+Uploading over a file that already exists replaces it, and only ever in one
+step. While the upload runs, the bytes go to a temporary `.<name>.<id>.part`
+file next to the destination; the destination itself is untouched until the
+whole file has arrived and reached stable storage, at which point the temporary
+file takes its name. So an upload that is cancelled, runs out of room or loses
+its connection costs nothing — the file that was already there is still the
+file that is there, and the temporary one is removed. Two transfers uploading
+to the same path at once would each replace the other's result, so the second
+one is refused rather than accepted.
+
 ### Mapped network drives on a Windows service host
 
 A host running as the Windows system service browses files from an elevated

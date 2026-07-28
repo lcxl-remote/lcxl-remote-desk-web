@@ -77,14 +77,27 @@ pub fn durable_atomic_write(path: &Path, contents: &[u8], mode: FileMode) -> io:
             fs::set_permissions(&temporary, existing.permissions())?;
         }
 
-        replace_file(&temporary, path)?;
-        sync_parent_directory(parent)
+        durable_replace(&temporary, path)
     })();
 
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+/// Give `temporary` the name `target` in a single step, and persist the
+/// directory entry that says so.
+///
+/// For a writer that produces its file over time rather than in one call — a
+/// streamed upload, say — and so cannot use [`durable_atomic_write`]. The
+/// caller owns getting the contents to stable storage before calling; this
+/// covers the rename itself, which is worth nothing on its own if a crash can
+/// lose it. `temporary` must already be in the same directory as `target`, or
+/// the replacement is not atomic.
+pub fn durable_replace(temporary: &Path, target: &Path) -> io::Result<()> {
+    replace_file(temporary, target)?;
+    sync_parent_directory(target.parent().unwrap_or_else(|| Path::new(".")))
 }
 
 #[cfg(unix)]

@@ -98,14 +98,40 @@ pub(crate) use metrics::{
     FILE_TRANSFER_CHUNK_SIZE_TX, FT_METRICS_WINDOW_CHUNKS, duration_ns, throughput_mbps,
 };
 
+/// Where an upload's bytes go.
+///
+/// A trait rather than [`tokio::fs::File`] for two reasons. A test can put a
+/// writer that fails, or blocks, in its place — a write or flush that fails
+/// partway is what turns a filesystem problem into an answer the browser can act
+/// on, and there is no portable way to make a real file do it on demand. And
+/// reaching stable storage is part of the contract, not an extra: the file only
+/// takes the destination's name once it is complete, and a rename that outlives
+/// the bytes it renames would replace a good file with an empty one.
+#[async_trait::async_trait]
+trait UploadSink: tokio::io::AsyncWrite + Unpin + Send {
+    async fn sync(&mut self) -> std::io::Result<()>;
+}
+
+#[async_trait::async_trait]
+impl UploadSink for tokio::fs::File {
+    async fn sync(&mut self) -> std::io::Result<()> {
+        self.sync_all().await
+    }
+}
+
+/// Discards everything. Installed in place of a real file once an upload is
+/// finished with, so the handle is released at a point the code chooses rather
+/// than whenever the last reference happens to go.
+#[async_trait::async_trait]
+impl UploadSink for tokio::io::Sink {
+    async fn sync(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Per-transfer in-flight upload state (browser uploading to host).
 struct UploadState {
-    /// Boxed rather than held as a [`tokio::fs::File`] so a test can put a
-    /// writer that fails, or blocks, in its place. A write or flush that fails
-    /// partway is what turns a filesystem problem into an answer the browser
-    /// can act on, and there is no portable way to make a real file do it on
-    /// demand.
-    file: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+    file: Box<dyn UploadSink>,
     total_chunks: u64,
     received_chunks: u64,
     expected_bytes: u64,
@@ -139,10 +165,26 @@ struct Upload {
     /// has the state lock and again after its write returns, and refuses to go
     /// any further either way.
     cancelled: AtomicBool,
-    /// Where the partial file is. Kept out here so teardown can name the file to
-    /// remove without taking the state lock — that lock is exactly what a slow
-    /// write is holding.
-    file_path: PathBuf,
+    /// The file the browser asked for. Nothing is written here: it is created,
+    /// in one step, out of [`Upload::staging`] once the whole upload has arrived
+    /// and reached stable storage.
+    ///
+    /// Uploading over an existing file is allowed and is what the browser's file
+    /// manager offers. Writing straight to this path is not, because then every
+    /// way an upload can end badly — a cancel, a full disk, a peer that
+    /// disconnects, a size that does not match — ends with the file the user
+    /// already had truncated or deleted, in exchange for one that never
+    /// finished arriving.
+    destination: PathBuf,
+    /// Where the bytes actually go while they arrive. Same directory as
+    /// [`Upload::destination`], so the final step is a rename within one
+    /// filesystem, and uniquely named, so two uploads never adopt each other's
+    /// partial file.
+    ///
+    /// Kept out here rather than behind the state lock so teardown can name the
+    /// file to remove without taking that lock — it is exactly what a slow write
+    /// is holding.
+    staging: PathBuf,
     state: TokioMutex<UploadState>,
 }
 
@@ -175,6 +217,14 @@ impl TransferKey {
 
 struct DispatcherInner {
     upload_states: HashMap<TransferKey, Arc<Upload>>,
+    /// Destinations an upload in flight has claimed.
+    ///
+    /// Two transfers writing the same file would each stage their own copy and
+    /// then rename over one another, so the file left behind is whichever
+    /// finished last while both are told they succeeded. The second one to ask
+    /// is refused instead. Keyed on the resolved destination, so the same file
+    /// reached through two spellings of its directory is still one claim.
+    upload_destinations: HashSet<PathBuf>,
     /// Downloads whose streaming loop is running and can therefore still act on
     /// a cancel. Registered by `serve_download` and released by it on the way
     /// out, whichever way it leaves.
@@ -202,6 +252,7 @@ impl DispatcherInner {
     fn new() -> Self {
         Self {
             upload_states: HashMap::new(),
+            upload_destinations: HashSet::new(),
             live_downloads: HashSet::new(),
             cancelled_transfers: HashSet::new(),
             active_connections: HashSet::new(),
@@ -221,19 +272,24 @@ impl DispatcherInner {
         }
     }
 
-    /// Take an upload out of reach and call it off, returning the partial file
+    /// Take an upload out of reach and call it off, returning the staging file
     /// the caller should remove.
+    ///
+    /// What comes back is never the destination: an upload that ends this way
+    /// never arrived, and the file the user already had is not the host's to
+    /// delete.
     ///
     /// Marking is what lets the caller leave without waiting: a chunk write
     /// already under way holds only its own transfer's lock, and when it returns
     /// it reads the mark, closes the file and removes what it wrote. So the
     /// caller's own removal is allowed to fail — a platform that refuses to
-    /// remove an open file still ends up with the partial gone, and a connection
-    /// ending never has to wait on a disk.
+    /// remove an open file still ends up with the staging file gone, and a
+    /// connection ending never has to wait on a disk.
     fn take_upload(&mut self, key: &TransferKey) -> Option<PathBuf> {
         let upload = self.upload_states.remove(key)?;
         upload.cancel();
-        Some(upload.file_path.clone())
+        self.upload_destinations.remove(&upload.destination);
+        Some(upload.staging.clone())
     }
 }
 
