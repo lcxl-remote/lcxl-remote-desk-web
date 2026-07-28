@@ -22,10 +22,39 @@ use crate::version::{SERVER_BUILD_NUMBER, SERVER_COMMIT_HASH};
 use std::sync::Arc;
 use tracing;
 
+/// Guards for every non-blocking writer installed by [`init_telemetry`]. The
+/// caller MUST keep this alive for the process lifetime: dropping it flushes the
+/// buffered lines and stops the writer threads, after which every subsequent log
+/// line is silently discarded.
+pub struct TelemetryGuards {
+    _guards: Vec<WorkerGuard>,
+}
+
+/// Wrap a sink so writing to it never blocks the thread that logged.
+///
+/// **Logging must never be able to stall the service.** Each sink — stdout and
+/// the log file — is handed to a dedicated writer thread behind a bounded queue,
+/// and the queue is explicitly **lossy**: when the sink stops draining (a hung or
+/// full disk, a container log driver that stopped reading, a console that stopped
+/// servicing writes for an inactive desktop), records are dropped rather than
+/// backpressured onto the caller. Capture, input injection and signaling must
+/// keep running while the disk is gone; the log lines are the acceptable loss.
+///
+/// `lossy(true)` is also the crate default, but it is stated explicitly because
+/// the opposite setting would silently convert this into the blocking behaviour
+/// this function exists to prevent.
+fn non_blocking_writer<W: std::io::Write + Send + 'static>(
+    sink: W,
+) -> (tracing_appender::non_blocking::NonBlocking, WorkerGuard) {
+    tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .lossy(true)
+        .finish(sink)
+}
+
 pub async fn init_telemetry(
     shared_settings: Arc<SharedSettings>,
     startup_mode: &StartupMode,
-) -> Result<Option<WorkerGuard>> {
+) -> Result<Option<TelemetryGuards>> {
     let (mut system_settings, log_settings) = {
         let settings_guard = shared_settings.read().await;
         (settings_guard.system.clone(), settings_guard.log.clone())
@@ -84,24 +113,39 @@ pub async fn init_telemetry(
     // headless service.
     let headless_mode = is_headless_startup_mode(startup_mode);
 
-    let stdout_general = (!headless_mode).then(|| {
+    // Even in the modes that keep stdout, it is written through a non-blocking
+    // writer. Written directly, `fmt` holds the process-wide stdout lock across
+    // the `write` syscall, so a consumer that stops reading blocks every thread
+    // that logs — the same deadlock shape the headless modes avoid by dropping
+    // these layers entirely, but reachable in an interactive run too (a paused
+    // `docker logs`, a full pipe, a hung disk behind a redirect).
+    let mut guards: Vec<WorkerGuard> = Vec::new();
+    let stdout_writer = (!headless_mode).then(|| {
+        let (writer, guard) = non_blocking_writer(std::io::stdout());
+        guards.push(guard);
+        writer
+    });
+
+    let stdout_general = stdout_writer.clone().map(|writer| {
         fmt::layer()
             .with_thread_ids(false)
             .with_thread_names(false)
             .with_target(true)
             .with_line_number(true)
+            .with_writer(writer)
             .with_filter(filter_fn(|metadata| {
                 LevelFilter::from_level(*metadata.level()) != LevelFilter::ERROR
             }))
             .with_filter(make_env_filter())
     });
 
-    let stdout_error = (!headless_mode).then(|| {
+    let stdout_error = stdout_writer.map(|writer| {
         fmt::layer()
             .with_thread_ids(false)
             .with_thread_names(false)
             .with_target(true)
             .with_line_number(true)
+            .with_writer(writer)
             .with_filter(LevelFilter::ERROR)
             .with_filter(make_env_filter())
     });
@@ -114,7 +158,8 @@ pub async fn init_telemetry(
 
     // File appender
     let file_appender = tracing_appender::rolling::daily(log_dir, log_file_name);
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    let (non_blocking, guard) = non_blocking_writer(file_appender);
+    guards.push(guard);
     let file_layer = fmt::layer()
         .with_ansi(false)
         .with_line_number(true)
@@ -214,10 +259,32 @@ pub async fn init_telemetry(
 
     registry.init();
 
-    // 5. Spawn log cleanup task
-    spawn_log_cleanup_task(shared_settings.clone());
+    // 5. Spawn log cleanup task, but only in a process that owns the log
+    //    directory (see `owns_log_cleanup`).
+    if owns_log_cleanup(startup_mode) {
+        spawn_log_cleanup_task(shared_settings.clone());
+    }
 
-    Ok(Some(guard))
+    Ok(Some(TelemetryGuards { _guards: guards }))
+}
+
+/// Whether a process in this startup mode may prune the shared log directory.
+///
+/// The sweep deletes every component's rolls, so exactly the long-lived processes
+/// that own the directory may run it:
+///
+/// - `SessionWorker` must not. Each desktop session spawns one, several can be
+///   alive at once, and its settings are a *startup snapshot* that never receives
+///   the daemon's updates — so a worker that outlived a settings change would keep
+///   enforcing a stale retention against the daemon's own logs, and an operator
+///   who disabled cleanup would not actually have disabled it.
+/// - `McpStdio` must not either: it is a short-lived stdio helper started per
+///   client, with the same stale-snapshot problem and no reason to own retention.
+pub fn owns_log_cleanup(startup_mode: &StartupMode) -> bool {
+    !matches!(
+        startup_mode,
+        StartupMode::SessionWorker | StartupMode::McpStdio
+    )
 }
 
 /// Returns the canonical log directory used by every component (daemon,
@@ -302,6 +369,25 @@ fn current_process_is_root() -> bool {
     false
 }
 
+/// Log file name written by the Tauri shell, which has no startup mode of its
+/// own but shares the log directory with every other component.
+const TAURI_SHELL_LOG_FILE_NAME: &str = "desk-tauri.log";
+
+/// Every rolling log base name this project writes into [`log_directory`]: one
+/// per startup mode plus the Tauri shell's.
+///
+/// The cleanup sweep deletes only rolls of these names, so an unrelated file
+/// sharing the directory — a co-located manager's `manager.log`, for instance —
+/// is never removed. [`log_file_name_for`] must only return names listed here;
+/// a test pins that so the two cannot drift.
+const MANAGED_LOG_BASE_NAMES: &[&str] = &[
+    "desk-server.log",
+    "desk-daemon.log",
+    "desk-worker.log",
+    "desk-mcp.log",
+    TAURI_SHELL_LOG_FILE_NAME,
+];
+
 /// Standard log file name for a given startup mode. Kept beside `log_directory`
 /// so the rotation appender uses identical naming everywhere.
 pub fn log_file_name_for(startup_mode: &StartupMode) -> &'static str {
@@ -351,8 +437,8 @@ pub fn init_tauri_shell_telemetry(log_level: &str) -> Result<WorkerGuard> {
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
 
-    let file_appender = tracing_appender::rolling::daily(log_dir, "desk-tauri.log");
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    let file_appender = tracing_appender::rolling::daily(log_dir, TAURI_SHELL_LOG_FILE_NAME);
+    let (non_blocking, guard) = non_blocking_writer(file_appender);
     let file_layer = fmt::layer()
         .with_ansi(false)
         .with_line_number(true)
@@ -367,6 +453,15 @@ pub fn init_tauri_shell_telemetry(log_level: &str) -> Result<WorkerGuard> {
     Ok(guard)
 }
 
+/// How long to wait before re-reading the settings while cleanup is disabled.
+/// The settings are live, so the task keeps polling instead of exiting: turning
+/// cleanup back on takes effect without a restart.
+const DISABLED_CLEANUP_RECHECK: Duration = Duration::from_secs(3600);
+
+/// Date suffix the daily rolling appender appends (`desk-server.log.2026-07-28`).
+/// The appender rolls on the **UTC** date, so the sweep compares against UTC too.
+const LOG_DATE_FORMAT: &str = "%Y-%m-%d";
+
 fn spawn_log_cleanup_task(shared_settings: Arc<SharedSettings>) {
     tokio::spawn(async move {
         loop {
@@ -379,6 +474,18 @@ fn spawn_log_cleanup_task(shared_settings: Arc<SharedSettings>) {
                 )
             };
 
+            // A zero in either knob means "cleanup off". The interval must be
+            // guarded regardless: sleeping zero seconds would spin the loop.
+            if interval_hours == 0 || retention_days == 0 {
+                tracing::debug!(
+                    "Log cleanup is disabled (interval {}h, retention {}d); rolled log files are kept",
+                    interval_hours,
+                    retention_days
+                );
+                tokio::time::sleep(DISABLED_CLEANUP_RECHECK).await;
+                continue;
+            }
+
             tracing::info!(
                 "Starting log cleanup task. Interval: {}h, Retention: {}d, Threshold: {}%",
                 interval_hours,
@@ -386,8 +493,22 @@ fn spawn_log_cleanup_task(shared_settings: Arc<SharedSettings>) {
                 threshold_percent
             );
 
-            if let Err(e) = perform_log_cleanup(retention_days, threshold_percent).await {
-                tracing::error!("Log cleanup error: {}", e);
+            // Directory scans and unlinks are blocking syscalls, so they stay off
+            // the runtime's worker threads.
+            let swept = tokio::task::spawn_blocking(move || {
+                cleanup_logs(
+                    &log_directory(),
+                    chrono::Utc::now().date_naive(),
+                    retention_days,
+                    threshold_percent,
+                )
+            })
+            .await;
+            match swept {
+                Ok(Ok(0)) => {}
+                Ok(Ok(n)) => tracing::info!("Log cleanup removed {} expired log file(s)", n),
+                Ok(Err(e)) => tracing::error!("Log cleanup error: {}", e),
+                Err(e) => tracing::error!("Log cleanup task failed: {}", e),
             }
 
             tokio::time::sleep(Duration::from_secs(interval_hours as u64 * 3600)).await;
@@ -395,42 +516,93 @@ fn spawn_log_cleanup_task(shared_settings: Arc<SharedSettings>) {
     });
 }
 
-async fn perform_log_cleanup(retention_days: u32, threshold_percent: u8) -> Result<()> {
-    let log_dir = "logs";
-    let path = std::path::Path::new(log_dir);
-    if !path.exists() {
-        return Ok(());
+/// The roll date of `file_name` if it is one of this project's rolled log files
+/// (`<base>.<date>` for a base in [`MANAGED_LOG_BASE_NAMES`]).
+///
+/// The file currently being written has no date suffix and so yields `None`,
+/// which is what keeps the live log out of the sweep.
+fn rolled_log_date(file_name: &str) -> Option<chrono::NaiveDate> {
+    MANAGED_LOG_BASE_NAMES.iter().find_map(|base| {
+        file_name
+            .strip_prefix(base)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .and_then(|date| chrono::NaiveDate::parse_from_str(date, LOG_DATE_FORMAT).ok())
+    })
+}
+
+/// Whether a roll may be deleted to reclaim disk space.
+///
+/// Only files at least a full day older than `today` qualify. A rolling appender
+/// decides whether to roll from the time it read *before* it writes, so around
+/// UTC midnight it can still hold yesterday's file open while the sweep already
+/// computes the new date. Deleting it then would send the next records to an
+/// unlinked inode (or a delete-pending handle on Windows) and lose them. Files
+/// past the retention window are deleted by age regardless — a non-zero retention
+/// keeps that cutoff at least a day back, so the same file is never at risk there.
+fn eligible_under_disk_pressure(date: chrono::NaiveDate, today: chrono::NaiveDate) -> bool {
+    match today.checked_sub_days(chrono::Days::new(1)) {
+        Some(yesterday) => date < yesterday,
+        None => false,
     }
+}
 
-    let now = chrono::Local::now().naive_local().date();
-    let expiration_date = now - chrono::Duration::days(retention_days as i64);
+/// Delete the rolled log files that have aged out of the retention window ending
+/// at `today`, then — when a disk threshold is configured — keep deleting the
+/// oldest surviving rolls until usage drops back under it. Returns how many files
+/// were removed.
+///
+/// Blocking filesystem work: call it from a blocking context.
+fn cleanup_logs(
+    dir: &std::path::Path,
+    today: chrono::NaiveDate,
+    retention_days: u32,
+    threshold_percent: u8,
+) -> Result<usize> {
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let Some(expiration_date) = today.checked_sub_days(chrono::Days::new(retention_days as u64))
+    else {
+        return Ok(0);
+    };
 
-    let mut log_files = Vec::new();
-    for entry in std::fs::read_dir(path)? {
+    let mut deleted = 0;
+    let mut survivors: Vec<(chrono::NaiveDate, std::path::PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
+        // The appenders only ever create plain files; never unlink a directory
+        // or follow a symlink out of the log directory.
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
         let file_name = entry.file_name().to_string_lossy().into_owned();
-        // Expected format: desk-server.log.YYYY-MM-DD
-        if let Some(date_str) = file_name.strip_prefix("desk-server.log.")
-            && let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
-        {
-            if date < expiration_date {
-                tracing::info!("Deleting expired log file: {}", file_name);
-                let _ = std::fs::remove_file(entry.path());
-            } else if date < now {
-                // Collect non-expired (but not current) files for potential disk space cleanup
-                log_files.push((date, entry.path()));
+        let Some(date) = rolled_log_date(&file_name) else {
+            continue;
+        };
+        if date < expiration_date {
+            tracing::info!("Deleting expired log file: {}", file_name);
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => deleted += 1,
+                // A file that cannot be unlinked (permissions, a sharing
+                // violation on Windows) will be retried next sweep, but silence
+                // would let the directory grow while cleanup looks healthy.
+                Err(e) => tracing::warn!("Failed to remove log file {}: {}", file_name, e),
             }
+        } else if eligible_under_disk_pressure(date, today) {
+            // Not expired, and provably not the file any appender still holds
+            // open: a candidate should the disk threshold below be exceeded.
+            survivors.push((date, entry.path()));
         }
     }
 
     // Sort by date (oldest first)
-    log_files.sort_by_key(|f| f.0);
+    survivors.sort_by_key(|f| f.0);
 
     // Check disk usage if threshold is set
     if threshold_percent > 0 {
         let mut disks = sysinfo::Disks::new_with_refreshed_list();
 
-        let abs_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let abs_path = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
         if let Some(disk) = disks.iter().find(|d| abs_path.starts_with(d.mount_point())) {
             let used_percent = ((disk.total_space() - disk.available_space()) as f64
                 / disk.total_space() as f64
@@ -443,9 +615,14 @@ async fn perform_log_cleanup(retention_days: u32, threshold_percent: u8) -> Resu
                     threshold_percent
                 );
 
-                for (_, file_path) in log_files {
+                for (_, file_path) in survivors {
                     tracing::info!("Deleting log file due to disk space: {:?}", file_path);
-                    let _ = std::fs::remove_file(&file_path);
+                    match std::fs::remove_file(&file_path) {
+                        Ok(()) => deleted += 1,
+                        Err(e) => {
+                            tracing::warn!("Failed to remove log file {:?}: {}", file_path, e)
+                        }
+                    }
 
                     // Re-check disk usage
                     disks = sysinfo::Disks::new_with_refreshed_list();
@@ -462,12 +639,199 @@ async fn perform_log_cleanup(retention_days: u32, threshold_percent: u8) -> Resu
         }
     }
 
-    Ok(())
+    Ok(deleted)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn day(s: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(s, LOG_DATE_FORMAT).expect("test date")
+    }
+
+    /// The sweep can only prune what it recognises, so every name the appenders
+    /// use must be listed. A new startup mode that forgets this would silently
+    /// leak its logs forever.
+    #[test]
+    fn every_startup_mode_log_name_is_managed_by_the_cleanup_sweep() {
+        for mode in [
+            StartupMode::Default,
+            StartupMode::Signaling,
+            StartupMode::DeskServer,
+            StartupMode::ServiceDaemon,
+            StartupMode::SessionWorker,
+            StartupMode::McpStdio,
+        ] {
+            let name = log_file_name_for(&mode);
+            assert!(
+                MANAGED_LOG_BASE_NAMES.contains(&name),
+                "{name} is written but never cleaned up"
+            );
+        }
+        assert!(MANAGED_LOG_BASE_NAMES.contains(&TAURI_SHELL_LOG_FILE_NAME));
+    }
+
+    /// A rolled file is `<managed base>.<date>`. The live file has no date
+    /// suffix, and a file belonging to something else sharing the directory is
+    /// not ours to delete.
+    #[test]
+    fn rolled_log_date_matches_only_this_project_s_rolls() {
+        assert_eq!(
+            rolled_log_date("desk-server.log.2026-07-28"),
+            Some(day("2026-07-28"))
+        );
+        assert_eq!(
+            rolled_log_date("desk-daemon.log.2026-07-28"),
+            Some(day("2026-07-28"))
+        );
+        assert_eq!(
+            rolled_log_date("desk-tauri.log.2026-07-28"),
+            Some(day("2026-07-28"))
+        );
+        // The file being written right now, and a co-located manager's logs.
+        assert_eq!(rolled_log_date("desk-server.log"), None);
+        assert_eq!(rolled_log_date("manager.log.2026-07-28"), None);
+        assert_eq!(rolled_log_date("access.log.2026-07-28"), None);
+        // Neither a missing separator nor a non-date suffix is a roll.
+        assert_eq!(rolled_log_date("desk-server.log2026-07-28"), None);
+        assert_eq!(rolled_log_date("desk-server.log.backup"), None);
+        assert_eq!(rolled_log_date("desk-server.log.2026-07-28.gz"), None);
+    }
+
+    /// The sweep runs against [`log_directory`] and covers every component's
+    /// rolls, keeps the retention window and the live files, and leaves foreign
+    /// files alone. A zero threshold disables the disk-usage stage, so this
+    /// asserts age-based deletion in isolation.
+    #[test]
+    fn cleanup_removes_only_expired_rolls_of_managed_logs() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let files = [
+            "desk-server.log",
+            "desk-server.log.2026-07-20",
+            "desk-server.log.2026-07-27",
+            "desk-daemon.log.2026-07-20",
+            "desk-worker.log.2026-07-20",
+            "desk-mcp.log.2026-07-21",
+            "desk-tauri.log.2026-07-20",
+            "manager.log.2026-07-20",
+            "notes.txt",
+        ];
+        for name in files {
+            std::fs::write(dir.path().join(name), b"x").expect("write file");
+        }
+
+        let deleted = cleanup_logs(dir.path(), day("2026-07-28"), 7, 0).expect("cleanup");
+        assert_eq!(deleted, 4);
+
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                // 2026-07-21 is the oldest day inside a 7-day window.
+                "desk-mcp.log.2026-07-21",
+                "desk-server.log",
+                "desk-server.log.2026-07-27",
+                "manager.log.2026-07-20",
+                "notes.txt",
+            ]
+        );
+    }
+
+    /// A sink that never returns from a write, standing in for a hung disk or a
+    /// console that stopped servicing writes for an inactive desktop.
+    struct HungSink;
+
+    impl std::io::Write for HungSink {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+            unreachable!("the test finishes long before this returns")
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Logging must never stall the caller: capture, injection and signaling keep
+    /// running even when the log sink is wedged. Records queue and are then
+    /// dropped; the thread that logged never waits on the sink.
+    ///
+    /// The guard is deliberately leaked: dropping it joins the writer thread,
+    /// which is parked inside the hung write and would never return.
+    #[test]
+    fn a_hung_sink_never_blocks_the_thread_that_logs() {
+        let (writer, guard) = non_blocking_writer(HungSink);
+        std::mem::forget(guard);
+        let subscriber = Registry::default().with(
+            fmt::layer()
+                .with_ansi(false)
+                .with_writer(writer)
+                .with_filter(EnvFilter::new("info")),
+        );
+
+        let started = std::time::Instant::now();
+        tracing::subscriber::with_default(subscriber, || {
+            for i in 0..10_000 {
+                tracing::info!("record {i} while the disk is gone");
+            }
+        });
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "logging to a hung sink took {elapsed:?}; the caller was blocked"
+        );
+    }
+
+    /// The sweep deletes every component's rolls, so only a process that owns the
+    /// log directory may run it. A SessionWorker holds a startup snapshot of the
+    /// settings that never sees the daemon's updates, so letting it sweep would
+    /// make "cleanup disabled" untrue and let a stale worker delete the daemon's
+    /// logs.
+    #[test]
+    fn only_directory_owning_modes_run_the_cleanup_sweep() {
+        for mode in [
+            StartupMode::Default,
+            StartupMode::Signaling,
+            StartupMode::DeskServer,
+            StartupMode::ServiceDaemon,
+        ] {
+            assert!(owns_log_cleanup(&mode), "{mode:?} should own cleanup");
+        }
+        for mode in [StartupMode::SessionWorker, StartupMode::McpStdio] {
+            assert!(
+                !owns_log_cleanup(&mode),
+                "{mode:?} must never sweep the shared log directory"
+            );
+        }
+    }
+
+    /// Disk-pressure deletion must not touch the file an appender may still hold
+    /// open across the UTC rollover — only rolls at least a full day old.
+    #[test]
+    fn disk_pressure_spares_todays_and_yesterdays_rolls() {
+        let today = day("2026-07-28");
+        assert!(!eligible_under_disk_pressure(day("2026-07-28"), today));
+        assert!(!eligible_under_disk_pressure(day("2026-07-27"), today));
+        assert!(eligible_under_disk_pressure(day("2026-07-26"), today));
+    }
+
+    /// A missing log directory is not an error: the appenders create it lazily,
+    /// so an early sweep simply has nothing to do.
+    #[test]
+    fn cleanup_tolerates_a_missing_log_directory() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("not-created-yet");
+        assert_eq!(
+            cleanup_logs(&missing, day("2026-07-28"), 7, 0).expect("cleanup"),
+            0
+        );
+    }
 
     /// Every component (daemon, embedded server, worker, Tauri shell) must
     /// agree on the log root so the daemon's cleanup task can prune them all.

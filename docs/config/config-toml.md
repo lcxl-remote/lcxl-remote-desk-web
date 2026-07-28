@@ -32,10 +32,28 @@ This host-local preference is not remotely configurable by manager. See
 
 - `log_level` — logging level (`error`, `warn`, `info`, `debug`, `trace`).
 - `traceback` — whether to enable Rust error backtraces.
-- `log_retention_days` — log retention in days (default `7`).
-- `log_cleanup_threshold_percent` — disk-usage threshold that triggers cleanup (default `90`).
-- `log_cleanup_interval_hours` — interval in hours for the cleanup task (default `12`).
+- `log_retention_days` — log retention in days (default `7`). `0` disables cleanup.
+- `log_cleanup_threshold_percent` — disk-usage threshold that triggers cleanup (default `90`). Once the disk is fuller than this, rolled files inside the retention window are deleted oldest-first until usage drops back under it; today's and yesterday's files are always kept, because an appender may still hold them open. `0` disables this stage, leaving retention as the only criterion.
+- `log_cleanup_interval_hours` — interval in hours for the cleanup task (default `12`). `0` disables cleanup.
 - `tokio_console_enabled` — enable the tokio-console subscriber (requires the `tokio_unstable` build flag, default `false`).
+
+Cleanup covers every component's rolled files in the log directory
+(`desk-server.log.<date>`, `desk-daemon.log.<date>`, `desk-worker.log.<date>`,
+`desk-mcp.log.<date>`, `desk-tauri.log.<date>`); files that belong to other
+programs sharing the directory are left alone. Every file carries a date suffix,
+including the one being written right now — retention is measured from it, so the
+live file is never removed. Roll dates are UTC.
+
+Logging never blocks the service: stdout and the log file are both written
+through a dedicated writer thread behind a bounded, lossy queue. If a sink stops
+draining — a full or hung disk, a console that stopped servicing writes for an
+inactive desktop — records are dropped rather than backpressured onto the caller,
+so capture, input injection and signaling keep running.
+
+The sweep runs in the process that owns the log directory: the daemon, or the
+server in a portable / signaling-only run. Session workers and the MCP stdio
+helper never sweep — they are short-lived and hold a startup snapshot of the
+settings, so a change to the values above would not reach them.
 
 ## User `[user]`
 

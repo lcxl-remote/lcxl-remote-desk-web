@@ -26,10 +26,24 @@
 
 - `log_level`——日志级别（`error`、`warn`、`info`、`debug`、`trace`）。
 - `traceback`——是否启用 Rust 错误回溯。
-- `log_retention_days`——日志保留天数（默认 `7`）。
-- `log_cleanup_threshold_percent`——触发清理的磁盘占用阈值（默认 `90`）。
-- `log_cleanup_interval_hours`——清理任务的间隔小时数（默认 `12`）。
+- `log_retention_days`——日志保留天数（默认 `7`）。设 `0` 关闭清理。
+- `log_cleanup_threshold_percent`——触发清理的磁盘占用阈值（默认 `90`）。磁盘占用超过该值时，会从最旧开始继续删除保留期内的滚动文件，直到占用回落到阈值以下；当天与前一天的文件始终保留，因为它们可能仍被写入方持有。设 `0` 关闭这一档，只按保留天数清理。
+- `log_cleanup_interval_hours`——清理任务的间隔小时数（默认 `12`）。设 `0` 关闭清理。
 - `tokio_console_enabled`——启用 tokio-console 订阅器（需 `tokio_unstable` 构建标志，默认 `false`）。
+
+清理覆盖日志目录下**所有组件**的滚动文件（`desk-server.log.<日期>`、
+`desk-daemon.log.<日期>`、`desk-worker.log.<日期>`、`desk-mcp.log.<日期>`、
+`desk-tauri.log.<日期>`）；同目录下属于其他程序的文件不会被碰。**每个文件都带日期
+后缀**，包括当前正在写入的那个——保留期从它的日期算起，所以活跃文件不会被删除。
+滚动日期按 UTC 计。
+
+日志永不阻塞主链路：stdout 与日志文件都经独立写入线程 + 有界有损队列落盘。出口停止
+消费时（磁盘写满 / hang 死、锁屏后停止响应的控制台），**丢弃记录**而不是把压力回传给
+调用方，采集、输入注入与信令照常运行。
+
+清理只在拥有日志目录的进程里执行：守护进程，或便携 / 纯信令模式下的服务端。会话
+工作进程与 MCP stdio 进程从不清理——它们生命周期短，且持有的是启动时的设置快照，
+上面这些参数的改动不会传达给它们。
 
 ## 用户 `[user]`
 

@@ -32,6 +32,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::telemetry::TelemetryGuards;
 use crate::{
     controller::{
         api_token::create_token,
@@ -103,7 +104,6 @@ use desk_utils::{error::DeskErrorCode, network::check_ipv6_available, rest::Rest
 use error::DeskError;
 use log::{error, info, warn};
 use model::settings::{Args, Settings, SharedSettings, StartupMode};
-use tracing_appender::non_blocking::WorkerGuard;
 
 use utoipa::OpenApi;
 use utoipa_actix_web::AppExt;
@@ -469,11 +469,11 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     result == 0
 }
 
-/// Returned alongside the running [`Server`]. The caller MUST keep this guard
-/// alive until `server.await` completes — dropping it earlier shuts down the
-/// `tracing_appender` non-blocking writer thread, after which every log line
+/// Returned alongside the running [`Server`]. The caller MUST keep these guards
+/// alive until `server.await` completes — dropping them earlier shuts down the
+/// `tracing_appender` non-blocking writer threads, after which every log line
 /// the running server emits is silently discarded.
-pub type ServerHandle = (Server, Option<WorkerGuard>);
+pub type ServerHandle = (Server, Option<TelemetryGuards>);
 
 pub async fn run() -> Result<ServerHandle, DeskError> {
     let args = Args::parse();
@@ -1076,7 +1076,7 @@ mod tests {
     }
 
     // Lock down the `ServerHandle` contract: the second tuple slot MUST be
-    // `Option<WorkerGuard>` so callers can keep the `tracing_appender`
+    // `Option<TelemetryGuards>` so callers can keep every `tracing_appender`
     // non-blocking writer alive for the entire `server.await` lifetime. The
     // earlier shape was `Result<Server, _>`, which let `run_with_hub` drop
     // its locally-bound guard at function return — closing the writer thread
@@ -1085,10 +1085,10 @@ mod tests {
     // returning a bare `Server`) breaks this assignment at compile time.
     #[test]
     fn server_handle_alias_carries_telemetry_worker_guard() {
-        fn _shape_check(handle: ServerHandle) -> (Server, Option<WorkerGuard>) {
+        fn _shape_check(handle: ServerHandle) -> (Server, Option<TelemetryGuards>) {
             handle
         }
-        let _coerce: fn(ServerHandle) -> (Server, Option<WorkerGuard>) = _shape_check;
+        let _coerce: fn(ServerHandle) -> (Server, Option<TelemetryGuards>) = _shape_check;
     }
 
     /// Build the daemon-style HTTP App (utoipa surface with daemon opts +
