@@ -29,12 +29,9 @@ pub enum FileMode {
     /// SYSTEM / root must not narrow it out of reach of a later run as the
     /// desktop user.
     ///
-    /// Permissions only. Ownership follows whoever wrote the replacement, which
-    /// an in-place write would have left alone — so on unix a privileged writer
-    /// takes over a file a less privileged one created, and a mode that only
-    /// granted the owner would stop reaching them. That is not a case this host
-    /// has: the two identities only diverge under the Windows service, and
-    /// `ReplaceFileW` carries the target's ACL across on its own.
+    /// The owner is carried across as well, as far as the writer is permitted
+    /// to — see [`carry_ownership`]. On Windows `ReplaceFileW` does both on its
+    /// own by keeping the target's ACL.
     Preserve,
 }
 
@@ -70,10 +67,14 @@ pub fn durable_atomic_write(path: &Path, contents: &[u8], mode: FileMode) -> io:
         // leaves it there. On Windows `ReplaceFileW` carries the target's ACL
         // over on its own, and `set_permissions` there only reaches the
         // read-only bit, so this stays unix-only.
+        //
+        // Ownership goes first: changing it drops the set-user/group-ID bits on
+        // most unices, so the permissions have to be applied after it to survive.
         #[cfg(unix)]
         if mode == FileMode::Preserve
             && let Ok(existing) = fs::metadata(path)
         {
+            carry_ownership(&temporary, &existing);
             fs::set_permissions(&temporary, existing.permissions())?;
         }
 
@@ -84,6 +85,25 @@ pub fn durable_atomic_write(path: &Path, contents: &[u8], mode: FileMode) -> io:
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+/// Give the replacement the owner the target already had.
+///
+/// The rename below hands the target's name to a *new* inode, so without this
+/// the file would belong to whoever saved last — where an in-place write left
+/// the original owner alone. The case that matters is a host saving as root
+/// over a file the desktop user created: every permission bit is preserved, and
+/// the user still loses the file, because the bits now describe root.
+///
+/// Best effort. Only a privileged writer may give a file away, and an
+/// unprivileged one could not have taken the file over by writing in place
+/// either; refusing the save would turn a configuration it is allowed to write
+/// into an error.
+#[cfg(unix)]
+fn carry_ownership(temporary: &Path, existing: &fs::Metadata) {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let _ = std::os::unix::fs::chown(temporary, Some(existing.uid()), Some(existing.gid()));
 }
 
 /// Give `temporary` the name `target` in a single step, and persist the
@@ -236,6 +256,52 @@ mod tests {
             assert_eq!(bits, 0o644);
             assert_eq!(fs::read_to_string(&path).unwrap(), "second");
         }
+    }
+
+    /// A group this process is allowed to hand a file to: any supplementary
+    /// group other than the one its own files land in. `None` when the account
+    /// running the test belongs to nothing else, which is the one case an
+    /// unprivileged test cannot express a change of owner in.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_group_this_process_can_give_a_file_to(current: u32) -> Option<u32> {
+        // SAFETY: the first call only asks for the count, the second fills a
+        // buffer allocated at exactly that size.
+        let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+        if count <= 0 {
+            return None;
+        }
+        let mut groups = vec![0 as libc::gid_t; count as usize];
+        let filled = unsafe { libc::getgroups(count, groups.as_mut_ptr()) };
+        if filled < 0 {
+            return None;
+        }
+        groups.truncate(filled as usize);
+        groups.into_iter().find(|&group| group != current)
+    }
+
+    /// Replacing the file must not hand it to whoever saved last: the daemon
+    /// runs as SYSTEM / root while a portable host runs as the desktop user,
+    /// and both write this same path. Owner is checked through the group, the
+    /// half of it an unprivileged process can actually change.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn preserve_keeps_the_owner_a_previous_writer_established() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        durable_atomic_write(&path, b"first", FileMode::Preserve).unwrap();
+        let Some(other_group) =
+            a_group_this_process_can_give_a_file_to(fs::metadata(&path).unwrap().gid())
+        else {
+            return;
+        };
+        std::os::unix::fs::chown(&path, None, Some(other_group)).unwrap();
+
+        durable_atomic_write(&path, b"second", FileMode::Preserve).unwrap();
+
+        assert_eq!(fs::metadata(&path).unwrap().gid(), other_group);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "second");
     }
 
     /// The state a single privileged process owns goes the other way: each

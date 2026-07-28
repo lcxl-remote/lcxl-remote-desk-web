@@ -3380,6 +3380,7 @@ export const turnRuntimeStateEnum = {
     disabled: "disabled",
     unsupported: "unsupported",
     "not-configured": "not-configured",
+    starting: "starting",
     failed: "failed"
 } as const;
 
