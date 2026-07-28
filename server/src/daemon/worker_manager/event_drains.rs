@@ -12,10 +12,22 @@ use super::*;
 pub(super) fn spawn_media_receiver_task(
     mut receiver: Box<dyn MediaReceiver>,
     pc_registry: PcRegistry,
+    gate: IncarnationGate,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         info!("[MediaReceiver] starting");
+        let mut superseded = false;
         while let Some(frame) = receiver.recv_frame().await {
+            // A worker that has been replaced can still have frames queued, and
+            // a frame carries nothing to say which worker captured it. The first
+            // key frame out of this lane is what tells a paused connection the
+            // swap is over and it may show what arrives next — so an old one
+            // gets through, the browser is handed the desktop the daemon just
+            // moved away from, and it keeps decoding against it.
+            if !gate.is_current() {
+                gate.superseded_once("MediaReceiver", &mut superseded);
+                continue;
+            }
             debug!(
                 "[MediaReceiver] frame seq={} kind={:?} len={} for {}",
                 frame.seq,
@@ -38,10 +50,19 @@ pub(super) fn spawn_media_receiver_task(
 pub(super) fn spawn_file_drain_task(
     mut receiver: Box<dyn EventReceiver<FileTransferPayload>>,
     pc_registry: PcRegistry,
+    gate: IncarnationGate,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         info!("[FileDrain] starting");
+        let mut superseded = false;
         while let Some(payload) = receiver.recv().await {
+            // Routed by `connection_id` onto a data channel that outlives worker
+            // swaps, so a replaced worker's queued replies would land on the
+            // browser as though the worker running now had sent them.
+            if !gate.is_current() {
+                gate.superseded_once("FileDrain", &mut superseded);
+                continue;
+            }
             crate::daemon::pc_manager::write_file_transfer_data(&pc_registry, payload).await;
         }
         info!("[FileDrain] exiting (transport closed)");

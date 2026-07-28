@@ -158,3 +158,124 @@ async fn a_sink_stamps_what_it_forwards() {
         second.incarnation(),
     );
 }
+
+/// A worker's other two lanes carry no messages to stamp — a video frame says
+/// nothing about which worker captured it — so they ask the same question a
+/// different way.
+mod lanes {
+    use super::*;
+    use crate::model::settings::{Settings, SharedSettings, StartupMode};
+    use desk_ipc_protocol::message::{MediaCodec, MediaFrame, MediaFrameKind};
+    use desk_signal_facade::model::signal::{RemoteSessionPurpose, RequestRemoteModel};
+
+    /// A manager sharing a registry with the caller, so a test can watch what
+    /// the drains do to it.
+    fn manager_over(registry: PcRegistry) -> (WorkerManager, WorkerMessageReceiver) {
+        let mut settings = Settings::default();
+        settings.args.startup_mode = StartupMode::ServiceDaemon;
+        let settings = web::Data::from(Arc::new(SharedSettings::from(settings)));
+        WorkerManager::new(settings, registry)
+    }
+
+    async fn paused_connection(registry: &PcRegistry, connection_id: &str) {
+        let request_remote = RequestRemoteModel {
+            purpose: RemoteSessionPurpose::RemoteDesktop,
+            ice_servers: vec![],
+            grant_session_id: None,
+        };
+        let mut settings = Settings::default();
+        settings.args.startup_mode = StartupMode::ServiceDaemon;
+        registry
+            .create_for_request_remote(connection_id, &request_remote, &settings)
+            .await
+            .expect("create");
+        registry.pause_all_media().await;
+    }
+
+    fn key_frame(connection_id: &str) -> MediaFrame {
+        MediaFrame {
+            connection_id: connection_id.into(),
+            seq: 0,
+            ts_ns: 0,
+            duration_ns: 16_666_666,
+            kind: MediaFrameKind::VideoI,
+            codec: MediaCodec::H264,
+            payload: vec![0x22; 32],
+        }
+    }
+
+    async fn is_paused(registry: &PcRegistry, connection_id: &str) -> bool {
+        registry
+            .get(connection_id)
+            .await
+            .expect("the connection is registered")
+            .read()
+            .await
+            .media_paused
+            .load(Ordering::Relaxed)
+    }
+
+    /// The control: a key frame from the worker that is running is exactly what
+    /// a paused connection is waiting for, and it must still get through.
+    #[tokio::test]
+    async fn a_key_frame_from_the_running_worker_resumes_a_paused_connection() {
+        let registry = PcRegistry::new();
+        let (manager, _worker_rx) = manager_over(registry.clone());
+        paused_connection(&registry, "conn-live").await;
+        let worker = manager.mint_worker();
+        let (media_tx, media_rx) = inprocess::make_media();
+        let drain = spawn_media_receiver_task(media_rx, registry.clone(), worker.gate());
+
+        media_tx.send_frame(key_frame("conn-live")).await.unwrap();
+        drop(media_tx);
+        drain.await.expect("the drain ran to the end of the lane");
+
+        assert!(!is_paused(&registry, "conn-live").await);
+    }
+
+    /// And the case that matters: the same frame from a worker that has been
+    /// replaced. Nothing on it says so — it is the first key frame the paused
+    /// connection has seen, so it would be taken as the replacement's, and the
+    /// browser would be shown the desktop the daemon just moved away from.
+    #[tokio::test]
+    async fn a_key_frame_from_a_replaced_worker_leaves_the_connection_paused() {
+        let registry = PcRegistry::new();
+        let (manager, _worker_rx) = manager_over(registry.clone());
+        paused_connection(&registry, "conn-swapped").await;
+        let outgoing = manager.mint_worker();
+        let (media_tx, media_rx) = inprocess::make_media();
+        let drain = spawn_media_receiver_task(media_rx, registry.clone(), outgoing.gate());
+
+        // A replacement is started. The outgoing worker's lane is still open and
+        // still has this frame in it.
+        let _incoming = manager.mint_worker();
+        media_tx
+            .send_frame(key_frame("conn-swapped"))
+            .await
+            .unwrap();
+        drop(media_tx);
+        drain.await.expect("the drain ran to the end of the lane");
+
+        assert!(
+            is_paused(&registry, "conn-swapped").await,
+            "only the worker running now may tell a connection the swap is over",
+        );
+    }
+
+    /// Taking a worker away with nothing to replace it closes its lanes too. A
+    /// shutting-down daemon has no more use for what a worker had queued than a
+    /// replaced one does.
+    #[tokio::test]
+    async fn retiring_the_last_worker_closes_its_lanes() {
+        let registry = PcRegistry::new();
+        let (manager, _worker_rx) = manager_over(registry.clone());
+        let (ipc_tx, _ipc_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
+        manager.install_active_for_test(ipc_tx).await;
+        let gate = manager.mint_worker().gate();
+        assert!(gate.is_current(), "a freshly named worker owns its lanes");
+
+        manager.shutdown_all().await;
+
+        assert!(!gate.is_current());
+    }
+}

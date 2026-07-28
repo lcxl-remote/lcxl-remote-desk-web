@@ -95,7 +95,11 @@ pub(super) async fn run_pipe_server(
                 let sender = framed::spawn_file_sender::<_, FileTransferPayload>(file_writer);
                 *file_sender_slot.write().await = Some(sender);
                 let receiver = framed::make_event_receiver::<_, FileTransferPayload>(file_reader);
-                Some(spawn_file_drain_task(receiver, pc_registry.clone()))
+                Some(spawn_file_drain_task(
+                    receiver,
+                    pc_registry.clone(),
+                    msg_tx.gate(),
+                ))
             }
             Ok(Err(e)) => {
                 warn!(

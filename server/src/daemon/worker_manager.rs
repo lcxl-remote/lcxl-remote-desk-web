@@ -54,18 +54,61 @@ pub struct WorkerMessage {
     pub message: WorkerToService,
 }
 
+/// Whether the worker a daemon-side task is working for is still the one the
+/// daemon is running.
+///
+/// The event lane answers this under the manager's lock, because it is
+/// refreshing the heartbeat in the same breath. The media and file lanes cannot:
+/// media asks once per frame, and taking an async mutex per frame to decide
+/// whether to write it would put the whole capture pipeline behind whatever else
+/// wants that lock. So they read it here instead, from a value the manager
+/// maintains under that same lock.
+#[derive(Clone)]
+pub(super) struct IncarnationGate {
+    mine: WorkerIncarnation,
+    current: Arc<AtomicU64>,
+}
+
+impl IncarnationGate {
+    fn is_current(&self) -> bool {
+        self.current.load(Ordering::Relaxed) == self.mine.0
+    }
+
+    /// Report the frames or payloads this lane must not deliver, once, when it
+    /// first finds itself superseded. A lane can be holding thousands of queued
+    /// frames; one line says as much as all of them.
+    fn superseded_once(&self, lane: &str, already_logged: &mut bool) {
+        if !*already_logged {
+            *already_logged = true;
+            info!(
+                "[{lane}] worker {} has been replaced; dropping what it had queued",
+                self.mine
+            );
+        }
+    }
+}
+
 /// The daemon end of one worker's event lane. Stamps every message with the
 /// worker it came from, which is what lets the reader tell a live report from a
 /// late one.
 #[derive(Clone)]
 pub(super) struct WorkerMessageSink {
     incarnation: WorkerIncarnation,
+    current: Arc<AtomicU64>,
     tx: mpsc::UnboundedSender<WorkerMessage>,
 }
 
 impl WorkerMessageSink {
     pub(super) fn incarnation(&self) -> WorkerIncarnation {
         self.incarnation
+    }
+
+    /// A gate for this worker's other lanes, which carry no messages to stamp.
+    pub(super) fn gate(&self) -> IncarnationGate {
+        IncarnationGate {
+            mine: self.incarnation,
+            current: Arc::clone(&self.current),
+        }
     }
 
     /// Hand a message to the daemon, stamped with this worker. `false` means
@@ -85,6 +128,7 @@ impl WorkerMessageSink {
     pub(super) fn for_test(incarnation: u64, tx: mpsc::UnboundedSender<WorkerMessage>) -> Self {
         Self {
             incarnation: WorkerIncarnation(incarnation),
+            current: Arc::new(AtomicU64::new(incarnation)),
             tx,
         }
     }
@@ -99,6 +143,11 @@ pub struct WorkerManager {
     /// so a number is never reused and a late message can never be mistaken for
     /// a message from the worker occupying that slot now.
     next_incarnation: Arc<AtomicU64>,
+    /// The worker the daemon most recently started, for readers that cannot take
+    /// the manager's lock to ask. Maintained alongside `active_worker`: set when
+    /// a worker is minted, cleared to zero when one is taken away and nothing
+    /// replaces it. See [`IncarnationGate`].
+    current_incarnation: Arc<AtomicU64>,
     /// Daemon-side per-`connection_id` PeerConnection registry.
     /// Held as a clonable handle so the media-pipe receiver task can
     /// look up `video_track`s and call `write_sample` without going back
@@ -189,6 +238,13 @@ struct WorkerHandle {
     file_sender_tx: Arc<RwLock<Option<Arc<dyn EventSender<FileTransferPayload>>>>>,
     inprocess_task: Option<tokio::task::JoinHandle<()>>,
     inprocess_restart: Option<InprocessRestart>,
+    /// Daemon-side tasks reading this worker's media and file lanes.
+    ///
+    /// Held so a replacement can stop them. Only the in-process topology puts
+    /// them here: in named-pipe mode the pipe server owns them and aborts them
+    /// on its own way out, and reaching in to abort that task instead would skip
+    /// the socket files and sender slot it cleans up.
+    lane_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Clone)]
@@ -299,6 +355,7 @@ impl WorkerManager {
             })),
             worker_msg_tx: Arc::new(tx),
             next_incarnation: Arc::new(AtomicU64::new(1)),
+            current_incarnation: Arc::new(AtomicU64::new(0)),
             pc_registry,
             worker_capabilities: Arc::new(StdMutex::new(None)),
             capabilities_version: Arc::new(AtomicU64::new(0)),
@@ -327,9 +384,33 @@ impl WorkerManager {
     /// worker ever says is already stamped.
     fn mint_worker(&self) -> WorkerMessageSink {
         let incarnation = WorkerIncarnation(self.next_incarnation.fetch_add(1, Ordering::Relaxed));
+        // Current from the moment it is named, not from the moment its handle is
+        // installed. Its own lanes are spawned in between, and a frame arriving
+        // in that window belongs to it.
+        self.current_incarnation
+            .store(incarnation.0, Ordering::Relaxed);
         WorkerMessageSink {
             incarnation,
+            current: Arc::clone(&self.current_incarnation),
             tx: (*self.worker_msg_tx).clone(),
+        }
+    }
+
+    /// Stop the daemon-side tasks reading a departing worker's media and file
+    /// lanes, and record that no worker is current.
+    ///
+    /// Aborted rather than awaited: a lane task can be parked on a write to a
+    /// browser that has stopped reading, and worker teardown holds the manager's
+    /// lock. Whatever a task manages to deliver between here and its next await
+    /// point is refused by its own [`IncarnationGate`], so stopping them is
+    /// tidiness rather than the guarantee.
+    fn retire_worker(&self, worker: &mut WorkerHandle) {
+        self.current_incarnation.store(0, Ordering::Relaxed);
+        for task in worker.lane_tasks.drain(..) {
+            task.abort();
+        }
+        if let Some(task) = worker.inprocess_task.take() {
+            task.abort();
         }
     }
 
@@ -357,6 +438,7 @@ impl WorkerManager {
         if let Some(mut worker) = inner.active_worker.take() {
             info!("Shutting down existing worker before starting new one");
             let _ = worker.ipc_tx.send(ServiceToWorker::Shutdown);
+            self.retire_worker(&mut worker);
             if let Some(mut proc) = worker.process_handle.take() {
                 match tokio::time::timeout(Duration::from_secs(3), proc.wait()).await {
                     Ok(()) => info!("Old worker exited gracefully"),
@@ -365,9 +447,6 @@ impl WorkerManager {
                         let _ = proc.kill().await;
                     }
                 }
-            }
-            if let Some(task) = worker.inprocess_task.take() {
-                task.abort();
             }
         }
 
@@ -442,6 +521,7 @@ impl WorkerManager {
             file_sender_tx: file_sender_slot,
             inprocess_task: None,
             inprocess_restart: None,
+            lane_tasks: Vec::new(),
         });
 
         info!("Worker {incarnation} started for session {session_id}");
@@ -486,9 +566,7 @@ impl WorkerManager {
         if let Some(mut worker) = inner.active_worker.take() {
             info!("Shutting down existing in-process worker before starting a new one");
             let _ = worker.ipc_tx.send(ServiceToWorker::Shutdown);
-            if let Some(task) = worker.inprocess_task.take() {
-                task.abort();
-            }
+            self.retire_worker(&mut worker);
         }
 
         let pipe_name = format!("inprocess-{session_id}-{}", uuid::Uuid::new_v4());
@@ -550,6 +628,7 @@ impl WorkerManager {
         let pipe_name_for_bridge = pipe_name.clone();
         let worker_msg_tx = self.mint_worker();
         let incarnation = worker_msg_tx.incarnation();
+        let lane_gate = worker_msg_tx.gate();
         actix_web::rt::spawn(async move {
             let _ = bridge_event_transport(
                 w2s_rx,
@@ -563,24 +642,31 @@ impl WorkerManager {
 
         // Daemon-side media receiver: identical to the named-pipe path
         // except the receiver is in-process (no decode work).
-        let _media_handle = spawn_media_receiver_task(media_rx, self.pc_registry.clone());
+        let media_handle =
+            spawn_media_receiver_task(media_rx, self.pc_registry.clone(), lane_gate.clone());
 
         // Daemon-side file-lane drain task: each worker → daemon
         // payload feeds into `pc_manager::write_file_transfer_data`,
         // which routes by `connection_id` to the matching browser DC.
         // Serial single-task drain accepts cross-connection HOL as a
         // known trade-off (see `dual_transport.rs` module docs).
-        {
+        let file_drain_handle = {
             let pc_registry = self.pc_registry.clone();
+            let gate = lane_gate.clone();
             tokio::spawn(async move {
                 info!("[worker_manager] in-process file-lane drain starting");
+                let mut superseded = false;
                 while let Some(payload) = file_w2d_rx.recv().await {
+                    if !gate.is_current() {
+                        gate.superseded_once("worker_manager", &mut superseded);
+                        continue;
+                    }
                     crate::daemon::pc_manager::write_file_transfer_data(&pc_registry, payload)
                         .await;
                 }
                 info!("[worker_manager] in-process file-lane drain exiting (closed)");
-            });
-        }
+            })
+        };
 
         // Spawn the worker on `actix_web::rt::spawn` because
         // `WorkerSession::run_with_transports` awaits actix-web internals
@@ -635,6 +721,7 @@ impl WorkerManager {
             file_sender_tx: file_sender_slot,
             inprocess_task: Some(inprocess_task),
             inprocess_restart: Some(restart),
+            lane_tasks: vec![media_handle, file_drain_handle],
         });
 
         info!("In-process worker {incarnation} started for session {session_id}");
@@ -727,6 +814,7 @@ impl WorkerManager {
             file_sender_tx: Arc::new(RwLock::new(None)),
             inprocess_task: None,
             inprocess_restart: None,
+            lane_tasks: Vec::new(),
         });
         incarnation
     }
@@ -788,23 +876,20 @@ impl WorkerManager {
     }
 
     pub async fn recycle_for_remote_access_timeout(&self) -> Result<(), String> {
-        let (session_id, desktop_name, inprocess_restart, mut process, task) = {
+        let (session_id, desktop_name, inprocess_restart, mut process) = {
             let mut inner = self.inner.lock().await;
             let Some(mut worker) = inner.active_worker.take() else {
                 return Ok(());
             };
             let _ = worker.ipc_tx.send(ServiceToWorker::Shutdown);
+            self.retire_worker(&mut worker);
             (
                 worker.session_id,
                 worker.desktop_name.clone(),
                 worker.inprocess_restart.take(),
                 worker.process_handle.take(),
-                worker.inprocess_task.take(),
             )
         };
-        if let Some(task) = task {
-            task.abort();
-        }
         if let Some(process) = process.as_mut() {
             let _ = process.kill().await;
             process.wait().await;
@@ -1153,6 +1238,7 @@ impl WorkerManager {
         if let Some(mut worker) = inner.active_worker.take() {
             info!("Shutting down worker: {}", worker.pipe_name);
             let _ = worker.ipc_tx.send(ServiceToWorker::Shutdown);
+            self.retire_worker(&mut worker);
             if let Some(mut proc) = worker.process_handle.take() {
                 match tokio::time::timeout(Duration::from_secs(3), proc.wait()).await {
                     Ok(()) => info!("Worker exited gracefully"),
@@ -1161,9 +1247,6 @@ impl WorkerManager {
                         let _ = proc.kill().await;
                     }
                 }
-            }
-            if let Some(task) = worker.inprocess_task.take() {
-                task.abort();
             }
         }
     }

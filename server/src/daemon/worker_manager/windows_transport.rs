@@ -117,7 +117,11 @@ pub(super) async fn run_pipe_server(
                 info!("Worker connected on media pipe {media_pipe_path}");
                 let (media_reader, _media_writer) = tokio::io::split(media_server);
                 let receiver = framed::make_media_receiver(media_reader);
-                Some(spawn_media_receiver_task(receiver, pc_registry.clone()))
+                Some(spawn_media_receiver_task(
+                    receiver,
+                    pc_registry.clone(),
+                    msg_tx.gate(),
+                ))
             }
             Ok(Err(e)) => {
                 warn!(
@@ -156,7 +160,11 @@ pub(super) async fn run_pipe_server(
                 // single serial drain accepts cross-connection HOL as a
                 // documented trade-off; per-connection lanes can be added
                 // later if it becomes a problem.
-                Some(spawn_file_drain_task(receiver, pc_registry.clone()))
+                Some(spawn_file_drain_task(
+                    receiver,
+                    pc_registry.clone(),
+                    msg_tx.gate(),
+                ))
             }
             Ok(Err(e)) => {
                 warn!(
