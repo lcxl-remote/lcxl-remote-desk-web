@@ -146,8 +146,8 @@ pub enum OwnerPlaneOutcome {
 }
 
 /// Default-denies owner-plane device-management frames
-/// (`ManagerUpdateSettings` / `ManagerQuerySettings` / `ManagerSystemInfo` /
-/// `ManagerSystemStatue` / `ChangeDisplaySettings`) for any sender that is not the
+/// (`ManagerSystemInfo` / `ManagerSystemStatue` / `ChangeDisplaySettings`) for
+/// any sender that is not the
 /// target device's owner (or an org-authorized operator). These frames carry no
 /// capability ceiling and are meaningful only to the owner, so a capped
 /// grant-holder session must never reach them.

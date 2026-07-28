@@ -61,7 +61,6 @@ use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_signal_facade::model::signal::{
     OfferModel, RemoteSessionPurpose, RequestRemoteModel, SignalingModel, SignalingType,
 };
-use desk_signal_facade::model::system_settings::RemoteSystemSettings;
 use desk_signal_facade::model::terminal::{
     StartTerminalSession, TerminalInputData, TerminalResizeData,
 };
@@ -299,14 +298,6 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // Heartbeat is a WS keepalive — not for the worker.
         SignalingType::Heartbeat => RouteOwnership::Daemon,
 
-        // The system settings a manager reads and writes. Answered against the
-        // daemon's own settings, which are the ones a change is committed
-        // against — a worker holds a startup copy and could report or overwrite
-        // values that have since moved.
-        SignalingType::ManagerQuerySettings | SignalingType::ManagerUpdateSettings => {
-            RouteOwnership::Daemon
-        }
-
         // ---- Worker-bound: user-session resources ----
         // Each of these rides a dedicated typed `ServiceToWorker::*`
         // IPC variant — see `route` below for the per-type dispatch
@@ -388,12 +379,9 @@ pub struct RouterContext {
     pub pc_registry: PcRegistry,
     pub outbound_tx: broadcast::Sender<String>,
     pub settings: web::Data<SharedSettings>,
-    /// The host's durable commit path for the security policy and the locale.
-    /// The manager settings plane writes through it, so a remote update lands
-    /// in exactly the same place as one made on the host itself.
-    pub settings_coordinator: Arc<crate::model::settings_coordinator::SettingsCoordinator>,
-    /// What the daemon-side permission gates read. Backed by the coordinator,
-    /// so a gate and a settings update can never disagree about the policy.
+    /// What the daemon-side permission gates read. Backed by the host's
+    /// settings coordinator, so a gate and a settings update can never disagree
+    /// about the policy.
     pub policy: Arc<crate::model::policy_access::PolicyAccess>,
     pub host_control_hub: Arc<HostControlHub>,
     /// handle_request_remote reads `worker_capabilities` from
@@ -884,14 +872,8 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         SignalingType::UpdateDeskSettings => handle_update_desk_settings_inbound(ctx, model).await,
         // Manager-plane typed-IPC dispatch.
         SignalingType::ManagerSystemInfo => handle_manager_system_info_inbound(ctx, model).await,
-        SignalingType::ManagerQuerySettings => {
-            handle_manager_query_settings_inbound(ctx, model).await
-        }
         SignalingType::ManagerFileList => handle_manager_file_list_inbound(ctx, model).await,
         SignalingType::ManagerFileDelete => handle_manager_file_delete_inbound(ctx, model).await,
-        SignalingType::ManagerUpdateSettings => {
-            handle_manager_update_settings_inbound(ctx, model).await
-        }
         // Terminal-plane typed-IPC dispatch.
         SignalingType::StartTerminal => handle_start_terminal_inbound(ctx, model).await,
         SignalingType::SendDataToTerminal => handle_send_data_to_terminal_inbound(ctx, model).await,

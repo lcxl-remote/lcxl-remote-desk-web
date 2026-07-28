@@ -62,7 +62,7 @@ pub(super) fn is_connection_scoped_capability_frame(t: SignalingType) -> bool {
 /// baseline frames unconditionally, plus the connection-scoped capability
 /// families whose ceiling dimension is not an explicit `Some(false)` — so the
 /// frame can reach its worker-side `meet(ceiling, global)` gate. Everything else
-/// is denied: owner-plane frames (`Manager*` settings / system-info, display,
+/// is denied: owner-plane frames (`Manager*` system-info, display,
 /// AI / exec / remote-tool) have **no** worker-side meet gate, so door1 is their
 /// only enforcement point against a capped session; and any unknown / future
 /// signaling type falls through the `_ => false` arm (deliberate fail-closed —

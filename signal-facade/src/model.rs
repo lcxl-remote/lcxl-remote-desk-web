@@ -17,7 +17,6 @@ pub mod signal;
 pub mod startup_mode;
 pub mod support;
 pub mod system_info;
-pub mod system_settings;
 pub mod terminal;
 pub mod version;
 pub mod virtual_display;

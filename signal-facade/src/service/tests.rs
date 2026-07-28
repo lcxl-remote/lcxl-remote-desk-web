@@ -8,8 +8,6 @@ use super::*;
 fn owner_plane_frames_are_classified_for_code_session_denial() {
     use SignalingType::*;
     for t in [
-        ManagerUpdateSettings,
-        ManagerQuerySettings,
         ManagerSystemInfo,
         ManagerSystemStatue,
         ChangeDisplaySettings,

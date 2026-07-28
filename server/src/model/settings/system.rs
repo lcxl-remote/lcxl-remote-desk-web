@@ -76,8 +76,8 @@ pub struct SystemSettings {
     /// host-local UI toggle that lets a user disable the manager connection
     /// without clearing `manager_url` / `manager_api_token`, so the address is
     /// retained for a later re-enable. `None` / `Some(true)` = enabled;
-    /// `Some(false)` = explicitly disabled. Not part of the shared
-    /// `RemoteSystemSettings` — the manager cannot flip its own link off.
+    /// `Some(false)` = explicitly disabled. Host-local only: no signaling frame
+    /// can read or write the host's system settings.
     pub manager_enabled: Option<bool>,
     /// Whether the local shell shows ongoing remote-access status.
     pub host_access_indicator_enabled: bool,

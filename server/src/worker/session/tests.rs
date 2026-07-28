@@ -264,8 +264,7 @@ fn outbound_dispatch_routes_manager_system_info_response_to_typed_variant() {
     }
 }
 
-/// Empty-body responses (`ManagerFileDelete`,
-/// `ManagerUpdateSettings`) ride
+/// Empty-body responses (`ManagerFileDelete`) ride
 /// `WorkerToService::ManagerResponseRefPayload` — only the
 /// `request_id` + `connection_id` matter.
 #[test]

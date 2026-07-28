@@ -50,19 +50,16 @@ async fn build_request_remote_ice(
 mod request_remote_ice_tests;
 
 /// Owner-plane host-management signaling frames that only the host owner may
-/// direct at a host: reading or writing host system settings (which carry the
-/// host's signaling / manager credentials), host system info / status, and
-/// display-mode changes. They have **no** worker-side `meet` gate, so the central
-/// forward path is their authorization point — a capability-scoped code-session
-/// (routed as `device_user`) can never originate one (see
+/// direct at a host: host system info / status and display-mode changes. They
+/// have **no** worker-side `meet` gate, so the central forward path is their
+/// authorization point — a capability-scoped code-session (routed as
+/// `device_user`) can never originate one (see
 /// [`ConnectionState::forward_to_peer`]). Session-scoped media tuning
 /// (`UpdateDeskSettings`) is deliberately excluded — it is not host config.
 pub(crate) fn is_owner_plane_management_frame(t: SignalingType) -> bool {
     matches!(
         t,
-        SignalingType::ManagerUpdateSettings
-            | SignalingType::ManagerQuerySettings
-            | SignalingType::ManagerSystemInfo
+        SignalingType::ManagerSystemInfo
             | SignalingType::ManagerSystemStatue
             | SignalingType::ChangeDisplaySettings
     )
@@ -447,9 +444,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
             }
             // A capability-scoped code-session (a redeemed device / support code,
             // routed as `device_user`) is never the host owner. Refuse to forward
-            // owner-plane host-management frames to it: reading / writing host
-            // system settings (which carry the host's signaling / manager
-            // credentials), host system info / status, and display-mode changes
+            // owner-plane host-management frames to it: host system info / status
+            // and display-mode changes
             // have **no** worker-side `meet` gate, so the central is their sole
             // authorization point. door1 denies them for an *admitted* capped
             // session; blocking here also closes the pre-`RequestRemote` window,
@@ -773,18 +769,16 @@ impl<U: SignalingUser> SignalingHandler<U> {
             }
             // Owner-plane device-management frames. These carry no capability
             // ceiling and are meaningful only for the target device's owner
-            // (settings read / write, system info, virtual-display mode change). In
-            // the manager a `CookieAuth` browser is owner or grant-holder depending
-            // on the target, so the owner-plane authorizer default-denies any
-            // non-owner (a capped grant-holder must never reach them) before
-            // relaying. The signal server leaves the authorizer unset; its own
-            // code-session denial in `forward_to_peer`
-            // (`is_owner_plane_management_frame`) still applies, so its behaviour is
-            // unchanged. Kept in lock-step with `is_owner_plane_management_frame`.
+            // (system info, virtual-display mode change). In the manager a
+            // `CookieAuth` browser is owner or grant-holder depending on the
+            // target, so the owner-plane authorizer default-denies any non-owner
+            // (a capped grant-holder must never reach them) before relaying. The
+            // signal server leaves the authorizer unset; its own code-session
+            // denial in `forward_to_peer` (`is_owner_plane_management_frame`)
+            // still applies, so its behaviour is unchanged. Kept in lock-step with
+            // `is_owner_plane_management_frame`.
             SignalingType::ManagerSystemInfo
             | SignalingType::ManagerSystemStatue
-            | SignalingType::ManagerQuerySettings
-            | SignalingType::ManagerUpdateSettings
             | SignalingType::ChangeDisplaySettings => {
                 if let Some(authorizer) = self.owner_plane_authorizer.clone() {
                     match authorizer

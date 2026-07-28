@@ -1570,8 +1570,6 @@ fn signaling_error_round_trips_wincode_for_every_signaling_type() {
         SignalingType::ListTerminal,
         SignalingType::TerminalStarted,
         SignalingType::TerminalClosed,
-        SignalingType::ManagerQuerySettings,
-        SignalingType::ManagerUpdateSettings,
         SignalingType::DesktopSwitching,
         SignalingType::DesktopReady,
         SignalingType::Error,
@@ -1579,7 +1577,7 @@ fn signaling_error_round_trips_wincode_for_every_signaling_type() {
     ];
     assert_eq!(
         all_types.len(),
-        36,
+        34,
         "SignalingType variant count drift — add new variant + tag here"
     );
     for ty in all_types {

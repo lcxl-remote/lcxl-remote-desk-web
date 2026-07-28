@@ -3230,7 +3230,7 @@ export type RestResponseSystemSettings = {
         */
         manager_api_token?: string | null;
         /**
-         * @description Whether the host should keep the manager link connected. This is a\nhost-local UI toggle that lets a user disable the manager connection\nwithout clearing `manager_url` / `manager_api_token`, so the address is\nretained for a later re-enable. `None` / `Some(true)` = enabled;\n`Some(false)` = explicitly disabled. Not part of the shared\n`RemoteSystemSettings` — the manager cannot flip its own link off.
+         * @description Whether the host should keep the manager link connected. This is a\nhost-local UI toggle that lets a user disable the manager connection\nwithout clearing `manager_url` / `manager_api_token`, so the address is\nretained for a later re-enable. `None` / `Some(true)` = enabled;\n`Some(false)` = explicitly disabled. Host-local only: no signaling frame\ncan read or write the host\'s system settings.
          * @type boolean,null
         */
         manager_enabled?: boolean | null;
@@ -4133,7 +4133,7 @@ export type SystemSettings = {
     */
     manager_api_token?: string | null;
     /**
-     * @description Whether the host should keep the manager link connected. This is a\nhost-local UI toggle that lets a user disable the manager connection\nwithout clearing `manager_url` / `manager_api_token`, so the address is\nretained for a later re-enable. `None` / `Some(true)` = enabled;\n`Some(false)` = explicitly disabled. Not part of the shared\n`RemoteSystemSettings` — the manager cannot flip its own link off.
+     * @description Whether the host should keep the manager link connected. This is a\nhost-local UI toggle that lets a user disable the manager connection\nwithout clearing `manager_url` / `manager_api_token`, so the address is\nretained for a later re-enable. `None` / `Some(true)` = enabled;\n`Some(false)` = explicitly disabled. Host-local only: no signaling frame\ncan read or write the host\'s system settings.
      * @type boolean,null
     */
     manager_enabled?: boolean | null;

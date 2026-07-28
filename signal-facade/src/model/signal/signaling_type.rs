@@ -175,12 +175,6 @@ pub enum SignalingType {
     /// Terminal closed
     #[wincode(tag = 10014)]
     TerminalClosed = 10014,
-    /// Query remote system settings via signaling
-    #[wincode(tag = 10015)]
-    ManagerQuerySettings = 10015,
-    /// Update remote system settings via signaling
-    #[wincode(tag = 10016)]
-    ManagerUpdateSettings = 10016,
 
     /// ServiceDaemon → Browser: desktop is switching, WebRTC will drop shortly
     #[wincode(tag = 500)]

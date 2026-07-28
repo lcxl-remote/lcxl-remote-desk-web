@@ -164,7 +164,6 @@ pub async fn run_signaling_proxy(
         policy: crate::model::policy_access::PolicyAccess::authoritative(Arc::clone(
             &settings_coordinator,
         )),
-        settings_coordinator: Arc::clone(&settings_coordinator),
         host_control_hub: host_control_hub.clone(),
         worker_mgr: worker_mgr.clone(),
         // Some(...) only in service-daemon mode; in-process and

@@ -317,167 +317,6 @@ pub(super) async fn route_start_terminal_with_invalid_payload_is_dropped() {
     assert!(route(&model, &ctx).await.is_ok());
 }
 
-/// A router context whose settings can actually be persisted, so the manager
-/// settings plane can be exercised end to end. The `TempDir` is returned
-/// because dropping it would take the configuration file with it.
-async fn make_ctx_with_persistence() -> (
-    RouterContext,
-    broadcast::Receiver<String>,
-    tempfile::TempDir,
-) {
-    let dir = tempfile::tempdir().unwrap();
-    let mut settings = crate::model::settings::Settings::default();
-    settings.args.config_file_path = dir.path().join("config").to_string_lossy().into_owned();
-    settings.system.locale = Some("zh-CN".to_string());
-    let shared = std::sync::Arc::new(crate::model::settings::SharedSettings::from(settings));
-    let coordinator = std::sync::Arc::new(
-        crate::model::settings_coordinator::SettingsCoordinator::from_settings(
-            std::sync::Arc::clone(&shared),
-        )
-        .await,
-    );
-    let mut ctx = make_ctx().await;
-    ctx.settings = web::Data::from(shared);
-    ctx.policy = crate::model::policy_access::PolicyAccess::authoritative(std::sync::Arc::clone(
-        &coordinator,
-    ));
-    ctx.settings_coordinator = coordinator;
-    let (new_tx, new_rx) = broadcast::channel::<String>(16);
-    ctx.outbound_tx = new_tx;
-    (ctx, new_rx, dir)
-}
-
-fn manager_settings_model(
-    request_id: &str,
-    signaling_type: SignalingType,
-    body: Option<serde_json::Value>,
-) -> SignalingModel {
-    SignalingModel::new(
-        request_id,
-        signaling_type,
-        Some("conn-mgr".to_string()),
-        None,
-        body,
-        None,
-    )
-}
-
-/// A manager reading the settings must see what the daemon holds — the values
-/// its own next update will be applied on top of.
-#[tokio::test]
-pub(super) async fn manager_query_settings_answers_from_the_daemon() {
-    let (ctx, mut rx, _dir) = make_ctx_with_persistence().await;
-
-    route(
-        &manager_settings_model("req-q", SignalingType::ManagerQuerySettings, None),
-        &ctx,
-    )
-    .await
-    .unwrap();
-
-    let response = read_response(&mut rx);
-    assert!(
-        response
-            .response_state
-            .as_ref()
-            .expect("a response state")
-            .is_success()
-    );
-    let reported = response
-        .get_data::<desk_signal_facade::model::system_settings::RemoteSystemSettings>()
-        .unwrap();
-    assert_eq!(reported.locale.as_deref(), Some("zh-CN"));
-    assert_eq!(reported.port, ctx.settings.read().await.system.port);
-}
-
-/// An update is durable before it is acknowledged, so a manager that sees
-/// success can rely on the host surviving a restart with the new values.
-#[tokio::test]
-pub(super) async fn manager_update_settings_persists_before_answering() {
-    let (ctx, mut rx, _dir) = make_ctx_with_persistence().await;
-    let remote = desk_signal_facade::model::system_settings::RemoteSystemSettings {
-        port: 9443,
-        locale: Some("en-US".to_string()),
-        ..Default::default()
-    };
-
-    route(
-        &manager_settings_model(
-            "req-u",
-            SignalingType::ManagerUpdateSettings,
-            Some(serde_json::to_value(&remote).unwrap()),
-        ),
-        &ctx,
-    )
-    .await
-    .unwrap();
-
-    let response = read_response(&mut rx);
-    assert!(response.response_state.unwrap().is_success());
-    let args = ctx.settings.read().await.args.clone();
-    let saved = crate::model::settings::Settings::load_readonly(&args).unwrap();
-    // One update, one write: the locale and the ordinary fields land together
-    // rather than as two saves with a half-applied state in between.
-    assert_eq!(saved.system.port, 9443);
-    assert_eq!(saved.system.locale.as_deref(), Some("en-US"));
-    assert_eq!(ctx.settings.read().await.system.port, 9443);
-    assert_eq!(crate::locale::current_locale(), "en-US");
-    let _ = crate::locale::set_global_locale("zh-CN");
-}
-
-/// A payload the daemon cannot read is answered, not dropped: a manager waiting
-/// on the request would otherwise hang until its own timeout with no idea why.
-#[tokio::test]
-pub(super) async fn manager_update_settings_reports_an_unreadable_payload() {
-    let (ctx, mut rx, _dir) = make_ctx_with_persistence().await;
-
-    route(
-        &manager_settings_model(
-            "req-bad",
-            SignalingType::ManagerUpdateSettings,
-            Some(serde_json::json!("not a settings object")),
-        ),
-        &ctx,
-    )
-    .await
-    .unwrap();
-
-    let response = read_response(&mut rx);
-    let state = response.response_state.expect("an answer, not silence");
-    assert!(!state.is_success());
-    assert_eq!(state.error_code, DeskErrorCode::INVALID_PARAMS.code());
-}
-
-/// An unsupported locale must not be persisted, and the manager has to be told
-/// rather than left believing the change took.
-#[tokio::test]
-pub(super) async fn manager_update_settings_rejects_an_unknown_locale() {
-    let (ctx, mut rx, _dir) = make_ctx_with_persistence().await;
-    let remote = desk_signal_facade::model::system_settings::RemoteSystemSettings {
-        locale: Some("fr-FR".to_string()),
-        ..Default::default()
-    };
-
-    route(
-        &manager_settings_model(
-            "req-locale",
-            SignalingType::ManagerUpdateSettings,
-            Some(serde_json::to_value(&remote).unwrap()),
-        ),
-        &ctx,
-    )
-    .await
-    .unwrap();
-
-    let response = read_response(&mut rx);
-    assert!(!response.response_state.unwrap().is_success());
-    assert_eq!(
-        ctx.settings.read().await.system.locale.as_deref(),
-        Some("zh-CN"),
-        "the host must stay on the locale it had"
-    );
-}
-
 /// Manager-plane requests are handled inline by the
 /// router (typed `ServiceToWorker::Manager*Request` IPC). With no
 /// active worker the typed send is logged but the route call
@@ -487,7 +326,6 @@ pub(super) async fn route_manager_requests_handled_inline_not_bridged() {
     let ctx = make_ctx().await;
     let cases = [
         (SignalingType::ManagerSystemInfo, serde_json::Value::Null),
-        (SignalingType::ManagerQuerySettings, serde_json::Value::Null),
         (
             SignalingType::ManagerFileList,
             serde_json::to_value(desk_signal_facade::model::files::FileListParams {
@@ -504,13 +342,6 @@ pub(super) async fn route_manager_requests_handled_inline_not_bridged() {
                 file_path: "C:\\old.txt".to_string(),
                 delete_permanently: Some(false),
             })
-            .unwrap(),
-        ),
-        (
-            SignalingType::ManagerUpdateSettings,
-            serde_json::to_value(
-                desk_signal_facade::model::system_settings::RemoteSystemSettings::default(),
-            )
             .unwrap(),
         ),
     ];
@@ -535,26 +366,12 @@ pub(super) async fn route_manager_requests_handled_inline_not_bridged() {
 #[tokio::test]
 pub(super) async fn route_non_file_manager_request_without_connection_id_forwards() {
     let ctx = make_ctx().await;
-    for t in [
-        SignalingType::ManagerSystemInfo,
-        SignalingType::ManagerQuerySettings,
-        SignalingType::ManagerUpdateSettings,
-    ] {
-        let body = match t {
-            SignalingType::ManagerUpdateSettings => Some(
-                serde_json::to_value(
-                    desk_signal_facade::model::system_settings::RemoteSystemSettings::default(),
-                )
-                .unwrap(),
-            ),
-            _ => None,
-        };
-        let model = SignalingModel::new("req-no-conn", t, None, None, body, None);
-        assert!(
-            route(&model, &ctx).await.is_ok(),
-            "{t:?} must retain request-id-only routing",
-        );
-    }
+    let t = SignalingType::ManagerSystemInfo;
+    let model = SignalingModel::new("req-no-conn", t, None, None, None, None);
+    assert!(
+        route(&model, &ctx).await.is_ok(),
+        "{t:?} must retain request-id-only routing",
+    );
 }
 
 /// Interactive file requests without a trusted controller identity are dropped.

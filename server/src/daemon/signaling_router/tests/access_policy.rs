@@ -50,7 +50,7 @@ pub(super) fn classify_daemon_owned_types() {
 }
 
 /// Worker-bound: user-session resources (files, terminal request
-/// types, settings, overlays, approval, manager queries). The 3
+/// types, overlays, approval, manager queries). The 3
 /// terminal *reverse* notification types (`ReplyFromTerminal`,
 /// `TerminalStarted`, `TerminalClosed`) are classified as
 /// daemon-owned because they only flow worker → browser; an
@@ -74,20 +74,6 @@ pub(super) fn classify_worker_owned_types() {
             classify(t),
             RouteOwnership::Worker,
             "{t:?} should be worker-owned",
-        );
-    }
-
-    // The system settings plane moved to the daemon: it holds the values a
-    // change commits against, so reading or writing them anywhere else would
-    // report or overwrite a policy that has already moved.
-    for t in [
-        SignalingType::ManagerQuerySettings,
-        SignalingType::ManagerUpdateSettings,
-    ] {
-        assert_eq!(
-            classify(t),
-            RouteOwnership::Daemon,
-            "{t:?} should be daemon-owned",
         );
     }
 }
@@ -161,8 +147,6 @@ pub(super) fn capped_session_permits_matrix_over_all_signaling_types() {
     // protects them, so door1 must deny them for a capped session even under a
     // permissive ceiling.
     for t in [
-        ManagerQuerySettings,
-        ManagerUpdateSettings,
         ManagerSystemInfo,
         ChangeDisplaySettings,
         AgentRequest,
@@ -246,12 +230,12 @@ pub(super) fn door1_permits_gates_capped_sessions_and_fails_closed_unadmitted_ca
     // Admitted owner: everything passes.
     assert!(door1_permits(
         &ConnectionGate::KnownOwnerFull,
-        ManagerUpdateSettings
+        ManagerSystemInfo
     ));
     // Admitted capped: owner-plane denied, permitted family allowed.
     assert!(!door1_permits(
         &ConnectionGate::KnownCapped(capped.clone()),
-        ManagerUpdateSettings
+        ManagerSystemInfo
     ));
     assert!(door1_permits(
         &ConnectionGate::KnownCapped(capped),
@@ -284,7 +268,7 @@ pub(super) fn door1_permits_gates_capped_sessions_and_fails_closed_unadmitted_ca
     // source-gate + handler).
     assert!(door1_permits(
         &ConnectionGate::UnadmittedConnection,
-        ManagerUpdateSettings
+        ManagerSystemInfo
     ));
     assert!(door1_permits(
         &ConnectionGate::UnadmittedConnection,

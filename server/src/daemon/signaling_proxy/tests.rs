@@ -551,7 +551,6 @@ async fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
         policy: crate::model::policy_access::PolicyAccess::authoritative(Arc::clone(
             &settings_coordinator,
         )),
-        settings_coordinator,
         host_control_hub: Arc::new(HostControlHub::new_local()),
         worker_mgr,
         virtual_display: None,

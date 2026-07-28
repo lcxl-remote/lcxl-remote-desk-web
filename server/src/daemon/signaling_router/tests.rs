@@ -30,7 +30,6 @@ async fn make_ctx() -> RouterContext {
         policy: crate::model::policy_access::PolicyAccess::authoritative(Arc::clone(
             &settings_coordinator,
         )),
-        settings_coordinator,
         host_control_hub,
         worker_mgr,
         virtual_display: None,

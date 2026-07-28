@@ -4,8 +4,6 @@ use wincode::{SchemaRead, SchemaWrite};
 #[cfg(doc)]
 use desk_signal_facade::model::system_info::SystemInfo;
 #[cfg(doc)]
-use desk_signal_facade::model::system_settings::RemoteSystemSettings;
-#[cfg(doc)]
 use desk_signal_facade::model::terminal::TerminalList;
 
 /// Messages sent from Service Core (daemon) to Worker process over the

@@ -549,7 +549,7 @@ pub struct FileTransferFinishedPayload {
 /// can pick the right outbound signaling websocket when it ferries
 /// the response. `connection_id` is `Option` because manager-plane
 /// requests originating from a HTTP REST controller (e.g.
-/// `signal-facade::controller::sysinfo` →
+/// `signal-facade::controller::terminal` →
 /// `connection.request_peer_with_callback`) carry no `from_connection_id`
 /// — the daemon correlates the response by `request_id` alone in that
 /// path.
@@ -560,7 +560,7 @@ pub struct ManagerRequestRefPayload {
 }
 
 /// Shared envelope for body-less manager *responses*
-/// (`ManagerFileDeleteResponse`, `ManagerUpdateSettingsResponse`).
+/// (`ManagerFileDeleteResponse`).
 /// Same shape as [`ManagerRequestRefPayload`] but kept distinct so
 /// the daemon's response-direction code is symmetric with the
 /// request-direction code at the type-system level. `connection_id`
