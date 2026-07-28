@@ -172,8 +172,8 @@ impl FileTransferDispatcher {
             let mut paths = Vec::new();
             let mut finished = Vec::new();
             for key in transfer_keys {
-                if let Some(state) = inner.upload_states.remove(&key) {
-                    paths.push(state.file_path);
+                if let Some(path) = inner.take_upload(&key) {
+                    paths.push(path);
                 } else {
                     inner.cancel_download(&key);
                 }
@@ -209,7 +209,10 @@ impl FileTransferDispatcher {
             let paths = inner
                 .upload_states
                 .drain()
-                .map(|(_, state)| state.file_path)
+                .map(|(_, upload)| {
+                    upload.cancel();
+                    upload.file_path.clone()
+                })
                 .collect::<Vec<_>>();
             let finished = inner
                 .activities
@@ -454,8 +457,8 @@ impl FileTransferDispatcher {
         {
             let mut inner = self.inner.lock().await;
             for key in &keys {
-                if let Some(state) = inner.upload_states.remove(key) {
-                    upload_paths_to_remove.push(state.file_path.clone());
+                if let Some(path) = inner.take_upload(key) {
+                    upload_paths_to_remove.push(path);
                 }
             }
         }

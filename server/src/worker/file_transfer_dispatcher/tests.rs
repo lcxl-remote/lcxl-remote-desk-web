@@ -1432,15 +1432,18 @@ async fn arm_upload(
     .await;
     d.inner.lock().await.upload_states.insert(
         TransferKey::new(connection_id, transfer_id),
-        UploadState {
-            file,
+        Arc::new(Upload {
+            cancelled: AtomicBool::new(false),
             file_path,
-            total_chunks,
-            received_chunks: 0,
-            expected_bytes,
-            received_bytes: 0,
-            metrics: Default::default(),
-        },
+            state: TokioMutex::new(UploadState {
+                file,
+                total_chunks,
+                received_chunks: 0,
+                expected_bytes,
+                received_bytes: 0,
+                metrics: Default::default(),
+            }),
+        }),
     );
 }
 
@@ -1572,6 +1575,254 @@ async fn an_upload_whose_final_flush_fails_reports_why() {
     assert!(
         !file_path.exists(),
         "a file that was never flushed is not left behind"
+    );
+}
+
+/// A sink whose writes park until the test lets them through, counting what it
+/// accepted. Stands in for a mount that has stopped answering — the case the
+/// dispatcher has no control over and cannot be allowed to wait on.
+struct StalledWriter {
+    /// Fires the first time a write is attempted, so a test can tell "the write
+    /// is in flight" from "the task has not got there yet".
+    started: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Resolves when the write is allowed to complete. `None` once it has.
+    release: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>,
+    writes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl StalledWriter {
+    /// A writer that never completes its first write.
+    fn stuck(started: tokio::sync::oneshot::Sender<()>) -> Self {
+        Self {
+            started: Some(started),
+            release: Some(Box::pin(std::future::pending())),
+            writes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// A writer whose first write completes once `gate` is signalled.
+    fn gated(
+        started: tokio::sync::oneshot::Sender<()>,
+        gate: tokio::sync::oneshot::Receiver<()>,
+        writes: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        Self {
+            started: Some(started),
+            release: Some(Box::pin(async move {
+                let _ = gate.await;
+            })),
+            writes,
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for StalledWriter {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        if let Some(started) = this.started.take() {
+            let _ = started.send(());
+        }
+        if let Some(release) = this.release.as_mut() {
+            match std::future::Future::poll(release.as_mut(), cx) {
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+                std::task::Poll::Ready(()) => this.release = None,
+            }
+        }
+        this.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::task::Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+/// Arm an upload whose first chunk write never returns, and hand back the
+/// dispatcher once that write is actually in flight.
+async fn upload_stuck_mid_write(
+    d: &FileTransferDispatcher,
+    connection_id: &str,
+    transfer_id: &str,
+    file_path: PathBuf,
+) {
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    arm_upload(
+        d,
+        connection_id,
+        transfer_id,
+        file_path,
+        Box::new(StalledWriter::stuck(started_tx)),
+        2,
+        8,
+    )
+    .await;
+    let writer = d.clone();
+    let connection_id = connection_id.to_string();
+    let chunk = build_binary_chunk(transfer_id, 0, b"abcd");
+    tokio::spawn(async move {
+        writer
+            .handle_binary(FileTransferPayload {
+                connection_id,
+                data: chunk,
+                is_text: false,
+                transfer_id: None,
+            })
+            .await;
+    });
+    started_rx.await.expect("the write must reach the writer");
+}
+
+/// A peer's access is withdrawn by the paths that end a connection, and none of
+/// them may be made to wait on a disk. A write can park for as long as the
+/// device feels like — if it were holding the lock those paths need, a stalled
+/// mount would be enough to keep a session that is supposed to be over alive.
+#[tokio::test]
+async fn a_connection_can_end_while_an_upload_write_is_stuck() {
+    let tmp = TempDir::new().unwrap();
+    let file_path = tmp.path().join("stuck.bin");
+    tokio::fs::write(&file_path, b"partial").await.unwrap();
+    let (d, _rx) = dispatcher();
+    d.start_connection(&start_payload("c1")).await;
+    let transfer_id = "00000000-0000-0000-0000-0000000000e4";
+    upload_stuck_mid_write(&d, "c1", transfer_id, file_path.clone()).await;
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        d.stop_connection(&StopMediaPayload {
+            connection_id: "c1".to_string(),
+        }),
+    )
+    .await
+    .expect("ending a connection must not wait for a write that is stuck");
+
+    assert!(
+        d.inner.lock().await.upload_states.is_empty(),
+        "the transfer is over even though its write never returned",
+    );
+}
+
+/// Same for the shutdown path, which runs when the worker is going away and has
+/// even less business waiting on a device.
+#[tokio::test]
+async fn a_shutdown_does_not_wait_for_a_stuck_upload_write() {
+    let tmp = TempDir::new().unwrap();
+    let file_path = tmp.path().join("stuck.bin");
+    tokio::fs::write(&file_path, b"partial").await.unwrap();
+    let (d, _rx) = dispatcher();
+    d.start_connection(&start_payload("c1")).await;
+    let transfer_id = "00000000-0000-0000-0000-0000000000e5";
+    upload_stuck_mid_write(&d, "c1", transfer_id, file_path.clone()).await;
+
+    tokio::time::timeout(Duration::from_secs(2), d.shutdown())
+        .await
+        .expect("shutdown must not wait for a write that is stuck");
+
+    assert!(d.inner.lock().await.upload_states.is_empty());
+}
+
+/// A cancel no longer waits for a write, so a chunk that queued behind one can
+/// still be holding a live handle on the transfer when the cancel lands — the
+/// handle it took before the transfer went out of reach. Once the transfer is
+/// called off nothing more may reach the file: it has already been reported
+/// gone, and a peer that asked to stop is entitled to have stopped.
+///
+/// Two chunks are driven concurrently here on purpose. The worker's file lane
+/// awaits one command before reading the next, so today they cannot overlap in
+/// production — but that is the drain loop's property, not the dispatcher's, and
+/// the guarantee under test belongs to the dispatcher.
+#[tokio::test]
+async fn a_chunk_queued_behind_a_cancelled_write_is_not_written() {
+    let tmp = TempDir::new().unwrap();
+    let file_path = tmp.path().join("queued.bin");
+    tokio::fs::write(&file_path, b"").await.unwrap();
+    let (d, _rx) = dispatcher();
+    d.start_connection(&start_payload("c1")).await;
+    let transfer_id = "00000000-0000-0000-0000-0000000000e6";
+    let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    arm_upload(
+        &d,
+        "c1",
+        transfer_id,
+        file_path.clone(),
+        Box::new(StalledWriter::gated(started_tx, release_rx, writes.clone())),
+        3,
+        12,
+    )
+    .await;
+
+    let first = tokio::spawn({
+        let d = d.clone();
+        let chunk = build_binary_chunk(transfer_id, 0, b"abcd");
+        async move {
+            d.handle_binary(FileTransferPayload {
+                connection_id: "c1".into(),
+                data: chunk,
+                is_text: false,
+                transfer_id: None,
+            })
+            .await;
+        }
+    });
+    started_rx.await.expect("the first write is in flight");
+
+    // The second chunk takes a handle on the transfer and then waits its turn
+    // behind the first — which is the state it has to be in when the cancel
+    // arrives for this to test anything.
+    let second = tokio::spawn({
+        let d = d.clone();
+        let chunk = build_binary_chunk(transfer_id, 1, b"efgh");
+        async move {
+            d.handle_binary(FileTransferPayload {
+                connection_id: "c1".into(),
+                data: chunk,
+                is_text: false,
+                transfer_id: None,
+            })
+            .await;
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    d.handle_text(FileTransferPayload {
+        connection_id: "c1".into(),
+        data: serde_json::to_vec(&FileTransferMessage::TransferCancel(TransferCancel {
+            transfer_id: transfer_id.to_string(),
+        }))
+        .unwrap(),
+        is_text: true,
+        transfer_id: None,
+    })
+    .await;
+
+    let _ = release_tx.send(());
+    first.await.unwrap();
+    second.await.unwrap();
+
+    assert_eq!(
+        writes.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "only the write that was already under way may reach the file",
+    );
+    assert!(
+        !file_path.exists(),
+        "a cancelled upload leaves nothing behind, whichever side removes it",
     );
 }
 

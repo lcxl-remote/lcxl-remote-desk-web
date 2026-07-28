@@ -73,11 +73,14 @@ impl FileTransferDispatcher {
             }
             FileTransferMessage::TransferComplete(complete) => {
                 let key = TransferKey::new(&payload.connection_id, &complete.transfer_id);
-                let state = {
+                let upload = {
                     let mut inner = self.inner.lock().await;
                     inner.upload_states.remove(&key)
                 };
-                if let Some(mut state) = state {
+                if let Some(upload) = upload {
+                    // The state lock, not the shared one, is what the flush runs
+                    // under: it can wait on the same disk a chunk write does.
+                    let mut state = upload.state.lock().await;
                     let received_chunks = state.received_chunks;
                     let flush_error = state.file.flush().await.err();
                     let is_complete = flush_error.is_none()
@@ -100,7 +103,10 @@ impl FileTransferDispatcher {
                             state.received_chunks
                         ),
                     };
-                    let file_path = state.file_path.clone();
+                    let file_path = upload.file_path.clone();
+                    // Close the file before anything below removes it: a
+                    // platform can refuse to remove a file that is still open.
+                    state.file = Box::new(tokio::io::sink());
                     drop(state);
                     info!(
                         "[FileTransferDispatcher] upload {} completed, received {} chunks",
@@ -143,14 +149,16 @@ impl FileTransferDispatcher {
                 let removed_upload = {
                     let mut inner = self.inner.lock().await;
                     inner.cancel_download(&key);
-                    inner.upload_states.remove(&key)
+                    inner.take_upload(&key)
                 };
-                if let Some(state) = removed_upload {
-                    let path = state.file_path.clone();
-                    drop(state);
+                if let Some(path) = removed_upload {
+                    // A write still in flight can be holding this open, and
+                    // waiting for it is exactly what a cancel must not do. The
+                    // writer removes it on the way out when that happens.
                     if let Err(e) = tokio::fs::remove_file(&path).await {
-                        warn!(
-                            "[FileTransferDispatcher] failed to remove cancelled upload file {}: {e}",
+                        debug!(
+                            "[FileTransferDispatcher] could not remove cancelled upload file {} \
+                             yet: {e}",
                             path.display()
                         );
                     }
@@ -195,26 +203,44 @@ impl FileTransferDispatcher {
         let chunk_data = chunk_data.to_vec();
         let chunk_len = chunk_data.len() as u64;
         let lock_start = Instant::now();
-        let mut inner = self.inner.lock().await;
-        let lock_elapsed = lock_start.elapsed();
-        let Some(state) = inner.upload_states.get_mut(&key) else {
+        // The shared lock is taken only to find the transfer, never to write to
+        // it. Everything below runs under this one upload's own lock, so a slow
+        // disk delays this transfer and nothing else — in particular not the
+        // stop, revoke and cancel paths, which all need the shared lock to
+        // withdraw a peer's access and cannot be made to wait on a device.
+        let upload = {
+            let inner = self.inner.lock().await;
+            inner.upload_states.get(&key).cloned()
+        };
+        let Some(upload) = upload else {
             warn!(
                 "[FileTransferDispatcher] {}: chunk for unknown transfer {}",
                 connection_id, transfer_id
             );
             return;
         };
+        let mut state = upload.state.lock().await;
+        let lock_elapsed = lock_start.elapsed();
+        if upload.is_cancelled() {
+            // Called off while this chunk queued behind an earlier one. The
+            // teardown has already answered the browser and removed the file.
+            debug!(
+                "[FileTransferDispatcher] {}: chunk {} arrived for cancelled transfer {}",
+                connection_id, chunk_index, transfer_id
+            );
+            return;
+        }
         let write_start = Instant::now();
         if let Err(error) = state.file.write_all(&chunk_data).await {
             error!(
                 "[FileTransferDispatcher] {}: write chunk {} for {} failed: {error}",
                 connection_id, chunk_index, transfer_id
             );
-            let failed = inner.upload_states.remove(&key);
-            drop(inner);
-            if let Some(failed) = failed {
-                let _ = tokio::fs::remove_file(failed.file_path).await;
-            }
+            // Out of reach first, so no later chunk can re-open the transfer,
+            // then close and remove what was written.
+            let _ = self.inner.lock().await.take_upload(&key);
+            Self::discard_partial(&upload, &mut state).await;
+            drop(state);
             self.fail_transfer(
                 &connection_id,
                 &transfer_id,
@@ -224,6 +250,16 @@ impl FileTransferDispatcher {
             .await;
             self.finish_activity(&connection_id, &transfer_id, FileTransferOutcome::Failed)
                 .await;
+            return;
+        }
+        if upload.is_cancelled() {
+            // Called off while that write was in flight. Teardown did not wait
+            // for it, so removing what it wrote falls to this task.
+            debug!(
+                "[FileTransferDispatcher] {}: transfer {} was cancelled mid-write",
+                connection_id, transfer_id
+            );
+            Self::discard_partial(&upload, &mut state).await;
             return;
         }
         let write_elapsed = write_start.elapsed();
@@ -241,18 +277,23 @@ impl FileTransferDispatcher {
         if state.received_chunks < state.total_chunks {
             return;
         }
-        let Some(mut state) = inner.upload_states.remove(&key) else {
+        // Last chunk. Claim the transfer so nothing else can reach it, then
+        // finish it off. Failing to claim means a teardown got here first.
+        if self.inner.lock().await.upload_states.remove(&key).is_none() {
+            Self::discard_partial(&upload, &mut state).await;
             return;
-        };
+        }
         let flush_result = state.file.flush().await;
         if let Some(line) = state.metrics.flush_line(&transfer_id, "ft-metrics") {
             info!("{line}");
         }
-        let file_path = state.file_path.clone();
+        let file_path = upload.file_path.clone();
         let expected_bytes = state.expected_bytes;
         let received_bytes = state.received_bytes;
+        // Closed before any of the branches below removes it: a platform can
+        // refuse to remove a file that is still open.
+        state.file = Box::new(tokio::io::sink());
         drop(state);
-        drop(inner);
         if let Err(error) = flush_result {
             error!(
                 "[FileTransferDispatcher] {}: flush of completed upload {} failed: {error}",
@@ -310,6 +351,25 @@ impl FileTransferDispatcher {
             "[FileTransferDispatcher] upload {} completed successfully",
             transfer_id
         );
+    }
+
+    /// Close a partial upload and remove what it wrote.
+    ///
+    /// Closing first is not cosmetic: a platform can refuse to remove a file
+    /// that is still open, which is exactly the case teardown cannot handle on
+    /// its own — it does not hold the state lock and so cannot close anything.
+    /// Whoever holds the file is who removes it.
+    async fn discard_partial(
+        upload: &Upload,
+        state: &mut tokio::sync::MutexGuard<'_, UploadState>,
+    ) {
+        state.file = Box::new(tokio::io::sink());
+        if let Err(error) = tokio::fs::remove_file(&upload.file_path).await {
+            debug!(
+                "[FileTransferDispatcher] could not remove partial upload {}: {error}",
+                upload.file_path.display()
+            );
+        }
     }
 
     async fn accept_upload(
@@ -383,21 +443,24 @@ impl FileTransferDispatcher {
                 return Err(error);
             }
         };
-        let state = UploadState {
-            file: Box::new(file),
+        let upload = Arc::new(Upload {
+            cancelled: AtomicBool::new(false),
             file_path: file_path.clone(),
-            total_chunks: req.total_chunks,
-            received_chunks: 0,
-            expected_bytes: req.file_size,
-            received_bytes: 0,
-            metrics: UploadWindow::default(),
-        };
+            state: TokioMutex::new(UploadState {
+                file: Box::new(file),
+                total_chunks: req.total_chunks,
+                received_chunks: 0,
+                expected_bytes: req.file_size,
+                received_bytes: 0,
+                metrics: UploadWindow::default(),
+            }),
+        });
         let key = TransferKey::new(&connection_id, &req.transfer_id);
         let state_inserted = {
             let mut inner = self.inner.lock().await;
             if inner.active_connections.contains(&connection_id) && inner.activities.contains(&key)
             {
-                inner.upload_states.insert(key.clone(), state);
+                inner.upload_states.insert(key.clone(), upload);
                 true
             } else {
                 false
@@ -424,10 +487,10 @@ impl FileTransferDispatcher {
             );
             let removed = {
                 let mut inner = self.inner.lock().await;
-                inner.upload_states.remove(&key)
+                inner.take_upload(&key)
             };
-            if let Some(state) = removed {
-                let _ = tokio::fs::remove_file(state.file_path).await;
+            if let Some(path) = removed {
+                let _ = tokio::fs::remove_file(path).await;
             }
             self.finish_activity(
                 &connection_id,

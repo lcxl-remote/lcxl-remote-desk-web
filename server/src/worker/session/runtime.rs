@@ -349,10 +349,10 @@ impl WorkerSession {
         // File-lane drain task: hands inbound `FileTransferPayload`
         // frames straight to the dispatcher. Runs independent of the
         // event main loop so a long `serve_download` / `accept_upload`
-        // never head-of-line blocks heartbeats or signaling — and so
-        // `dispatcher.handle_command(...).await` (which is internally
-        // serial because it `lock`s `inner`) reflects exactly the
-        // browser DC arrival order without an extra hop. Exits on
+        // never head-of-line blocks heartbeats or signaling. Awaiting
+        // each `dispatcher.handle_command(...)` before reading the next
+        // frame is what makes the lane reflect exactly the browser DC
+        // arrival order, without an extra hop. Exits on
         // `None` from `recv()` (lane closed → daemon vanished);
         // worker shutdown happens through the event lane so this
         // task is allowed to terminate quietly.

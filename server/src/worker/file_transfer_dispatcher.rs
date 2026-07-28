@@ -68,6 +68,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use desk_ipc_protocol::dual_transport::{EventSender, TransportError};
@@ -100,11 +101,11 @@ pub(crate) use metrics::{
 /// Per-transfer in-flight upload state (browser uploading to host).
 struct UploadState {
     /// Boxed rather than held as a [`tokio::fs::File`] so a test can put a
-    /// writer that fails in its place. A write or flush that fails partway is
-    /// what turns a filesystem problem into an answer the browser can act on,
-    /// and there is no portable way to make a real file do it on demand.
+    /// writer that fails, or blocks, in its place. A write or flush that fails
+    /// partway is what turns a filesystem problem into an answer the browser
+    /// can act on, and there is no portable way to make a real file do it on
+    /// demand.
     file: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
-    file_path: PathBuf,
     total_chunks: u64,
     received_chunks: u64,
     expected_bytes: u64,
@@ -113,6 +114,48 @@ struct UploadState {
     /// [`FT_METRICS_WINDOW_CHUNKS`] chunks and once more on completion
     /// so the final partial window does not get lost.
     metrics: UploadWindow,
+}
+
+/// One live upload, reachable from [`DispatcherInner::upload_states`] through a
+/// handle small enough to take out from under the shared lock.
+///
+/// Writing a chunk means waiting on a disk, and how long that takes is not the
+/// worker's to decide — a network share or a stalled device can hold a single
+/// write for as long as it likes. The same shared lock is what a connection
+/// ending, a revoked session, a cancel and a shutdown all have to take before
+/// they can do anything, and those are the paths that withdraw a peer's access.
+/// So the file and its counters live behind a lock of their own, and a write
+/// holds nothing but the transfer it belongs to.
+///
+/// **Lock order**: the shared lock is never held while waiting for a state lock
+/// — it is taken to look a transfer up and released before the state lock is
+/// asked for. The reverse is how a writer takes itself out of the map on its way
+/// out, and is safe precisely because of that rule.
+struct Upload {
+    /// Whether the transfer has been called off.
+    ///
+    /// Teardown records this and moves on; it does not wait for a write that is
+    /// already in flight, which is the whole point. The writer reads it once it
+    /// has the state lock and again after its write returns, and refuses to go
+    /// any further either way.
+    cancelled: AtomicBool,
+    /// Where the partial file is. Kept out here so teardown can name the file to
+    /// remove without taking the state lock — that lock is exactly what a slow
+    /// write is holding.
+    file_path: PathBuf,
+    state: TokioMutex<UploadState>,
+}
+
+impl Upload {
+    /// Call the transfer off, so a write that is in flight stops at the end of
+    /// the chunk it is on.
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -131,7 +174,7 @@ impl TransferKey {
 }
 
 struct DispatcherInner {
-    upload_states: HashMap<TransferKey, UploadState>,
+    upload_states: HashMap<TransferKey, Arc<Upload>>,
     /// Downloads whose streaming loop is running and can therefore still act on
     /// a cancel. Registered by `serve_download` and released by it on the way
     /// out, whichever way it leaves.
@@ -176,6 +219,21 @@ impl DispatcherInner {
         if self.live_downloads.contains(key) {
             self.cancelled_transfers.insert(key.clone());
         }
+    }
+
+    /// Take an upload out of reach and call it off, returning the partial file
+    /// the caller should remove.
+    ///
+    /// Marking is what lets the caller leave without waiting: a chunk write
+    /// already under way holds only its own transfer's lock, and when it returns
+    /// it reads the mark, closes the file and removes what it wrote. So the
+    /// caller's own removal is allowed to fail — a platform that refuses to
+    /// remove an open file still ends up with the partial gone, and a connection
+    /// ending never has to wait on a disk.
+    fn take_upload(&mut self, key: &TransferKey) -> Option<PathBuf> {
+        let upload = self.upload_states.remove(key)?;
+        upload.cancel();
+        Some(upload.file_path.clone())
     }
 }
 
