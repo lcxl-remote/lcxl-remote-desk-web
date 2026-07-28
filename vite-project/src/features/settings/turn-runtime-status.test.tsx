@@ -10,8 +10,14 @@ const turnInfo: {
     error: unknown
 } = { data: undefined, isLoading: false, error: undefined }
 
+/** The options the card asked the query with, so the polling policy is testable. */
+let queryOptions: { query?: { refetchInterval?: unknown } } | undefined
+
 vi.mock("@/services/hooks/turnController/useGetTurnInfo", () => ({
-    useGetTurnInfo: () => turnInfo,
+    useGetTurnInfo: (options: { query?: { refetchInterval?: unknown } }) => {
+        queryOptions = options
+        return turnInfo
+    },
 }))
 
 import { TurnRuntimeStatus } from "./turn-runtime-status"
@@ -34,7 +40,17 @@ beforeEach(() => {
     turnInfo.data = undefined
     turnInfo.isLoading = false
     turnInfo.error = undefined
+    queryOptions = undefined
 })
+
+/** Ask the card's own policy what it would do with a given state. */
+function pollFor(state: string): unknown {
+    render(<TurnRuntimeStatus />)
+    const refetchInterval = queryOptions?.query?.refetchInterval as (query: {
+        state: { data: unknown }
+    }) => unknown
+    return refetchInterval({ state: { data: info({ state }) } })
+}
 
 describe("TurnRuntimeStatus", () => {
     /// "Not relaying" is the answer that most needs explaining, so each reason
@@ -53,6 +69,30 @@ describe("TurnRuntimeStatus", () => {
             expect(screen.getByText(badge), state).toBeInTheDocument()
             expect(screen.getByText(detail), state).toBeInTheDocument()
             unmount()
+        }
+    })
+
+    /// A save returns before the host has bound a socket, so the read right
+    /// after one lands mid-start. Calling that "failed to start" would report a
+    /// failure for every save, and the operator has nothing to fix.
+    it("reports a start that has not finished as under way, not as a failure", () => {
+        turnInfo.data = info({ state: "starting" })
+        render(<TurnRuntimeStatus />)
+
+        expect(screen.getByText(/^Starting$/)).toBeInTheDocument()
+        expect(screen.getByText(/is starting and is not relaying yet/i)).toBeInTheDocument()
+        expect(screen.queryByText(/^Failed to start$/)).toBeNull()
+    })
+
+    /// The card is read once per mount, while the states above are left by the
+    /// host on its own. Without asking again, a relay that comes up seconds
+    /// after a save is reported as starting or failing for as long as the page
+    /// stays open.
+    it("keeps asking while the host is still settling, and stops when it has", () => {
+        expect(pollFor("starting")).toBe(3000)
+        expect(pollFor("failed")).toBe(3000)
+        for (const settled of ["running", "disabled", "unsupported", "not-configured"]) {
+            expect(pollFor(settled), settled).toBe(false)
         }
     })
 

@@ -99,6 +99,12 @@ not running when it is not, and any entry that was refused. The card is what to
 read after saving — the form shows the configuration, the card shows what became
 of it.
 
+A save returns before the ports are bound, so immediately afterwards the card
+reads `starting` rather than running — that is the normal path, not a failure,
+and only a state with a cause to report is called one. The card re-reads itself
+while the host is still settling, so it becomes running, or names what went
+wrong, without being refreshed by hand.
+
 ## Desktop `[desk]` {#desktop-desk}
 
 - `video_fps` — video frame rate (default `60`). Lowering reduces CPU and bandwidth usage.

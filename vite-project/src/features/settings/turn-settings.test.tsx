@@ -19,8 +19,19 @@ const turnInfo: { data: { data: Record<string, unknown> } | undefined; isLoading
     isLoading: false,
 }
 
+// No provider is mounted here, and what these tests check is which queries the
+// page declares stale — not the cache doing it.
+const invalidateQueries = vi.fn()
+vi.mock("@tanstack/react-query", async (importOriginal) => ({
+    ...(await importOriginal<Record<string, unknown>>()),
+    useQueryClient: () => ({ invalidateQueries }),
+}))
+
+const regenerateSecret = vi.fn(async () => ({}))
+
 vi.mock("@/services/hooks/turnController/useGetTurnInfo", () => ({
     useGetTurnInfo: () => turnInfo,
+    getTurnInfoQueryKey: () => [{ url: "/api/turn/info" }],
 }))
 vi.mock("@/services/hooks/turnController/useQueryTurnSettings", () => ({
     useQueryTurnSettings: () => turnQuery,
@@ -29,7 +40,7 @@ vi.mock("@/services/hooks/turnController/useUpdateTurnSettings", () => ({
     useUpdateTurnSettings: () => ({ mutateAsync: updateTurnSettings, isPending: false }),
 }))
 vi.mock("@/services/hooks/turnController/useRegenerateTurnSecret", () => ({
-    useRegenerateTurnSecret: () => ({ mutateAsync: vi.fn(), isPending: false }),
+    useRegenerateTurnSecret: () => ({ mutateAsync: regenerateSecret, isPending: false }),
 }))
 
 import { TurnSettings } from "./turn-settings"
@@ -48,6 +59,8 @@ function turnSwitch() {
 
 beforeEach(() => {
     updateTurnSettings.mockClear()
+    regenerateSecret.mockClear()
+    invalidateQueries.mockClear()
     turnQuery.data = undefined
     turnQuery.isLoading = false
     turnInfo.data = {
@@ -112,6 +125,39 @@ describe("TurnSettings — saving is the confirmation", () => {
 
         expect(screen.getByText(/restarts the TURN service immediately/i)).toBeInTheDocument()
         expect(screen.getByText(/drops the connections currently being relayed/i)).toBeInTheDocument()
+    })
+})
+
+describe("TurnSettings — the status card follows what was saved", () => {
+    /// Both writes restart, stop or re-key the relay. The card polls only the
+    /// states the host leaves by itself, so without this the operator who just
+    /// switched TURN off goes on being told it is running.
+    it("marks the runtime status stale after saving", async () => {
+        turnQuery.data = { data: { ...SAVED } }
+        render(<TurnSettings />)
+
+        fireEvent.click(await turnSwitch())
+        fireEvent.click(screen.getByRole("button", { name: /save settings/i }))
+
+        await waitFor(() => expect(updateTurnSettings).toHaveBeenCalledTimes(1))
+        expect(invalidateQueries).toHaveBeenCalledWith({
+            queryKey: [{ url: "/api/turn/info" }],
+        })
+    })
+
+    /// A rotated secret is adopted by restarting the runtime, so the card is
+    /// describing a server that no longer exists until it is re-read.
+    it("marks the runtime status stale after rotating the secret", async () => {
+        turnQuery.data = { data: { ...SAVED } }
+        render(<TurnSettings />)
+
+        fireEvent.click(screen.getByRole("button", { name: /regenerate turn secret/i }))
+        fireEvent.click(await screen.findByRole("button", { name: /^confirm$/i }))
+
+        await waitFor(() => expect(regenerateSecret).toHaveBeenCalledTimes(1))
+        expect(invalidateQueries).toHaveBeenCalledWith({
+            queryKey: [{ url: "/api/turn/info" }],
+        })
     })
 })
 

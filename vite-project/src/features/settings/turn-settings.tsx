@@ -5,9 +5,12 @@ import * as z from "zod"
 import { useTranslation } from "react-i18next"
 import { Loader2, Save, ShieldCheck, RefreshCw, Plus, Trash2 } from "lucide-react"
 
+import { useQueryClient } from "@tanstack/react-query"
+
 import { useQueryTurnSettings } from "@/services/hooks/turnController/useQueryTurnSettings"
 import { useUpdateTurnSettings } from "@/services/hooks/turnController/useUpdateTurnSettings"
 import { useRegenerateTurnSecret } from "@/services/hooks/turnController/useRegenerateTurnSecret"
+import { getTurnInfoQueryKey } from "@/services/hooks/turnController/useGetTurnInfo"
 import type { TurnSettings } from "@/services/types"
 
 import { Button } from "@/components/ui/button"
@@ -87,9 +90,19 @@ export function TurnSettings() {
     const { t } = useTranslation()
     const { toast } = useToast()
 
+    const queryClient = useQueryClient()
+
     const { data: turnSettingsResponse, isLoading } = useQueryTurnSettings()
     const { mutateAsync: updateTurnSettings, isPending: isUpdating } = useUpdateTurnSettings()
     const { mutateAsync: regenerateSecret, isPending: isRegenerating } = useRegenerateTurnSecret()
+
+    // Both writes below make the host restart, switch off, or re-key its relay,
+    // and the status card would otherwise go on showing the runtime from before
+    // the change: the states it settles on by itself are polled, but the ones an
+    // operator causes have nothing else to notice them.
+    const rereadRuntime = () => {
+        void queryClient.invalidateQueries({ queryKey: getTurnInfoQueryKey() })
+    }
 
     const schema = useMemo(() => makeTurnSettingsSchema(t), [t])
     const form = useForm<TurnSettingsFormValues>({
@@ -131,6 +144,7 @@ export function TurnSettings() {
                 ...values,
             } as TurnSettings;
             await updateTurnSettings({ data: payload })
+            rereadRuntime()
             toast({
                 title: t('pages.system.settings.success'),
                 description: t('pages.turn.settings.updateSucceedMessage'),
@@ -147,6 +161,7 @@ export function TurnSettings() {
     const onRegenerateSecret = async () => {
         try {
             await regenerateSecret()
+            rereadRuntime()
             toast({
                 title: t('pages.system.settings.success'),
                 description: t('pages.system.settings.regenerateSecretSuccess'),

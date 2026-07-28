@@ -16,9 +16,34 @@ import { Badge } from '@/components/ui/badge';
  * that most needs explaining, so hiding the card exactly then would leave the
  * page silent about the only thing the operator wants to know.
  */
+/**
+ * How often the card re-reads a state the host is still working on. Long enough
+ * not to poll a settings page for nothing, short enough that a relay coming up
+ * is reported while the operator is still looking at the save they just made.
+ */
+const SETTLING_POLL_MS = 3000;
+
+/** States the host leaves on its own, so the card has to keep asking. */
+function isSettling(info: TurnRuntimeInfo | undefined): boolean {
+    // `starting` is mid-convergence, and `failed` is retried with a backoff —
+    // both become `running` with nothing further from the operator.
+    return (
+        info?.state === turnRuntimeStateEnum.starting || info?.state === turnRuntimeStateEnum.failed
+    );
+}
+
 export function TurnRuntimeStatus() {
     const { t } = useTranslation();
-    const { data, isLoading, error } = useGetTurnInfo();
+    const { data, isLoading, error } = useGetTurnInfo({
+        query: {
+            // A save publishes the intent and returns before the socket is
+            // bound, so a single read lands on the state *before* the one being
+            // waited for. The other states are only left by an operator action,
+            // and those invalidate this query themselves.
+            refetchInterval: (query) =>
+                isSettling(query.state.data?.data) ? SETTLING_POLL_MS : false,
+        },
+    });
     const info = data?.data;
 
     return (
@@ -67,6 +92,11 @@ function RuntimeDetail({ info }: { info: TurnRuntimeInfo }) {
                     <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
                 ) : info.state === turnRuntimeStateEnum.failed ? (
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+                ) : info.state === turnRuntimeStateEnum.starting ? (
+                    /* Work in progress, not a stop: the crossed circle the other
+                       non-running states carry would read as "this is not going
+                       to happen". */
+                    <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
                 ) : (
                     <CircleSlash className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
                 )}
@@ -153,6 +183,8 @@ function stateLabelKey(state: TurnRuntimeInfo['state']): string {
             return 'pages.turn.runtime.state.unsupported';
         case turnRuntimeStateEnum['not-configured']:
             return 'pages.turn.runtime.state.notConfigured';
+        case turnRuntimeStateEnum.starting:
+            return 'pages.turn.runtime.state.starting';
         case turnRuntimeStateEnum.failed:
             return 'pages.turn.runtime.state.failed';
     }
