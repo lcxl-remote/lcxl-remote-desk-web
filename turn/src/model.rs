@@ -142,6 +142,10 @@ pub enum TurnRuntimeState {
     Unsupported,
     /// Switched on, but there is no interface to serve on.
     NotConfigured,
+    /// Meant to run and not serving yet, with nothing having gone wrong. A save
+    /// returns before the supervisor has bound anything, so this is the normal
+    /// answer for the moment right after one.
+    Starting,
     /// Meant to run and could not; `last_error` says why, and the supervisor
     /// keeps retrying.
     Failed,

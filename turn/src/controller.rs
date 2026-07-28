@@ -302,10 +302,14 @@ mod tests {
             test::call_service(&app, test::TestRequest::get().uri("/info").to_request()).await;
         let body: Value = test::read_body_json(res).await;
         assert_ne!(body["data"]["state"], "running");
-        assert_eq!(
-            view.info().await.state,
-            TurnRuntimeState::Failed,
-            "a host still meant to relay, with nothing running, is a failure to report"
+        // Nothing went wrong here — the runtime was taken away. Reporting a
+        // failure would put a state on the card that the document's own
+        // `last_error` cannot explain.
+        let info = view.info().await;
+        assert_eq!(info.state, TurnRuntimeState::Starting);
+        assert!(
+            info.last_error.is_none(),
+            "a failure is only reported when there is one to report"
         );
     }
 }

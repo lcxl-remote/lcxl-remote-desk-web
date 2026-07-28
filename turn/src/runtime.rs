@@ -128,14 +128,20 @@ impl TurnRuntimeView {
             TurnIntent::Disabled => (TurnRuntimeState::Disabled, None),
             TurnIntent::Unsupported => (TurnRuntimeState::Unsupported, None),
             TurnIntent::NotConfigured => (TurnRuntimeState::NotConfigured, None),
-            // Meant to run and is not: the supervisor is mid-retry, and its last
-            // error is the only actionable thing to report.
+            // Meant to run and is not. Convergence is asynchronous, so this is
+            // also what the window between publishing the intent and binding a
+            // socket looks like — and calling that a failure would report one
+            // for every save. A recorded error is what tells the two apart, and
+            // is the only actionable thing to report when there is one.
             TurnIntent::Run => {
                 let last_error = match &self.supervisor {
                     Some(s) => s.status().await.last_error,
                     None => None,
                 };
-                (TurnRuntimeState::Failed, last_error)
+                match last_error {
+                    Some(error) => (TurnRuntimeState::Failed, Some(error)),
+                    None => (TurnRuntimeState::Starting, None),
+                }
             }
         };
         TurnRuntimeInfo {
@@ -297,6 +303,41 @@ mod tests {
         let info = TurnRuntimeView::unsupported().info().await;
         assert_eq!(info.state, TurnRuntimeState::Unsupported);
         assert!(!info.software.is_empty());
+    }
+
+    /// A save publishes the intent and returns; the socket is bound afterwards.
+    /// Reporting that window as a failure would produce one for every save, and
+    /// a `Failed` with nothing in `last_error` contradicts the document's own
+    /// promise that the state is explained.
+    #[tokio::test]
+    async fn a_start_that_has_not_finished_yet_is_not_a_failure() {
+        struct NeverFinishes;
+        #[async_trait]
+        impl TurnRuntimeDriver for NeverFinishes {
+            async fn start(&self, _params: &TurnRuntimeParams) -> Result<StartedRuntime, String> {
+                std::future::pending().await
+            }
+        }
+        let (_tx, rx) = watch::channel(TurnPosture::new(TurnIntent::Run));
+        let (supervisor, _retired) = spawn(
+            Arc::new(NeverFinishes),
+            DesiredState {
+                revision: 1,
+                params: Some(loopback_params("s")),
+            },
+            BackoffConfig {
+                min: Duration::from_millis(5),
+                max: Duration::from_millis(20),
+            },
+        );
+        let view = TurnRuntimeView::new(supervisor, rx);
+
+        let info = view.info().await;
+
+        assert_eq!(info.state, TurnRuntimeState::Starting);
+        assert!(info.last_error.is_none(), "nothing has gone wrong yet");
+        assert!(info.interfaces.is_empty(), "nothing is being served yet");
+        assert!(info.uptime_secs.is_none());
     }
 
     /// Meant to run but not running is the one case that carries a cause.
