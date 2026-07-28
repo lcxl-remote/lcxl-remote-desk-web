@@ -10,7 +10,7 @@ pub(super) async fn run_pipe_server(
     desktop_name: Option<String>,
     config_json: String,
     mut cmd_rx: mpsc::UnboundedReceiver<ServiceToWorker>,
-    msg_tx: mpsc::UnboundedSender<WorkerToService>,
+    msg_tx: WorkerMessageSink,
     worker_mgr: WorkerManager,
     host_upstream_url: String,
     ipc_token: Option<String>,
@@ -18,7 +18,8 @@ pub(super) async fn run_pipe_server(
     file_sender_slot: Arc<RwLock<Option<Arc<dyn EventSender<FileTransferPayload>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pipe_path = format!(r"\\.\pipe\{}", pipe_name);
-    info!("Creating Named Pipe server: {pipe_path}");
+    let incarnation = msg_tx.incarnation();
+    info!("Creating Named Pipe server for worker {incarnation}: {pipe_path}");
 
     // Look up the SID owning the target session so the pipe ACL grants
     // access only to SYSTEM + Administrators + that user. A failure to
@@ -64,12 +65,12 @@ pub(super) async fn run_pipe_server(
         Ok(Ok(())) => info!("Worker connected"),
         Ok(Err(e)) => {
             error!("Pipe connection error for {pipe_path}: {e}");
-            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+            worker_mgr.handle_crash_recovery(incarnation, session_id, desktop_name_copy);
             return Ok(());
         }
         Err(_) => {
             warn!("Timed out waiting for worker to connect on {pipe_path}; triggering recovery");
-            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+            worker_mgr.handle_crash_recovery(incarnation, session_id, desktop_name_copy);
             return Ok(());
         }
     }
@@ -162,7 +163,7 @@ pub(super) async fn run_pipe_server(
                     "File pipe connect failed for {file_pipe_path}: {e}; \
                  dropping into recovery (no file lane = no file transfer)"
                 );
-                worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+                worker_mgr.handle_crash_recovery(incarnation, session_id, desktop_name_copy);
                 return Ok(());
             }
             Err(_) => {
@@ -170,7 +171,7 @@ pub(super) async fn run_pipe_server(
                     "Timed out waiting for worker on file pipe {file_pipe_path}; \
                  dropping into recovery"
                 );
-                worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+                worker_mgr.handle_crash_recovery(incarnation, session_id, desktop_name_copy);
                 return Ok(());
             }
         };
@@ -199,7 +200,7 @@ pub(super) async fn run_pipe_server(
     *file_sender_slot.write().await = None;
 
     if !expected {
-        worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+        worker_mgr.handle_crash_recovery(incarnation, session_id, desktop_name_copy);
     }
 
     Ok(())

@@ -2,7 +2,6 @@ use super::*;
 use crate::daemon::pc_manager::PcRegistry;
 use crate::model::settings::{Settings, SharedSettings};
 use actix_web::web;
-use desk_ipc_protocol::message::WorkerToService;
 use desk_virtual_display::VirtualDisplayHandleInner;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -50,7 +49,7 @@ impl VirtualDisplayLifecycle for MockLifecycle {
 
 fn make_worker_mgr() -> (
     WorkerManager,
-    tokio::sync::mpsc::UnboundedReceiver<WorkerToService>,
+    crate::daemon::worker_manager::WorkerMessageReceiver,
 ) {
     let shared = SharedSettings::from(Settings::default());
     let settings = web::Data::new(shared);

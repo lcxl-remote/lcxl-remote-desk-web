@@ -11,7 +11,7 @@ pub(super) async fn bridge_loop<R, W>(
     reader: R,
     writer: W,
     cmd_rx: &mut mpsc::UnboundedReceiver<ServiceToWorker>,
-    msg_tx: &mpsc::UnboundedSender<WorkerToService>,
+    msg_tx: &WorkerMessageSink,
     name: &str,
 ) -> bool
 where
@@ -23,17 +23,22 @@ where
     bridge_event_transport(event_rx, event_tx, cmd_rx, msg_tx, name).await
 }
 
-/// Transport-agnostic bridge between the daemon's internal mpsc channels
-/// (`cmd_rx` for daemon → worker; `msg_tx` for worker → daemon) and the
-/// supplied event transport pair. Returns `true` when the daemon initiated
-/// the shutdown (Shutdown command sent or cmd channel closed) and `false`
-/// when the worker side dropped first — the caller uses this to decide
-/// whether to trigger crash-recovery.
+/// Transport-agnostic bridge between the daemon's internal channels (`cmd_rx`
+/// for daemon → worker; `msg_tx` for worker → daemon) and the supplied event
+/// transport pair. Returns `true` when the daemon initiated the shutdown
+/// (Shutdown command sent or cmd channel closed) and `false` when the worker
+/// side dropped first — the caller uses this to decide whether to trigger
+/// crash-recovery.
+///
+/// One bridge serves exactly one worker, which is why `msg_tx` is a
+/// [`WorkerMessageSink`] rather than the daemon's shared channel: the sink knows
+/// whose messages these are and stamps them, so the daemon can still tell them
+/// apart after this worker has been replaced.
 pub(super) async fn bridge_event_transport(
     mut event_rx: Box<dyn EventReceiver<WorkerToService>>,
     event_tx: Arc<dyn EventSender<ServiceToWorker>>,
     cmd_rx: &mut mpsc::UnboundedReceiver<ServiceToWorker>,
-    msg_tx: &mpsc::UnboundedSender<WorkerToService>,
+    msg_tx: &WorkerMessageSink,
     name: &str,
 ) -> bool {
     let (worker_msg_tx, mut worker_msg_rx) = mpsc::unbounded_channel::<Option<WorkerToService>>();
@@ -77,7 +82,7 @@ pub(super) async fn bridge_event_transport(
             msg_result = worker_msg_rx.recv() => {
                 match msg_result {
                     Some(Some(msg)) => {
-                        if msg_tx.send(msg).is_err() {
+                        if !msg_tx.send(msg) {
                             error!("SignalingProxy receiver dropped for [{name}]");
                             break;
                         }

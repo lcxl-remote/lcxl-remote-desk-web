@@ -449,15 +449,36 @@ pub async fn run_signaling_proxy(
         })
     };
 
-    while let Some(msg) = worker_rx.recv().await {
+    while let Some(worker_message) = worker_rx.recv().await {
         // Every IPC message — heartbeat, signaling, desktop change —
         // counts as a sign of life for the watchdog. Updating before
         // the match keeps the bookkeeping in one place and avoids the
         // watchdog firing on a worker that's actively talking but
         // hasn't happened to send a Heartbeat in the last interval.
-        worker_mgr.note_heartbeat().await;
+        //
+        // It counts for the worker that sent it, though, and only while that
+        // worker is still the one running. Replacing a worker does not silence
+        // it: what it had already queued arrives afterwards, and every handler
+        // below assumes it is hearing from the worker in charge. A desktop
+        // switch, a crash restart or a remote-access recycle would otherwise
+        // let the outgoing worker overwrite its successor's capability
+        // snapshot, order the successor replaced in turn, or stand in for the
+        // successor's heartbeat while the successor has never spoken. When a
+        // worker goes, everything it was doing goes with it — the daemon has
+        // already cleared its capabilities and dropped its activity — so there
+        // is nothing left for its backlog to say.
+        if !worker_mgr
+            .note_message_from(worker_message.incarnation)
+            .await
+        {
+            debug!(
+                "[SignalingProxy] dropping a message from worker {} — it has been replaced",
+                worker_message.incarnation
+            );
+            continue;
+        }
 
-        match msg {
+        match worker_message.message {
             WorkerToService::Ready => {
                 info!("[SignalingProxy] Worker is Ready");
             }

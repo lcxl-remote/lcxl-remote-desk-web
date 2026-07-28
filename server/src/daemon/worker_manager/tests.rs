@@ -209,7 +209,8 @@ async fn handle_crash_recovery_is_noop_when_inprocess() {
     mgr.is_inprocess.store(true, Ordering::Relaxed);
 
     // Should return synchronously without scheduling any recovery work.
-    mgr.handle_crash_recovery(0, None);
+    let worker = mgr.mint_worker().incarnation();
+    mgr.handle_crash_recovery(worker, 0, None);
 
     // Yield once so any (incorrectly) spawned task would get a chance
     // to flip state. With the fix in place, nothing is queued.

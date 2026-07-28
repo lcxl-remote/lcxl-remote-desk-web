@@ -28,11 +28,77 @@ const DEFAULT_WORKER_HEARTBEAT_TIMEOUT_SECS: u64 = 30;
 /// keeps recovery latency bounded.
 const WORKER_HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Identifies one worker the daemon started, so what that worker says can be
+/// told apart from what the worker that replaced it says.
+///
+/// Replacing a worker does not silence it instantly: messages it already put on
+/// the wire, and messages its bridge already queued, arrive after the
+/// replacement is installed. Without a name on them the daemon reads a dead
+/// worker's report as the living one's — an old capability snapshot overwrites
+/// the new worker's devices, an old desktop-drift notice restarts a worker that
+/// just started, and an old message counts as the replacement's sign of life
+/// even if the replacement has never spoken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WorkerIncarnation(u64);
+
+impl std::fmt::Display for WorkerIncarnation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}", self.0)
+    }
+}
+
+/// A message from a worker, carrying which worker sent it.
+#[derive(Debug, Clone)]
+pub struct WorkerMessage {
+    pub incarnation: WorkerIncarnation,
+    pub message: WorkerToService,
+}
+
+/// The daemon end of one worker's event lane. Stamps every message with the
+/// worker it came from, which is what lets the reader tell a live report from a
+/// late one.
+#[derive(Clone)]
+pub(super) struct WorkerMessageSink {
+    incarnation: WorkerIncarnation,
+    tx: mpsc::UnboundedSender<WorkerMessage>,
+}
+
+impl WorkerMessageSink {
+    pub(super) fn incarnation(&self) -> WorkerIncarnation {
+        self.incarnation
+    }
+
+    /// Hand a message to the daemon, stamped with this worker. `false` means
+    /// the daemon has stopped reading altogether, which is the bridge's cue to
+    /// give up rather than keep draining a worker nobody is listening to.
+    #[must_use]
+    pub(super) fn send(&self, message: WorkerToService) -> bool {
+        self.tx
+            .send(WorkerMessage {
+                incarnation: self.incarnation,
+                message,
+            })
+            .is_ok()
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test(incarnation: u64, tx: mpsc::UnboundedSender<WorkerMessage>) -> Self {
+        Self {
+            incarnation: WorkerIncarnation(incarnation),
+            tx,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct WorkerManager {
     settings: web::Data<SharedSettings>,
     inner: Arc<Mutex<WorkerManagerInner>>,
-    worker_msg_tx: Arc<mpsc::UnboundedSender<WorkerToService>>,
+    worker_msg_tx: Arc<mpsc::UnboundedSender<WorkerMessage>>,
+    /// Source of [`WorkerIncarnation`]s. Monotonic for the life of the daemon,
+    /// so a number is never reused and a late message can never be mistaken for
+    /// a message from the worker occupying that slot now.
+    next_incarnation: Arc<AtomicU64>,
     /// Daemon-side per-`connection_id` PeerConnection registry.
     /// Held as a clonable handle so the media-pipe receiver task can
     /// look up `video_track`s and call `write_sample` without going back
@@ -90,6 +156,9 @@ struct WorkerManagerInner {
 }
 
 struct WorkerHandle {
+    /// Which worker this is. Every message the daemon reads carries the same
+    /// value, and only a match means the sender is still the worker in charge.
+    incarnation: WorkerIncarnation,
     pipe_name: String,
     ipc_tx: mpsc::UnboundedSender<ServiceToWorker>,
     process_handle: Option<ProcessHandle>,
@@ -214,14 +283,14 @@ impl Drop for NativeWindowsChild {
     }
 }
 
-pub type WorkerMessageReceiver = mpsc::UnboundedReceiver<WorkerToService>;
+pub type WorkerMessageReceiver = mpsc::UnboundedReceiver<WorkerMessage>;
 
 impl WorkerManager {
     pub fn new(
         settings: web::Data<SharedSettings>,
         pc_registry: PcRegistry,
     ) -> (Self, WorkerMessageReceiver) {
-        let (tx, rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkerMessage>();
         let (cap_version_tx, _cap_version_rx) = watch::channel::<u64>(0);
         let mgr = WorkerManager {
             settings,
@@ -229,6 +298,7 @@ impl WorkerManager {
                 active_worker: None,
             })),
             worker_msg_tx: Arc::new(tx),
+            next_incarnation: Arc::new(AtomicU64::new(1)),
             pc_registry,
             worker_capabilities: Arc::new(StdMutex::new(None)),
             capabilities_version: Arc::new(AtomicU64::new(0)),
@@ -250,6 +320,17 @@ impl WorkerManager {
     /// only meaningful in the daemon-spawned (named-pipe) topology.
     pub fn is_inprocess(&self) -> bool {
         self.is_inprocess.load(Ordering::Relaxed)
+    }
+
+    /// Name the worker that is about to start, and hand back the sink its
+    /// bridge posts to. Called before the worker exists so everything the
+    /// worker ever says is already stamped.
+    fn mint_worker(&self) -> WorkerMessageSink {
+        let incarnation = WorkerIncarnation(self.next_incarnation.fetch_add(1, Ordering::Relaxed));
+        WorkerMessageSink {
+            incarnation,
+            tx: (*self.worker_msg_tx).clone(),
+        }
     }
 
     pub fn bind_remote_access_gate(&self, gate: crate::daemon::remote_access::RemoteAccessGate) {
@@ -309,7 +390,8 @@ impl WorkerManager {
             crate::daemon::local_api::SERVICE_API_PORT
         );
 
-        let worker_msg_tx = Arc::clone(&self.worker_msg_tx);
+        let worker_msg_tx = self.mint_worker();
+        let incarnation = worker_msg_tx.incarnation();
         let pipe_name_c = pipe_name.clone();
         let desktop_c = desktop_name.clone();
         let config_c = config_json.clone();
@@ -332,7 +414,7 @@ impl WorkerManager {
                 desktop_c,
                 config_c,
                 ipc_cmd_rx,
-                (*worker_msg_tx).clone(),
+                worker_msg_tx,
                 mgr_c,
                 host_upstream_url_c,
                 ipc_token_c,
@@ -350,6 +432,7 @@ impl WorkerManager {
             .await?;
 
         inner.active_worker = Some(WorkerHandle {
+            incarnation,
             pipe_name,
             ipc_tx: ipc_cmd_tx,
             process_handle: Some(process),
@@ -361,7 +444,7 @@ impl WorkerManager {
             inprocess_restart: None,
         });
 
-        info!("Worker started for session {session_id}");
+        info!("Worker {incarnation} started for session {session_id}");
         Ok(())
     }
 
@@ -465,7 +548,8 @@ impl WorkerManager {
         // so the in-process and named-pipe paths share the
         // shutdown / closed bookkeeping.
         let pipe_name_for_bridge = pipe_name.clone();
-        let worker_msg_tx = (*self.worker_msg_tx).clone();
+        let worker_msg_tx = self.mint_worker();
+        let incarnation = worker_msg_tx.incarnation();
         actix_web::rt::spawn(async move {
             let _ = bridge_event_transport(
                 w2s_rx,
@@ -536,6 +620,7 @@ impl WorkerManager {
             Arc::new(RwLock::new(Some(file_d2w_tx)));
 
         inner.active_worker = Some(WorkerHandle {
+            incarnation,
             pipe_name,
             ipc_tx: ipc_cmd_tx,
             // No OS process to track in in-process mode. The worker task
@@ -552,7 +637,7 @@ impl WorkerManager {
             inprocess_restart: Some(restart),
         });
 
-        info!("In-process worker started for session {session_id}");
+        info!("In-process worker {incarnation} started for session {session_id}");
         Ok(())
     }
 
@@ -625,9 +710,14 @@ impl WorkerManager {
     /// observe the IPC the daemon sends without standing up a real
     /// worker process.
     #[cfg(test)]
-    pub async fn install_active_for_test(&self, ipc_tx: mpsc::UnboundedSender<ServiceToWorker>) {
+    pub async fn install_active_for_test(
+        &self,
+        ipc_tx: mpsc::UnboundedSender<ServiceToWorker>,
+    ) -> WorkerIncarnation {
+        let incarnation = self.mint_worker().incarnation();
         let mut inner = self.inner.lock().await;
         inner.active_worker = Some(WorkerHandle {
+            incarnation,
             pipe_name: "test".to_string(),
             ipc_tx,
             process_handle: None,
@@ -638,6 +728,7 @@ impl WorkerManager {
             inprocess_task: None,
             inprocess_restart: None,
         });
+        incarnation
     }
 
     pub fn complete_remote_access_ack(
@@ -781,14 +872,27 @@ impl WorkerManager {
         sender.send(payload).await.map_err(|e| format!("{e}"))
     }
 
-    /// Record that the daemon just received an IPC message from the
-    /// active worker. The watchdog uses this to detect when a worker
-    /// has stopped responding (every IPC message — heartbeat or
-    /// otherwise — counts as a sign of life).
-    pub async fn note_heartbeat(&self) {
+    /// Record that a message arrived from `incarnation`, and report whether
+    /// that worker is the one the daemon is running.
+    ///
+    /// A `false` answer means the message was overtaken: it was sent by a
+    /// worker the daemon has already replaced, so it describes a process that
+    /// is gone and must not be allowed to speak for the one that took its
+    /// place. The reader drops it.
+    ///
+    /// The two halves are answered together, under one lock, because they are
+    /// the same question. Every IPC message — heartbeat or otherwise — counts
+    /// as a sign of life, but only for the worker that sent it: crediting a
+    /// replaced worker's backlog to its replacement would keep the watchdog
+    /// quiet about a replacement that has never said anything.
+    pub async fn note_message_from(&self, incarnation: WorkerIncarnation) -> bool {
         let mut inner = self.inner.lock().await;
-        if let Some(worker) = inner.active_worker.as_mut() {
-            worker.last_heartbeat_at = Instant::now();
+        match inner.active_worker.as_mut() {
+            Some(worker) if worker.incarnation == incarnation => {
+                worker.last_heartbeat_at = Instant::now();
+                true
+            }
+            _ => false,
         }
     }
 
@@ -897,12 +1001,35 @@ impl WorkerManager {
     /// heartbeat — separated out so the watchdog can decide whether
     /// to fire without holding the manager lock during the kill /
     /// restart path.
-    async fn active_worker_snapshot(&self) -> Option<(u32, Option<String>, Instant)> {
+    async fn active_worker_snapshot(
+        &self,
+    ) -> Option<(WorkerIncarnation, u32, Option<String>, Instant)> {
         let inner = self.inner.lock().await;
-        inner
-            .active_worker
-            .as_ref()
-            .map(|w| (w.session_id, w.desktop_name.clone(), w.last_heartbeat_at))
+        inner.active_worker.as_ref().map(|w| {
+            (
+                w.incarnation,
+                w.session_id,
+                w.desktop_name.clone(),
+                w.last_heartbeat_at,
+            )
+        })
+    }
+
+    /// Whether restarting on `incarnation`'s behalf is still the right thing to
+    /// do: either it is the worker the daemon is running, or the daemon has no
+    /// worker at all, so a restart has nothing newer to trample.
+    ///
+    /// The second case is what keeps a failed start recoverable — a pipe server
+    /// whose worker never dialled in reports the failure long after
+    /// `start_worker` gave up, and by then there is no handle to compare
+    /// against. The first case is what stops a pipe server from tearing down
+    /// the worker that was started while it was giving up.
+    async fn restart_is_still_wanted(&self, incarnation: WorkerIncarnation) -> bool {
+        let inner = self.inner.lock().await;
+        match inner.active_worker.as_ref() {
+            Some(worker) => worker.incarnation == incarnation,
+            None => true,
+        }
     }
 
     /// Spawn the heartbeat watchdog. Returns the join handle so the
@@ -930,7 +1057,8 @@ impl WorkerManager {
                     )
                 };
 
-                let Some((session_id, desktop_name, last)) = mgr.active_worker_snapshot().await
+                let Some((incarnation, session_id, desktop_name, last)) =
+                    mgr.active_worker_snapshot().await
                 else {
                     continue;
                 };
@@ -940,11 +1068,12 @@ impl WorkerManager {
                 }
 
                 warn!(
-                    "[WorkerWatchdog] no IPC traffic for {:?} (timeout={:?}, session={session_id}, \
-                     desktop={desktop_name:?}) — declaring worker stuck and restarting",
+                    "[WorkerWatchdog] no IPC traffic for {:?} (timeout={:?}, worker={incarnation}, \
+                     session={session_id}, desktop={desktop_name:?}) — declaring worker stuck and \
+                     restarting",
                     elapsed, timeout
                 );
-                mgr.handle_crash_recovery(session_id, desktop_name);
+                mgr.handle_crash_recovery(incarnation, session_id, desktop_name);
             }
         })
     }
@@ -965,27 +1094,52 @@ impl WorkerManager {
         self.pc_registry.pause_all_media().await;
     }
 
-    pub fn handle_crash_recovery(&self, session_id: u32, desktop_name: Option<String>) {
-        self.pc_registry.clear_worker_activity();
+    /// Restart the worker named by `incarnation` because it stopped serving.
+    ///
+    /// The caller is whoever noticed — a pipe server whose worker never dialled
+    /// in or whose transport dropped, or the heartbeat watchdog. Any of them can
+    /// be reporting on a worker the daemon has already moved on from: a pipe
+    /// server spends up to fifteen seconds waiting for a connection, and a
+    /// desktop switch during that wait installs a replacement in the meantime.
+    /// Restarting on the stale one's behalf would kill the worker that is
+    /// actually running, so the decision is re-checked against the current
+    /// worker before anything is torn down.
+    pub fn handle_crash_recovery(
+        &self,
+        incarnation: WorkerIncarnation,
+        session_id: u32,
+        desktop_name: Option<String>,
+    ) {
         // Portable / Default mode: there is no external process to
         // crash-recover. The "worker" is an in-process task — if it
         // unwound the whole runtime is going down anyway, and even if
         // we tried to re-launch we'd hit `CreateProcessAsUserW` from a
         // non-SYSTEM context. Log and bail.
         if self.is_inprocess() {
+            self.pc_registry.clear_worker_activity();
             warn!(
-                "[WorkerManager] In-process worker exited unexpectedly (session={session_id}); \
-                 crash recovery is a no-op in portable mode"
+                "[WorkerManager] In-process worker {incarnation} exited unexpectedly \
+                 (session={session_id}); crash recovery is a no-op in portable mode"
             );
             return;
         }
 
-        warn!("[WorkerManager] Worker exited unexpectedly — restarting (session={session_id})");
         let mgr = self.clone();
         // Must use tokio::spawn (not actix_web::rt::spawn / spawn_local) because this
         // is called from within a tokio::spawn task (run_pipe_server) which has no
         // LocalSet; calling spawn_local there panics and silently kills the task.
         tokio::spawn(async move {
+            if !mgr.restart_is_still_wanted(incarnation).await {
+                info!(
+                    "[WorkerManager] Worker {incarnation} reported it stopped, but it has already \
+                     been replaced; leaving the current worker alone"
+                );
+                return;
+            }
+            warn!(
+                "[WorkerManager] Worker {incarnation} exited unexpectedly — restarting \
+                 (session={session_id})"
+            );
             mgr.notify_desktop_switch().await;
             tokio::time::sleep(Duration::from_millis(500)).await;
             if let Err(e) = mgr.start_worker(session_id, desktop_name).await {
@@ -1089,6 +1243,9 @@ mod tests;
 
 #[cfg(test)]
 mod bridge_tests;
+
+#[cfg(test)]
+mod incarnation_tests;
 
 #[cfg(test)]
 mod policy_tests;

@@ -12,7 +12,8 @@ async fn bridge_forwards_cmd_to_worker() {
     let (s2w_tx, mut s2w_rx) = inprocess::make_event::<ServiceToWorker>();
     let (_w2s_tx, w2s_rx) = inprocess::make_event::<WorkerToService>();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
-    let (msg_tx, _msg_rx) = mpsc::unbounded_channel::<WorkerToService>();
+    let (raw_msg_tx, _msg_rx) = mpsc::unbounded_channel::<WorkerMessage>();
+    let msg_tx = WorkerMessageSink::for_test(7, raw_msg_tx);
 
     let handle = tokio::spawn(async move {
         bridge_event_transport(w2s_rx, s2w_tx, &mut cmd_rx, &msg_tx, "bridge-test").await
@@ -48,7 +49,9 @@ async fn bridge_forwards_worker_msg_to_daemon() {
     let (s2w_tx, _s2w_rx) = inprocess::make_event::<ServiceToWorker>();
     let (w2s_tx, w2s_rx) = inprocess::make_event::<WorkerToService>();
     let (_cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
-    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<WorkerToService>();
+    let (raw_msg_tx, mut msg_rx) = mpsc::unbounded_channel::<WorkerMessage>();
+    let msg_tx = WorkerMessageSink::for_test(7, raw_msg_tx);
+    let stamp = msg_tx.incarnation();
 
     let handle = tokio::spawn(async move {
         bridge_event_transport(w2s_rx, s2w_tx, &mut cmd_rx, &msg_tx, "bridge-test").await
@@ -68,7 +71,11 @@ async fn bridge_forwards_worker_msg_to_daemon() {
         .await
         .expect("daemon should observe worker msg")
         .expect("daemon msg channel open");
-    match observed {
+    assert_eq!(
+        observed.incarnation, stamp,
+        "the bridge stamps every message with the worker it serves"
+    );
+    match observed.message {
         WorkerToService::Heartbeat(p) => assert_eq!(p.timestamp_ms, 42),
         other => panic!("expected Heartbeat, got {other:?}"),
     }
@@ -96,7 +103,8 @@ async fn bridge_shutdown_cmd_marks_daemon_initiated() {
     let (s2w_tx, mut s2w_rx) = inprocess::make_event::<ServiceToWorker>();
     let (_w2s_tx, w2s_rx) = inprocess::make_event::<WorkerToService>();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
-    let (msg_tx, _msg_rx) = mpsc::unbounded_channel::<WorkerToService>();
+    let (raw_msg_tx, _msg_rx) = mpsc::unbounded_channel::<WorkerMessage>();
+    let msg_tx = WorkerMessageSink::for_test(7, raw_msg_tx);
 
     let handle = tokio::spawn(async move {
         bridge_event_transport(w2s_rx, s2w_tx, &mut cmd_rx, &msg_tx, "bridge-test").await

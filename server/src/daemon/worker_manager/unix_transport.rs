@@ -10,7 +10,7 @@ pub(super) async fn run_pipe_server(
     desktop_name: Option<String>,
     config_json: String,
     mut cmd_rx: mpsc::UnboundedReceiver<ServiceToWorker>,
-    msg_tx: mpsc::UnboundedSender<WorkerToService>,
+    msg_tx: WorkerMessageSink,
     worker_mgr: WorkerManager,
     host_upstream_url: String,
     ipc_token: Option<String>,
@@ -19,7 +19,8 @@ pub(super) async fn run_pipe_server(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::net::UnixListener;
 
-    info!("Creating Unix socket server: {socket_path}");
+    let incarnation = msg_tx.incarnation();
+    info!("Creating Unix socket server for worker {incarnation}: {socket_path}");
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
 
@@ -41,14 +42,14 @@ pub(super) async fn run_pipe_server(
         }
         Ok(Err(e)) => {
             error!("Unix socket accept error for {socket_path}: {e}");
-            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+            worker_mgr.handle_crash_recovery(incarnation, session_id, desktop_name_copy);
             let _ = std::fs::remove_file(socket_path);
             let _ = std::fs::remove_file(&file_socket_path);
             return Ok(());
         }
         Err(_) => {
             warn!("Timed out waiting for worker to connect on {socket_path}; triggering recovery");
-            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+            worker_mgr.handle_crash_recovery(incarnation, session_id, desktop_name_copy);
             let _ = std::fs::remove_file(socket_path);
             let _ = std::fs::remove_file(&file_socket_path);
             return Ok(());
@@ -101,7 +102,7 @@ pub(super) async fn run_pipe_server(
                     "File socket accept failed for {file_socket_path}: {e}; \
                  dropping into recovery (no file lane = no file transfer)"
                 );
-                worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+                worker_mgr.handle_crash_recovery(incarnation, session_id, desktop_name_copy);
                 let _ = std::fs::remove_file(socket_path);
                 let _ = std::fs::remove_file(&file_socket_path);
                 return Ok(());
@@ -111,7 +112,7 @@ pub(super) async fn run_pipe_server(
                     "Timed out waiting for worker on file socket {file_socket_path}; \
                  dropping into recovery"
                 );
-                worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+                worker_mgr.handle_crash_recovery(incarnation, session_id, desktop_name_copy);
                 let _ = std::fs::remove_file(socket_path);
                 let _ = std::fs::remove_file(&file_socket_path);
                 return Ok(());
@@ -131,7 +132,7 @@ pub(super) async fn run_pipe_server(
     *file_sender_slot.write().await = None;
 
     if !expected {
-        worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+        worker_mgr.handle_crash_recovery(incarnation, session_id, desktop_name_copy);
     }
 
     Ok(())
