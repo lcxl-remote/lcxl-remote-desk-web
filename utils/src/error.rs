@@ -347,6 +347,31 @@ desk_error_codes! {
     /// first. Carried in `RestResponse.code` (business error, HTTP stays 200).
     ACCOUNT_IS_PLATFORM_ADMIN = 72,
 
+    // ---- External identity and OAuth security core ----
+    /// The account already has an identity for the requested provider, or the
+    /// immutable provider key is already owned by another identity.
+    IDENTITY_ALREADY_LINKED = 73,
+    /// Removing or disabling the requested authentication method would leave
+    /// the account with no usable way to sign in.
+    LAST_LOGIN_METHOD = 74,
+    /// The requested password-authenticated operation cannot run because this
+    /// externally provisioned account has not set a password.
+    PASSWORD_NOT_SET = 75,
+    /// The selected OAuth provider is disabled or not fully configured.
+    OAUTH_PROVIDER_DISABLED = 76,
+    /// The provider code exchange or identity fetch failed. Details remain
+    /// server-side to avoid leaking provider responses or credentials.
+    OAUTH_EXCHANGE_FAILED = 77,
+    /// A sensitive operation requires a fresh, action-bound reauthentication
+    /// proof.
+    REAUTH_REQUIRED = 78,
+    /// The OAuth transaction is absent, expired, already consumed, or does not
+    /// match its provider, browser session, or configuration revision.
+    OAUTH_TXN_INVALID = 79,
+    /// The OAuth continuation is absent, expired, already completed, fenced by
+    /// another attempt, or otherwise invalid for this operation.
+    OAUTH_CONTINUATION_INVALID = 80,
+
     /// A connection-verify probe could not reach the target at all (DNS failure,
     /// connection refused, TLS handshake failure). Carried inside the
     /// `ConnectionVerifyResult` for display.
