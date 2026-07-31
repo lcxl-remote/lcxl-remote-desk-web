@@ -42,6 +42,24 @@ pub(super) fn suspended_recovery_delay(attempt: u32, jitter_ms: u64) -> Duration
     Duration::from_secs(core_seconds) + Duration::from_millis(jitter_ms.min(30_000))
 }
 
+pub(super) fn next_suspended_recovery_delay(attempt: &mut u32, sample: u64) -> Duration {
+    let delay = suspended_recovery_delay(*attempt, suspended_recovery_jitter_ms(sample));
+    *attempt = attempt.saturating_add(1);
+    delay
+}
+
+pub(super) fn manager_reconnect_jitter_ms(sample: u64) -> u64 {
+    sample % 20_001
+}
+
+pub(super) fn suspended_recovery_jitter_ms(sample: u64) -> u64 {
+    sample % 30_001
+}
+
+pub(super) fn lease_expiry_reconnect_jitter_ms(sample: u64) -> u64 {
+    sample % 60_001
+}
+
 pub(super) fn credential_expiry_reconnect_delay(jitter_ms: u64) -> Duration {
     Duration::from_secs(5) + Duration::from_millis(jitter_ms.min(60_000))
 }

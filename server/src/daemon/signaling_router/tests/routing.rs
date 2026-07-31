@@ -192,11 +192,12 @@ pub(super) async fn route_terminal_requests_handled_inline_not_bridged() {
 /// A stamped owner `StartTerminal` on an un-admitted terminal WS connection
 /// establishes the connection's admission (owner → `OwnerFull`) and marks it as
 /// a terminal — the admission-establishing role that lets its later
-/// SendData/Resize/Close frames pass door1. No ceiling send is needed for an
-/// owner, so this runs without an active worker.
+/// SendData/Resize/Close frames pass door1.
 #[tokio::test]
 pub(super) async fn route_start_terminal_owner_stamp_records_admission_and_marks_terminal() {
     let mut ctx = make_ctx().await;
+    let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+    ctx.worker_mgr.install_active_for_test(worker_tx).await;
     ctx.inbound_start_terminal_authz = Some(
         desk_signal_facade::model::request_remote_authz::RequestRemoteAuthz {
             version: desk_signal_facade::model::request_remote_authz::REQUEST_REMOTE_AUTHZ_VERSION,
@@ -230,14 +231,63 @@ pub(super) async fn route_start_terminal_owner_stamp_records_admission_and_marks
         Some(pc_manager::Admission::OwnerFull)
     ));
     assert!(ctx.pc_registry.is_terminal_connection("term-x").await);
+    assert!(matches!(
+        worker_rx.try_recv(),
+        Ok(ServiceToWorker::StartTerminalRequest(_))
+    ));
     // A bare frame (owner-only relay, no stamp) admits as owner the same way.
     let mut ctx2 = make_ctx().await;
+    let (worker_tx2, mut worker_rx2) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+    ctx2.worker_mgr.install_active_for_test(worker_tx2).await;
     ctx2.inbound_start_terminal_authz = None;
     route(&model, &ctx2).await.expect("ok");
     assert!(matches!(
         ctx2.pc_registry.admission("term-x").await,
         Some(pc_manager::Admission::OwnerFull)
     ));
+    assert!(matches!(
+        worker_rx2.try_recv(),
+        Ok(ServiceToWorker::StartTerminalRequest(_))
+    ));
+}
+
+#[tokio::test]
+pub(super) async fn route_start_terminal_dispatch_failure_clears_capability_footprint() {
+    let mut ctx = make_ctx().await;
+    ctx.inbound_start_terminal_authz = Some(
+        desk_signal_facade::model::request_remote_authz::RequestRemoteAuthz {
+            version: desk_signal_facade::model::request_remote_authz::REQUEST_REMOTE_AUTHZ_VERSION,
+            access_ceiling: None,
+            grant_session_id: None,
+            generation: 0,
+            actor: desk_signal_facade::model::request_remote_authz::ActorSummary::unknown(),
+            request_id: "rt-failed".to_string(),
+            audience: "aud".to_string(),
+            expires_at: None,
+        },
+    );
+    let model = SignalingModel::new(
+        "rt-failed",
+        SignalingType::StartTerminal,
+        Some("term-failed".to_string()),
+        None,
+        Some(
+            serde_json::to_value(desk_signal_facade::model::terminal::StartTerminalSession {
+                command: "cmd.exe".to_string(),
+                device_id: None,
+                grant_session_id: None,
+            })
+            .unwrap(),
+        ),
+        None,
+    );
+
+    route(&model, &ctx)
+        .await
+        .expect("dispatch failure is handled");
+
+    assert!(ctx.pc_registry.admission("term-failed").await.is_none());
+    assert!(!ctx.pc_registry.is_terminal_connection("term-failed").await);
 }
 
 /// A `CloseTerminal` clears the terminal connection's whole capability

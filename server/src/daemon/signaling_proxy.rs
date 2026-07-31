@@ -400,13 +400,10 @@ pub async fn run_signaling_proxy(
                             // Reversible owner/token state: retry the same token on
                             // a deliberately slow lane, never reissue it.
                             suspended_recovery = true;
-                            suspended_recovery_attempt = 0;
-                            let delay = suspended_recovery_delay(
-                                suspended_recovery_attempt,
-                                rand::random::<u64>() % 30_001,
+                            let delay = next_suspended_recovery_delay(
+                                &mut suspended_recovery_attempt,
+                                rand::random(),
                             );
-                            suspended_recovery_attempt =
-                                suspended_recovery_attempt.saturating_add(1);
                             tokio::time::sleep(delay).await;
                             continue;
                         }
@@ -420,18 +417,16 @@ pub async fn run_signaling_proxy(
                             suspended_recovery_attempt = 0;
                             manager_reconnect_attempt = 0;
                             tokio::time::sleep(credential_expiry_reconnect_delay(
-                                rand::random::<u64>() % 60_001,
+                                lease_expiry_reconnect_jitter_ms(rand::random()),
                             ))
                             .await;
                             continue;
                         }
                         Err(_) if suspended_recovery => {
-                            let delay = suspended_recovery_delay(
-                                suspended_recovery_attempt,
-                                rand::random::<u64>() % 30_001,
+                            let delay = next_suspended_recovery_delay(
+                                &mut suspended_recovery_attempt,
+                                rand::random(),
                             );
-                            suspended_recovery_attempt =
-                                suspended_recovery_attempt.saturating_add(1);
                             tokio::time::sleep(delay).await;
                             continue;
                         }
@@ -440,7 +435,7 @@ pub async fn run_signaling_proxy(
 
                     let delay = manager_host_reconnect_delay(
                         manager_reconnect_attempt,
-                        rand::random::<u64>() % 20_001,
+                        manager_reconnect_jitter_ms(rand::random()),
                     );
                     manager_reconnect_attempt = manager_reconnect_attempt.saturating_add(1);
                     tokio::time::sleep(delay).await;

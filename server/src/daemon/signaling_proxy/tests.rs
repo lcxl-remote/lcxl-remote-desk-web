@@ -697,6 +697,28 @@ fn suspended_recovery_delay_has_frozen_bounds() {
 }
 
 #[test]
+fn suspended_recovery_attempt_advances_across_explicit_rejections() {
+    let mut attempt = 0;
+    assert_eq!(
+        next_suspended_recovery_delay(&mut attempt, 0),
+        Duration::from_secs(60)
+    );
+    assert_eq!(
+        next_suspended_recovery_delay(&mut attempt, 0),
+        Duration::from_secs(120)
+    );
+    assert_eq!(
+        next_suspended_recovery_delay(&mut attempt, 0),
+        Duration::from_secs(240)
+    );
+    assert_eq!(
+        next_suspended_recovery_delay(&mut attempt, 0),
+        Duration::from_secs(300)
+    );
+    assert_eq!(attempt, 4);
+}
+
+#[test]
 fn credential_expiry_reconnect_delay_has_frozen_bounds() {
     assert_eq!(credential_expiry_reconnect_delay(0), Duration::from_secs(5));
     assert_eq!(
@@ -711,27 +733,54 @@ fn credential_expiry_reconnect_delay_has_frozen_bounds() {
 
 #[test]
 fn ten_thousand_expiry_redials_fit_the_frozen_one_second_bucket_gate() {
-    let mut buckets = [0_u16; 61];
+    let mut buckets = std::collections::BTreeMap::<u64, u16>::new();
     for host in 0..10_000 {
-        buckets[host % buckets.len()] += 1;
+        let sample = (host * 60_001) / 10_000;
+        let delay = credential_expiry_reconnect_delay(lease_expiry_reconnect_jitter_ms(sample));
+        *buckets.entry(delay.as_secs()).or_default() += 1;
     }
-    assert!(buckets.into_iter().all(|count| count <= 250));
+    assert!(buckets.into_values().all(|count| count <= 250));
 }
 
 #[test]
 fn fleet_jitter_windows_can_meet_all_frozen_one_second_bucket_gates() {
-    fn peak(hosts: usize, buckets: usize) -> usize {
-        let mut counts = vec![0_usize; buckets];
-        for host in 0..hosts {
-            counts[host % buckets] += 1;
-        }
-        counts.into_iter().max().unwrap_or_default()
+    fn evenly_spaced_sample(host: u64, window_ms: u64) -> u64 {
+        (host * window_ms) / 10_000
     }
 
-    assert!(peak(10_000, 10) <= 1_500, "accelerated probe");
-    assert!(peak(10_000, 21) <= 750, "ordinary reconnect");
-    assert!(peak(10_000, 31) <= 500, "suspended recovery");
-    assert!(peak(10_000, 61) <= 250, "lease-expiry reconnect");
+    fn peak(delays: impl IntoIterator<Item = Duration>) -> usize {
+        let mut counts = std::collections::BTreeMap::<u64, usize>::new();
+        for delay in delays {
+            *counts.entry(delay.as_secs()).or_default() += 1;
+        }
+        counts.into_values().max().unwrap_or_default()
+    }
+
+    assert!(
+        peak((0..10_000).map(accelerated_probe_phase)) <= 1_500,
+        "accelerated probe"
+    );
+    assert!(
+        peak((0..10_000).map(|host| {
+            let sample = evenly_spaced_sample(host, 20_001);
+            manager_host_reconnect_delay(0, manager_reconnect_jitter_ms(sample))
+        })) <= 750,
+        "ordinary reconnect"
+    );
+    assert!(
+        peak((0..10_000).map(|host| {
+            let sample = evenly_spaced_sample(host, 30_001);
+            suspended_recovery_delay(0, suspended_recovery_jitter_ms(sample))
+        })) <= 500,
+        "suspended recovery"
+    );
+    assert!(
+        peak((0..10_000).map(|host| {
+            let sample = evenly_spaced_sample(host, 60_001);
+            credential_expiry_reconnect_delay(lease_expiry_reconnect_jitter_ms(sample))
+        })) <= 250,
+        "lease-expiry reconnect"
+    );
 }
 
 #[test]
