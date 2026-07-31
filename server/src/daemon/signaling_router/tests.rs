@@ -25,6 +25,8 @@ async fn make_ctx() -> RouterContext {
                 .expect("in-memory ledger"),
         ),
         pc_registry,
+        admission_origin: crate::daemon::pc_manager::AdmissionOrigin::Local,
+        manager_credential_link: None,
         outbound_tx,
         settings,
         policy: crate::model::policy_access::PolicyAccess::authoritative(Arc::clone(

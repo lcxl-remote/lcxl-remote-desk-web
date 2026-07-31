@@ -8,6 +8,7 @@ pub mod exec_ledger;
 pub mod local_access_control;
 pub mod local_access_control_transport;
 pub mod local_api;
+pub mod manager_credential_scope;
 pub mod manager_link_gate;
 pub mod manager_link_state;
 pub mod pc_manager;

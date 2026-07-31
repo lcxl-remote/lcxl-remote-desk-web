@@ -47,6 +47,7 @@ use crate::daemon::bitrate_controller::{
     AdaptiveBitrateShared, AdaptiveBitrateState, CapDirective,
 };
 use crate::daemon::codec_negotiation;
+use crate::daemon::manager_credential_scope::CredentialFingerprint;
 use crate::daemon::worker_manager::WorkerManager;
 use crate::error::DeskError;
 use crate::host_control::HostControlHub;
@@ -321,6 +322,25 @@ pub enum Admission {
     Capped(SecuritySettings),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionOrigin {
+    Local,
+    RemoteSignal,
+    Manager(CredentialFingerprint),
+}
+
+#[derive(Debug, Clone)]
+pub struct AdmissionRecord {
+    pub class: Admission,
+    pub origin: AdmissionOrigin,
+}
+
+#[derive(Debug, Default)]
+struct AdmissionRegistry {
+    by_connection: HashMap<String, AdmissionRecord>,
+    by_manager_credential: HashMap<CredentialFingerprint, HashSet<String>>,
+}
+
 /// Daemon-wide registry of active per-browser
 /// `PeerConnectionContext`s, indexed by `connection_id`. Equivalent
 /// to the `DeskSession::rtc_peer_connection_map` the worker process
@@ -353,6 +373,11 @@ pub struct PcRegistry {
     inner: Arc<RwLock<HashMap<String, Arc<RwLock<PeerConnectionContext>>>>>,
     worker_mgr: Arc<tokio::sync::OnceCell<WorkerManager>>,
     host_activity: Arc<tokio::sync::OnceCell<crate::host_activity::HostActivityRegistry>>,
+    manager_credential_scopes: Arc<
+        tokio::sync::OnceCell<
+            crate::daemon::manager_credential_scope::ManagerCredentialScopeRegistry,
+        >,
+    >,
     /// The hub that owns pending approval prompts, so tearing a connection down
     /// can cancel the ones it raised. Weak because the hub outlives the
     /// registry it installed itself into and holding it strongly would make the
@@ -398,7 +423,7 @@ pub struct PcRegistry {
     /// post-teardown escalation where a capped client sends `CloseControl` then
     /// reuses the same connection id for owner-plane frames. Shared via `Arc` so
     /// registry clones stay consistent.
-    admissions: Arc<RwLock<HashMap<String, Admission>>>,
+    admissions: Arc<RwLock<AdmissionRegistry>>,
     /// Connection ids that are **terminal** WS connections (a distinct connection
     /// per open terminal, admitted via `StartTerminal` rather than `RequestRemote`
     /// and holding no PC). Tracked so a teardown — the connection's own
@@ -473,6 +498,15 @@ impl PcRegistry {
         }
     }
 
+    pub fn set_manager_credential_scopes(
+        &self,
+        registry: crate::daemon::manager_credential_scope::ManagerCredentialScopeRegistry,
+    ) {
+        if self.manager_credential_scopes.set(registry).is_err() {
+            log::debug!("[pc_manager] manager credential scope registry already installed");
+        }
+    }
+
     pub fn set_host_control_hub(&self, hub: &Arc<HostControlHub>) {
         if self.host_control_hub.set(Arc::downgrade(hub)).is_err() {
             log::debug!("[pc_manager] host control hub already installed; ignoring");
@@ -520,7 +554,7 @@ impl PcRegistry {
     pub async fn all_connection_ids(&self) -> Vec<String> {
         let mut ids = std::collections::BTreeSet::new();
         ids.extend(self.inner.read().await.keys().cloned());
-        ids.extend(self.admissions.read().await.keys().cloned());
+        ids.extend(self.admissions.read().await.by_connection.keys().cloned());
         ids.extend(self.terminal_connections.read().await.iter().cloned());
         if let Some(activity) = self.host_activity() {
             ids.extend(
@@ -609,10 +643,40 @@ impl PcRegistry {
     /// authorized. Kept for the whole signaling connection — see
     /// [`Self::admissions`].
     pub async fn record_admission(&self, connection_id: &str, admission: Admission) {
-        self.admissions
-            .write()
-            .await
-            .insert(connection_id.to_string(), admission);
+        self.record_admission_with_origin(connection_id, admission, AdmissionOrigin::Local)
+            .await;
+    }
+
+    pub async fn record_admission_with_origin(
+        &self,
+        connection_id: &str,
+        admission: Admission,
+        origin: AdmissionOrigin,
+    ) {
+        let mut registry = self.admissions.write().await;
+        if let Some(previous) = registry.by_connection.remove(connection_id)
+            && let AdmissionOrigin::Manager(fingerprint) = previous.origin
+            && let Some(connections) = registry.by_manager_credential.get_mut(&fingerprint)
+        {
+            connections.remove(connection_id);
+            if connections.is_empty() {
+                registry.by_manager_credential.remove(&fingerprint);
+            }
+        }
+        if let AdmissionOrigin::Manager(fingerprint) = &origin {
+            registry
+                .by_manager_credential
+                .entry(fingerprint.clone())
+                .or_default()
+                .insert(connection_id.to_string());
+        }
+        registry.by_connection.insert(
+            connection_id.to_string(),
+            AdmissionRecord {
+                class: admission,
+                origin,
+            },
+        );
     }
 
     /// The admission class of `connection_id`, if its `RequestRemote` was
@@ -620,7 +684,25 @@ impl PcRegistry {
     /// authorized `RequestRemote` (e.g. a central/owner management-only connection
     /// whose privileged frames are gated by their own source/authz gates).
     pub async fn admission(&self, connection_id: &str) -> Option<Admission> {
-        self.admissions.read().await.get(connection_id).cloned()
+        self.admissions
+            .read()
+            .await
+            .by_connection
+            .get(connection_id)
+            .map(|record| record.class.clone())
+    }
+
+    pub async fn manager_credential_connections(
+        &self,
+        fingerprint: &CredentialFingerprint,
+    ) -> Vec<String> {
+        self.admissions
+            .read()
+            .await
+            .by_manager_credential
+            .get(fingerprint)
+            .map(|connections| connections.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Drop `connection_id`'s admission record. Called only when the signaling
@@ -628,7 +710,30 @@ impl PcRegistry {
     /// on a `CloseControl` PC teardown, so a capped connection stays classified as
     /// capped for the life of its signaling connection.
     pub async fn clear_admission(&self, connection_id: &str) {
-        self.admissions.write().await.remove(connection_id);
+        let mut registry = self.admissions.write().await;
+        let manager_fingerprint = registry
+            .by_connection
+            .remove(connection_id)
+            .and_then(|record| {
+                if let AdmissionOrigin::Manager(fingerprint) = record.origin {
+                    if let Some(connections) = registry.by_manager_credential.get_mut(&fingerprint)
+                    {
+                        connections.remove(connection_id);
+                        if connections.is_empty() {
+                            registry.by_manager_credential.remove(&fingerprint);
+                        }
+                    }
+                    Some(fingerprint)
+                } else {
+                    None
+                }
+            });
+        drop(registry);
+        if let Some(fingerprint) = manager_fingerprint
+            && let Some(scopes) = self.manager_credential_scopes.get()
+        {
+            scopes.remove_member(&fingerprint, connection_id).await;
+        }
     }
 
     /// Mark `connection_id` as a terminal WS connection (see
@@ -860,7 +965,14 @@ impl PcRegistry {
             let mut out = Vec::with_capacity(map.len());
             for (id, ctx) in map.iter() {
                 let cached = ctx.read().await.cached_start_media.read().await.clone();
-                out.push((id.clone(), cached, admissions.get(id).cloned()));
+                out.push((
+                    id.clone(),
+                    cached,
+                    admissions
+                        .by_connection
+                        .get(id)
+                        .map(|record| record.class.clone()),
+                ));
             }
             out
         };

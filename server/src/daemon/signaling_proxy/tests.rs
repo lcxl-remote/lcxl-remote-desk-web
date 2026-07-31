@@ -546,6 +546,8 @@ async fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
                 .expect("in-memory ledger"),
         ),
         pc_registry,
+        admission_origin: crate::daemon::pc_manager::AdmissionOrigin::Local,
+        manager_credential_link: None,
         outbound_tx: outbound_tx.clone(),
         settings,
         policy: crate::model::policy_access::PolicyAccess::authoritative(Arc::clone(
@@ -666,6 +668,77 @@ fn fatal_registration_reject_matches_only_quota_codes() {
     // A non-Error frame is never fatal.
     let normal = SignalingModel::new("r", SignalingType::RequestRemote, None, None, None, None);
     assert_eq!(fatal_registration_reject(&normal), None);
+}
+
+#[test]
+fn manager_host_reconnect_delay_has_frozen_bounds() {
+    assert_eq!(manager_host_reconnect_delay(0, 0), Duration::from_secs(5));
+    assert_eq!(
+        manager_host_reconnect_delay(2, 10_000),
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        manager_host_reconnect_delay(100, 20_000),
+        Duration::from_secs(80)
+    );
+}
+
+#[test]
+fn suspended_recovery_delay_has_frozen_bounds() {
+    assert_eq!(suspended_recovery_delay(0, 0), Duration::from_secs(60));
+    assert_eq!(
+        suspended_recovery_delay(1, 30_000),
+        Duration::from_secs(150)
+    );
+    assert_eq!(
+        suspended_recovery_delay(100, 30_000),
+        Duration::from_secs(330)
+    );
+}
+
+#[test]
+fn credential_expiry_reconnect_delay_has_frozen_bounds() {
+    assert_eq!(credential_expiry_reconnect_delay(0), Duration::from_secs(5));
+    assert_eq!(
+        credential_expiry_reconnect_delay(60_000),
+        Duration::from_secs(65)
+    );
+    assert_eq!(
+        credential_expiry_reconnect_delay(u64::MAX),
+        Duration::from_secs(65)
+    );
+}
+
+#[test]
+fn ten_thousand_expiry_redials_fit_the_frozen_one_second_bucket_gate() {
+    let mut buckets = [0_u16; 61];
+    for host in 0..10_000 {
+        buckets[host % buckets.len()] += 1;
+    }
+    assert!(buckets.into_iter().all(|count| count <= 250));
+}
+
+#[test]
+fn fleet_jitter_windows_can_meet_all_frozen_one_second_bucket_gates() {
+    fn peak(hosts: usize, buckets: usize) -> usize {
+        let mut counts = vec![0_usize; buckets];
+        for host in 0..hosts {
+            counts[host % buckets] += 1;
+        }
+        counts.into_iter().max().unwrap_or_default()
+    }
+
+    assert!(peak(10_000, 10) <= 1_500, "accelerated probe");
+    assert!(peak(10_000, 21) <= 750, "ordinary reconnect");
+    assert!(peak(10_000, 31) <= 500, "suspended recovery");
+    assert!(peak(10_000, 61) <= 250, "lease-expiry reconnect");
+}
+
+#[test]
+fn accelerated_probe_phase_is_between_one_and_ten_seconds() {
+    assert_eq!(accelerated_probe_phase(0), Duration::from_secs(1));
+    assert_eq!(accelerated_probe_phase(9), Duration::from_secs(10));
+    assert_eq!(accelerated_probe_phase(10), Duration::from_secs(1));
 }
 
 /// On the manager link (flag enabled) a device-quota `Error` frame yields a

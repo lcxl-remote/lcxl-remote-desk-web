@@ -101,6 +101,20 @@ pub(super) async fn handle_start_terminal_inbound(
     let Some(connection_id) = require_from_connection_id(model, "StartTerminal") else {
         return Ok(());
     };
+    let manager_permit = if let Some(link) = ctx.manager_credential_link.as_ref() {
+        match link.begin_admission(connection_id).await {
+            Ok(permit) => Some(permit),
+            Err(crate::daemon::manager_credential_scope::AdmissionRejection::AwaitingProof) => {
+                super::send_manager_admission_retry(ctx, model);
+                return Ok(());
+            }
+            Err(crate::daemon::manager_credential_scope::AdmissionRejection::Terminal) => {
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
     let session = match model.get_data::<StartTerminalSession>() {
         Ok(s) => s,
         Err(e) => {
@@ -140,6 +154,27 @@ pub(super) async fn handle_start_terminal_inbound(
         .await
     {
         log::warn!("[router] failed to send typed StartTerminalRequest: {e}");
+        pc_manager::force_disconnect_connection(
+            &ctx.pc_registry,
+            &ctx.worker_mgr,
+            ctx.virtual_display.as_ref(),
+            connection_id,
+            "terminal-start-dispatch-failed",
+        )
+        .await;
+        return Ok(());
+    }
+    if let Some(permit) = manager_permit
+        && !permit.commit().await
+    {
+        pc_manager::force_disconnect_connection(
+            &ctx.pc_registry,
+            &ctx.worker_mgr,
+            ctx.virtual_display.as_ref(),
+            connection_id,
+            "manager-credential-terminal-admission-fenced",
+        )
+        .await;
     }
     Ok(())
 }
@@ -173,14 +208,19 @@ pub(super) async fn register_terminal_admission(ctx: &RouterContext, connection_
                     return false;
                 }
                 ctx.pc_registry
-                    .record_admission(
+                    .record_admission_with_origin(
                         connection_id,
                         pc_manager::Admission::Capped(ceiling.clone()),
+                        ctx.admission_origin.clone(),
                     )
                     .await;
             } else {
                 ctx.pc_registry
-                    .record_admission(connection_id, pc_manager::Admission::OwnerFull)
+                    .record_admission_with_origin(
+                        connection_id,
+                        pc_manager::Admission::OwnerFull,
+                        ctx.admission_origin.clone(),
+                    )
                     .await;
             }
             // Index a capped terminal under its grant so a directed revocation /
@@ -193,7 +233,11 @@ pub(super) async fn register_terminal_admission(ctx: &RouterContext, connection_
         }
         None => {
             ctx.pc_registry
-                .record_admission(connection_id, pc_manager::Admission::OwnerFull)
+                .record_admission_with_origin(
+                    connection_id,
+                    pc_manager::Admission::OwnerFull,
+                    ctx.admission_origin.clone(),
+                )
                 .await;
         }
     }

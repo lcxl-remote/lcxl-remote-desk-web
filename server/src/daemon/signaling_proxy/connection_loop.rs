@@ -2,6 +2,40 @@
 
 use super::*;
 
+struct OutstandingHeartbeat {
+    request_id: String,
+    deadline: tokio::time::Instant,
+}
+
+pub(super) async fn teardown_manager_members(
+    router_ctx: &RouterContext,
+    members: &[String],
+    reason: &str,
+) {
+    for connection_id in members {
+        if let Some(coordinator) = router_ctx.host_control_hub.remote_access_coordinator() {
+            if let Err(error) = coordinator.disconnect_connection(connection_id).await {
+                warn!(
+                    "[credential-proof] could not disconnect {connection_id} through coordinator: \
+                     {error}"
+                );
+            }
+        } else {
+            crate::daemon::pc_manager::force_disconnect_connection(
+                &router_ctx.pc_registry,
+                &router_ctx.worker_mgr,
+                router_ctx.virtual_display.as_ref(),
+                connection_id,
+                reason,
+            )
+            .await;
+            router_ctx
+                .host_control_hub
+                .cancel_pending_for_connection(connection_id);
+        }
+    }
+}
+
 pub(super) async fn maintain_proxy_connection(
     settings: web::Data<SharedSettings>,
     router_ctx: &RouterContext,
@@ -24,6 +58,7 @@ pub(super) async fn maintain_proxy_connection(
     // Candidate kind used to elect exactly one authoritative mirror dynamically:
     // manager > configured remote signal > embedded local signal.
     remote_access_central_link: RemoteAccessCentralLink,
+    credential_scopes: &crate::daemon::manager_credential_scope::ManagerCredentialScopeRegistry,
 ) -> Result<ProxyConnectionOutcome, Box<dyn std::error::Error>> {
     let display_name = {
         let s = settings.read().await;
@@ -59,7 +94,7 @@ pub(super) async fn maintain_proxy_connection(
         display_name,
         Some(client_id),
     );
-    version_info.token = Some(auth_token);
+    version_info.token = Some(auth_token.clone());
     version_info.set_available_exec_shells(&crate::exec_shells::available_exec_shells());
     let advertised_ai_command_runtime_ms = {
         let settings = settings.read().await;
@@ -137,6 +172,35 @@ pub(super) async fn maintain_proxy_connection(
         redact_token_in_url(&signaling_url)
     );
 
+    let manager_credential_link = if remote_access_central_link == RemoteAccessCentralLink::Manager
+    {
+        Some(credential_scopes.begin_link(&auth_token).await)
+    } else {
+        None
+    };
+    let mut credential_expiry_rx = credential_scopes.subscribe_expirations();
+    let effective_router_ctx = RouterContext {
+        admission_origin: match remote_access_central_link {
+            RemoteAccessCentralLink::Manager => {
+                crate::daemon::pc_manager::AdmissionOrigin::Manager(
+                    manager_credential_link
+                        .as_ref()
+                        .expect("manager link scope")
+                        .fingerprint(),
+                )
+            }
+            RemoteAccessCentralLink::RemoteSignal => {
+                crate::daemon::pc_manager::AdmissionOrigin::RemoteSignal
+            }
+            RemoteAccessCentralLink::Local | RemoteAccessCentralLink::None => {
+                crate::daemon::pc_manager::AdmissionOrigin::Local
+            }
+        },
+        manager_credential_link: manager_credential_link.clone(),
+        ..router_ctx.clone()
+    };
+    let router_ctx = &effective_router_ctx;
+
     // A successful (re)connection clears any prior fatal rejection so the host UI
     // stops showing the blocked state once registration goes through.
     if let Some(state) = manager_link_state.as_ref() {
@@ -144,6 +208,11 @@ pub(super) async fn maintain_proxy_connection(
     }
 
     let (mut sink, mut stream) = framed.split();
+    let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(30));
+    heartbeat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut outstanding_heartbeat: Option<OutstandingHeartbeat> = None;
+    let mut accelerated_remaining = 0_u8;
+    let mut accelerated_at: Option<tokio::time::Instant> = None;
     let mut remote_access_reconcile = tokio::time::interval(Duration::from_secs(2));
     remote_access_reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut agent_capability_reconcile = tokio::time::interval(Duration::from_secs(2));
@@ -172,6 +241,7 @@ pub(super) async fn maintain_proxy_connection(
         return Ok(ProxyConnectionOutcome::Closed);
     }
 
+    let mut credential_expired = false;
     loop {
         tokio::select! {
             ws_msg = stream.next() => {
@@ -186,6 +256,104 @@ pub(super) async fn maintain_proxy_connection(
                                         continue;
                                     }
                                 };
+                                if let Some(link) = manager_credential_link.as_ref()
+                                    && let Ok(model) =
+                                        serde_json::from_str::<SignalingModel>(&text_str)
+                                    && outstanding_heartbeat
+                                        .as_ref()
+                                        .is_some_and(|heartbeat| {
+                                            heartbeat.request_id == model.request_id
+                                        })
+                                {
+                                    if model.signaling_type == SignalingType::Heartbeat
+                                        && model
+                                            .response_state
+                                            .as_ref()
+                                            .is_some_and(SignalingResponseState::is_success)
+                                    {
+                                        outstanding_heartbeat = None;
+                                        let proof = model
+                                            .get_data_with_type::<
+                                                desk_signal_facade::model::credential_heartbeat::ManagerCredentialHeartbeatProof,
+                                            >()
+                                            .ok()
+                                            .flatten();
+                                        if proof.is_some_and(|proof| proof.is_supported())
+                                            && link.accept_proof().await
+                                        {
+                                            accelerated_remaining = 0;
+                                            accelerated_at = None;
+                                        } else {
+                                            link.proof_unavailable().await;
+                                            if accelerated_remaining == 0 {
+                                                accelerated_remaining = 3;
+                                                accelerated_at = Some(
+                                                    tokio::time::Instant::now()
+                                                        + accelerated_probe_phase(
+                                                            rand::random::<u64>(),
+                                                        ),
+                                                );
+                                            } else if accelerated_remaining > 0 {
+                                                accelerated_at = Some(
+                                                    tokio::time::Instant::now()
+                                                        + Duration::from_secs(10),
+                                                );
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                    if model.signaling_type == SignalingType::Error
+                                        && let Some(response) = model.response_state.as_ref()
+                                        && (response.error_code
+                                            == DeskErrorCode::MANAGER_CREDENTIAL_REVOKED.code()
+                                            || response.error_code
+                                                == DeskErrorCode::MANAGER_CREDENTIAL_SUSPENDED.code())
+                                    {
+                                        let suspended = response.error_code
+                                            == DeskErrorCode::MANAGER_CREDENTIAL_SUSPENDED.code();
+                                        let scope_state = if suspended {
+                                            crate::daemon::manager_credential_scope::CredentialScopeState::Suspended
+                                        } else {
+                                            crate::daemon::manager_credential_scope::CredentialScopeState::Revoked
+                                        };
+                                        let members = link.invalidate(scope_state).await;
+                                        teardown_manager_members(
+                                            router_ctx,
+                                            &members,
+                                            if suspended {
+                                                "manager-credential-suspended"
+                                            } else {
+                                                "manager-credential-revoked"
+                                            },
+                                        )
+                                        .await;
+                                        let message = response.message.clone().unwrap_or_else(|| {
+                                            if suspended {
+                                                "Manager credential is temporarily suspended"
+                                            } else {
+                                                "Manager credential is no longer valid"
+                                            }
+                                            .to_string()
+                                        });
+                                        if let Some(state) = manager_link_state.as_ref() {
+                                            state
+                                                .record_fatal(response.error_code, message.clone())
+                                                .await;
+                                        }
+                                        let _ = sink.send(awc::ws::Message::Close(None)).await;
+                                        return if suspended {
+                                            Ok(ProxyConnectionOutcome::CredentialSuspended {
+                                                error_code: response.error_code,
+                                                message,
+                                            })
+                                        } else {
+                                            Ok(ProxyConnectionOutcome::FatalReject {
+                                                error_code: response.error_code,
+                                                message,
+                                            })
+                                        };
+                                    }
+                                }
                                 if remote_access_link_is_primary(
                                     &settings,
                                     remote_access_central_link,
@@ -263,6 +431,86 @@ pub(super) async fn maintain_proxy_connection(
                 }
             }
 
+            _ = heartbeat_tick.tick(), if manager_credential_link.is_some()
+                && outstanding_heartbeat.is_none()
+                && accelerated_remaining == 0 => {
+                let heartbeat = SignalingModel::new_request::<()>(
+                    SignalingType::Heartbeat,
+                    None,
+                    None,
+                )
+                .map_err(|error| format!("could not build manager heartbeat: {error}"))?;
+                let request_id = heartbeat.request_id.clone();
+                sink.send(awc::ws::Message::Text(
+                    serde_json::to_string(&heartbeat)?.into(),
+                ))
+                .await?;
+                outstanding_heartbeat = Some(OutstandingHeartbeat {
+                    request_id,
+                    deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+                });
+            }
+
+            _ = async {
+                match accelerated_at {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if manager_credential_link.is_some()
+                && outstanding_heartbeat.is_none()
+                && accelerated_remaining > 0 => {
+                let heartbeat = SignalingModel::new_request::<()>(
+                    SignalingType::Heartbeat,
+                    None,
+                    None,
+                )
+                .map_err(|error| format!("could not build manager heartbeat: {error}"))?;
+                let request_id = heartbeat.request_id.clone();
+                sink.send(awc::ws::Message::Text(
+                    serde_json::to_string(&heartbeat)?.into(),
+                ))
+                .await?;
+                accelerated_remaining = accelerated_remaining.saturating_sub(1);
+                accelerated_at = None;
+                outstanding_heartbeat = Some(OutstandingHeartbeat {
+                    request_id,
+                    deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+                });
+            }
+
+            _ = async {
+                match outstanding_heartbeat.as_ref() {
+                    Some(heartbeat) => tokio::time::sleep_until(heartbeat.deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if manager_credential_link.is_some() && outstanding_heartbeat.is_some() => {
+                outstanding_heartbeat = None;
+                if let Some(link) = manager_credential_link.as_ref() {
+                    link.proof_unavailable().await;
+                    if accelerated_remaining == 0 {
+                        accelerated_remaining = 3;
+                        accelerated_at = Some(
+                            tokio::time::Instant::now()
+                                + accelerated_probe_phase(rand::random::<u64>()),
+                        );
+                    } else if accelerated_remaining > 0 {
+                        accelerated_at = Some(
+                            tokio::time::Instant::now() + Duration::from_secs(10),
+                        );
+                    }
+                }
+            }
+
+            expiry = credential_expiry_rx.recv(), if manager_credential_link.is_some() => {
+                if let (Ok(expiry), Some(link)) = (expiry, manager_credential_link.as_ref())
+                    && expiry.belongs_to(link)
+                {
+                    let _ = sink.send(awc::ws::Message::Close(None)).await;
+                    credential_expired = true;
+                    break;
+                }
+            }
+
             _ = remote_access_reconcile.tick(), if remote_access_central_link != RemoteAccessCentralLink::None => {
                 if remote_access_link_is_primary(&settings, remote_access_central_link).await
                     && let Some(frame) = pending_remote_access_frame(&router_ctx.host_control_hub)
@@ -325,5 +573,9 @@ pub(super) async fn maintain_proxy_connection(
         "[Proxy] Connection to {} ended",
         redact_token_in_url(&signaling_url)
     );
-    Ok(ProxyConnectionOutcome::Closed)
+    Ok(if credential_expired {
+        ProxyConnectionOutcome::CredentialExpired
+    } else {
+        ProxyConnectionOutcome::Closed
+    })
 }

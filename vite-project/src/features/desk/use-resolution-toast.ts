@@ -33,7 +33,7 @@ export interface ResolutionEchoMessage {
     signaling_type: number;
     request_id?: string;
     signaling_data?: ResolutionEchoData | null;
-    response_state?: { error_code: number; message?: string } | null;
+    response_state?: { error_code: number; message?: string | null } | null;
 }
 
 export interface UseResolutionToastParams {

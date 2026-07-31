@@ -94,6 +94,9 @@ pub async fn run_signaling_proxy(
     let host_activity = host_control_hub.host_activity();
 
     let (outbound_tx, _seed_rx) = broadcast::channel::<String>(128);
+    let credential_scopes =
+        crate::daemon::manager_credential_scope::ManagerCredentialScopeRegistry::default();
+    pc_registry.set_manager_credential_scopes(credential_scopes.clone());
 
     // Operator command templates (built-in baseline ∪ manager-synced) are shared by
     // every inbound execution path so preview and dispatch see the same snapshot.
@@ -159,6 +162,8 @@ pub async fn run_signaling_proxy(
         exec_ledger: exec_ledger.clone(),
         exec_capacity: Arc::new(crate::daemon::exec_capacity::ExecCapacity::new()),
         pc_registry: pc_registry.clone(),
+        admission_origin: crate::daemon::pc_manager::AdmissionOrigin::Local,
+        manager_credential_link: None,
         outbound_tx: outbound_tx.clone(),
         settings: settings.clone(),
         policy: crate::model::policy_access::PolicyAccess::authoritative(Arc::clone(
@@ -197,10 +202,37 @@ pub async fn run_signaling_proxy(
         support_link_state: support_link_state.clone(),
     };
 
+    let credential_expiry_handle = {
+        let mut expiry_rx = credential_scopes.subscribe_expirations();
+        let router_ctx = router_ctx.clone();
+        actix_web::rt::spawn(async move {
+            loop {
+                match expiry_rx.recv().await {
+                    Ok(expiry) => {
+                        teardown_manager_members(
+                            &router_ctx,
+                            &expiry.members,
+                            "manager-credential-proof-expired",
+                        )
+                        .await;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        error!(
+                            "[credential-proof] expiry consumer lagged by {skipped} events; \
+                             credential teardown capacity is insufficient"
+                        );
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
+    };
+
     let local_handle = {
         let settings = settings.clone();
         let outbound_tx = outbound_tx.clone();
         let router_ctx = router_ctx.clone();
+        let credential_scopes = credential_scopes.clone();
         actix_web::rt::spawn(async move {
             loop {
                 let (port, enable_ipv6, local_token, startup_mode) = {
@@ -253,6 +285,7 @@ pub async fn run_signaling_proxy(
                     None,
                     None,
                     RemoteAccessCentralLink::Local,
+                    &credential_scopes,
                 )
                 .await
                 {
@@ -268,6 +301,7 @@ pub async fn run_signaling_proxy(
         let settings = settings.clone();
         let outbound_tx = outbound_tx.clone();
         let router_ctx = router_ctx.clone();
+        let credential_scopes = credential_scopes.clone();
         actix_web::rt::spawn(async move {
             loop {
                 let (signaling_url, signaling_token) = {
@@ -289,13 +323,14 @@ pub async fn run_signaling_proxy(
                         settings.clone(),
                         &router_ctx,
                         url,
-                        token,
+                        token.clone(),
                         rx,
                         InboundSignalingSource::RemoteSignaling,
                         false,
                         None,
                         None,
                         RemoteAccessCentralLink::RemoteSignal,
+                        &credential_scopes,
                     )
                     .await;
                 }
@@ -311,7 +346,11 @@ pub async fn run_signaling_proxy(
         let router_ctx = router_ctx.clone();
         let manager_link_state = manager_link_state.clone();
         let manager_link_gate = manager_link_gate.clone();
+        let credential_scopes = credential_scopes.clone();
         actix_web::rt::spawn(async move {
+            let mut manager_reconnect_attempt = 0_u32;
+            let mut suspended_recovery_attempt = 0_u32;
+            let mut suspended_recovery = false;
             loop {
                 let (manager_url, manager_api_token, manager_enabled) = {
                     let s = settings.read().await;
@@ -335,25 +374,77 @@ pub async fn run_signaling_proxy(
                         settings.clone(),
                         &router_ctx,
                         url,
-                        token,
+                        token.clone(),
                         rx,
                         InboundSignalingSource::TrustedCentral,
                         true,
                         Some(manager_link_state.clone()),
                         Some(manager_link_gate.subscribe()),
                         RemoteAccessCentralLink::Manager,
+                        &credential_scopes,
                     )
                     .await;
 
-                    if let Ok(ProxyConnectionOutcome::FatalReject { .. }) = outcome {
-                        // Stop the 5s auto-reconnect storm: retrying changes nothing
-                        // until the user frees a device slot from a control end. Park
-                        // until a manual retry is requested, then reconnect at once
-                        // (no long backoff).
-                        manager_link_state.await_retry().await;
-                        manager_link_state.clear().await;
-                        continue;
+                    match outcome {
+                        Ok(ProxyConnectionOutcome::FatalReject { .. }) => {
+                            // Terminal token rejection cannot heal under the same
+                            // credential. Park until explicit replacement/retry.
+                            manager_link_state.await_retry().await;
+                            manager_link_state.clear().await;
+                            manager_reconnect_attempt = 0;
+                            suspended_recovery_attempt = 0;
+                            suspended_recovery = false;
+                            continue;
+                        }
+                        Ok(ProxyConnectionOutcome::CredentialSuspended { .. }) => {
+                            // Reversible owner/token state: retry the same token on
+                            // a deliberately slow lane, never reissue it.
+                            suspended_recovery = true;
+                            suspended_recovery_attempt = 0;
+                            let delay = suspended_recovery_delay(
+                                suspended_recovery_attempt,
+                                rand::random::<u64>() % 30_001,
+                            );
+                            suspended_recovery_attempt =
+                                suspended_recovery_attempt.saturating_add(1);
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        Ok(ProxyConnectionOutcome::Closed) => {
+                            suspended_recovery = false;
+                            suspended_recovery_attempt = 0;
+                            manager_reconnect_attempt = 0;
+                        }
+                        Ok(ProxyConnectionOutcome::CredentialExpired) => {
+                            suspended_recovery = false;
+                            suspended_recovery_attempt = 0;
+                            manager_reconnect_attempt = 0;
+                            tokio::time::sleep(credential_expiry_reconnect_delay(
+                                rand::random::<u64>() % 60_001,
+                            ))
+                            .await;
+                            continue;
+                        }
+                        Err(_) if suspended_recovery => {
+                            let delay = suspended_recovery_delay(
+                                suspended_recovery_attempt,
+                                rand::random::<u64>() % 30_001,
+                            );
+                            suspended_recovery_attempt =
+                                suspended_recovery_attempt.saturating_add(1);
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        Err(_) => {}
                     }
+
+                    let delay = manager_host_reconnect_delay(
+                        manager_reconnect_attempt,
+                        rand::random::<u64>() % 20_001,
+                    );
+                    manager_reconnect_attempt = manager_reconnect_attempt.saturating_add(1);
+                    tokio::time::sleep(delay).await;
+                    continue;
                 }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1100,6 +1191,7 @@ pub async fn run_signaling_proxy(
     remote_sig_handle.abort();
     remote_mgr_handle.abort();
     support_handle.abort();
+    credential_expiry_handle.abort();
 
     info!("Signaling proxy stopped");
     Ok(())

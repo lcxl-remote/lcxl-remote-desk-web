@@ -10,7 +10,9 @@ use desk_signal_facade::model::{
     terminal::{StartTerminalPath, StartTerminalSession},
     version::VersionInfo,
 };
-use desk_signal_facade::service::{RequestRemoteOutcome, TerminalStartAuthorizer};
+use desk_signal_facade::service::{
+    CredentialPolicy, RequestRemoteOutcome, TerminalStartAuthorizer,
+};
 use desk_turn::runtime::{LiveTurnProvider, TurnRuntimeView};
 use log::{error, info};
 use std::sync::Arc;
@@ -102,6 +104,7 @@ pub async fn open_terminal_session(
         turn_provider,
         None,
         auth_context,
+        CredentialPolicy::Plain,
         desk_server_version::SERVER_API_VERSION,
     )
     .await?;

@@ -57,4 +57,14 @@ This outbound guard is separate from the model-provider SSRF guard (`ProviderSsr
 - The `local_signaling_token` is a host credential. It is masked in logs (the `SystemSettings` `Debug` output redacts it and the other secrets) and is never logged in plaintext.
 - Tokens for remote signaling and the manager are passed in the WebSocket URL query string.
 
+## Manager credential proof and local lease
+
+A host connected on the explicit Manager lane sends an application-level Heartbeat every 30 seconds. The Manager returns a correlated proof only while the token and owner snapshot remains fresh and valid. The host uses a monotonic 120-second credential lease; a normal OSS/local/remote-signaling Heartbeat never renews it.
+
+- Terminal revocation closes sessions and parks same-token reconnect.
+- Recoverable suspension closes sessions but retries the same token with bounded delay (at most about 330 seconds after restoration).
+- A stale snapshot or backend outage returns no proof without closing the WebSocket. Existing sessions survive only until the lease; new desktop/terminal admission is retryable at adjacent 2/5/10/20-second intervals for a 37-second window.
+- Deletion or expiry normally disconnects sessions within about 90 seconds, with a hard three-minute bound even if the fatal frame is lost.
+- Replacing the Manager token creates a new fingerprint. Proof for it cannot renew old-token sessions; those sessions expire within 120 seconds and never resurrect.
+
 These mechanisms are distinct on purpose; mixing them up is a security defect.

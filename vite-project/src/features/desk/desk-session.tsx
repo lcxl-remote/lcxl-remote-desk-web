@@ -27,6 +27,7 @@ import { useResolutionToast } from "./use-resolution-toast"
 import { isWebRtcAvailable } from "./webrtc-support"
 import { useToast } from "@/hooks/use-toast"
 import type { DeskSettings } from "@/services/types"
+import { deskErrorCodeEnum } from "@/services/types"
 import { useRestrictedSession } from "@/features/desk/restricted-session"
 import {
     buildDesktopRequestRemotePayload,
@@ -51,7 +52,10 @@ import {
     SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED,
     SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_ERROR,
     SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
+    SIGNALING_TYPE_CODE_ERROR,
+    SIGNALING_TYPE_CODE_INIT,
 } from "./constants"
+import { AdmissionRetrySchedule } from "./admission-retry"
 
 /** Container props. `orgId` is injected only by the manager console's org view
  *  (via a static wrapper); the open-source standalone app renders `<DeskSession/>`
@@ -70,6 +74,12 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     const [hasControl, setHasControl] = useState(false);
     const [isWaitingApproval, setIsWaitingApproval] = useState(false);
     const hasRequestedRef = useRef(false);
+    const admissionRetryRef = useRef({
+        generation: 0,
+        requestIds: new Set<string>(),
+        schedule: new AdmissionRetrySchedule(),
+        timer: null as number | null,
+    });
 
     const { isConnected, subscribe, sendMessage, sendTracked, cancelQueued } = useDeskSignaling()
 
@@ -77,16 +87,39 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     const restricted = useRestrictedSession(deskId);
     const grantSessionId = restricted.grantSessionId;
 
+    const clearAdmissionRetry = useCallback(() => {
+        const state = admissionRetryRef.current;
+        state.generation += 1;
+        state.requestIds.clear();
+        state.schedule.reset();
+        if (state.timer !== null) {
+            window.clearTimeout(state.timer);
+            state.timer = null;
+        }
+    }, []);
+
+    const sendRemoteAdmission = useCallback((newLogicalAttempt: boolean) => {
+        if (!deskId) return;
+        const state = admissionRetryRef.current;
+        if (newLogicalAttempt) {
+            clearAdmissionRetry();
+        }
+        const requestData = buildDesktopRequestRemotePayload(deskId, grantSessionId)
+        const requestId = sendMessage(
+            SIGNALING_TYPE_CODE_REQUEST_REMOTE,
+            requestData,
+            deskId,
+        );
+        state.requestIds.add(requestId);
+        hasRequestedRef.current = true;
+    }, [clearAdmissionRetry, deskId, grantSessionId, sendMessage]);
+
     const handleConnect = useCallback(() => {
         if (deskId && !hasRequestedRef.current) {
             console.log("WebSocket opened, requesting remote connection directly:", deskId);
-            // Carry the grant token so the trusted central looks up the grant and
-            // stamps the code's ceiling; owner sessions have no grant and omit it.
-            const requestData = buildDesktopRequestRemotePayload(deskId, grantSessionId)
-            sendMessage(SIGNALING_TYPE_CODE_REQUEST_REMOTE, requestData, deskId);
-            hasRequestedRef.current = true;
+            sendRemoteAdmission(true);
         }
-    }, [deskId, sendMessage, grantSessionId]);
+    }, [deskId, sendRemoteAdmission]);
 
     useEffect(() => {
         if (isConnected) {
@@ -306,7 +339,39 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         const handle = (message: SignalingMessage) => {
             const { signaling_type } = message;
 
-            if (signaling_type === SIGNALING_TYPE_CODE_ACCEPT_CONTROL) {
+            if (signaling_type === SIGNALING_TYPE_CODE_INIT
+                && message.request_id
+                && admissionRetryRef.current.requestIds.has(message.request_id)
+            ) {
+                clearAdmissionRetry();
+            } else if (signaling_type === SIGNALING_TYPE_CODE_ERROR
+                && message.request_id
+                && admissionRetryRef.current.requestIds.delete(message.request_id)
+            ) {
+                if (message.response_state?.error_code === deskErrorCodeEnum.ACTION_NEED_RETRY) {
+                    const state = admissionRetryRef.current;
+                    const delay = state.schedule.nextDelay();
+                    if (delay === null) {
+                        clearAdmissionRetry();
+                        toast({
+                            title: t('pages.desk.admissionRetry.title'),
+                            description: t('pages.desk.admissionRetry.exhausted'),
+                            variant: 'destructive',
+                        });
+                    } else {
+                        const generation = state.generation;
+                        if (state.timer !== null) window.clearTimeout(state.timer);
+                        state.timer = window.setTimeout(() => {
+                            if (admissionRetryRef.current.generation === generation) {
+                                admissionRetryRef.current.timer = null;
+                                sendRemoteAdmission(false);
+                            }
+                        }, delay);
+                    }
+                } else {
+                    clearAdmissionRetry();
+                }
+            } else if (signaling_type === SIGNALING_TYPE_CODE_ACCEPT_CONTROL) {
                 console.log("Remote control request ACCEPTED by peer.");
                 setHasControl(true);
                 setIsWaitingApproval(false);
@@ -350,14 +415,17 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
             }
         };
         return subscribe(handle);
-    }, [subscribe]);
+    }, [clearAdmissionRetry, sendRemoteAdmission, subscribe, t, toast]);
 
     // Reset requested state if connection drops
     useEffect(() => {
         if (!isConnected) {
+            clearAdmissionRetry();
             hasRequestedRef.current = false;
         }
-    }, [isConnected]);
+    }, [clearAdmissionRetry, isConnected]);
+
+    useEffect(() => clearAdmissionRetry, [clearAdmissionRetry]);
 
     // Wait for INIT data, then show the config dialog so the user can pick
     // capture settings. Reopen it only for the initial pick or after a terminal

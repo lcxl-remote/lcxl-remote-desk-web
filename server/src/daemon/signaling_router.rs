@@ -377,6 +377,13 @@ impl From<DeskError> for RouterError {
 #[derive(Clone)]
 pub struct RouterContext {
     pub pc_registry: PcRegistry,
+    /// Exact upstream lane for admission provenance. Manager is set only by the
+    /// manager connection loop and never inferred from `TrustedCentral`.
+    pub admission_origin: pc_manager::AdmissionOrigin,
+    /// Credential scope bound to the current manager WebSocket. `None` on local
+    /// and bare remote-signaling lanes.
+    pub manager_credential_link:
+        Option<crate::daemon::manager_credential_scope::ManagerCredentialLink>,
     pub outbound_tx: broadcast::Sender<String>,
     pub settings: web::Data<SharedSettings>,
     /// What the daemon-side permission gates read. Backed by the host's
@@ -655,6 +662,25 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             let request_remote = model
                 .get_data::<RequestRemoteModel>()
                 .map_err(DeskError::from)?;
+            let connection_id = model
+                .check_and_get_from_connection_id()
+                .map_err(DeskError::from)?;
+            let manager_permit = if let Some(link) = ctx.manager_credential_link.as_ref() {
+                match link.begin_admission(connection_id).await {
+                    Ok(permit) => Some(permit),
+                    Err(
+                        crate::daemon::manager_credential_scope::AdmissionRejection::AwaitingProof,
+                    ) => {
+                        send_manager_admission_retry(ctx, model);
+                        return Ok(());
+                    }
+                    Err(crate::daemon::manager_credential_scope::AdmissionRejection::Terminal) => {
+                        return Ok(());
+                    }
+                }
+            } else {
+                None
+            };
             // Hold a pending guard for the lifetime
             // of this handler so cleanup_pc on a concurrently-closing
             // old PC cannot N→0 detach the IDD out from under us.
@@ -710,8 +736,12 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                     ),
                     None => (None, None, 0),
                 };
+            let admission = match access_ceiling.as_ref() {
+                Some(ceiling) => pc_manager::Admission::Capped(ceiling.clone()),
+                None => pc_manager::Admission::OwnerFull,
+            };
             ctx.host_control_hub.host_activity().ensure_session(
-                model.check_and_get_from_connection_id().map_err(DeskError::from)?,
+                connection_id,
                 ctx.inbound_request_remote_authz
                     .as_ref()
                     .map(|authz| authz.actor.clone())
@@ -759,6 +789,25 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             }
 
             result?;
+            ctx.pc_registry
+                .record_admission_with_origin(
+                    connection_id,
+                    admission,
+                    ctx.admission_origin.clone(),
+                )
+                .await;
+            if let Some(permit) = manager_permit
+                && !permit.commit().await
+            {
+                pc_manager::force_disconnect_connection(
+                    &ctx.pc_registry,
+                    &ctx.worker_mgr,
+                    ctx.virtual_display.as_ref(),
+                    connection_id,
+                    "manager-credential-admission-fenced",
+                )
+                .await;
+            }
             Ok(())
         }
         SignalingType::Offer => {
@@ -970,6 +1019,22 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // RemoteToolResponse is emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never consumes its own stream).
         SignalingType::RemoteToolResponse => Ok(()),
+    }
+}
+
+fn send_manager_admission_retry(ctx: &RouterContext, model: &SignalingModel) {
+    let response = SignalingModel::error(
+        &model.request_id,
+        SignalingType::Error,
+        None,
+        model.from_connection_id.clone(),
+        DeskErrorCode::ACTION_NEED_RETRY,
+        "Manager credential verification is temporarily unavailable",
+    );
+    if let Ok(response) = response
+        && let Ok(text) = serde_json::to_string(&response)
+    {
+        let _ = ctx.outbound_tx.send(text);
     }
 }
 

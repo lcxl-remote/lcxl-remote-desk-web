@@ -3,6 +3,7 @@ pub mod audio_capture;
 pub mod auth_context;
 pub mod code_session;
 pub mod connection;
+pub mod credential_heartbeat;
 pub mod desk_settings;
 pub mod files;
 pub mod image_capture;

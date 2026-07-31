@@ -20,6 +20,34 @@ pub(super) enum ProxyConnectionOutcome {
     /// The manager fatally rejected registration; the caller must NOT auto-reconnect
     /// until a manual retry is requested.
     FatalReject { error_code: i32, message: String },
+    /// The credential is reversibly disabled. The caller retries the same token
+    /// on a slow bounded lane; it must not park forever or reissue the token.
+    CredentialSuspended { error_code: i32, message: String },
+    /// The host-local credential lease expired. Use a wider first-redial jitter
+    /// so a shared backend outage cannot synchronize a fleet onto handshakes.
+    CredentialExpired,
+}
+
+pub(super) fn manager_host_reconnect_delay(attempt: u32, jitter_ms: u64) -> Duration {
+    let core_seconds = 5_u64
+        .saturating_mul(1_u64.checked_shl(attempt.min(30)).unwrap_or(u64::MAX))
+        .min(60);
+    Duration::from_secs(core_seconds) + Duration::from_millis(jitter_ms.min(20_000))
+}
+
+pub(super) fn suspended_recovery_delay(attempt: u32, jitter_ms: u64) -> Duration {
+    let core_seconds = 60_u64
+        .saturating_mul(1_u64.checked_shl(attempt.min(30)).unwrap_or(u64::MAX))
+        .min(300);
+    Duration::from_secs(core_seconds) + Duration::from_millis(jitter_ms.min(30_000))
+}
+
+pub(super) fn credential_expiry_reconnect_delay(jitter_ms: u64) -> Duration {
+    Duration::from_secs(5) + Duration::from_millis(jitter_ms.min(60_000))
+}
+
+pub(super) fn accelerated_probe_phase(sample: u64) -> Duration {
+    Duration::from_secs(1 + sample % 10)
 }
 
 /// Whether an inbound `Error(-1)` frame is a fatal registration rejection the host

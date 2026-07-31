@@ -57,4 +57,18 @@
 - `local_signaling_token` 是 host 凭据：日志中已脱敏（`SystemSettings` 的 `Debug` 输出会遮蔽它及其他密钥），绝不明文打印。
 - 远程信令与 manager 的 token 通过 WebSocket URL 查询串传递。
 
+## Manager 凭据 proof 与本地租约
+
+明确处于 Manager lane 的被控端每 30 秒发送一次应用层 Heartbeat。只有 token 与 owner
+快照仍新鲜且有效时，manager 才返回 request-id 关联的 proof。被控端使用单调时钟维护
+120 秒凭据租约；OSS、本地或远程信令返回的普通 Heartbeat 绝不能续期它。
+
+- 终态撤销会关闭相关会话，并停止同 token 自动重连。
+- 可恢复暂停同样关闭会话，但按有界长退避重试原 token；恢复后最长约 330 秒自动连接。
+- 快照过期或后端不可用时不回 proof、也不主动关闭 WebSocket。既有会话只在租约内保留；
+  新建桌面/终端按相邻间隔 2/5/10/20 秒自动重试，累计窗口 37 秒。
+- 删除/到期通常约 90 秒内断开；fatal 帧丢失时仍有 3 分钟硬上界。
+- 替换 Manager token 会建立新 fingerprint，新 proof 不会延长旧 token 会话；旧会话
+  最迟 120 秒内拆除且不会复活。
+
 这些机制刻意彼此独立；混用即为安全缺陷。

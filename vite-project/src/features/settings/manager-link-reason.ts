@@ -15,8 +15,20 @@ const CODE_TO_KEY: ErrorCodeKeyMap = {
     [deskErrorCodeEnum.DEVICE_QUOTA_EXCEEDED]: "pages.managerLink.quotaFull",
     // This host has no device identity the manager can bind the registration to.
     [deskErrorCodeEnum.DEVICE_CLIENT_ID_REQUIRED]: "pages.managerLink.missingIdentity",
+    [deskErrorCodeEnum.MANAGER_CREDENTIAL_REVOKED]: "pages.managerLink.credentialRevoked",
+    [deskErrorCodeEnum.MANAGER_CREDENTIAL_SUSPENDED]: "pages.managerLink.credentialSuspended",
 }
 
 export function managerLinkReasonKey(errorCode: number | null | undefined): string {
     return deskErrorKeyOr(CODE_TO_KEY, errorCode, "pages.managerLink.genericBlocked")
+}
+
+export function managerLinkTitleKey(errorCode: number | null | undefined): string {
+    if (errorCode === deskErrorCodeEnum.MANAGER_CREDENTIAL_REVOKED) {
+        return "pages.managerLink.credentialRevokedTitle"
+    }
+    if (errorCode === deskErrorCodeEnum.MANAGER_CREDENTIAL_SUSPENDED) {
+        return "pages.managerLink.credentialSuspendedTitle"
+    }
+    return "pages.managerLink.blockedTitle"
 }

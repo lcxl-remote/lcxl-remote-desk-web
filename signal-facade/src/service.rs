@@ -73,12 +73,19 @@ pub use routing::*;
 
 // ====== SignalingHandler ======
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageControl {
+    Continue,
+    Close,
+}
+
 /// Generic signaling handler. Usable by both signal server and manager.
 pub struct SignalingHandler<U: SignalingUser> {
     pub connection_state: ConnectionState,
     pub connection_map: web::Data<SharedConnectionMap>,
     pub user: U,
     pub turn: Option<Arc<dyn TurnProvider>>,
+    pub credential_policy: CredentialPolicy,
     /// Fleet policy decision point for the control-end AI frames. `Some` only in
     /// the manager (which wraps the frames with an authorization decision);
     /// `None` in the signal server, where the frames relay unwrapped.
@@ -249,6 +256,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
         turn: Option<Arc<dyn TurnProvider>>,
         device_code: Option<String>,
         auth_context: crate::model::auth_context::AuthContext,
+        credential_policy: CredentialPolicy,
         server_api_version: i32,
     ) -> Result<Self, DeskSignalFacadeError> {
         log::info!(
@@ -293,6 +301,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             connection_map,
             user,
             turn,
+            credential_policy,
             control_authorizer: None,
             request_remote_authorizer: None,
             owner_plane_authorizer: None,
@@ -530,7 +539,10 @@ impl<U: SignalingUser> SignalingHandler<U> {
     }
 
     /// Handle incoming signaling message
-    pub async fn handle_message(&mut self, text: ByteString) -> Result<(), DeskSignalFacadeError> {
+    pub async fn handle_message(
+        &mut self,
+        text: ByteString,
+    ) -> Result<MessageControl, DeskSignalFacadeError> {
         log::debug!("Received text message: {}", text);
         let signaling_model = serde_json::from_str::<SignalingModel>(&text)?;
         if signaling_model.is_request()
@@ -551,17 +563,99 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 }
             }
         }
+        let mut control = MessageControl::Continue;
         match signaling_model.signaling_type {
             SignalingType::Heartbeat => {
-                // Respond to heartbeat immediately to keep connection alive
-                let response = SignalingModel::success_response::<()>(
-                    &signaling_model.request_id,
-                    SignalingType::Heartbeat,
-                    None,
-                    None,
-                    None,
-                )?;
-                self.connection_state.send_response(None, &response).await?;
+                let (response, should_close) = match &self.credential_policy {
+                    CredentialPolicy::Plain => (
+                        SignalingModel::success_response::<()>(
+                            &signaling_model.request_id,
+                            SignalingType::Heartbeat,
+                            None,
+                            Some(self.connection_state.model.connection_id.clone()),
+                            None,
+                        )?,
+                        false,
+                    ),
+                    CredentialPolicy::ManagerToken(authorizer) => {
+                        match authorizer
+                            .authorize_heartbeat(&self.connection_state)
+                            .await
+                        {
+                            CredentialHeartbeatOutcome::Proof(proof) => (
+                                SignalingModel::success_response(
+                                    &signaling_model.request_id,
+                                    SignalingType::Heartbeat,
+                                    None,
+                                    Some(self.connection_state.model.connection_id.clone()),
+                                    Some(&proof),
+                                )?,
+                                false,
+                            ),
+                            CredentialHeartbeatOutcome::TerminalRevoked(reason) => {
+                                log::warn!(
+                                    "Manager credential terminally revoked for connection {}: \
+                                     {reason:?}",
+                                    self.connection_state.model.connection_id
+                                );
+                                (
+                                    SignalingModel::error(
+                                        &signaling_model.request_id,
+                                        SignalingType::Error,
+                                        None,
+                                        Some(
+                                            self.connection_state.model.connection_id.clone(),
+                                        ),
+                                        DeskErrorCode::MANAGER_CREDENTIAL_REVOKED,
+                                        "Manager credential is no longer valid",
+                                    )?,
+                                    true,
+                                )
+                            }
+                            CredentialHeartbeatOutcome::Suspended(reason) => {
+                                log::warn!(
+                                    "Manager credential suspended for connection {}: {reason:?}",
+                                    self.connection_state.model.connection_id
+                                );
+                                (
+                                    SignalingModel::error(
+                                        &signaling_model.request_id,
+                                        SignalingType::Error,
+                                        None,
+                                        Some(
+                                            self.connection_state.model.connection_id.clone(),
+                                        ),
+                                        DeskErrorCode::MANAGER_CREDENTIAL_SUSPENDED,
+                                        "Manager credential is temporarily unavailable",
+                                    )?,
+                                    true,
+                                )
+                            }
+                            CredentialHeartbeatOutcome::SnapshotStale
+                            | CredentialHeartbeatOutcome::BackendUnavailable => (
+                                SignalingModel::success_response::<()>(
+                                    &signaling_model.request_id,
+                                    SignalingType::Heartbeat,
+                                    None,
+                                    Some(
+                                        self.connection_state.model.connection_id.clone(),
+                                    ),
+                                    None,
+                                )?,
+                                false,
+                            ),
+                        }
+                    }
+                };
+                self.connection_state
+                    .session
+                    .write()
+                    .await
+                    .text(serde_json::to_string(&response)?)
+                    .await?;
+                if should_close {
+                    control = MessageControl::Close;
+                }
             }
             SignalingType::FetchConnections => {
                 let connection_map = if let Some(resolver) = &self.fetch_connections_resolver {
@@ -676,7 +770,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 }) && let Some(rewritten) = rewrite_mdns_candidate_with_ip(&signaling_model, ip)
                 {
                     self.forward_to_peer(&rewritten, false).await?;
-                    return Ok(());
+                    return Ok(MessageControl::Continue);
                 }
                 self.forward_to_peer(&signaling_model, false).await?;
             }
@@ -909,7 +1003,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                         }
                         // The authorizer ran the frame itself (manager-side
                         // orchestration); nothing is relayed to the host.
-                        ControlFrameOutcome::Handled => return Ok(()),
+                        ControlFrameOutcome::Handled => return Ok(MessageControl::Continue),
                     }
                 } else {
                     signaling_model
@@ -1074,7 +1168,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 );
             }
         }
-        Ok(())
+        Ok(control)
     }
 
     pub async fn binary(&mut self, _bin: Bytes) -> Result<(), DeskSignalFacadeError> {
@@ -1100,8 +1194,16 @@ impl<U: SignalingUser> SignalingHandler<U> {
             match msg {
                 Ok(AggregatedMessage::Text(text)) => {
                     // echo text message
-                    if let Err(e) = self.handle_message(text).await {
-                        log::error!("Error handling signaling message: {}", e);
+                    match self.handle_message(text).await {
+                        Ok(MessageControl::Continue) => {}
+                        Ok(MessageControl::Close) => {
+                            let session = self.connection_state.session.read().await.clone();
+                            let _ = session.close(None).await;
+                            break;
+                        }
+                        Err(e) => {
+                            log::error!("Error handling signaling message: {}", e);
+                        }
                     }
                 }
 

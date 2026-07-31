@@ -16,6 +16,8 @@ import { TerminalCopilotPanel } from "./terminal-copilot-panel"
 import { AiGeneratedMark, type AiProvenance } from "@/components/ai-generated-mark"
 import { ModelSelector } from "../desk/model-selector"
 import { useConfirmExec } from "../exec/use-confirm-exec"
+import { deskErrorCodeEnum } from "@/services/types"
+import { AdmissionRetrySchedule } from "../desk/admission-retry"
 import {
     useTerminalComplete,
     pickLocalGhost,
@@ -35,6 +37,7 @@ const SIGNALING_TYPE_CODE_RESIZE = 10009
 const SIGNALING_TYPE_CODE_TERMINAL_STARTED = 10013
 const SIGNALING_TYPE_CODE_TERMINAL_CLOSED = 10014
 const SIGNALING_TYPE_CODE_HEARTBEAT = 1
+const SIGNALING_TYPE_CODE_ERROR = -1
 const TERMINAL_HEARTBEAT_INTERVAL_MS = 30_000
 
 export function TerminalView({ connectionId, deviceId, command, onClose, orgId }: { connectionId: string; deviceId?: string; command: string; onClose: () => void; orgId?: number }) {
@@ -221,6 +224,9 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
         // Connect to WebSocket
         let ws: WebSocket | null = null;
         let connectTimer: number;
+        let admissionRetryTimer: number | null = null;
+        let disposed = false;
+        const admissionRetry = new AdmissionRetrySchedule();
 
         try {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -281,7 +287,25 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
                         if (typeof event.data === 'string') {
                             try {
                                 const msg = JSON.parse(event.data)
-                                if (msg.signaling_type === SIGNALING_TYPE_CODE_REPLY) {
+                                if (
+                                    msg.signaling_type === SIGNALING_TYPE_CODE_ERROR
+                                    && !terminalStarted.current
+                                    && msg.response_state?.error_code === deskErrorCodeEnum.ACTION_NEED_RETRY
+                                ) {
+                                    const delay = admissionRetry.nextDelay();
+                                    ws!.onclose = null;
+                                    ws!.close();
+                                    if (delay === null) {
+                                        term.write(`\r\n\x1b[33m${t('pages.desk.admissionRetry.exhausted')}\x1b[0m\r\n`);
+                                        admissionRetryTimer = window.setTimeout(onClose, 1_000);
+                                    } else {
+                                        term.write(`\r\n\x1b[33m${t('pages.desk.admissionRetry.title')}\x1b[0m\r\n`);
+                                        admissionRetryTimer = window.setTimeout(() => {
+                                            admissionRetryTimer = null;
+                                            if (!disposed) connectWS();
+                                        }, delay);
+                                    }
+                                } else if (msg.signaling_type === SIGNALING_TYPE_CODE_REPLY) {
                                     const content = msg.signaling_data.content
                                     term.write(content)
                                     // Tap a bounded ring buffer of recent output for the copilot hint.
@@ -291,6 +315,11 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
                                     }
                                 } else if (msg.signaling_type === SIGNALING_TYPE_CODE_TERMINAL_STARTED) {
                                     console.log("terminal started")
+                                    admissionRetry.reset()
+                                    if (admissionRetryTimer !== null) {
+                                        window.clearTimeout(admissionRetryTimer)
+                                        admissionRetryTimer = null
+                                    }
                                     terminalStarted.current = true
                                     // Send resize again after started to be safe
                                     sendResize({ rows: term.rows, cols: term.cols })
@@ -418,7 +447,12 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
 
         return () => {
             console.log("Cleaning up terminal session")
+            disposed = true;
             clearTimeout(connectTimer);
+            if (admissionRetryTimer !== null) {
+                clearTimeout(admissionRetryTimer)
+                admissionRetryTimer = null
+            }
             if (heartbeatTimerRef.current !== null) {
                 clearInterval(heartbeatTimerRef.current)
                 heartbeatTimerRef.current = null
@@ -437,7 +471,7 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
             xtermRef.current = null
             term.dispose()
         }
-    }, [connectionId, deviceId, command, onClose])
+    }, [connectionId, deviceId, command, onClose, t])
 
     return (
         <div className="h-full w-full flex bg-[#1e1e1e] overflow-hidden">

@@ -70,6 +70,17 @@ mod wincode_tests {
             );
         }
     }
+
+    #[test]
+    fn signaling_type_discriminants_are_unique() {
+        let mut tags: Vec<i32> = SignalingType::iter()
+            .map(|variant| variant as i32)
+            .collect();
+        let total = tags.len();
+        tags.sort_unstable();
+        tags.dedup();
+        assert_eq!(tags.len(), total, "duplicate SignalingType discriminant");
+    }
 }
 
 #[cfg(test)]

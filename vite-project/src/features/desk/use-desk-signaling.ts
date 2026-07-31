@@ -7,6 +7,10 @@ export type SignalingMessage = {
     signaling_type: number;
     signaling_data: any;
     to_connection_id?: string;
+    response_state?: {
+        error_code: number;
+        message?: string | null;
+    } | null;
 };
 
 /** A handler invoked synchronously for every inbound non-heartbeat

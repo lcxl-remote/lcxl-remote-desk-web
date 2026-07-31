@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest"
 
 import { deskErrorCodeEnum } from "@/services/types"
-import { managerLinkReasonKey } from "./manager-link-reason"
+import { managerLinkReasonKey, managerLinkTitleKey } from "./manager-link-reason"
 
 describe("managerLinkReasonKey", () => {
     it("maps the quota-exceeded code to the quota-full key", () => {
@@ -10,6 +10,21 @@ describe("managerLinkReasonKey", () => {
 
     it("maps the missing-identity code to the missing-identity key", () => {
         expect(managerLinkReasonKey(deskErrorCodeEnum.DEVICE_CLIENT_ID_REQUIRED)).toBe("pages.managerLink.missingIdentity")
+    })
+
+    it("distinguishes revoked and recoverable manager credentials", () => {
+        expect(managerLinkReasonKey(deskErrorCodeEnum.MANAGER_CREDENTIAL_REVOKED)).toBe(
+            "pages.managerLink.credentialRevoked",
+        )
+        expect(managerLinkTitleKey(deskErrorCodeEnum.MANAGER_CREDENTIAL_REVOKED)).toBe(
+            "pages.managerLink.credentialRevokedTitle",
+        )
+        expect(managerLinkReasonKey(deskErrorCodeEnum.MANAGER_CREDENTIAL_SUSPENDED)).toBe(
+            "pages.managerLink.credentialSuspended",
+        )
+        expect(managerLinkTitleKey(deskErrorCodeEnum.MANAGER_CREDENTIAL_SUSPENDED)).toBe(
+            "pages.managerLink.credentialSuspendedTitle",
+        )
     })
 
     it("falls back to the generic key for an unknown code", () => {

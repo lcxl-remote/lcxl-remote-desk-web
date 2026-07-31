@@ -3,7 +3,7 @@ import { AlertTriangle, Loader2, RotateCw } from "lucide-react"
 
 import { useQueryManagerLinkStatus } from "@/services/hooks/managerLinkController/useQueryManagerLinkStatus"
 import { useRetryManagerLink } from "@/services/hooks/managerLinkController/useRetryManagerLink"
-import { managerLinkReasonKey } from "@/features/settings/manager-link-reason"
+import { managerLinkReasonKey, managerLinkTitleKey } from "@/features/settings/manager-link-reason"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -50,7 +50,7 @@ export function ManagerLinkBanner() {
     return (
         <Alert variant="destructive" className="mb-6">
             <AlertTriangle className="h-4 w-4" />
-            <AlertTitle>{t("pages.managerLink.blockedTitle")}</AlertTitle>
+            <AlertTitle>{t(managerLinkTitleKey(status.error_code))}</AlertTitle>
             <AlertDescription className="space-y-3">
                 <p>{t(managerLinkReasonKey(status.error_code))}</p>
                 {status.message ? (

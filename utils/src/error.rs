@@ -371,6 +371,14 @@ desk_error_codes! {
     /// The OAuth continuation is absent, expired, already completed, fenced by
     /// another attempt, or otherwise invalid for this operation.
     OAUTH_CONTINUATION_INVALID = 80,
+    /// A manager API token can no longer become valid: it is missing, expired,
+    /// owned by a missing account, or its owner is being/deleted. Hosts tear down
+    /// every session admitted by that credential and park same-token reconnects.
+    MANAGER_CREDENTIAL_REVOKED = 81,
+    /// A manager API token is temporarily unusable because the token or owner is
+    /// disabled, or account deletion is still cancellable. Hosts tear down the
+    /// credential scope but periodically retry the same token.
+    MANAGER_CREDENTIAL_SUSPENDED = 82,
 
     /// A connection-verify probe could not reach the target at all (DNS failure,
     /// connection refused, TLS handshake failure). Carried inside the
@@ -710,6 +718,20 @@ mod tests {
         assert_ne!(
             DeskErrorCode::REMOTE_ACCESS_LOCKED.code(),
             DeskErrorCode::REMOTE_DESK_OFFLINE.code()
+        );
+    }
+
+    #[test]
+    fn manager_credential_codes_are_stable_and_distinct() {
+        assert_eq!(DeskErrorCode::MANAGER_CREDENTIAL_REVOKED.code(), 81);
+        assert_eq!(DeskErrorCode::MANAGER_CREDENTIAL_SUSPENDED.code(), 82);
+        assert_ne!(
+            DeskErrorCode::MANAGER_CREDENTIAL_REVOKED.code(),
+            DeskErrorCode::MANAGER_CREDENTIAL_SUSPENDED.code()
+        );
+        assert_ne!(
+            DeskErrorCode::MANAGER_CREDENTIAL_REVOKED.code(),
+            DeskErrorCode::ACTION_NEED_RETRY.code()
         );
     }
 

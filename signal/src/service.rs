@@ -277,6 +277,7 @@ pub async fn handle_signaling(
         turn,
         device_code,
         auth_context,
+        desk_signal_facade::service::CredentialPolicy::Plain,
         desk_server_version::SERVER_API_VERSION,
     )
     .await?

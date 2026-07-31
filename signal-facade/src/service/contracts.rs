@@ -1,6 +1,47 @@
 //! Extension contracts used by the signaling handler.
 
 use super::*;
+use async_trait::async_trait;
+
+// ====== Credential heartbeat policy ======
+
+/// Stable reason classification for a manager credential that is no longer
+/// usable. The reason remains server-side; hosts receive only the terminal or
+/// suspended disposition through the error code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialInvalidityReason {
+    MissingToken,
+    TokenExpired,
+    MissingOwner,
+    OwnerDeletingOrDeleted,
+    Disabled,
+    InactiveOwner,
+    OwnerDeletionPending,
+}
+
+/// Result of revalidating the credential bound to the current manager WebSocket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialHeartbeatOutcome {
+    Proof(crate::model::credential_heartbeat::ManagerCredentialHeartbeatProof),
+    TerminalRevoked(CredentialInvalidityReason),
+    Suspended(CredentialInvalidityReason),
+    SnapshotStale,
+    BackendUnavailable,
+}
+
+#[async_trait]
+pub trait CredentialHeartbeatAuthorizer: Send + Sync {
+    async fn authorize_heartbeat(&self, state: &ConnectionState) -> CredentialHeartbeatOutcome;
+}
+
+/// Credential behavior is selected when a signaling handler is constructed.
+/// Manager token connections cannot exist without their authorizer, while OSS
+/// signal and cookie/control connections remain explicitly plain.
+#[derive(Clone)]
+pub enum CredentialPolicy {
+    Plain,
+    ManagerToken(Arc<dyn CredentialHeartbeatAuthorizer>),
+}
 
 // ====== DeviceCodeService trait ======
 

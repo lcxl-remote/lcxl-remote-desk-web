@@ -214,6 +214,14 @@ export function DeskConnectionSettings() {
     ])
 
     const onSubmit = async (values: DeskConnectionFormValues) => {
+        const previousToken = settingsResponse?.data?.manager_api_token ?? null
+        if (
+            previousToken &&
+            values.manager_api_token !== previousToken &&
+            !window.confirm(t('pages.deskConnection.managerToken.replaceConfirm'))
+        ) {
+            return
+        }
         try {
             // `update_settings` is a full-struct replace, so the payload must
             // carry every SystemSettings field. Refetch the latest settings and
@@ -350,6 +358,7 @@ export function DeskConnectionSettings() {
                                             <FormControl>
                                                 <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="Access token for the manager server..." />
                                             </FormControl>
+                                            <FormDescription>{t("pages.deskConnection.managerToken.replaceHint")}</FormDescription>
                                             <FormMessage />
                                         </FormItem>
                                     )}
