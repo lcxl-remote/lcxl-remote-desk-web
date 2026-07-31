@@ -812,6 +812,10 @@ export default {
   'pages.agentError.copilotSubjectMismatch': '该 Copilot 会话属于另一个会话，请重新发起提问。',
   'pages.agentError.sameToolRepeatLimit':
     '为避免循环执行，AI 在重复请求同一类操作后已停止。此前结果已保留，你可以让它继续。',
+  'pages.agentError.aiRateDisabled': '当前套餐已停用平台 AI，请更换套餐或联系管理员。',
+  'pages.agentError.aiContextLimitExceeded':
+    '本次请求携带的上下文超过免费套餐上限。请缩短对话或减少诊断证据后重试。',
+  'pages.agentError.aiPlatformBusy': '免费 AI 队列当前已满，请稍后重试。',
   'pages.fileError.permissionDenied':
     '设备所有者未允许此操作。请在被控端的安全设置中开启对应权限，或等待对方确认授权。',
   'pages.fileError.transferDenied':

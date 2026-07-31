@@ -819,6 +819,12 @@ export default {
     'This copilot conversation belongs to a different session. Start a new question.',
   'pages.agentError.sameToolRepeatLimit':
     'The AI stopped to prevent a loop after requesting the same type of action repeatedly. Previous results were kept; you can ask it to continue.',
+  'pages.agentError.aiRateDisabled':
+    'Platform AI is disabled for your current plan. Switch plans or contact an administrator.',
+  'pages.agentError.aiContextLimitExceeded':
+    'This request contains more context than the free plan allows. Shorten the conversation or include less diagnostic evidence, then try again.',
+  'pages.agentError.aiPlatformBusy':
+    'The free AI queue is full right now. Please try again later.',
   'pages.fileError.permissionDenied':
     'The device owner has not allowed this operation. Enable the matching permission in the host\'s security settings, or wait for them to approve the request.',
   'pages.fileError.transferDenied':

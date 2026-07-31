@@ -22,6 +22,9 @@ const CODE_TO_KEY: ErrorCodeKeyMap = {
     [deskErrorCodeEnum.COPILOT_TURN_BUSY]: 'pages.agentError.copilotTurnBusy',
     [deskErrorCodeEnum.COPILOT_SUBJECT_MISMATCH]: 'pages.agentError.copilotSubjectMismatch',
     [deskErrorCodeEnum.AGENT_SAME_TOOL_REPEAT_LIMIT]: 'pages.agentError.sameToolRepeatLimit',
+    [deskErrorCodeEnum.RATE_LIMITED]: 'pages.agentError.aiRateDisabled',
+    [deskErrorCodeEnum.AI_CONTEXT_LIMIT_EXCEEDED]: 'pages.agentError.aiContextLimitExceeded',
+    [deskErrorCodeEnum.AI_PLATFORM_BUSY]: 'pages.agentError.aiPlatformBusy',
 };
 
 /**
