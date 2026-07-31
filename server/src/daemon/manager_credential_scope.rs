@@ -54,16 +54,9 @@ struct CredentialScope {
     members: HashMap<String, MemberState>,
 }
 
+#[derive(Default)]
 struct RegistryState {
     scopes: HashMap<CredentialFingerprint, CredentialScope>,
-}
-
-impl Default for RegistryState {
-    fn default() -> Self {
-        Self {
-            scopes: HashMap::new(),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
