@@ -11,6 +11,7 @@ desk-utils = { workspace = true }
 desk-signal-facade = { workspace = true }
 
 turn = { workspace = true }
+stun = { workspace = true }
 webrtc = { workspace = true }
 webrtc-util = { workspace = true }
 

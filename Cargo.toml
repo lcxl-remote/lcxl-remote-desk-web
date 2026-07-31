@@ -69,6 +69,7 @@ wincode = { version = "0.5", features = ["derive"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 
 turn = "0.17"
+stun = "0.17"
 webrtc-util = "0.17"
 hmac = "0.12"
 sha1 = "0.10"

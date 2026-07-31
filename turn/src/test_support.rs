@@ -58,6 +58,7 @@ pub async fn loopback_runtime(settings: TurnSettings) -> Arc<TurnApiState> {
         settings,
         Arc::new(AllowAll),
         Arc::new(RwLock::new(Statistics::default())),
+        Arc::new(crate::service::AllowAllRelayTrafficGate),
     )
     .await
     .expect("a loopback TURN runtime should start")

@@ -693,9 +693,14 @@ mod tests {
             )),
             statistics.clone(),
         ));
-        desk_turn::service::startup_turn_server(settings, auth, statistics)
-            .await
-            .expect("a loopback TURN runtime should start")
+        desk_turn::service::startup_turn_server(
+            settings,
+            auth,
+            statistics,
+            Arc::new(desk_turn::service::AllowAllRelayTrafficGate),
+        )
+        .await
+        .expect("a loopback TURN runtime should start")
     }
 
     /// Fold `bytes` of relayed traffic for `conn_id` into a runtime's counters.

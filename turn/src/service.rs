@@ -22,14 +22,40 @@ use crate::{
     relay::FamilyPinnedRelay,
 };
 
-/// STUN magic cookie (RFC 5389 §6), located at bytes[4..8] of every STUN message.
-const STUN_MAGIC_COOKIE: u32 = 0x2112_A442;
-/// STUN message header size in bytes (RFC 5389 §6).
+/// `turn 0.17.1` allocates this private `server::INBOUND_MTU` receive buffer.
+/// Keep the version in the name and lock its behavior with an integration test
+/// whenever the dependency is upgraded.
+pub const PINNED_TURN_0_17_INBOUND_MTU_BYTES: usize = 1500;
+#[cfg(test)]
 const STUN_HEADER_SIZE: usize = 20;
-/// TURN Send indication method (RFC 5766) — client → server relayed data.
-const METHOD_SEND: u16 = 0x006;
-/// TURN Data indication method (RFC 5766) — server → client relayed data.
-const METHOD_DATA: u16 = 0x007;
+#[cfg(test)]
+const STUN_MAGIC_COOKIE: u32 = 0x2112_A442;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayDirection {
+    ClientToServer,
+    ServerToClient,
+}
+
+#[async_trait]
+pub trait RelayTrafficGate: Send + Sync {
+    async fn allow_relay(&self, peer: SocketAddr, direction: RelayDirection, bytes: usize) -> bool;
+}
+
+#[derive(Debug, Default)]
+pub struct AllowAllRelayTrafficGate;
+
+#[async_trait]
+impl RelayTrafficGate for AllowAllRelayTrafficGate {
+    async fn allow_relay(
+        &self,
+        _peer: SocketAddr,
+        _direction: RelayDirection,
+        _bytes: usize,
+    ) -> bool {
+        true
+    }
+}
 
 /// Classify a single client-facing TURN datagram (`data == &buf[..n]`).
 ///
@@ -37,31 +63,25 @@ const METHOD_DATA: u16 = 0x007;
 /// indication. Everything else — control STUN, malformed, or too short — is
 /// classified as Control (fail-open: bytes that cannot be confirmed as relayed
 /// are never billed).
-fn classify(data: &[u8]) -> TurnTrafficClass {
+pub fn classify(data: &[u8]) -> TurnTrafficClass {
     // Validated ChannelData: checks header length, declared length, and channel
     // number range 0x4000..=0x7FFF (stricter than a bare leading-byte check).
     if turn::proto::chandata::ChannelData::is_channel_data(data) {
         return TurnTrafficClass::Relay;
     }
-    // STUN message: require a well-formed header BEFORE trusting the method, so a
-    // malformed ChannelData / non-STUN datagram cannot slip through as a Send/Data
-    // relay indication. A valid STUN header (RFC 5389 §6) has:
-    //   - the top two bits of the message type set to zero (`data[0] & 0xC0 == 0`),
-    //   - the magic cookie 0x2112A442 at bytes[4..8], and
-    //   - a message-length field (bytes[2..4]) that exactly accounts for the body,
-    //     i.e. `len == 20 + declared_length`.
-    // Anything failing these stays Control (fail-open: never billed).
-    if data.len() >= STUN_HEADER_SIZE
-        && data[0] & 0xc0 == 0
-        && u32::from_be_bytes([data[4], data[5], data[6], data[7]]) == STUN_MAGIC_COOKIE
-        && data.len() == STUN_HEADER_SIZE + u16::from_be_bytes([data[2], data[3]]) as usize
+    // Use the same STUN crate/version as the TURN server instead of maintaining
+    // an independent header parser whose trailing-byte semantics can drift.
+    let mut message = stun::message::Message::new();
+    message.raw.clear();
+    message.raw.extend_from_slice(data);
+    if message.decode().is_ok()
+        && message.typ.class == stun::message::CLASS_INDICATION
+        && matches!(
+            message.typ.method,
+            stun::message::METHOD_SEND | stun::message::METHOD_DATA
+        )
     {
-        let typ = u16::from_be_bytes([data[0], data[1]]);
-        // Reassemble the 12-bit STUN method from its interleaved bit groups.
-        let method = (typ & 0x000f) | ((typ & 0x00e0) >> 1) | ((typ & 0x3e00) >> 2);
-        if method == METHOD_SEND || method == METHOD_DATA {
-            return TurnTrafficClass::Relay;
-        }
+        return TurnTrafficClass::Relay;
     }
     TurnTrafficClass::Control
 }
@@ -71,6 +91,7 @@ fn classify(data: &[u8]) -> TurnTrafficClass {
 struct TrackedUdpConn {
     inner: Arc<UdpSocket>,
     statistics: Arc<RwLock<Statistics>>,
+    gate: Arc<dyn RelayTrafficGate>,
 }
 
 #[async_trait]
@@ -86,18 +107,25 @@ impl Conn for TrackedUdpConn {
     }
 
     async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
-        let (n, addr) = self.inner.recv_from(buf).await?;
-        log::trace!("TURN UDP recv_from: {} bytes from {}", n, addr);
-
-        // Classify only the valid payload slice, not the whole caller buffer.
-        let class = classify(&buf[..n]);
-        if let Ok(mut stats) = self.statistics.write() {
-            stats.global.add_recv(n, class);
-            stats.sessions.entry(addr).or_default().add_recv(n, class);
-            stats.record_recv(addr, n, class);
+        loop {
+            let (n, addr) = self.inner.recv_from(buf).await?;
+            log::trace!("TURN UDP recv_from: {} bytes from {}", n, addr);
+            let class = classify(&buf[..n]);
+            if class == TurnTrafficClass::Relay
+                && !self
+                    .gate
+                    .allow_relay(addr, RelayDirection::ClientToServer, n)
+                    .await
+            {
+                continue;
+            }
+            if let Ok(mut stats) = self.statistics.write() {
+                stats.global.add_recv(n, class);
+                stats.sessions.entry(addr).or_default().add_recv(n, class);
+                stats.record_recv(addr, n, class);
+            }
+            return Ok((n, addr));
         }
-
-        Ok((n, addr))
     }
 
     async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
@@ -106,11 +134,19 @@ impl Conn for TrackedUdpConn {
     }
 
     async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
+        let class = classify(buf);
+        if class == TurnTrafficClass::Relay
+            && !self
+                .gate
+                .allow_relay(target, RelayDirection::ServerToClient, buf.len())
+                .await
+        {
+            // Model UDP network loss without surfacing a socket failure to the
+            // TURN allocation state machine.
+            return Ok(buf.len());
+        }
         let n = self.inner.send_to(buf, target).await?;
         log::trace!("TURN UDP send_to: {} bytes to {}", n, target);
-
-        // Classify only the bytes actually sent.
-        let class = classify(&buf[..n]);
         if let Ok(mut stats) = self.statistics.write() {
             stats.global.add_send(n, class);
             stats.sessions.entry(target).or_default().add_send(n, class);
@@ -142,6 +178,7 @@ pub async fn startup_turn_server<A>(
     settings: TurnSettings,
     auth_handler: Arc<A>,
     statistics: Arc<RwLock<Statistics>>,
+    traffic_gate: Arc<dyn RelayTrafficGate>,
 ) -> Result<Arc<TurnApiState>, DeskTurnError>
 where
     A: AuthHandler + Send + Sync + 'static,
@@ -174,6 +211,7 @@ where
         let tracked_conn = Arc::new(TrackedUdpConn {
             inner: udp_socket,
             statistics: statistics.clone(),
+            gate: traffic_gate.clone(),
         });
 
         conn_configs.push(ConnConfig {
@@ -261,6 +299,7 @@ mod startup_tests {
             settings,
             Arc::new(AllowAll),
             Arc::new(RwLock::new(Statistics::default())),
+            Arc::new(AllowAllRelayTrafficGate),
         )
         .await;
 
@@ -282,6 +321,7 @@ mod startup_tests {
             settings,
             Arc::new(AllowAll),
             Arc::new(RwLock::new(Statistics::default())),
+            Arc::new(AllowAllRelayTrafficGate),
         )
         .await
         .expect("an ephemeral port must be bindable");
@@ -308,6 +348,7 @@ mod startup_tests {
             settings,
             Arc::new(AllowAll),
             Arc::new(RwLock::new(Statistics::default())),
+            Arc::new(AllowAllRelayTrafficGate),
         )
         .await
         {
@@ -338,6 +379,7 @@ mod startup_tests {
             settings,
             Arc::new(AllowAll),
             Arc::new(RwLock::new(Statistics::default())),
+            Arc::new(AllowAllRelayTrafficGate),
         )
         .await
         .expect("the UDP entry is servable");
@@ -431,6 +473,7 @@ mod ipv6_relay_tests {
             settings,
             Arc::new(StaticCredential),
             Arc::new(RwLock::new(Statistics::default())),
+            Arc::new(AllowAllRelayTrafficGate),
         )
         .await
         .expect("an IPv6 TURN server must start");

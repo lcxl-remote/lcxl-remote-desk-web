@@ -649,6 +649,7 @@ mod tests {
             settings,
             Arc::new(AllowAll),
             Arc::new(std::sync::RwLock::new(Statistics::default())),
+            Arc::new(crate::service::AllowAllRelayTrafficGate),
         )
         .await
         .expect("a loopback TURN runtime should start")

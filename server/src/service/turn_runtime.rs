@@ -76,9 +76,14 @@ impl TurnRuntimeDriver for HostTurnDriver {
             self.connection_map.clone(),
             statistics.clone(),
         ));
-        let api_state = startup_turn_server(settings, auth, statistics)
-            .await
-            .map_err(|e| e.to_string())?;
+        let api_state = startup_turn_server(
+            settings,
+            auth,
+            statistics,
+            Arc::new(desk_turn::service::AllowAllRelayTrafficGate),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(StartedRuntime {
             handle: Arc::new(HostHandle {
                 state: api_state.clone(),
