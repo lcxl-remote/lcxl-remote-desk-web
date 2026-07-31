@@ -379,6 +379,16 @@ desk_error_codes! {
     /// disabled, or account deletion is still cancellable. Hosts tear down the
     /// credential scope but periodically retry the same token.
     MANAGER_CREDENTIAL_SUSPENDED = 82,
+    /// A free-plan platform AI request exceeded the manager's estimated context
+    /// token ceiling before any provider request, billing hold, or AI admission
+    /// lease was created. The user must shorten the conversation or evidence.
+    /// Rides the agent-error / REST business-error wire, never an HTTP status.
+    AI_CONTEXT_LIMIT_EXCEEDED = 83,
+    /// The bounded global queue for free-plan platform AI calls is full. No
+    /// provider request or billing hold was created; a newly initiated request
+    /// may retry later and joins the queue at a new tail position. Rides the
+    /// agent-error / REST business-error wire, never an HTTP status.
+    AI_PLATFORM_BUSY = 84,
 
     /// A connection-verify probe could not reach the target at all (DNS failure,
     /// connection refused, TLS handshake failure). Carried inside the
@@ -677,6 +687,20 @@ mod tests {
         // Distinct from the adjacent anti-abuse block and the next contract value.
         assert!(!codes.contains(&DeskErrorCode::RATE_LIMITED.code()));
         assert!(!codes.contains(&DeskErrorCode::ACTION_NEED_RETRY.code()));
+    }
+
+    #[test]
+    fn platform_ai_abuse_codes_are_stable_and_distinct() {
+        assert_eq!(DeskErrorCode::AI_CONTEXT_LIMIT_EXCEEDED.code(), 83);
+        assert_eq!(DeskErrorCode::AI_PLATFORM_BUSY.code(), 84);
+        assert_ne!(
+            DeskErrorCode::AI_CONTEXT_LIMIT_EXCEEDED,
+            DeskErrorCode::AI_PLATFORM_BUSY
+        );
+        assert_ne!(
+            DeskErrorCode::AI_CONTEXT_LIMIT_EXCEEDED,
+            DeskErrorCode::RATE_LIMITED
+        );
     }
 
     /// Lock the numeric wire values of the per-user device-quota codes. The manager
