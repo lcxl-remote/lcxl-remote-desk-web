@@ -1,11 +1,10 @@
 //! Full-collection size / latency measurement.
 //!
 //! Runs each host-available read collector once, timing it and measuring the
-//! serialized JSON size of its outcome. The numbers calibrate M1b's context
-//! budget and latency thresholds. This is a measurement harness,
+//! serialized JSON size of its outcome. The numbers calibrate the diagnose
+//! loop's context budget and latency thresholds. This is a measurement harness,
 //! not an assertion suite: the [`measure_full_collection`] test is `#[ignore]`
-//! and prints a table when run with `--nocapture`; the captured figures are
-//! written up in the `agent_works` measurement note.
+//! and prints a table when run with `--nocapture`.
 
 use std::time::Instant;
 
