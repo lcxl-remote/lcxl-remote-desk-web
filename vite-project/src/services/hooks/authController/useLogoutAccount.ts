@@ -9,7 +9,7 @@ import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tansta
 import { logoutAccount } from "../../clients.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
 
-export const logoutAccountMutationKey = () => [{ url: '/api/login/outLogin' }] as const
+export const logoutAccountMutationKey = () => [{ url: '/api/auth/logout' }] as const
 
 export type LogoutAccountMutationKey = ReturnType<typeof logoutAccountMutationKey>
 
@@ -27,7 +27,7 @@ export function logoutAccountMutationOptions<TContext = unknown>(config: Partial
 
 /**
  * @summary Logout user account
- * {@link /api/login/outLogin}
+ * {@link /api/auth/logout}
  */
 export function useLogoutAccount<TContext>(options: 
 {

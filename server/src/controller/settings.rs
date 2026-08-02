@@ -18,6 +18,7 @@ use crate::model::settings::{
 use crate::model::settings_coordinator::SettingsCoordinator;
 use crate::service::auto_start::update_auto_start_status;
 use crate::service::turn_runtime::TurnRuntimeControl;
+use desk_signal_facade::model::auth::EmptyResponseDto;
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_turn::model::TurnSettings;
 
@@ -369,7 +370,7 @@ pub async fn query_telemetry_status(
     summary = "Update telemetry consent",
     request_body(content = TelemetryConsent),
     responses(
-        (status = 200, description = "Update telemetry consent successfully"),
+        (status = 200, description = "Update telemetry consent successfully", body = RestResponse<EmptyResponseDto>),
     ),
 )]
 #[post("/telemetry/consent")]
@@ -386,7 +387,7 @@ pub async fn update_telemetry_consent(
         "Update telemetry consent successfully, consent: {}",
         params.consent
     );
-    Ok(HttpResponse::Ok().finish())
+    Ok(HttpResponse::Ok().json(RestResponse::<()>::succeed()))
 }
 
 #[utoipa::path(

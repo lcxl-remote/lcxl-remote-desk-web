@@ -52,7 +52,9 @@ vi.mock("@/services/hooks/systemController/useQueryServerInfo", () => ({
     useQueryServerInfo: () => ({ data: { data: { startup_mode: "default" } } }),
 }))
 vi.mock("@/services/hooks/userController/useGetCurrentUser", () => ({
-    useGetCurrentUser: () => ({ data: { data: { name: "Alice", access: "user" } } }),
+    useGetCurrentUser: () => ({
+        data: { data: { name: "Alice", access: "user", target_connection_id: "device-1" } },
+    }),
 }))
 
 const logout = vi.hoisted(() => vi.fn())

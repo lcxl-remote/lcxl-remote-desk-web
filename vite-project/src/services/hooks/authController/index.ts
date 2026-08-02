@@ -1,5 +1,4 @@
 export type { ChangePasswordMutationKey } from "./useChangePassword.ts";
-export type { GetCaptchaMutationKey } from "./useGetCaptcha.ts";
 export type { LoginAccountMutationKey } from "./useLoginAccount.ts";
 export type { LoginTauriMutationKey } from "./useLoginTauri.ts";
 export type { LogoutAccountMutationKey } from "./useLogoutAccount.ts";
@@ -7,9 +6,6 @@ export type { RedeemCodeMutationKey } from "./useRedeemCode.ts";
 export { changePasswordMutationKey } from "./useChangePassword.ts";
 export { changePasswordMutationOptions } from "./useChangePassword.ts";
 export { useChangePassword } from "./useChangePassword.ts";
-export { getCaptchaMutationKey } from "./useGetCaptcha.ts";
-export { getCaptchaMutationOptions } from "./useGetCaptcha.ts";
-export { useGetCaptcha } from "./useGetCaptcha.ts";
 export { loginAccountMutationKey } from "./useLoginAccount.ts";
 export { loginAccountMutationOptions } from "./useLoginAccount.ts";
 export { useLoginAccount } from "./useLoginAccount.ts";

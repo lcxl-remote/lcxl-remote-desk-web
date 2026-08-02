@@ -87,13 +87,6 @@ impl SignalingUser for CurrentUser {
 }
 
 #[derive(Serialize, Debug, ToSchema)]
-pub struct NoLogintUser {
-    #[serde(rename(serialize = "isLogin"))]
-    #[schema(rename = "isLogin")]
-    pub login: bool,
-}
-
-#[derive(Serialize, Debug, ToSchema)]
 pub enum NoticeIconItemType {
     #[serde(rename(serialize = "notification"))]
     #[schema(rename = "notification")]
@@ -126,17 +119,5 @@ pub struct NoticeIconItem {
 pub struct NoticeIconList {
     pub data: Option<Vec<NoticeIconItem>>,
     pub total: u32,
-    pub success: bool,
-}
-
-#[derive(Serialize, Debug, ToSchema)]
-pub struct UserRespone<T> {
-    pub data: T,
-    #[serde(rename(serialize = "errorCode"))]
-    #[schema(rename = "errorCode")]
-    pub error_code: i32,
-    #[serde(rename(serialize = "errorMessage"))]
-    #[schema(rename = "errorMessage")]
-    pub error_message: String,
     pub success: bool,
 }

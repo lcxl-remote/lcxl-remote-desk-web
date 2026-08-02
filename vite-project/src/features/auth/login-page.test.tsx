@@ -8,8 +8,10 @@ vi.mock("react-i18next", () =>
 vi.mock("@/components/mode-toggle", () => ({ ModeToggle: () => null }))
 vi.mock("@/components/language-toggle", () => ({ LanguageToggle: () => null }))
 
-const axiosPost = vi.hoisted(() => vi.fn())
-vi.mock("axios", () => ({ default: { post: axiosPost } }))
+const tauriLogin = vi.hoisted(() => vi.fn())
+vi.mock("@/services/hooks/authController/useLoginTauri", () => ({
+    useLoginTauri: () => ({ mutateAsync: tauriLogin }),
+}))
 const fetchUserInfo = vi.hoisted(() => vi.fn())
 vi.mock("@/services/hooks/authController/useLoginAccount", () => ({
     useLoginAccount: () => ({ mutateAsync: vi.fn() }),
@@ -46,14 +48,14 @@ function LocationProbe() {
 
 describe("LoginPage Tauri auto-login", () => {
     beforeEach(() => {
-        axiosPost.mockReset()
+        tauriLogin.mockReset()
         fetchUserInfo.mockReset()
     })
 
     it("blocks normal login until auto-login, user refresh, and navigation complete", async () => {
-        const login = deferred<{ data: { status: string; startup_mode: string } }>()
+        const login = deferred<{ data: { startup_mode: string } }>()
         const currentUser = deferred<unknown>()
-        axiosPost.mockReturnValue(login.promise)
+        tauriLogin.mockReturnValue(login.promise)
         fetchUserInfo.mockReturnValue(currentUser.promise)
         render(
             <MemoryRouter initialEntries={["/user/login?token=tauri-token"]}>
@@ -65,13 +67,26 @@ describe("LoginPage Tauri auto-login", () => {
         expect(submit).toBeDisabled()
         expect(submit).toHaveAttribute("aria-busy", "true")
 
-        act(() => login.resolve({ data: { status: "ok", startup_mode: "default" } }))
+        expect(tauriLogin).toHaveBeenCalledWith({ params: { token: "tauri-token" } })
+        act(() => login.resolve({ data: { startup_mode: "default" } }))
         await waitFor(() => expect(fetchUserInfo).toHaveBeenCalledTimes(1))
         expect(submit).toBeDisabled()
         expect(submit).toHaveTextContent("Signing in…")
 
         act(() => currentUser.resolve({}))
         await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/desk/list"))
-        expect(axiosPost).toHaveBeenCalledTimes(1)
+        expect(tauriLogin).toHaveBeenCalledTimes(1)
+    })
+
+    it("returns to the normal form when the generated mutation rejects a business failure", async () => {
+        tauriLogin.mockRejectedValue(new Error("invalid token"))
+        render(
+            <MemoryRouter initialEntries={["/user/login?token=bad-token"]}>
+                <LoginPage />
+            </MemoryRouter>,
+        )
+
+        await waitFor(() => expect(tauriLogin).toHaveBeenCalledWith({ params: { token: "bad-token" } }))
+        await waitFor(() => expect(screen.getByRole("button", { name: "Login" })).toBeEnabled())
     })
 })

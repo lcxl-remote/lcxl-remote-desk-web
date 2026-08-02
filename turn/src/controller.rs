@@ -20,18 +20,6 @@ pub async fn get_turn_info(
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(view.info().await)))
 }
 
-pub async fn get_turn_session(
-    _query: web::Query<TurnQueryParams>,
-) -> Result<HttpResponse, DeskTurnError> {
-    // `webrtc::turn` exposes no way to enumerate sessions. That is a property of
-    // this build, not of the request, so it answers in the envelope every other
-    // endpoint answers in rather than as a transport-level failure.
-    Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
-        DeskErrorCode::FEATURE_UNAVAILABLE,
-        "Session enumeration is not supported by this TURN implementation".to_string(),
-    )))
-}
-
 pub async fn get_turn_session_statistics(
     view: web::Data<TurnRuntimeView>,
     query: web::Query<TurnQueryParams>,
@@ -67,18 +55,6 @@ pub async fn get_turn_session_statistics(
             None,
         )),
     )
-}
-
-pub async fn delete_turn_session(
-    _query: web::Query<TurnQueryParams>,
-) -> Result<HttpResponse, DeskTurnError> {
-    // `webrtc::turn` has no way to force-close one session. Same reasoning as
-    // the enumeration placeholder: the caller is told in the envelope.
-    Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
-        DeskErrorCode::FEATURE_UNAVAILABLE,
-        "Closing an individual TURN session is not supported by this TURN implementation"
-            .to_string(),
-    )))
 }
 
 pub async fn get_turn_metrics(
@@ -141,8 +117,6 @@ mod tests {
         move |cfg: &mut actix_web::web::ServiceConfig| {
             cfg.app_data(web::Data::new(view))
                 .route("/info", web::get().to(get_turn_info))
-                .route("/session", web::get().to(get_turn_session))
-                .route("/session", web::delete().to(delete_turn_session))
                 .route(
                     "/session/statistics",
                     web::get().to(get_turn_session_statistics),
@@ -153,13 +127,9 @@ mod tests {
 
     const QUERY: &str = "?address=127.0.0.1:5000&interface=udp";
 
-    /// Every endpoint in one case, because the failure mode this guards against
-    /// is a single sweeping "TURN is unavailable" applied to all of them. Three
-    /// classes have to stay apart: the ones that genuinely depend on a runtime
-    /// report *why* there is none, the two placeholders keep their existing
-    /// answers (the operations are unsupported by the TURN library, which has
-    /// nothing to do with whether a relay is up), and none of them may be a 500
-    /// or a 404-because-unregistered.
+    /// Every supported endpoint in one case, because the failure mode this
+    /// guards against is a sweeping "TURN is unavailable" response that erases
+    /// the distinction between runtime state, statistics and scraper output.
     #[actix_web::test]
     async fn a_host_with_no_runtime_answers_each_endpoint_in_its_own_way() {
         let app =
@@ -196,24 +166,9 @@ mod tests {
             test::call_service(&app, test::TestRequest::get().uri("/metrics").to_request()).await;
         assert_eq!(res.status(), 503);
         assert_eq!(res.headers().get("content-type").unwrap(), "text/plain");
-
-        // Placeholders: the TURN library supports neither operation whether or
-        // not a relay is running. Unsupported is a business answer, so it comes
-        // back in the envelope with a 200 like every other JSON endpoint here.
-        for req in [
-            test::TestRequest::get().uri(&format!("/session{QUERY}")),
-            test::TestRequest::delete().uri(&format!("/session{QUERY}")),
-        ] {
-            let res = test::call_service(&app, req.to_request()).await;
-            assert_eq!(res.status(), 200);
-            let body: Value = test::read_body_json(res).await;
-            assert_eq!(body["success"], false);
-            assert_eq!(body["code"], DeskErrorCode::FEATURE_UNAVAILABLE.code());
-        }
     }
 
-    /// With a relay up, the same endpoints report it — and the two placeholders
-    /// still answer exactly as they did without one.
+    /// With a relay up, the supported endpoints report it.
     #[actix_web::test]
     async fn a_running_host_reports_its_runtime() {
         let (supervisor, view, _intent_tx) = loopback_supervisor(
@@ -279,21 +234,6 @@ mod tests {
         let body = test::read_body(res).await;
         let body = String::from_utf8_lossy(&body);
         assert!(body.contains("turn_server_received_bytes_total{class=\"relay\"} 42"));
-
-        let res = test::call_service(
-            &app,
-            test::TestRequest::get()
-                .uri(&format!("/session{QUERY}"))
-                .to_request(),
-        )
-        .await;
-        assert_eq!(res.status(), 200);
-        let body: Value = test::read_body_json(res).await;
-        assert_eq!(
-            body["success"], false,
-            "session enumeration stays unsupported"
-        );
-        assert_eq!(body["code"], DeskErrorCode::FEATURE_UNAVAILABLE.code());
 
         supervisor.shutdown().await;
         // The relay is gone; the same endpoint now reports the reason rather

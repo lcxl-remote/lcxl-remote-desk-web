@@ -3,20 +3,20 @@
 * Do not edit manually.
 */
 
-import type { ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403 } from "../../types.ts";
+import type { ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword401, ChangePassword403 } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
 import { changePassword } from "../../clients.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
 
-export const changePasswordMutationKey = () => [{ url: '/api/desk/api/login/password' }] as const
+export const changePasswordMutationKey = () => [{ url: '/api/auth/credentials' }] as const
 
 export type ChangePasswordMutationKey = ReturnType<typeof changePasswordMutationKey>
 
 export function changePasswordMutationOptions<TContext = unknown>(config: Partial<RequestConfig<ChangePasswordMutationRequest>> & { client?: Client } = {}) {
 
         const mutationKey = changePasswordMutationKey()
-        return mutationOptions<ChangePasswordMutationResponse, ResponseErrorConfig<ChangePassword403>, {data: ChangePasswordMutationRequest}, TContext>({
+        return mutationOptions<ChangePasswordMutationResponse, ResponseErrorConfig<ChangePassword401 | ChangePassword403>, {data: ChangePasswordMutationRequest}, TContext>({
           mutationKey,
           mutationFn: async({ data }) => {
             return changePassword(data, config)
@@ -26,12 +26,12 @@ export function changePasswordMutationOptions<TContext = unknown>(config: Partia
 }
 
 /**
- * @summary Change password of user account
- * {@link /api/desk/api/login/password}
+ * @summary Update the configured local account credentials
+ * {@link /api/auth/credentials}
  */
 export function useChangePassword<TContext>(options: 
 {
-  mutation?: UseMutationOptions<ChangePasswordMutationResponse, ResponseErrorConfig<ChangePassword403>, {data: ChangePasswordMutationRequest}, TContext> & { client?: QueryClient },
+  mutation?: UseMutationOptions<ChangePasswordMutationResponse, ResponseErrorConfig<ChangePassword401 | ChangePassword403>, {data: ChangePasswordMutationRequest}, TContext> & { client?: QueryClient },
   client?: Partial<RequestConfig<ChangePasswordMutationRequest>> & { client?: Client },
 }
  = {}) {
@@ -40,13 +40,13 @@ export function useChangePassword<TContext>(options:
           const { client: queryClient, ...mutationOptions } = mutation;
           const mutationKey = mutationOptions.mutationKey ?? changePasswordMutationKey()
 
-          const baseOptions = changePasswordMutationOptions(config) as UseMutationOptions<ChangePasswordMutationResponse, ResponseErrorConfig<ChangePassword403>, {data: ChangePasswordMutationRequest}, TContext>
+          const baseOptions = changePasswordMutationOptions(config) as UseMutationOptions<ChangePasswordMutationResponse, ResponseErrorConfig<ChangePassword401 | ChangePassword403>, {data: ChangePasswordMutationRequest}, TContext>
           
 
-          return useMutation<ChangePasswordMutationResponse, ResponseErrorConfig<ChangePassword403>, {data: ChangePasswordMutationRequest}, TContext>({
+          return useMutation<ChangePasswordMutationResponse, ResponseErrorConfig<ChangePassword401 | ChangePassword403>, {data: ChangePasswordMutationRequest}, TContext>({
             ...baseOptions,
             mutationKey,
             ...mutationOptions,
-          }, queryClient) as UseMutationResult<ChangePasswordMutationResponse, ResponseErrorConfig<ChangePassword403>, {data: ChangePasswordMutationRequest}, TContext>
+          }, queryClient) as UseMutationResult<ChangePasswordMutationResponse, ResponseErrorConfig<ChangePassword401 | ChangePassword403>, {data: ChangePasswordMutationRequest}, TContext>
       
 }

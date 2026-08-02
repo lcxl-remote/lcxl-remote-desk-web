@@ -15,5 +15,6 @@ export function mergeSystemSettings(
     base: Partial<SystemSettings>,
     edits: Partial<SystemSettings>,
 ): SystemSettings {
-    return { ...base, ...edits } as SystemSettings
+    const { telemetry_consent: _ignoredConsent, ...payload } = { ...base, ...edits }
+    return payload as SystemSettings
 }

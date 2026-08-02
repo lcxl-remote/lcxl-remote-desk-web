@@ -53,7 +53,6 @@ describe("mergeSystemSettings", () => {
             port: 9000,
             listen_addr_ipv4: "127.0.0.1",
             listen_addr_ipv6: "::1",
-            telemetry_consent: false,
             auto_start: false,
             host_access_indicator_enabled: false,
         }
@@ -67,5 +66,6 @@ describe("mergeSystemSettings", () => {
         expect(payload.signaling_url).toBe("ws://remote/api/desk/signaling")
         expect(payload.manager_api_token).toBe("mgr-token")
         expect(payload.local_signaling_token).toBe("local-token")
+        expect(payload).not.toHaveProperty("telemetry_consent")
     })
 })

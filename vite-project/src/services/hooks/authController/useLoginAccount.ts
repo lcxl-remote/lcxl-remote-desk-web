@@ -3,20 +3,20 @@
 * Do not edit manually.
 */
 
-import type { LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403 } from "../../types.ts";
+import type { LoginAccountMutationRequest, LoginAccountMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
 import { loginAccount } from "../../clients.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
 
-export const loginAccountMutationKey = () => [{ url: '/api/login/account' }] as const
+export const loginAccountMutationKey = () => [{ url: '/api/auth/login' }] as const
 
 export type LoginAccountMutationKey = ReturnType<typeof loginAccountMutationKey>
 
 export function loginAccountMutationOptions<TContext = unknown>(config: Partial<RequestConfig<LoginAccountMutationRequest>> & { client?: Client } = {}) {
 
         const mutationKey = loginAccountMutationKey()
-        return mutationOptions<LoginAccountMutationResponse, ResponseErrorConfig<LoginAccount403>, {data: LoginAccountMutationRequest}, TContext>({
+        return mutationOptions<LoginAccountMutationResponse, ResponseErrorConfig<Error>, {data: LoginAccountMutationRequest}, TContext>({
           mutationKey,
           mutationFn: async({ data }) => {
             return loginAccount(data, config)
@@ -26,12 +26,13 @@ export function loginAccountMutationOptions<TContext = unknown>(config: Partial<
 }
 
 /**
- * @summary Login user account
- * {@link /api/login/account}
+ * @description The username is matched exactly against the standalone server's configured local username. The standalone server has no email lookup lane.
+ * @summary Login the configured local user account
+ * {@link /api/auth/login}
  */
 export function useLoginAccount<TContext>(options: 
 {
-  mutation?: UseMutationOptions<LoginAccountMutationResponse, ResponseErrorConfig<LoginAccount403>, {data: LoginAccountMutationRequest}, TContext> & { client?: QueryClient },
+  mutation?: UseMutationOptions<LoginAccountMutationResponse, ResponseErrorConfig<Error>, {data: LoginAccountMutationRequest}, TContext> & { client?: QueryClient },
   client?: Partial<RequestConfig<LoginAccountMutationRequest>> & { client?: Client },
 }
  = {}) {
@@ -40,13 +41,13 @@ export function useLoginAccount<TContext>(options:
           const { client: queryClient, ...mutationOptions } = mutation;
           const mutationKey = mutationOptions.mutationKey ?? loginAccountMutationKey()
 
-          const baseOptions = loginAccountMutationOptions(config) as UseMutationOptions<LoginAccountMutationResponse, ResponseErrorConfig<LoginAccount403>, {data: LoginAccountMutationRequest}, TContext>
+          const baseOptions = loginAccountMutationOptions(config) as UseMutationOptions<LoginAccountMutationResponse, ResponseErrorConfig<Error>, {data: LoginAccountMutationRequest}, TContext>
           
 
-          return useMutation<LoginAccountMutationResponse, ResponseErrorConfig<LoginAccount403>, {data: LoginAccountMutationRequest}, TContext>({
+          return useMutation<LoginAccountMutationResponse, ResponseErrorConfig<Error>, {data: LoginAccountMutationRequest}, TContext>({
             ...baseOptions,
             mutationKey,
             ...mutationOptions,
-          }, queryClient) as UseMutationResult<LoginAccountMutationResponse, ResponseErrorConfig<LoginAccount403>, {data: LoginAccountMutationRequest}, TContext>
+          }, queryClient) as UseMutationResult<LoginAccountMutationResponse, ResponseErrorConfig<Error>, {data: LoginAccountMutationRequest}, TContext>
       
 }

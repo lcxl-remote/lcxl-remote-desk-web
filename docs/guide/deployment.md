@@ -43,6 +43,14 @@ On Apple Silicon, make sure `pkg-config` can locate the Homebrew `.pc` files:
 export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH"
 ```
 
+For unattended access, open **System Settings → macOS Status → Automatic
+Login** in the web console. The card reports FileVault, the configured
+automatic-login user and the current user, and provides copyable enable/disable
+commands. The enable command uses `sysadminctl ... -password -`: run it in
+Terminal so macOS requests the password interactively; the web page never reads
+or handles the password. FileVault and automatic login are mutually exclusive,
+so the page disables the enable action while FileVault is active.
+
 ### Windows
 
 No extra dependencies; everything is managed automatically through Cargo. (AV1 encoding optionally needs [nasm](https://www.nasm.us/) — see [Quick Start](/guide/quick-start).)

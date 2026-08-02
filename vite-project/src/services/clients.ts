@@ -4,8 +4,99 @@
 */
 
 import fetch from "@/lib/kubb-client";
-import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, GetCurrentUserQueryResponse, GetCurrentUser401, VerifyConnectionMutationRequest, VerifyConnectionMutationResponse, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, QueryMacosAutologinQueryResponse, RetryManagerLinkMutationResponse, QueryManagerLinkStatusQueryResponse, RedeemCodeMutationRequest, RedeemCodeMutationResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, StartSupportMutationResponse, SupportStatusQueryResponse, StopSupportMutationResponse, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, TestModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, GetDiagnoseSessionQueryResponse, GetDiagnoseSessionQueryParams, ListDiagnoseSessionsQueryResponse, ListDiagnoseSessionsQueryParams, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics503, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, GetUsageRetentionQueryResponse, UpdateUsageRetentionMutationRequest, UpdateUsageRetentionMutationResponse, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
+import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword401, ChangePassword403, LoginAccountMutationRequest, LoginAccountMutationResponse, LogoutAccountMutationResponse, GetCurrentUserQueryResponse, GetCurrentUser401, LoginTauriMutationResponse, LoginTauriQueryParams, VerifyConnectionMutationRequest, VerifyConnectionMutationResponse, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, QueryMacosAutologinQueryResponse, RetryManagerLinkMutationResponse, QueryManagerLinkStatusQueryResponse, RedeemCodeMutationRequest, RedeemCodeMutationResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, StartSupportMutationResponse, SupportStatusQueryResponse, StopSupportMutationResponse, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, TestModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, GetDiagnoseSessionQueryResponse, GetDiagnoseSessionQueryParams, ListDiagnoseSessionsQueryResponse, ListDiagnoseSessionsQueryParams, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics503, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, GetUsageRetentionQueryResponse, UpdateUsageRetentionMutationRequest, UpdateUsageRetentionMutationResponse, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
+
+function getChangePasswordUrl() {
+  const res = { method: 'PATCH', url: `/api/auth/credentials` as const }
+  return res
+}
+
+/**
+ * @summary Update the configured local account credentials
+ * {@link /api/auth/credentials}
+ */
+export async function changePassword(data: ChangePasswordMutationRequest, config: Partial<RequestConfig<ChangePasswordMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<ChangePasswordMutationResponse, ResponseErrorConfig<ChangePassword401 | ChangePassword403>, ChangePasswordMutationRequest>({ method : "PATCH", url : getChangePasswordUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getLoginAccountUrl() {
+  const res = { method: 'POST', url: `/api/auth/login` as const }
+  return res
+}
+
+/**
+ * @description The username is matched exactly against the standalone server's configured local username. The standalone server has no email lookup lane.
+ * @summary Login the configured local user account
+ * {@link /api/auth/login}
+ */
+export async function loginAccount(data: LoginAccountMutationRequest, config: Partial<RequestConfig<LoginAccountMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<LoginAccountMutationResponse, ResponseErrorConfig<Error>, LoginAccountMutationRequest>({ method : "POST", url : getLoginAccountUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getLogoutAccountUrl() {
+  const res = { method: 'POST', url: `/api/auth/logout` as const }
+  return res
+}
+
+/**
+ * @summary Logout user account
+ * {@link /api/auth/logout}
+ */
+export async function logoutAccount(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<LogoutAccountMutationResponse, ResponseErrorConfig<Error>, unknown>({ method : "POST", url : getLogoutAccountUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getGetCurrentUserUrl() {
+  const res = { method: 'GET', url: `/api/auth/me` as const }
+  return res
+}
+
+/**
+ * @summary Get current user
+ * {@link /api/auth/me}
+ */
+export async function getCurrentUser(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<GetCurrentUserQueryResponse, ResponseErrorConfig<GetCurrentUser401>, unknown>({ method : "GET", url : getGetCurrentUserUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getLoginTauriUrl() {
+  const res = { method: 'POST', url: `/api/auth/tauri-login` as const }
+  return res
+}
+
+/**
+ * @summary Auto-login from Tauri WebView using one-time token
+ * {@link /api/auth/tauri-login}
+ */
+export async function loginTauri(params: LoginTauriQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<LoginTauriMutationResponse, ResponseErrorConfig<Error>, unknown>({ method : "POST", url : getLoginTauriUrl().url.toString(), params, ... requestConfig })
+  return res.data
+}
 
 function getVerifyConnectionUrl() {
   const res = { method: 'POST', url: `/api/connection/verify` as const }
@@ -22,42 +113,6 @@ export async function verifyConnection(data: VerifyConnectionMutationRequest, co
   const requestData = data
 
   const res = await request<VerifyConnectionMutationResponse, ResponseErrorConfig<Error>, VerifyConnectionMutationRequest>({ method : "POST", url : getVerifyConnectionUrl().url.toString(), data : requestData, ... requestConfig })
-  return res.data
-}
-
-function getGetCurrentUserUrl() {
-  const res = { method: 'GET', url: `/api/currentUser` as const }
-  return res
-}
-
-/**
- * @summary Get current user
- * {@link /api/currentUser}
- */
-export async function getCurrentUser(config: Partial<RequestConfig> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-
-
-  const res = await request<GetCurrentUserQueryResponse, ResponseErrorConfig<GetCurrentUser401>, unknown>({ method : "GET", url : getGetCurrentUserUrl().url.toString(), ... requestConfig })
-  return res.data
-}
-
-function getChangePasswordUrl() {
-  const res = { method: 'POST', url: `/api/desk/api/login/password` as const }
-  return res
-}
-
-/**
- * @summary Change password of user account
- * {@link /api/desk/api/login/password}
- */
-export async function changePassword(data: ChangePasswordMutationRequest, config: Partial<RequestConfig<ChangePasswordMutationRequest>> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-  const requestData = data
-
-  const res = await request<ChangePasswordMutationResponse, ResponseErrorConfig<ChangePassword403>, ChangePasswordMutationRequest>({ method : "POST", url : getChangePasswordUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 
@@ -788,78 +843,6 @@ export async function initSystem(data: InitSystemMutationRequest, config: Partia
   return res.data
 }
 
-function getLoginAccountUrl() {
-  const res = { method: 'POST', url: `/api/login/account` as const }
-  return res
-}
-
-/**
- * @summary Login user account
- * {@link /api/login/account}
- */
-export async function loginAccount(data: LoginAccountMutationRequest, config: Partial<RequestConfig<LoginAccountMutationRequest>> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-  const requestData = data
-
-  const res = await request<LoginAccountMutationResponse, ResponseErrorConfig<LoginAccount403>, LoginAccountMutationRequest>({ method : "POST", url : getLoginAccountUrl().url.toString(), data : requestData, ... requestConfig })
-  return res.data
-}
-
-function getGetCaptchaUrl() {
-  const res = { method: 'POST', url: `/api/login/captcha` as const }
-  return res
-}
-
-/**
- * @summary Get captcha for login
- * {@link /api/login/captcha}
- */
-export async function getCaptcha(data: GetCaptchaMutationRequest, config: Partial<RequestConfig<GetCaptchaMutationRequest>> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-  const requestData = data
-
-  const res = await request<GetCaptchaMutationResponse, ResponseErrorConfig<GetCaptcha400 | GetCaptcha501>, GetCaptchaMutationRequest>({ method : "POST", url : getGetCaptchaUrl().url.toString(), data : requestData, ... requestConfig })
-  return res.data
-}
-
-function getLogoutAccountUrl() {
-  const res = { method: 'POST', url: `/api/login/outLogin` as const }
-  return res
-}
-
-/**
- * @summary Logout user account
- * {@link /api/login/outLogin}
- */
-export async function logoutAccount(config: Partial<RequestConfig> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-
-
-  const res = await request<LogoutAccountMutationResponse, ResponseErrorConfig<Error>, unknown>({ method : "POST", url : getLogoutAccountUrl().url.toString(), ... requestConfig })
-  return res.data
-}
-
-function getLoginTauriUrl() {
-  const res = { method: 'POST', url: `/api/login/tauri` as const }
-  return res
-}
-
-/**
- * @summary Auto-login from Tauri WebView using one-time token
- * {@link /api/login/tauri}
- */
-export async function loginTauri(params: LoginTauriQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-
-
-  const res = await request<LoginTauriMutationResponse, ResponseErrorConfig<LoginTauri403>, unknown>({ method : "POST", url : getLoginTauriUrl().url.toString(), params, ... requestConfig })
-  return res.data
-}
-
 function getGetModelProviderUrl() {
   const res = { method: 'GET', url: `/api/model/provider` as const }
   return res
@@ -1079,42 +1062,6 @@ export async function getTurnMetrics(config: Partial<RequestConfig> & { client?:
 
 
   const res = await request<GetTurnMetricsQueryResponse, ResponseErrorConfig<GetTurnMetrics503>, unknown>({ method : "GET", url : getGetTurnMetricsUrl().url.toString(), ... requestConfig })
-  return res.data
-}
-
-function getGetTurnSessionUrl() {
-  const res = { method: 'GET', url: `/api/turn/session` as const }
-  return res
-}
-
-/**
- * @summary Get turn server session
- * {@link /api/turn/session}
- */
-export async function getTurnSession(params: GetTurnSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-
-
-  const res = await request<GetTurnSessionQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetTurnSessionUrl().url.toString(), params, ... requestConfig })
-  return res.data
-}
-
-function getDeleteTurnSessionUrl() {
-  const res = { method: 'DELETE', url: `/api/turn/session` as const }
-  return res
-}
-
-/**
- * @summary Delete turn server session
- * {@link /api/turn/session}
- */
-export async function deleteTurnSession(params: DeleteTurnSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-
-
-  const res = await request<DeleteTurnSessionMutationResponse, ResponseErrorConfig<Error>, unknown>({ method : "DELETE", url : getDeleteTurnSessionUrl().url.toString(), params, ... requestConfig })
   return res.data
 }
 

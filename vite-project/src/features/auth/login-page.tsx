@@ -5,7 +5,6 @@ import * as z from "zod"
 import { useNavigate, useSearchParams } from "react-router-dom"
 import { useTranslation } from "react-i18next"
 import { Lock, User } from "lucide-react"
-import axios from "axios"
 
 import {
     Form,
@@ -19,6 +18,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useToast } from "@/hooks/use-toast"
 import { useLoginAccount } from "@/services/hooks/authController/useLoginAccount"
+import { useLoginTauri } from "@/services/hooks/authController/useLoginTauri"
 import { useRedeemCode } from "@/services/hooks/authController/useRedeemCode"
 import { useGetCurrentUser } from "@/services/hooks/userController/useGetCurrentUser"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
@@ -32,7 +32,6 @@ const formSchema = z.object({
     username: z.string().optional(),
     password: z.string().optional(),
     deviceCode: z.string().optional(),
-    autoLogin: z.boolean().default(true),
     type: z.string().default("account"),
 })
 
@@ -48,6 +47,7 @@ export default function LoginPage() {
     const tauriAutoLoginTokenRef = useRef<string | null>(null)
 
     const { mutateAsync: login } = useLoginAccount()
+    const { mutateAsync: loginTauri } = useLoginTauri()
     const { mutateAsync: redeem } = useRedeemCode()
     const { refetch: fetchUserInfo } = useGetCurrentUser()
     const { data: serverInfoResp, isLoading: isServerInfoLoading } = useQueryServerInfo()
@@ -71,22 +71,19 @@ export default function LoginPage() {
 
         const doTauriLogin = async () => {
             try {
-                const response = await axios.post(`/api/login/tauri?token=${encodeURIComponent(token)}`)
-                if (response.data?.status === "ok") {
-                    toast({
-                        title: t("pages.login.success"),
-                    })
-                    await fetchUserInfo()
+                const response = await loginTauri({ params: { token } })
+                toast({
+                    title: t("pages.login.success"),
+                })
+                await fetchUserInfo()
 
-                    // Navigate based on startup_mode
-                    const startupMode = response.data?.startup_mode
-                    if (startupMode === startupModeEnum["desk-server"]) {
-                        navigate("/system/settings")
-                    } else {
-                        navigate("/desk/list")
-                    }
-                    return
+                const startupMode = response.data?.startup_mode
+                if (startupMode === startupModeEnum["desk-server"]) {
+                    navigate("/system/settings")
+                } else {
+                    navigate("/desk/list")
                 }
+                return
             } catch (error) {
                 // Token invalid or expired, fall through to normal login form
                 console.warn("Tauri auto-login failed:", error)
@@ -108,7 +105,6 @@ export default function LoginPage() {
             username: "",
             password: "",
             deviceCode: "",
-            autoLogin: true,
             type: "account",
         },
     })
@@ -149,31 +145,19 @@ export default function LoginPage() {
                 return
             }
 
-            const response = await login({
+            await login({
                 data: {
                     username: values.username || "",
                     password: values.password || "",
-                    autoLogin: values.autoLogin,
-                    type: values.type,
                 }
             })
+            toast({
+                title: t("pages.login.success"),
+            })
+            await fetchUserInfo()
 
-            // Kubb generated client returns the data directly
-            if (response && response.status === 'ok') {
-                toast({
-                    title: t("pages.login.success"),
-                })
-                await fetchUserInfo()
-
-                const redirect = searchParams.get("redirect") || "/"
-                navigate(redirect)
-            } else {
-                toast({
-                    variant: "destructive",
-                    title: t("pages.login.failure"),
-                    description: "Login failed with status: " + (response?.status || 'unknown'),
-                })
-            }
+            const redirect = searchParams.get("redirect") || "/"
+            navigate(redirect)
         } catch (error: any) {
             let errorMsg = error?.message || "Unknown error";
             if (error?.response?.data?.message) {

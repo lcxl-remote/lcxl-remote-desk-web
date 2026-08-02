@@ -1,5 +1,5 @@
-use actix_web::{HttpResponse, delete, get, web};
-use desk_turn::model::{TurnQueryParams, TurnRuntimeInfo, TurnSession, TurnSessionStatistics};
+use actix_web::{HttpResponse, get, web};
+use desk_turn::model::{TurnQueryParams, TurnRuntimeInfo, TurnSessionStatistics};
 use desk_turn::runtime::TurnRuntimeView;
 use desk_utils::rest::RestResponse;
 
@@ -22,24 +22,6 @@ pub async fn get_turn_info(view: web::Data<TurnRuntimeView>) -> Result<HttpRespo
 
 #[utoipa::path(
     tag = TAG,
-    summary = "Get turn server session",
-    params(TurnQueryParams),
-    responses(
-        (status = 200, description = "Session enumeration is not supported by this \
-         implementation; the reason is carried in RestResponse.code",
-         body = RestResponse<TurnSession>),
-    ),
-)]
-#[get("/session")]
-pub async fn get_turn_session(
-    query: web::Query<TurnQueryParams>,
-) -> Result<HttpResponse, DeskError> {
-    let response = desk_turn::controller::get_turn_session(query).await?;
-    Ok(response)
-}
-
-#[utoipa::path(
-    tag = TAG,
     summary = "Get turn server session statistics",
     params(TurnQueryParams),
     responses(
@@ -53,23 +35,6 @@ pub async fn get_turn_session_statistics(
     query: web::Query<TurnQueryParams>,
 ) -> Result<HttpResponse, DeskError> {
     let response = desk_turn::controller::get_turn_session_statistics(view, query).await?;
-    Ok(response)
-}
-
-#[utoipa::path(
-    tag = TAG,
-    summary = "Delete turn server session",
-    params(TurnQueryParams),
-    responses(
-        (status = 200, description = "Closing an individual session is not supported by this \
-         implementation; the reason is carried in RestResponse.code"),
-    ),
-)]
-#[delete("/session")]
-pub async fn delete_turn_session(
-    query: web::Query<TurnQueryParams>,
-) -> Result<HttpResponse, DeskError> {
-    let response = desk_turn::controller::delete_turn_session(query).await?;
     Ok(response)
 }
 

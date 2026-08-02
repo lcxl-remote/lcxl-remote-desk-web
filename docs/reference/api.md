@@ -37,6 +37,22 @@ Generated files under `vite-project/src/services/` are produced by Kubb — do n
 `npm run build` only runs tsc and vite; it never regenerates the client. A backend change that alters the spec therefore leaves a stale client that still compiles — and a changed numeric value produces no error at all, it just keeps being sent. CI regenerates on every push and fails if the result differs from what is committed.
 :::
 
+## Authentication contract
+
+Browser/controller authentication uses one canonical JSON surface:
+
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `GET /api/auth/me`
+- `PATCH /api/auth/credentials`
+- `POST /api/auth/tauri-login` (standalone desktop host only)
+
+Every response uses `RestResponse`. Credential/business failures from login and
+credentials remain HTTP 200 with `success=false`; an absent or expired session
+on `/api/auth/me` is HTTP 401 with the same JSON envelope. Public fields use
+snake_case. OAuth authorization/callback continuation remains under
+`/api/oauth/*` and is not part of this route family.
+
 ## Error Codes
 
 `DeskErrorCode` (`utils/src/error.rs`) is declared through the `desk_error_codes!` macro, which emits both the constants and an `ALL` name/value table. That table is published in the spec as an int32 enum carrying `x-enum-varnames`, so the generated client exposes `deskErrorCodeEnum` with named members — frontends branch on those instead of mirroring the numbers by hand.

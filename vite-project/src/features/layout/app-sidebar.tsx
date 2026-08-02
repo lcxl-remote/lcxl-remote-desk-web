@@ -84,7 +84,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
 
         return buildNavItems({
             access: user.access,
-            targetConnectionId: user.targetConnectionId,
+            targetConnectionId: user.target_connection_id,
             startupMode: serverInfo.startup_mode,
         });
     }, [user, serverInfo]);

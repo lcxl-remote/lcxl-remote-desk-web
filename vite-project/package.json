@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "prebuild": "node scripts/verify-services.cjs && node scripts/verify-i18n.cjs && node scripts/verify-error-codes.cjs",
+    "prebuild": "node scripts/verify-services.cjs && node scripts/verify-auth-contract.cjs && node scripts/verify-i18n.cjs && node scripts/verify-error-codes.cjs",
     "verify-services": "node scripts/verify-services.cjs",
     "verify-i18n": "node scripts/verify-i18n.cjs",
     "verify-error-codes": "node scripts/verify-error-codes.cjs",

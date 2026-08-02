@@ -3,20 +3,20 @@
 * Do not edit manually.
 */
 
-import type { LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403 } from "../../types.ts";
+import type { LoginTauriMutationResponse, LoginTauriQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
 import { loginTauri } from "../../clients.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
 
-export const loginTauriMutationKey = () => [{ url: '/api/login/tauri' }] as const
+export const loginTauriMutationKey = () => [{ url: '/api/auth/tauri-login' }] as const
 
 export type LoginTauriMutationKey = ReturnType<typeof loginTauriMutationKey>
 
 export function loginTauriMutationOptions<TContext = unknown>(config: Partial<RequestConfig> & { client?: Client } = {}) {
 
         const mutationKey = loginTauriMutationKey()
-        return mutationOptions<LoginTauriMutationResponse, ResponseErrorConfig<LoginTauri403>, {params: LoginTauriQueryParams}, TContext>({
+        return mutationOptions<LoginTauriMutationResponse, ResponseErrorConfig<Error>, {params: LoginTauriQueryParams}, TContext>({
           mutationKey,
           mutationFn: async({ params }) => {
             return loginTauri(params, config)
@@ -27,11 +27,11 @@ export function loginTauriMutationOptions<TContext = unknown>(config: Partial<Re
 
 /**
  * @summary Auto-login from Tauri WebView using one-time token
- * {@link /api/login/tauri}
+ * {@link /api/auth/tauri-login}
  */
 export function useLoginTauri<TContext>(options: 
 {
-  mutation?: UseMutationOptions<LoginTauriMutationResponse, ResponseErrorConfig<LoginTauri403>, {params: LoginTauriQueryParams}, TContext> & { client?: QueryClient },
+  mutation?: UseMutationOptions<LoginTauriMutationResponse, ResponseErrorConfig<Error>, {params: LoginTauriQueryParams}, TContext> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client },
 }
  = {}) {
@@ -40,13 +40,13 @@ export function useLoginTauri<TContext>(options:
           const { client: queryClient, ...mutationOptions } = mutation;
           const mutationKey = mutationOptions.mutationKey ?? loginTauriMutationKey()
 
-          const baseOptions = loginTauriMutationOptions(config) as UseMutationOptions<LoginTauriMutationResponse, ResponseErrorConfig<LoginTauri403>, {params: LoginTauriQueryParams}, TContext>
+          const baseOptions = loginTauriMutationOptions(config) as UseMutationOptions<LoginTauriMutationResponse, ResponseErrorConfig<Error>, {params: LoginTauriQueryParams}, TContext>
           
 
-          return useMutation<LoginTauriMutationResponse, ResponseErrorConfig<LoginTauri403>, {params: LoginTauriQueryParams}, TContext>({
+          return useMutation<LoginTauriMutationResponse, ResponseErrorConfig<Error>, {params: LoginTauriQueryParams}, TContext>({
             ...baseOptions,
             mutationKey,
             ...mutationOptions,
-          }, queryClient) as UseMutationResult<LoginTauriMutationResponse, ResponseErrorConfig<LoginTauri403>, {params: LoginTauriQueryParams}, TContext>
+          }, queryClient) as UseMutationResult<LoginTauriMutationResponse, ResponseErrorConfig<Error>, {params: LoginTauriQueryParams}, TContext>
       
 }

@@ -19,6 +19,15 @@ Server settings are managed via `conf/config.toml`. The config file path can be 
 
 - `local_signaling_token` — auto-generated, persisted token used by the local desk server (and other hosts) to authenticate with the co-located signaling server. Do not set by hand; it is a credential and is masked in logs.
 
+### Telemetry consent
+
+`telemetry_consent` is owned by the dedicated **Telemetry** card rather than the
+general system-settings form. Changing ports, addresses, IPv6 or auto-start
+cannot change or clear it. A consent choice is persisted immediately, but the
+OpenTelemetry exporters/layers are created at process startup; restart the
+relevant server, daemon and worker processes before describing the new choice as
+active at runtime.
+
 ### Local remote-access presentation
 
 <code>host_access_indicator_enabled</code> controls whether the Tauri host shows
@@ -122,6 +131,13 @@ reads `starting` rather than running — that is the normal path, not a failure,
 and only a state with a cause to report is called one. The card re-reads itself
 while the host is still settling, so it becomes running, or names what went
 wrong, without being refreshed by hand.
+
+The page also has a collapsed **Advanced statistics lookup**. Given a known
+client `IP:port` and interface, it shows relay and control bytes/packets for that
+address and distinguishes a stopped runtime from an address with no record.
+This TURN implementation cannot enumerate all sessions or force-close one, so
+the former `GET /api/turn/session` and `DELETE /api/turn/session` placeholders
+are not part of the API; only `/api/turn/session/statistics` remains.
 
 ## Desktop `[desk]` {#desktop-desk}
 

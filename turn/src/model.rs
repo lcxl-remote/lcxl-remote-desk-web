@@ -186,15 +186,6 @@ pub struct TurnQueryParams {
     pub interface: String,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct TurnSession {
-    pub username: String,
-    pub permissions: Vec<u16>,
-    pub channels: Vec<u16>,
-    pub port: Option<u16>,
-    pub expires: u64,
-}
-
 /// Traffic class of a single TURN client-facing datagram. `Relay` carries
 /// relayed application data (ChannelData / Send / Data indication) and is the
 /// billable dimension; `Control` covers STUN Binding and TURN control messages

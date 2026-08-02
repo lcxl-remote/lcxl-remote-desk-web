@@ -9,7 +9,7 @@ import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryRe
 import { getCurrentUser } from "../../clients.ts";
 import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 
-export const getCurrentUserSuspenseQueryKey = () => [{ url: '/api/currentUser' }] as const
+export const getCurrentUserSuspenseQueryKey = () => [{ url: '/api/auth/me' }] as const
 
 export type GetCurrentUserSuspenseQueryKey = ReturnType<typeof getCurrentUserSuspenseQueryKey>
 
@@ -28,7 +28,7 @@ export function getCurrentUserSuspenseQueryOptions(config: Partial<RequestConfig
 
 /**
  * @summary Get current user
- * {@link /api/currentUser}
+ * {@link /api/auth/me}
  */
 export function useGetCurrentUserSuspense<TData = GetCurrentUserQueryResponse, TQueryKey extends QueryKey = GetCurrentUserSuspenseQueryKey>(options: 
 {

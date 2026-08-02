@@ -28,6 +28,12 @@ vi.mock("@tanstack/react-query", async (importOriginal) => ({
 }))
 
 const regenerateSecret = vi.fn(async () => ({}))
+const queryStatistics = vi.fn(async () => ({}))
+const statisticsQuery: {
+    data?: { data?: Record<string, unknown> }
+    error?: Error
+    isFetching: boolean
+} = { isFetching: false }
 
 vi.mock("@/services/hooks/turnController/useGetTurnInfo", () => ({
     useGetTurnInfo: () => turnInfo,
@@ -41,6 +47,9 @@ vi.mock("@/services/hooks/turnController/useUpdateTurnSettings", () => ({
 }))
 vi.mock("@/services/hooks/turnController/useRegenerateTurnSecret", () => ({
     useRegenerateTurnSecret: () => ({ mutateAsync: regenerateSecret, isPending: false }),
+}))
+vi.mock("@/services/hooks/turnController/useGetTurnSessionStatistics", () => ({
+    useGetTurnSessionStatistics: () => ({ ...statisticsQuery, refetch: queryStatistics }),
 }))
 
 import { TurnSettings } from "./turn-settings"
@@ -61,6 +70,10 @@ beforeEach(() => {
     updateTurnSettings.mockClear()
     regenerateSecret.mockClear()
     invalidateQueries.mockClear()
+    queryStatistics.mockClear()
+    statisticsQuery.data = undefined
+    statisticsQuery.error = undefined
+    statisticsQuery.isFetching = false
     turnQuery.data = undefined
     turnQuery.isLoading = false
     turnInfo.data = {
@@ -197,5 +210,30 @@ describe("TurnSettings — interface addresses", () => {
         const payload = (updateTurnSettings.mock.calls[0] as unknown as [{ data: Record<string, unknown> }])[0]
             .data
         expect((payload.interfaces as { external: string }[])[0].external).toBe("[2001:db8::1]:3478")
+    })
+})
+
+describe("TurnSettings — session diagnostics", () => {
+    it("queries a known address and renders relay/control counters", async () => {
+        turnQuery.data = { data: { ...SAVED } }
+        statisticsQuery.data = {
+            data: {
+                relay: { received_bytes: 10, send_bytes: 20, received_pkts: 1, send_pkts: 2 },
+                control: { received_bytes: 30, send_bytes: 40, received_pkts: 3, send_pkts: 4 },
+                error_pkts: 5,
+            },
+        }
+        render(<TurnSettings />)
+
+        fireEvent.click(screen.getByRole("button", { name: /advanced statistics lookup/i }))
+        fireEvent.change(screen.getByLabelText("Client IP:port"), {
+            target: { value: "203.0.113.10:54321" },
+        })
+        fireEvent.click(screen.getByRole("button", { name: /^query$/i }))
+
+        await waitFor(() => expect(queryStatistics).toHaveBeenCalledTimes(1))
+        expect(screen.getByText("Relay traffic")).toBeInTheDocument()
+        expect(screen.getByText("Control traffic")).toBeInTheDocument()
+        expect(screen.getByText("5 error packet(s)")).toBeInTheDocument()
     })
 })

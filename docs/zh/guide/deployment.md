@@ -43,6 +43,12 @@ brew install pkgconf libvpx x264 cmake
 export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH"
 ```
 
+如需无人值守访问，请在 Web 控制台打开**系统设置 → macOS 状态 → 自动登录**。
+卡片会显示 FileVault、已配置的自动登录用户与当前用户，并提供可复制的启用/禁用命令。
+启用命令使用 `sysadminctl ... -password -`：请在终端中执行，由 macOS 交互式请求密码；
+网页绝不读取或处理密码。FileVault 与自动登录互斥，因此 FileVault 开启时页面会禁用
+启用操作。
+
 ### Windows
 
 无需额外依赖；一切由 Cargo 自动管理。（AV1 编码可选地需要 [nasm](https://www.nasm.us/)——见[快速开始](/zh/guide/quick-start)。）

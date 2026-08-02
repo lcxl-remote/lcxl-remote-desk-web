@@ -1,1 +1,0 @@
-{"type":"object","required":["isLogin"],"properties":{"isLogin":{"type":"boolean"}},"x-readme-ref-name":"NoLogintUser"}

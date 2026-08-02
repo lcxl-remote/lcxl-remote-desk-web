@@ -9,7 +9,7 @@ import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from
 import { getCurrentUser } from "../../clients.ts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 
-export const getCurrentUserQueryKey = () => [{ url: '/api/currentUser' }] as const
+export const getCurrentUserQueryKey = () => [{ url: '/api/auth/me' }] as const
 
 export type GetCurrentUserQueryKey = ReturnType<typeof getCurrentUserQueryKey>
 
@@ -28,7 +28,7 @@ export function getCurrentUserQueryOptions(config: Partial<RequestConfig> & { cl
 
 /**
  * @summary Get current user
- * {@link /api/currentUser}
+ * {@link /api/auth/me}
  */
 export function useGetCurrentUser<TData = GetCurrentUserQueryResponse, TQueryData = GetCurrentUserQueryResponse, TQueryKey extends QueryKey = GetCurrentUserQueryKey>(options: 
 {

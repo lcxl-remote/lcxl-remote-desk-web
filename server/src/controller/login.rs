@@ -1,36 +1,33 @@
 use actix_session::Session;
-use actix_web::{Error as AWError, HttpResponse, post, web};
+use actix_web::{Error as AWError, HttpResponse, patch, post, web};
 use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 use desk_server_version::SERVER_API_VERSION;
+use desk_signal_facade::model::auth::{
+    EmptyResponseDto, LoginOutcomeDto, LoginRequest, UpdateCredentialsRequest,
+};
 use log::{error, info};
 
-use crate::{
-    error::DeskErrorCode,
-    model::{
-        login::{FakeCaptcha, FakeCaptchaParams, LoginParams, LoginResult, PasswordParams},
-        settings::SharedSettings,
-    },
-};
+use crate::{error::DeskErrorCode, model::settings::SharedSettings};
 use desk_utils::rest::RestResponse;
 
 pub const TAG: &str = "Auth";
 
 #[utoipa::path(
     tag = TAG,
-    summary = "Login user account",
-    request_body(content = LoginParams),
+    summary = "Login the configured local user account",
+    description = "The username is matched exactly against the standalone server's configured local username. The standalone server has no email lookup lane.",
+    request_body(content = LoginRequest),
     responses(
-        (status = 200, description = "Login result", body=LoginResult),
-        (status = 403, description = "Illegal username or password"),
+        (status = 200, description = "Login result", body = RestResponse<LoginOutcomeDto>),
     ),
 )]
-#[post("/api/login/account")]
+#[post("/api/auth/login")]
 pub async fn login_account(
-    requst_json: web::Json<LoginParams>,
+    request_json: web::Json<LoginRequest>,
     settings: web::Data<SharedSettings>,
     session: Session,
 ) -> Result<HttpResponse, AWError> {
-    let params = requst_json.into_inner();
+    let params = request_json.into_inner();
     let startup_mode = {
         let settings = settings.read().await;
         settings.args.startup_mode.clone()
@@ -44,102 +41,98 @@ pub async fn login_account(
         let settings = settings.read().await;
         if settings.user.login_user_name != params.username {
             error!("Username does not match");
-            return Ok(HttpResponse::Forbidden().json(RestResponse::<()>::failed(
-                DeskErrorCode::SYSTEM_ERROR,
-                "Illegal username or password".to_string(),
-            )));
+            return Ok(
+                HttpResponse::Ok().json(RestResponse::<LoginOutcomeDto>::failed_with_data(
+                    DeskErrorCode::ILLEGAL_CREDENTIALS,
+                    Some("Illegal username or password".to_string()),
+                    None,
+                )),
+            );
         }
         if settings.user.login_password != params.password {
             error!("Password does not match");
-            return Ok(HttpResponse::Forbidden().json(RestResponse::<()>::failed(
-                DeskErrorCode::SYSTEM_ERROR,
-                "Illegal username or password".to_string(),
-            )));
+            return Ok(
+                HttpResponse::Ok().json(RestResponse::<LoginOutcomeDto>::failed_with_data(
+                    DeskErrorCode::ILLEGAL_CREDENTIALS,
+                    Some("Illegal username or password".to_string()),
+                    None,
+                )),
+            );
         }
     }
-    let result = LoginResult {
-        status: String::from("ok"),
-        login_type: params.login_type,
-        current_authority: String::from("admin"),
-        api_version: SERVER_API_VERSION,
-        target_connection_id: None,
+    let result = LoginOutcomeDto {
+        captcha_required: None,
+        retry_after_sec: None,
+        api_version: Some(SERVER_API_VERSION),
         startup_mode: Some(startup_mode),
     };
     let user_info = CurrentUser::new_admin(&params.username);
     // Store user information in session
     session.set_current_user(&user_info)?;
     info!("Login successful, username: {}", params.username);
-    Ok(HttpResponse::Ok().json(result))
-}
-
-#[utoipa::path(
-    tag = TAG,
-    summary = "Get captcha for login",
-    request_body(content = FakeCaptchaParams),
-    responses(
-        (status = 200, description = "Get captcha successfully", body=FakeCaptcha),
-        (status = 400, description = "Bad request"),
-        (status = 501, description = "Not implemented"),
-    ),
-)]
-#[post("/api/login/captcha")]
-pub async fn get_captcha(
-    requst_json: web::Json<FakeCaptchaParams>,
-) -> Result<HttpResponse, AWError> {
-    let params = requst_json.into_inner();
-    if params.phone.is_none() {
-        return Ok(HttpResponse::BadRequest().body("Phone is null"));
-    }
-    Ok(HttpResponse::NotImplemented().body("Not implemented"))
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(result)))
 }
 
 #[utoipa::path(
     tag = TAG,
     summary = "Logout user account",
     responses(
-        (status = 200, description = "Logout successful"),
+        (status = 200, description = "Logout successful", body = RestResponse<EmptyResponseDto>),
     ),
 )]
-#[post("/api/login/outLogin")]
+#[post("/api/auth/logout")]
 pub async fn logout_account(session: Session) -> Result<HttpResponse, AWError> {
     session.remove_current_user();
     info!("Logout successful");
-    Ok(HttpResponse::Ok().finish())
+    Ok(HttpResponse::Ok().json(RestResponse::succeed()))
 }
 
 #[utoipa::path(
     tag = TAG,
-    summary = "Change password of user account",
-    request_body(content = PasswordParams),
+    summary = "Update the configured local account credentials",
+    request_body(content = UpdateCredentialsRequest),
     responses(
-        (status = 200, description = "Change password successful"),
-        (status = 403, description = "Illegal username or password"),
+        (status = 200, description = "Credentials result", body = RestResponse<EmptyResponseDto>),
+        (status = 401, description = "Owner session required", body = RestResponse<EmptyResponseDto>),
+        (status = 403, description = "Code sessions cannot update credentials", body = RestResponse<EmptyResponseDto>),
     ),
 )]
-#[post("/api/login/password")]
+#[patch("/auth/credentials")]
 pub async fn change_password(
-    requst_json: web::Json<PasswordParams>,
+    request_json: web::Json<UpdateCredentialsRequest>,
     settings: web::Data<SharedSettings>,
     session: Session,
 ) -> Result<HttpResponse, AWError> {
-    let params = requst_json.into_inner();
+    let params = request_json.into_inner();
     let mut settings = settings.write().await;
-    if params.password.is_empty() || params.username.is_empty() {
+    if params.current_password.is_empty() || params.current_username.is_empty() {
         error!("Username or password is empty");
-        return Ok(HttpResponse::Forbidden().body("Illegal username or password"));
+        return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+            DeskErrorCode::ILLEGAL_CREDENTIALS,
+            "Illegal username or password".to_string(),
+        )));
     }
     if params.new_password.is_none() && params.new_username.is_none() {
         error!("All new username and new  password are  empty");
-        return Ok(HttpResponse::Forbidden().body("Illegal new username or new password"));
+        return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+            DeskErrorCode::INVALID_PARAMS,
+            "Illegal new username or new password".to_string(),
+        )));
     }
 
-    if settings.user.login_user_name != params.username {
+    if settings.user.login_user_name != params.current_username {
         error!("Username does not match");
-        return Ok(HttpResponse::Forbidden().body("Illegal username or password"));
+        return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+            DeskErrorCode::ILLEGAL_CREDENTIALS,
+            "Illegal username or password".to_string(),
+        )));
     }
-    if settings.user.login_password != params.password {
+    if settings.user.login_password != params.current_password {
         error!("Password does not match");
-        return Ok(HttpResponse::Forbidden().body("Illegal username or password"));
+        return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+            DeskErrorCode::ILLEGAL_CREDENTIALS,
+            "Illegal username or password".to_string(),
+        )));
     }
 
     if let Some(new_username) = params.new_username
@@ -165,7 +158,7 @@ pub async fn change_password(
 
     // logout
     session.remove_current_user();
-    Ok(HttpResponse::Ok().finish())
+    Ok(HttpResponse::Ok().json(RestResponse::succeed()))
 }
 
 /// Query params for tauri login
@@ -181,11 +174,10 @@ pub struct TauriLoginQuery {
         ("token" = String, Query, description = "One-time login token generated by Tauri")
     ),
     responses(
-        (status = 200, description = "Login result", body = LoginResult),
-        (status = 403, description = "Invalid or expired token"),
+        (status = 200, description = "Login result", body = RestResponse<LoginOutcomeDto>),
     ),
 )]
-#[post("/api/login/tauri")]
+#[post("/api/auth/tauri-login")]
 pub async fn login_tauri(
     query: web::Query<TauriLoginQuery>,
     settings: web::Data<SharedSettings>,
@@ -197,20 +189,26 @@ pub async fn login_tauri(
         Some(store) => store,
         None => {
             error!("Tauri login attempted but no token configured");
-            return Ok(HttpResponse::Forbidden().json(RestResponse::<()>::failed(
-                DeskErrorCode::SYSTEM_ERROR,
-                "Tauri login is not available".to_string(),
-            )));
+            return Ok(
+                HttpResponse::Ok().json(RestResponse::<LoginOutcomeDto>::failed_with_data(
+                    DeskErrorCode::FEATURE_UNAVAILABLE,
+                    Some("Tauri login is not available".to_string()),
+                    None,
+                )),
+            );
         }
     };
 
     // Verify and consume the one-time token
     if !token_store.verify_and_consume(&query.token) {
         error!("Tauri login failed: invalid or already consumed token");
-        return Ok(HttpResponse::Forbidden().json(RestResponse::<()>::failed(
-            DeskErrorCode::SYSTEM_ERROR,
-            "Invalid or expired token".to_string(),
-        )));
+        return Ok(
+            HttpResponse::Ok().json(RestResponse::<LoginOutcomeDto>::failed_with_data(
+                DeskErrorCode::INVALID_OR_EXPIRED_TOKEN,
+                Some("Invalid or expired token".to_string()),
+                None,
+            )),
+        );
     }
 
     // Check system is initialized
@@ -224,27 +222,28 @@ pub async fn login_tauri(
 
     if !initialized {
         error!("Tauri login failed: system not initialized");
-        return Ok(HttpResponse::Forbidden().json(RestResponse::<()>::failed(
-            DeskErrorCode::SYSTEM_ERROR,
-            "System not initialized".to_string(),
-        )));
+        return Ok(
+            HttpResponse::Ok().json(RestResponse::<LoginOutcomeDto>::failed_with_data(
+                DeskErrorCode::PRECONDITION_FAILED,
+                Some("System not initialized".to_string()),
+                None,
+            )),
+        );
     }
 
     // Auto-login as admin
     let user_info = CurrentUser::new_admin(&username);
     session.set_current_user(&user_info)?;
 
-    let result = LoginResult {
-        status: String::from("ok"),
-        login_type: String::from("tauri"),
-        current_authority: String::from("admin"),
-        api_version: SERVER_API_VERSION,
-        target_connection_id: None,
+    let result = LoginOutcomeDto {
+        captcha_required: None,
+        retry_after_sec: None,
+        api_version: Some(SERVER_API_VERSION),
         startup_mode: Some(startup_mode),
     };
 
     info!("Tauri auto-login successful, username: {}", username);
-    Ok(HttpResponse::Ok().json(result))
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(result)))
 }
 
 #[cfg(test)]
@@ -290,22 +289,22 @@ mod tests {
         )
         .await;
 
-        let params = LoginParams {
+        let params = LoginRequest {
             username: "admin".to_string(),
             password: "password".to_string(),
-            login_type: "account".to_string(),
-            ..Default::default()
+            captcha_token: None,
         };
 
         let req = TestRequest::post()
-            .uri("/api/login/account")
+            .uri("/api/auth/login")
             .set_json(&params)
             .to_request();
         let resp = test::call_service(&app, req).await;
 
         assert!(resp.status().is_success());
-        let body: LoginResult = test::read_body_json(resp).await;
-        assert_eq!(body.status, "ok");
+        let body: RestResponse<LoginOutcomeDto> = test::read_body_json(resp).await;
+        assert!(body.success);
+        assert_eq!(body.data.unwrap().api_version, Some(SERVER_API_VERSION));
     }
 
     #[actix_web::test]
@@ -322,20 +321,22 @@ mod tests {
         )
         .await;
 
-        let params = LoginParams {
+        let params = LoginRequest {
             username: "admin".to_string(),
             password: "wrong_password".to_string(),
-            login_type: "account".to_string(),
-            ..Default::default()
+            captcha_token: None,
         };
 
         let req = TestRequest::post()
-            .uri("/api/login/account")
+            .uri("/api/auth/login")
             .set_json(&params)
             .to_request();
         let resp = test::call_service(&app, req).await;
 
-        assert_eq!(resp.status(), actix_web::http::StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        let body: RestResponse<LoginOutcomeDto> = test::read_body_json(resp).await;
+        assert!(!body.success);
+        assert_eq!(body.code, DeskErrorCode::ILLEGAL_CREDENTIALS.code());
     }
 
     #[actix_web::test]
@@ -352,15 +353,15 @@ mod tests {
         )
         .await;
 
-        let params = PasswordParams {
-            username: "admin".to_string(),
-            password: "password".to_string(),
+        let params = UpdateCredentialsRequest {
+            current_username: "admin".to_string(),
+            current_password: "password".to_string(),
             new_password: Some("new_password".to_string()),
             new_username: None,
         };
 
-        let req = TestRequest::post()
-            .uri("/api/login/password")
+        let req = TestRequest::patch()
+            .uri("/auth/credentials")
             .set_json(&params)
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -392,10 +393,12 @@ mod tests {
         .await;
 
         let req = TestRequest::post()
-            .uri(&format!("/api/login/tauri?token={}", token))
+            .uri(&format!("/api/auth/tauri-login?token={}", token))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());
+        let body: RestResponse<LoginOutcomeDto> = test::read_body_json(resp).await;
+        assert!(body.success);
     }
 
     #[actix_web::test]
@@ -422,10 +425,13 @@ mod tests {
         .await;
 
         let req = TestRequest::post()
-            .uri("/api/login/tauri?token=wrong-token")
+            .uri("/api/auth/tauri-login?token=wrong-token")
             .to_request();
         let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), actix_web::http::StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        let body: RestResponse<LoginOutcomeDto> = test::read_body_json(resp).await;
+        assert!(!body.success);
+        assert_eq!(body.code, DeskErrorCode::INVALID_OR_EXPIRED_TOKEN.code());
     }
 
     #[actix_web::test]
@@ -452,16 +458,18 @@ mod tests {
 
         // First use: should succeed
         let req = TestRequest::post()
-            .uri(&format!("/api/login/tauri?token={}", token))
+            .uri(&format!("/api/auth/tauri-login?token={}", token))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());
 
         // Second use: should fail (token consumed)
         let req2 = TestRequest::post()
-            .uri(&format!("/api/login/tauri?token={}", token))
+            .uri(&format!("/api/auth/tauri-login?token={}", token))
             .to_request();
         let resp2 = test::call_service(&app, req2).await;
-        assert_eq!(resp2.status(), actix_web::http::StatusCode::FORBIDDEN);
+        assert_eq!(resp2.status(), actix_web::http::StatusCode::OK);
+        let body: RestResponse<LoginOutcomeDto> = test::read_body_json(resp2).await;
+        assert!(!body.success);
     }
 }

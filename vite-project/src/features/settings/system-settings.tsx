@@ -3,12 +3,15 @@ import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import { useTranslation } from "react-i18next"
-import { Loader2, Save } from "lucide-react"
+import { Check, Copy, Loader2, Save } from "lucide-react"
 
 import { useQuerySettings } from "@/services/hooks/settingsController/useQuerySettings"
 import { useUpdateSettings } from "@/services/hooks/settingsController/useUpdateSettings"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { useQueryBackendInfo } from "@/services/hooks/systemController/useQueryBackendInfo"
+import { useQueryMacosAutologin } from "@/services/hooks/systemController/useQueryMacosAutologin"
+import { useQueryTelemetryStatus } from "@/services/hooks/telemetryController/useQueryTelemetryStatus"
+import { useUpdateTelemetryConsent } from "@/services/hooks/telemetryController/useUpdateTelemetryConsent"
 import { mergeSystemSettings } from "@/features/settings/settings-payload"
 
 import { Button } from "@/components/ui/button"
@@ -26,7 +29,6 @@ import { useState } from "react"
 
 const systemSettingsSchema = z.object({
     enable_ipv6: z.boolean(),
-    telemetry_consent: z.boolean().nullable(),
     auto_start: z.boolean().nullable(),
     host_access_indicator_enabled: z.boolean(),
     listen_addr_ipv4: z.string().min(1, "IPv4 address is required"),
@@ -58,7 +60,6 @@ export function SystemSettings() {
         resolver: zodResolver(systemSettingsSchema),
         defaultValues: {
             enable_ipv6: true,
-            telemetry_consent: null,
             auto_start: null,
             host_access_indicator_enabled: true,
             listen_addr_ipv4: "0.0.0.0",
@@ -73,7 +74,6 @@ export function SystemSettings() {
             const data = settingsResponse.data
             form.reset({
                 enable_ipv6: data.enable_ipv6 ?? true,
-                telemetry_consent: data.telemetry_consent ?? null,
                 auto_start: data.auto_start ?? null,
                 host_access_indicator_enabled: data.host_access_indicator_enabled ?? true,
                 listen_addr_ipv4: data.listen_addr_ipv4 || "0.0.0.0",
@@ -228,25 +228,6 @@ export function SystemSettings() {
 
                                 <FormField
                                     control={form.control}
-                                    name="telemetry_consent"
-                                    render={({ field }) => (
-                                        <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
-                                            <div className="space-y-0.5">
-                                                <FormLabel className="flex items-center gap-2">
-                                                    {t("pages.system.settings.telemetry_consent")}
-                                                    <TelemetryDisclosure />
-                                                </FormLabel>
-                                                <FormDescription>{t("pages.system.settings.telemetry_consent.tooltip")}</FormDescription>
-                                            </div>
-                                            <FormControl>
-                                                <Switch checked={field.value ?? false} onCheckedChange={field.onChange} />
-                                            </FormControl>
-                                        </FormItem>
-                                    )}
-                                />
-
-                                <FormField
-                                    control={form.control}
                                     name="auto_start"
                                     render={({ field }) => (
                                         <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
@@ -272,6 +253,8 @@ export function SystemSettings() {
                     </Form>
                 </CardContent>
             </Card>
+
+            <TelemetrySettingsCard />
 
             {!isMac && (serverInfo?.startup_mode === "default" || serverInfo?.startup_mode === "service-daemon") && serverInfo.server_binary_available && (
                 <Card className="mt-6 border-amber-500/50 bg-amber-500/10 dark:border-amber-500/30 dark:bg-amber-500/10">
@@ -371,6 +354,8 @@ export function SystemSettings() {
                                 )}
                             </div>
                         </div>
+
+                        <MacosAutologinStatus enabled={isMac} />
                     </CardContent>
                 </Card>
             )}
@@ -402,6 +387,178 @@ export function SystemSettings() {
                     )}
                 </CardContent>
             </Card>
+        </div>
+    )
+}
+
+function TelemetrySettingsCard() {
+    const { t } = useTranslation()
+    const { toast } = useToast()
+    const { data, isLoading, isError, refetch } = useQueryTelemetryStatus()
+    const { mutateAsync, isPending } = useUpdateTelemetryConsent()
+    const status = data?.data
+
+    const updateConsent = async (consent: boolean) => {
+        try {
+            await mutateAsync({ data: { consent } })
+            await refetch()
+            toast({
+                title: t("pages.system.settings.telemetry.saved"),
+                description: t("pages.system.settings.telemetry.restartRequired"),
+            })
+        } catch {
+            toast({
+                variant: "destructive",
+                title: t("pages.system.settings.telemetry.error"),
+            })
+        }
+    }
+
+    return (
+        <Card className="mt-6">
+            <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                    {t("pages.system.settings.telemetry.title")}
+                    <TelemetryDisclosure />
+                </CardTitle>
+                <CardDescription>{t("pages.system.settings.telemetry.description")}</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+                {isLoading ? (
+                    <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        {t("common.loading")}
+                    </p>
+                ) : isError || !status ? (
+                    <Alert variant="destructive">
+                        <AlertDescription>{t("pages.system.settings.telemetry.loadError")}</AlertDescription>
+                    </Alert>
+                ) : (
+                    <>
+                        <div className="flex items-center justify-between gap-4 rounded-lg border p-4">
+                            <div className="space-y-1">
+                                <p className="text-sm font-medium">{t("pages.system.settings.telemetry.consent")}</p>
+                                <p className="text-sm text-muted-foreground">
+                                    {status.needed
+                                        ? t("pages.system.settings.telemetry.decisionNeeded")
+                                        : status.consented
+                                            ? t("pages.system.settings.telemetry.enabled")
+                                            : t("pages.system.settings.telemetry.disabled")}
+                                </p>
+                            </div>
+                            <Switch
+                                checked={status.consented === true}
+                                disabled={isPending}
+                                onCheckedChange={(checked) => void updateConsent(checked)}
+                            />
+                        </div>
+                        <Alert>
+                            <AlertTitle>{t("pages.system.settings.telemetry.effectTitle")}</AlertTitle>
+                            <AlertDescription>{t("pages.system.settings.telemetry.restartRequired")}</AlertDescription>
+                        </Alert>
+                    </>
+                )}
+            </CardContent>
+        </Card>
+    )
+}
+
+function MacosAutologinStatus({ enabled }: { enabled: boolean }) {
+    const { t } = useTranslation()
+    const { toast } = useToast()
+    const { data, isLoading, isError } = useQueryMacosAutologin({ query: { enabled } })
+    const status = data?.data
+    const [copied, setCopied] = useState<string | null>(null)
+
+    const copyCommand = async (label: string, command: string) => {
+        try {
+            await navigator.clipboard.writeText(command)
+            setCopied(label)
+            toast({ title: t("pages.system.settings.macos.autologin.copied") })
+        } catch {
+            toast({ variant: "destructive", title: t("pages.system.settings.macos.autologin.copyFailed") })
+        }
+    }
+
+    return (
+        <div className="space-y-3 border-t pt-6">
+            <h4 className="text-sm font-medium">{t("pages.system.settings.macos.autologin.title")}</h4>
+            {isLoading ? (
+                <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            ) : isError || !status ? (
+                <Alert variant="destructive">
+                    <AlertDescription>{t("pages.system.settings.macos.autologin.loadError")}</AlertDescription>
+                </Alert>
+            ) : (
+                <>
+                    <dl className="grid gap-3 text-sm sm:grid-cols-2">
+                        <div>
+                            <dt className="text-muted-foreground">FileVault</dt>
+                            <dd>{status.filevault_enabled ? t("common.enabled") : t("common.disabled")}</dd>
+                        </div>
+                        <div>
+                            <dt className="text-muted-foreground">{t("pages.system.settings.macos.autologin.configured")}</dt>
+                            <dd>{status.configured ? t("common.yes") : t("common.no")}</dd>
+                        </div>
+                        <div>
+                            <dt className="text-muted-foreground">{t("pages.system.settings.macos.autologin.targetUser")}</dt>
+                            <dd>{status.autologin_user ?? "-"}</dd>
+                        </div>
+                        <div>
+                            <dt className="text-muted-foreground">{t("pages.system.settings.macos.autologin.currentUser")}</dt>
+                            <dd>{status.current_user ?? "-"}</dd>
+                        </div>
+                    </dl>
+                    {status.filevault_enabled && (
+                        <Alert variant="destructive">
+                            <AlertTitle>{t("pages.system.settings.macos.autologin.filevaultTitle")}</AlertTitle>
+                            <AlertDescription>{t("pages.system.settings.macos.autologin.filevaultBlocked")}</AlertDescription>
+                        </Alert>
+                    )}
+                    <CommandRow
+                        label={t("pages.system.settings.macos.autologin.enableCommand")}
+                        command={status.enable_command}
+                        copied={copied === "enable"}
+                        disabled={!status.available}
+                        onCopy={() => void copyCommand("enable", status.enable_command)}
+                    />
+                    <CommandRow
+                        label={t("pages.system.settings.macos.autologin.disableCommand")}
+                        command={status.disable_command}
+                        copied={copied === "disable"}
+                        onCopy={() => void copyCommand("disable", status.disable_command)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                        {t("pages.system.settings.macos.autologin.passwordNotice")}
+                    </p>
+                </>
+            )}
+        </div>
+    )
+}
+
+function CommandRow({
+    label,
+    command,
+    copied,
+    disabled = false,
+    onCopy,
+}: {
+    label: string
+    command: string
+    copied: boolean
+    disabled?: boolean
+    onCopy: () => void
+}) {
+    return (
+        <div className="space-y-2">
+            <p className="text-sm font-medium">{label}</p>
+            <div className="flex items-start gap-2">
+                <code className="min-w-0 flex-1 overflow-x-auto rounded-md bg-muted p-3 text-xs">{command}</code>
+                <Button type="button" size="icon" variant="outline" disabled={disabled} onClick={onCopy}>
+                    {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                </Button>
+            </div>
         </div>
     )
 }

@@ -52,9 +52,10 @@ export function UserSettings() {
         try {
             await changePassword({
                 data: {
-                    username: user?.name || "admin",
-                    password: values.old_password,
+                    current_username: user?.name || "admin",
+                    current_password: values.old_password,
                     new_password: values.new_password,
+                    new_username: null,
                 }
             })
             toast({

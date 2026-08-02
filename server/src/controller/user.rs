@@ -3,15 +3,17 @@ use actix_web::{
     Error as AWError, FromRequest, HttpRequest, HttpResponse,
     body::MessageBody,
     dev::{ServiceRequest, ServiceResponse},
+    error::InternalError,
     get,
     middleware::Next,
 };
-use desk_server_user::{
-    model::{CurrentUser, NoLogintUser, UserRespone},
-    service::UserSessionAccessor,
-};
+use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 
-use desk_signal_facade::model::code_session::{CODE_SESSION_KEY, CodeSessionCookie};
+use desk_signal_facade::model::{
+    auth::{CurrentUserDto, EmptyResponseDto},
+    code_session::{CODE_SESSION_KEY, CodeSessionCookie},
+};
+use desk_utils::{error::DeskErrorCode, rest::RestResponse};
 use log::{info, warn};
 
 pub const TAG: &str = "User";
@@ -20,11 +22,11 @@ pub const TAG: &str = "User";
     tag = TAG,
     summary = "Get current user",
     responses(
-        (status = 200, description = "Current user info", body = UserRespone<CurrentUser>),
-        (status  = 401, description = "Unauthorized", body = UserRespone<NoLogintUser>),
+        (status = 200, description = "Current user info", body = RestResponse<CurrentUserDto>),
+        (status = 401, description = "Unauthorized", body = RestResponse<EmptyResponseDto>),
     ),
 )]
-#[get("/api/currentUser")]
+#[get("/api/auth/me")]
 pub async fn get_current_user(req: HttpRequest, session: Session) -> Result<HttpResponse, AWError> {
     info!("Connection Info: {:?}", req.connection_info());
     if let Some(client_ip_str) = req.connection_info().realip_remote_addr() {
@@ -33,26 +35,26 @@ pub async fn get_current_user(req: HttpRequest, session: Session) -> Result<Http
         warn!("No client IP found in request");
     }
 
-    if let Some(current_user) = session.get_current_user()? {
-        let user_response = UserRespone::<CurrentUser> {
-            data: current_user,
-            error_code: 0,
-            error_message: String::from(""),
-            success: true,
+    if let Some(current_user) = session.get_current_user::<CurrentUser>()? {
+        let user = CurrentUserDto {
+            user_id: None,
+            name: current_user.name,
+            avatar: current_user.avatar,
+            email: current_user.email,
+            access: current_user.access,
+            target_connection_id: current_user.target_connection_id,
         };
 
-        info!("Current user: {:?}", user_response.data);
-        return Ok(HttpResponse::Ok().json(user_response));
+        info!("Current user: {}", user.name);
+        return Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(user)));
     }
     warn!("User is not logged in.");
-    let no_login_user = NoLogintUser { login: false };
-    let user_response = UserRespone::<NoLogintUser> {
-        data: no_login_user,
-        error_code: 401,
-        error_message: String::from("User is not logged in."),
-        success: true,
-    };
-    Ok(HttpResponse::Unauthorized().json(user_response))
+    Ok(
+        HttpResponse::Unauthorized().json(RestResponse::<()>::failed(
+            DeskErrorCode::PERMISSION_ERROR,
+            "User is not logged in.".to_string(),
+        )),
+    )
 }
 
 /// Default-deny guard for the REST `/api` surface. Owners keep full access;
@@ -76,22 +78,27 @@ pub async fn enforce_device_scope(
         .is_some()
     {
         warn!("Code session denied access to the REST API.");
-        return Err(actix_web::error::ErrorForbidden(
-            "Code sessions must use signaling for scoped capabilities.",
+        let response = HttpResponse::Forbidden().json(RestResponse::<()>::failed(
+            DeskErrorCode::PERMISSION_ERROR,
+            "Code sessions must use signaling for scoped capabilities.".to_string(),
         ));
+        return Err(InternalError::from_response("Code session is forbidden", response).into());
     }
 
     warn!("Anonymous user tried to access protected resource.");
-    Err(actix_web::error::ErrorUnauthorized(
-        "User is not logged in.",
-    ))
+    let response = HttpResponse::Unauthorized().json(RestResponse::<()>::failed(
+        DeskErrorCode::PERMISSION_ERROR,
+        "User is not logged in.".to_string(),
+    ));
+    Err(InternalError::from_response("User is not logged in", response).into())
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use actix_session::{SessionMiddleware, storage::CookieSessionStore};
     use actix_web::{
-        App, HttpResponse, cookie::Key, http::StatusCode, middleware::from_fn, test as at, web,
+        App, HttpResponse, body::to_bytes, cookie::Key, http::StatusCode, middleware::from_fn,
+        test as at, web,
     };
 
     async fn seed_code_session(session: Session) -> HttpResponse {
@@ -108,6 +115,13 @@ mod tests {
         HttpResponse::Ok().finish()
     }
 
+    async fn seed_owner_session(session: Session) -> HttpResponse {
+        session
+            .set_current_user(&CurrentUser::new_admin("owner"))
+            .expect("seed owner session");
+        HttpResponse::Ok().finish()
+    }
+
     async fn protected_probe() -> HttpResponse {
         HttpResponse::Ok().finish()
     }
@@ -121,6 +135,7 @@ mod tests {
                     Key::generate(),
                 ))
                 .route("/seed", web::post().to(seed_code_session))
+                .route("/seed-owner", web::post().to(seed_owner_session))
                 .service(
                     web::scope("/api")
                         .wrap(from_fn(enforce_device_scope))
@@ -133,10 +148,15 @@ mod tests {
             at::try_call_service(&app, at::TestRequest::get().uri("/api/probe").to_request())
                 .await
                 .expect_err("anonymous REST request must be rejected");
-        assert_eq!(
-            anonymous.error_response().status(),
-            StatusCode::UNAUTHORIZED
-        );
+        let anonymous_response = anonymous.error_response();
+        assert_eq!(anonymous_response.status(), StatusCode::UNAUTHORIZED);
+        let anonymous_bytes = to_bytes(anonymous_response.into_body())
+            .await
+            .expect("read anonymous response body");
+        let anonymous_body: RestResponse<()> =
+            serde_json::from_slice(&anonymous_bytes).expect("decode anonymous response body");
+        assert!(!anonymous_body.success);
+        assert_eq!(anonymous_body.code, DeskErrorCode::PERMISSION_ERROR.code());
 
         let seed = at::call_service(&app, at::TestRequest::post().uri("/seed").to_request()).await;
         let cookie = seed
@@ -154,9 +174,38 @@ mod tests {
         )
         .await
         .expect_err("code-session REST request must be rejected");
+        let code_session_response = code_session.error_response();
+        assert_eq!(code_session_response.status(), StatusCode::FORBIDDEN);
+        let code_session_bytes = to_bytes(code_session_response.into_body())
+            .await
+            .expect("read code-session response body");
+        let code_session_body: RestResponse<()> =
+            serde_json::from_slice(&code_session_bytes).expect("decode code-session response body");
+        assert!(!code_session_body.success);
         assert_eq!(
-            code_session.error_response().status(),
-            StatusCode::FORBIDDEN
+            code_session_body.code,
+            DeskErrorCode::PERMISSION_ERROR.code()
         );
+
+        let owner_seed = at::call_service(
+            &app,
+            at::TestRequest::post().uri("/seed-owner").to_request(),
+        )
+        .await;
+        let owner_cookie = owner_seed
+            .response()
+            .cookies()
+            .next()
+            .expect("owner session cookie")
+            .into_owned();
+        let owner = at::call_service(
+            &app,
+            at::TestRequest::get()
+                .uri("/api/probe")
+                .cookie(owner_cookie)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(owner.status(), StatusCode::OK);
     }
 }

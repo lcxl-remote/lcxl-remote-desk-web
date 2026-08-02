@@ -67,7 +67,7 @@ pub fn check_query_token(
 pub struct EndpointState {
     pub hub: Arc<HostControlHub>,
     pub ipc_token: String,
-    /// Auto-login token shared with the HTTP `/login_tauri` route; refreshed on
+    /// Auto-login token shared with the HTTP `/api/auth/tauri-login` route; refreshed on
     /// every Tauri ws connect so the next webview load can auto-authenticate.
     pub tauri_login_token: TauriLoginToken,
     /// Used to assign monotonically increasing UpstreamSessionId values.

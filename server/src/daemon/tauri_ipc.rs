@@ -13,7 +13,8 @@
 //!   `Ready`. Read by `/api/sysinfo` and `/api/server_info` to override the
 //!   ServiceDaemon's SYSTEM-account `is_admin()` result.
 //! - `tauri_login_token`: the auto-login token written by the host control
-//!   endpoint on every Tauri ws connect, consumed by the HTTP `/login_tauri`
+//!   endpoint on every Tauri ws connect, consumed by the HTTP
+//!   `/api/auth/tauri-login`
 //!   route.
 
 use std::sync::{Arc, Mutex};

@@ -37,6 +37,21 @@ Kubb 的版本被精确钉死，且以 `npx --no-install` 调用，因此生成�
 `npm run build` 只跑 tsc 和 vite，从不重新生成客户端。所以后端改动了规范之后，陈旧的客户端照样能编译通过——而一个改掉的数值根本不会报错，只会继续被发出去。CI 每次 push 都会重新生成，并在结果与 committed 版本不一致时失败。
 :::
 
+## 认证契约
+
+浏览器/控制端认证使用唯一的规范 JSON 接口面：
+
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `GET /api/auth/me`
+- `PATCH /api/auth/credentials`
+- `POST /api/auth/tauri-login`（仅独立桌面被控端）
+
+所有响应都使用 `RestResponse`。登录和改密的凭据/业务失败保持 HTTP 200 且
+`success=false`；`/api/auth/me` 在 session 缺失或过期时返回 HTTP 401，但 body 仍为
+同一 JSON 包络。公开字段统一使用 snake_case。OAuth authorize/callback continuation
+继续位于 `/api/oauth/*`，不属于这组基础认证路由。
+
 ## 错误码
 
 `DeskErrorCode`（`utils/src/error.rs`）由 `desk_error_codes!` 宏统一声明，宏同时产出常量与 `ALL` 名值表。该表以带 `x-enum-varnames` 的 int32 enum 形式发布进规范，于是生成的客户端提供具名成员 `deskErrorCodeEnum`——前端据此分支，不必再手写数值镜像。

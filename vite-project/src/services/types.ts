@@ -552,23 +552,10 @@ export type CreateApiTokenResult = {
     token: string;
 };
 
-export type LabelKey = {
-    /**
-     * @type string,null
-    */
-    key?: string | null;
-    /**
-     * @type string,null
-    */
-    label?: string | null;
-};
-
-export type Geographic = {
-    city?: (null | LabelKey);
-    province?: (null | LabelKey);
-};
-
-export type CurrentUser = {
+/**
+ * @description Public current-user projection. Session and signaling identities stay\nprivate to their owning services.
+*/
+export type CurrentUserDto = {
     /**
      * @type string,null
     */
@@ -576,62 +563,23 @@ export type CurrentUser = {
     /**
      * @type string,null
     */
-    address?: string | null;
-    /**
-     * @type string,null
-    */
     avatar?: string | null;
     /**
      * @type string,null
     */
-    country?: string | null;
-    /**
-     * @type string,null
-    */
     email?: string | null;
-    geographic?: (null | Geographic);
-    /**
-     * @type string,null
-    */
-    group?: string | null;
     /**
      * @type string
     */
     name: string;
     /**
-     * @minLength 0
+     * @type string,null
+    */
+    target_connection_id?: string | null;
+    /**
      * @type integer,null, int32
     */
-    notifyCount?: number | null;
-    /**
-     * @type string,null
-    */
-    phone?: string | null;
-    /**
-     * @type string,null
-    */
-    signature?: string | null;
-    /**
-     * @type array,null
-    */
-    tags?: LabelKey[] | null;
-    /**
-     * @type string,null
-    */
-    targetConnectionId?: string | null;
-    /**
-     * @type string,null
-    */
-    title?: string | null;
-    /**
-     * @minLength 0
-     * @type integer,null, int32
-    */
-    unreadCount?: number | null;
-    /**
-     * @type string,null
-    */
-    userid?: string | null;
+    user_id?: number | null;
 };
 
 export const deskErrorCodeEnum = {
@@ -1350,24 +1298,10 @@ export type DownloadResponse = {
     transfer_id: string;
 };
 
-export type FakeCaptcha = {
-    /**
-     * @minLength 0
-     * @type integer,null, int32
-    */
-    code?: number | null;
-    /**
-     * @type string,null
-    */
-    status?: string | null;
-};
-
-export type FakeCaptchaParams = {
-    /**
-     * @type string,null
-    */
-    phone?: string | null;
-};
+/**
+ * @description Marker used only to describe an envelope whose `data` member is null.
+*/
+export type EmptyResponseDto = object;
 
 export type UploadRequest = {
     /**
@@ -1784,36 +1718,6 @@ export type LogSettings = {
     traceback?: boolean;
 };
 
-/**
- * @description Login params
-*/
-export type LoginParams = {
-    /**
-     * @type boolean
-    */
-    autoLogin: boolean;
-    /**
-     * @type string,null
-    */
-    device_code?: string | null;
-    /**
-     * @type string
-    */
-    password: string;
-    /**
-     * @type string,null
-    */
-    token?: string | null;
-    /**
-     * @type string
-    */
-    type: string;
-    /**
-     * @type string
-    */
-    username: string;
-};
-
 export const startupModeEnum = {
     default: "default",
     signaling: "signaling",
@@ -1831,31 +1735,43 @@ export type StartupModeEnumKey = (typeof startupModeEnum)[keyof typeof startupMo
 export type StartupMode = StartupModeEnumKey;
 
 /**
- * @description Login result
+ * @description Login metadata shared by manager and standalone-server control clients.
 */
-export type LoginResult = {
+export type LoginOutcomeDto = {
     /**
-     * @description return api version of signal/desk/manage server
-     * @type integer, int32
+     * @type integer,null, int32
     */
-    api_version: number;
+    api_version?: number | null;
     /**
-     * @type string
+     * @type boolean,null
     */
-    currentAuthority: string;
+    captcha_required?: boolean | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    retry_after_sec?: number | null;
     startup_mode?: (null | StartupMode);
+};
+
+/**
+ * @description Account credentials submitted to the current service.\n\nConcrete identifier rules are documented by each service\'s login operation.
+*/
+export type LoginRequest = {
     /**
-     * @type string
-    */
-    status: string;
-    /**
+     * @description Optional human-verification token. Services without CAPTCHA ignore it.
      * @type string,null
     */
-    targetConnectionId?: string | null;
+    captcha_token?: string | null;
     /**
      * @type string
     */
-    type: string;
+    password: string;
+    /**
+     * @description Account identifier interpreted by the receiving service.
+     * @type string
+    */
+    username: string;
 };
 
 /**
@@ -2158,39 +2074,6 @@ export type MouseEventData = {
      * @type number, double
     */
     y: number;
-};
-
-export type NoLogintUser = {
-    /**
-     * @type boolean
-    */
-    isLogin: boolean;
-};
-
-/**
- * @description Password params
-*/
-export type PasswordParams = {
-    /**
-     * @description New password (optional)
-     * @type string,null
-    */
-    new_password?: string | null;
-    /**
-     * @description New username (optional)
-     * @type string,null
-    */
-    new_username?: string | null;
-    /**
-     * @description Old password
-     * @type string
-    */
-    password: string;
-    /**
-     * @description Old username
-     * @type string
-    */
-    username: string;
 };
 
 /**
@@ -2561,6 +2444,51 @@ export type RestResponseCreateApiTokenResult = {
     success: boolean;
 };
 
+export type RestResponseCurrentUserDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Public current-user projection. Session and signaling identities stay\nprivate to their owning services.
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string,null
+        */
+        access?: string | null;
+        /**
+         * @type string,null
+        */
+        avatar?: string | null;
+        /**
+         * @type string,null
+        */
+        email?: string | null;
+        /**
+         * @type string
+        */
+        name: string;
+        /**
+         * @type string,null
+        */
+        target_connection_id?: string | null;
+        /**
+         * @type integer,null, int32
+        */
+        user_id?: number | null;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseDiagnoseSessionListDto = {
     /**
      * @type integer, int32
@@ -2628,6 +2556,26 @@ export type RestResponseDiagnoseSessionSnapshotDto = {
     success: boolean;
 };
 
+export type RestResponseEmptyResponseDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Marker used only to describe an envelope whose `data` member is null.
+     * @type object | undefined
+    */
+    data?: object;
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseLogSettings = {
     /**
      * @type integer, int32
@@ -2677,6 +2625,41 @@ export type RestResponseLogSettings = {
          * @type boolean | undefined
         */
         traceback?: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseLoginOutcomeDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Login metadata shared by manager and standalone-server control clients.
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type integer,null, int32
+        */
+        api_version?: number | null;
+        /**
+         * @type boolean,null
+        */
+        captcha_required?: boolean | null;
+        /**
+         * @minLength 0
+         * @type integer,null, int64
+        */
+        retry_after_sec?: number | null;
+        startup_mode?: (null | StartupMode);
     };
     /**
      * @type string,null
@@ -3444,48 +3427,6 @@ export type RestResponseTurnRuntimeInfo = {
          * @type integer,null, int64
         */
         uptime_secs?: number | null;
-    };
-    /**
-     * @type string,null
-    */
-    message?: string | null;
-    /**
-     * @type boolean
-    */
-    success: boolean;
-};
-
-export type RestResponseTurnSession = {
-    /**
-     * @type integer, int32
-    */
-    code: number;
-    /**
-     * @type object | undefined
-    */
-    data?: {
-        /**
-         * @type array
-        */
-        channels: number[];
-        /**
-         * @minLength 0
-         * @type integer, int64
-        */
-        expires: number;
-        /**
-         * @type array
-        */
-        permissions: number[];
-        /**
-         * @minLength 0
-         * @type integer,null, int32
-        */
-        port?: number | null;
-        /**
-         * @type string
-        */
-        username: string;
     };
     /**
      * @type string,null
@@ -4330,31 +4271,6 @@ export type TurnRuntimeInfo = {
     uptime_secs?: number | null;
 };
 
-export type TurnSession = {
-    /**
-     * @type array
-    */
-    channels: number[];
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    expires: number;
-    /**
-     * @type array
-    */
-    permissions: number[];
-    /**
-     * @minLength 0
-     * @type integer,null, int32
-    */
-    port?: number | null;
-    /**
-     * @type string
-    */
-    username: string;
-};
-
 export type TurnSessionStatistics = {
     /**
      * @description Byte/packet counters for one traffic class in both directions.
@@ -4436,6 +4352,28 @@ export type TurnUsageResult = {
 };
 
 /**
+ * @description Verify the current credentials and optionally replace either credential.
+*/
+export type UpdateCredentialsRequest = {
+    /**
+     * @type string
+    */
+    current_password: string;
+    /**
+     * @type string
+    */
+    current_username: string;
+    /**
+     * @type string,null
+    */
+    new_password?: string | null;
+    /**
+     * @type string,null
+    */
+    new_username?: string | null;
+};
+
+/**
  * @description Usage-retention windows, one per rollup family, in whole days.
 */
 export type UsageRetentionConfig = {
@@ -4457,113 +4395,6 @@ export type UsageRetentionConfig = {
      * @type integer, int32
     */
     turn_days: number;
-};
-
-export type UserResponeCurrentUser = {
-    /**
-     * @type object
-    */
-    data: {
-        /**
-         * @type string,null
-        */
-        access?: string | null;
-        /**
-         * @type string,null
-        */
-        address?: string | null;
-        /**
-         * @type string,null
-        */
-        avatar?: string | null;
-        /**
-         * @type string,null
-        */
-        country?: string | null;
-        /**
-         * @type string,null
-        */
-        email?: string | null;
-        geographic?: (null | Geographic);
-        /**
-         * @type string,null
-        */
-        group?: string | null;
-        /**
-         * @type string
-        */
-        name: string;
-        /**
-         * @minLength 0
-         * @type integer,null, int32
-        */
-        notifyCount?: number | null;
-        /**
-         * @type string,null
-        */
-        phone?: string | null;
-        /**
-         * @type string,null
-        */
-        signature?: string | null;
-        /**
-         * @type array,null
-        */
-        tags?: LabelKey[] | null;
-        /**
-         * @type string,null
-        */
-        targetConnectionId?: string | null;
-        /**
-         * @type string,null
-        */
-        title?: string | null;
-        /**
-         * @minLength 0
-         * @type integer,null, int32
-        */
-        unreadCount?: number | null;
-        /**
-         * @type string,null
-        */
-        userid?: string | null;
-    };
-    /**
-     * @type integer, int32
-    */
-    errorCode: number;
-    /**
-     * @type string
-    */
-    errorMessage: string;
-    /**
-     * @type boolean
-    */
-    success: boolean;
-};
-
-export type UserResponeNoLogintUser = {
-    /**
-     * @type object
-    */
-    data: {
-        /**
-         * @type boolean
-        */
-        isLogin: boolean;
-    };
-    /**
-     * @type integer, int32
-    */
-    errorCode: number;
-    /**
-     * @type string
-    */
-    errorMessage: string;
-    /**
-     * @type boolean
-    */
-    success: boolean;
 };
 
 /**
@@ -4639,6 +4470,96 @@ export type VirtualDisplaySettings = {
 };
 
 /**
+ * @description Credentials result
+*/
+export type ChangePassword200 = RestResponseEmptyResponseDto;
+
+/**
+ * @description Owner session required
+*/
+export type ChangePassword401 = RestResponseEmptyResponseDto;
+
+/**
+ * @description Code sessions cannot update credentials
+*/
+export type ChangePassword403 = RestResponseEmptyResponseDto;
+
+export type ChangePasswordMutationRequest = UpdateCredentialsRequest;
+
+export type ChangePasswordMutationResponse = ChangePassword200;
+
+export type ChangePasswordMutation = {
+    Response: ChangePassword200;
+    Request: ChangePasswordMutationRequest;
+    Errors: ChangePassword401 | ChangePassword403;
+};
+
+/**
+ * @description Login result
+*/
+export type LoginAccount200 = RestResponseLoginOutcomeDto;
+
+export type LoginAccountMutationRequest = LoginRequest;
+
+export type LoginAccountMutationResponse = LoginAccount200;
+
+export type LoginAccountMutation = {
+    Response: LoginAccount200;
+    Request: LoginAccountMutationRequest;
+    Errors: any;
+};
+
+/**
+ * @description Logout successful
+*/
+export type LogoutAccount200 = RestResponseEmptyResponseDto;
+
+export type LogoutAccountMutationResponse = LogoutAccount200;
+
+export type LogoutAccountMutation = {
+    Response: LogoutAccount200;
+    Errors: any;
+};
+
+/**
+ * @description Current user info
+*/
+export type GetCurrentUser200 = RestResponseCurrentUserDto;
+
+/**
+ * @description Unauthorized
+*/
+export type GetCurrentUser401 = RestResponseEmptyResponseDto;
+
+export type GetCurrentUserQueryResponse = GetCurrentUser200;
+
+export type GetCurrentUserQuery = {
+    Response: GetCurrentUser200;
+    Errors: GetCurrentUser401;
+};
+
+export type LoginTauriQueryParams = {
+    /**
+     * @description One-time login token generated by Tauri
+     * @type string
+    */
+    token: string;
+};
+
+/**
+ * @description Login result
+*/
+export type LoginTauri200 = RestResponseLoginOutcomeDto;
+
+export type LoginTauriMutationResponse = LoginTauri200;
+
+export type LoginTauriMutation = {
+    Response: LoginTauri200;
+    QueryParams: LoginTauriQueryParams;
+    Errors: any;
+};
+
+/**
  * @description Verification result
 */
 export type VerifyConnection200 = RestResponseConnectionVerifyResult;
@@ -4651,43 +4572,6 @@ export type VerifyConnectionMutation = {
     Response: VerifyConnection200;
     Request: VerifyConnectionMutationRequest;
     Errors: any;
-};
-
-/**
- * @description Current user info
-*/
-export type GetCurrentUser200 = UserResponeCurrentUser;
-
-/**
- * @description Unauthorized
-*/
-export type GetCurrentUser401 = UserResponeNoLogintUser;
-
-export type GetCurrentUserQueryResponse = GetCurrentUser200;
-
-export type GetCurrentUserQuery = {
-    Response: GetCurrentUser200;
-    Errors: GetCurrentUser401;
-};
-
-/**
- * @description Change password successful
-*/
-export type ChangePassword200 = any;
-
-/**
- * @description Illegal username or password
-*/
-export type ChangePassword403 = any;
-
-export type ChangePasswordMutationRequest = PasswordParams;
-
-export type ChangePasswordMutationResponse = ChangePassword200;
-
-export type ChangePasswordMutation = {
-    Response: ChangePassword200;
-    Request: ChangePasswordMutationRequest;
-    Errors: ChangePassword403;
 };
 
 /**
@@ -5252,7 +5136,7 @@ export type QuerySysinfoQuery = {
 /**
  * @description Update telemetry consent successfully
 */
-export type UpdateTelemetryConsent200 = any;
+export type UpdateTelemetryConsent200 = RestResponseEmptyResponseDto;
 
 export type UpdateTelemetryConsentMutationRequest = TelemetryConsent;
 
@@ -5364,89 +5248,6 @@ export type InitSystemMutation = {
     Response: InitSystem200;
     Request: InitSystemMutationRequest;
     Errors: InitSystem403;
-};
-
-/**
- * @description Login result
-*/
-export type LoginAccount200 = LoginResult;
-
-/**
- * @description Illegal username or password
-*/
-export type LoginAccount403 = any;
-
-export type LoginAccountMutationRequest = LoginParams;
-
-export type LoginAccountMutationResponse = LoginAccount200;
-
-export type LoginAccountMutation = {
-    Response: LoginAccount200;
-    Request: LoginAccountMutationRequest;
-    Errors: LoginAccount403;
-};
-
-/**
- * @description Get captcha successfully
-*/
-export type GetCaptcha200 = FakeCaptcha;
-
-/**
- * @description Bad request
-*/
-export type GetCaptcha400 = any;
-
-/**
- * @description Not implemented
-*/
-export type GetCaptcha501 = any;
-
-export type GetCaptchaMutationRequest = FakeCaptchaParams;
-
-export type GetCaptchaMutationResponse = GetCaptcha200;
-
-export type GetCaptchaMutation = {
-    Response: GetCaptcha200;
-    Request: GetCaptchaMutationRequest;
-    Errors: GetCaptcha400 | GetCaptcha501;
-};
-
-/**
- * @description Logout successful
-*/
-export type LogoutAccount200 = any;
-
-export type LogoutAccountMutationResponse = LogoutAccount200;
-
-export type LogoutAccountMutation = {
-    Response: LogoutAccount200;
-    Errors: any;
-};
-
-export type LoginTauriQueryParams = {
-    /**
-     * @description One-time login token generated by Tauri
-     * @type string
-    */
-    token: string;
-};
-
-/**
- * @description Login result
-*/
-export type LoginTauri200 = LoginResult;
-
-/**
- * @description Invalid or expired token
-*/
-export type LoginTauri403 = any;
-
-export type LoginTauriMutationResponse = LoginTauri200;
-
-export type LoginTauriMutation = {
-    Response: LoginTauri200;
-    QueryParams: LoginTauriQueryParams;
-    Errors: LoginTauri403;
 };
 
 /**
@@ -5666,54 +5467,6 @@ export type GetTurnMetricsQueryResponse = GetTurnMetrics200;
 export type GetTurnMetricsQuery = {
     Response: GetTurnMetrics200;
     Errors: GetTurnMetrics503;
-};
-
-export type GetTurnSessionQueryParams = {
-    /**
-     * @type string
-    */
-    address: string;
-    /**
-     * @type string
-    */
-    interface: string;
-};
-
-/**
- * @description Session enumeration is not supported by this implementation; the reason is carried in RestResponse.code
-*/
-export type GetTurnSession200 = RestResponseTurnSession;
-
-export type GetTurnSessionQueryResponse = GetTurnSession200;
-
-export type GetTurnSessionQuery = {
-    Response: GetTurnSession200;
-    QueryParams: GetTurnSessionQueryParams;
-    Errors: any;
-};
-
-export type DeleteTurnSessionQueryParams = {
-    /**
-     * @type string
-    */
-    address: string;
-    /**
-     * @type string
-    */
-    interface: string;
-};
-
-/**
- * @description Closing an individual session is not supported by this implementation; the reason is carried in RestResponse.code
-*/
-export type DeleteTurnSession200 = any;
-
-export type DeleteTurnSessionMutationResponse = DeleteTurnSession200;
-
-export type DeleteTurnSessionMutation = {
-    Response: DeleteTurnSession200;
-    QueryParams: DeleteTurnSessionQueryParams;
-    Errors: any;
 };
 
 export type GetTurnSessionStatisticsQueryParams = {

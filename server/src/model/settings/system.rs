@@ -270,6 +270,11 @@ impl SystemSettings {
     /// spurious or malicious one. Letting an explicit value win would let an
     /// authenticated settings write pin an attacker-known cookie signing key or
     /// IPC identity, which survives a restart and enables session forgery.
+    ///
+    /// `telemetry_consent` is owned by the dedicated consent endpoint and is
+    /// also restored unconditionally. This prevents an unrelated settings save
+    /// from clearing consent when the general form omits the field, and prevents
+    /// that broad endpoint from bypassing the dedicated consent workflow.
     pub fn preserve_internal_fields(&mut self, previous: &SystemSettings) {
         if self.client_id.is_none() {
             self.client_id = previous.client_id.clone();
@@ -279,6 +284,7 @@ impl SystemSettings {
         }
         self.tauri_ipc_token = previous.tauri_ipc_token.clone();
         self.session_secret_key = previous.session_secret_key.clone();
+        self.telemetry_consent = previous.telemetry_consent;
     }
 
     /// A copy safe to serialize into an HTTP response: the secrets the console
@@ -427,6 +433,35 @@ mod tests {
             incoming.session_secret_key.as_deref(),
             Some("real-session-key")
         );
+    }
+
+    #[test]
+    fn preserve_internal_fields_keeps_telemetry_consent_when_omitted() {
+        let previous = SystemSettings {
+            telemetry_consent: Some(true),
+            ..SystemSettings::default()
+        };
+        let mut incoming = SystemSettings::default();
+
+        incoming.preserve_internal_fields(&previous);
+
+        assert_eq!(incoming.telemetry_consent, Some(true));
+    }
+
+    #[test]
+    fn preserve_internal_fields_rejects_telemetry_consent_override() {
+        let previous = SystemSettings {
+            telemetry_consent: Some(true),
+            ..SystemSettings::default()
+        };
+        let mut incoming = SystemSettings {
+            telemetry_consent: Some(false),
+            ..SystemSettings::default()
+        };
+
+        incoming.preserve_internal_fields(&previous);
+
+        assert_eq!(incoming.telemetry_consent, Some(true));
     }
 
     #[test]

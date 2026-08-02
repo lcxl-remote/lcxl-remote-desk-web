@@ -10,8 +10,10 @@ import { useQueryClient } from "@tanstack/react-query"
 import { useQueryTurnSettings } from "@/services/hooks/turnController/useQueryTurnSettings"
 import { useUpdateTurnSettings } from "@/services/hooks/turnController/useUpdateTurnSettings"
 import { useRegenerateTurnSecret } from "@/services/hooks/turnController/useRegenerateTurnSecret"
+import { useGetTurnSessionStatistics } from "@/services/hooks/turnController/useGetTurnSessionStatistics"
 import { getTurnInfoQueryKey } from "@/services/hooks/turnController/useGetTurnInfo"
-import type { TurnSettings } from "@/services/types"
+import { deskErrorCodeEnum, type TurnDirectionalCounters, type TurnSettings } from "@/services/types"
+import { RestResponseError } from "@/lib/kubb-client"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -33,6 +35,7 @@ import {
 import { useToast } from "@/hooks/use-toast"
 import { TurnRuntimeStatus } from "@/features/settings/turn-runtime-status"
 import { AsyncButton } from "@/components/async-button"
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
 
 /**
  * `IP:port`, with IPv6 literals in brackets — the same shape the server binds
@@ -97,6 +100,17 @@ export function TurnSettings() {
     const { mutateAsync: regenerateSecret, isPending: isRegenerating } = useRegenerateTurnSecret()
     const [regenerateDialogOpen, setRegenerateDialogOpen] = useState(false)
     const regeneratePendingRef = useRef(false)
+    const [diagnosticAddress, setDiagnosticAddress] = useState("")
+    const [diagnosticInterface, setDiagnosticInterface] = useState("udp")
+    const {
+        data: diagnosticResponse,
+        error: diagnosticError,
+        isFetching: diagnosticPending,
+        refetch: queryStatistics,
+    } = useGetTurnSessionStatistics(
+        { address: diagnosticAddress, interface: diagnosticInterface },
+        { query: { enabled: false, retry: false } },
+    )
 
     // Both writes below make the host restart, switch off, or re-key its relay,
     // and the status card would otherwise go on showing the runtime from before
@@ -379,6 +393,89 @@ export function TurnSettings() {
                 </CardContent>
             </Card>
 
+            <Card className="mt-8">
+                <CardHeader>
+                    <CardTitle>{t("pages.turn.diagnostics.title")}</CardTitle>
+                    <CardDescription>{t("pages.turn.diagnostics.description")}</CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <Accordion type="single" collapsible>
+                        <AccordionItem value="session-statistics" className="border-0">
+                            <AccordionTrigger>{t("pages.turn.diagnostics.advanced")}</AccordionTrigger>
+                            <AccordionContent className="space-y-4 pt-2">
+                                <div className="grid gap-4 sm:grid-cols-[1fr_10rem_auto] sm:items-end">
+                                    <div className="space-y-2">
+                                        <label className="text-sm font-medium" htmlFor="turn-diagnostic-address">
+                                            {t("pages.turn.diagnostics.address")}
+                                        </label>
+                                        <Input
+                                            id="turn-diagnostic-address"
+                                            value={diagnosticAddress}
+                                            onChange={(event) => setDiagnosticAddress(event.target.value)}
+                                            placeholder="203.0.113.10:54321"
+                                        />
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-sm font-medium" htmlFor="turn-diagnostic-interface">
+                                            {t("pages.turn.diagnostics.interface")}
+                                        </label>
+                                        <Select value={diagnosticInterface} onValueChange={setDiagnosticInterface}>
+                                            <SelectTrigger id="turn-diagnostic-interface">
+                                                <SelectValue />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                <SelectItem value="udp">UDP</SelectItem>
+                                                <SelectItem value="tcp">TCP</SelectItem>
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
+                                    <Button
+                                        type="button"
+                                        disabled={!SOCKET_ADDRESS.test(diagnosticAddress) || diagnosticPending}
+                                        onClick={() => void queryStatistics()}
+                                    >
+                                        {diagnosticPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                                        {t("pages.turn.diagnostics.query")}
+                                    </Button>
+                                </div>
+
+                                {diagnosticError && (
+                                    <Alert variant="destructive">
+                                        <AlertDescription>
+                                            {diagnosticError instanceof RestResponseError
+                                                && diagnosticError.code === deskErrorCodeEnum.FEATURE_UNAVAILABLE
+                                                ? t("pages.turn.diagnostics.notRunning")
+                                                : diagnosticError instanceof RestResponseError
+                                                    && diagnosticError.code === deskErrorCodeEnum.SESSION_NOT_FOUND
+                                                    ? t("pages.turn.diagnostics.notFound")
+                                                    : t("pages.turn.diagnostics.error")}
+                                        </AlertDescription>
+                                    </Alert>
+                                )}
+
+                                {diagnosticResponse?.data && (
+                                    <div className="grid gap-4 md:grid-cols-2">
+                                        <CounterCard
+                                            title={t("pages.turn.diagnostics.relay")}
+                                            counters={diagnosticResponse.data.relay}
+                                        />
+                                        <CounterCard
+                                            title={t("pages.turn.diagnostics.control")}
+                                            counters={diagnosticResponse.data.control}
+                                        />
+                                        <p className="text-sm text-muted-foreground md:col-span-2">
+                                            {t("pages.turn.diagnostics.errorPackets", {
+                                                count: diagnosticResponse.data.error_pkts,
+                                            })}
+                                        </p>
+                                    </div>
+                                )}
+                            </AccordionContent>
+                        </AccordionItem>
+                    </Accordion>
+                </CardContent>
+            </Card>
+
             <Card className="mt-8 border-destructive/20">
                 <CardHeader>
                     <div className="flex items-center gap-2">
@@ -424,6 +521,34 @@ export function TurnSettings() {
                     </AlertDialog>
                 </CardContent>
             </Card>
+        </div>
+    )
+}
+
+function CounterCard({ title, counters }: { title: string; counters: TurnDirectionalCounters }) {
+    const { t } = useTranslation()
+
+    return (
+        <div className="rounded-md border p-4">
+            <h4 className="mb-3 text-sm font-medium">{title}</h4>
+            <dl className="grid grid-cols-2 gap-3 text-sm">
+                <div>
+                    <dt className="text-muted-foreground">{t("pages.turn.diagnostics.receivedBytes")}</dt>
+                    <dd className="font-mono">{counters.received_bytes.toLocaleString()}</dd>
+                </div>
+                <div>
+                    <dt className="text-muted-foreground">{t("pages.turn.diagnostics.sentBytes")}</dt>
+                    <dd className="font-mono">{counters.send_bytes.toLocaleString()}</dd>
+                </div>
+                <div>
+                    <dt className="text-muted-foreground">{t("pages.turn.diagnostics.receivedPackets")}</dt>
+                    <dd className="font-mono">{counters.received_pkts.toLocaleString()}</dd>
+                </div>
+                <div>
+                    <dt className="text-muted-foreground">{t("pages.turn.diagnostics.sentPackets")}</dt>
+                    <dd className="font-mono">{counters.send_pkts.toLocaleString()}</dd>
+                </div>
+            </dl>
         </div>
     )
 }

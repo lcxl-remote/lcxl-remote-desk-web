@@ -1,0 +1,1 @@
+{"type":"object","description":"Marker used only to describe an envelope whose `data` member is null.","x-readme-ref-name":"EmptyResponseDto"}

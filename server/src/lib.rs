@@ -39,7 +39,7 @@ use crate::{
         connection::verify_connection,
         info::{query_backend_info, query_macos_autologin, query_server_info, query_sysinfo},
         init::init_system,
-        login::{change_password, get_captcha, login_account, login_tauri, logout_account},
+        login::{change_password, login_account, login_tauri, logout_account},
         manager_link::{query_manager_link_status, retry_manager_link},
         redeem::redeem_code,
         service_mgmt::{install_service, uninstall_service},
@@ -52,10 +52,7 @@ use crate::{
             update_telemetry_consent, update_turn_client_settings, update_turn_settings,
         },
         support::{start_support, stop_support, support_status},
-        turn::{
-            delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
-            get_turn_session_statistics,
-        },
+        turn::{get_turn_info, get_turn_metrics, get_turn_session_statistics},
         user::{enforce_device_scope, get_current_user},
         virtual_display::{
             install_driver as install_virtual_display_driver,
@@ -203,7 +200,6 @@ pub fn configure_api_surface(
         .service(login_tauri)
         .service(logout_account)
         .service(get_current_user)
-        .service(get_captcha)
         .service(query_server_info)
         .service(install_service)
         .service(uninstall_service)
@@ -233,6 +229,7 @@ pub fn configure_api_surface(
             .service(query_virtual_display_driver_status)
             .service(install_virtual_display_driver)
             .service(uninstall_virtual_display_driver)
+            .service(change_password)
             .configure(move |cfg| {
                 // Host signaling-token issuance is only meaningful where a
                 // co-located signaling server exists for the host to connect to
@@ -246,7 +243,6 @@ pub fn configure_api_surface(
             })
             .service(
                 utoipa_actix_web::scope("/desk")
-                    .service(change_password)
                     .service(query_settings)
                     .service(update_settings)
                     .service(query_ai_policy_settings)
@@ -301,9 +297,7 @@ pub fn configure_api_surface(
                 cfg.service(
                     utoipa_actix_web::scope("/turn")
                         .service(get_turn_info)
-                        .service(get_turn_session)
                         .service(get_turn_session_statistics)
-                        .service(delete_turn_session)
                         .service(get_turn_metrics)
                         .configure(move |cfg| {
                             if opts.has_signal_db {
@@ -565,7 +559,7 @@ pub async fn run_with_hub(
     let shared_settings_data = web::Data::from(shared_settings.clone());
     let settings_coordinator_data = web::Data::from(settings_coordinator.clone());
 
-    // The TauriLoginToken is shared between the HTTP `/login_tauri` route (which
+    // The TauriLoginToken is shared between the HTTP `/api/auth/tauri-login` route (which
     // verifies + consumes) and the host-control `/ws/tauri_ipc` endpoint (which
     // refreshes the token on every Tauri reconnect). Cloning the struct shares
     // the inner `Arc<Mutex<>>`. We always start empty — the hub endpoint pushes
