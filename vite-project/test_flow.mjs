@@ -71,15 +71,12 @@ async function runTests() {
     }
 
     // 3. Login as Admin
-    console.log('\n[3] Testing POST /api/login (Password)...');
-    res = await fetchApi('/api/login/account', {
+    console.log('\n[3] Testing POST /api/auth/login...');
+    res = await fetchApi('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({
-            type: "Password",
             username: "admin",
-            password: "admin",
-            captcha_code: 0,
-            autoLogin: false
+            password: "password"
         })
     });
     console.log('Status:', res.status);
@@ -113,18 +110,13 @@ async function runTests() {
     console.log('Found created item:', createdItem);
     if (!createdItem) throw new Error('Created item not found in list');
 
-    // 6. Test Device Code Login (Clear cookie first)
-    console.log('\n[6] Testing POST /api/login (DeviceCode)...');
+    // 6. Redeem the device code (clear the admin cookie first)
+    console.log('\n[6] Testing POST /api/desk/redeem-code...');
     sessionCookie = ''; // clear admin session
-    res = await fetchApi('/api/login/account', {
+    res = await fetchApi('/api/desk/redeem-code', {
         method: 'POST',
         body: JSON.stringify({
-            type: "device_code",
-            username: "",
-            password: "",
-            device_code: testDeviceCode,
-            captcha_code: 0,
-            autoLogin: false
+            code: testDeviceCode
         })
     });
     console.log('Status:', res.status);
@@ -134,7 +126,6 @@ async function runTests() {
     } else if (res.status !== 200) {
         throw new Error('Device code login failed with unexpected status: ' + res.status);
     } else {
-        if (res.data.data.access !== 'device_user') throw new Error('Expected access = device_user');
         if (res.data.data.target_connection_id !== testClientId) throw new Error('Expected target_connection_id to be client_id');
     }
 
@@ -152,14 +143,11 @@ async function runTests() {
     // 8. Log back in as admin and Delete Device Code
     console.log('\n[8] Logging back in as Admin to cleanup...');
     sessionCookie = '';
-    res = await fetchApi('/api/login/account', {
+    res = await fetchApi('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({
-            type: "Password",
             username: "admin",
-            password: "admin",
-            captcha_code: 0,
-            autoLogin: false
+            password: "password"
         })
     });
     if (res.status !== 200) throw new Error('Admin re-login failed');

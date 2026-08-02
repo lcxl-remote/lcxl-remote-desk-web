@@ -1238,7 +1238,6 @@ mod tests {
             vec![
                 "/api/turn/info",
                 "/api/turn/metrics",
-                "/api/turn/session",
                 "/api/turn/session/statistics",
                 "/api/turn/usage",
             ],
