@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useForm, useFieldArray } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
@@ -22,7 +22,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
     AlertDialog,
-    AlertDialogAction,
     AlertDialogCancel,
     AlertDialogContent,
     AlertDialogDescription,
@@ -33,6 +32,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { useToast } from "@/hooks/use-toast"
 import { TurnRuntimeStatus } from "@/features/settings/turn-runtime-status"
+import { AsyncButton } from "@/components/async-button"
 
 /**
  * `IP:port`, with IPv6 literals in brackets — the same shape the server binds
@@ -95,6 +95,8 @@ export function TurnSettings() {
     const { data: turnSettingsResponse, isLoading } = useQueryTurnSettings()
     const { mutateAsync: updateTurnSettings, isPending: isUpdating } = useUpdateTurnSettings()
     const { mutateAsync: regenerateSecret, isPending: isRegenerating } = useRegenerateTurnSecret()
+    const [regenerateDialogOpen, setRegenerateDialogOpen] = useState(false)
+    const regeneratePendingRef = useRef(false)
 
     // Both writes below make the host restart, switch off, or re-key its relay,
     // and the status card would otherwise go on showing the runtime from before
@@ -159,6 +161,8 @@ export function TurnSettings() {
     }
 
     const onRegenerateSecret = async () => {
+        if (regeneratePendingRef.current) return
+        regeneratePendingRef.current = true
         try {
             await regenerateSecret()
             rereadRuntime()
@@ -166,12 +170,15 @@ export function TurnSettings() {
                 title: t('pages.system.settings.success'),
                 description: t('pages.system.settings.regenerateSecretSuccess'),
             })
+            setRegenerateDialogOpen(false)
         } catch (error) {
             toast({
                 variant: "destructive",
                 title: t('pages.system.settings.error'),
                 description: t('pages.system.settings.regenerateSecretError'),
             })
+        } finally {
+            regeneratePendingRef.current = false
         }
     }
 
@@ -386,7 +393,7 @@ export function TurnSettings() {
                     <p className="text-sm text-muted-foreground">
                         {t("pages.system.settings.regenerateSecretDescription")}
                     </p>
-                    <AlertDialog>
+                    <AlertDialog open={regenerateDialogOpen} onOpenChange={(open) => !isRegenerating && setRegenerateDialogOpen(open)}>
                         <AlertDialogTrigger asChild>
                             <Button variant="outline" className="text-destructive hover:bg-destructive/10" disabled={isRegenerating}>
                                 {isRegenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
@@ -403,10 +410,15 @@ export function TurnSettings() {
                                 </AlertDialogDescription>
                             </AlertDialogHeader>
                             <AlertDialogFooter>
-                                <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
-                                <AlertDialogAction onClick={onRegenerateSecret} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+                                <AlertDialogCancel disabled={isRegenerating}>{t("common.cancel")}</AlertDialogCancel>
+                                <AsyncButton
+                                    pending={isRegenerating}
+                                    pendingLabel={t("pages.system.settings.regeneratingSecret")}
+                                    onClick={() => void onRegenerateSecret()}
+                                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                >
                                     {t("common.confirm")}
-                                </AlertDialogAction>
+                                </AsyncButton>
                             </AlertDialogFooter>
                         </AlertDialogContent>
                     </AlertDialog>

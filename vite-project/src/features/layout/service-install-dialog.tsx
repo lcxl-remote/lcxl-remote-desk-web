@@ -2,6 +2,7 @@ import * as React from "react"
 import { useTranslation } from "react-i18next"
 
 import { Button } from "@/components/ui/button"
+import { AsyncButton } from "@/components/async-button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
     Dialog,
@@ -49,6 +50,7 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
     const [installPath, setInstallPath] = React.useState(defaultInstallPath)
     const [installIdd, setInstallIdd] = React.useState(false)
     const [submitting, setSubmitting] = React.useState(false)
+    const submittingRef = React.useRef(false)
     const [driverStatus, setDriverStatus] = React.useState<DriverStatus | null>(null)
     const [statusLoading, setStatusLoading] = React.useState(false)
 
@@ -75,6 +77,8 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
     const iddCheckboxDisabled = statusLoading || !filesAvailable
 
     const onConfirm = async () => {
+        if (submittingRef.current) return
+        submittingRef.current = true
         setSubmitting(true)
         try {
             const resp = await fetch("/api/service/install", {
@@ -123,12 +127,13 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
                 ),
             })
         } finally {
+            submittingRef.current = false
             setSubmitting(false)
         }
     }
 
     return (
-        <Dialog open={open} onOpenChange={onOpenChange}>
+        <Dialog open={open} onOpenChange={(nextOpen) => !submitting && onOpenChange(nextOpen)}>
             <DialogContent>
                 <DialogHeader>
                     <DialogTitle>{t("pages.layout.serviceBanner.title")}</DialogTitle>
@@ -186,12 +191,14 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
                     >
                         {t("pages.layout.serviceBanner.installDialog.cancel")}
                     </Button>
-                    <Button
+                    <AsyncButton
+                        pending={submitting}
+                        pendingLabel={t("pages.layout.serviceBanner.installDialog.installing")}
                         onClick={onConfirm}
-                        disabled={!installPath.trim() || submitting}
+                        disabled={!installPath.trim()}
                     >
                         {t("pages.layout.serviceBanner.installButton")}
-                    </Button>
+                    </AsyncButton>
                 </DialogFooter>
             </DialogContent>
         </Dialog>

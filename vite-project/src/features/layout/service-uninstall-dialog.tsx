@@ -2,6 +2,7 @@ import * as React from "react"
 import { useTranslation } from "react-i18next"
 
 import { Button } from "@/components/ui/button"
+import { AsyncButton } from "@/components/async-button"
 import {
     Dialog,
     DialogContent,
@@ -29,8 +30,11 @@ export function ServiceUninstallDialog(props: ServiceUninstallDialogProps) {
     const { t } = useTranslation()
     const { toast } = useToast()
     const [submitting, setSubmitting] = React.useState(false)
+    const submittingRef = React.useRef(false)
 
     const onConfirm = async () => {
+        if (submittingRef.current) return
+        submittingRef.current = true
         setSubmitting(true)
         try {
             const resp = await fetch("/api/service/uninstall", { method: "POST" })
@@ -63,12 +67,13 @@ export function ServiceUninstallDialog(props: ServiceUninstallDialogProps) {
                 ),
             })
         } finally {
+            submittingRef.current = false
             setSubmitting(false)
         }
     }
 
     return (
-        <Dialog open={open} onOpenChange={onOpenChange}>
+        <Dialog open={open} onOpenChange={(nextOpen) => !submitting && onOpenChange(nextOpen)}>
             <DialogContent>
                 <DialogHeader>
                     <DialogTitle>
@@ -92,15 +97,16 @@ export function ServiceUninstallDialog(props: ServiceUninstallDialogProps) {
                             "pages.system.settings.serviceManagement.uninstallDialog.cancel",
                         )}
                     </Button>
-                    <Button
+                    <AsyncButton
                         variant="destructive"
+                        pending={submitting}
+                        pendingLabel={t("pages.system.settings.serviceManagement.uninstallDialog.uninstalling")}
                         onClick={onConfirm}
-                        disabled={submitting}
                     >
                         {t(
                             "pages.system.settings.serviceManagement.uninstallDialog.confirm",
                         )}
-                    </Button>
+                    </AsyncButton>
                 </DialogFooter>
             </DialogContent>
         </Dialog>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
     ChevronDown,
@@ -17,6 +17,7 @@ import { emit } from '@tauri-apps/api/event';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { AsyncButton } from '@/components/async-button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 
@@ -121,6 +122,8 @@ export default function HostAccessStatusPage() {
     );
     const [open, setOpen] = useState(false);
     const [pendingRequest, setPendingRequest] = useState<string | null>(null);
+    const pendingRequestRef = useRef<string | null>(null);
+    const [pendingDisconnectId, setPendingDisconnectId] = useState<string | null>(null);
     const [controlError, setControlError] = useState<string | null>(null);
     const remoteAccessLocked = snapshot?.remote_access.mode !== 'unlocked';
 
@@ -148,7 +151,9 @@ export default function HostAccessStatusPage() {
         const receive = (event: Event) => {
             const result = (event as CustomEvent<ControlResult>).detail;
             if (result.request_id !== pendingRequest) return;
+            pendingRequestRef.current = null;
             setPendingRequest(null);
+            setPendingDisconnectId(null);
             setControlError(result.ok ? null : result.error ?? t('hostAccess.controlFailed'));
         };
         window.addEventListener(CONTROL_RESULT_EVENT, receive);
@@ -156,13 +161,22 @@ export default function HostAccessStatusPage() {
     }, [pendingRequest, t]);
 
     const requestControl = async (payload: Record<string, unknown>) => {
+        if (pendingRequestRef.current !== null) return;
         const request_id = crypto.randomUUID();
+        pendingRequestRef.current = request_id;
         setPendingRequest(request_id);
+        setPendingDisconnectId(
+            payload.action === 'disconnect' && typeof payload.connection_id === 'string'
+                ? payload.connection_id
+                : null,
+        );
         setControlError(null);
         try {
             await emit(CONTROL_EVENT, { request_id, ...payload });
         } catch (error) {
+            pendingRequestRef.current = null;
             setPendingRequest(null);
+            setPendingDisconnectId(null);
             setControlError(error instanceof Error ? error.message : String(error));
         }
     };
@@ -317,6 +331,7 @@ export default function HostAccessStatusPage() {
                                     key={session.connection_id}
                                     session={session}
                                     disabled={pendingRequest !== null}
+                                    disconnecting={pendingDisconnectId === session.connection_id}
                                     onDisconnect={(connectionId) => void requestControl({
                                         action: 'disconnect',
                                         connection_id: connectionId,
@@ -349,10 +364,12 @@ function ActivityBadge({
 function SessionDetails({
     session,
     disabled,
+    disconnecting,
     onDisconnect,
 }: {
     session: HostAccessSession;
     disabled: boolean;
+    disconnecting: boolean;
     onDisconnect: (connectionId: string) => void;
 }) {
     const { t } = useTranslation();
@@ -396,16 +413,18 @@ function SessionDetails({
                     })}
                 </div>
             )}
-            <Button
+            <AsyncButton
                 variant="outline"
                 size="sm"
                 className="mt-3 w-full"
+                pending={disconnecting}
+                pendingLabel={t('hostAccess.disconnecting')}
                 disabled={disabled}
                 onClick={() => onDisconnect(session.connection_id)}
             >
                 <LogOut className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
                 {t('hostAccess.disconnect')}
-            </Button>
+            </AsyncButton>
         </section>
     );
 }

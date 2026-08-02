@@ -332,8 +332,15 @@ export default function FileList() {
                     <Button variant="outline" size="icon" onClick={handleGoUp} disabled={currentPath === ""}>
                         <ArrowUp className="h-4 w-4" />
                     </Button>
-                    <Button variant="outline" size="icon" onClick={() => void loadFiles()}>
-                        <RefreshCw className="h-4 w-4" />
+                    <Button
+                        variant="outline"
+                        size="icon"
+                        disabled={isLoading}
+                        aria-busy={isLoading || undefined}
+                        aria-label={t('common.refresh')}
+                        onClick={() => void loadFiles()}
+                    >
+                        <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
                     </Button>
                     <Button variant="outline" size="sm" onClick={handleUploadClick}>
                         <Upload className="h-4 w-4 mr-1" />

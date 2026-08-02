@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { Loader2, Plus, RefreshCw, Trash2, Edit2 } from "lucide-react"
 
@@ -18,7 +18,6 @@ import {
 } from "@/components/ui/dialog"
 import {
     AlertDialog,
-    AlertDialogAction,
     AlertDialogCancel,
     AlertDialogContent,
     AlertDialogDescription,
@@ -37,6 +36,7 @@ import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import { v4 as uuidv4 } from "uuid"
 import { CapabilityCeilingEditor } from "@/features/settings/capability-ceiling-editor"
+import { AsyncButton } from "@/components/async-button"
 
 // Generate a fresh 6-character device code from an unambiguous charset.
 const generateDeviceCode = () => {
@@ -55,7 +55,7 @@ export function DeviceCodeList() {
     const page = 1
     const pageSize = 20
 
-    const { data: listResp, isLoading, refetch } = useListDeviceCodes({
+    const { data: listResp, isLoading, isFetching, refetch } = useListDeviceCodes({
         page: page as any,
         page_size: pageSize as any
     })
@@ -78,6 +78,21 @@ export function DeviceCodeList() {
     const [deleteId, setDeleteId] = useState<number | null>(null)
     const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
     const [regenItem, setRegenItem] = useState<DeviceCodeItem | null>(null)
+    const [pendingAction, setPendingAction] = useState<string | null>(null)
+    const pendingActionRef = useRef<string | null>(null)
+
+    const beginAction = (action: string) => {
+        if (pendingActionRef.current !== null) return false
+        pendingActionRef.current = action
+        setPendingAction(action)
+        return true
+    }
+
+    const finishAction = (action: string) => {
+        if (pendingActionRef.current !== action) return
+        pendingActionRef.current = null
+        setPendingAction(null)
+    }
 
     const handleOpenCreate = () => {
         setCreateForm({ clientId: uuidv4(), deviceCode: generateDeviceCode(), capabilities: null })
@@ -86,6 +101,8 @@ export function DeviceCodeList() {
 
     const submitCreate = async () => {
         if (!createForm.clientId || !createForm.deviceCode) return;
+        const action = "create"
+        if (!beginAction(action)) return
         try {
             await createDeviceCode({
                 data: {
@@ -97,26 +114,30 @@ export function DeviceCodeList() {
             toast({
                 title: t('pages.deviceCodeList.generateSuccess')
             })
+            await refetch()
             setIsCreateOpen(false)
-            refetch()
         } catch (error) {
             toast({
                 variant: 'destructive',
                 title: t('pages.deviceCodeList.generateFailed'),
                 description: (error as Error).message
             })
+        } finally {
+            finishAction(action)
         }
     }
 
     const confirmDelete = async () => {
         if (deleteId == null) return
+        const action = `delete:${deleteId}`
+        if (!beginAction(action)) return
         try {
             await deleteDeviceCode({ id: deleteId })
             toast({
                 title: t('pages.deviceCodeList.deleteSuccess')
             })
             setSelectedIds(prev => prev.filter(i => i !== deleteId))
-            refetch()
+            await refetch()
         } catch (error) {
             toast({
                 variant: 'destructive',
@@ -125,6 +146,7 @@ export function DeviceCodeList() {
             })
         } finally {
             setDeleteId(null)
+            finishAction(action)
         }
     }
 
@@ -135,6 +157,8 @@ export function DeviceCodeList() {
 
     const submitEdit = async () => {
         if (!editItem || !editForm.deviceCode) return;
+        const action = `edit:${editItem.id}`
+        if (!beginAction(action)) return
         // Always send the update: the code and/or the ceiling may have changed, and the
         // backend only bumps the generation when the code itself rotates.
         try {
@@ -148,14 +172,16 @@ export function DeviceCodeList() {
             toast({
                 title: t('pages.deviceCodeList.updateSuccess')
             })
+            await refetch()
             setEditItem(null)
-            refetch()
         } catch (error) {
             toast({
                 variant: 'destructive',
                 title: t('pages.deviceCodeList.updateFailed'),
                 description: (error as Error).message
             })
+        } finally {
+            finishAction(action)
         }
     }
 
@@ -164,6 +190,8 @@ export function DeviceCodeList() {
     // code) while preserving the configured capability ceiling.
     const confirmRegenerate = async () => {
         if (!regenItem) return
+        const action = `regenerate:${regenItem.id}`
+        if (!beginAction(action)) return
         try {
             await updateDeviceCode({
                 id: regenItem.id,
@@ -173,7 +201,7 @@ export function DeviceCodeList() {
                 }
             })
             toast({ title: t('pages.deviceCodeList.regenerateSuccess') })
-            refetch()
+            await refetch()
         } catch (error) {
             toast({
                 variant: 'destructive',
@@ -182,18 +210,21 @@ export function DeviceCodeList() {
             })
         } finally {
             setRegenItem(null)
+            finishAction(action)
         }
     }
 
     const confirmBatchDelete = async () => {
         if (!selectedIds.length) return
+        const action = "batch-delete"
+        if (!beginAction(action)) return
         try {
             await batchDeleteDeviceCodes({ data: { ids: selectedIds } })
             toast({
                 title: t('pages.deviceCodeList.deleteSuccess')
             })
             setSelectedIds([])
-            refetch()
+            await refetch()
         } catch (error) {
             toast({
                 variant: 'destructive',
@@ -202,6 +233,7 @@ export function DeviceCodeList() {
             })
         } finally {
             setBatchDeleteOpen(false)
+            finishAction(action)
         }
     }
 
@@ -221,8 +253,8 @@ export function DeviceCodeList() {
                             {t('pages.deviceCodeList.batchDelete')} ({selectedIds.length})
                         </Button>
                     )}
-                    <Button variant="outline" onClick={() => refetch()}>
-                        <RefreshCw className="mr-2 h-4 w-4" />
+                    <Button variant="outline" disabled={isFetching} aria-busy={isFetching || undefined} onClick={() => void refetch()}>
+                        <RefreshCw className={`mr-2 h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
                         {t('common.refresh')}
                     </Button>
                     <Button onClick={handleOpenCreate} disabled={isCreating}>
@@ -326,7 +358,7 @@ export function DeviceCodeList() {
                 </CardContent>
             </Card>
 
-            <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+            <Dialog open={isCreateOpen} onOpenChange={(open) => pendingAction !== "create" && setIsCreateOpen(open)}>
                 <DialogContent className="flex max-h-[90dvh] flex-col">
                     <DialogHeader>
                         <DialogTitle>{t('pages.deviceCodeList.createModal.title')}</DialogTitle>
@@ -366,16 +398,20 @@ export function DeviceCodeList() {
                         </div>
                     </div>
                     <DialogFooter>
-                        <Button variant="outline" onClick={() => setIsCreateOpen(false)}>{t('common.cancel')}</Button>
-                        <Button onClick={submitCreate} disabled={isCreating || !createForm.clientId || !createForm.deviceCode}>
-                            {isCreating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                        <Button variant="outline" disabled={pendingAction === "create"} onClick={() => setIsCreateOpen(false)}>{t('common.cancel')}</Button>
+                        <AsyncButton
+                            pending={pendingAction === "create" || isCreating}
+                            pendingLabel={t('common.saving')}
+                            onClick={() => void submitCreate()}
+                            disabled={!createForm.clientId || !createForm.deviceCode}
+                        >
                             {t('common.save')}
-                        </Button>
+                        </AsyncButton>
                     </DialogFooter>
                 </DialogContent>
             </Dialog>
 
-            <Dialog open={!!editItem} onOpenChange={(open) => !open && setEditItem(null)}>
+            <Dialog open={!!editItem} onOpenChange={(open) => !open && !pendingAction?.startsWith("edit:") && setEditItem(null)}>
                 <DialogContent className="flex max-h-[90dvh] flex-col">
                     <DialogHeader>
                         <DialogTitle>{t('pages.deviceCodeList.editModal.title')}</DialogTitle>
@@ -415,15 +451,20 @@ export function DeviceCodeList() {
                         </div>
                     </div>
                     <DialogFooter>
-                        <Button variant="outline" onClick={() => setEditItem(null)}>{t('common.cancel')}</Button>
-                        <Button onClick={submitEdit} disabled={!editForm.deviceCode}>
+                        <Button variant="outline" disabled={pendingAction?.startsWith("edit:")} onClick={() => setEditItem(null)}>{t('common.cancel')}</Button>
+                        <AsyncButton
+                            pending={pendingAction === `edit:${editItem?.id}`}
+                            pendingLabel={t('common.saving')}
+                            onClick={() => void submitEdit()}
+                            disabled={!editForm.deviceCode}
+                        >
                             {t('common.save')}
-                        </Button>
+                        </AsyncButton>
                     </DialogFooter>
                 </DialogContent>
             </Dialog>
 
-            <AlertDialog open={deleteId != null} onOpenChange={(open) => !open && setDeleteId(null)}>
+            <AlertDialog open={deleteId != null} onOpenChange={(open) => !open && !pendingAction?.startsWith("delete:") && setDeleteId(null)}>
                 <AlertDialogContent>
                     <AlertDialogHeader>
                         <AlertDialogTitle>{t('pages.deviceCodeList.deleteConfirm.title')}</AlertDialogTitle>
@@ -432,18 +473,20 @@ export function DeviceCodeList() {
                         </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
-                        <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
-                        <AlertDialogAction
-                            onClick={confirmDelete}
+                        <AlertDialogCancel disabled={pendingAction?.startsWith("delete:")}>{t('common.cancel')}</AlertDialogCancel>
+                        <AsyncButton
+                            pending={pendingAction === `delete:${deleteId}`}
+                            pendingLabel={t('common.deleting')}
+                            onClick={() => void confirmDelete()}
                             className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                         >
                             {t('pages.deviceCodeList.action.delete')}
-                        </AlertDialogAction>
+                        </AsyncButton>
                     </AlertDialogFooter>
                 </AlertDialogContent>
             </AlertDialog>
 
-            <AlertDialog open={batchDeleteOpen} onOpenChange={setBatchDeleteOpen}>
+            <AlertDialog open={batchDeleteOpen} onOpenChange={(open) => pendingAction !== "batch-delete" && setBatchDeleteOpen(open)}>
                 <AlertDialogContent>
                     <AlertDialogHeader>
                         <AlertDialogTitle>{t('pages.deviceCodeList.deleteConfirm.title')}</AlertDialogTitle>
@@ -452,18 +495,20 @@ export function DeviceCodeList() {
                         </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
-                        <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
-                        <AlertDialogAction
-                            onClick={confirmBatchDelete}
+                        <AlertDialogCancel disabled={pendingAction === "batch-delete"}>{t('common.cancel')}</AlertDialogCancel>
+                        <AsyncButton
+                            pending={pendingAction === "batch-delete" || isBatchDeleting}
+                            pendingLabel={t('common.deleting')}
+                            onClick={() => void confirmBatchDelete()}
                             className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                         >
                             {t('pages.deviceCodeList.batchDelete')}
-                        </AlertDialogAction>
+                        </AsyncButton>
                     </AlertDialogFooter>
                 </AlertDialogContent>
             </AlertDialog>
 
-            <AlertDialog open={!!regenItem} onOpenChange={(open) => !open && setRegenItem(null)}>
+            <AlertDialog open={!!regenItem} onOpenChange={(open) => !open && !pendingAction?.startsWith("regenerate:") && setRegenItem(null)}>
                 <AlertDialogContent>
                     <AlertDialogHeader>
                         <AlertDialogTitle>{t('pages.deviceCodeList.regenerate')}</AlertDialogTitle>
@@ -472,10 +517,14 @@ export function DeviceCodeList() {
                         </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
-                        <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
-                        <AlertDialogAction onClick={confirmRegenerate}>
+                        <AlertDialogCancel disabled={pendingAction?.startsWith("regenerate:")}>{t('common.cancel')}</AlertDialogCancel>
+                        <AsyncButton
+                            pending={pendingAction === `regenerate:${regenItem?.id}`}
+                            pendingLabel={t('pages.deviceCodeList.regenerating')}
+                            onClick={() => void confirmRegenerate()}
+                        >
                             {t('common.confirm')}
-                        </AlertDialogAction>
+                        </AsyncButton>
                     </AlertDialogFooter>
                 </AlertDialogContent>
             </AlertDialog>

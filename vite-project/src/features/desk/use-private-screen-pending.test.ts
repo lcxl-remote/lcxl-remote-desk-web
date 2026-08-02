@@ -1,0 +1,51 @@
+import { act, renderHook } from "@testing-library/react"
+import { afterEach, describe, expect, it, vi } from "vitest"
+
+import { usePrivateScreenPending } from "./use-private-screen-pending"
+
+afterEach(() => {
+    vi.useRealTimers()
+})
+
+describe("usePrivateScreenPending", () => {
+    it("settles only when the status push confirms the requested target", () => {
+        const onError = vi.fn()
+        const { result } = renderHook(() => usePrivateScreenPending({ onError }))
+        act(() => expect(result.current.start(true)).toBe(true))
+        expect(result.current.pending).toBe(true)
+
+        act(() => result.current.confirm(false))
+        expect(result.current.pending).toBe(true)
+        act(() => result.current.confirm(true))
+        expect(result.current.pending).toBe(false)
+        expect(onError).not.toHaveBeenCalled()
+    })
+
+    it("surfaces an explicit remote error and permits retry", () => {
+        const onError = vi.fn()
+        const { result } = renderHook(() => usePrivateScreenPending({ onError }))
+        act(() => result.current.start(true))
+        act(() => result.current.fail("driver unavailable"))
+
+        expect(result.current.pending).toBe(false)
+        expect(onError).toHaveBeenCalledWith("remote", "driver unavailable")
+        act(() => expect(result.current.start(true)).toBe(true))
+    })
+
+    it("times out and cancels its watchdog on unmount", () => {
+        vi.useFakeTimers()
+        const onError = vi.fn()
+        const { result, unmount } = renderHook(() =>
+            usePrivateScreenPending({ onError, timeoutMs: 100 }),
+        )
+        act(() => result.current.start(true))
+        act(() => vi.advanceTimersByTime(100))
+        expect(result.current.pending).toBe(false)
+        expect(onError).toHaveBeenCalledWith("timeout")
+
+        act(() => result.current.start(false))
+        unmount()
+        act(() => vi.runAllTimers())
+        expect(onError).toHaveBeenCalledTimes(1)
+    })
+})

@@ -62,6 +62,7 @@ type DeskControlBarProps = {
     isFullscreen: boolean
     isMuted: boolean
     isPrivateScreen: boolean
+    isPrivateScreenPending: boolean
     isPrivateScreenSupported: boolean
     isWaitingApproval: boolean
     keyboardLockSupported: boolean
@@ -93,6 +94,7 @@ export function DeskControlBar({
     isFullscreen,
     isMuted,
     isPrivateScreen,
+    isPrivateScreenPending,
     isPrivateScreenSupported,
     isWaitingApproval,
     keyboardLockSupported,
@@ -284,14 +286,22 @@ export function DeskControlBar({
                             <TooltipTrigger asChild>
                                 <Button
                                     className={`controlButton ${isPrivateScreen ? "bg-white/20 text-green-400" : ""}`}
+                                    disabled={isPrivateScreenPending}
+                                    aria-busy={isPrivateScreenPending || undefined}
                                     onClick={onTogglePrivateScreen}
                                     variant="ghost"
                                 >
-                                    {isPrivateScreen ? <ShieldCheck /> : <ShieldOff />}
+                                    {isPrivateScreenPending
+                                        ? <Loader2 className="animate-spin" />
+                                        : isPrivateScreen ? <ShieldCheck /> : <ShieldOff />}
                                 </Button>
                             </TooltipTrigger>
                             <TooltipContent>
-                                <p>{isPrivateScreen ? t("pages.desk.disablePrivateScreen") : t("pages.desk.enablePrivateScreen")}</p>
+                                <p>{isPrivateScreenPending
+                                    ? t("pages.desk.updatingPrivateScreen")
+                                    : isPrivateScreen
+                                        ? t("pages.desk.disablePrivateScreen")
+                                        : t("pages.desk.enablePrivateScreen")}</p>
                             </TooltipContent>
                         </Tooltip>
                     )}

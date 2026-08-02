@@ -56,6 +56,7 @@ import {
     SIGNALING_TYPE_CODE_INIT,
 } from "./constants"
 import { AdmissionRetrySchedule } from "./admission-retry"
+import { usePrivateScreenPending } from "./use-private-screen-pending"
 
 /** Container props. `orgId` is injected only by the manager console's org view
  *  (via a static wrapper); the open-source standalone app renders `<DeskSession/>`
@@ -203,6 +204,23 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     // Privacy screen state
     const [isPrivateScreen, setIsPrivateScreen] = useState(false);
     const [isPrivateScreenSupported, setIsPrivateScreenSupported] = useState(true);
+    const {
+        pending: isPrivateScreenPending,
+        start: startPrivateScreenPending,
+        confirm: confirmPrivateScreenPending,
+        fail: failPrivateScreenPending,
+        clear: clearPrivateScreenPending,
+    } = usePrivateScreenPending({
+        onError: (kind, message) => {
+            toast({
+                variant: "destructive",
+                title: t(kind === "timeout"
+                    ? "pages.desk.privateScreenTimeout"
+                    : "pages.desk.privateScreenFailed"),
+                description: message,
+            });
+        },
+    });
 
     const { peerConnection, remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, whiteboardChannel, cursorSyncChannel, isRTCConnected, rtcFailed, closeRTC, rtcStats } = useDeskRTC({
         deskId: deskId || null,
@@ -392,6 +410,9 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                     setIsPrivateScreenSupported(data.is_supported ?? true);
                     if (data.error_msg) {
                         console.error("Private screen error:", data.error_msg);
+                        failPrivateScreenPending(data.error_msg);
+                    } else if (typeof data.visible === "boolean") {
+                        confirmPrivateScreenPending(data.visible);
                     }
                 }
             } else if (signaling_type === SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_ERROR) {
@@ -415,15 +436,16 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
             }
         };
         return subscribe(handle);
-    }, [clearAdmissionRetry, sendRemoteAdmission, subscribe, t, toast]);
+    }, [clearAdmissionRetry, confirmPrivateScreenPending, failPrivateScreenPending, sendRemoteAdmission, subscribe, t, toast]);
 
     // Reset requested state if connection drops
     useEffect(() => {
         if (!isConnected) {
             clearAdmissionRetry();
+            clearPrivateScreenPending();
             hasRequestedRef.current = false;
         }
-    }, [clearAdmissionRetry, isConnected]);
+    }, [clearAdmissionRetry, clearPrivateScreenPending, isConnected]);
 
     useEffect(() => clearAdmissionRetry, [clearAdmissionRetry]);
 
@@ -663,6 +685,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         if (isRTCConnected && deskId) {
             console.log("Updating desk settings dynamically...", settingsWithPrefs);
             sendMessage(SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, settingsWithPrefs, deskId);
+            toast({ title: t("pages.desk.settingsSent") });
         } else {
             // Mark that a connect is in flight so a transient ICE drop during
             // negotiation does not auto-reopen this dialog.
@@ -714,6 +737,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     };
 
     const handleDisconnect = () => {
+        clearPrivateScreenPending();
         if (deskId) {
             if (isPrivateScreen) {
                 console.log(`Disabling private screen before disconnect`);
@@ -728,6 +752,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     const handleTogglePrivateScreen = () => {
         if (!deskId) return;
         const newState = !isPrivateScreen;
+        if (!startPrivateScreenPending(newState)) return;
         console.log(`Toggling private screen: ${newState}`);
         sendMessage(SIGNALING_TYPE_CODE_ENABLE_PRIVATE_SCREEN, { enable: newState }, deskId);
     };
@@ -1026,6 +1051,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                                 isFullscreen={isFullscreen}
                                 isMuted={isMuted}
                                 isPrivateScreen={isPrivateScreen}
+                                isPrivateScreenPending={isPrivateScreenPending}
                                 isPrivateScreenSupported={isPrivateScreenSupported}
                                 isWaitingApproval={isWaitingApproval}
                                 keyboardLockSupported={keyboardLockSupported}

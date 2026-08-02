@@ -1,13 +1,12 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import { useNavigate, useSearchParams } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Loader2, Lock, User } from "lucide-react"
+import { Lock, User } from "lucide-react"
 import axios from "axios"
 
-import { Button } from "@/components/ui/button"
 import {
     Form,
     FormControl,
@@ -27,6 +26,7 @@ import { startupModeEnum } from "@/services/types"
 import { saveSessionGrant, clearSessionGrant } from "@/features/desk/session-grant"
 import { ModeToggle } from "@/components/mode-toggle"
 import { LanguageToggle } from "@/components/language-toggle"
+import { AsyncButton } from "@/components/async-button"
 
 const formSchema = z.object({
     username: z.string().optional(),
@@ -44,6 +44,8 @@ export default function LoginPage() {
     const [searchParams] = useSearchParams()
     const { toast } = useToast()
     const [activeTab, setActiveTab] = useState("account")
+    const [tauriAutoLoginPending, setTauriAutoLoginPending] = useState(false)
+    const tauriAutoLoginTokenRef = useRef<string | null>(null)
 
     const { mutateAsync: login } = useLoginAccount()
     const { mutateAsync: redeem } = useRedeemCode()
@@ -63,7 +65,9 @@ export default function LoginPage() {
     // Tauri auto-login: detect token in URL params
     useEffect(() => {
         const token = searchParams.get("token")
-        if (!token) return
+        if (!token || tauriAutoLoginTokenRef.current === token) return
+        tauriAutoLoginTokenRef.current = token
+        setTauriAutoLoginPending(true)
 
         const doTauriLogin = async () => {
             try {
@@ -91,6 +95,8 @@ export default function LoginPage() {
             const newParams = new URLSearchParams(searchParams)
             newParams.delete("token")
             window.history.replaceState({}, "", `${window.location.pathname}${newParams.toString() ? '?' + newParams.toString() : ''}`)
+            tauriAutoLoginTokenRef.current = null
+            setTauriAutoLoginPending(false)
         }
 
         doTauriLogin()
@@ -136,6 +142,7 @@ export default function LoginPage() {
     }
 
     async function onSubmit(values: FormValues) {
+        if (tauriAutoLoginTokenRef.current !== null) return
         try {
             if (values.type === "device_code") {
                 await onRedeemCode(values)
@@ -201,13 +208,14 @@ export default function LoginPage() {
                 </CardHeader>
                 <CardContent>
                     <Tabs value={activeTab} onValueChange={(val) => {
+                        if (tauriAutoLoginPending) return
                         setActiveTab(val);
                         form.setValue("type", val);
                     }} className="w-full">
                         {serverInfo && serverInfo.startup_mode !== startupModeEnum["desk-server"] && (
                             <TabsList className="grid w-full grid-cols-2 mb-4">
-                                <TabsTrigger value="account">{t('pages.login.accountLogin.tab')}</TabsTrigger>
-                                <TabsTrigger value="device_code">{t('pages.login.deviceCode.tab')}</TabsTrigger>
+                                <TabsTrigger value="account" disabled={tauriAutoLoginPending}>{t('pages.login.accountLogin.tab')}</TabsTrigger>
+                                <TabsTrigger value="device_code" disabled={tauriAutoLoginPending}>{t('pages.login.deviceCode.tab')}</TabsTrigger>
                             </TabsList>
                         )}
                         <TabsContent value="account">
@@ -221,7 +229,7 @@ export default function LoginPage() {
                                                 <FormControl>
                                                     <div className="relative">
                                                         <User className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-                                                        <Input placeholder={t('pages.login.username.placeholder')} className="pl-9" {...field} />
+                                                        <Input placeholder={t('pages.login.username.placeholder')} className="pl-9" disabled={tauriAutoLoginPending} {...field} />
                                                     </div>
                                                 </FormControl>
                                                 <FormMessage />
@@ -236,17 +244,21 @@ export default function LoginPage() {
                                                 <FormControl>
                                                     <div className="relative">
                                                         <Lock className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-                                                        <Input type="password" placeholder={t('pages.login.password.placeholder')} className="pl-9" {...field} />
+                                                        <Input type="password" placeholder={t('pages.login.password.placeholder')} className="pl-9" disabled={tauriAutoLoginPending} {...field} />
                                                     </div>
                                                 </FormControl>
                                                 <FormMessage />
                                             </FormItem>
                                         )}
                                     />
-                                    <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
-                                        {form.formState.isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                                    <AsyncButton
+                                        type="submit"
+                                        className="w-full"
+                                        pending={form.formState.isSubmitting || tauriAutoLoginPending}
+                                        pendingLabel={t('pages.login.loggingIn')}
+                                    >
                                         {t('pages.login.submit')}
-                                    </Button>
+                                    </AsyncButton>
                                 </form>
                             </Form>
                         </TabsContent>
@@ -265,6 +277,7 @@ export default function LoginPage() {
                                                             placeholder={t('pages.login.deviceCode.placeholder')}
                                                             className="pl-9"
                                                             maxLength={6}
+                                                            disabled={tauriAutoLoginPending}
                                                             {...field}
                                                             onChange={e => {
                                                                 e.target.value = e.target.value.toUpperCase();
@@ -278,10 +291,14 @@ export default function LoginPage() {
                                         )}
                                     />
                                     <p className="text-xs text-muted-foreground">{t('pages.login.deviceCode.hint')}</p>
-                                    <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
-                                        {form.formState.isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                                    <AsyncButton
+                                        type="submit"
+                                        className="w-full"
+                                        pending={form.formState.isSubmitting || tauriAutoLoginPending}
+                                        pendingLabel={t('pages.login.loggingIn')}
+                                    >
                                         {t('pages.login.deviceCode.connect')}
-                                    </Button>
+                                    </AsyncButton>
                                 </form>
                             </Form>
                         </TabsContent>

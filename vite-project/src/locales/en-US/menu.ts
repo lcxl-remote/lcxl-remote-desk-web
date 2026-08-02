@@ -45,6 +45,8 @@ export default {
   'menu.account.trigger': 'Trigger Error',
   'menu.account.settings': 'Account Settings',
   'menu.account.logout': 'Logout',
+  'menu.account.loggingOut': 'Signing out…',
+  'menu.account.logoutFailed': 'Could not sign out. Try again.',
   'menu.editor': 'Graphic Editor',
   'menu.editor.flow': 'Flow Editor',
   'menu.editor.mind': 'Mind Editor',

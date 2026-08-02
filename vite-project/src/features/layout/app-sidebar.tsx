@@ -5,6 +5,7 @@ import {
     LogOut,
     ChevronRight,
     ChevronDown,
+    Loader2,
 } from "lucide-react"
 import { useLocation, Link, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
@@ -14,6 +15,7 @@ import { useLogoutAccount } from "@/services/hooks/authController/useLogoutAccou
 import { clearAllGrants } from "@/features/desk/session-grant"
 import { buildNavItems, startupModeLabel } from "@/features/layout/sidebar-nav"
 import { Badge } from "@/components/ui/badge"
+import { useToast } from "@/hooks/use-toast"
 
 import {
     Sidebar,
@@ -47,19 +49,34 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     const { t } = useTranslation()
     const location = useLocation()
     const navigate = useNavigate()
+    const { toast } = useToast()
     const { data: serverInfoResp } = useQueryServerInfo()
     const { data: userResp } = useGetCurrentUser()
     const { mutateAsync: logout } = useLogoutAccount()
+    const [logoutPending, setLogoutPending] = React.useState(false)
+    const logoutPendingRef = React.useRef(false)
 
     const serverInfo = serverInfoResp?.data
     const user = userResp?.data
 
-    const handleLogout = () => {
+    const handleLogout = async () => {
+        if (logoutPendingRef.current) return
+        logoutPendingRef.current = true
+        setLogoutPending(true)
         // Clear every redeemed grant so one account's restricted sessions never
         // linger into the next account signed in on this tab.
         clearAllGrants()
-        logout().catch(console.error)
-        navigate("/user/login", { replace: true })
+        try {
+            await logout()
+            navigate("/user/login", { replace: true })
+        } catch {
+            logoutPendingRef.current = false
+            setLogoutPending(false)
+            toast({
+                variant: "destructive",
+                title: t("menu.account.logoutFailed"),
+            })
+        }
     }
 
     const navItems: any[] = React.useMemo(() => {
@@ -193,9 +210,18 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                                         </Link>
                                     </DropdownMenuItem>
                                 )}
-                                <DropdownMenuItem onClick={handleLogout} className="cursor-pointer">
-                                    <LogOut className="mr-2 h-4 w-4" />
-                                    {t('menu.account.logout')}
+                                <DropdownMenuItem
+                                    onClick={() => void handleLogout()}
+                                    disabled={logoutPending}
+                                    aria-busy={logoutPending || undefined}
+                                    className="cursor-pointer"
+                                >
+                                    {logoutPending
+                                        ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                                        : <LogOut className="mr-2 h-4 w-4" />}
+                                    {logoutPending
+                                        ? t('menu.account.loggingOut')
+                                        : t('menu.account.logout')}
                                 </DropdownMenuItem>
                             </DropdownMenuContent>
                         </DropdownMenu>

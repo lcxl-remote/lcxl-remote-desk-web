@@ -44,6 +44,8 @@ type RestResponse<T> = {
     data?: T | null
 }
 
+type SaveState = "idle" | "saving" | "error"
+
 /** The AI role slot a selector targets. Diagnose and the terminal copilot both use
  *  the `agent` model; terminal completion is a separate slot. */
 export type ModelRole = "agent" | "completion"
@@ -104,11 +106,20 @@ export function ModelSelector({ role, onChange, className, orgId, label }: Model
     const [hidden, setHidden] = useState(false)
     const [selectedId, setSelectedId] = useState<number | null>(null)
     const [balance, setBalance] = useState<{ points: string; currency: string } | null>(null)
+    const [saveState, setSaveState] = useState<SaveState>("idle")
+    const desiredPersistIdRef = useRef<number | null>(null)
+    const persistedIdRef = useRef<number | null>(null)
+    const persistInFlightRef = useRef(false)
+    const mountedRef = useRef(true)
 
     // Hold the latest `onChange` in a ref so the load effect need not depend on it
     // (a new closure each render would otherwise re-run the fetch).
     const onChangeRef = useRef(onChange)
     onChangeRef.current = onChange
+
+    useEffect(() => () => {
+        mountedRef.current = false
+    }, [])
 
     useEffect(() => {
         let cancelled = false
@@ -160,6 +171,9 @@ export function ModelSelector({ role, onChange, className, orgId, label }: Model
                 if (cancelled) return
                 setModels(forRole)
                 setSelectedId(pre.model_id)
+                desiredPersistIdRef.current = pre.model_id
+                persistedIdRef.current = pre.model_id
+                setSaveState("idle")
                 // Surface the pre-selected model so the first request already carries it.
                 onChangeRef.current(pre.model_id)
                 // The selector is live; now it is worth fetching the balance.
@@ -178,24 +192,43 @@ export function ModelSelector({ role, onChange, className, orgId, label }: Model
 
     if (hidden || !models || selectedId === null) return null
 
-    const persist = async (id: number) => {
+    const drainPersistence = async () => {
+        if (persistInFlightRef.current) return
+        persistInFlightRef.current = true
+        if (mountedRef.current) setSaveState("saving")
         try {
-            const res = await fetch(preferenceUrl, {
-                method: "PUT",
-                credentials: "include",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ role, model_id: id }),
-            })
-            if (!res.ok) throw new Error("http")
-            const body = (await res.json().catch(() => null)) as RestResponse<unknown> | null
-            if (body && body.success === false) throw new Error("biz")
-        } catch {
-            // The choice is already applied to the next request via `onChange`; only
-            // the durable preference failed to save, so a non-blocking toast suffices.
-            toast({
-                title: t("pages.desk.modelSelector.saveFailed"),
-                variant: "destructive",
-            })
+            while (
+                desiredPersistIdRef.current !== null &&
+                desiredPersistIdRef.current !== persistedIdRef.current
+            ) {
+                const id = desiredPersistIdRef.current
+                try {
+                    const res = await fetch(preferenceUrl, {
+                        method: "PUT",
+                        credentials: "include",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ role, model_id: id }),
+                    })
+                    if (!res.ok) throw new Error("http")
+                    const body = (await res.json().catch(() => null)) as RestResponse<unknown> | null
+                    if (body && body.success === false) throw new Error("biz")
+                    persistedIdRef.current = id
+                } catch {
+                    if (mountedRef.current) {
+                        setSaveState("error")
+                        toast({
+                            title: t("pages.desk.modelSelector.saveFailed"),
+                            variant: "destructive",
+                        })
+                    }
+                    // If the user selected again while this request was pending,
+                    // continue with the newest value; otherwise leave it retryable.
+                    if (desiredPersistIdRef.current === id) return
+                }
+            }
+            if (mountedRef.current) setSaveState("idle")
+        } finally {
+            persistInFlightRef.current = false
         }
     }
 
@@ -204,7 +237,8 @@ export function ModelSelector({ role, onChange, className, orgId, label }: Model
         if (Number.isNaN(id)) return
         setSelectedId(id)
         onChangeRef.current(id)
-        void persist(id)
+        desiredPersistIdRef.current = id
+        void drainPersistence()
     }
 
     /** Compact per-model price hint: input / output unit price in points, or "free". */
@@ -229,6 +263,13 @@ export function ModelSelector({ role, onChange, className, orgId, label }: Model
                         {t("pages.desk.modelSelector.balance", {
                             points: balance.points,
                         })}
+                    </span>
+                )}
+                {saveState !== "idle" && (
+                    <span className="text-[10px] text-inherit opacity-60" aria-live="polite">
+                        {t(saveState === "saving"
+                            ? "pages.desk.modelSelector.saving"
+                            : "pages.desk.modelSelector.saveFailed")}
                     </span>
                 )}
             </div>

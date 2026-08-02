@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 // i18n: real en-US locale so assertions match what users see.
@@ -9,12 +9,15 @@ vi.mock("react-i18next", () => import("@/test-utils/i18n-mock").then((m) => m.re
 const h = vi.hoisted(() => ({
     connections: [] as unknown[],
     isLoading: false,
+    isFetching: false,
+    refetch: vi.fn(),
 }));
 vi.mock("@/services/hooks/connectionController/useListConnections", () => ({
     useListConnections: () => ({
         data: h.connections,
         isLoading: h.isLoading,
-        refetch: vi.fn(),
+        isFetching: h.isFetching,
+        refetch: h.refetch,
     }),
 }));
 
@@ -43,10 +46,22 @@ function renderList() {
 afterEach(() => {
     h.connections = [];
     h.isLoading = false;
+    h.isFetching = false;
     vi.clearAllMocks();
 });
 
 describe("DeskList platform column", () => {
+    it("disables and spins the manual refresh while refetching", () => {
+        h.isFetching = true;
+        renderList();
+        const refresh = screen.getByRole("button", { name: "Refresh" });
+        expect(refresh).toBeDisabled();
+        expect(refresh).toHaveAttribute("aria-busy", "true");
+        expect(refresh.querySelector("svg")).toHaveClass("animate-spin");
+        fireEvent.click(refresh);
+        expect(h.refetch).not.toHaveBeenCalled();
+    });
+
     it("renders the reported OS for a non-Windows client (Android), not a hardcoded Windows", () => {
         // Regression: the platform cell used to be hardcoded to "Windows",
         // so an Android host was mislabelled in the list even though the

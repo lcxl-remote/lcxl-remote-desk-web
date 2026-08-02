@@ -75,6 +75,28 @@ describe('host access status controls', () => {
         expect(screen.queryByText('hostAccess.lockedTitle')).not.toBeInTheDocument();
     });
 
+    it('marks only the target session as disconnecting until the daemon result', async () => {
+        render(<HostAccessStatusPage />);
+        fireEvent.click(screen.getByRole('button', { name: 'hostAccess.toggleDetails' }));
+        const disconnect = await screen.findByRole('button', { name: 'hostAccess.disconnect' });
+
+        fireEvent.click(disconnect);
+        fireEvent.click(disconnect);
+
+        await waitFor(() => expect(emit).toHaveBeenCalledTimes(1));
+        expect(screen.getByRole('button', { name: 'hostAccess.disconnecting' })).toBeDisabled();
+        act(() => window.dispatchEvent(new CustomEvent('lcxl-host-access-control-result', {
+            detail: {
+                request_id: '11111111-1111-4111-8111-111111111111',
+                ok: true,
+                error: null,
+            },
+        })));
+        await waitFor(() => expect(
+            screen.getByRole('button', { name: 'hostAccess.disconnect' }),
+        ).toBeEnabled());
+    });
+
     it('allows local unlock while central synchronization is pending', async () => {
         Object.defineProperty(window, '__lcxlHostAccessSnapshot', {
             configurable: true,

@@ -20,6 +20,7 @@ import { useToast } from "@/hooks/use-toast"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { deskErrorCodeEnum } from "@/services/types"
 import { ServiceUninstallDialog } from "@/features/layout/service-uninstall-dialog"
+import { AsyncButton } from "@/components/async-button"
 
 interface DriverStatus {
     files_available: boolean
@@ -46,6 +47,8 @@ interface VirtualDisplaySettings {
     adaptive_throttle_ms: number
     adaptive_min_delta_px: number
 }
+
+type PendingAction = "install" | "uninstall" | "save"
 
 /**
  * Mirrors server's `VirtualDisplaySettings::default()`. Used as the
@@ -115,7 +118,8 @@ export function VirtualDisplaySettings() {
 
     const [status, setStatus] = React.useState<DriverStatus | null>(null)
     const [statusLoading, setStatusLoading] = React.useState(false)
-    const [busy, setBusy] = React.useState(false)
+    const [pendingAction, setPendingAction] = React.useState<PendingAction | null>(null)
+    const pendingActionRef = React.useRef<PendingAction | null>(null)
     const [settings, setSettings] = React.useState<VirtualDisplaySettings | null>(null)
     const [settingsLoading, setSettingsLoading] = React.useState(true)
     // Failure flag for the settings GET. When `true` we keep
@@ -130,6 +134,19 @@ export function VirtualDisplaySettings() {
     // cycle. A useEffect below syncs it whenever the canonical
     // settings change (first GET / save round-trip / uninstall).
     const [promptMsInput, setPromptMsInput] = React.useState("5000")
+
+    const beginAction = (action: PendingAction) => {
+        if (pendingActionRef.current !== null) return false
+        pendingActionRef.current = action
+        setPendingAction(action)
+        return true
+    }
+
+    const finishAction = (action: PendingAction) => {
+        if (pendingActionRef.current !== action) return
+        pendingActionRef.current = null
+        setPendingAction(null)
+    }
 
     const refreshStatus = React.useCallback(async () => {
         setStatusLoading(true)
@@ -193,7 +210,7 @@ export function VirtualDisplaySettings() {
     const canModify = status?.can_modify === true
 
     const handleInstall = async () => {
-        setBusy(true)
+        if (!beginAction("install")) return
         try {
             const resp = await fetch("/api/virtual-display/driver/install", {
                 method: "POST",
@@ -215,12 +232,12 @@ export function VirtualDisplaySettings() {
                 })
             }
         } finally {
-            setBusy(false)
+            finishAction("install")
         }
     }
 
     const handleUninstall = async () => {
-        setBusy(true)
+        if (!beginAction("uninstall")) return
         try {
             const resp = await fetch("/api/virtual-display/driver/uninstall", {
                 method: "POST",
@@ -248,7 +265,7 @@ export function VirtualDisplaySettings() {
                 })
             }
         } finally {
-            setBusy(false)
+            finishAction("uninstall")
         }
     }
 
@@ -261,9 +278,9 @@ export function VirtualDisplaySettings() {
      * time the user toggled enabled.
      */
     const saveSettings = async (patch: Partial<VirtualDisplaySettings>) => {
+        if (!beginAction("save")) return
         const base = settings ?? DEFAULT_VIRTUAL_DISPLAY_SETTINGS
         const payload: VirtualDisplaySettings = { ...base, ...patch }
-        setBusy(true)
         try {
             const resp = await fetch("/api/desk/settings/virtual-display", {
                 method: "POST",
@@ -288,12 +305,12 @@ export function VirtualDisplaySettings() {
                 })
             }
         } finally {
-            setBusy(false)
+            finishAction("save")
         }
     }
 
     const enabledSwitchDisabled =
-        busy || settingsLoading || settingsLoadFailed || status?.installed !== true
+        pendingAction !== null || settingsLoading || settingsLoadFailed || status?.installed !== true
 
     /** Exclusive mode requires the virtual display to be enabled
      *  first — there is nothing to flip displays to otherwise. */
@@ -431,10 +448,12 @@ export function VirtualDisplaySettings() {
                     )}
 
                     <div className="flex gap-2">
-                        <Button
-                            onClick={handleInstall}
+                        <AsyncButton
+                            pending={pendingAction === "install"}
+                            pendingLabel={t("pages.virtualDisplay.driver.installing")}
+                            onClick={() => void handleInstall()}
                             disabled={
-                                busy ||
+                                pendingAction !== null ||
                                 !canModify ||
                                 !status?.files_available ||
                                 status?.installed === true ||
@@ -442,12 +461,14 @@ export function VirtualDisplaySettings() {
                             }
                         >
                             {t("pages.virtualDisplay.driver.installButton")}
-                        </Button>
-                        <Button
+                        </AsyncButton>
+                        <AsyncButton
                             variant="destructive"
-                            onClick={handleUninstall}
+                            pending={pendingAction === "uninstall"}
+                            pendingLabel={t("pages.virtualDisplay.driver.uninstalling")}
+                            onClick={() => void handleUninstall()}
                             disabled={
-                                busy ||
+                                pendingAction !== null ||
                                 !canModify ||
                                 status?.installed !== true
                             }
@@ -455,7 +476,7 @@ export function VirtualDisplaySettings() {
                             {t(
                                 "pages.virtualDisplay.driver.uninstallButton",
                             )}
-                        </Button>
+                        </AsyncButton>
                     </div>
                 </CardContent>
             </Card>
@@ -499,14 +520,15 @@ export function VirtualDisplaySettings() {
                                         "pages.virtualDisplay.loadFailedDescription",
                                     )}
                                 </span>
-                                <Button
+                                <AsyncButton
                                     size="sm"
                                     variant="outline"
-                                    onClick={loadSettings}
-                                    disabled={settingsLoading}
+                                    pending={settingsLoading}
+                                    pendingLabel={t("pages.virtualDisplay.loadingSettings")}
+                                    onClick={() => void loadSettings()}
                                 >
                                     {t("pages.virtualDisplay.loadFailedRetry")}
-                                </Button>
+                                </AsyncButton>
                             </AlertDescription>
                         </Alert>
                     )}
@@ -544,7 +566,7 @@ export function VirtualDisplaySettings() {
                             variant="outline"
                             onClick={() => setUninstallDialogOpen(true)}
                             disabled={
-                                busy ||
+                                pendingAction !== null ||
                                 serverInfo?.service_installed !== true ||
                                 !serverInfo?.is_admin
                             }

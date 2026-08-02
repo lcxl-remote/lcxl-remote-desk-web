@@ -10,7 +10,7 @@ import {
     CardHeader,
     CardTitle,
 } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { AsyncButton } from "@/components/async-button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useQuerySecuritySettings } from "@/services/hooks/securityController/useQuerySecuritySettings";
 
@@ -39,6 +39,7 @@ export default function SecurityApprovalPage() {
     const [remember, setRemember] = useState(false);
     const [timeLeft, setTimeLeft] = useState<number | null>(null);
     const [submitting, setSubmitting] = useState(false);
+    const [submittingChoice, setSubmittingChoice] = useState<boolean | null>(null);
     const [submitError, setSubmitError] = useState(false);
 
     const submittingRef = useRef(false);
@@ -125,6 +126,7 @@ export default function SecurityApprovalPage() {
         }
         submittingRef.current = true;
         setSubmitting(true);
+        setSubmittingChoice(approved);
         setSubmitError(false);
         (async () => {
             try {
@@ -140,11 +142,13 @@ export default function SecurityApprovalPage() {
                 } else {
                     submittingRef.current = false;
                     setSubmitting(false);
+                    setSubmittingChoice(null);
                     setSubmitError(true);
                 }
             } catch {
                 submittingRef.current = false;
                 setSubmitting(false);
+                setSubmittingChoice(null);
                 setSubmitError(true);
             }
         })();
@@ -229,20 +233,24 @@ export default function SecurityApprovalPage() {
                     </div>
 
                     <div className="flex justify-end gap-2">
-                        <Button
+                        <AsyncButton
                             variant="outline"
+                            pending={submitting && submittingChoice === false}
+                            pendingLabel={t("security.dialog.denying")}
                             disabled={notReady || submitting}
                             onClick={() => submit(false)}
                         >
                             {t("security.dialog.deny")}
                             {timeLeft !== null && ` (${timeLeft}s)`}
-                        </Button>
-                        <Button
+                        </AsyncButton>
+                        <AsyncButton
+                            pending={submitting && submittingChoice === true}
+                            pendingLabel={t("security.dialog.allowing")}
                             disabled={notReady || submitting}
                             onClick={() => submit(true)}
                         >
                             {t("security.dialog.allow")}
-                        </Button>
+                        </AsyncButton>
                     </div>
                 </CardContent>
             </Card>

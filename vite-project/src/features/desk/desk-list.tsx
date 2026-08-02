@@ -20,7 +20,7 @@ import { clearSessionGrant } from "@/features/desk/session-grant"
 export default function DeskList() {
     const { t } = useTranslation()
     const navigate = useNavigate()
-    const { data: connections, isLoading, refetch } = useListConnections()
+    const { data: connections, isLoading, isFetching, refetch } = useListConnections()
 
     // Helper to handle navigation to desk. Connecting from the owner's own list is a
     // full-control session, so drop any stale restricted grant for this target first
@@ -45,8 +45,15 @@ export default function DeskList() {
             <div className="flex items-center justify-between">
                 <h2 className="text-3xl font-bold tracking-tight">{t('menu.desk')}</h2>
                 <div className="flex items-center gap-2">
-                    <Button variant="outline" size="icon" onClick={() => refetch()}>
-                        <RefreshCw className="h-4 w-4" />
+                    <Button
+                        variant="outline"
+                        size="icon"
+                        disabled={isFetching}
+                        aria-busy={isFetching || undefined}
+                        aria-label={t('common.refresh')}
+                        onClick={() => void refetch()}
+                    >
+                        <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
                     </Button>
                 </div>
             </div>
