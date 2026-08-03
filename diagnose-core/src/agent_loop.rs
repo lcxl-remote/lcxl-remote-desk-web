@@ -26,7 +26,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use desk_agent_protocol::AgentError;
+use desk_agent_protocol::{AgentError, AgentErrorKind};
 
 use crate::chat::{ChatMessage, ModelTurnError, TurnDisposition, classify_model_turn};
 use crate::registry::{RegisteredTool, ToolEffect, exposed_specs, lookup_exposed};
@@ -41,6 +41,23 @@ use crate::session::{ExecutionState, SubjectMismatch, TurnState};
 /// assume the command succeeded. A late real result replaces it in place.
 const OUTCOME_UNKNOWN_PLACEHOLDER: &str =
     "execution outcome unknown; the command may have executed; do not assume success";
+
+fn image_input_error(error: crate::image_input::ImageInputError) -> AgentError {
+    AgentError {
+        kind: AgentErrorKind::InvalidInput,
+        message: format!("invalid model image attachment: {error}"),
+        retryable: false,
+        safe_for_model: false,
+        error_code: None,
+    }
+}
+
+fn retain_latest_session_image(
+    session: &mut crate::session::PersistedAgentSession,
+) -> Result<(), AgentError> {
+    crate::image_input::retain_latest_session_image(&mut session.conversation)
+        .map_err(image_input_error)
+}
 
 /// Why the loop's circuit breaker stopped a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +182,7 @@ async fn run_or_resume(
         _ => TurnState::Idle,
     };
     session.finish_turn(terminal, (deps.clock)());
+    crate::image_input::strip_session_images(&mut session.conversation);
     // Surface a save failure only if the loop itself otherwise succeeded.
     let save = deps.session_seam.save(&mut session).await;
     match (result, save) {
@@ -334,6 +352,7 @@ async fn run_inner(
                             let mut msg = ChatMessage::tool_result(mint(), &call.id, out.content);
                             msg.image_data_url = out.image_data_url;
                             session.conversation.push(msg);
+                            retain_latest_session_image(session)?;
                             finish_tool(session, &call.id, ok, sink);
                         }
                         ToolEffect::Mutating => {
@@ -451,6 +470,7 @@ async fn run_mutating<F: FnMut() -> String>(
             let mut msg = ChatMessage::tool_result(message_id, &call.id, output.content);
             msg.image_data_url = output.image_data_url;
             session.conversation.push(msg);
+            retain_latest_session_image(session)?;
             finish_tool(session, &call.id, true, sink);
         }
         Ok(ExecOutcome::Rejected { reason }) => {
@@ -638,6 +658,7 @@ async fn run_wait<F: FnMut() -> String>(
             let mut msg = ChatMessage::tool_result(message_id, &call.id, output.content);
             msg.image_data_url = output.image_data_url;
             session.conversation.push(msg);
+            retain_latest_session_image(session)?;
             // The awaited task settled: a follow-up may mutate again.
             session.execution_state = ExecutionState::None;
             finish_tool(session, &call.id, true, sink);

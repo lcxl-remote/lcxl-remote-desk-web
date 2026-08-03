@@ -28,6 +28,7 @@ export type AiModelDto = {
     output_price_points_micro?: number | null
     is_default: boolean
     is_current_preference: boolean
+    supports_image_input: boolean
 }
 
 /** The slice of the manager's `WalletBalanceDto` this component displays. */
@@ -60,6 +61,8 @@ type ModelSelectorProps = {
      * is sent.
      */
     onChange: (modelId: number | null) => void
+    /** Optional richer selection callback for hosts that gate capability-specific UI. */
+    onModelChange?: (model: AiModelDto | null) => void
     /** Extra classes for the `<select>`, so each host (the dark diagnose overlay vs.
      *  the themed terminal card) can blend it in. */
     className?: string
@@ -94,7 +97,14 @@ function pointsFromMicro(micro: number): string {
  * parent for the next request. Renders nothing when the manager endpoints are
  * unavailable (open-source signal) or when no model exists for `role`.
  */
-export function ModelSelector({ role, onChange, className, orgId, label }: ModelSelectorProps) {
+export function ModelSelector({
+    role,
+    onChange,
+    onModelChange,
+    className,
+    orgId,
+    label,
+}: ModelSelectorProps) {
     const { t } = useTranslation()
     const { toast } = useToast()
     // The manager endpoints to query: the org face when an org is active, else the
@@ -116,6 +126,8 @@ export function ModelSelector({ role, onChange, className, orgId, label }: Model
     // (a new closure each render would otherwise re-run the fetch).
     const onChangeRef = useRef(onChange)
     onChangeRef.current = onChange
+    const onModelChangeRef = useRef(onModelChange)
+    onModelChangeRef.current = onModelChange
 
     useEffect(() => () => {
         mountedRef.current = false
@@ -123,6 +135,7 @@ export function ModelSelector({ role, onChange, className, orgId, label }: Model
 
     useEffect(() => {
         let cancelled = false
+        onModelChangeRef.current?.(null)
 
         // Best-effort wallet balance; a 404 (no manager / no billing) just omits it.
         const loadBalance = async () => {
@@ -176,6 +189,7 @@ export function ModelSelector({ role, onChange, className, orgId, label }: Model
                 setSaveState("idle")
                 // Surface the pre-selected model so the first request already carries it.
                 onChangeRef.current(pre.model_id)
+                onModelChangeRef.current?.(pre)
                 // The selector is live; now it is worth fetching the balance.
                 void loadBalance()
             } catch {
@@ -237,6 +251,7 @@ export function ModelSelector({ role, onChange, className, orgId, label }: Model
         if (Number.isNaN(id)) return
         setSelectedId(id)
         onChangeRef.current(id)
+        onModelChangeRef.current?.(models.find((model) => model.model_id === id) ?? null)
         desiredPersistIdRef.current = id
         void drainPersistence()
     }
@@ -284,6 +299,12 @@ export function ModelSelector({ role, onChange, className, orgId, label }: Model
                 {models.map((m) => (
                     <option key={m.model_id} value={m.model_id} className="bg-neutral-800 text-white">
                         {m.display_name} · {priceHint(m)}
+                        {" · "}
+                        {t(
+                            m.supports_image_input
+                                ? "pages.desk.modelSelector.imageInput"
+                                : "pages.desk.modelSelector.textOnly",
+                        )}
                     </option>
                 ))}
             </select>

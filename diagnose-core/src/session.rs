@@ -872,6 +872,7 @@ impl PersistedAgentSession {
             }
         }
         self.finish_turn(TurnState::Failed, now);
+        crate::image_input::strip_session_images(&mut self.conversation);
     }
 }
 
@@ -1604,8 +1605,10 @@ mod tests {
         let mut s = session();
         s.begin_turn("t1", None, None, 7, s.scope_snapshot.clone(), "t")
             .unwrap();
-        s.conversation
-            .push(ChatMessage::text("u1", ChatRole::User, "restart it"));
+        s.conversation.push(
+            ChatMessage::text("u1", ChatRole::User, "restart it")
+                .with_image("data:image/jpeg;base64,AQID"),
+        );
         // Assistant requested a mutating call that never got a tool result (crash
         // during the approval/exec wait → AwaitingApproval).
         s.conversation.push(ChatMessage::assistant_tool_calls(
@@ -1627,6 +1630,16 @@ mod tests {
             "interrupted bars new mutation"
         );
         assert!(!s.execution_state.allows_new_mutation());
+        assert!(
+            s.conversation
+                .iter()
+                .all(|message| message.image_data_url.is_none())
+        );
+        assert!(
+            s.conversation[0]
+                .text
+                .contains(crate::image_input::IMAGE_NOT_RETAINED_PLACEHOLDER)
+        );
         let closed = s
             .conversation
             .iter()

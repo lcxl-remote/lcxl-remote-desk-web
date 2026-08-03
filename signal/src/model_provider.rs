@@ -90,6 +90,8 @@ pub struct ModelProviderConfig {
     pub provider: Option<String>,
     /// Model name passed to the provider.
     pub model: Option<String>,
+    /// Whether the configured model accepts image content in user messages.
+    pub supports_image_input: bool,
     /// Base URL of the (OpenAI-compatible) chat completions endpoint.
     pub base_url: Option<String>,
     /// Server-side secret. Never serialized into a public view; its `Debug` is
@@ -116,6 +118,7 @@ impl Default for ModelProviderConfig {
         Self {
             provider: None,
             model: None,
+            supports_image_input: false,
             base_url: None,
             api_key: None,
             max_context_bytes: None,
@@ -145,6 +148,7 @@ impl ModelProviderConfig {
         ModelProviderPublic {
             provider: self.provider.clone(),
             model: self.model.clone(),
+            supports_image_input: self.supports_image_input,
             base_url: self.base_url.clone(),
             max_context_bytes: self.max_context_bytes,
             response_format: self.response_format,
@@ -164,6 +168,9 @@ impl ModelProviderConfig {
         }
         if let Some(model) = update.model {
             self.model = Some(model);
+        }
+        if let Some(supports_image_input) = update.supports_image_input {
+            self.supports_image_input = supports_image_input;
         }
         if let Some(base_url) = update.base_url {
             self.base_url = Some(base_url);
@@ -202,6 +209,7 @@ impl ModelProviderConfig {
         Self {
             provider: row.provider,
             model: row.model,
+            supports_image_input: row.supports_image_input,
             base_url: row.base_url,
             api_key: row.api_key,
             max_context_bytes: row.max_context_bytes.map(|v| v.max(0) as u64),
@@ -223,6 +231,7 @@ impl ModelProviderConfig {
             id: Set(SINGLETON_ID),
             provider: Set(self.provider),
             model: Set(self.model),
+            supports_image_input: Set(self.supports_image_input),
             base_url: Set(self.base_url),
             api_key: Set(self.api_key),
             max_context_bytes: Set(self
@@ -251,6 +260,7 @@ impl fmt::Debug for ModelProviderConfig {
         f.debug_struct("ModelProviderConfig")
             .field("provider", &self.provider)
             .field("model", &self.model)
+            .field("supports_image_input", &self.supports_image_input)
             .field("base_url", &self.base_url)
             // Redact: report presence, never the value.
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
@@ -272,6 +282,7 @@ impl fmt::Debug for ModelProviderConfig {
 pub struct ModelProviderPublic {
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub supports_image_input: bool,
     pub base_url: Option<String>,
     pub max_context_bytes: Option<u64>,
     pub response_format: ResponseFormatMode,
@@ -299,6 +310,8 @@ impl Default for ModelProviderPublic {
 pub struct ModelProviderUpdate {
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// `None` leaves the stored image-input capability unchanged.
+    pub supports_image_input: Option<bool>,
     pub base_url: Option<String>,
     pub max_context_bytes: Option<u64>,
     /// `None` leaves the stored format unchanged.
@@ -322,6 +335,7 @@ impl fmt::Debug for ModelProviderUpdate {
         f.debug_struct("ModelProviderUpdate")
             .field("provider", &self.provider)
             .field("model", &self.model)
+            .field("supports_image_input", &self.supports_image_input)
             .field("base_url", &self.base_url)
             .field("max_context_bytes", &self.max_context_bytes)
             .field("response_format", &self.response_format)
@@ -357,6 +371,7 @@ pub async fn save(db: &DatabaseConnection, config: ModelProviderConfig) -> Resul
                 .update_columns([
                     model_provider::Column::Provider,
                     model_provider::Column::Model,
+                    model_provider::Column::SupportsImageInput,
                     model_provider::Column::BaseUrl,
                     model_provider::Column::ApiKey,
                     model_provider::Column::MaxContextBytes,
@@ -390,6 +405,7 @@ mod tests {
         ModelProviderConfig {
             provider: Some("openai-compatible".into()),
             model: Some("example-model".into()),
+            supports_image_input: true,
             base_url: Some("https://api.example/v1".into()),
             api_key: Some("sk-secret-value".into()),
             max_context_bytes: Some(131_072),
@@ -515,6 +531,7 @@ mod tests {
 
         let loaded = load(&db).await.unwrap();
         assert_eq!(loaded.model.as_deref(), Some("example-model"));
+        assert!(loaded.supports_image_input);
         assert_eq!(loaded.api_key.as_deref(), Some("sk-secret-value"));
         assert_eq!(loaded.max_context_bytes, Some(131_072));
         assert_eq!(loaded.response_format, ResponseFormatMode::JsonSchema);

@@ -593,6 +593,9 @@ export default {
   'pages.desk.diagnose.presetPort': 'Which process is holding the port I need?',
   'pages.desk.diagnose.presetContainer': 'Why does my container fail to start?',
   'pages.desk.diagnose.includeScreen': 'Include a screenshot',
+  'pages.desk.diagnose.imageModelRequired': 'Select a model with image input enabled to include a screenshot.',
+  'pages.desk.modelSelector.imageInput': 'image input',
+  'pages.desk.modelSelector.textOnly': 'text only',
   'pages.desk.diagnose.submit': 'Start diagnosis',
   'pages.desk.diagnose.statusCollecting': 'Collecting evidence...',
   'pages.desk.diagnose.statusRedacting': 'Redacting sensitive data...',
@@ -852,6 +855,8 @@ export default {
     'This request contains more context than the free plan allows. Shorten the conversation or include less diagnostic evidence, then try again.',
   'pages.agentError.aiPlatformBusy':
     'The free AI queue is full right now. Please try again later.',
+  'pages.agentError.aiModelImageInputUnsupported':
+    'The selected AI model does not support screenshot input. Choose a model with image input enabled, or turn off the screenshot option.',
   'pages.fileError.permissionDenied':
     'The device owner has not allowed this operation. Enable the matching permission in the host\'s security settings, or wait for them to approve the request.',
   'pages.fileError.transferDenied':
@@ -1071,6 +1076,8 @@ export default {
   'pages.aiModel.settings.apiKeyUnset': 'Not configured',
   'pages.aiModel.settings.clearApiKey': 'Clear stored key',
   'pages.aiModel.settings.clearApiKey.description': 'Remove the stored API key on save.',
+  'pages.aiModel.settings.supportsImageInput': 'This model supports image input',
+  'pages.aiModel.settings.supportsImageInput.description': 'When enabled, the existing connection test sends a small visual probe and only succeeds when the model reads its hidden marker.',
   'pages.aiModel.settings.responseFormat': 'Output Format',
   'pages.aiModel.settings.responseFormat.description': 'How the gateway is asked to constrain output. json_schema only helps if the gateway enforces it.',
   'pages.aiModel.settings.responseFormat.none': 'None (free text)',
@@ -1089,6 +1096,7 @@ export default {
   'pages.aiModel.settings.updateFailedMessage': 'Failed to update the model provider',
   'pages.aiModel.settings.testConnection': 'Test connection',
   'pages.aiModel.settings.testSucceed': 'Connection OK',
+  'pages.aiModel.settings.testImageSucceed': 'Connection and image input OK',
   'pages.aiModel.settings.testFailed': 'Connection test failed',
   'pages.aiModel.settings.testResult': '{{latency}} ms latency, AI-generated reply: {{sample}}',
   'pages.aiModel.settings.testResultNoSample': '{{latency}} ms latency (no text returned)',

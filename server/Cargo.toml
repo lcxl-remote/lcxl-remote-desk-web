@@ -119,6 +119,7 @@ trash = { workspace = true }
 auto-launch = { workspace = true }
 once_cell = { workspace = true }
 image = { workspace = true }
+rand = { workspace = true }
 
 
 [target."cfg(tokio_unstable)".dependencies]
@@ -140,7 +141,6 @@ pipewire = { workspace = true }
 evdev = { workspace = true }
 xcb = { workspace = true }
 zbus = { workspace = true }
-rand = { workspace = true }
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

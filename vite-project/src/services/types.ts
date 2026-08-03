@@ -653,6 +653,7 @@ export const deskErrorCodeEnum = {
     MANAGER_CREDENTIAL_SUSPENDED: 82,
     AI_CONTEXT_LIMIT_EXCEEDED: 83,
     AI_PLATFORM_BUSY: 84,
+    AI_MODEL_IMAGE_INPUT_UNSUPPORTED: 85,
     CONNECTION_UNREACHABLE: 64,
     CONNECTION_NOT_SIGNALING: 65,
     CONNECTION_AUTH_FAILED: 66,
@@ -1914,6 +1915,10 @@ export type ModelProviderPublic = {
      * @type string
     */
     response_format: ResponseFormatMode;
+    /**
+     * @type boolean
+    */
+    supports_image_input: boolean;
 };
 
 /**
@@ -1958,6 +1963,11 @@ export type ModelProviderUpdate = {
     */
     provider?: string | null;
     response_format?: (null | ResponseFormatMode);
+    /**
+     * @description `None` leaves the stored image-input capability unchanged.
+     * @type boolean,null
+    */
+    supports_image_input?: boolean | null;
 };
 
 /**
@@ -2092,6 +2102,11 @@ export type ProviderTestDto = {
      * @type string,null
     */
     sample?: string | null;
+    /**
+     * @description Capabilities that this exact probe exercised successfully.
+     * @type array
+    */
+    validated_capabilities: string[];
 };
 
 export type RedeemCodeParams = {
@@ -2820,6 +2835,10 @@ export type RestResponseModelProviderPublic = {
          * @type string
         */
         response_format: ResponseFormatMode;
+        /**
+         * @type boolean
+        */
+        supports_image_input: boolean;
     };
     /**
      * @type string,null
@@ -2882,6 +2901,11 @@ export type RestResponseProviderTestDto = {
          * @type string,null
         */
         sample?: string | null;
+        /**
+         * @description Capabilities that this exact probe exercised successfully.
+         * @type array
+        */
+        validated_capabilities: string[];
     };
     /**
      * @type string,null

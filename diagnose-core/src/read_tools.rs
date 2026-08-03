@@ -12,8 +12,8 @@
 
 use desk_agent_protocol::{
     AgentError, AgentErrorKind, Capability, ContainerListParams, ContextKind, LogRecentParams,
-    NetworkPortsParams, OperationInput, ProcessListParams, ReadContextInput, ServiceStatusParams,
-    SystemInfoParams,
+    NetworkPortsParams, OperationInput, ProcessListParams, ReadContextInput, ScreenCaptureParams,
+    ServiceStatusParams, SystemInfoParams,
 };
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -115,6 +115,17 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
             "List containers on the device.",
             json!({"type": "object"}),
         ),
+        read(
+            "read_current_screen",
+            Capability::ScreenCaptureCurrent,
+            "Capture the device's current screen for visual diagnosis.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "display": {"type": "string"}
+                }
+            }),
+        ),
     ]
 }
 
@@ -150,6 +161,9 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
         "read_container_list" => {
             ContextKind::ContainerList(parse_params::<ContainerListParams>(&call.arguments_json)?)
         }
+        "read_current_screen" => ContextKind::ScreenCaptureCurrent(parse_params::<
+            ScreenCaptureParams,
+        >(&call.arguments_json)?),
         other => {
             return Err(AgentError {
                 kind: AgentErrorKind::UnsupportedCapability,
@@ -198,6 +212,20 @@ mod tests {
             input,
             OperationInput::ReadContext(ReadContextInput {
                 kind: ContextKind::ProcessList(_)
+            })
+        ));
+
+        let (cap, input) = build_read_operation(&ToolCall {
+            id: "c".into(),
+            name: "read_current_screen".into(),
+            arguments_json: r#"{"display":"primary"}"#.into(),
+        })
+        .unwrap();
+        assert_eq!(cap, Capability::ScreenCaptureCurrent);
+        assert!(matches!(
+            input,
+            OperationInput::ReadContext(ReadContextInput {
+                kind: ContextKind::ScreenCaptureCurrent(_)
             })
         ));
 

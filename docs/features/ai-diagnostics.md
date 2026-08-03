@@ -33,7 +33,7 @@ graph LR
 ## Key Properties
 
 - **Thin Edge** — the device never runs model inference or holds provider credentials; it only collects and redacts evidence when the central brain asks.
-- **Read-Only Data Collection** — system info, processes, ports, logs, and screenshots, gated locally by the edge collection policy.
+- **Read-Only Data Collection** — system info, processes, ports, logs, and optional screenshots, gated locally by the edge collection policy. A screenshot is offered only to a model declared image-capable; the original image is kept only while the active turn needs it, then replaced by bounded text metadata instead of being retained in conversation history.
 - **Model Agnostic** — compatible with both OpenAI-compatible and Anthropic endpoints, configured centrally.
 - **Suggest-Only Defaults** — the model proposes fixes; execution requires explicit user confirmation, capped by each device's local execution ceiling.
 - **Owner-Confirmed Actions** — in Confirm Each Action / Session Approved mode, the authenticated owner may approve an off-template PowerShell, pwsh, bash, or sh command. It is always shown as **Critical** and only the effective blocklist is claimed to have been checked.
@@ -54,7 +54,7 @@ A headless `desk-server` is a pure thin edge: it has **no embedded signaling ser
 
 The **model provider** (provider, base URL, model, API key, output format, granted execution mode, per-turn reasoning-round limit, and per-turn same-tool call limit) is configured on the **central signaling server**. The reasoning-round limit defaults to **40**, accepts **1–80**, counts model responses rather than individual tool calls, and cannot be lower than the same-tool limit. The same-tool limit defaults to **20**, accepts **1–50**, and counts calls to one tool type even when its arguments differ. Both are independent of the Desk Server's simultaneous-command-process limit. **API keys are strictly server-side secrets** — they are never returned to the browser, never written to logs, and never included in any public settings DTO.
 
-A **Test connection** button next to Save probes the **saved** provider config end-to-end: it sends a tiny chat request (a one-word reply) through the configured base URL / API key / model and reports the latency and a reply snippet, or the real upstream reason on failure. It runs against the stored config, so save your edits before testing. The API key stays server-side throughout.
+A **Test connection** button next to Save probes the **saved** provider config end-to-end. A text-only provider receives a tiny one-word chat probe; when **Supports image input** is enabled, the same button sends the repository-owned visual probe and succeeds only when the model reads its marker. The result reports the validated `text` / `image_input` capabilities. It runs against the stored config, so save your edits before testing. The API key stays server-side throughout.
 
 Each device additionally keeps two **local** controls in its own settings: an **execution ceiling** (the highest mode the AI may use on that device, which caps any central grant) and an **evidence collection policy** (`allow_logs` / `allow_screen`, the device's final say over what evidence may leave it).
 

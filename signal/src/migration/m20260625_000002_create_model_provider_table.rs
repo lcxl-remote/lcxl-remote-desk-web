@@ -19,6 +19,12 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(ModelProvider::Provider).string().null())
                     .col(ColumnDef::new(ModelProvider::Model).string().null())
+                    .col(
+                        ColumnDef::new(ModelProvider::SupportsImageInput)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
                     .col(ColumnDef::new(ModelProvider::BaseUrl).string().null())
                     .col(ColumnDef::new(ModelProvider::ApiKey).string().null())
                     .col(
@@ -59,6 +65,7 @@ pub enum ModelProvider {
     Id,
     Provider,
     Model,
+    SupportsImageInput,
     BaseUrl,
     ApiKey,
     MaxContextBytes,

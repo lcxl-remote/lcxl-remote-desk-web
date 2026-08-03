@@ -139,7 +139,7 @@ pub(super) async fn handle_remote_tool_request_inbound(
     };
 
     match invoker.invoke_redacted(request.envelope).await {
-        Ok(outcome) => match serde_json::to_vec(&outcome) {
+        Ok(output) => match serde_json::to_vec(&output) {
             Ok(bytes) => {
                 for chunk in desk_diagnose_core::chunk::chunk_bytes(
                     &request_id,

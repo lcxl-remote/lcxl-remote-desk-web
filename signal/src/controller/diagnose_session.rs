@@ -255,10 +255,13 @@ mod tests {
             name: "read_system_info".into(),
             arguments_json: "{}".into(),
         });
+        message.image_data_url = Some("data:image/jpeg;base64,AQID".into());
         let value = serde_json::to_value(SnapshotMessageDto::from(message)).unwrap();
         assert_eq!(value["id"], "m1");
         assert_eq!(value["toolCalls"][0]["argumentsJson"], "{}");
         assert!(value.get("tool_calls").is_none());
+        assert!(value.get("imageDataUrl").is_none());
+        assert!(!value.to_string().contains("AQID"));
 
         let completion = ChatMessage::untrusted_output("done-1", "call-1", "task-1", "exit_code=0");
         let value = serde_json::to_value(SnapshotMessageDto::from(completion)).unwrap();

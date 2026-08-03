@@ -20,6 +20,32 @@ pub const DEFAULT_MAX_BYTES: usize = 400_000;
 
 /// JPEG qualities tried in order until the encoded image fits the budget.
 const QUALITY_LADDER: [u8; 5] = [80, 65, 50, 35, 20];
+/// Longest-edge floor for the dimension ladder. An image that is already smaller
+/// is never upscaled.
+const MIN_LONGEST_EDGE: u32 = 320;
+
+#[derive(Debug)]
+pub enum ScreenshotFitError {
+    Decode(ImageError),
+    BudgetExceeded,
+}
+
+impl std::fmt::Display for ScreenshotFitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decode(error) => write!(f, "image decode/encode failed: {error}"),
+            Self::BudgetExceeded => f.write_str("image cannot fit the screenshot byte budget"),
+        }
+    }
+}
+
+impl std::error::Error for ScreenshotFitError {}
+
+impl From<ImageError> for ScreenshotFitError {
+    fn from(value: ImageError) -> Self {
+        Self::Decode(value)
+    }
+}
 
 /// A screenshot re-fitted for the model: JPEG bytes plus the scaled dimensions.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,42 +64,49 @@ impl FittedScreenshot {
     }
 }
 
-/// Fit an encoded image (PNG/JPEG/WebP) into the model budget: scale the longest
-/// edge down to `max_dimension` (keeping aspect ratio) and re-encode as JPEG at
-/// the highest quality that stays within `max_bytes`. If even the lowest quality
-/// exceeds the budget, the lowest-quality result is returned (best effort).
+/// Fit an encoded image (PNG/JPEG/WebP) into the model budget. It walks a
+/// longest-edge dimension ladder and, at each dimension, a JPEG quality ladder.
+/// The function succeeds only when the hard byte limit is met; callers never get
+/// a best-effort oversized image.
 pub fn fit_screenshot_to_budget(
     encoded: &[u8],
     max_dimension: u32,
     max_bytes: usize,
-) -> Result<FittedScreenshot, ImageError> {
-    let image = image::load_from_memory(encoded)?;
-    let scaled = if image.width() > max_dimension || image.height() > max_dimension {
-        image.resize(max_dimension, max_dimension, FilterType::Triangle)
-    } else {
-        image
-    };
-    // JPEG has no alpha channel; flatten to RGB.
-    let rgb = scaled.to_rgb8();
-
-    let mut last: Option<Vec<u8>> = None;
-    for quality in QUALITY_LADDER {
-        let mut buf = Vec::new();
-        JpegEncoder::new_with_quality(&mut buf, quality).encode_image(&rgb)?;
-        if buf.len() <= max_bytes {
-            return Ok(FittedScreenshot {
-                jpeg: buf,
-                width: rgb.width(),
-                height: rgb.height(),
-            });
-        }
-        last = Some(buf);
+) -> Result<FittedScreenshot, ScreenshotFitError> {
+    if max_dimension == 0 || max_bytes == 0 {
+        return Err(ScreenshotFitError::BudgetExceeded);
     }
-    Ok(FittedScreenshot {
-        jpeg: last.unwrap_or_default(),
-        width: rgb.width(),
-        height: rgb.height(),
-    })
+    let image = image::load_from_memory(encoded)?;
+    let original_longest = image.width().max(image.height());
+    let mut target_longest = original_longest.min(max_dimension);
+
+    loop {
+        let scaled = if original_longest > target_longest {
+            image.resize(target_longest, target_longest, FilterType::Triangle)
+        } else {
+            image.clone()
+        };
+        // JPEG has no alpha channel; flatten to RGB.
+        let rgb = scaled.to_rgb8();
+        for quality in QUALITY_LADDER {
+            let mut buf = Vec::new();
+            JpegEncoder::new_with_quality(&mut buf, quality).encode_image(&rgb)?;
+            if buf.len() <= max_bytes {
+                return Ok(FittedScreenshot {
+                    jpeg: buf,
+                    width: rgb.width(),
+                    height: rgb.height(),
+                });
+            }
+        }
+
+        if target_longest <= MIN_LONGEST_EDGE.min(original_longest) {
+            break;
+        }
+        let next = target_longest.saturating_mul(3) / 4;
+        target_longest = next.max(MIN_LONGEST_EDGE.min(original_longest));
+    }
+    Err(ScreenshotFitError::BudgetExceeded)
 }
 
 /// Refit every screenshot entry in an evidence snapshot into a model-ready data
@@ -171,13 +204,14 @@ mod tests {
         assert_eq!((fitted.width, fitted.height), (320, 240));
     }
 
-    /// A tiny byte budget still returns a (best-effort) JPEG rather than failing.
+    /// A tiny byte budget fails instead of returning an oversized best-effort JPEG.
     #[test]
-    fn impossible_budget_returns_best_effort() {
+    fn impossible_budget_fails_closed() {
         let png = noisy_png(1000, 1000);
-        let fitted = fit_screenshot_to_budget(&png, 512, 1).expect("fit");
-        assert!(!fitted.jpeg.is_empty());
-        assert_eq!(&fitted.jpeg[0..2], &[0xFF, 0xD8]);
+        assert!(matches!(
+            fit_screenshot_to_budget(&png, 512, 1),
+            Err(ScreenshotFitError::BudgetExceeded)
+        ));
     }
 
     /// Invalid image bytes surface a decode error (the caller drops the

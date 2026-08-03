@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 import {
     AlertCircle,
@@ -84,7 +84,35 @@ export function DiagnosePanel({
     // The manager-selected agent model, or null when the selector is hidden
     // (open-source signal) — in which case no `model_id` is sent.
     const [modelId, setModelId] = useState<number | null>(null)
+    const [selectedModelSupportsImage, setSelectedModelSupportsImage] = useState<boolean | null>(
+        null,
+    )
     const [showHistory, setShowHistory] = useState(false)
+    const [signalSupportsImage, setSignalSupportsImage] = useState<boolean | null>(null)
+
+    useEffect(() => {
+        let cancelled = false
+        void fetch("/api/model/provider", {
+            credentials: "include",
+            headers: { Accept: "application/json" },
+        })
+            .then(async (response) => {
+                if (!response.ok) return
+                const body = (await response.json()) as {
+                    success?: boolean
+                    data?: { supports_image_input?: boolean } | null
+                }
+                if (!cancelled && body.success !== false && body.data) {
+                    setSignalSupportsImage(body.data.supports_image_input === true)
+                }
+            })
+            .catch(() => undefined)
+        return () => {
+            cancelled = true
+        }
+    }, [])
+
+    const supportsImage = selectedModelSupportsImage ?? signalSupportsImage
 
     const toggleHistory = () => {
         setShowHistory((current) => {
@@ -285,11 +313,17 @@ export function DiagnosePanel({
                             <input
                                 type="checkbox"
                                 checked={includeScreen}
+                                disabled={supportsImage === false}
                                 onChange={(e) => setIncludeScreen(e.target.checked)}
                                 className="h-3.5 w-3.5"
                             />
                             {t("pages.desk.diagnose.includeScreen")}
                         </label>
+                        {supportsImage === false && (
+                            <p className="text-xs text-amber-300" role="note">
+                                {t("pages.desk.diagnose.imageModelRequired")}
+                            </p>
+                        )}
 
                         {/* Manager-only agent-model picker; renders nothing against
                             an open-source signal server, leaving the flow unchanged. */}
@@ -297,6 +331,11 @@ export function DiagnosePanel({
                             role="agent"
                             orgId={orgId}
                             onChange={setModelId}
+                            onModelChange={(model) => {
+                                const supports = model?.supports_image_input ?? null
+                                setSelectedModelSupportsImage(supports)
+                                if (supports === false) setIncludeScreen(false)
+                            }}
                             className="border-white/20 bg-white/10 text-white"
                         />
 

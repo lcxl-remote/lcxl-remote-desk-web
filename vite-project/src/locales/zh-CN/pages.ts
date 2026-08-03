@@ -591,6 +591,9 @@ export default {
   'pages.desk.diagnose.presetPort': '我要用的端口被哪个进程占用了？',
   'pages.desk.diagnose.presetContainer': '容器为什么启动失败？',
   'pages.desk.diagnose.includeScreen': '附带一张截图',
+  'pages.desk.diagnose.imageModelRequired': '请选择已启用图片输入能力的模型后再附带截图。',
+  'pages.desk.modelSelector.imageInput': '支持图片',
+  'pages.desk.modelSelector.textOnly': '仅文本',
   'pages.desk.diagnose.submit': '开始诊断',
   'pages.desk.diagnose.statusCollecting': '正在采集证据…',
   'pages.desk.diagnose.statusRedacting': '正在脱敏敏感数据…',
@@ -843,6 +846,8 @@ export default {
   'pages.agentError.aiContextLimitExceeded':
     '本次请求携带的上下文超过免费套餐上限。请缩短对话或减少诊断证据后重试。',
   'pages.agentError.aiPlatformBusy': '免费 AI 队列当前已满，请稍后重试。',
+  'pages.agentError.aiModelImageInputUnsupported':
+    '当前选择的 AI 模型不支持截图输入。请选择已启用图片输入能力的模型，或关闭截图选项。',
   'pages.fileError.permissionDenied':
     '设备所有者未允许此操作。请在被控端的安全设置中开启对应权限，或等待对方确认授权。',
   'pages.fileError.transferDenied':
@@ -1062,6 +1067,8 @@ export default {
   'pages.aiModel.settings.apiKeyUnset': '未配置',
   'pages.aiModel.settings.clearApiKey': '清除已保存的密钥',
   'pages.aiModel.settings.clearApiKey.description': '保存时移除已存储的 API 密钥。',
+  'pages.aiModel.settings.supportsImageInput': '该模型支持图片输入',
+  'pages.aiModel.settings.supportsImageInput.description': '启用后，现有连接测试会发送一张小型视觉探针；仅当模型读出隐藏标记时才算成功。',
   'pages.aiModel.settings.responseFormat': '输出格式',
   'pages.aiModel.settings.responseFormat.description': '请求网关约束输出格式。json_schema 仅在网关真正 enforce 时有效。',
   'pages.aiModel.settings.responseFormat.none': '无（自由文本）',
@@ -1080,6 +1087,7 @@ export default {
   'pages.aiModel.settings.updateFailedMessage': '模型服务更新失败',
   'pages.aiModel.settings.testConnection': '测试连接',
   'pages.aiModel.settings.testSucceed': '连接正常',
+  'pages.aiModel.settings.testImageSucceed': '连接与图片输入均正常',
   'pages.aiModel.settings.testFailed': '连接测试失败',
   'pages.aiModel.settings.testResult': '延迟 {{latency}} ms，AI 生成的回复：{{sample}}',
   'pages.aiModel.settings.testResultNoSample': '延迟 {{latency}} ms（模型未返回文本）',

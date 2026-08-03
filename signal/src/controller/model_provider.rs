@@ -2,8 +2,9 @@ use std::time::Instant;
 
 use actix_web::{HttpResponse, get, post, web};
 use desk_agent_protocol::provenance::AiProvenance;
-use desk_diagnose_core::chat::{ChatMessage, ChatRole};
+use desk_diagnose_core::model_capability::ModelCapabilities;
 use desk_diagnose_core::prompt::ResponseFormatSpec;
+use desk_diagnose_core::provider_probe::{provider_probe_request, verify_probe_response};
 use desk_diagnose_core::seam::{ModelRequest, ModelSeam, NullTurnSink};
 use desk_utils::error::DeskErrorCode;
 use desk_utils::rest::RestResponse;
@@ -16,10 +17,6 @@ use crate::model_provider::{self, ModelProviderPublic, ModelProviderUpdate};
 
 pub const TAG: &str = "ModelProvider";
 
-/// Small output cap for the connectivity probe. The reply is a single word, so a
-/// tiny ceiling keeps a misconfigured model from streaming a wall of text.
-const PROBE_MAX_OUTPUT_TOKENS: u32 = 16;
-
 /// Result of a successful provider connectivity test. The `api_key` stays
 /// server-side; only latency and a bounded reply snippet are returned.
 #[derive(Debug, Serialize, ToSchema)]
@@ -28,6 +25,8 @@ pub struct ProviderTestDto {
     pub latency_ms: u64,
     /// A short snippet of the model's reply (bounded), when it returned text.
     pub sample: Option<String>,
+    /// Capabilities that this exact probe exercised successfully.
+    pub validated_capabilities: Vec<String>,
     /// Machine-readable AI marking for `sample` (EU AI Act Art.50(2)): the snippet
     /// is model-generated text shown to the operator, so it carries a marking.
     /// Present only when a `sample` is returned; absent otherwise.
@@ -132,17 +131,14 @@ pub async fn update_model_provider(
 async fn run_probe(
     seam: &dyn ModelSeam,
     model: Option<String>,
+    supports_image_input: bool,
 ) -> Result<ProviderTestDto, DeskSignalError> {
-    let mut request = ModelRequest::text_only(
-        vec![ChatMessage::text(
-            "probe",
-            ChatRole::User,
-            "Reply with the single word: pong",
-        )],
-        ResponseFormatSpec::None,
-    );
-    // A one-word reply — cap output so a misconfigured model cannot stream forever.
-    request.max_output_tokens = Some(PROBE_MAX_OUTPUT_TOKENS);
+    let expectation = provider_probe_request(ModelCapabilities {
+        image_input: supports_image_input,
+    });
+    let mut request =
+        ModelRequest::text_only(vec![expectation.message.clone()], ResponseFormatSpec::None);
+    request.max_output_tokens = Some(expectation.max_output_tokens);
 
     let started = Instant::now();
     let mut sink = NullTurnSink;
@@ -153,8 +149,16 @@ async fn run_probe(
         )
     })?;
     let latency_ms = started.elapsed().as_millis() as u64;
-    // Bound the snippet; do not match the text exactly (a small cap may truncate a
-    // healthy reply), just prove the chain returned something.
+    verify_probe_response(&expectation, &turn.text).map_err(|message| {
+        DeskSignalError::new_custom_error(
+            if expectation.required_marker.is_some() {
+                DeskErrorCode::AI_MODEL_IMAGE_INPUT_UNSUPPORTED
+            } else {
+                DeskErrorCode::SYSTEM_ERROR
+            },
+            &format!("Test failed: {message}"),
+        )
+    })?;
     let trimmed = turn.text.trim();
     let sample: Option<String> = if trimmed.is_empty() {
         None
@@ -168,6 +172,7 @@ async fn run_probe(
     Ok(ProviderTestDto {
         latency_ms,
         sample,
+        validated_capabilities: expectation.validated_capabilities(),
         provenance,
     })
 }
@@ -190,7 +195,7 @@ pub async fn test_model_provider() -> Result<HttpResponse, DeskSignalError> {
     })?;
     // A reachable-but-broken chain (bad key, wrong model, unreachable host) is a
     // business outcome surfaced as the failure body with the real reason.
-    let dto = run_probe(&seam, config.model.clone()).await?;
+    let dto = run_probe(&seam, config.model.clone(), config.supports_image_input).await?;
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(dto)))
 }
 
@@ -211,13 +216,13 @@ mod tests {
             request: ModelRequest,
             _sink: &mut dyn TurnSink,
         ) -> Result<ModelTurn, AgentError> {
+            let visual = request.messages[0].image_data_url.is_some();
             assert_eq!(
                 request.max_output_tokens,
-                Some(PROBE_MAX_OUTPUT_TOKENS),
-                "probe must cap the output tokens"
+                Some(if visual { 64 } else { 16 })
             );
             Ok(ModelTurn {
-                text: "  pong  ".into(),
+                text: if visual { "LCXL7F" } else { "pong" }.into(),
                 ..Default::default()
             })
         }
@@ -226,6 +231,22 @@ mod tests {
     /// A seam that always fails, standing in for an unreachable / misconfigured
     /// upstream.
     struct ErrSeam;
+
+    struct BlindSeam;
+
+    #[async_trait::async_trait(?Send)]
+    impl ModelSeam for BlindSeam {
+        async fn call(
+            &self,
+            _request: ModelRequest,
+            _sink: &mut dyn TurnSink,
+        ) -> Result<ModelTurn, AgentError> {
+            Ok(ModelTurn {
+                text: "I received your request".into(),
+                ..Default::default()
+            })
+        }
+    }
 
     #[async_trait::async_trait(?Send)]
     impl ModelSeam for ErrSeam {
@@ -246,7 +267,7 @@ mod tests {
 
     #[tokio::test]
     async fn probe_success_trims_reply_into_sample() {
-        let dto = run_probe(&OkSeam, Some("gpt-4o".into()))
+        let dto = run_probe(&OkSeam, Some("gpt-4o".into()), false)
             .await
             .expect("probe ok");
         assert_eq!(dto.sample.as_deref(), Some("pong"));
@@ -255,7 +276,7 @@ mod tests {
     /// A returned sample is marked AI-generated (Art.50(2)) with the probed model.
     #[tokio::test]
     async fn probe_sample_is_marked_with_the_model() {
-        let dto = run_probe(&OkSeam, Some("gpt-4o".into()))
+        let dto = run_probe(&OkSeam, Some("gpt-4o".into()), false)
             .await
             .expect("probe ok");
         let prov = dto.provenance.expect("a returned sample carries a marking");
@@ -268,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn probe_error_surfaces_upstream_reason_as_business_failure() {
-        let err = run_probe(&ErrSeam, Some("gpt-4o".into()))
+        let err = run_probe(&ErrSeam, Some("gpt-4o".into()), false)
             .await
             .expect_err("probe should fail");
         assert!(matches!(err, DeskSignalError::CustomError(_)));
@@ -276,5 +297,22 @@ mod tests {
             err.to_string().contains("boom"),
             "the upstream reason should pass through: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn visual_probe_proves_image_access() {
+        let dto = run_probe(&OkSeam, Some("gpt-4o".into()), true)
+            .await
+            .expect("visual probe ok");
+        assert_eq!(dto.validated_capabilities, vec!["text", "image_input"]);
+        assert_eq!(dto.sample.as_deref(), Some("LCXL7F"));
+    }
+
+    #[tokio::test]
+    async fn visual_probe_rejects_a_non_marker_response() {
+        let error = run_probe(&BlindSeam, Some("gpt-4o".into()), true)
+            .await
+            .expect_err("a generic reply does not prove image access");
+        assert!(error.to_string().contains("did not prove image access"));
     }
 }

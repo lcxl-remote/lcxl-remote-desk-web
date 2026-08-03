@@ -3,8 +3,8 @@
 //! When the agentic loop runs on the manager (the central-brain runtime), a tool
 //! call cannot run in-process: the device is the edge. The manager ships one
 //! [`RemoteToolRequest`] to the edge over the already-established B→A signaling
-//! socket and the edge replies with a chunked [`RemoteToolResponse`] carrying the
-//! serialized, **already-redacted** [`crate::AgentOutcome`]. The edge is the sole
+//! socket and the edge replies with a chunked [`RemoteToolResponse`] carrying a
+//! serialized, **already-redacted** [`RemoteToolOutput`]. The edge is the sole
 //! party permitted to answer a request and re-runs its own capability gate before
 //! running anything, so it keeps final say over what leaves the machine.
 //!
@@ -21,7 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentEnvelope, AgentError};
+use crate::{AgentEnvelope, AgentError, AgentOutcome};
 
 /// Hard upper bound on the total (pre-base64) byte length of a reassembled remote
 /// tool result. The reassembler rejects a first chunk whose declared `total_len`
@@ -62,9 +62,37 @@ pub struct RemoteToolRequest {
     pub envelope: AgentEnvelope,
 }
 
+/// Sanitized output of one remote read call.
+///
+/// Screenshot bytes inside [`AgentOutcome`] have already been stripped at the
+/// edge. A model-ready image is carried separately so it can never be serialized
+/// as a JSON decimal byte array in tool text. `image = None` is the normal shape
+/// for every non-visual read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RemoteToolOutput {
+    pub outcome: AgentOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<RemoteToolImage>,
+}
+
+/// A bounded, model-ready visual attachment produced at the edge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteToolImage {
+    /// Complete `data:image/...;base64,...` URL.
+    pub data_url: String,
+    /// MIME type repeated explicitly so consumers need not infer policy metadata
+    /// from an untrusted string.
+    pub media_type: String,
+    /// Dimensions after edge-side refit.
+    pub width: u32,
+    pub height: u32,
+    /// Decoded attachment size after edge-side refit.
+    pub decoded_bytes: usize,
+}
+
 /// One chunk of a B→A remote tool result.
 ///
-/// The edge serializes the whole [`crate::AgentOutcome`] **once** to JSON bytes,
+/// The edge serializes the whole [`RemoteToolOutput`] **once** to JSON bytes,
 /// slices those bytes on byte boundaries, and base64-encodes each slice. The
 /// manager reassembles by ordering on `seq`, concatenating the decoded bytes,
 /// verifying `total_len` and the final `sha256`, then deserializing. Field shape
@@ -177,6 +205,29 @@ mod tests {
         let json = serde_json::to_string(&req).expect("encode");
         let back: RemoteToolRequest = serde_json::from_str(&json).expect("decode");
         assert_eq!(req, back);
+    }
+
+    #[test]
+    fn remote_tool_output_round_trips_visual_attachment() {
+        let output = RemoteToolOutput {
+            outcome: crate::AgentOutcome::Err(AgentError {
+                kind: AgentErrorKind::Internal,
+                message: "sample".into(),
+                retryable: false,
+                safe_for_model: true,
+                error_code: None,
+            }),
+            image: Some(RemoteToolImage {
+                data_url: "data:image/jpeg;base64,/9j/".into(),
+                media_type: "image/jpeg".into(),
+                width: 320,
+                height: 200,
+                decoded_bytes: 3,
+            }),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let back: RemoteToolOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, output);
     }
 
     #[test]

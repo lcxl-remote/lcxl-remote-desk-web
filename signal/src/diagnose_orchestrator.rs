@@ -35,6 +35,10 @@ use desk_diagnose_core::conversation_key::{
 use desk_diagnose_core::exec_tools::{
     exec_tool_registry_for_shells_with_timeout, sanitize_available_exec_shells,
 };
+use desk_diagnose_core::image_input::validate_image_request;
+use desk_diagnose_core::model_capability::{
+    ModelCapabilities, ModelRequirements, filter_model_compatible_tools,
+};
 use desk_diagnose_core::prompt::ResponseFormatSpec;
 #[cfg(test)]
 use desk_diagnose_core::prompt::diagnosis_json_schema;
@@ -275,13 +279,54 @@ pub async fn start_diagnosis(
     browser_connection_id: &str,
     actor_user_id: i32,
     target_device_id: String,
-    scope: desk_agent_protocol::AgentScope,
+    mut scope: desk_agent_protocol::AgentScope,
     max_risk: desk_agent_protocol::RiskLevel,
     exec_admission_policy: desk_agent_protocol::authz::ExecAdmissionPolicy,
     available_exec_shells: Vec<String>,
     max_command_runtime_ms: u32,
     request: DiagnoseRequestData,
 ) {
+    if !request.include_screen {
+        scope
+            .granted
+            .retain(|capability| *capability != Capability::ScreenCaptureCurrent);
+    }
+    if request.include_screen && scope.granted.contains(&Capability::ScreenCaptureCurrent) {
+        match model_provider::load(crate::db::get_db()).await {
+            Ok(config) if config.supports_image_input => {}
+            Ok(_) => {
+                stream_diagnose_error(
+                    connection_map,
+                    browser_connection_id,
+                    request_id,
+                    seq::COLLECTING,
+                    AgentError {
+                        kind: AgentErrorKind::InvalidInput,
+                        message: "The selected AI model does not support image input.".into(),
+                        retryable: false,
+                        safe_for_model: true,
+                        error_code: Some(
+                            desk_utils::error::DeskErrorCode::AI_MODEL_IMAGE_INPUT_UNSUPPORTED
+                                .code(),
+                        ),
+                    },
+                )
+                .await;
+                return;
+            }
+            Err(error) => {
+                stream_diagnose_error(
+                    connection_map,
+                    browser_connection_id,
+                    request_id,
+                    seq::COLLECTING,
+                    transport_error(format!("failed to load model provider config: {error}")),
+                )
+                .await;
+                return;
+            }
+        }
+    }
     let ctx = CollectContext {
         request_id: request_id.to_string(),
         target_connection_id: target_connection_id.to_string(),
@@ -521,6 +566,52 @@ pub async fn run_model_phase(
             return;
         }
     };
+    let image_urls: Vec<&str> = snapshot
+        .contexts
+        .iter()
+        .filter_map(|entry| entry.image_data_url.as_deref())
+        .collect();
+    if let Err(error) = validate_image_request(image_urls.iter().copied()) {
+        stream_diagnose_error(
+            map,
+            &ctx.browser_connection_id,
+            &ctx.request_id,
+            seq::TERMINAL,
+            AgentError {
+                kind: AgentErrorKind::InvalidInput,
+                message: format!("invalid collected image: {error}"),
+                retryable: false,
+                safe_for_model: false,
+                error_code: None,
+            },
+        )
+        .await;
+        return;
+    }
+    if !image_urls.is_empty()
+        && !(ModelCapabilities {
+            image_input: config.supports_image_input,
+        })
+        .satisfies(ModelRequirements::IMAGE_INPUT)
+    {
+        stream_diagnose_error(
+            map,
+            &ctx.browser_connection_id,
+            &ctx.request_id,
+            seq::TERMINAL,
+            AgentError {
+                kind: AgentErrorKind::InvalidInput,
+                message: "The selected AI model does not support image input.".into(),
+                retryable: false,
+                safe_for_model: true,
+                error_code: Some(
+                    desk_utils::error::DeskErrorCode::AI_MODEL_IMAGE_INPUT_UNSUPPORTED.code(),
+                ),
+            },
+        )
+        .await;
+        return;
+    }
     let seam = match SignalModelSeam::from_config(&config) {
         Ok(s) => s,
         Err(e) => {
@@ -545,7 +636,12 @@ pub async fn run_model_phase(
         db: db.clone(),
         model_name: config.model.clone().unwrap_or_default(),
     };
-    let mut registry = read_tool_registry();
+    let mut registry = filter_model_compatible_tools(
+        &read_tool_registry(),
+        ModelCapabilities {
+            image_input: config.supports_image_input,
+        },
+    );
     if ctx.scope.granted.contains(&Capability::ShellExecConfirmed)
         && matches!(
             ctx.scope.mode,

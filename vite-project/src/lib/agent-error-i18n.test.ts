@@ -14,6 +14,10 @@ describe('agentErrorMessage', () => {
             'pages.agentError.aiContextLimitExceeded',
         ],
         [deskErrorCodeEnum.AI_PLATFORM_BUSY, 'pages.agentError.aiPlatformBusy'],
+        [
+            deskErrorCodeEnum.AI_MODEL_IMAGE_INPUT_UNSUPPORTED,
+            'pages.agentError.aiModelImageInputUnsupported',
+        ],
     ])('localizes platform AI safeguard code %s', (code, key) => {
         expect(agentErrorMessage(t, code, 'raw backend text', 'fallback')).toBe(`t:${key}`);
     });

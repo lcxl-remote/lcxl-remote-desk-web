@@ -1118,6 +1118,32 @@ mod tests {
         assert!(!summary.contains("secret-host"));
     }
 
+    #[test]
+    fn screenshot_audit_summary_never_contains_raw_or_encoded_image_data() {
+        let env = envelope(OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::ScreenCaptureCurrent(crate::ScreenCaptureParams::default()),
+        }));
+        let output = OperationOutput::ReadContext(ReadContextOutput::ScreenCaptureCurrent(
+            crate::ScreenCaptureOutput {
+                format: crate::ImageFormat::Png,
+                width: 2,
+                height: 1,
+                image: vec![137, 80, 78, 71, 1, 2, 3],
+                truncated: false,
+            },
+        ));
+
+        let event = AuditEvent::context_collected("id".into(), "ts".into(), &env, &output, 0);
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            event.output_summary.as_deref(),
+            Some("screen.capture.current: 2x1, 7 bytes")
+        );
+        assert!(!json.contains("data:image"));
+        assert!(!json.contains("iVBOR"));
+        assert!(!json.contains("137,80,78,71"));
+    }
+
     /// The authorization event carries the deciding policy and correlates by the
     /// frame's own request id — the key a host's lifecycle events echo back in
     /// `task_id` and its rejections carry in `request_id`. It is not a sub-call,

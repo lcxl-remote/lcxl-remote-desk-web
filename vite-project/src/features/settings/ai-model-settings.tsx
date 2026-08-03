@@ -41,6 +41,7 @@ const providerSchema = z.object({
     base_url: z.string(),
     api_key: z.string(),
     clear_api_key: z.boolean(),
+    supports_image_input: z.boolean(),
     max_context_bytes: z.number().min(0),
     response_format: z.enum(RESPONSE_FORMATS),
     execution_mode: z.enum(EXECUTION_MODES),
@@ -97,6 +98,7 @@ export function AiModelSettings() {
             base_url: "",
             api_key: "",
             clear_api_key: false,
+            supports_image_input: false,
             max_context_bytes: 0,
             response_format: "json_object",
             execution_mode: "suggest_only",
@@ -127,6 +129,7 @@ export function AiModelSettings() {
                 base_url: data.base_url ?? "",
                 api_key: "",
                 clear_api_key: false,
+                supports_image_input: data.supports_image_input,
                 max_context_bytes: data.max_context_bytes ?? 0,
                 response_format: rf,
                 execution_mode: normalizeExecutionMode(data.execution_mode),
@@ -164,6 +167,7 @@ export function AiModelSettings() {
             execution_mode: values.execution_mode,
             max_steps_per_turn: values.max_steps_per_turn,
             max_same_tool_calls_per_turn: values.max_same_tool_calls_per_turn,
+            supports_image_input: values.supports_image_input,
             api_key,
         }
 
@@ -204,8 +208,11 @@ export function AiModelSettings() {
             }
             const latency = res?.data?.latency_ms
             const sample = res?.data?.sample
+            const validatedCapabilities = res?.data?.validated_capabilities ?? []
             toast({
-                title: t("pages.aiModel.settings.testSucceed"),
+                title: validatedCapabilities.includes("image_input")
+                    ? t("pages.aiModel.settings.testImageSucceed")
+                    : t("pages.aiModel.settings.testSucceed"),
                 description: sample
                     ? t("pages.aiModel.settings.testResult", { latency, sample })
                     : t("pages.aiModel.settings.testResultNoSample", { latency }),
@@ -364,6 +371,29 @@ export function AiModelSettings() {
                                     )}
                                 />
                             )}
+
+                            <FormField
+                                control={form.control}
+                                name="supports_image_input"
+                                render={({ field }) => (
+                                    <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                                        <div className="space-y-0.5">
+                                            <FormLabel>
+                                                {t("pages.aiModel.settings.supportsImageInput")}
+                                            </FormLabel>
+                                            <FormDescription>
+                                                {t("pages.aiModel.settings.supportsImageInput.description")}
+                                            </FormDescription>
+                                        </div>
+                                        <FormControl>
+                                            <Switch
+                                                checked={field.value}
+                                                onCheckedChange={field.onChange}
+                                            />
+                                        </FormControl>
+                                    </FormItem>
+                                )}
+                            />
 
                             <div className="grid gap-6 md:grid-cols-2">
                                 <FormField

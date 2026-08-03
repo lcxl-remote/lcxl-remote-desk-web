@@ -21,6 +21,9 @@ pub struct Model {
     pub id: i32,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// Whether the configured model accepts image content in user messages.
+    #[sea_orm(default_value = false)]
+    pub supports_image_input: bool,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub max_context_bytes: Option<i64>,

@@ -17,6 +17,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use sha2::{Digest, Sha256};
 
+/// Hard ceiling for a serialized collect-first evidence snapshot on the wire.
+pub const MAX_SNAPSHOT_WIRE_BYTES: u64 = 3 * 1024 * 1024;
+
 /// Why a chunked snapshot could not be encoded or reassembled.
 #[derive(Debug)]
 pub enum ChunkError {
@@ -49,6 +52,9 @@ pub enum ChunkError {
     ChunkAfterFinal { seq: u32 },
     /// The accumulated decoded bytes exceeded the declared `total_len`.
     OverDeclaredLen { declared: u64, accumulated: u64 },
+    /// A chunk's encoded payload cannot possibly fit in the remaining declared
+    /// byte count. Rejected before base64 decoding/allocation.
+    ChunkPayloadTooLarge { encoded: usize, remaining: u64 },
 }
 
 impl std::fmt::Display for ChunkError {
@@ -93,6 +99,10 @@ impl std::fmt::Display for ChunkError {
                     "accumulated {accumulated} bytes exceeds declared total_len {declared}"
                 )
             }
+            ChunkError::ChunkPayloadTooLarge { encoded, remaining } => write!(
+                f,
+                "base64 payload length {encoded} cannot fit in remaining {remaining} bytes"
+            ),
         }
     }
 }
@@ -159,18 +169,35 @@ pub fn chunk_snapshot(
 /// Stateful accumulator for B→A evidence chunks. The manager feeds chunks in as
 /// they arrive (they ride the signaling socket in order) and finishes once the
 /// `last` chunk has been seen.
-#[derive(Default)]
 pub struct SnapshotReassembler {
     buf: Vec<u8>,
     next_seq: u32,
     total_len: Option<u64>,
     hash: Option<String>,
     seen_final: bool,
+    max_total_bytes: u64,
+}
+
+impl Default for SnapshotReassembler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SnapshotReassembler {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_limit(MAX_SNAPSHOT_WIRE_BYTES)
+    }
+
+    pub fn with_limit(max_total_bytes: u64) -> Self {
+        Self {
+            buf: Vec::new(),
+            next_seq: 0,
+            total_len: None,
+            hash: None,
+            seen_final: false,
+            max_total_bytes,
+        }
     }
 
     /// Whether the final chunk has been accepted.
@@ -180,18 +207,52 @@ impl SnapshotReassembler {
 
     /// Accept one chunk. Chunks must arrive in `seq` order starting at 0.
     pub fn push(&mut self, chunk: &CollectResponseChunk) -> Result<(), ChunkError> {
+        if self.seen_final {
+            return Err(ChunkError::ChunkAfterFinal { seq: chunk.seq });
+        }
         if chunk.seq != self.next_seq {
             return Err(ChunkError::SeqGap {
                 expected: self.next_seq,
                 got: chunk.seq,
             });
         }
+        if !chunk.last && chunk.sha256.is_some() {
+            return Err(ChunkError::HashOnNonFinal { seq: chunk.seq });
+        }
+        match self.total_len {
+            None => {
+                if chunk.total_len > self.max_total_bytes {
+                    return Err(ChunkError::TotalLenTooLarge {
+                        declared: chunk.total_len,
+                        limit: self.max_total_bytes,
+                    });
+                }
+                self.total_len = Some(chunk.total_len);
+            }
+            Some(first) if first != chunk.total_len => {
+                return Err(ChunkError::InconsistentTotalLen {
+                    first,
+                    got: chunk.total_len,
+                });
+            }
+            Some(_) => {}
+        }
+        reject_encoded_payload_over_remaining(
+            chunk.payload_b64.len(),
+            chunk.total_len.saturating_sub(self.buf.len() as u64),
+        )?;
         let decoded = BASE64
             .decode(chunk.payload_b64.as_bytes())
             .map_err(ChunkError::Base64)?;
+        let accumulated = self.buf.len() as u64 + decoded.len() as u64;
+        if accumulated > chunk.total_len {
+            return Err(ChunkError::OverDeclaredLen {
+                declared: chunk.total_len,
+                accumulated,
+            });
+        }
         self.buf.extend_from_slice(&decoded);
         self.next_seq += 1;
-        self.total_len = Some(chunk.total_len);
         if chunk.last {
             self.seen_final = true;
             self.hash = chunk.sha256.clone();
@@ -230,11 +291,25 @@ impl SnapshotReassembler {
     }
 }
 
+fn reject_encoded_payload_over_remaining(
+    encoded_len: usize,
+    remaining: u64,
+) -> Result<(), ChunkError> {
+    let max_encoded = remaining.div_ceil(3).saturating_mul(4);
+    if encoded_len as u64 > max_encoded {
+        return Err(ChunkError::ChunkPayloadTooLarge {
+            encoded: encoded_len,
+            remaining,
+        });
+    }
+    Ok(())
+}
+
 /// Split arbitrary already-serialized bytes into [`RemoteToolResponseChunk`]s
 /// whose base64 payload stays within `base64_limit` characters. Always returns at
 /// least one chunk (an empty input still produces a single `last = true` chunk
 /// with an empty payload). The edge uses this to ship a serialized
-/// [`desk_agent_protocol::AgentOutcome`] back to the manager.
+/// [`desk_agent_protocol::remote_tool::RemoteToolOutput`] back to the manager.
 pub fn chunk_bytes(
     request_id: &str,
     bytes: &[u8],
@@ -342,6 +417,10 @@ impl ByteReassembler {
             }
             Some(_) => {}
         }
+        reject_encoded_payload_over_remaining(
+            chunk.payload_b64.len(),
+            chunk.total_len.saturating_sub(self.buf.len() as u64),
+        )?;
         let decoded = BASE64
             .decode(chunk.payload_b64.as_bytes())
             .map_err(ChunkError::Base64)?;
@@ -508,7 +587,49 @@ mod tests {
         let err = reassemble(&chunks).unwrap_err();
         assert!(matches!(
             err,
-            ChunkError::HashMismatch { .. } | ChunkError::TotalLenMismatch { .. }
+            ChunkError::HashMismatch { .. }
+                | ChunkError::TotalLenMismatch { .. }
+                | ChunkError::OverDeclaredLen { .. }
+                | ChunkError::ChunkPayloadTooLarge { .. }
+        ));
+    }
+
+    #[test]
+    fn snapshot_declared_len_over_hard_limit_rejected_before_decode() {
+        let mut r = SnapshotReassembler::with_limit(16);
+        let chunk = CollectResponseChunk {
+            request_id: "req".into(),
+            seq: 0,
+            last: false,
+            total_len: 1_000_000,
+            payload_b64: BASE64.encode(b"AAAA"),
+            sha256: None,
+        };
+        assert!(matches!(
+            r.push(&chunk).unwrap_err(),
+            ChunkError::TotalLenTooLarge { .. }
+        ));
+    }
+
+    #[test]
+    fn snapshot_rejects_inconsistent_len_and_chunk_after_final() {
+        let snap = snapshot(2000);
+        let mut chunks = chunk_snapshot("req", &snap, 256).unwrap();
+        let mut r = SnapshotReassembler::new();
+        r.push(&chunks[0]).unwrap();
+        chunks[1].total_len += 1;
+        assert!(matches!(
+            r.push(&chunks[1]).unwrap_err(),
+            ChunkError::InconsistentTotalLen { .. }
+        ));
+
+        let snap = snapshot(1);
+        let chunks = chunk_snapshot("req", &snap, 1024 * 1024).unwrap();
+        let mut r = SnapshotReassembler::new();
+        r.push(&chunks[0]).unwrap();
+        assert!(matches!(
+            r.push(&chunks[0]).unwrap_err(),
+            ChunkError::ChunkAfterFinal { .. }
         ));
     }
 

@@ -389,6 +389,11 @@ desk_error_codes! {
     /// may retry later and joins the queue at a new tail position. Rides the
     /// agent-error / REST business-error wire, never an HTTP status.
     AI_PLATFORM_BUSY = 84,
+    /// A request contains one or more image inputs, but the selected model is
+    /// explicitly declared text-only. The caller must choose/configure a visual
+    /// model or retry without screenshots; the server never silently drops the
+    /// image or switches models. Rides agent-error / REST business-error wires.
+    AI_MODEL_IMAGE_INPUT_UNSUPPORTED = 85,
 
     /// A connection-verify probe could not reach the target at all (DNS failure,
     /// connection refused, TLS handshake failure). Carried inside the
@@ -726,6 +731,7 @@ mod tests {
         assert_eq!(DeskErrorCode::COPILOT_TURN_BUSY.code(), 60);
         assert_eq!(DeskErrorCode::COPILOT_SUBJECT_MISMATCH.code(), 61);
         assert_eq!(DeskErrorCode::AGENT_SAME_TOOL_REPEAT_LIMIT.code(), 70);
+        assert_eq!(DeskErrorCode::AI_MODEL_IMAGE_INPUT_UNSUPPORTED.code(), 85);
         let codes = [
             DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(),
             DeskErrorCode::DEVICE_CLIENT_ID_REQUIRED.code(),

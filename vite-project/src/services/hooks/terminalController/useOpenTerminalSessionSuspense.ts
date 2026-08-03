@@ -13,14 +13,14 @@ export const openTerminalSessionSuspenseQueryKey = (connection_id: OpenTerminalS
 
 export type OpenTerminalSessionSuspenseQueryKey = ReturnType<typeof openTerminalSessionSuspenseQueryKey>
 
-export function openTerminalSessionSuspenseQueryOptions(connection_id: OpenTerminalSessionPathParams["connection_id"], params: OpenTerminalSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+export function openTerminalSessionSuspenseQueryOptions(connection_id: OpenTerminalSessionPathParams["connection_id"] | undefined, params: OpenTerminalSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
 
         const queryKey = openTerminalSessionSuspenseQueryKey(connection_id, params)
         return queryOptions<OpenTerminalSessionQueryResponse, ResponseErrorConfig<Error>, OpenTerminalSessionQueryResponse, typeof queryKey>({
-         
+         enabled: !!(connection_id),
          queryKey,
          queryFn: async ({ signal }) => {
-            return openTerminalSession(connection_id, params, { ...config, signal: config.signal ?? signal })
+            return openTerminalSession(connection_id!, params, { ...config, signal: config.signal ?? signal })
          },
         })
 
@@ -30,7 +30,7 @@ export function openTerminalSessionSuspenseQueryOptions(connection_id: OpenTermi
  * @summary Open terminal connection
  * {@link /api/desk/terminal/:connection_id}
  */
-export function useOpenTerminalSessionSuspense<TData = OpenTerminalSessionQueryResponse, TQueryKey extends QueryKey = OpenTerminalSessionSuspenseQueryKey>(connection_id: OpenTerminalSessionPathParams["connection_id"], params: OpenTerminalSessionQueryParams, options: 
+export function useOpenTerminalSessionSuspense<TData = OpenTerminalSessionQueryResponse, TQueryKey extends QueryKey = OpenTerminalSessionSuspenseQueryKey>(connection_id: OpenTerminalSessionPathParams["connection_id"] | undefined, params: OpenTerminalSessionQueryParams, options: 
 {
   query?: Partial<UseSuspenseQueryOptions<OpenTerminalSessionQueryResponse, ResponseErrorConfig<Error>, TData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }

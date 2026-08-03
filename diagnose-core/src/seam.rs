@@ -47,6 +47,24 @@ impl ModelRequest {
             max_output_tokens: None,
         }
     }
+
+    /// Requirements derived from the actual message payload immediately before a
+    /// provider call. Advertising the screen-read tool itself requires a visual
+    /// model: a text-only model must be rejected before it can select a tool whose
+    /// result it could not consume. An attached image is checked again on every
+    /// later step.
+    pub fn requirements(&self) -> crate::model_capability::ModelRequirements {
+        crate::model_capability::ModelRequirements {
+            image_input: self
+                .messages
+                .iter()
+                .any(|message| message.image_data_url.is_some())
+                || self
+                    .tools
+                    .iter()
+                    .any(|tool| tool.name == "read_current_screen"),
+        }
+    }
 }
 
 /// Receives streaming output and lifecycle events from an agent turn as they
@@ -393,3 +411,30 @@ pub trait LeaseHeartbeat {
 /// Opaque handle whose `Drop` stops the lease-renewal ticker started by
 /// [`LeaseHeartbeat::start`].
 pub trait HeartbeatGuard {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::{ChatRole, ToolChoice, ToolSpec};
+
+    #[test]
+    fn screen_tool_requires_visual_capability_before_it_is_advertised() {
+        let request = ModelRequest {
+            messages: vec![ChatMessage::text(
+                "u1",
+                ChatRole::User,
+                "inspect the screen",
+            )],
+            tools: vec![ToolSpec {
+                name: "read_current_screen".into(),
+                description: "read the current screen".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+            }],
+            tool_choice: ToolChoice::Auto,
+            response_format: ResponseFormatSpec::None,
+            max_output_tokens: None,
+        };
+
+        assert!(request.requirements().image_input);
+    }
+}

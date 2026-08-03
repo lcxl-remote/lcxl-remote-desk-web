@@ -671,6 +671,12 @@ impl SessionSeam for SignalAgentSessionStore {
         let now = Utc::now();
         let old_version = session.version;
         let new_version = old_version + 1;
+        if session.turn_state.is_active() {
+            desk_diagnose_core::image_input::retain_latest_session_image(&mut session.conversation)
+                .map_err(|error| internal(format!("invalid session image: {error}")))?;
+        } else {
+            desk_diagnose_core::image_input::strip_session_images(&mut session.conversation);
+        }
         let mut stored = session.clone();
         stored.version = new_version;
         let state_json = serde_json::to_string(&stored)
@@ -782,9 +788,10 @@ mod tests {
         assert!(store.read_snapshot("missing").await.unwrap().is_none());
 
         let mut session = store.claim_turn(claim("turn-1")).await.unwrap();
-        session
-            .conversation
-            .push(ChatMessage::text("u1", ChatRole::User, "question"));
+        session.conversation.push(
+            ChatMessage::text("u1", ChatRole::User, "question")
+                .with_image("data:image/jpeg;base64,AQID"),
+        );
         session.execution_state = ExecutionState::Executing {
             work_id: 7,
             execution_id: "generation-bg-1".into(),
@@ -803,9 +810,11 @@ mod tests {
             Some("generation-bg-1")
         );
         assert_eq!(active.messages.len(), 1);
+        assert!(session.conversation[0].image_data_url.is_some());
 
         session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
         store.save(&mut session).await.unwrap();
+        assert!(session.conversation[0].image_data_url.is_none());
         let settled = store
             .read_snapshot("conversation-1")
             .await
