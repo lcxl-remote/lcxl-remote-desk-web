@@ -2,91 +2,89 @@
 
 [English](README.md)
 
-LCXL Remote Desk Web 是一款 **AI 原生（AI-Native）** 的开源高性能远程桌面：它把 AI 视为与浏览器**并列的一等控制端**——既能用浏览器远程控制，也内置设备诊断 AI Agent 读取设备状态进行排障、并可在**设备 owner 逐条明确确认后执行命令**；对外部 AI 助手则只通过**只读** [MCP](https://modelcontextprotocol.io/) 服务开放读取能力。AI 层以安全为第一原则：服务端统一裁决权限，模型默认仅提供操作建议（执行必须经 owner 确认，且服务端冻结出 argv 级命令计划、worker 从不重新解析命令字符串），数据在上传前强制脱敏（脱敏失败直接阻断请求），每次调用均留存审计记录，API 密钥仅驻留服务端。底层基于 WebRTC（AV1 / H.264 / VP8 / VP9 软硬编码 + Opus 音频），后端采用 Rust 编写，前端基于 React + Vite + Tailwind CSS 构建。
+LCXL Remote Desk Web 是一款 **AI 原生（AI-Native）** 的开源高性能远程桌面。它把 AI 作为与浏览器**并列的一等控制端**：内置诊断 Agent 可以读取设备状态，并在设备 owner 对每条完整命令明确确认后执行获批的修复操作；面向外部 AI 助手的 [MCP](https://modelcontextprotocol.io/) 接口则始终保持**只读**。中心信令服务负责模型访问、编排、授权与审计，被控设备只承担证据采集和最终执行，是“中心大脑 + 瘦被控端”的架构。后端采用 Rust，前端基于 React、Vite 与 Tailwind CSS。
 
 > [!WARNING]
-> **免责声明**：本项目目前处于早期开发阶段，代码库可能存在不稳定性、未修复的漏洞或功能不完整。
-> **安全风险提示**：远程桌面技术涉及对计算机系统的深度访问。在使用本项目进行远程连接时，请务必确保网络环境安全。作者不对因使用本项目而导致的任何损害承担法律责任。
+> **免责声明**：本项目目前处于早期开发阶段，代码库可能存在不稳定性、未修复的问题或功能不完整。
+> **安全风险提示**：远程桌面技术涉及对计算机系统的深度访问。使用时请务必确保网络环境安全。作者不对因使用本项目而导致的任何损害承担责任。
 
 ---
 
 ## 核心功能
 
-- **AI 故障诊断**：通过自然语言提问，系统会自动采集设备状态（包括系统信息、进程、监听端口、服务、近期日志等），在本地脱敏后交由 AI 模型分析，并返回诊断结果与修复建议。目前兼容 OpenAI 和 Anthropic 的接口协议。
-- **owner 确认的命令执行**：在自己的设备上，诊断 Agent 不止于建议——它可以请求执行受支持 shell 的命令，但**必须由设备 owner 对该条完整命令明确确认后才会执行**。服务端负责风险分级、黑名单硬拒与命令计划冻结（argv 级），被控端在执行前独立复校一遍，执行结果回填并留存审计。
-- **只读 MCP 服务**：通过 `--startup-mode mcp-stdio` 启动，可将设备的只读状态查询能力通过 MCP 协议暴露给本地的 AI 助手。提供的工具集为静态白名单，不包含任何可执行或具有写入权限的工具——**MCP 侧不受上面那条执行能力影响，始终只读**。
-- **安全的权限控制**：服务端是判断授权的唯一依据。默认情况下 AI 只给出建议，任何执行都需人工逐条确认。数据采集采用默认阻断的脱敏机制，API 密钥仅保留在服务端。
-- **高性能桌面连接**：基于 WebRTC，支持 AV1 / H.264 / VP8 / VP9 的软硬件编码，音频采用 Opus 编码，保证极低延迟。
-- **远程终端**：内置基于 xterm.js 的 Web 终端，支持完整的命令行交互。
-- **文件管理**：支持文件的上传、下载、删除以及回收站功能。
-- **剪贴板同步**：支持本地与远程的文本剪贴板双向同步。
-- **远程白板**：允许在远端屏幕上进行标注与绘画，适合远程演示与协作（需配合 tauri-app 使用）。
-- **隐私屏模式**：锁定本地显示器与输入，确保远程操作的私密性（需配合 tauri-app 使用）。
-- **系统音频**：支持远程音频的捕获与同步播放。
+- **中心化 AI 故障诊断**：用户可用自然语言提问，中心信令服务驱动有步数和重复调用上限的 tool-calling 循环；被控端只采集本轮请求所需的证据，并在上传前严格脱敏。兼容 OpenAI 接口协议与 Anthropic API。
+- **owner 确认的命令执行**：模型只提出命令建议，不能直接执行。服务端完成风险分级与黑名单硬拒；owner 确认该条完整命令后，服务端冻结 argv 级执行计划，被控端再逐字段复校后执行，结果回填诊断并进入审计。
+- **只读 MCP 服务**：`--startup-mode mcp-stdio` 仅提供系统信息、进程、监听端口和受策略控制的近期日志四个静态白名单工具，不调用模型，也没有截图、执行、控制或写入能力。
+- **能力分级的访问码**：可为设备访问码分别设置远程控制、文件浏览/传输/删除、终端、剪贴板、隐私屏与白板的能力上限；被控端全局策略与实时确认仍会继续生效。
+- **高性能桌面连接**：基于 WebRTC，支持 X264 / OpenH264 / VP8 / VP9 / AV1 软件编码与 Opus 系统音频。
+- **远程终端**：内置 xterm.js，通过独立且经过鉴权的 WebSocket 提供完整 shell 交互。
+- **文件管理**：支持上传、下载、删除及回收站流程。
+- **剪贴板同步**：支持文本剪贴板双向同步。
+- **远程白板**：在远端屏幕上标注与绘画（需配合 `tauri-app`）。
+- **隐私屏模式**：远程操作期间锁定本地显示与输入（需配合 `tauri-app`）。
+- **Windows 虚拟屏**：在 Windows `service-daemon` 模式下提供 IddCx 虚拟显示器、自适应分辨率和可选独占模式。
+- **跨平台采集**：Windows WASAPI、Linux PipeWire、macOS ScreenCaptureKit 系统音频链路，以及 Windows、Linux、macOS 的桌面采集与输入支持。
 - **多语言支持**：界面与文档提供中英双语。
 
 ---
 
 ## 快速开始
 
-### 方式 1：Docker 部署（推荐）
+### 方式 1：Docker 信令服务
 
-使用 Docker Compose 一键启动：
+仓库提供的镜像默认以 `signaling` 模式启动，承载 Web 控制台、信令与可选 TURN 中继；桌面采集和输入注入仍由容器外的被控设备完成。
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
-启动后访问 `http://localhost:8081`，首次访问需设置管理员账号。
+启动后访问 `http://localhost:8081`，首次访问时创建管理员账号。
 
 ### 方式 2：Tauri 桌面客户端
 
-适用于需要隐私屏、远程白板等依赖本地系统能力的高级功能场景：
+需要隐私屏、远程白板等本地 GUI 集成时使用：
 
 ```bash
 cd tauri-app
 cargo tauri dev
 ```
 
-### 方式 3：源码运行（面向开发者）
+### 方式 3：源码运行
 
-1. **环境准备**：
-   - 安装 [Rust](https://www.rust-lang.org/) 最新稳定版。
-   - 安装 [Node.js](https://nodejs.org/)。
-   - **AV1 编码支持（可选）**：Windows 环境下使用 AV1 需要安装 [nasm](https://www.nasm.us/)：
-     ```bash
-     $NASM_VERSION="2.15.05"
-     $LINK="https://www.nasm.us/pub/nasm/releasebuilds/$NASM_VERSION/win64"
-     curl --ssl-no-revoke -LO "$LINK/nasm-$NASM_VERSION-win64.zip"
-     7z e -y "nasm-$NASM_VERSION-win64.zip" -o "C:\nasm"
-     set PATH="%PATH%;C:\nasm"
-     ```
+1. 安装仓库钉定的 Rust 1.90 工具链、Node.js 22.16+，以及[开发指南](DEVELOPMENT_CN.md)列出的平台依赖。
 
-2. **启动后端**（默认开启信令与桌面服务）：
+2. 启动便携后端。`default` 同时内置信令与被控端流水线：
+
    ```bash
-   cargo run --release
+   cargo run -p lcxl-remote-desk-server --release -- --startup-mode default
    ```
 
-3. **启动前端**：
+3. 在另一个终端启动前端：
+
    ```bash
    cd vite-project
    npm ci
    npm run dev
    ```
+
    启动后访问 `http://localhost:5174`。
 
 ---
 
 ## 核心配置说明
 
-项目的详细参数可通过 `conf/config.toml` 进行调整：
+被控端配置默认从 `conf/config.toml` 读取，可用 `-c` 指定其他路径，也可通过 `LRD_*` 环境变量覆盖。以下主机侧设置可在本地控制台保存：
 
-- **系统设置**：包括监听地址、端口、日志级别等。
-- **桌面与编码**：帧率、视频编码器（X264 / VP8 / VP9 / H264 / AV1）、光标可见性等，可在建立连接时针对每个会话进行设置。
-- **AI 模型配置**：在管理控制台设置服务商、接口地址、模型名称与 API 密钥。密钥仅存放在服务端，不会泄露给浏览器或写入日志。
-- **运行模式**：通过 `--startup-mode`（或 `-s`）切换启动模式，支持 default、signaling、desk-server、service-daemon 等多种模式；配置文件路径可通过 `-c` 参数指定。
+- **系统与连接**：监听地址和端口、本地/远端信令、manager 连接、日志与内置 TURN 接口。
+- **桌面与编码**：显示器、帧率、编码器、光标、音频及每会话媒体参数。
+- **主机安全策略**：各项能力的允许 / 拒绝 / 询问策略、采集策略（`allow_logs`、`allow_screen`），以及本机允许的 AI 执行风险上限。
+- **Windows 虚拟屏**：`service-daemon` 模式下的驱动状态、启用开关、独占模式与自适应分辨率参数。
 
-> 更多技术细节请参考 [开发指南 (DEVELOPMENT_CN.md)](DEVELOPMENT_CN.md)。
+模型配置与主机配置分离：服务商、接口地址、模型名称和只写 API 密钥由中心信令服务的控制台管理。浏览器和被控端都不会拿到模型凭据。
+
+`--startup-mode` 支持 `default`、`signaling`、`desk-server`、`service-daemon`、`session-worker` 和 `mcp-stdio`。其中 `session-worker` 是由 daemon 拉起的内部子进程模式。
+
+> 构建依赖与详细架构请参考[开发指南](DEVELOPMENT_CN.md)。
 
 ---
 
@@ -94,111 +92,67 @@ cargo tauri dev
 
 ### 连接与媒体链路
 
-```mermaid
-flowchart LR
-    subgraph BR["🌐 浏览器客户端"]
-        direction TB
-        dash["管理控制台"]
-        ctrl["远程控制端"]
-    end
+![连接与媒体链路](assets/architecture/connection-path-cn.svg)
 
-    SIG["📨 信令服务<br/>(WebSocket · SDP / ICE)"]
-    ICE["🧭 STUN / TURN<br/>(NAT 穿透 · 中继)"]
+浏览器与被控端通过信令服务交换 SDP / ICE，并借助 STUN/TURN 收集候选地址。连接会优先使用 WebRTC P2P 直连，仅在 NAT 穿透失败时回退到 TURN。内置 TURN 只有在配置监听/公网接口后才会提供中继，部署时还需放行相应的中继端口。
 
-    subgraph DS["🖥️ 远程桌面服务（被控端）"]
-        direction TB
-        CAP["屏幕 / 音频采集 + 编码"]
-        INJ["输入注入 · 文件 · 剪贴板"]
-    end
-
-    ctrl <-->|"① SDP / ICE"| SIG <-->|"① SDP / ICE"| DS
-    ctrl <-->|"② 候选收集"| ICE <-->|"② 候选收集"| DS
-    ctrl <==>|"③ WebRTC P2P · TURN 中继兜底"| DS
-```
-
-浏览器与被控端首先通过信令服务交换 SDP 和 ICE 数据，并借助 STUN/TURN 服务收集候选地址，优先建立直连的 WebRTC P2P 连接。仅在内网穿透失败时，才会回退到 TURN 中继。服务端已内置信令与 TURN 服务，方便进行局域网和公网部署。
-
-连接建立后，所有数据均在该链路上进行传输。这包括视频轨道、音频轨道，以及专门用于鼠标、键盘、文件传输、剪贴板和白板的数据通道。远程终端则会使用独立的数据通道。
+连接建立后，WebRTC 承载视频、Opus 音频，以及输入、剪贴板、文件传输和白板事件的数据通道。远程终端**不复用**这些数据通道，而是建立一条独立且经过鉴权的 WebSocket。
 
 ### 进程模型
 
-`server` 支持多种启动模式。默认的 default 模式将画面采集、编码、输入控制等流程在单进程中运行。为了能够捕获 Windows 的登录和授权界面（如 UAC 弹窗），可以通过 service-daemon 模式将进程权限拆开：
+所有被控模式都使用同一套 daemon → PeerConnection manager → worker 逻辑流水线。`default` 和 `desk-server` 在单个进程内运行这些组件，并通过进程内 channel 通信；`service-daemon` 则把同一边界拆分到不同系统进程，使桌面任务能够在交互用户会话中运行：
 
-```mermaid
-flowchart LR
-    BR["🌐 浏览器"] <==>|"WebRTC"| DM
+![Service-daemon 进程模型](assets/architecture/process-model-cn.svg)
 
-    subgraph HOST["被控主机 — service-daemon 模式"]
-        direction TB
-        DM["ServiceDaemon (SYSTEM 权限)<br/>维护信令代理与 WebRTC 连接"]
-        subgraph SESS["用户桌面会话"]
-            WK["SessionWorker<br/>负责画面采集、编码与输入注入"]
-        end
-        DM <-->|"事件管道（双向）<br/>信令、控制消息等"| WK
-        WK -->|"媒体管道（单向）<br/>传输编码后的视频帧"| DM
-    end
+常驻 ServiceDaemon 持有信令、WebRTC PeerConnection 与 worker 生命周期；SessionWorker 在桌面会话内负责采集、编码、系统音频、输入注入、剪贴板和文件操作。两者使用三条 IPC 通道：双向事件管道、从 worker 指向 daemon 的单向音视频媒体管道，以及双向文件传输管道。切换用户会话时 worker 可以重启，而浏览器侧 PeerConnection 仍保持在线。
 
-    DM <-->|"信令"| SIG2["信令服务"]
-```
-
-ServiceDaemon 运行在系统权限下，负责维护网络连接和子进程生命周期。当用户进行交互时，它会在桌面会话内启动 SessionWorker 来执行实际的画面抓取和输入模拟。它们之间通过两条管道进行通信，这种隔离设计使得在切换系统用户时，画面采集进程可以安全重启而不至于断开浏览器的连接。
+目前只有 Windows 接入了真正的系统服务管理；其他平台运行 `service-daemon` 时会退化为交互式进程。
 
 ---
 
 ## AI 诊断架构
 
-除了基础的远程操作，系统还允许 AI 分析设备的运行状态，协助排查问题。
+AI 推理由中心服务统一编排，被控设备是精简的证据采集与执行端。`default` 模式内置中心信令服务，因此便携版仍可独立完成诊断；单独运行的 `desk-server` 则需连接外部 signal 或 manager 才能使用 AI 编排。
 
-**客户端内的 AI 诊断**。当用户在网页端提出疑问（如：“这台机器为什么卡顿？”）时，服务端会执行一套固定的处理流程：采集状态、脱敏、调用模型、返回诊断结果；如果模型提出需要执行命令，则进入 owner 确认闭环后才会真正执行。
+![AI 诊断与 owner 确认执行闭环](assets/architecture/ai-diagnostics-cn.svg)
 
-```mermaid
-graph LR
-    user[用户提问] --> orch[服务端编排器]
-    orch -->|只读采集| evidence[收集设备状态]
-    evidence -->|强制脱敏| model[AI 模型]
-    model -->|流式返回| diag[诊断结果<br/>发现问题与修复建议]
-    model -.建议命令.-> confirm{owner 逐条确认}
-    confirm -->|已确认| exec[冻结 argv 计划<br/>被控端复校后执行]
-    exec -->|结果回填| orch
-    confirm -->|拒绝 / 超时| diag
-    orch -.审计.-> audit[(生成审计记录)]
-```
+- **有边界的 Agent 循环**：中心编排器选择只读能力、请求证据、调用模型，并可在配置的步数与重复工具调用上限内进行多轮 tool-calling。
+- **被控端采集与脱敏**：按需采集系统信息、进程、监听端口、服务、日志和可选截图。日志与截图受本地策略控制；每条证据都在被控端严格脱敏，任一步失败即阻断请求。
+- **服务端模型访问**：支持 OpenAI 兼容接口与 Anthropic 协议。API 密钥只保存在中心服务，不会发送给浏览器或被控设备。
+- **默认仅建议**：命令建议走独立授权路径，必须通过风险/黑名单检查和 owner 逐条确认；服务端冻结批准后的 argv 计划，被控端再检查不可变字段与风险上限后执行。
+- **保护隐私的审计**：模型调用、批准/拒绝、脱敏失败和执行结果会产生审计元数据与摘要；审计事件不保存原始提问、模型回复、stdout 或截图。
 
-- **状态采集**：获取系统信息、进程列表、网络端口、服务状态、日志以及屏幕截图。
-- **协议兼容**：内部抽象层屏蔽了具体协议差异，可随意切换 OpenAI 兼容接口或 Anthropic 网关。
-- **安全约束**：模型默认只展示建议；要真正执行必须由 owner 对完整命令逐条确认。服务端做风险分级与黑名单硬拒，并把批准的命令冻结成 argv 级计划下发，被控端执行前再独立复校一遍（`risk <= max_risk`、逐字段比对），**worker 从不重新解析命令字符串**。
-- **部署方式**：诊断逻辑封装在 `desk-diagnose-core` 中，被控端既可以自行完成完整的诊断与确认执行流程，也可以只作为采集端与执行点，把脱敏后的数据发往中心服务器编排。这种方式适合大规模部署，可以避免每台被控端都保存 API 密钥。
-
-**面向外部的 MCP 服务**。如果使用 `--startup-mode mcp-stdio` 启动程序，设备将作为本地的 MCP 服务运行。它会向本地的其他 AI 助手提供一组只读工具，包括查询系统信息、进程和日志等。为保障安全，该模式去除了屏幕截图工具以及所有具有执行权限的指令。
-
-**安全机制**。权限范围和审批逻辑均在服务端进行硬性校验，客户端无法伪造。任何敏感数据的采集都会经过严格脱敏，一旦脱敏环节出错将立刻阻断请求。此外，所有的模型调用都会生成审计记录，但为了隐私考量，仅记录调用量和内容大小，绝不保存原始的提问与模型回复。
+**面向外部的 MCP 服务。** `mcp-stdio` 与诊断 Agent 完全分离，只暴露 `lcxl_system_info`、`lcxl_process_list`、`lcxl_network_ports` 和 `lcxl_recent_logs`。其中日志工具每次调用都会实时检查 `allow_logs`；MCP 不调用模型，也不提供截图、执行、远程控制或写入工具。
 
 ---
 
 ## 项目结构
 
-对于最终用户，项目提供三种形式的产物：
+- **`server`**：多模式 Rust 二进制，可作为便携一体版、信令/控制平面、被控端、Windows 系统服务 daemon、内部 worker 或只读 MCP stdio 服务运行。
+- **`signal`**：信令、访问授权、中心 AI 编排/模型网关、执行裁决与审计持久化。
+- **`diagnose-core` / `agent-protocol`**：模型中立的共享 Agent 逻辑，以及强类型证据/执行协议。
+- **`capture-engine` / `input` / `ipc-protocol`**：采集编码、输入注入与 daemon-worker 通信。
+- **`tauri-app`**：桌面 GUI 外壳，以及隐私屏、白板等本地集成。
+- **`vite-project`**：React Web 控制台与浏览器远程控制端。
 
-- **`server`**：无界面的远程桌面服务端，内置信令与 TURN 服务。适合在服务器和纯命令行环境中部署。
-- **`tauri-app`**：带图形界面的桌面增强版。在基础服务端之外，额外提供隐私屏、白板等需要接管本地显示输出的功能。
-- **`vite-project`**：基于 React 编写的 Web 前端，既作为管理后台，也是远程连接的控制端。
-
-> 其余部分为内部的逻辑库，包含画面捕捉、音频处理、输入模拟和网络通信等模块。详细的开发指引请查阅 [开发指南 (DEVELOPMENT_CN.md)](DEVELOPMENT_CN.md)。
+> 各模块的构建与平台细节请查阅[开发指南](DEVELOPMENT_CN.md)。
 
 ---
 
-## 路线图 (Roadmap)
+## 路线图
 
 - [x] 基于 WebRTC 的高性能桌面流传输
-- [x] 跨平台支持 (Linux/Windows/MacOS)
-- [x] 远程终端与文件管理系统
-- [x] 隐私屏与白板功能
-- [x] AI 系统故障诊断（支持 OpenAI 与 Anthropic 协议）
-- [x] 提供给外部 AI 助手的 MCP 只读服务
-- [x] 具备安全拦截机制的 AI 命令执行功能（owner 逐条确认 + 服务端冻结计划 + 被控端复校）
+- [x] 跨平台支持（Linux / Windows / macOS）
+- [x] 远程终端与文件管理
+- [x] 能力分级的设备访问码
+- [x] 隐私屏与白板
+- [x] Windows service-daemon 虚拟屏
+- [x] 中心化 AI 故障诊断（OpenAI 兼容 / Anthropic）
+- [x] 面向外部 AI 助手的只读 MCP 服务
+- [x] owner 逐条确认、服务端冻结计划、被控端复校的 AI 命令执行
 - [ ] 移动端浏览体验优化
-- [ ] 基于角色的权限系统与多用户控制管理
-- [ ] 远程会话录制功能
+- [ ] 基于角色的权限系统与多用户管理
+- [ ] 远程会话录制
 
 ---
 
