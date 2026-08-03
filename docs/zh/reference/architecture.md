@@ -60,7 +60,7 @@ graph LR
     orch -.审计.-> audit[(审计轨迹)]
 ```
 
-编排器按 **采集 → 脱敏 → 模型 → 渲染** 运行，脱敏 fail-closed。见 [AI 安全模型](/zh/security/ai-security-model)。
+编排器按照 **采集 → 脱敏 → 模型 → 展示** 的顺序运行；任何脱敏失败都会立即中止请求。见 [AI 安全模型](/zh/security/ai-security-model)。
 
 ## 技术栈
 

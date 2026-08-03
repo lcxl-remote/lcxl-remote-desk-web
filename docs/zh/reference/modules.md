@@ -10,7 +10,7 @@ Rust workspace 拆分为若干聚焦的 crate，外加前端与 Tauri 壳。
 | `turn/` | TURN / STUN 服务（与信令服务器捆绑）。 |
 | `vite-project/` | React 19 + TanStack Query 前端——管理 UI 与 Web 控制端（含 AI 设置页与诊断面板）。 |
 | `tauri-app/` | Tauri 壳，用于在被控机本地渲染防窥屏 / 白板。 |
-| `agent-protocol/` | 设备能力协议（`desk-agent-protocol`）：wire 类型 + `DeviceAgent` trait + 审计 / 诊断 / exec 协议。纯协议、无平台实现；服务端是所有受信字段的唯一可信源。 |
+| `agent-protocol/` | 设备能力协议（`desk-agent-protocol`）：线路数据类型、`DeviceAgent` 接口，以及审计、诊断和命令执行协议。只定义协议，不包含平台实现；所有受信字段都以服务端为准。 |
 | `mcp-server/` | 只读 MCP 服务（`desk-mcp-server`）：`rmcp` SDK + stdio，静态白名单的只读工具（无 exec/write/control）。 |
 | `capture-engine/` | 屏幕 / 音频采集与编码。 |
 | `input-injection/` | 鼠标 / 键盘注入与剪贴板控制。 |

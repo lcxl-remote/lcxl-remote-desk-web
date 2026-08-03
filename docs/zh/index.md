@@ -19,7 +19,7 @@ hero:
 features:
   - icon: 🤖
     title: AI 原生设计
-    details: 内置诊断 Agent 可读取设备状态并提出命令。仅 owner 可在逐命令明确确认后执行；服务端仍是权限与风险的唯一可信源。
+    details: 内置诊断助手可以读取设备状态并提出命令建议。只有设备所有者逐条确认后，命令才会执行；权限与风险等级始终由服务端判断。
     link: /zh/features/ai-diagnostics
     linkText: AI 诊断
   - icon: 🔌
@@ -34,7 +34,7 @@ features:
     linkText: 串流
   - icon: 🔒
     title: 安全优先
-    details: 服务端权威、fail-closed 脱敏、API Key 仅存服务端、审计只记元数据。从底层为信任而设计。
+    details: 权限由服务端统一判断；脱敏失败会立即中止请求；API 密钥只保存在服务端；审计记录不含原始内容。
     link: /zh/security/ai-security-model
     linkText: 安全模型
   - icon: 🖥️
@@ -44,7 +44,7 @@ features:
     linkText: 实用功能
   - icon: 🦀
     title: Rust + React
-    details: Rust (Actix-Web) 后端 + 多种启动模式，React + Vite + Tailwind 前端。跨 Linux / Windows / macOS。
+    details: 后端采用 Rust 与 Actix Web，前端采用 React、Vite 和 Tailwind CSS，支持 Linux、Windows 与 macOS。
     link: /zh/reference/architecture
     linkText: 架构
 ---

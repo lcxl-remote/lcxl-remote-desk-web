@@ -10,8 +10,8 @@
 
 信令端点依调用者不同采用不同鉴权——见[信令鉴权](/zh/security/signaling-auth)。简言之：
 
-- Desk Server → 信令 使用 WebSocket URL 查询串里的 token。
-- Browser → 信令 使用 Actix-Session Cookie，**不带 token 参数**。
+- Desk Server 连接信令服务时，使用 WebSocket URL 查询参数中的令牌。
+- 浏览器连接信令服务时，使用 Actix-Session Cookie，**不在 URL 中携带令牌参数**。
 
 ## 添加新信令类型
 

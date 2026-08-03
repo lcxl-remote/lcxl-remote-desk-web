@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-LCXL Remote Desk Web 是一款 **AI 原生（AI-Native）** 的开源高性能远程桌面。它把 AI 作为与浏览器**并列的一等控制端**：内置诊断 Agent 可以读取设备状态，并在设备 owner 对每条完整命令明确确认后执行获批的修复操作；面向外部 AI 助手的 [MCP](https://modelcontextprotocol.io/) 接口则始终保持**只读**。中心信令服务负责模型访问、编排、授权与审计，被控设备只承担证据采集和最终执行，是“中心大脑 + 瘦被控端”的架构。后端采用 Rust，前端基于 React、Vite 与 Tailwind CSS。
+LCXL Remote Desk Web 是一款 **AI 原生（AI-Native）**的开源高性能远程桌面。AI 与浏览器一样，都是系统的一等控制端：内置诊断助手可以读取设备状态，并在设备所有者逐条确认后执行获批的修复命令；面向外部 AI 助手的 [MCP](https://modelcontextprotocol.io/) 接口则始终保持**只读**。中心信令服务负责模型访问、任务编排、授权和审计，被控设备专注于证据采集和最终执行，形成“中心大脑 + 瘦被控端”的架构。后端采用 Rust，前端基于 React、Vite 和 Tailwind CSS。
 
 > [!WARNING]
 > **免责声明**：本项目目前处于早期开发阶段，代码库可能存在不稳定性、未修复的问题或功能不完整。
@@ -12,12 +12,12 @@ LCXL Remote Desk Web 是一款 **AI 原生（AI-Native）** 的开源高性能�
 
 ## 核心功能
 
-- **中心化 AI 故障诊断**：用户可用自然语言提问，中心信令服务驱动有步数和重复调用上限的 tool-calling 循环；被控端只采集本轮请求所需的证据，并在上传前严格脱敏。兼容 OpenAI 接口协议与 Anthropic API。
-- **owner 确认的命令执行**：模型只提出命令建议，不能直接执行。服务端完成风险分级与黑名单硬拒；owner 确认该条完整命令后，服务端冻结 argv 级执行计划，被控端再逐字段复校后执行，结果回填诊断并进入审计。
+- **中心化 AI 故障诊断**：用户可以直接用自然语言提问。中心信令服务会在设定的推理轮次和工具重复调用上限内自主收集证据、分析问题；被控端只采集当前请求所需的信息，并在上传前严格脱敏。支持 OpenAI 兼容接口和 Anthropic API。
+- **由设备所有者确认命令执行**：模型只能提出命令建议，不能自行执行。服务端会完成风险分级，并直接拒绝命中黑名单的命令；设备所有者确认完整命令后，服务端固化执行计划，被控端再次核对各项参数和风险上限，确认无误后执行，并将结果返回诊断流程、写入审计记录。
 - **只读 MCP 服务**：`--startup-mode mcp-stdio` 仅提供系统信息、进程、监听端口和受策略控制的近期日志四个静态白名单工具，不调用模型，也没有截图、执行、控制或写入能力。
 - **能力分级的访问码**：可为设备访问码分别设置远程控制、文件浏览/传输/删除、终端、剪贴板、隐私屏与白板的能力上限；被控端全局策略与实时确认仍会继续生效。
 - **高性能桌面连接**：基于 WebRTC，支持 X264 / OpenH264 / VP8 / VP9 / AV1 软件编码与 Opus 系统音频。
-- **远程终端**：内置 xterm.js，通过独立且经过鉴权的 WebSocket 提供完整 shell 交互。
+- **远程终端**：内置 xterm.js，通过独立且经过身份认证的 WebSocket 提供完整的命令行交互。
 - **文件管理**：支持上传、下载、删除及回收站流程。
 - **剪贴板同步**：支持文本剪贴板双向同步。
 - **远程白板**：在远端屏幕上标注与绘画（需配合 `tauri-app`）。
@@ -75,14 +75,14 @@ cargo tauri dev
 
 被控端配置默认从 `conf/config.toml` 读取，可用 `-c` 指定其他路径，也可通过 `LRD_*` 环境变量覆盖。以下主机侧设置可在本地控制台保存：
 
-- **系统与连接**：监听地址和端口、本地/远端信令、manager 连接、日志与内置 TURN 接口。
+- **系统与连接**：监听地址和端口、本地与远程信令、Manager 连接、日志和内置 TURN 接口。
 - **桌面与编码**：显示器、帧率、编码器、光标、音频及每会话媒体参数。
 - **主机安全策略**：各项能力的允许 / 拒绝 / 询问策略、采集策略（`allow_logs`、`allow_screen`），以及本机允许的 AI 执行风险上限。
 - **Windows 虚拟屏**：`service-daemon` 模式下的驱动状态、启用开关、独占模式与自适应分辨率参数。
 
 模型配置与主机配置分离：服务商、接口地址、模型名称和只写 API 密钥由中心信令服务的控制台管理。浏览器和被控端都不会拿到模型凭据。
 
-`--startup-mode` 支持 `default`、`signaling`、`desk-server`、`service-daemon`、`session-worker` 和 `mcp-stdio`。其中 `session-worker` 是由 daemon 拉起的内部子进程模式。
+`--startup-mode` 支持 `default`、`signaling`、`desk-server`、`service-daemon`、`session-worker` 和 `mcp-stdio`。其中 `session-worker` 是由守护进程启动的内部工作进程。
 
 > 构建依赖与详细架构请参考[开发指南](DEVELOPMENT_CN.md)。
 
@@ -100,11 +100,11 @@ cargo tauri dev
 
 ### 进程模型
 
-所有被控模式都使用同一套 daemon → PeerConnection manager → worker 逻辑流水线。`default` 和 `desk-server` 在单个进程内运行这些组件，并通过进程内 channel 通信；`service-daemon` 则把同一边界拆分到不同系统进程，使桌面任务能够在交互用户会话中运行：
+所有被控模式都使用同一套“守护进程 → WebRTC 对等连接管理器 → 会话工作进程”流水线。`default` 和 `desk-server` 在单个进程内运行这些组件，并通过进程内通道通信；`service-daemon` 则将它们拆分到不同系统进程，使桌面任务能够在当前用户的桌面会话中运行：
 
 ![Service-daemon 进程模型](assets/architecture/process-model-cn.svg)
 
-常驻 ServiceDaemon 持有信令、WebRTC PeerConnection 与 worker 生命周期；SessionWorker 在桌面会话内负责采集、编码、系统音频、输入注入、剪贴板和文件操作。两者使用三条 IPC 通道：双向事件管道、从 worker 指向 daemon 的单向音视频媒体管道，以及双向文件传输管道。切换用户会话时 worker 可以重启，而浏览器侧 PeerConnection 仍保持在线。
+常驻的 ServiceDaemon 负责信令、WebRTC 对等连接以及工作进程的生命周期；SessionWorker 在桌面会话内负责采集、编码、系统音频、输入注入、剪贴板和文件操作。两者使用三条 IPC 通道：双向事件管道、从工作进程指向守护进程的单向音视频管道，以及双向文件传输管道。切换用户会话时可以重启工作进程，而浏览器侧的 WebRTC 连接仍然保持在线。
 
 目前只有 Windows 接入了真正的系统服务管理；其他平台运行 `service-daemon` 时会退化为交互式进程。
 
@@ -112,26 +112,26 @@ cargo tauri dev
 
 ## AI 诊断架构
 
-AI 推理由中心服务统一编排，被控设备是精简的证据采集与执行端。`default` 模式内置中心信令服务，因此便携版仍可独立完成诊断；单独运行的 `desk-server` 则需连接外部 signal 或 manager 才能使用 AI 编排。
+AI 推理由中心服务统一编排，被控设备只负责证据采集和最终执行。`default` 模式内置中心信令服务，因此便携版可以独立完成诊断；单独运行的 `desk-server` 则需要连接外部信令服务或 Manager 才能使用 AI 编排。
 
-![AI 诊断与 owner 确认执行闭环](assets/architecture/ai-diagnostics-cn.svg)
+![AI 诊断与设备所有者确认执行闭环](assets/architecture/ai-diagnostics-cn.svg)
 
-- **有边界的 Agent 循环**：中心编排器选择只读能力、请求证据、调用模型，并可在配置的步数与重复工具调用上限内进行多轮 tool-calling。
+- **有明确边界的智能体循环**：中心编排器按需选择采集能力、请求证据并调用模型，可以在配置的推理轮次和工具重复调用上限内连续分析问题。
 - **被控端采集与脱敏**：按需采集系统信息、进程、监听端口、服务、日志和可选截图。日志与截图受本地策略控制；每条证据都在被控端严格脱敏，任一步失败即阻断请求。
 - **服务端模型访问**：支持 OpenAI 兼容接口与 Anthropic 协议。API 密钥只保存在中心服务，不会发送给浏览器或被控设备。
-- **默认仅建议**：命令建议走独立授权路径，必须通过风险/黑名单检查和 owner 逐条确认；服务端冻结批准后的 argv 计划，被控端再检查不可变字段与风险上限后执行。
+- **默认只提出建议**：命令建议使用独立的授权流程，必须通过风险检查和黑名单检查，并由设备所有者逐条确认；服务端会固化获批的命令与参数，被控端再次核对不可变字段和风险上限后才会执行。
 - **保护隐私的审计**：模型调用、批准/拒绝、脱敏失败和执行结果会产生审计元数据与摘要；审计事件不保存原始提问、模型回复、stdout 或截图。
 
-**面向外部的 MCP 服务。** `mcp-stdio` 与诊断 Agent 完全分离，只暴露 `lcxl_system_info`、`lcxl_process_list`、`lcxl_network_ports` 和 `lcxl_recent_logs`。其中日志工具每次调用都会实时检查 `allow_logs`；MCP 不调用模型，也不提供截图、执行、远程控制或写入工具。
+**面向外部的 MCP 服务。** `mcp-stdio` 与内置诊断助手完全分离，只提供 `lcxl_system_info`、`lcxl_process_list`、`lcxl_network_ports` 和 `lcxl_recent_logs`。其中日志工具每次调用都会实时检查 `allow_logs`；MCP 不调用模型，也不提供截图、命令执行、远程控制或其他写入工具。
 
 ---
 
 ## 项目结构
 
-- **`server`**：多模式 Rust 二进制，可作为便携一体版、信令/控制平面、被控端、Windows 系统服务 daemon、内部 worker 或只读 MCP stdio 服务运行。
+- **`server`**：多模式 Rust 可执行程序，可作为便携一体版、信令与控制服务、被控端、Windows 系统服务、内部工作进程或只读 MCP stdio 服务运行。
 - **`signal`**：信令、访问授权、中心 AI 编排/模型网关、执行裁决与审计持久化。
-- **`diagnose-core` / `agent-protocol`**：模型中立的共享 Agent 逻辑，以及强类型证据/执行协议。
-- **`capture-engine` / `input` / `ipc-protocol`**：采集编码、输入注入与 daemon-worker 通信。
+- **`diagnose-core` / `agent-protocol`**：与具体模型无关的共享智能体逻辑，以及强类型的证据和执行协议。
+- **`capture-engine` / `input` / `ipc-protocol`**：采集编码、输入注入，以及守护进程与工作进程之间的通信。
 - **`tauri-app`**：桌面 GUI 外壳，以及隐私屏、白板等本地集成。
 - **`vite-project`**：React Web 控制台与浏览器远程控制端。
 
@@ -149,7 +149,7 @@ AI 推理由中心服务统一编排，被控设备是精简的证据采集与�
 - [x] Windows service-daemon 虚拟屏
 - [x] 中心化 AI 故障诊断（OpenAI 兼容 / Anthropic）
 - [x] 面向外部 AI 助手的只读 MCP 服务
-- [x] owner 逐条确认、服务端冻结计划、被控端复校的 AI 命令执行
+- [x] 设备所有者逐条确认、服务端固化计划、被控端再次核验的 AI 命令执行
 - [ ] 移动端浏览体验优化
 - [ ] 基于角色的权限系统与多用户管理
 - [ ] 远程会话录制

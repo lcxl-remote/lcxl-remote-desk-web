@@ -15,7 +15,7 @@ cargo run -- --help
 | `signaling` | 仅信令服务（信令 + TURN）。 |
 | `desk-server` | 仅被控端（Desk Server）。 |
 | `service-daemon` | 系统服务守护进程（SYSTEM / root），管理各会话的 worker。 |
-| `session-worker` | 由守护进程在用户桌面会话中启动的工作进程。 |
+| `session-worker` | 由守护进程在用户桌面会话中启动的内部工作进程。 |
 | `mcp-stdio` | 面向本地 AI 助手的只读 MCP 服务（stdio）。 |
 
 ## 默认模式
@@ -45,7 +45,7 @@ flowchart LR
 
 **ServiceDaemon**（以 SYSTEM 运行）持有 WebRTC 连接、信令与子进程；它在每个桌面会话中启动一个 **SessionWorker** 处理屏幕采集与输入注入。二者通过双向 **event pipe**（信令与控制）与单向 **media pipe**（编码帧）通信。
 
-这种拆分让 session worker 能在用户切换时重启而**不中断浏览器连接**——对等连接位于守护进程中。
+这种拆分让会话工作进程可以在用户切换时重启，而**不中断浏览器连接**，因为 WebRTC 对等连接由守护进程持有。
 
 ## MCP stdio 模式
 
