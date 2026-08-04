@@ -3,23 +3,23 @@
 * Do not edit manually.
 */
 
-import type { TestModelProviderMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import { testModelProvider } from "../../clients.ts";
+import type { TestModelProviderMutationRequest, TestModelProviderMutationResponse } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
+import { testModelProvider } from "../../clients.ts";
 
 export const testModelProviderMutationKey = () => [{ url: '/api/model/provider/test' }] as const
 
 export type TestModelProviderMutationKey = ReturnType<typeof testModelProviderMutationKey>
 
-export function testModelProviderMutationOptions<TContext = unknown>(config: Partial<RequestConfig> & { client?: Client } = {}) {
+export function testModelProviderMutationOptions<TContext = unknown>(config: Partial<RequestConfig<TestModelProviderMutationRequest>> & { client?: Client } = {}) {
 
         const mutationKey = testModelProviderMutationKey()
-        return mutationOptions<TestModelProviderMutationResponse, ResponseErrorConfig<Error>, void, TContext>({
+        return mutationOptions<TestModelProviderMutationResponse, ResponseErrorConfig<Error>, {data: TestModelProviderMutationRequest}, TContext>({
           mutationKey,
-          mutationFn: async() => {
-            return testModelProvider(config)
+          mutationFn: async({ data }) => {
+            return testModelProvider(data, config)
           },
         })
 
@@ -31,8 +31,8 @@ export function testModelProviderMutationOptions<TContext = unknown>(config: Par
  */
 export function useTestModelProvider<TContext>(options: 
 {
-  mutation?: UseMutationOptions<TestModelProviderMutationResponse, ResponseErrorConfig<Error>, void, TContext> & { client?: QueryClient },
-  client?: Partial<RequestConfig> & { client?: Client },
+  mutation?: UseMutationOptions<TestModelProviderMutationResponse, ResponseErrorConfig<Error>, {data: TestModelProviderMutationRequest}, TContext> & { client?: QueryClient },
+  client?: Partial<RequestConfig<TestModelProviderMutationRequest>> & { client?: Client },
 }
  = {}) {
 
@@ -40,13 +40,13 @@ export function useTestModelProvider<TContext>(options:
           const { client: queryClient, ...mutationOptions } = mutation;
           const mutationKey = mutationOptions.mutationKey ?? testModelProviderMutationKey()
 
-          const baseOptions = testModelProviderMutationOptions(config) as UseMutationOptions<TestModelProviderMutationResponse, ResponseErrorConfig<Error>, void, TContext>
+          const baseOptions = testModelProviderMutationOptions(config) as UseMutationOptions<TestModelProviderMutationResponse, ResponseErrorConfig<Error>, {data: TestModelProviderMutationRequest}, TContext>
           
 
-          return useMutation<TestModelProviderMutationResponse, ResponseErrorConfig<Error>, void, TContext>({
+          return useMutation<TestModelProviderMutationResponse, ResponseErrorConfig<Error>, {data: TestModelProviderMutationRequest}, TContext>({
             ...baseOptions,
             mutationKey,
             ...mutationOptions,
-          }, queryClient) as UseMutationResult<TestModelProviderMutationResponse, ResponseErrorConfig<Error>, void, TContext>
+          }, queryClient) as UseMutationResult<TestModelProviderMutationResponse, ResponseErrorConfig<Error>, {data: TestModelProviderMutationRequest}, TContext>
       
 }

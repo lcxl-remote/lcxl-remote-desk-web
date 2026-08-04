@@ -8,7 +8,7 @@ import { Loader2, Save, PlugZap } from "lucide-react"
 import { useGetModelProvider } from "@/services/hooks/modelProviderController/useGetModelProvider"
 import { useUpdateModelProvider } from "@/services/hooks/modelProviderController/useUpdateModelProvider"
 import { useTestModelProvider } from "@/services/hooks/modelProviderController/useTestModelProvider"
-import type { ModelProviderUpdate } from "@/services/types"
+import type { ModelProviderUpdate, ProviderTestParams } from "@/services/types"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -59,6 +59,11 @@ const providerSchema = z.object({
 
 type ProviderFormValues = z.infer<typeof providerSchema>
 
+function pendingApiKey(values: ProviderFormValues): string | undefined {
+    if (values.clear_api_key) return ""
+    return values.api_key.trim() === "" ? undefined : values.api_key
+}
+
 // Render the central execution-grant choices.
 function ExecutionModeItems() {
     const { t } = useTranslation()
@@ -75,6 +80,10 @@ function normalizeExecutionMode(mode: string | undefined): (typeof EXECUTION_MOD
     return EXECUTION_MODES.includes(mode as (typeof EXECUTION_MODES)[number])
         ? (mode as (typeof EXECUTION_MODES)[number])
         : "suggest_only"
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+    return error instanceof Error && error.message ? error.message : fallback
 }
 
 export function AiModelSettings() {
@@ -150,12 +159,7 @@ export function AiModelSettings() {
         }
         // api_key is write-only: clearing wins, then a typed value sets it, and
         // an empty field leaves the stored key unchanged (omit it).
-        let api_key: string | undefined
-        if (values.clear_api_key) {
-            api_key = ""
-        } else if (values.api_key.trim() !== "") {
-            api_key = values.api_key
-        }
+        const api_key = pendingApiKey(values)
 
         const payload: ModelProviderUpdate = {
             provider: values.provider,
@@ -191,13 +195,21 @@ export function AiModelSettings() {
         }
     }
 
-    // Probe the stored provider (base_url / key / model / dialect) end-to-end with a
-    // tiny chat call. Tests the saved config, not the unsaved form — save first to
-    // test edits. A reachable-but-broken chain comes back as `success === false`
-    // with the real reason, so it is a toast, not a thrown error.
+    // Probe the form's current provider fields end-to-end without saving them.
+    // A blank key reuses the stored secret; a typed key is transient. The shared
+    // HTTP client turns a RestResponse business failure into an Error, whose
+    // backend-provided reason remains visible to the operator.
     const onTestConnection = async () => {
         try {
-            const res = await testProvider()
+            const values = form.getValues()
+            const payload: ProviderTestParams = {
+                provider: values.provider,
+                model: values.model,
+                supports_image_input: values.supports_image_input,
+                base_url: values.base_url,
+                api_key: pendingApiKey(values),
+            }
+            const res = await testProvider({ data: payload })
             if (res?.success === false) {
                 toast({
                     variant: "destructive",
@@ -217,11 +229,11 @@ export function AiModelSettings() {
                     ? t("pages.aiModel.settings.testResult", { latency, sample })
                     : t("pages.aiModel.settings.testResultNoSample", { latency }),
             })
-        } catch {
+        } catch (error) {
             toast({
                 variant: "destructive",
                 title: t("pages.aiModel.settings.testFailed"),
-                description: t("pages.aiModel.settings.updateFailedMessage"),
+                description: errorMessage(error, t("pages.aiModel.settings.testFailed")),
             })
         }
     }

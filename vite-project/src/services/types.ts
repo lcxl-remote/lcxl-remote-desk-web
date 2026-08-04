@@ -2109,6 +2109,33 @@ export type ProviderTestDto = {
     validated_capabilities: string[];
 };
 
+/**
+ * @description Unsaved connection fields used for one provider probe. An omitted API key\nreuses the stored secret; a supplied key is kept in memory for this request.
+*/
+export type ProviderTestParams = {
+    /**
+     * @description Write-only. `None` reuses the stored key; an empty string clears it for\nthis probe; any other value is used only for this probe.
+     * @type string,null
+    */
+    api_key?: string | null;
+    /**
+     * @type string
+    */
+    base_url: string;
+    /**
+     * @type string
+    */
+    model: string;
+    /**
+     * @type string
+    */
+    provider: string;
+    /**
+     * @type boolean
+    */
+    supports_image_input: boolean;
+};
+
 export type RedeemCodeParams = {
     /**
      * @description The access-grant code (device code or support code) to redeem.
@@ -5306,10 +5333,13 @@ export type UpdateModelProviderMutation = {
 */
 export type TestModelProvider200 = RestResponseProviderTestDto;
 
+export type TestModelProviderMutationRequest = ProviderTestParams;
+
 export type TestModelProviderMutationResponse = TestModelProvider200;
 
 export type TestModelProviderMutation = {
     Response: TestModelProvider200;
+    Request: TestModelProviderMutationRequest;
     Errors: any;
 };
 

@@ -8,7 +8,7 @@ use desk_diagnose_core::provider_probe::{provider_probe_request, verify_probe_re
 use desk_diagnose_core::seam::{ModelRequest, ModelSeam, NullTurnSink};
 use desk_utils::error::DeskErrorCode;
 use desk_utils::rest::RestResponse;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::error::DeskSignalError;
@@ -32,6 +32,35 @@ pub struct ProviderTestDto {
     /// Present only when a `sample` is returned; absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance: Option<AiProvenance>,
+}
+
+/// Unsaved connection fields used for one provider probe. An omitted API key
+/// reuses the stored secret; a supplied key is kept in memory for this request.
+#[derive(Deserialize, ToSchema)]
+pub struct ProviderTestParams {
+    pub provider: String,
+    pub model: String,
+    pub supports_image_input: bool,
+    pub base_url: String,
+    /// Write-only. `None` reuses the stored key; an empty string clears it for
+    /// this probe; any other value is used only for this probe.
+    pub api_key: Option<String>,
+}
+
+fn config_for_probe(
+    stored: &model_provider::ModelProviderConfig,
+    params: ProviderTestParams,
+) -> model_provider::ModelProviderConfig {
+    let mut candidate = stored.clone();
+    candidate.apply_update(ModelProviderUpdate {
+        provider: Some(params.provider),
+        model: Some(params.model),
+        supports_image_input: Some(params.supports_image_input),
+        base_url: Some(params.base_url),
+        api_key: params.api_key,
+        ..Default::default()
+    });
+    candidate
 }
 
 #[utoipa::path(
@@ -180,14 +209,20 @@ async fn run_probe(
 #[utoipa::path(
     tag = TAG,
     summary = "Test the model-provider AI call chain",
+    request_body = ProviderTestParams,
     responses(
         (status = 200, description = "Connectivity test result", body = RestResponse<ProviderTestDto>),
     ),
 )]
 #[post("/provider/test")]
-pub async fn test_model_provider() -> Result<HttpResponse, DeskSignalError> {
+pub async fn test_model_provider(
+    body: web::Json<ProviderTestParams>,
+) -> Result<HttpResponse, DeskSignalError> {
     let db = crate::db::get_db();
-    let config = model_provider::load(db).await?;
+    let stored = model_provider::load(db).await?;
+    // Overlay the form values in memory. The candidate is deliberately never
+    // passed to `save`, so testing cannot commit an unverified configuration.
+    let config = config_for_probe(&stored, body.into_inner());
     // Fail closed with a precondition error when the provider is not fully
     // configured (missing model / base_url / api_key).
     let seam = SignalModelSeam::from_config(&config).map_err(|e| {
@@ -233,6 +268,60 @@ mod tests {
     struct ErrSeam;
 
     struct BlindSeam;
+
+    #[test]
+    fn probe_params_overlay_form_values_without_mutating_stored_config() {
+        let stored = model_provider::ModelProviderConfig {
+            provider: Some("openai-compatible".into()),
+            model: Some("saved-model".into()),
+            supports_image_input: false,
+            base_url: Some("https://saved.example/v1".into()),
+            api_key: Some("saved-key".into()),
+            ..Default::default()
+        };
+
+        let candidate = config_for_probe(
+            &stored,
+            ProviderTestParams {
+                provider: "anthropic".into(),
+                model: "unsaved-model".into(),
+                supports_image_input: true,
+                base_url: "https://unsaved.example".into(),
+                api_key: Some("unsaved-key".into()),
+            },
+        );
+
+        assert_eq!(candidate.provider.as_deref(), Some("anthropic"));
+        assert_eq!(candidate.model.as_deref(), Some("unsaved-model"));
+        assert!(candidate.supports_image_input);
+        assert_eq!(
+            candidate.base_url.as_deref(),
+            Some("https://unsaved.example")
+        );
+        assert_eq!(candidate.api_key.as_deref(), Some("unsaved-key"));
+        assert_eq!(stored.model.as_deref(), Some("saved-model"));
+        assert_eq!(stored.api_key.as_deref(), Some("saved-key"));
+    }
+
+    #[test]
+    fn probe_without_a_typed_key_reuses_the_stored_secret() {
+        let stored = model_provider::ModelProviderConfig {
+            api_key: Some("saved-key".into()),
+            ..Default::default()
+        };
+        let candidate = config_for_probe(
+            &stored,
+            ProviderTestParams {
+                provider: "openai-compatible".into(),
+                model: "model".into(),
+                supports_image_input: false,
+                base_url: "https://example.com/v1".into(),
+                api_key: None,
+            },
+        );
+
+        assert_eq!(candidate.api_key.as_deref(), Some("saved-key"));
+    }
 
     #[async_trait::async_trait(?Send)]
     impl ModelSeam for BlindSeam {

@@ -12,6 +12,7 @@ vi.mock("@/hooks/use-toast", () => ({
 const h = vi.hoisted(() => ({
     providerData: {} as Record<string, unknown>,
     providerMutateAsync: vi.fn(async () => ({})),
+    testMutateAsync: vi.fn(async () => ({})),
     toast: vi.fn(),
 }))
 
@@ -22,7 +23,7 @@ vi.mock("@/services/hooks/modelProviderController/useUpdateModelProvider", () =>
     useUpdateModelProvider: () => ({ mutateAsync: h.providerMutateAsync, isPending: false }),
 }))
 vi.mock("@/services/hooks/modelProviderController/useTestModelProvider", () => ({
-    useTestModelProvider: () => ({ mutateAsync: vi.fn(), isPending: false }),
+    useTestModelProvider: () => ({ mutateAsync: h.testMutateAsync, isPending: false }),
 }))
 
 import { AiModelSettings } from "./ai-model-settings"
@@ -33,6 +34,8 @@ function lastProviderPayload() {
 
 beforeEach(() => {
     h.providerMutateAsync.mockClear()
+    h.testMutateAsync.mockReset()
+    h.testMutateAsync.mockResolvedValue({})
     h.toast.mockClear()
     h.providerData = {
         provider: "openai-compatible",
@@ -174,5 +177,53 @@ describe("AiModelSettings", () => {
         render(<AiModelSettings />)
         await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
         expect(screen.queryByRole("switch", { name: /clear stored key/i })).toBeNull()
+    })
+
+    it("shows the backend reason when the connection test rejects", async () => {
+        const reason =
+            "Test failed: model gateway returned status 400 Bad Request: unknown variant image_url, expected text"
+        h.testMutateAsync.mockRejectedValueOnce(new Error(reason))
+
+        render(<AiModelSettings />)
+        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+        fireEvent.click(screen.getByRole("button", { name: "Test connection" }))
+
+        await waitFor(() =>
+            expect(h.toast).toHaveBeenCalledWith({
+                variant: "destructive",
+                title: "Connection test failed",
+                description: reason,
+            }),
+        )
+    })
+
+    it("tests the current unsaved form values without saving them", async () => {
+        render(<AiModelSettings />)
+        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+
+        fireEvent.change(screen.getByDisplayValue("gpt-4o-mini"), {
+            target: { value: "unsaved-vision-model" },
+        })
+        fireEvent.change(screen.getByDisplayValue("https://api.example/v1"), {
+            target: { value: "https://unsaved.example/v1" },
+        })
+        fireEvent.change(screen.getByPlaceholderText(/Configured/i), {
+            target: { value: "unsaved-key" },
+        })
+        fireEvent.click(screen.getByRole("switch", { name: /supports image input/i }))
+        fireEvent.click(screen.getByRole("button", { name: "Test connection" }))
+
+        await waitFor(() =>
+            expect(h.testMutateAsync).toHaveBeenCalledWith({
+                data: {
+                    provider: "openai-compatible",
+                    model: "unsaved-vision-model",
+                    supports_image_input: true,
+                    base_url: "https://unsaved.example/v1",
+                    api_key: "unsaved-key",
+                },
+            }),
+        )
+        expect(h.providerMutateAsync).not.toHaveBeenCalled()
     })
 })
