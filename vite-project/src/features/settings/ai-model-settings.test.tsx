@@ -27,6 +27,7 @@ vi.mock("@/services/hooks/modelProviderController/useTestModelProvider", () => (
 }))
 
 import { AiModelSettings } from "./ai-model-settings"
+import { RestResponseError } from "@/lib/kubb-client"
 
 function lastProviderPayload() {
     return (h.providerMutateAsync.mock.calls[0][0] as { data: Record<string, unknown> }).data
@@ -180,9 +181,9 @@ describe("AiModelSettings", () => {
     })
 
     it("shows the backend reason when the connection test rejects", async () => {
-        const reason =
-            "Test failed: model gateway returned status 400 Bad Request: unknown variant image_url, expected text"
-        h.testMutateAsync.mockRejectedValueOnce(new Error(reason))
+        const providerDetail = "unknown variant image_url, expected text"
+        const reason = `Custom desk error(1): Test failed: model gateway returned status 400 Bad Request: ${providerDetail}`
+        h.testMutateAsync.mockRejectedValueOnce(new RestResponseError(reason, 1, null))
 
         render(<AiModelSettings />)
         await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
@@ -192,7 +193,7 @@ describe("AiModelSettings", () => {
             expect(h.toast).toHaveBeenCalledWith({
                 variant: "destructive",
                 title: "Connection test failed",
-                description: reason,
+                description: `Model gateway returned 400 Bad Request: ${providerDetail}`,
             }),
         )
     })

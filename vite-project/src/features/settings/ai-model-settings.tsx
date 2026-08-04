@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
+import type { TFunction } from "i18next"
 import { useTranslation } from "react-i18next"
 import { Loader2, Save, PlugZap } from "lucide-react"
 
@@ -17,6 +18,7 @@ import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useToast } from "@/hooks/use-toast"
+import { RestResponseError } from "@/lib/kubb-client"
 
 const RESPONSE_FORMATS = ["none", "json_object", "json_schema"] as const
 
@@ -84,6 +86,27 @@ function normalizeExecutionMode(mode: string | undefined): (typeof EXECUTION_MOD
 
 function errorMessage(error: unknown, fallback: string): string {
     return error instanceof Error && error.message ? error.message : fallback
+}
+
+function connectionTestErrorMessage(error: unknown, t: TFunction, fallback: string): string {
+    if (!(error instanceof RestResponseError)) return errorMessage(error, fallback)
+
+    const message = error.message.replace(/^Custom desk error\(-?\d+\):\s*/, "")
+    const gatewayFailure = message.match(
+        /^Test failed: model gateway returned status ([^:]+)(?::\s*([\s\S]*))?$/,
+    )
+    if (gatewayFailure) {
+        const [, status, detail] = gatewayFailure
+        return detail
+            ? t("pages.aiModel.settings.testGatewayFailed", { status, detail })
+            : t("pages.aiModel.settings.testGatewayFailedNoDetail", { status })
+    }
+
+    const testFailure = message.match(/^Test failed:\s*([\s\S]+)$/)
+    if (testFailure) {
+        return t("pages.aiModel.settings.testFailedWithReason", { reason: testFailure[1] })
+    }
+    return message || fallback
 }
 
 export function AiModelSettings() {
@@ -233,7 +256,11 @@ export function AiModelSettings() {
             toast({
                 variant: "destructive",
                 title: t("pages.aiModel.settings.testFailed"),
-                description: errorMessage(error, t("pages.aiModel.settings.testFailed")),
+                description: connectionTestErrorMessage(
+                    error,
+                    t,
+                    t("pages.aiModel.settings.testFailed"),
+                ),
             })
         }
     }
