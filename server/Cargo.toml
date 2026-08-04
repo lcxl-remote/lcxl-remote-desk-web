@@ -52,7 +52,6 @@ utoipa-actix-web = { workspace = true }
 
 chrono = { workspace = true }
 sea-orm = { workspace = true }
-sea-orm-migration = { workspace = true }
 bollard = { workspace = true }
 
 serde = { workspace = true }

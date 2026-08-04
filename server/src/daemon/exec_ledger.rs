@@ -38,12 +38,10 @@ use desk_agent_protocol::exec_lifecycle::{ExecState, ExecStateReplyPayload};
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
-    DbErr, EntityTrait, QueryFilter, Set, TransactionTrait,
+    DbErr, EntityTrait, QueryFilter, Schema, Set, TransactionTrait,
 };
-use sea_orm_migration::MigratorTrait;
 
 pub mod entity;
-pub mod migration;
 
 pub use entity::exec_ledger_entry::{self, State};
 
@@ -92,7 +90,7 @@ pub struct ExecLedger {
 }
 
 impl ExecLedger {
-    /// Open (creating if needed) the ledger under `config_dir` and migrate it.
+    /// Open (creating if needed) the ledger under `config_dir` and initialize it.
     pub async fn open(config_dir: &str) -> Result<Self, DbErr> {
         let path = Path::new(config_dir).join("desk_exec_ledger.db");
         Self::connect(&sqlite_url(&path)).await
@@ -116,7 +114,7 @@ impl ExecLedger {
         for pragma in ["PRAGMA journal_mode = WAL", "PRAGMA synchronous = FULL"] {
             db.execute_unprepared(pragma).await?;
         }
-        migration::Migrator::up(&db, None).await?;
+        initialize_schema(&db).await?;
         Ok(Self { db })
     }
 
@@ -379,6 +377,24 @@ impl ExecLedger {
             .await?;
         Ok(res.rows_affected)
     }
+}
+
+/// Create the ledger at its current schema.
+///
+/// The desk server has not shipped with an older ledger schema, so maintaining a
+/// migration history would only add upgrade machinery for a version no user can
+/// have. Introduce migrations when a released schema actually needs upgrading.
+async fn initialize_schema(db: &DatabaseConnection) -> Result<(), DbErr> {
+    let schema = Schema::new(db.get_database_backend());
+    let mut table = schema.create_table_from_entity(exec_ledger_entry::Entity);
+    table.if_not_exists();
+    db.execute(&table).await?;
+
+    for mut index in schema.create_index_from_entity(exec_ledger_entry::Entity) {
+        index.if_not_exists();
+        db.execute(&index).await?;
+    }
+    Ok(())
 }
 
 fn sqlite_url(path: &Path) -> String {
