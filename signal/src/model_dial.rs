@@ -1132,6 +1132,7 @@ mod tests {
                     "properties": {"detail": {"type": "string"}}
                 }),
             }],
+            tool_requirements: desk_diagnose_core::model_capability::ModelRequirements::TEXT_ONLY,
             tool_choice: choice,
             response_format: ResponseFormatSpec::None,
             max_output_tokens: None,

@@ -26,6 +26,10 @@ use crate::session::{PersistedAgentSession, SubjectMismatch};
 pub struct ModelRequest {
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolSpec>,
+    /// Requirements derived from the server-authoritative metadata of the tools
+    /// advertised in this request. Keeping this explicit prevents provider seams
+    /// from guessing security properties from model-facing tool names.
+    pub tool_requirements: crate::model_capability::ModelRequirements,
     pub tool_choice: ToolChoice,
     pub response_format: ResponseFormatSpec,
     /// Optional upper bound on the model's output tokens. `None` leaves the seam's
@@ -42,28 +46,22 @@ impl ModelRequest {
         Self {
             messages,
             tools: Vec::new(),
+            tool_requirements: crate::model_capability::ModelRequirements::TEXT_ONLY,
             tool_choice: ToolChoice::Auto,
             response_format,
             max_output_tokens: None,
         }
     }
 
-    /// Requirements derived from the actual message payload immediately before a
-    /// provider call. Advertising the screen-read tool itself requires a visual
-    /// model: a text-only model must be rejected before it can select a tool whose
-    /// result it could not consume. An attached image is checked again on every
-    /// later step.
+    /// Requirements derived from the authoritative advertised-tool metadata and
+    /// the actual message payload immediately before a provider call. Images are
+    /// checked again on every later step so a pinned model whose capability was
+    /// revoked cannot receive one.
     pub fn requirements(&self) -> crate::model_capability::ModelRequirements {
-        crate::model_capability::ModelRequirements {
-            image_input: self
-                .messages
-                .iter()
-                .any(|message| message.image_data_url.is_some())
-                || self
-                    .tools
-                    .iter()
-                    .any(|tool| tool.name == "read_current_screen"),
-        }
+        self.tool_requirements
+            .union(crate::model_capability::ModelRequirements::for_messages(
+                &self.messages,
+            ))
     }
 }
 
@@ -418,7 +416,7 @@ mod tests {
     use crate::chat::{ChatRole, ToolChoice, ToolSpec};
 
     #[test]
-    fn screen_tool_requires_visual_capability_before_it_is_advertised() {
+    fn registered_tool_requirement_survives_model_facing_rename() {
         let request = ModelRequest {
             messages: vec![ChatMessage::text(
                 "u1",
@@ -426,10 +424,11 @@ mod tests {
                 "inspect the screen",
             )],
             tools: vec![ToolSpec {
-                name: "read_current_screen".into(),
+                name: "renamed_screen_reader".into(),
                 description: "read the current screen".into(),
                 parameters_schema: serde_json::json!({"type": "object"}),
             }],
+            tool_requirements: crate::model_capability::ModelRequirements::IMAGE_INPUT,
             tool_choice: ToolChoice::Auto,
             response_format: ResponseFormatSpec::None,
             max_output_tokens: None,

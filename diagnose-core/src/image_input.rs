@@ -139,7 +139,9 @@ fn remove_image(message: &mut ChatMessage) {
 
 /// Validate the newest image and replace every older image with a bounded text
 /// placeholder. Agent sessions therefore carry at most one data URL, and only
-/// while the current turn is active.
+/// while the current turn is active. An invalid newest image is an invariant
+/// violation: return an error without silently dropping it; the loop's terminal
+/// cleanup strips every image before persisting the failed turn.
 pub fn retain_latest_session_image(messages: &mut [ChatMessage]) -> Result<(), ImageInputError> {
     let latest = messages
         .iter()
@@ -268,6 +270,31 @@ mod tests {
                 .all(|message| message.image_data_url.is_none())
         );
         assert!(messages[1].text.contains(IMAGE_NOT_RETAINED_PLACEHOLDER));
+    }
+
+    #[test]
+    fn invalid_latest_session_image_fails_closed_without_partial_mutation() {
+        let mut messages = vec![
+            ChatMessage::text("one", crate::chat::ChatRole::Tool, "first")
+                .with_image(data_url(&[1])),
+            ChatMessage::text("two", crate::chat::ChatRole::Tool, "second")
+                .with_image("data:image/jpeg;base64,***"),
+        ];
+
+        assert!(retain_latest_session_image(&mut messages).is_err());
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.image_data_url.is_some()),
+            "validation failure must not masquerade as successful compaction"
+        );
+
+        strip_session_images(&mut messages);
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.image_data_url.is_none())
+        );
     }
 
     #[test]

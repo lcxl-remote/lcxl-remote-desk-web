@@ -13,7 +13,7 @@
 //! the unknown-outcome closure (§6): a placeholder tool result keeps the model
 //! history well-formed and a late result replaces it in place. Mutating calls in
 //! one turn run serially; a rejection / timeout / unknown outcome halts the rest.
-//! The same exposure matrix ([`registry::exposed_specs`] /
+//! The same exposure matrix ([`registry::exposed_tools`] /
 //! [`registry::lookup_exposed`]) both advertises tools to the model and validates
 //! a returned call, so a model can never invoke a tool it was not shown.
 //!
@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 
 use crate::chat::{ChatMessage, ModelTurnError, TurnDisposition, classify_model_turn};
-use crate::registry::{RegisteredTool, ToolEffect, exposed_specs, lookup_exposed};
+use crate::registry::{RegisteredTool, ToolEffect, exposed_tools, lookup_exposed};
 use crate::seam::{
     ClaimError, ClaimTurnParams, ExecContext, ExecOutcome, ModelRequest, ModelSeam, SessionSeam,
     ToolSeam, TurnSink, WaitOutcome,
@@ -212,12 +212,16 @@ async fn run_inner(
             return Ok(LoopOutcome::CircuitBreak(CircuitBreakReason::StepBudget));
         }
 
-        let specs = exposed_specs(
+        let exposed = exposed_tools(
             deps.registry,
             &session.scope_snapshot,
             &session.execution_state,
             session.trigger_origin,
         );
+        let tool_requirements = crate::model_capability::ModelRequirements::for_registered_tools(
+            exposed.iter().copied(),
+        );
+        let specs = exposed.iter().map(|tool| tool.spec.clone()).collect();
         // Assemble the model request: a freshly built system prompt prepended to a
         // trailing, budget-trimmed window of the stored conversation. The system
         // prompt is never persisted, so it is added here on every call.
@@ -236,6 +240,7 @@ async fn run_inner(
         let request = ModelRequest {
             messages,
             tools: specs,
+            tool_requirements,
             tool_choice: crate::chat::ToolChoice::Auto,
             response_format: deps.response_format.clone(),
             max_output_tokens: None,

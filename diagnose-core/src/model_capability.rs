@@ -26,6 +26,21 @@ impl ModelRequirements {
                 .any(|message| message.image_data_url.is_some()),
         }
     }
+
+    /// Derive requirements from server-authoritative registered-tool metadata.
+    /// This deliberately uses the required capability rather than a model-facing
+    /// tool name, so renaming a tool cannot silently remove its image gate.
+    pub fn for_registered_tools<'a>(tools: impl IntoIterator<Item = &'a RegisteredTool>) -> Self {
+        Self {
+            image_input: tools.into_iter().any(tool_requires_image_input),
+        }
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            image_input: self.image_input || other.image_input,
+        }
+    }
 }
 
 impl ModelCapabilities {
@@ -43,11 +58,13 @@ pub fn filter_model_compatible_tools(
 ) -> Vec<RegisteredTool> {
     registry
         .iter()
-        .filter(|tool| {
-            capabilities.image_input || tool.required_capability != Capability::ScreenCaptureCurrent
-        })
+        .filter(|tool| capabilities.image_input || !tool_requires_image_input(tool))
         .cloned()
         .collect()
+}
+
+fn tool_requires_image_input(tool: &RegisteredTool) -> bool {
+    tool.required_capability == Capability::ScreenCaptureCurrent
 }
 
 #[cfg(test)]
@@ -94,6 +111,20 @@ mod tests {
             filtered
                 .iter()
                 .any(|tool| tool.name() == "read_system_info")
+        );
+    }
+
+    #[test]
+    fn tool_requirements_follow_capability_not_tool_name() {
+        let mut screen = read_tool_registry()
+            .into_iter()
+            .find(|tool| tool.required_capability == Capability::ScreenCaptureCurrent)
+            .unwrap();
+        screen.spec.name = "renamed_screen_reader".into();
+
+        assert_eq!(
+            ModelRequirements::for_registered_tools([&screen]),
+            ModelRequirements::IMAGE_INPUT
         );
     }
 }
