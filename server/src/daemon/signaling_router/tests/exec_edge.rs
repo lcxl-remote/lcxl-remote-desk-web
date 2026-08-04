@@ -630,6 +630,31 @@ pub(super) fn agentic_owner_freeform_requires_explicit_owner_policy() {
     );
 }
 
+#[test]
+pub(super) fn agentic_owner_multiline_freeform_revalidates_at_the_edge() {
+    let input = agentic_input(
+        "$first = Get-Process\r\n$first | Select-Object -First 5",
+        None,
+        0,
+    );
+    let plan = owner_agentic_plan_from_input(&input, "a-owner-multiline");
+    assert_eq!(
+        plan.execution_basis,
+        desk_agent_protocol::exec::ExecExecutionBasis::OwnerBlocklistOnly
+    );
+    assert_eq!(
+        validate_agentic_edge_exec(
+            &plan,
+            &input,
+            desk_agent_protocol::authz::ExecAdmissionPolicy::OwnerInteractive,
+            desk_agent_protocol::RiskLevel::Critical,
+            &[],
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
+        ),
+        None
+    );
+}
+
 #[tokio::test]
 pub(super) async fn agentic_owner_freeform_is_rejected_when_local_mode_tightens() {
     let (mut ctx, mut rx) = make_ctx_with_rx().await;
