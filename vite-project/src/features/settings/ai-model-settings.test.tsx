@@ -106,6 +106,17 @@ describe("AiModelSettings", () => {
         expect(lastProviderPayload().max_same_tool_calls_per_turn).toBe(20)
     })
 
+    it("defaults a missing execution grant to confirm each action", async () => {
+        delete h.providerData.execution_mode
+        render(<AiModelSettings />)
+        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+
+        fireEvent.click(screen.getAllByText("Save Settings")[0])
+        await waitFor(() => expect(h.providerMutateAsync).toHaveBeenCalled())
+
+        expect(lastProviderPayload().execution_mode).toBe("confirm_each_action")
+    })
+
     it("accepts an 80-round limit", async () => {
         render(<AiModelSettings />)
         await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())

@@ -81,7 +81,7 @@ function ExecutionModeItems() {
 function normalizeExecutionMode(mode: string | undefined): (typeof EXECUTION_MODES)[number] {
     return EXECUTION_MODES.includes(mode as (typeof EXECUTION_MODES)[number])
         ? (mode as (typeof EXECUTION_MODES)[number])
-        : "suggest_only"
+        : "confirm_each_action"
 }
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -133,7 +133,7 @@ export function AiModelSettings() {
             supports_image_input: false,
             max_context_bytes: 0,
             response_format: "json_object",
-            execution_mode: "suggest_only",
+            execution_mode: "confirm_each_action",
             max_steps_per_turn: MAX_STEPS_DEFAULT,
             max_same_tool_calls_per_turn: SAME_TOOL_LIMIT_DEFAULT,
         },

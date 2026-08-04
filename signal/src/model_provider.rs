@@ -123,7 +123,10 @@ impl Default for ModelProviderConfig {
             api_key: None,
             max_context_bytes: None,
             response_format: ResponseFormatMode::default(),
-            execution_mode: ExecutionMode::default(),
+            // Grant confirmed execution centrally by default. The target edge's
+            // local AI policy remains an independent ceiling, and every command
+            // still requires the operator's one-shot approval.
+            execution_mode: ExecutionMode::ConfirmEachAction,
             max_same_tool_calls_per_turn: MAX_SAME_TOOL_CALLS_DEFAULT,
             max_steps_per_turn: MAX_STEPS_DEFAULT,
         }
@@ -511,7 +514,7 @@ mod tests {
         let db = memory_db().await;
         let cfg = load(&db).await.unwrap();
         assert!(!cfg.is_configured());
-        assert_eq!(cfg.execution_mode, ExecutionMode::SuggestOnly);
+        assert_eq!(cfg.execution_mode, ExecutionMode::ConfirmEachAction);
         assert_eq!(
             cfg.max_same_tool_calls_per_turn,
             MAX_SAME_TOOL_CALLS_DEFAULT

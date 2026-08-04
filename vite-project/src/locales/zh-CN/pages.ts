@@ -998,7 +998,7 @@ export default {
   'pages.layout.serviceBanner.installDialog.invalidPath': '安装路径包含禁止字符（双引号或控制字符）。',
 
   'pages.settings.category.general': '通用设置',
-  'pages.settings.category.signal': 'Signal 服务端设置',
+  'pages.settings.category.signal': '信令服务端设置',
   'pages.settings.category.desk': 'Desk 服务端设置',
   'pages.settings.backToOverview': '返回设置概览',
   'pages.system.settings.serviceManagement.title': 'Windows 服务',
@@ -1077,7 +1077,7 @@ export default {
   'pages.aiModel.settings.maxContextBytes': '最大上下文（字节）',
   'pages.aiModel.settings.maxContextBytes.description': '0 表示使用默认预算（128 KB）。',
   'pages.aiModel.settings.executionMode': '授予的执行模式',
-  'pages.aiModel.settings.executionMode.description': 'Signal 服务端允许 AI 行动的范围。每台 Desk 服务端会另行应用自己的本地上限。',
+  'pages.aiModel.settings.executionMode.description': '信令服务端允许 AI 行动的范围。每台 Desk 服务端会另行应用自己的本地上限。',
   'pages.aiModel.settings.maxStepsPerTurn': '单回合模型推理轮次上限',
   'pages.aiModel.settings.maxStepsPerTurn.description': '单个 AI 回合最多允许多少次模型响应。一次模型响应可以包含多个工具调用，最终答案也需要一个模型轮次。范围：{{min}}–{{max}}，默认：{{defaultValue}}；不得小于同一工具重复调用上限。',
   'pages.aiModel.settings.maxStepsPerTurn.notBelowSameTool': '模型推理轮次上限不能小于同一工具重复调用上限。',
