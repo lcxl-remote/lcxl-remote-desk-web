@@ -120,7 +120,6 @@ sea-orm = { version = "2.0.0-rc", features = [
     "runtime-tokio-rustls",
     "macros",
 ] }
-sea-orm-migration = "2.0.0-rc"
 
 rand = { version = "0.9", features = ["std"] }
 

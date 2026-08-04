@@ -29,7 +29,6 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true }
 sea-orm = { workspace = true }
-sea-orm-migration = { workspace = true }
 chrono = { workspace = true }
 rand = { workspace = true }
 

@@ -10,7 +10,6 @@ pub mod db;
 pub mod diagnose_orchestrator;
 pub mod entity;
 pub mod error;
-pub mod migration;
 pub mod model;
 pub mod model_dial;
 pub mod model_provider;

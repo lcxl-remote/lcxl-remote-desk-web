@@ -368,9 +368,9 @@ impl SignalAgentExecStore {
     }
 }
 
-/// Start the crash-replayable completion publisher after migrations have made the
-/// task table available. The database is authoritative; this loop is only a
-/// delivery worker and can restart freely.
+/// Start the crash-replayable completion publisher after schema initialization
+/// has made the task table available. The database is authoritative; this loop
+/// is only a delivery worker and can restart freely.
 pub fn start_completion_publisher(db: DatabaseConnection) {
     // The auto-follow-up model seam uses `awc` and is intentionally `!Send`;
     // portable Signal runs on Actix's local arbiter, so keep the publisher there.
@@ -394,14 +394,12 @@ mod tests {
     use desk_diagnose_core::seam::{ClaimTurnParams, SessionSeam};
     use desk_diagnose_core::session::{ExecutionState, TriggerOrigin, TurnState};
     use sea_orm::Database;
-    use sea_orm_migration::MigratorTrait;
 
     use super::*;
-    use crate::migration::Migrator;
 
     async fn store() -> SignalAgentExecStore {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
         SignalAgentExecStore::new(db)
     }
 
