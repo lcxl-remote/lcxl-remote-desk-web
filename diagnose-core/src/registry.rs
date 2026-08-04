@@ -108,19 +108,6 @@ pub fn exposed_tools<'a>(
         .collect()
 }
 
-/// The [`ToolSpec`]s to advertise to the model (the exposed tools' specs).
-pub fn exposed_specs(
-    registry: &[RegisteredTool],
-    scope: &AgentScope,
-    execution_state: &ExecutionState,
-    origin: TriggerOrigin,
-) -> Vec<ToolSpec> {
-    exposed_tools(registry, scope, execution_state, origin)
-        .into_iter()
-        .map(|t| t.spec.clone())
-        .collect()
-}
-
 /// Look up an exposed tool by the name the model used. Returns `None` if the name
 /// is unknown **or** the tool is not exposed under the current scope/state/origin —
 /// so a model that names a tool it was never shown is rejected uniformly.
