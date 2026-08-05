@@ -482,6 +482,35 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                             ...prev,
                             partialSummary: prev.partialSummary + (event.partial_summary ?? ''),
                         };
+                    case 'partial_committed': {
+                        const streamed = extractStreamingSummary(prev.partialSummary);
+                        return {
+                            ...prev,
+                            partialSummary: '',
+                            timeline: streamed
+                                ? [
+                                      ...prev.timeline,
+                                      {
+                                          kind: 'assistant' as const,
+                                          id: `assistant:${event.request_id}:${event.seq}`,
+                                          text: streamed,
+                                          provenance: null,
+                                      },
+                                  ]
+                                : prev.timeline,
+                        };
+                    }
+                    case 'retracted':
+                        activeRequestRef.current = null;
+                        return {
+                            ...prev,
+                            phase: 'error',
+                            partialSummary: '',
+                            error: event.error?.message ?? 'content retracted',
+                            errorCode: event.error?.error_code ?? null,
+                            retractionReason: event.retraction_reason ?? 'incomplete',
+                            pendingExec: null,
+                        };
                     case 'final':
                         activeRequestRef.current = null;
                         return {

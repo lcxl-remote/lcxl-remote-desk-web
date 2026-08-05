@@ -41,6 +41,8 @@ export type Diagnosis = {
 export type DiagnoseEventKind =
     | 'status'
     | 'partial'
+    | 'partial_committed'
+    | 'retracted'
     | 'final'
     | 'error'
     | 'turn_started'
@@ -56,6 +58,11 @@ export type AgentError = {
     /** Optional business code (a `DeskErrorCode`) the control end localizes. */
     error_code?: number | null;
 };
+export type StreamRetractionReason =
+    | 'policy_blocked'
+    | 'safe_redirect'
+    | 'safety_unavailable'
+    | 'incomplete';
 
 export type DiagnoseEvent = {
     request_id: string;
@@ -64,6 +71,8 @@ export type DiagnoseEvent = {
     status?: string | null;
     partial_summary?: string | null;
     final_result?: Diagnosis | null;
+    /** `retracted`: fixed local policy/unavailable message selector. */
+    retraction_reason?: StreamRetractionReason | null;
     error?: AgentError | null;
     /** `turn_started`: the id of the agentic turn that started. */
     turn_id?: string | null;
@@ -272,6 +281,8 @@ export type DiagnoseState = {
     turnId: string | null;
     /** Assistant messages and tool calls in their original order. */
     timeline: DiagnoseTimelineItem[];
+    /** Closed reason for a server-requested provisional-text retraction. */
+    retractionReason?: StreamRetractionReason | null;
     /**
      * Machine-readable AI marking for the current result / answer (Art.50(2)),
      * set on a `final` / `answer` frame. Null does not mean "not AI" — the

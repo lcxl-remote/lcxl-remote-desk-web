@@ -222,6 +222,62 @@ describe('useDeskDiagnose', () => {
         expect(result.current.state.partialSummary).toBe('A');
     });
 
+    it('commits reviewed text and retracts later provisional text', () => {
+        const { result, feed } = renderDiagnose();
+        act(() => result.current.start('why?', {}));
+
+        feed(
+            frame({
+                request_id: 'req-1',
+                seq: 0,
+                kind: 'partial',
+                partial_summary: 'reviewed answer',
+            }),
+        );
+        feed(frame({ request_id: 'req-1', seq: 1, kind: 'partial_committed' }));
+        expect(result.current.state.partialSummary).toBe('');
+        expect(result.current.state.timeline.at(-1)).toMatchObject({
+            kind: 'assistant',
+            text: 'reviewed answer',
+        });
+
+        feed(
+            frame({
+                request_id: 'req-1',
+                seq: 2,
+                kind: 'partial',
+                partial_summary: 'unsafe provisional text',
+            }),
+        );
+        feed(
+            frame({
+                request_id: 'req-1',
+                seq: 3,
+                kind: 'retracted',
+                retraction_reason: 'policy_blocked',
+                error: {
+                    kind: 'content_blocked',
+                    message: 'provider text must not be displayed',
+                    retryable: false,
+                    safe_for_model: true,
+                },
+            }),
+        );
+
+        expect(result.current.state.phase).toBe('error');
+        expect(result.current.state.partialSummary).toBe('');
+        expect(result.current.state.retractionReason).toBe('policy_blocked');
+        feed(
+            frame({
+                request_id: 'req-1',
+                seq: 4,
+                kind: 'partial',
+                partial_summary: 'late',
+            }),
+        );
+        expect(result.current.state.partialSummary).toBe('');
+    });
+
     it('an error frame moves to the error phase with the message', () => {
         const { result, feed } = renderDiagnose();
         act(() => result.current.start('why?', {}));

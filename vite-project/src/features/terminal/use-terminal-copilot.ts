@@ -44,7 +44,13 @@ export type CopilotHistoryTurn = {
     assistant: string;
 };
 
-export type TerminalCopilotEventKind = 'partial' | 'tool_started' | 'final' | 'error';
+export type TerminalCopilotEventKind =
+    | 'partial'
+    | 'partial_committed'
+    | 'retracted'
+    | 'tool_started'
+    | 'final'
+    | 'error';
 
 export type AgentError = {
     kind: string;
@@ -54,6 +60,12 @@ export type AgentError = {
     /** Optional business code (a `DeskErrorCode`) the control end localizes. */
     error_code?: number | null;
 };
+export type StreamRetractionReason =
+    | 'policy_blocked'
+    | 'safe_redirect'
+    | 'safety_unavailable'
+    | 'incomplete';
+
 
 export type TerminalCopilotEvent = {
     request_id: string;
@@ -63,6 +75,8 @@ export type TerminalCopilotEvent = {
     tool_name?: string | null;
     answer?: TerminalCopilotAnswer | null;
     error?: AgentError | null;
+    /** `retracted`: fixed local policy/unavailable message selector. */
+    retraction_reason?: StreamRetractionReason | null;
     /** `final`: machine-readable AI marking for the answer content frame. */
     provenance?: AiProvenance | null;
 };
@@ -118,22 +132,28 @@ export type CopilotState = {
     /** Accumulated streaming explanation fragments for the in-flight turn
      *  (provisional; the Final answer's `explanation_md` is authoritative). */
     partialText: string;
+    /** Reviewed prose committed by prior tool-calling steps in this turn. */
+    committedText: string;
     /** Read-only tools dispatched this run, in order. */
     tools: CopilotTool[];
     /** A human-readable failure message, set on the terminal `error` frame. */
     error: string | null;
     /** Optional business code from the error frame, localized by the panel. */
     errorCode: number | null;
+    /** Closed reason for a server-requested provisional-text retraction. */
+    retractionReason?: StreamRetractionReason | null;
 };
 
 const INITIAL_STATE: CopilotState = {
     phase: 'idle',
     requestId: null,
+    retractionReason: null,
     conversationId: null,
     mode: 'how_to',
     turns: [],
     partialText: '',
     tools: [],
+    committedText: '',
     error: null,
     errorCode: null,
 };
@@ -254,9 +274,11 @@ export function useTerminalCopilot({
                     { question, mode: input.mode, answer: null, provenance: null },
                 ],
                 partialText: '',
+                committedText: '',
                 tools: [],
                 error: null,
                 errorCode: null,
+                retractionReason: null,
             }));
         },
         [connectionId, sendMessage, i18n],
@@ -298,6 +320,22 @@ export function useTerminalCopilot({
                             ...prev,
                             partialText: prev.partialText + (event.partial_text ?? ''),
                         };
+                    case 'partial_committed':
+                        return {
+                            ...prev,
+                            committedText: prev.committedText + prev.partialText,
+                            partialText: '',
+                        };
+                    case 'retracted':
+                        activeRequestRef.current = null;
+                        return {
+                            ...prev,
+                            phase: 'error',
+                            partialText: '',
+                            error: event.error?.message ?? 'content retracted',
+                            errorCode: event.error?.error_code ?? null,
+                            retractionReason: event.retraction_reason ?? 'incomplete',
+                        };
                     case 'tool_started':
                         return {
                             ...prev,
@@ -315,7 +353,14 @@ export function useTerminalCopilot({
                                 provenance: event.provenance ?? null,
                             };
                         }
-                        return { ...prev, phase: 'done', partialText: '', turns };
+                        return {
+                            ...prev,
+                            phase: 'done',
+                            partialText: '',
+                            committedText: '',
+                            retractionReason: null,
+                            turns,
+                        };
                     }
                     case 'error':
                         activeRequestRef.current = null;
@@ -325,6 +370,7 @@ export function useTerminalCopilot({
                             ...prev,
                             phase: 'error',
                             error: event.error?.message ?? 'copilot failed',
+                            retractionReason: null,
                             errorCode: event.error?.error_code ?? null,
                         };
                     default:

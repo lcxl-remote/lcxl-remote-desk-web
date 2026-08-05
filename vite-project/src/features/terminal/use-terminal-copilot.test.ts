@@ -136,6 +136,60 @@ describe('useTerminalCopilot', () => {
         expect(result.current.state.partialText).toBe('first second');
     });
 
+    it('keeps reviewed text visible and retracts unsafe provisional text', () => {
+        const { result, feed } = renderCopilot();
+        act(() => result.current.ask({ mode: 'how_to', question: 'q', context: ctx }));
+
+        feed(
+            eventFrame({
+                request_id: 'req-1',
+                seq: 0,
+                kind: 'partial',
+                partial_text: 'reviewed ',
+            }),
+        );
+        feed(eventFrame({ request_id: 'req-1', seq: 1, kind: 'partial_committed' }));
+        expect(result.current.state.partialText).toBe('');
+        expect(result.current.state.committedText).toBe('reviewed ');
+
+        feed(
+            eventFrame({
+                request_id: 'req-1',
+                seq: 2,
+                kind: 'partial',
+                partial_text: 'unsafe',
+            }),
+        );
+        feed(
+            eventFrame({
+                request_id: 'req-1',
+                seq: 3,
+                kind: 'retracted',
+                retraction_reason: 'safe_redirect',
+                error: {
+                    kind: 'content_blocked',
+                    message: 'provider text must not be displayed',
+                    retryable: false,
+                    safe_for_model: true,
+                },
+            }),
+        );
+
+        expect(result.current.state.phase).toBe('error');
+        expect(result.current.state.partialText).toBe('');
+        expect(result.current.state.committedText).toBe('reviewed ');
+        expect(result.current.state.retractionReason).toBe('safe_redirect');
+        feed(
+            eventFrame({
+                request_id: 'req-1',
+                seq: 4,
+                kind: 'partial',
+                partial_text: 'late',
+            }),
+        );
+        expect(result.current.state.partialText).toBe('');
+    });
+
     it('drops frames whose request_id does not match the active ask', () => {
         const { result, feed } = renderCopilot();
         act(() => result.current.ask({ mode: 'how_to', question: 'q', context: ctx }));

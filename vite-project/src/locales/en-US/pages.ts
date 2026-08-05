@@ -863,6 +863,10 @@ export default {
     'The selected AI model does not support screenshot input. Choose a model with image input enabled, or turn off the screenshot option.',
   'pages.agentError.aiContentBlocked':
     'This request cannot be processed under the content safety policy.',
+  'pages.agentError.aiContentSafeRedirect':
+    'I cannot help with self-harm instructions. If you may be in immediate danger, contact local emergency services or a trusted person now.',
+  'pages.agentError.aiContentIncomplete':
+    'The provisional AI response was withdrawn before it could be reviewed. Please try again.',
   'pages.agentError.aiContentSafetyUnavailable':
     'Content safety review is temporarily unavailable, so this AI request was stopped. Please try again.',
   'pages.agentError.aiContentSafetyImageUnsupported':

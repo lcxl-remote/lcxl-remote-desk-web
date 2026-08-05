@@ -47,3 +47,24 @@ export function agentErrorMessage(
 ): string {
     return deskErrorMessage(t, CODE_TO_KEY, code, message, fallback);
 }
+
+export type ContentRetractionReason =
+    | 'policy_blocked'
+    | 'safe_redirect'
+    | 'safety_unavailable'
+    | 'incomplete';
+
+const RETRACTION_KEY: Record<ContentRetractionReason, string> = {
+    policy_blocked: 'pages.agentError.aiContentBlocked',
+    safe_redirect: 'pages.agentError.aiContentSafeRedirect',
+    safety_unavailable: 'pages.agentError.aiContentSafetyUnavailable',
+    incomplete: 'pages.agentError.aiContentIncomplete',
+};
+
+/** Select fixed local text from a closed retraction reason; never show provider prose. */
+export function contentRetractionMessage(
+    t: TFunction,
+    reason: ContentRetractionReason,
+): string {
+    return t(RETRACTION_KEY[reason]);
+}

@@ -853,6 +853,10 @@ export default {
   'pages.agentError.aiModelImageInputUnsupported':
     '当前选择的 AI 模型不支持截图输入。请选择已启用图片输入能力的模型，或关闭截图选项。',
   'pages.agentError.aiContentBlocked': '此请求因内容安全策略无法处理。',
+  'pages.agentError.aiContentSafeRedirect':
+    '我无法协助提供自残方法。如果你可能正处于紧急危险中，请立即联系当地紧急服务或你信任的人。',
+  'pages.agentError.aiContentIncomplete':
+    '临时 AI 响应在完成审核前已撤销，请重试。',
   'pages.agentError.aiContentSafetyUnavailable':
     '内容安全审核暂时不可用，因此本次 AI 请求已停止，请稍后重试。',
   'pages.agentError.aiContentSafetyImageUnsupported':

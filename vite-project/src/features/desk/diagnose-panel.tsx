@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { AiGeneratedMark } from "@/components/ai-generated-mark"
 import { MarkdownContent } from "@/components/markdown-content"
-import { agentErrorMessage } from "@/lib/agent-error-i18n"
+import { agentErrorMessage, contentRetractionMessage } from "@/lib/agent-error-i18n"
 import {
     extractStreamingSummary,
     type DiagnoseState,
@@ -407,12 +407,14 @@ export function DiagnosePanel({
                         <div className="flex items-start gap-2 text-sm text-red-300">
                             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                             <span>
-                                {agentErrorMessage(
-                                    t,
-                                    state.errorCode,
-                                    state.error,
-                                    state.error ?? "",
-                                )}
+                                {state.retractionReason
+                                    ? contentRetractionMessage(t, state.retractionReason)
+                                    : agentErrorMessage(
+                                          t,
+                                          state.errorCode,
+                                          state.error,
+                                          state.error ?? "",
+                                      )}
                             </span>
                         </div>
                         {/* A failed turn is settled, so a follow-up may continue the

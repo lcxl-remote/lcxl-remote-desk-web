@@ -14,7 +14,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { AiGeneratedMark } from '@/components/ai-generated-mark';
-import { agentErrorMessage } from '@/lib/agent-error-i18n';
+import { agentErrorMessage, contentRetractionMessage } from '@/lib/agent-error-i18n';
 import type {
     CommandSuggestion,
     CopilotState,
@@ -216,6 +216,8 @@ export function TerminalCopilotPanel({
     const [modelId, setModelId] = useState<number | null>(null);
 
     const running = state.phase === 'running';
+    const streamedText =
+        state.committedText + (running ? state.partialText : '');
 
     // The conversation scrolls above a bottom-pinned composer; keep the newest
     // turn (and streaming text) in view as it grows, mirroring a chat log.
@@ -223,7 +225,7 @@ export function TerminalCopilotPanel({
     useEffect(() => {
         const log = logRef.current;
         if (log) log.scrollTop = log.scrollHeight;
-    }, [state.turns, state.partialText, state.phase]);
+    }, [state.turns, state.committedText, state.partialText, state.phase]);
 
     const submit = () => {
         if (running) return;
@@ -312,7 +314,7 @@ export function TerminalCopilotPanel({
                                             </div>
                                         )}
 
-                                        {running && state.partialText && (
+                                        {(running || state.phase === 'error') && streamedText && (
                                             <div className="space-y-2">
                                                 {/* AI-generated marking (Art.50(2)) for the
                                                     streaming answer, shown as soon as text is
@@ -322,13 +324,13 @@ export function TerminalCopilotPanel({
                                                     model is not yet known mid-stream. */}
                                                 <AiGeneratedMark />
                                                 <p className="whitespace-pre-wrap text-sm text-muted-foreground">
-                                                    {state.partialText}
+                                                    {streamedText}
                                                 </p>
                                             </div>
                                         )}
 
                                         {running &&
-                                            !state.partialText &&
+                                            !streamedText &&
                                             state.tools.length === 0 && (
                                                 <div className="flex items-center gap-1 text-xs text-muted-foreground">
                                                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -340,12 +342,14 @@ export function TerminalCopilotPanel({
                                             <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-300">
                                                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                                                 <span>
-                                                    {agentErrorMessage(
-                                                        t,
-                                                        state.errorCode,
-                                                        state.error,
-                                                        t('pages.deskTerminal.copilot.error'),
-                                                    )}
+                                                    {state.retractionReason
+                                                        ? contentRetractionMessage(t, state.retractionReason)
+                                                        : agentErrorMessage(
+                                                              t,
+                                                              state.errorCode,
+                                                              state.error,
+                                                              t('pages.deskTerminal.copilot.error'),
+                                                          )}
                                                 </span>
                                             </div>
                                         )}
