@@ -21,9 +21,84 @@ use crate::model::info::{
 #[cfg(target_os = "linux")]
 use desk_capture_engine::image_capture::portal_client::probe_screencast_monitor;
 #[cfg(target_os = "linux")]
-use desk_input_injection::service::wayland_remote_desktop::WaylandRemoteDesktop;
+use desk_input_injection::{
+    error::InputError, service::wayland_remote_desktop::WaylandRemoteDesktop,
+};
 #[cfg(target_os = "linux")]
 use desk_utils::linux_display::{LinuxDisplayServer, detect_linux_display_environment};
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinuxInputControlMode {
+    Auto,
+    None,
+    Uinput,
+    Portal,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxInputControlMode {
+    fn from_configured(value: Option<&str>) -> Self {
+        match value.unwrap_or("auto") {
+            "none" => Self::None,
+            "uinput" => Self::Uinput,
+            "portal" => Self::Portal,
+            _ => Self::Auto,
+        }
+    }
+
+    const fn resolved(self, active_server: LinuxDisplayServer) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Uinput => "uinput",
+            Self::Portal => "portal",
+            Self::Auto if matches!(active_server, LinuxDisplayServer::Wayland) => "portal(auto)",
+            Self::Auto => "uinput(auto)",
+        }
+    }
+
+    const fn requires_portal_probe(self, active_server: LinuxDisplayServer) -> bool {
+        matches!(self, Self::Portal)
+            || (matches!(self, Self::Auto) && matches!(active_server, LinuxDisplayServer::Wayland))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn remote_desktop_diagnostic(
+    probe: Option<Result<u32, InputError>>,
+    automatic: bool,
+) -> (String, BackendDiagnosticStatus, Option<String>) {
+    let (ready_value, error_value, error_status) = if automatic {
+        (
+            "ready(portal-auto)",
+            "fallback(uinput-auto)",
+            BackendDiagnosticStatus::Warning,
+        )
+    } else {
+        (
+            "ready(portal)",
+            "error(portal)",
+            BackendDiagnosticStatus::Error,
+        )
+    };
+    match probe {
+        Some(Ok(device_types)) => (
+            ready_value.to_string(),
+            BackendDiagnosticStatus::Ready,
+            Some(format!("AvailableDeviceTypes={device_types}")),
+        ),
+        Some(Err(error)) => (
+            error_value.to_string(),
+            error_status,
+            Some(error.to_string()),
+        ),
+        None => (
+            error_value.to_string(),
+            error_status,
+            Some("RemoteDesktop Portal probe was not executed".to_string()),
+        ),
+    }
+}
 
 pub const TAG: &str = "System";
 
@@ -255,65 +330,40 @@ pub async fn query_backend_info(
     #[cfg(target_os = "linux")]
     {
         let environment = detect_linux_display_environment();
-        let mode = desk_settings
-            .wayland_control_mode
-            .as_deref()
-            .unwrap_or("auto");
-        backend_info.resolved_input_control = match mode {
-            "none" => "none".to_string(),
-            "uinput" => "uinput".to_string(),
-            "portal" => "portal".to_string(),
-            _ if environment.active_server() == LinuxDisplayServer::Wayland => {
-                "portal(auto)".to_string()
-            }
-            _ => "uinput(auto)".to_string(),
-        };
-
-        let remote_desktop_probe = if matches!(mode, "portal")
-            || (mode == "auto" && environment.active_server() == LinuxDisplayServer::Wayland)
+        let configured_mode = desk_settings.wayland_control_mode.as_deref();
+        let mode = LinuxInputControlMode::from_configured(configured_mode);
+        if configured_mode
+            .is_some_and(|value| !matches!(value, "auto" | "none" | "uinput" | "portal"))
         {
-            WaylandRemoteDesktop::probe_portal(std::time::Duration::from_secs(3)).await
+            log::warn!(
+                "Unknown wayland_control_mode {:?}; treating it as auto",
+                configured_mode
+            );
+        }
+        let active_server = environment.active_server();
+        backend_info.resolved_input_control = mode.resolved(active_server).to_string();
+
+        let remote_desktop_probe = if mode.requires_portal_probe(active_server) {
+            Some(WaylandRemoteDesktop::probe_portal(std::time::Duration::from_secs(3)).await)
         } else {
-            Ok(0)
+            None
         };
         let (input_value, input_status, input_detail) = match mode {
-            "none" => (
+            LinuxInputControlMode::None => (
                 "disabled".to_string(),
                 BackendDiagnosticStatus::Warning,
                 None,
             ),
-            "uinput" => (
+            LinuxInputControlMode::Uinput => (
                 "ready(uinput)".to_string(),
                 BackendDiagnosticStatus::Ready,
                 None,
             ),
-            "portal" => match remote_desktop_probe {
-                Ok(device_types) => (
-                    "ready(portal)".to_string(),
-                    BackendDiagnosticStatus::Ready,
-                    Some(format!("AvailableDeviceTypes={device_types}")),
-                ),
-                Err(error) => (
-                    "error(portal)".to_string(),
-                    BackendDiagnosticStatus::Error,
-                    Some(error.to_string()),
-                ),
-            },
-            _ if environment.active_server() == LinuxDisplayServer::Wayland => {
-                match remote_desktop_probe {
-                    Ok(device_types) => (
-                        "ready(portal-auto)".to_string(),
-                        BackendDiagnosticStatus::Ready,
-                        Some(format!("AvailableDeviceTypes={device_types}")),
-                    ),
-                    Err(error) => (
-                        "fallback(uinput-auto)".to_string(),
-                        BackendDiagnosticStatus::Warning,
-                        Some(error.to_string()),
-                    ),
-                }
+            LinuxInputControlMode::Portal => remote_desktop_diagnostic(remote_desktop_probe, false),
+            LinuxInputControlMode::Auto if matches!(active_server, LinuxDisplayServer::Wayland) => {
+                remote_desktop_diagnostic(remote_desktop_probe, true)
             }
-            _ => (
+            LinuxInputControlMode::Auto => (
                 "ready(uinput-auto)".to_string(),
                 BackendDiagnosticStatus::Ready,
                 None,
@@ -385,6 +435,52 @@ mod tests {
     use super::*;
     use crate::model::settings::Settings;
     use actix_web::{App, test};
+
+    #[cfg(target_os = "linux")]
+    #[actix_web::test]
+    async fn linux_input_control_mode_normalizes_unknown_values_to_auto() {
+        assert_eq!(
+            LinuxInputControlMode::from_configured(None),
+            LinuxInputControlMode::Auto
+        );
+        assert_eq!(
+            LinuxInputControlMode::from_configured(Some("auto")),
+            LinuxInputControlMode::Auto
+        );
+        assert_eq!(
+            LinuxInputControlMode::from_configured(Some("future-value")),
+            LinuxInputControlMode::Auto
+        );
+        assert_eq!(
+            LinuxInputControlMode::from_configured(Some("portal")),
+            LinuxInputControlMode::Portal
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[actix_web::test]
+    async fn normalized_auto_mode_probes_portal_only_in_wayland_sessions() {
+        let mode = LinuxInputControlMode::from_configured(Some("unknown"));
+        assert_eq!(mode.resolved(LinuxDisplayServer::Wayland), "portal(auto)");
+        assert!(mode.requires_portal_probe(LinuxDisplayServer::Wayland));
+        assert_eq!(mode.resolved(LinuxDisplayServer::X11), "uinput(auto)");
+        assert!(!mode.requires_portal_probe(LinuxDisplayServer::X11));
+        assert!(!mode.requires_portal_probe(LinuxDisplayServer::Headless));
+        assert!(LinuxInputControlMode::Portal.requires_portal_probe(LinuxDisplayServer::Headless));
+        assert!(!LinuxInputControlMode::None.requires_portal_probe(LinuxDisplayServer::Wayland));
+        assert!(!LinuxInputControlMode::Uinput.requires_portal_probe(LinuxDisplayServer::Wayland));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[actix_web::test]
+    async fn missing_portal_probe_never_reports_ready_or_zero_device_types() {
+        let (value, status, detail) = remote_desktop_diagnostic(None, true);
+        assert_eq!(value, "fallback(uinput-auto)");
+        assert_eq!(status, BackendDiagnosticStatus::Warning);
+        let detail = detail.expect("missing probe must explain the fallback");
+        assert!(detail.contains("not executed"));
+        assert!(!detail.contains("AvailableDeviceTypes=0"));
+    }
 
     #[actix_web::test]
     async fn test_query_sysinfo() {
