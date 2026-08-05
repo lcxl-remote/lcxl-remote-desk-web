@@ -263,6 +263,7 @@ fn deps<'a>(
         session_seam: sess,
         model,
         tools,
+        content_safety: crate::content_safety::ContentSafetyMode::Disabled,
         registry,
         response_format: ResponseFormatSpec::None,
         system_prompt: build_agentic_system_message(None),

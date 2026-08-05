@@ -13,6 +13,7 @@
 //! accidentally require `Send`.
 
 use async_trait::async_trait;
+use desk_agent_protocol::content_safety::StreamRetractionReason;
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope};
 
 use crate::chat::{ChatMessage, ModelTurn, ToolCall, ToolChoice, ToolSpec};
@@ -69,13 +70,13 @@ impl ModelRequest {
 /// happen, so a runtime can forward them to the UI (the manager maps these onto
 /// `DiagnoseEvent` tool/turn frames; the Direct runtime onto its own stream).
 ///
-/// Text deltas are **provisional** until the turn's [`StopReason`] is known: the
-/// loop commits them only on a final answer (via [`on_answer_committed`]) and
-/// signals [`on_turn_discarded`] on a truncated turn, so intermediate
-/// tool-calling turns never leak half-text to the UI. The tool hooks bracket each
-/// dispatched tool call (a read tool, or a mutating tool's approval wait), letting
-/// the UI show progress without parsing the conversation. All hooks but
-/// [`on_text_delta`] default to no-ops so an existing text-only sink keeps working.
+/// Text deltas are **provisional**. In enforced mode an allowed intermediate
+/// tool-calling turn commits its prose with [`on_partial_committed`] before any
+/// tool lifecycle event; a rejected, unavailable, truncated, or otherwise failed
+/// turn uses [`on_turn_retracted`] so the UI can atomically clear uncommitted text.
+/// A final answer commits through [`on_answer_committed`]. Disabled runtimes keep
+/// the legacy callbacks and never emit safety-specific frames. All hooks but
+/// [`on_text_delta`] default to no-ops.
 /// Object-safe so a `&mut dyn TurnSink` can be passed across the seam.
 ///
 /// [`StopReason`]: crate::chat::StopReason
@@ -86,6 +87,18 @@ pub trait TurnSink {
     /// An incremental fragment of the assistant's text for the current turn
     /// (provisional until the turn commits).
     fn on_text_delta(&mut self, delta: &str);
+
+    /// Commit provisional prose from an allowed intermediate tool-calling turn.
+    /// Enforced loops invoke this only after the assistant tool-call message has
+    /// been persisted and before any tool or approval lifecycle event.
+    fn on_partial_committed(&mut self) {}
+
+    /// Retract provisional prose without repeating it. `error` is a fixed typed
+    /// error for policy/unavailable cases and is absent for incomplete turns whose
+    /// ordinary terminal error is selected by the runtime.
+    fn on_turn_retracted(&mut self, reason: StreamRetractionReason, error: Option<AgentError>) {
+        let _ = (reason, error);
+    }
 
     /// A read tool call was dispatched (about to run).
     fn on_tool_started(&mut self, tool_name: &str, call_id: &str, arguments_json: &str) {

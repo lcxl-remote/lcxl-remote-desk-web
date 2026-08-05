@@ -51,6 +51,18 @@ pub struct SafetyImage {
 
 pub type SafetyVerdict = ContentSafetyVerdict;
 
+/// Immutable content-safety snapshot frozen before a protected turn is claimed.
+/// The manager resolves these fields once; the shared loop never reselects a
+/// model or revision while the turn is running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafetyContext {
+    pub surface: ContentSafetySurface,
+    pub original_allowed_intent: String,
+    pub policy_revision: u64,
+    pub safety_model_id: String,
+    pub safety_prompt_version: String,
+}
+
 /// Classifies content without owning provider, persistence, or governance state.
 #[async_trait(?Send)]
 pub trait ContentSafetySeam {
@@ -134,4 +146,31 @@ mod tests {
             Some(DeskErrorCode::AI_CONTENT_BLOCKED.code())
         );
     }
+}
+
+/// Closed runtime mode. OSS signal and an explicitly disabled manager pass
+/// `Disabled`; a protected manager turn must carry the complete frozen seam and
+/// context and cannot silently degrade to a no-op implementation.
+pub enum ContentSafetyMode<'a> {
+    Disabled,
+    Enforced {
+        seam: &'a dyn ContentSafetySeam,
+        context: SafetyContext,
+    },
+}
+
+impl ContentSafetyMode<'_> {
+    pub const fn is_enforced(&self) -> bool {
+        matches!(self, Self::Enforced { .. })
+    }
+}
+
+/// Collapse arbitrary seam failures to fixed, non-provider-controlled wire
+/// errors. The image-capability code remains distinct; all other details are
+/// deliberately discarded.
+pub fn normalize_safety_error(error: &AgentError) -> AgentError {
+    if error.error_code == Some(DeskErrorCode::AI_CONTENT_SAFETY_IMAGE_UNSUPPORTED.code()) {
+        return content_safety_image_unsupported();
+    }
+    content_safety_unavailable()
 }

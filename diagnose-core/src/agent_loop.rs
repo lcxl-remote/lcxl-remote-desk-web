@@ -24,8 +24,13 @@
 //! [`MAX_STEPS_PER_TURN`]: crate::MAX_STEPS_PER_TURN
 //! [`MAX_SAME_TOOL_PER_TURN`]: crate::MAX_SAME_TOOL_PER_TURN
 
+use desk_agent_protocol::content_safety::{ContentSafetyDecision, StreamRetractionReason};
 use std::collections::{HashMap, HashSet};
 
+use crate::content_safety::{
+    ContentSafetyMode, SafetyImage, SafetyModelTurn, SafetyToolCall, content_blocked_error,
+    normalize_safety_error, refusal_placeholder_for,
+};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 
 use crate::chat::{ChatMessage, ModelTurnError, TurnDisposition, classify_model_turn};
@@ -73,6 +78,11 @@ pub enum CircuitBreakReason {
 pub enum LoopOutcome {
     /// The model produced a final text answer.
     Answered(String),
+    /// A complete model turn or image was rejected by application policy.
+    ContentRejected(ContentSafetyDecision),
+    /// The required safety dependency did not produce a trustworthy verdict.
+    /// This is a retryable failed turn, distinct from a policy rejection.
+    ContentSafetyUnavailable(AgentError),
     /// The model turn was truncated (`MaxTokens` / `Other`) and discarded.
     Truncated,
     /// A circuit breaker stopped the turn.
@@ -90,6 +100,10 @@ pub struct LoopDeps<'a> {
     pub session_seam: &'a dyn SessionSeam,
     pub model: &'a dyn ModelSeam,
     pub tools: &'a dyn ToolSeam,
+    /// Closed safety mode for this turn. OSS must pass `Disabled`; protected
+    /// manager callers freeze a complete `Enforced` context before claiming.
+    pub content_safety: ContentSafetyMode<'a>,
+
     pub registry: &'a [RegisteredTool],
     pub response_format: crate::prompt::ResponseFormatSpec,
     /// The system message prepended to the (trimmed) conversation on every model
@@ -175,10 +189,18 @@ async fn run_or_resume(
 
     // Run the loop; whatever happens, settle the turn machine and persist once.
     let result = run_inner(deps, &mut session, &turn_id, sink).await;
+    if result.is_err() && deps.content_safety.is_enforced() {
+        // The provider/session error is intentionally not copied into a retraction
+        // frame. The closed `Incomplete` reason selects local UI text without
+        // exposing arbitrary backend detail.
+        sink.on_turn_retracted(StreamRetractionReason::Incomplete, None);
+    }
     let terminal = match &result {
-        Ok(LoopOutcome::ProtocolError(_)) | Err(_) => TurnState::Failed,
-        // Answered / Truncated / CircuitBreak return to Idle so a follow-up turn
-        // can be claimed; Busy / SubjectRejected never claimed a turn here.
+        Ok(LoopOutcome::ProtocolError(_))
+        | Ok(LoopOutcome::ContentSafetyUnavailable(_))
+        | Err(_) => TurnState::Failed,
+        // Policy rejection is a settled Idle turn. Answered / Truncated /
+        // CircuitBreak also return to Idle so a follow-up can be claimed.
         _ => TurnState::Idle,
     };
     session.finish_turn(terminal, (deps.clock)());
@@ -189,6 +211,93 @@ async fn run_or_resume(
         (Ok(outcome), Ok(())) => Ok(outcome),
         (Ok(_), Err(e)) => Err(e),
         (Err(e), _) => Err(e),
+    }
+}
+fn canonical_arguments_json(raw: &str) -> String {
+    let value: serde_json::Value =
+        serde_json::from_str(raw).expect("classify_model_turn validated tool arguments");
+    serde_json::to_string(&value).expect("JSON values are serializable")
+}
+
+fn safety_tool_calls(deps: &LoopDeps<'_>, turn: &crate::chat::ModelTurn) -> Vec<SafetyToolCall> {
+    turn.tool_calls
+        .iter()
+        .map(|call| {
+            let effect = deps
+                .registry
+                .iter()
+                .find(|tool| tool.name() == call.name)
+                .map(|tool| tool.effect)
+                // Unknown tools are never executed; classifying them as mutating is
+                // the conservative server-authoritative fallback.
+                .unwrap_or(ToolEffect::Mutating);
+            SafetyToolCall {
+                name: call.name.clone(),
+                effect,
+                canonical_arguments_json: canonical_arguments_json(&call.arguments_json),
+            }
+        })
+        .collect()
+}
+
+async fn review_model_turn(
+    deps: &LoopDeps<'_>,
+    turn: &crate::chat::ModelTurn,
+) -> Result<ContentSafetyDecision, AgentError> {
+    match &deps.content_safety {
+        ContentSafetyMode::Disabled => Ok(ContentSafetyDecision::Allow),
+        ContentSafetyMode::Enforced { seam, context } => seam
+            .check_model_turn(SafetyModelTurn {
+                surface: context.surface,
+                text: turn.text.clone(),
+                tool_calls: safety_tool_calls(deps, turn),
+                original_allowed_intent: context.original_allowed_intent.clone(),
+            })
+            .await
+            .map(|verdict| verdict.decision)
+            .map_err(|error| normalize_safety_error(&error)),
+    }
+}
+
+async fn review_image(
+    deps: &LoopDeps<'_>,
+    image_data_url: &str,
+    mime_type: &str,
+) -> Result<ContentSafetyDecision, AgentError> {
+    match &deps.content_safety {
+        ContentSafetyMode::Disabled => Ok(ContentSafetyDecision::Allow),
+        ContentSafetyMode::Enforced { seam, context } => seam
+            .check_image(SafetyImage {
+                surface: context.surface,
+                image_data_url: image_data_url.to_string(),
+                mime_type: mime_type.to_string(),
+                original_allowed_intent: context.original_allowed_intent.clone(),
+            })
+            .await
+            .map(|verdict| verdict.decision)
+            .map_err(|error| normalize_safety_error(&error)),
+    }
+}
+
+const fn retraction_reason(decision: ContentSafetyDecision) -> StreamRetractionReason {
+    match decision {
+        ContentSafetyDecision::Block => StreamRetractionReason::PolicyBlocked,
+        ContentSafetyDecision::SafeRedirect => StreamRetractionReason::SafeRedirect,
+        ContentSafetyDecision::Allow => StreamRetractionReason::Incomplete,
+    }
+}
+
+fn append_refusal_placeholder<F: FnMut() -> String>(
+    session: &mut crate::session::PersistedAgentSession,
+    mint: &mut F,
+    decision: ContentSafetyDecision,
+) {
+    if let Some(text) = refusal_placeholder_for(decision) {
+        session.conversation.push(ChatMessage::text(
+            mint(),
+            crate::chat::ChatRole::Assistant,
+            text,
+        ));
     }
 }
 
@@ -249,9 +358,47 @@ async fn run_inner(
         let turn = deps.model.call(request, sink).await?;
         session.record_step(turn.usage);
 
-        match classify_model_turn(&turn) {
-            Err(e) => return Ok(LoopOutcome::ProtocolError(e)),
-            Ok(TurnDisposition::Answer) => {
+        let disposition = match classify_model_turn(&turn) {
+            Ok(disposition) => disposition,
+            Err(error) => {
+                if deps.content_safety.is_enforced() {
+                    sink.on_turn_retracted(StreamRetractionReason::Incomplete, None);
+                }
+                return Ok(LoopOutcome::ProtocolError(error));
+            }
+        };
+        if disposition == TurnDisposition::Discard {
+            if deps.content_safety.is_enforced() {
+                sink.on_turn_retracted(StreamRetractionReason::Incomplete, None);
+            } else {
+                sink.on_turn_discarded();
+            }
+            return Ok(LoopOutcome::Truncated);
+        }
+
+        let safety_decision = match review_model_turn(deps, &turn).await {
+            Ok(decision) => decision,
+            Err(error) => {
+                sink.on_turn_retracted(
+                    StreamRetractionReason::SafetyUnavailable,
+                    Some(error.clone()),
+                );
+                return Ok(LoopOutcome::ContentSafetyUnavailable(error));
+            }
+        };
+        if safety_decision != ContentSafetyDecision::Allow {
+            append_refusal_placeholder(session, &mut mint, safety_decision);
+            session.clear_reacted_auto_triggers(&request_message_ids);
+            deps.session_seam.save(session).await?;
+            sink.on_turn_retracted(
+                retraction_reason(safety_decision),
+                Some(content_blocked_error()),
+            );
+            return Ok(LoopOutcome::ContentRejected(safety_decision));
+        }
+
+        match disposition {
+            TurnDisposition::Answer => {
                 session.conversation.push(ChatMessage::text(
                     mint(),
                     crate::chat::ChatRole::Assistant,
@@ -264,12 +411,8 @@ async fn run_inner(
                 sink.on_answer_committed(&turn.text);
                 return Ok(LoopOutcome::Answered(turn.text));
             }
-            // A truncated turn is discarded: nothing is appended or executed.
-            Ok(TurnDisposition::Discard) => {
-                sink.on_turn_discarded();
-                return Ok(LoopOutcome::Truncated);
-            }
-            Ok(TurnDisposition::InvokeTools) => {
+            TurnDisposition::Discard => unreachable!("discard returned before safety review"),
+            TurnDisposition::InvokeTools => {
                 // Record the assistant's tool-call message so the conversation
                 // stays well-formed when replayed to the model.
                 let refs = turn.tool_calls.iter().map(|c| c.to_ref()).collect();
@@ -282,6 +425,12 @@ async fn run_inner(
                 // pending auto-trigger whose completion it saw here. Persisted with
                 // the tool results at the save below.
                 session.clear_reacted_auto_triggers(&request_message_ids);
+                if deps.content_safety.is_enforced() {
+                    // Enforced turns persist the reviewed assistant tool-call
+                    // message before any tool lifecycle event or durable action.
+                    deps.session_seam.save(session).await?;
+                    sink.on_partial_committed();
+                }
 
                 // Mutating tools in one turn run serially; once one is rejected,
                 // times out, or goes to an unknown outcome, the rest of the turn's
@@ -354,11 +503,75 @@ async fn run_inner(
                                     false,
                                 ),
                             };
-                            let mut msg = ChatMessage::tool_result(mint(), &call.id, out.content);
-                            msg.image_data_url = out.image_data_url;
-                            session.conversation.push(msg);
-                            retain_latest_session_image(session)?;
-                            finish_tool(session, &call.id, ok, sink);
+                            let crate::seam::ToolRunOutput {
+                                content,
+                                image_data_url,
+                            } = out;
+                            if let Some(image_data_url) = image_data_url {
+                                let info =
+                                    crate::image_input::validate_image_data_url(&image_data_url)
+                                        .map_err(image_input_error)?;
+                                match review_image(deps, &image_data_url, &info.media_type).await {
+                                    Ok(ContentSafetyDecision::Allow) => {
+                                        let mut msg =
+                                            ChatMessage::tool_result(mint(), &call.id, content);
+                                        msg.image_data_url = Some(image_data_url);
+                                        session.conversation.push(msg);
+                                        retain_latest_session_image(session)?;
+                                        finish_tool(session, &call.id, ok, sink);
+                                    }
+                                    Ok(decision) => {
+                                        session.conversation.push(ChatMessage::tool_result(
+                                            mint(),
+                                            &call.id,
+                                            "[image and tool result omitted by content safety policy]",
+                                        ));
+                                        for skipped in turn.tool_calls.iter().skip(call_index + 1) {
+                                            session.conversation.push(ChatMessage::tool_result(
+                                                mint(),
+                                                &skipped.id,
+                                                "[tool not run because content safety stopped the turn]",
+                                            ));
+                                        }
+                                        append_refusal_placeholder(session, &mut mint, decision);
+                                        deps.session_seam.save(session).await?;
+                                        finish_tool(session, &call.id, false, sink);
+                                        sink.on_turn_retracted(
+                                            retraction_reason(decision),
+                                            Some(content_blocked_error()),
+                                        );
+                                        return Ok(LoopOutcome::ContentRejected(decision));
+                                    }
+                                    Err(error) => {
+                                        session.conversation.push(ChatMessage::tool_result(
+                                            mint(),
+                                            &call.id,
+                                            "[image and tool result omitted because content safety review was unavailable]",
+                                        ));
+                                        for skipped in turn.tool_calls.iter().skip(call_index + 1) {
+                                            session.conversation.push(ChatMessage::tool_result(
+                                                mint(),
+                                                &skipped.id,
+                                                "[tool not run because content safety review was unavailable]",
+                                            ));
+                                        }
+                                        deps.session_seam.save(session).await?;
+                                        finish_tool(session, &call.id, false, sink);
+                                        sink.on_turn_retracted(
+                                            StreamRetractionReason::SafetyUnavailable,
+                                            Some(error.clone()),
+                                        );
+                                        return Ok(LoopOutcome::ContentSafetyUnavailable(error));
+                                    }
+                                }
+                            } else {
+                                session.conversation.push(ChatMessage::tool_result(
+                                    mint(),
+                                    &call.id,
+                                    content,
+                                ));
+                                finish_tool(session, &call.id, ok, sink);
+                            }
                         }
                         ToolEffect::Mutating => {
                             run_mutating(

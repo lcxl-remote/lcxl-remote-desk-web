@@ -15,6 +15,7 @@
 //! (it has no turn id), so the runtime emits it via
 //! [`StreamingTurnSink::turn_started`] before running the turn.
 
+use desk_agent_protocol::content_safety::StreamRetractionReason;
 use desk_agent_protocol::diagnose::DiagnoseEvent;
 use desk_agent_protocol::provenance::AiProvenance;
 use desk_agent_protocol::{AgentError, AgentErrorKind};
@@ -46,6 +47,7 @@ pub struct StreamingTurnSink<S> {
     request_id: String,
     seq: u32,
     terminated: bool,
+    uncommitted_partial: bool,
     /// Machine-readable AI marking stamped onto the terminal `Answer` frame, when
     /// the upper layer (which knows the model and has a clock) injected one before
     /// running the turn. This crate has neither, so it carries the pre-built stamp
@@ -68,6 +70,7 @@ impl<S: DiagnoseFrameSink> StreamingTurnSink<S> {
             request_id: request_id.into(),
             seq: initial_seq,
             terminated: false,
+            uncommitted_partial: false,
             provenance: None,
         }
     }
@@ -109,6 +112,7 @@ impl<S: DiagnoseFrameSink> StreamingTurnSink<S> {
         let seq = self.next_seq();
         self.sink
             .emit(DiagnoseEvent::error(&self.request_id, seq, error));
+        self.uncommitted_partial = false;
         self.terminated = true;
     }
 
@@ -137,6 +141,36 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
         let seq = self.next_seq();
         self.sink
             .emit(DiagnoseEvent::partial(&self.request_id, seq, delta));
+        self.uncommitted_partial = true;
+    }
+
+    fn on_partial_committed(&mut self) {
+        if self.terminated || !self.uncommitted_partial {
+            return;
+        }
+        let seq = self.next_seq();
+        self.sink
+            .emit(DiagnoseEvent::partial_committed(&self.request_id, seq));
+        self.uncommitted_partial = false;
+    }
+
+    fn on_turn_retracted(&mut self, reason: StreamRetractionReason, error: Option<AgentError>) {
+        if self.terminated {
+            return;
+        }
+        if self.uncommitted_partial {
+            let seq = self.next_seq();
+            self.sink.emit(DiagnoseEvent::retracted(
+                &self.request_id,
+                seq,
+                reason,
+                error,
+            ));
+            self.uncommitted_partial = false;
+            self.terminated = true;
+        } else if let Some(error) = error {
+            self.error(error);
+        }
     }
 
     fn on_tool_started(&mut self, tool_name: &str, call_id: &str, arguments_json: &str) {
@@ -197,6 +231,7 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
             frame = frame.with_provenance(provenance.clone());
         }
         self.sink.emit(frame);
+        self.uncommitted_partial = false;
         self.terminated = true;
     }
 
@@ -213,6 +248,8 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
 pub fn terminal_error_for(outcome: &LoopOutcome) -> Option<AgentError> {
     let err = match outcome {
         LoopOutcome::Answered(_) => return None,
+        LoopOutcome::ContentRejected(_) => crate::content_safety::content_blocked_error(),
+        LoopOutcome::ContentSafetyUnavailable(error) => error.clone(),
         LoopOutcome::Truncated => AgentError {
             kind: AgentErrorKind::OutputLimitExceeded,
             message: "the model response was truncated before it finished; please retry".into(),
@@ -528,5 +565,73 @@ mod tests {
             ]
         );
         assert!(ev.last().unwrap().is_terminal());
+    }
+    #[test]
+    fn provisional_partial_is_retracted_once_and_late_frames_are_ignored() {
+        use desk_agent_protocol::content_safety::{ContentSafetyDecision, StreamRetractionReason};
+
+        let (store, sink) = recorder();
+        let mut bridge = StreamingTurnSink::new(sink, "r");
+        bridge.on_text_delta("unsafe provisional text");
+        bridge.on_turn_retracted(
+            StreamRetractionReason::PolicyBlocked,
+            Some(crate::content_safety::content_blocked_error()),
+        );
+        bridge.on_text_delta("late text");
+        bridge.finish_outcome(&LoopOutcome::ContentRejected(ContentSafetyDecision::Block));
+
+        let events = store.borrow();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, DiagnoseEventKind::Partial);
+        assert_eq!(events[1].kind, DiagnoseEventKind::Retracted);
+        assert!(events[1].is_terminal());
+        assert_eq!(
+            events[1].retraction_reason,
+            Some(StreamRetractionReason::PolicyBlocked)
+        );
+    }
+
+    #[test]
+    fn policy_failure_without_partial_uses_error_not_retracted() {
+        use desk_agent_protocol::content_safety::StreamRetractionReason;
+
+        let (store, sink) = recorder();
+        let mut bridge = StreamingTurnSink::new(sink, "r");
+        bridge.on_turn_retracted(
+            StreamRetractionReason::SafetyUnavailable,
+            Some(crate::content_safety::content_safety_unavailable()),
+        );
+
+        let events = store.borrow();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, DiagnoseEventKind::Error);
+        assert!(events[0].is_terminal());
+    }
+
+    #[test]
+    fn committed_partial_precedes_tool_and_later_image_failure_is_error() {
+        use desk_agent_protocol::content_safety::StreamRetractionReason;
+
+        let (store, sink) = recorder();
+        let mut bridge = StreamingTurnSink::new(sink, "r");
+        bridge.on_text_delta("reviewed reasoning");
+        bridge.on_partial_committed();
+        bridge.on_tool_started("screenshot", "c1", "{}");
+        bridge.on_turn_retracted(
+            StreamRetractionReason::PolicyBlocked,
+            Some(crate::content_safety::content_blocked_error()),
+        );
+
+        let events = store.borrow();
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                DiagnoseEventKind::Partial,
+                DiagnoseEventKind::PartialCommitted,
+                DiagnoseEventKind::ToolStarted,
+                DiagnoseEventKind::Error,
+            ]
+        );
+        assert!(events.last().unwrap().is_terminal());
     }
 }

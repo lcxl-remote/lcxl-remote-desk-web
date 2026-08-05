@@ -169,6 +169,7 @@ fn deps<'a>(
         session_seam: sess,
         model,
         tools,
+        content_safety: crate::content_safety::ContentSafetyMode::Disabled,
         registry,
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
@@ -799,6 +800,7 @@ fn exec_deps<'a>(
         session_seam: sess,
         model,
         tools: scripted,
+        content_safety: crate::content_safety::ContentSafetyMode::Disabled,
         registry,
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
@@ -1585,6 +1587,7 @@ async fn mutating_backend_error_fails_turn() {
         session_seam: &sess,
         model: &model,
         tools: &failing,
+        content_safety: crate::content_safety::ContentSafetyMode::Disabled,
         registry: &reg,
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
@@ -1683,6 +1686,7 @@ async fn retryable_mutating_error_returns_to_model_for_correction() {
         session_seam: &sess,
         model: &model,
         tools: &tools,
+        content_safety: crate::content_safety::ContentSafetyMode::Disabled,
         registry: &reg,
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
@@ -1716,6 +1720,16 @@ async fn retryable_mutating_error_returns_to_model_for_correction() {
 struct EventLog(Rc<RefCell<Vec<String>>>);
 impl TurnSink for EventLog {
     fn on_text_delta(&mut self, _delta: &str) {}
+    fn on_partial_committed(&mut self) {
+        self.0.borrow_mut().push("committed".into());
+    }
+    fn on_turn_retracted(
+        &mut self,
+        _reason: desk_agent_protocol::content_safety::StreamRetractionReason,
+        _error: Option<desk_agent_protocol::AgentError>,
+    ) {
+        self.0.borrow_mut().push("retracted".into());
+    }
     fn on_tool_started(&mut self, tool_name: &str, call_id: &str, arguments_json: &str) {
         self.0
             .borrow_mut()
@@ -1857,4 +1871,603 @@ async fn streams_discarded_on_truncated_turn() {
     .unwrap();
     assert_eq!(outcome, LoopOutcome::Truncated);
     assert_eq!(*log.borrow(), vec!["discarded".to_string()]);
+}
+
+// ---------------------------- Content safety ----------------------------
+
+#[derive(Default)]
+struct SafetyScript {
+    model_turn_results: RefCell<
+        std::collections::VecDeque<
+            Result<crate::content_safety::SafetyVerdict, desk_agent_protocol::AgentError>,
+        >,
+    >,
+    image_results: RefCell<
+        std::collections::VecDeque<
+            Result<crate::content_safety::SafetyVerdict, desk_agent_protocol::AgentError>,
+        >,
+    >,
+    model_turn_requests: Rc<RefCell<Vec<crate::content_safety::SafetyModelTurn>>>,
+    image_requests: Rc<RefCell<Vec<crate::content_safety::SafetyImage>>>,
+}
+
+#[async_trait(?Send)]
+impl crate::content_safety::ContentSafetySeam for SafetyScript {
+    async fn check_input(
+        &self,
+        _request: crate::content_safety::SafetyInput,
+    ) -> Result<crate::content_safety::SafetyVerdict, desk_agent_protocol::AgentError> {
+        panic!("the shared loop never performs the manager input-stage check")
+    }
+
+    async fn check_model_turn(
+        &self,
+        request: crate::content_safety::SafetyModelTurn,
+    ) -> Result<crate::content_safety::SafetyVerdict, desk_agent_protocol::AgentError> {
+        self.model_turn_requests.borrow_mut().push(request);
+        self.model_turn_results
+            .borrow_mut()
+            .pop_front()
+            .expect("a scripted model-turn safety result")
+    }
+
+    async fn check_image(
+        &self,
+        request: crate::content_safety::SafetyImage,
+    ) -> Result<crate::content_safety::SafetyVerdict, desk_agent_protocol::AgentError> {
+        self.image_requests.borrow_mut().push(request);
+        self.image_results
+            .borrow_mut()
+            .pop_front()
+            .expect("a scripted image safety result")
+    }
+}
+
+fn safety_verdict(
+    decision: desk_agent_protocol::content_safety::ContentSafetyDecision,
+    stage: desk_agent_protocol::content_safety::ContentSafetyStage,
+) -> crate::content_safety::SafetyVerdict {
+    use desk_agent_protocol::content_safety::ContentSafetyDecision;
+    if decision == ContentSafetyDecision::Allow {
+        return crate::content_safety::SafetyVerdict {
+            decision,
+            categories: Vec::new(),
+            stages: Vec::new(),
+            policy_version: crate::content_safety::CONTENT_SAFETY_PROMPT_VERSION.into(),
+        };
+    }
+    crate::content_safety::SafetyVerdict {
+        decision,
+        categories: vec![
+            desk_agent_protocol::content_safety::ContentSafetyCategory::ViolentWrongdoing,
+        ],
+        stages: vec![stage],
+        policy_version: crate::content_safety::CONTENT_SAFETY_PROMPT_VERSION.into(),
+    }
+}
+
+fn safety_context() -> crate::content_safety::SafetyContext {
+    crate::content_safety::SafetyContext {
+        surface: desk_agent_protocol::content_safety::ContentSafetySurface::Diagnosis,
+        original_allowed_intent: "diagnose the device".into(),
+        policy_revision: 7,
+        safety_model_id: "safety-model".into(),
+        safety_prompt_version: crate::content_safety::CONTENT_SAFETY_PROMPT_VERSION.into(),
+    }
+}
+
+struct SafetyEventLog(Rc<RefCell<Vec<String>>>);
+
+impl TurnSink for SafetyEventLog {
+    fn on_text_delta(&mut self, delta: &str) {
+        self.0.borrow_mut().push(format!("partial:{delta}"));
+    }
+
+    fn on_partial_committed(&mut self) {
+        self.0.borrow_mut().push("committed".into());
+    }
+
+    fn on_turn_retracted(
+        &mut self,
+        reason: desk_agent_protocol::content_safety::StreamRetractionReason,
+        error: Option<desk_agent_protocol::AgentError>,
+    ) {
+        let code = error.and_then(|value| value.error_code);
+        self.0
+            .borrow_mut()
+            .push(format!("retracted:{reason:?}:{code:?}"));
+    }
+
+    fn on_tool_started(&mut self, tool_name: &str, call_id: &str, _arguments_json: &str) {
+        self.0
+            .borrow_mut()
+            .push(format!("started:{tool_name}:{call_id}"));
+    }
+
+    fn on_tool_finished(
+        &mut self,
+        call_id: &str,
+        ok: bool,
+        _output: &str,
+        _background_task_id: Option<&str>,
+    ) {
+        self.0.borrow_mut().push(format!("finished:{call_id}:{ok}"));
+    }
+
+    fn on_answer_committed(&mut self, text: &str) {
+        self.0.borrow_mut().push(format!("answer:{text}"));
+    }
+}
+
+#[tokio::test]
+async fn enforced_model_turn_block_reviews_once_and_persists_only_fixed_placeholder() {
+    use desk_agent_protocol::content_safety::{
+        ContentSafetyDecision, ContentSafetyStage, StreamRetractionReason,
+    };
+    use desk_utils::error::DeskErrorCode;
+
+    const REJECTED_TEXT: &str = "raw rejected violent instructions";
+    const REJECTED_ARG: &str = "raw-secret-action";
+    let sess = MemSession::default();
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [ModelTurn {
+                text: REJECTED_TEXT.into(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "c1".into(),
+                        name: "sysinfo".into(),
+                        arguments_json: format!(r#"{{"payload":"{REJECTED_ARG}"}}"#),
+                    },
+                    ToolCall {
+                        id: "c2".into(),
+                        name: "logs".into(),
+                        arguments_json: r#"{"limit":10}"#.into(),
+                    },
+                ],
+                stop_reason: StopReason::ToolUse,
+                ..Default::default()
+            }]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "must not run".into(),
+    };
+    let registry = vec![
+        read_tool("sysinfo", Capability::SystemInfo),
+        read_tool("logs", Capability::LogRecent),
+    ];
+    let safety = SafetyScript {
+        model_turn_results: RefCell::new(
+            [Ok(safety_verdict(
+                ContentSafetyDecision::Block,
+                ContentSafetyStage::Action,
+            ))]
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let clock = || "t".to_string();
+    let mut loop_deps = deps(&sess, &model, &tools, &registry, &clock);
+    loop_deps.content_safety = crate::content_safety::ContentSafetyMode::Enforced {
+        seam: &safety,
+        context: safety_context(),
+    };
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut sink = SafetyEventLog(events.clone());
+    let outcome = run_agent_turn(
+        &loop_deps,
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "diagnose the device"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        LoopOutcome::ContentRejected(ContentSafetyDecision::Block)
+    );
+    assert!(tools.calls.borrow().is_empty());
+    let reviews = safety.model_turn_requests.borrow();
+    assert_eq!(reviews.len(), 1, "one complete ModelTurn gets one review");
+    assert_eq!(reviews[0].text, REJECTED_TEXT);
+    assert_eq!(reviews[0].tool_calls.len(), 2);
+    assert_eq!(
+        reviews[0].tool_calls[0].canonical_arguments_json,
+        format!(r#"{{"payload":"{REJECTED_ARG}"}}"#)
+    );
+    drop(reviews);
+
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(stored.turn_state, TurnState::Idle);
+    assert_eq!(stored.conversation.len(), 2);
+    assert_eq!(stored.conversation[1].role, ChatRole::Assistant);
+    assert!(stored.conversation[1].tool_calls.is_empty());
+    let serialized = serde_json::to_string(&stored.conversation).unwrap();
+    assert!(!serialized.contains(REJECTED_TEXT));
+    assert!(!serialized.contains(REJECTED_ARG));
+    assert!(
+        stored.conversation[1]
+            .text
+            .contains("content safety policy")
+    );
+    assert_eq!(
+        *events.borrow(),
+        vec![
+            format!("partial:{REJECTED_TEXT}"),
+            format!(
+                "retracted:{:?}:{:?}",
+                StreamRetractionReason::PolicyBlocked,
+                Some(DeskErrorCode::AI_CONTENT_BLOCKED.code())
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn enforced_safety_unavailable_fails_without_placeholder_or_provider_detail() {
+    use desk_agent_protocol::content_safety::StreamRetractionReason;
+    use desk_agent_protocol::{AgentError, AgentErrorKind};
+    use desk_utils::error::DeskErrorCode;
+
+    const RAW_TEXT: &str = "unreviewed provider output";
+    let sess = MemSession::default();
+    let model = ScriptModel {
+        turns: RefCell::new([answer(RAW_TEXT)].into()),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: String::new(),
+    };
+    let registry = Vec::new();
+    let safety = SafetyScript {
+        model_turn_results: RefCell::new(
+            [Err(AgentError {
+                kind: AgentErrorKind::TransportError,
+                message: "provider secret failure detail".into(),
+                retryable: false,
+                safe_for_model: true,
+                error_code: None,
+            })]
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let clock = || "t".to_string();
+    let mut loop_deps = deps(&sess, &model, &tools, &registry, &clock);
+    loop_deps.content_safety = crate::content_safety::ContentSafetyMode::Enforced {
+        seam: &safety,
+        context: safety_context(),
+    };
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut sink = SafetyEventLog(events.clone());
+    let outcome = run_agent_turn(
+        &loop_deps,
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "diagnose the device"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+
+    let LoopOutcome::ContentSafetyUnavailable(error) = outcome else {
+        panic!("expected the distinct unavailable outcome");
+    };
+    assert_eq!(error.kind, AgentErrorKind::ContentSafetyUnavailable);
+    assert!(error.retryable);
+    assert_eq!(
+        error.error_code,
+        Some(DeskErrorCode::AI_CONTENT_SAFETY_UNAVAILABLE.code())
+    );
+    assert!(!error.message.contains("provider secret"));
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(stored.turn_state, TurnState::Failed);
+    assert_eq!(stored.conversation.len(), 1);
+    assert_eq!(stored.conversation[0].role, ChatRole::User);
+    assert!(
+        !serde_json::to_string(&stored.conversation)
+            .unwrap()
+            .contains(RAW_TEXT)
+    );
+    assert_eq!(
+        *events.borrow(),
+        vec![
+            format!("partial:{RAW_TEXT}"),
+            format!(
+                "retracted:{:?}:{:?}",
+                StreamRetractionReason::SafetyUnavailable,
+                Some(DeskErrorCode::AI_CONTENT_SAFETY_UNAVAILABLE.code())
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn enforced_allow_persists_and_commits_before_tool_dispatch() {
+    use desk_agent_protocol::content_safety::{ContentSafetyDecision, ContentSafetyStage};
+
+    let sess = MemSession::default();
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                ModelTurn {
+                    text: "I will inspect the system.".into(),
+                    tool_calls: vec![ToolCall {
+                        id: "c1".into(),
+                        name: "sysinfo".into(),
+                        arguments_json: "{}".into(),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    ..Default::default()
+                },
+                answer("done"),
+            ]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "ok".into(),
+    };
+    let registry = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let safety = SafetyScript {
+        model_turn_results: RefCell::new(
+            [
+                Ok(safety_verdict(
+                    ContentSafetyDecision::Allow,
+                    ContentSafetyStage::Action,
+                )),
+                Ok(safety_verdict(
+                    ContentSafetyDecision::Allow,
+                    ContentSafetyStage::Output,
+                )),
+            ]
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let clock = || "t".to_string();
+    let mut loop_deps = deps(&sess, &model, &tools, &registry, &clock);
+    loop_deps.content_safety = crate::content_safety::ContentSafetyMode::Enforced {
+        seam: &safety,
+        context: safety_context(),
+    };
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut sink = SafetyEventLog(events.clone());
+    let outcome = run_agent_turn(
+        &loop_deps,
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "diagnose the device"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("done".into()));
+    assert_eq!(safety.model_turn_requests.borrow().len(), 2);
+    assert_eq!(*tools.calls.borrow(), vec!["sysinfo"]);
+    assert_eq!(
+        *events.borrow(),
+        vec![
+            "partial:I will inspect the system.".to_string(),
+            "committed".to_string(),
+            "started:sysinfo:c1".to_string(),
+            "finished:c1:true".to_string(),
+            "partial:done".to_string(),
+            "answer:done".to_string(),
+        ]
+    );
+}
+
+struct ImageTools {
+    calls: Rc<RefCell<Vec<String>>>,
+    image_data_url: String,
+    raw_content: String,
+}
+
+#[async_trait(?Send)]
+impl ToolSeam for ImageTools {
+    async fn run_read(
+        &self,
+        call: &ToolCall,
+    ) -> Result<ToolRunOutput, desk_agent_protocol::AgentError> {
+        self.calls.borrow_mut().push(call.id.clone());
+        Ok(ToolRunOutput {
+            content: self.raw_content.clone(),
+            image_data_url: Some(self.image_data_url.clone()),
+        })
+    }
+}
+
+#[tokio::test]
+async fn rejected_tool_image_is_not_persisted_and_remaining_calls_are_paired() {
+    use desk_agent_protocol::content_safety::{ContentSafetyDecision, ContentSafetyStage};
+
+    const RAW_TOOL_CONTENT: &str = "raw tool content next to rejected image";
+    let image_data_url = "data:image/jpeg;base64,AQID".to_string();
+    let sess = MemSession::default();
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [ModelTurn {
+                text: "I will inspect screenshots.".into(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "c1".into(),
+                        name: "first".into(),
+                        arguments_json: "{}".into(),
+                    },
+                    ToolCall {
+                        id: "c2".into(),
+                        name: "second".into(),
+                        arguments_json: "{}".into(),
+                    },
+                ],
+                stop_reason: StopReason::ToolUse,
+                ..Default::default()
+            }]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let image_tools = ImageTools {
+        calls: Rc::new(RefCell::new(Vec::new())),
+        image_data_url: image_data_url.clone(),
+        raw_content: RAW_TOOL_CONTENT.into(),
+    };
+    let registry = vec![
+        read_tool("first", Capability::SystemInfo),
+        read_tool("second", Capability::LogRecent),
+    ];
+    let safety = SafetyScript {
+        model_turn_results: RefCell::new(
+            [Ok(safety_verdict(
+                ContentSafetyDecision::Allow,
+                ContentSafetyStage::Action,
+            ))]
+            .into(),
+        ),
+        image_results: RefCell::new(
+            [Ok(safety_verdict(
+                ContentSafetyDecision::Block,
+                ContentSafetyStage::Image,
+            ))]
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let clock = || "t".to_string();
+    let loop_deps = LoopDeps {
+        session_seam: &sess,
+        model: &model,
+        tools: &image_tools,
+        content_safety: crate::content_safety::ContentSafetyMode::Enforced {
+            seam: &safety,
+            context: safety_context(),
+        },
+        registry: &registry,
+        response_format: ResponseFormatSpec::None,
+        system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
+        max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
+        max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
+        max_same_tool_per_turn: crate::MAX_SAME_TOOL_PER_TURN,
+        clock: &clock,
+        heartbeat: None,
+    };
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    let outcome = run_agent_turn(
+        &loop_deps,
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "diagnose the device"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        LoopOutcome::ContentRejected(ContentSafetyDecision::Block)
+    );
+    assert_eq!(*image_tools.calls.borrow(), vec!["c1"]);
+    assert_eq!(safety.image_requests.borrow().len(), 1);
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(stored.turn_state, TurnState::Idle);
+    let tool_results: Vec<_> = stored
+        .conversation
+        .iter()
+        .filter(|message| message.role == ChatRole::Tool)
+        .collect();
+    assert_eq!(tool_results.len(), 2);
+    assert_eq!(tool_results[0].tool_call_id.as_deref(), Some("c1"));
+    assert_eq!(tool_results[1].tool_call_id.as_deref(), Some("c2"));
+    assert!(
+        stored
+            .conversation
+            .iter()
+            .all(|message| message.image_data_url.is_none())
+    );
+    let serialized = serde_json::to_string(&stored.conversation).unwrap();
+    assert!(!serialized.contains(&image_data_url));
+    assert!(!serialized.contains(RAW_TOOL_CONTENT));
+}
+
+#[tokio::test]
+async fn unavailable_retry_resumes_existing_history_without_duplicate_user() {
+    use desk_agent_protocol::content_safety::{ContentSafetyDecision, ContentSafetyStage};
+    use desk_agent_protocol::{AgentError, AgentErrorKind};
+
+    let sess = MemSession::default();
+    let model = ScriptModel {
+        turns: RefCell::new([answer("unreviewed"), answer("recovered")].into()),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: String::new(),
+    };
+    let registry = Vec::new();
+    let safety = SafetyScript {
+        model_turn_results: RefCell::new(
+            [
+                Err(AgentError {
+                    kind: AgentErrorKind::TransportError,
+                    message: "temporary classifier outage".into(),
+                    retryable: true,
+                    safe_for_model: false,
+                    error_code: None,
+                }),
+                Ok(safety_verdict(
+                    ContentSafetyDecision::Allow,
+                    ContentSafetyStage::Output,
+                )),
+            ]
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let clock = || "t".to_string();
+    let mut loop_deps = deps(&sess, &model, &tools, &registry, &clock);
+    loop_deps.content_safety = crate::content_safety::ContentSafetyMode::Enforced {
+        seam: &safety,
+        context: safety_context(),
+    };
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    let first = run_agent_turn(
+        &loop_deps,
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "diagnose the device"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(first, LoopOutcome::ContentSafetyUnavailable(_)));
+
+    let mut retry_claim = claim();
+    retry_claim.turn_id = "turn-retry".into();
+    retry_claim.request_id = Some("req-retry".into());
+    let second = resume_agent_turn(&loop_deps, retry_claim, &mut sink)
+        .await
+        .unwrap();
+    assert_eq!(second, LoopOutcome::Answered("recovered".into()));
+
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(
+        stored
+            .conversation
+            .iter()
+            .filter(|message| message.role == ChatRole::User)
+            .count(),
+        1
+    );
+    assert_eq!(stored.conversation.len(), 2);
+    assert_eq!(stored.conversation[1].text, "recovered");
 }

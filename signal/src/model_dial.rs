@@ -1594,4 +1594,37 @@ mod tests {
         );
         assert_eq!(split_data_url("not-a-data-url"), None);
     }
+    #[test]
+    fn both_dialects_serialize_consecutive_same_role_messages() {
+        let request = ModelRequest::text_only(
+            vec![
+                ChatMessage::text("u1", ChatRole::User, "first user"),
+                ChatMessage::text("u2", ChatRole::User, "retry user"),
+                ChatMessage::text("a1", ChatRole::Assistant, "first assistant"),
+                ChatMessage::text("a2", ChatRole::Assistant, "second assistant"),
+            ],
+            ResponseFormatSpec::None,
+        );
+
+        let openai = build_openai_body("gpt-test", &request);
+        let openai_roles: Vec<_> = openai["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(openai_roles, vec!["user", "user", "assistant", "assistant"]);
+
+        let anthropic = build_anthropic_body("claude-x", &request);
+        let anthropic_roles: Vec<_> = anthropic["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            anthropic_roles,
+            vec!["user", "user", "assistant", "assistant"]
+        );
+    }
 }

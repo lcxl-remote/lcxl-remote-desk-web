@@ -8,6 +8,7 @@
 //! model's own output never carries those fields, so a prompt-injected model
 //! cannot mark a command as safe to run.
 
+use desk_agent_protocol::content_safety::StreamRetractionReason;
 use desk_agent_protocol::provenance::AiProvenance;
 use desk_agent_protocol::terminal_copilot::{
     CommandSuggestion, CopilotHistoryTurn, TerminalCopilotAnswer, TerminalCopilotAsk,
@@ -371,6 +372,7 @@ pub struct CopilotStreamSink<S> {
     request_id: String,
     seq: u32,
     terminated: bool,
+    uncommitted_partial: bool,
     /// Whether to forward explanation prose as `Partial` frames (opt-in).
     stream_text: bool,
     /// Assembled assistant text so far (only tracked when `stream_text`).
@@ -395,6 +397,7 @@ impl<S: CopilotFrameSink> CopilotStreamSink<S> {
             request_id: request_id.into(),
             seq: 0,
             terminated: false,
+            uncommitted_partial: false,
             stream_text: false,
             text: String::new(),
             emitted: 0,
@@ -435,6 +438,7 @@ impl<S: CopilotFrameSink> CopilotStreamSink<S> {
             frame = frame.with_provenance(provenance.clone());
         }
         self.sink.emit(frame);
+        self.uncommitted_partial = false;
         self.terminated = true;
     }
 
@@ -449,6 +453,7 @@ impl<S: CopilotFrameSink> CopilotStreamSink<S> {
             seq,
             error,
         ));
+        self.uncommitted_partial = false;
         self.terminated = true;
     }
 
@@ -477,6 +482,44 @@ impl<S: CopilotFrameSink> TurnSink for CopilotStreamSink<S> {
                 seq,
                 fragment,
             ));
+            self.uncommitted_partial = true;
+        }
+    }
+
+    fn on_partial_committed(&mut self) {
+        if self.terminated {
+            return;
+        }
+        if self.uncommitted_partial {
+            let seq = self.next_seq();
+            self.sink.emit(TerminalCopilotEvent::partial_committed(
+                self.request_id.clone(),
+                seq,
+            ));
+        }
+        self.uncommitted_partial = false;
+        self.text.clear();
+        self.emitted = 0;
+    }
+
+    fn on_turn_retracted(&mut self, reason: StreamRetractionReason, error: Option<AgentError>) {
+        if self.terminated {
+            return;
+        }
+        if self.uncommitted_partial {
+            let seq = self.next_seq();
+            self.sink.emit(TerminalCopilotEvent::retracted(
+                self.request_id.clone(),
+                seq,
+                reason,
+                error,
+            ));
+            self.uncommitted_partial = false;
+            self.text.clear();
+            self.emitted = 0;
+            self.terminated = true;
+        } else if let Some(error) = error {
+            self.emit_error(error);
         }
     }
 
@@ -906,5 +949,73 @@ mod tests {
         assert_eq!(ev[0].kind, TerminalCopilotEventKind::Error);
         assert!(ev[0].is_terminal());
         assert!(s.is_terminated());
+    }
+    #[test]
+    fn stream_sink_retracts_provisional_text_once_and_ignores_late_delta() {
+        use desk_agent_protocol::content_safety::StreamRetractionReason;
+
+        let (store, sink) = recorder();
+        let mut stream = CopilotStreamSink::new(sink, "r").streaming_text();
+        stream.on_text_delta("unsafe provisional text");
+        stream.on_turn_retracted(
+            StreamRetractionReason::PolicyBlocked,
+            Some(crate::content_safety::content_blocked_error()),
+        );
+        stream.on_text_delta("late");
+        stream.emit_error(crate::content_safety::content_safety_unavailable());
+
+        let events = store.borrow();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, TerminalCopilotEventKind::Partial);
+        assert_eq!(events[1].kind, TerminalCopilotEventKind::Retracted);
+        assert!(events[1].is_terminal());
+        assert_eq!(
+            events[1].retraction_reason,
+            Some(StreamRetractionReason::PolicyBlocked)
+        );
+    }
+
+    #[test]
+    fn stream_sink_policy_failure_without_partial_is_error() {
+        use desk_agent_protocol::content_safety::StreamRetractionReason;
+
+        let (store, sink) = recorder();
+        let mut stream = CopilotStreamSink::new(sink, "r").streaming_text();
+        stream.on_turn_retracted(
+            StreamRetractionReason::SafetyUnavailable,
+            Some(crate::content_safety::content_safety_unavailable()),
+        );
+
+        let events = store.borrow();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, TerminalCopilotEventKind::Error);
+        assert!(events[0].is_terminal());
+    }
+
+    #[test]
+    fn stream_sink_commits_before_tool_and_uses_error_after_commit() {
+        use desk_agent_protocol::content_safety::StreamRetractionReason;
+
+        let (store, sink) = recorder();
+        let mut stream = CopilotStreamSink::new(sink, "r").streaming_text();
+        stream.on_text_delta("reviewed reasoning");
+        stream.on_partial_committed();
+        stream.on_tool_started("read_system_info", "c1", "{}");
+        stream.on_turn_retracted(
+            StreamRetractionReason::PolicyBlocked,
+            Some(crate::content_safety::content_blocked_error()),
+        );
+
+        let events = store.borrow();
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                TerminalCopilotEventKind::Partial,
+                TerminalCopilotEventKind::PartialCommitted,
+                TerminalCopilotEventKind::ToolStarted,
+                TerminalCopilotEventKind::Error,
+            ]
+        );
+        assert!(events.last().unwrap().is_terminal());
     }
 }

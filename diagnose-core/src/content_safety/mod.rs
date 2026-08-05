@@ -18,8 +18,9 @@ pub use prompt::{
     CONTENT_SAFETY_PROMPT_VERSION, SafetyPrompt, build_image_prompt, build_input_prompt,
     build_model_turn_prompt,
 };
-pub use refusal::{RefusalReasonKey, refusal_reason_for};
+pub use refusal::{RefusalReasonKey, refusal_placeholder_for, refusal_reason_for};
 pub use seam::{
-    ContentSafetySeam, SafetyImage, SafetyInput, SafetyModelTurn, SafetyToolCall, SafetyVerdict,
-    content_blocked_error, content_safety_image_unsupported, content_safety_unavailable,
+    ContentSafetyMode, ContentSafetySeam, SafetyContext, SafetyImage, SafetyInput, SafetyModelTurn,
+    SafetyToolCall, SafetyVerdict, content_blocked_error, content_safety_image_unsupported,
+    content_safety_unavailable, normalize_safety_error,
 };
