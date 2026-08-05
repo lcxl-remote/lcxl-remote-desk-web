@@ -55,12 +55,15 @@ pub fn verify_probe_response(expectation: &ProbeExpectation, content: &str) -> R
     if content.is_empty() {
         return Err("provider returned an empty probe response".to_string());
     }
-    if let Some(marker) = expectation.required_marker
-        && !content.to_ascii_uppercase().contains(marker)
-    {
-        return Err("provider response did not prove image access".to_string());
+    match expectation.required_marker {
+        Some(marker) if !content.to_ascii_uppercase().starts_with(marker) => {
+            Err("provider response did not prove image access".to_string())
+        }
+        None if !content.eq_ignore_ascii_case("pong") => {
+            Err("provider response did not match the fixed text probe token".to_string())
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -79,7 +82,7 @@ mod tests {
                 .starts_with("data:image/png;base64,")
         );
         assert_eq!(probe.max_output_tokens, 64);
-        assert!(verify_probe_response(&probe, "The image reads LCXL7F.").is_ok());
+        assert!(verify_probe_response(&probe, "LCXL7F").is_ok());
         assert!(verify_probe_response(&probe, "I can see an image").is_err());
         assert_eq!(probe.validated_capabilities(), vec!["text", "image_input"]);
     }
@@ -90,6 +93,7 @@ mod tests {
         assert!(probe.message.image_data_url.is_none());
         assert_eq!(probe.max_output_tokens, 16);
         assert!(verify_probe_response(&probe, " pong ").is_ok());
+        assert!(verify_probe_response(&probe, "arbitrary provider prose").is_err());
         assert!(verify_probe_response(&probe, " ").is_err());
         assert_eq!(probe.validated_capabilities(), vec!["text"]);
     }

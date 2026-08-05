@@ -1,22 +1,11 @@
-//! Desk-server → manager model-proxy carrier (the `ManagerProxy` gateway).
+//! Provider-neutral chat request types shared by diagnosis runtimes.
 //!
-//! In the `ManagerProxy` gateway mode the desk server does not hold provider
-//! credentials. Instead it sends the prompt (messages + response-format
-//! preference) to the manager's model-proxy endpoint, authenticated with its
-//! `manager_api_token`; the manager fills in the provider `base_url` / `api_key`
-//! / `model` from its own (DB-stored) provider config, dials the provider with
-//! streaming, and relays the OpenAI-compatible server-sent-event stream back
-//! verbatim. Credentials never leave the manager.
-//!
-//! The response body is an OpenAI-style SSE stream, so the desk server reuses
-//! its existing SSE accumulator to parse deltas + usage — there is no separate
-//! response DTO here. Only the **request** shape is shared.
+//! These structures describe messages and response-format preferences without
+//! exposing a transport endpoint. Manager and OSS runtimes translate them into
+//! their provider dialect locally.
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-
-/// HTTP path of the manager model-proxy endpoint (relative to the manager URL).
-pub const MODEL_PROXY_PATH: &str = "/api/model/proxy";
 
 /// One chat message in a proxied request. `role` is `system` / `user`;
 /// `image_data_url` carries an optional vision attachment (a `data:` URL).
