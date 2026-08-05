@@ -32,6 +32,7 @@ pub mod audit;
 pub mod authz;
 pub mod command_blocklist;
 pub mod command_template;
+pub mod content_safety;
 pub mod diagnose;
 pub mod edge_exec;
 pub mod evidence;
@@ -856,6 +857,12 @@ pub enum AgentErrorKind {
     InvalidInput,
     RedactionFailed,
     TransportError,
+    /// A closed content-policy decision rejected the request or model turn.
+    /// Waiting cannot make the same content permissible.
+    ContentBlocked,
+    /// The required content-safety service could not produce a trustworthy
+    /// verdict. Protected manager surfaces fail closed and may retry.
+    ContentSafetyUnavailable,
     Internal,
 }
 

@@ -394,6 +394,18 @@ desk_error_codes! {
     /// model or retry without screenshots; the server never silently drops the
     /// image or switches models. Rides agent-error / REST business-error wires.
     AI_MODEL_IMAGE_INPUT_UNSUPPORTED = 85,
+    /// The platform content policy rejected the input, output, action, or image.
+    /// The response never carries the rejected material or provider rationale.
+    AI_CONTENT_BLOCKED = 86,
+    /// A required platform content-safety verdict could not be obtained or
+    /// validated. When content safety is enabled, protected AI fails closed and
+    /// the user may retry this typed infrastructure failure.
+    AI_CONTENT_SAFETY_UNAVAILABLE = 87,
+    /// The platform safety model cannot review an image that would otherwise be
+    /// sent to the selected Agent model. Distinct from code 85: code 85 describes
+    /// the user-selected main model, while this code describes the mandatory
+    /// platform reviewer.
+    AI_CONTENT_SAFETY_IMAGE_UNSUPPORTED = 88,
 
     /// A connection-verify probe could not reach the target at all (DNS failure,
     /// connection refused, TLS handshake failure). Carried inside the
@@ -705,6 +717,23 @@ mod tests {
         assert_ne!(
             DeskErrorCode::AI_CONTEXT_LIMIT_EXCEEDED,
             DeskErrorCode::RATE_LIMITED
+        );
+    }
+    #[test]
+    fn content_safety_codes_are_stable_and_image_failures_are_distinct() {
+        assert_eq!(DeskErrorCode::AI_CONTENT_BLOCKED.code(), 86);
+        assert_eq!(DeskErrorCode::AI_CONTENT_SAFETY_UNAVAILABLE.code(), 87);
+        assert_eq!(
+            DeskErrorCode::AI_CONTENT_SAFETY_IMAGE_UNSUPPORTED.code(),
+            88
+        );
+        assert_ne!(
+            DeskErrorCode::AI_CONTENT_SAFETY_IMAGE_UNSUPPORTED,
+            DeskErrorCode::AI_MODEL_IMAGE_INPUT_UNSUPPORTED
+        );
+        assert_ne!(
+            DeskErrorCode::AI_CONTENT_BLOCKED,
+            DeskErrorCode::AI_CONTENT_SAFETY_UNAVAILABLE
         );
     }
 

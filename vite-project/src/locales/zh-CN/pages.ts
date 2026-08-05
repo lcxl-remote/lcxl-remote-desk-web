@@ -852,6 +852,11 @@ export default {
   'pages.agentError.aiPlatformBusy': '免费 AI 队列当前已满，请稍后重试。',
   'pages.agentError.aiModelImageInputUnsupported':
     '当前选择的 AI 模型不支持截图输入。请选择已启用图片输入能力的模型，或关闭截图选项。',
+  'pages.agentError.aiContentBlocked': '此请求因内容安全策略无法处理。',
+  'pages.agentError.aiContentSafetyUnavailable':
+    '内容安全审核暂时不可用，因此本次 AI 请求已停止，请稍后重试。',
+  'pages.agentError.aiContentSafetyImageUnsupported':
+    '平台内容安全模型无法审核截图输入，请联系管理员配置支持图片的安全审核模型。',
   'pages.fileError.permissionDenied':
     '设备所有者未允许此操作。请在被控端的安全设置中开启对应权限，或等待对方确认授权。',
   'pages.fileError.transferDenied':

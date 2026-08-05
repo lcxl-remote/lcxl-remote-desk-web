@@ -861,6 +861,12 @@ export default {
     'The free AI queue is full right now. Please try again later.',
   'pages.agentError.aiModelImageInputUnsupported':
     'The selected AI model does not support screenshot input. Choose a model with image input enabled, or turn off the screenshot option.',
+  'pages.agentError.aiContentBlocked':
+    'This request cannot be processed under the content safety policy.',
+  'pages.agentError.aiContentSafetyUnavailable':
+    'Content safety review is temporarily unavailable, so this AI request was stopped. Please try again.',
+  'pages.agentError.aiContentSafetyImageUnsupported':
+    'The platform content safety model cannot review screenshot input. Ask an administrator to configure a safety model with image support.',
   'pages.fileError.permissionDenied':
     'The device owner has not allowed this operation. Enable the matching permission in the host\'s security settings, or wait for them to approve the request.',
   'pages.fileError.transferDenied':

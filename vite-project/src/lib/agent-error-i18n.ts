@@ -27,6 +27,11 @@ const CODE_TO_KEY: ErrorCodeKeyMap = {
     [deskErrorCodeEnum.AI_PLATFORM_BUSY]: 'pages.agentError.aiPlatformBusy',
     [deskErrorCodeEnum.AI_MODEL_IMAGE_INPUT_UNSUPPORTED]:
         'pages.agentError.aiModelImageInputUnsupported',
+    [deskErrorCodeEnum.AI_CONTENT_BLOCKED]: 'pages.agentError.aiContentBlocked',
+    [deskErrorCodeEnum.AI_CONTENT_SAFETY_UNAVAILABLE]:
+        'pages.agentError.aiContentSafetyUnavailable',
+    [deskErrorCodeEnum.AI_CONTENT_SAFETY_IMAGE_UNSUPPORTED]:
+        'pages.agentError.aiContentSafetyImageUnsupported',
 };
 
 /**

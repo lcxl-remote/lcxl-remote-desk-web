@@ -13,14 +13,14 @@ export const listTerminalSuspenseQueryKey = (connection_id: ListTerminalPathPara
 
 export type ListTerminalSuspenseQueryKey = ReturnType<typeof listTerminalSuspenseQueryKey>
 
-export function listTerminalSuspenseQueryOptions(connection_id: ListTerminalPathParams["connection_id"] | undefined, params?: ListTerminalQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+export function listTerminalSuspenseQueryOptions(connection_id: ListTerminalPathParams["connection_id"], params?: ListTerminalQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
 
         const queryKey = listTerminalSuspenseQueryKey(connection_id, params)
         return queryOptions<ListTerminalQueryResponse, ResponseErrorConfig<Error>, ListTerminalQueryResponse, typeof queryKey>({
-         enabled: !!(connection_id),
+         
          queryKey,
          queryFn: async ({ signal }) => {
-            return listTerminal(connection_id!, params, { ...config, signal: config.signal ?? signal })
+            return listTerminal(connection_id, params, { ...config, signal: config.signal ?? signal })
          },
         })
 
@@ -30,7 +30,7 @@ export function listTerminalSuspenseQueryOptions(connection_id: ListTerminalPath
  * @summary List terminal commands on remote desk
  * {@link /api/desk/terminals/:connection_id}
  */
-export function useListTerminalSuspense<TData = ListTerminalQueryResponse, TQueryKey extends QueryKey = ListTerminalSuspenseQueryKey>(connection_id: ListTerminalPathParams["connection_id"] | undefined, params?: ListTerminalQueryParams, options: 
+export function useListTerminalSuspense<TData = ListTerminalQueryResponse, TQueryKey extends QueryKey = ListTerminalSuspenseQueryKey>(connection_id: ListTerminalPathParams["connection_id"], params?: ListTerminalQueryParams, options: 
 {
   query?: Partial<UseSuspenseQueryOptions<ListTerminalQueryResponse, ResponseErrorConfig<Error>, TData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }

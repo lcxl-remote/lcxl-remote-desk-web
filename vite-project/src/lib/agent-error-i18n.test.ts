@@ -18,6 +18,15 @@ describe('agentErrorMessage', () => {
             deskErrorCodeEnum.AI_MODEL_IMAGE_INPUT_UNSUPPORTED,
             'pages.agentError.aiModelImageInputUnsupported',
         ],
+        [deskErrorCodeEnum.AI_CONTENT_BLOCKED, 'pages.agentError.aiContentBlocked'],
+        [
+            deskErrorCodeEnum.AI_CONTENT_SAFETY_UNAVAILABLE,
+            'pages.agentError.aiContentSafetyUnavailable',
+        ],
+        [
+            deskErrorCodeEnum.AI_CONTENT_SAFETY_IMAGE_UNSUPPORTED,
+            'pages.agentError.aiContentSafetyImageUnsupported',
+        ],
     ])('localizes platform AI safeguard code %s', (code, key) => {
         expect(agentErrorMessage(t, code, 'raw backend text', 'fallback')).toBe(`t:${key}`);
     });

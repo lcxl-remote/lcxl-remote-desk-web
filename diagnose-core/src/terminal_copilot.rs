@@ -28,6 +28,9 @@ use crate::seam::TurnSink;
 /// The manager treats this as the fallback when its platform-configured limit
 /// (`ai.terminal_copilot.max_steps_per_turn`) is absent or unparseable.
 pub const COPILOT_MAX_STEPS_PER_TURN: u32 = crate::MAX_STEPS_PER_TURN;
+/// Semantic version of the shared Terminal Copilot system prompt. Bump whenever
+/// `build_copilot_system_message` changes.
+pub const COPILOT_PROMPT_VERSION: &str = "copilot-v1";
 
 /// Max bytes of recent terminal output forwarded to the model (after the runtime
 /// has redacted it). Caps prompt size / latency; the runtime redacts first.
@@ -97,6 +100,18 @@ pub fn build_copilot_system_message(
          suggestion for the operator to run.\n\
          - Use the operator's OS and shell (given in the request). Keep commands \
          minimal; avoid destructive operations.{language_rule}\n\n\
+         - Refuse to generate, transform, summarize, translate, role-play, or \
+         operationalize sexual content (especially involving minors), violence or \
+         graphic injury, violent wrongdoing, hate or threatening harassment, \
+         self-harm instructions, or illicit real-world wrongdoing. Do not propose \
+         commands that advance such requests.\n\
+         - Refuse substantive content about political figures, parties, elections, \
+         political systems, government policy, war positions, geopolitics, or \
+         political movements, including factual explanation, evaluation, prediction, \
+         persuasion, or propaganda. Allow political names, institutions, sites, or \
+         words only as incidental technical objects in logs, files, processes, DNS, \
+         TLS, networking, or security response, and keep the response strictly \
+         technical. Computer terms such as leader election are not political content.\n\
          Final answer — emit exactly two parts, in this order:\n\
          1. Write your explanation as Markdown prose. This streams to the operator \
          as you write it, so the human-readable answer goes here, not inside the \
@@ -518,6 +533,10 @@ mod tests {
             // The answer is streamed prose followed by a trailing ```json block.
             assert!(p.contains("Markdown prose"));
             assert!(p.contains("```json"));
+            assert_eq!(COPILOT_PROMPT_VERSION, "copilot-v1");
+            assert!(p.contains("political figures"));
+            assert!(p.contains("incidental technical"));
+            assert!(p.contains("self-harm instructions"));
         }
     }
 

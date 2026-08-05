@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
+use crate::content_safety::StreamRetractionReason;
 use crate::exec::ExecDecision;
 use crate::provenance::AiProvenance;
 use crate::{AgentError, RiskLevel};
@@ -168,6 +169,12 @@ pub struct TerminalCopilotAnswer {
 pub enum TerminalCopilotEventKind {
     /// A streaming explanation fragment.
     Partial,
+    /// Marks all provisional explanation text since the previous commit.
+    /// Carries no text and is not terminal.
+    PartialCommitted,
+    /// Terminal: clears provisional text and selects a fixed local message from
+    /// the closed retraction reason.
+    Retracted,
     /// A read-only evidence tool was dispatched.
     ToolStarted,
     /// Terminal: the structured answer.
@@ -200,6 +207,9 @@ pub struct TerminalCopilotEvent {
     /// `kind = Error`: the failure (carries `safe_for_model` / `retryable`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<AgentError>,
+    /// `kind = Retracted`: closed reason for clearing provisional text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retraction_reason: Option<StreamRetractionReason>,
     /// Machine-readable AI marking for the `Final` (answer) content frame. Absent
     /// on non-content frames (partial / tool / error). Its absence on a content
     /// frame does not mean "not AI" — the frame kind already establishes that;
@@ -220,6 +230,7 @@ impl TerminalCopilotEvent {
             tool_name: None,
             answer: None,
             error: None,
+            retraction_reason: None,
             provenance: None,
         }
     }
@@ -237,6 +248,24 @@ impl TerminalCopilotEvent {
         Self {
             partial_text: Some(fragment.into()),
             ..Self::base(request_id, seq, TerminalCopilotEventKind::Partial)
+        }
+    }
+    /// A non-terminal marker committing provisional explanation text.
+    pub fn partial_committed(request_id: impl Into<String>, seq: u32) -> Self {
+        Self::base(request_id, seq, TerminalCopilotEventKind::PartialCommitted)
+    }
+
+    /// A terminal retraction that never repeats the removed model text.
+    pub fn retracted(
+        request_id: impl Into<String>,
+        seq: u32,
+        reason: StreamRetractionReason,
+        error: Option<AgentError>,
+    ) -> Self {
+        Self {
+            retraction_reason: Some(reason),
+            error,
+            ..Self::base(request_id, seq, TerminalCopilotEventKind::Retracted)
         }
     }
 
@@ -272,11 +301,14 @@ impl TerminalCopilotEvent {
         }
     }
 
-    /// Whether this frame ends its request's stream (`Final` / `Error`).
+    /// Whether this frame ends its request's stream. A commit marker is not
+    /// terminal; a retraction is.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.kind,
-            TerminalCopilotEventKind::Final | TerminalCopilotEventKind::Error
+            TerminalCopilotEventKind::Final
+                | TerminalCopilotEventKind::Error
+                | TerminalCopilotEventKind::Retracted
         )
     }
 }
@@ -316,11 +348,24 @@ mod tests {
     }
 
     #[test]
-    fn only_final_and_error_are_terminal() {
+    fn final_error_and_retracted_are_terminal() {
         assert!(!TerminalCopilotEvent::partial("r", 0, "x").is_terminal());
         assert!(!TerminalCopilotEvent::tool_started("r", 1, "read_process_list").is_terminal());
         assert!(TerminalCopilotEvent::final_answer("r", 2, sample_answer()).is_terminal());
         assert!(TerminalCopilotEvent::error("r", 3, sample_error()).is_terminal());
+        assert!(!TerminalCopilotEvent::partial_committed("r", 2).is_terminal());
+        let retracted =
+            TerminalCopilotEvent::retracted("r", 3, StreamRetractionReason::PolicyBlocked, None);
+        assert!(retracted.is_terminal());
+        let json = serde_json::to_string(&retracted).expect("retraction JSON");
+        assert!(json.contains("\"kind\":\"retracted\""));
+        assert!(json.contains("\"retraction_reason\":\"policy_blocked\""));
+        assert!(!json.contains("partial_text"));
+        let cfg = unbounded_config();
+        let bytes = wincode::config::serialize(&retracted, cfg).expect("wincode encode");
+        let decoded: TerminalCopilotEvent =
+            wincode::config::deserialize(&bytes, cfg).expect("wincode decode");
+        assert_eq!(decoded, retracted);
     }
 
     #[test]

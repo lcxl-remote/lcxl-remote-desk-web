@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
+use crate::content_safety::StreamRetractionReason;
 use crate::provenance::AiProvenance;
 use crate::{AgentError, AgentErrorKind, RiskLevel};
 
@@ -261,8 +262,8 @@ pub struct Diagnosis {
     pub collected: Vec<String>,
 }
 
-/// Kind of a streamed [`DiagnoseEvent`] frame. `Final` and `Error` are
-/// terminal.
+/// Kind of a streamed [`DiagnoseEvent`] frame. `Final`, `Answer`, `Error`, and
+/// `Retracted` are terminal.
 #[derive(
     Debug,
     Clone,
@@ -282,6 +283,12 @@ pub enum DiagnoseEventKind {
     Status,
     /// An incremental summary / answer token from the streaming model.
     Partial,
+    /// Marks all provisional text since the previous commit as reviewed.
+    /// Carries no text and is not terminal.
+    PartialCommitted,
+    /// Terminal: provisional text is atomically removed and replaced by a fixed,
+    /// locally selected policy/unavailable/incomplete message.
+    Retracted,
     /// Terminal: the structured result (single-turn diagnose).
     Final,
     /// Terminal: the diagnosis failed.
@@ -327,6 +334,9 @@ pub struct DiagnoseEvent {
     /// `retryable` carry through to the UI).
     #[serde(default)]
     pub error: Option<AgentError>,
+    /// `kind = Retracted`: closed reason for clearing provisional text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retraction_reason: Option<StreamRetractionReason>,
     /// `kind = TurnStarted`: the id of the agentic turn that started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
@@ -380,6 +390,7 @@ impl DiagnoseEvent {
             partial_summary: None,
             final_result: None,
             error: None,
+            retraction_reason: None,
             turn_id: None,
             tool_name: None,
             tool_arguments_json: None,
@@ -414,6 +425,26 @@ impl DiagnoseEvent {
         Self {
             partial_summary: Some(fragment.into()),
             ..Self::base(request_id, seq, DiagnoseEventKind::Partial)
+        }
+    }
+    /// A non-terminal marker committing all provisional text emitted since the
+    /// previous commit marker.
+    pub fn partial_committed(request_id: impl Into<String>, seq: u32) -> Self {
+        Self::base(request_id, seq, DiagnoseEventKind::PartialCommitted)
+    }
+
+    /// A terminal retraction. It never carries the provisional text, provider
+    /// rationale, category, or threshold.
+    pub fn retracted(
+        request_id: impl Into<String>,
+        seq: u32,
+        reason: StreamRetractionReason,
+        error: Option<AgentError>,
+    ) -> Self {
+        Self {
+            retraction_reason: Some(reason),
+            error,
+            ..Self::base(request_id, seq, DiagnoseEventKind::Retracted)
         }
     }
 
@@ -495,12 +526,15 @@ impl DiagnoseEvent {
         }
     }
 
-    /// Whether this is a terminal frame: a single-turn `Final`, an agentic
-    /// `Answer`, or an `Error` — each ends its request's stream.
+    /// Whether this is a terminal frame. `PartialCommitted` is deliberately
+    /// non-terminal; `Retracted` participates in the exactly-one terminal latch.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.kind,
-            DiagnoseEventKind::Final | DiagnoseEventKind::Answer | DiagnoseEventKind::Error
+            DiagnoseEventKind::Final
+                | DiagnoseEventKind::Answer
+                | DiagnoseEventKind::Error
+                | DiagnoseEventKind::Retracted
         )
     }
 }
@@ -660,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_frames_are_final_answer_and_error() {
+    fn terminal_frames_include_retracted() {
         assert!(!DiagnoseEvent::status("r", 0, "x").is_terminal());
         assert!(!DiagnoseEvent::partial("r", 1, "y").is_terminal());
         assert!(!DiagnoseEvent::turn_started("r", 0, "turn-1").is_terminal());
@@ -682,6 +716,20 @@ mod tests {
             )
             .is_terminal()
         );
+        assert!(!DiagnoseEvent::partial_committed("r", 2).is_terminal());
+        let retracted =
+            DiagnoseEvent::retracted("r", 3, StreamRetractionReason::SafetyUnavailable, None);
+        assert!(retracted.is_terminal());
+        let json = serde_json::to_string(&retracted).expect("retraction JSON");
+        assert!(json.contains("\"kind\":\"retracted\""));
+        assert!(json.contains("\"retraction_reason\":\"safety_unavailable\""));
+        assert!(json.contains("\"partial_summary\":null"));
+        assert!(!json.contains("removed model text"));
+        let config = unbounded_config();
+        let bytes = wincode::config::serialize(&retracted, config).expect("wincode encode");
+        let decoded: DiagnoseEvent =
+            wincode::config::deserialize(&bytes, config).expect("wincode decode");
+        assert_eq!(decoded, retracted);
     }
 
     /// The agentic tool/turn frames round-trip through both JSON and wincode, and
