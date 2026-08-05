@@ -1,4 +1,7 @@
 #[cfg(target_os = "linux")]
+use desk_utils::linux_display::{LinuxDisplayServer, detect_linux_display_environment};
+
+#[cfg(target_os = "linux")]
 use crate::model::data_channel::KeyboardEventData;
 use crate::{error::InputError, model::data_channel::KeyboardEventHandler};
 
@@ -36,7 +39,7 @@ pub fn create_keyboard_event_handler(
         log::info!(
             "Keyboard handler: selecting linux backend, mode={}, WAYLAND_DISPLAY={}",
             mode,
-            std::env::var("WAYLAND_DISPLAY").is_ok()
+            detect_linux_display_environment().wayland_present
         );
         match mode {
             "none" => {
@@ -56,7 +59,7 @@ pub fn create_keyboard_event_handler(
             _ => {}
         }
 
-        if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        if detect_linux_display_environment().active_server() == LinuxDisplayServer::Wayland {
             match wayland_portal::WaylandPortalKeyboardEventHandler::new() {
                 Ok(handler) => {
                     log::info!("Keyboard handler: auto selected wayland portal backend");

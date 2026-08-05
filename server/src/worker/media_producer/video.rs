@@ -14,11 +14,13 @@ pub(super) async fn video_pipeline_loop(
     media_sender: Arc<dyn MediaSender>,
     error_tx: mpsc::UnboundedSender<WorkerToService>,
     stop_flag: Arc<AtomicBool>,
+    mut stop_rx: watch::Receiver<bool>,
     keyframe_requested: Arc<AtomicBool>,
     mut settings_rx: mpsc::UnboundedReceiver<UpdateMediaSettingsPayload>,
     capture_registry: Arc<SharedCaptureRegistry>,
     capture_keys: Arc<StdMutex<HashMap<String, CaptureKeyRecord>>>,
-    capture_key_generation: Arc<AtomicU64>,
+    generation: u64,
+    geometry_update_handler: Option<Arc<GeometryUpdateHandler>>,
 ) -> Result<(), String> {
     let connection_id = payload.connection_id.clone();
     let codec = payload.video_codec;
@@ -76,7 +78,6 @@ pub(super) async fn video_pipeline_loop(
     // alone." Without this token the old guard would erase the new
     // pipeline's freshly recorded key, and the next
     // `SetVirtualDisplayMode` would silently skip the WGC restart.
-    let generation = capture_key_generation.fetch_add(1, Ordering::Relaxed);
     capture_keys
         .lock()
         .expect("media producer capture_keys lock poisoned")
@@ -95,6 +96,22 @@ pub(super) async fn video_pipeline_loop(
 
     let mut frame_rx = capture_handle.subscribe();
     let display_info = capture_handle.display_info().clone();
+    let coordinates = display_info.desktop_coordinates;
+    if coordinates.width() > 0
+        && coordinates.height() > 0
+        && let Some(handler) = geometry_update_handler.as_ref()
+    {
+        handler(
+            &connection_id,
+            generation,
+            (
+                coordinates.left,
+                coordinates.top,
+                coordinates.width(),
+                coordinates.height(),
+            ),
+        );
+    }
 
     // `encoder_init_size` is the *only* authoritative source of the
     // encoder's current width/height. Every `create_video_encoder`
@@ -146,7 +163,15 @@ pub(super) async fn video_pipeline_loop(
         // Wait for the next shared frame. The capture loop runs as
         // fast as the backend yields; this loop's fps throttle gates
         // whether the frame is encoded or skipped.
-        let shared_frame = match frame_rx.recv().await {
+        if *stop_rx.borrow() {
+            break;
+        }
+        let next_frame = tokio::select! {
+            biased;
+            _ = stop_rx.changed() => break,
+            frame = frame_rx.recv() => frame,
+        };
+        let shared_frame = match next_frame {
             Ok(f) => f,
             Err(broadcast::error::RecvError::Closed) => {
                 warn!(
@@ -348,7 +373,15 @@ pub(super) async fn video_pipeline_loop(
                     nal.nal_bytes.to_vec(),
                 );
                 seq += 1;
-                if !send_frame(&media_sender, &error_tx, &connection_id, frame).await {
+                if !send_frame_or_stop(
+                    &media_sender,
+                    &error_tx,
+                    &connection_id,
+                    frame,
+                    &mut stop_rx,
+                )
+                .await
+                {
                     return Ok(());
                 }
             }
@@ -442,7 +475,15 @@ pub(super) async fn video_pipeline_loop(
                 nal.nal_bytes.to_vec(),
             );
             seq += 1;
-            if !send_frame(&media_sender, &error_tx, &connection_id, frame).await {
+            if !send_frame_or_stop(
+                &media_sender,
+                &error_tx,
+                &connection_id,
+                frame,
+                &mut stop_rx,
+            )
+            .await
+            {
                 return Ok(());
             }
         }

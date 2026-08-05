@@ -25,6 +25,8 @@
 use std::collections::HashMap;
 
 use desk_utils::error::DeskErrorCode;
+pub use desk_utils::linux_display::LinuxDisplayServer as Backend;
+use desk_utils::linux_display::detect_linux_display_environment;
 use x11rb::connection::Connection;
 use x11rb::protocol::dpms::{ConnectionExt as _, DPMSMode};
 use x11rb::protocol::randr::{
@@ -42,25 +44,9 @@ pub const UINPUT_KEYBOARD_DEVICE_NAME: &str = "lcxl-web-remote-desk-keyboard";
 /// uinput virtual-device name used by the mouse injection backend.
 pub const UINPUT_MOUSE_DEVICE_NAME: &str = "lcxl-web-remote-desk-mouse";
 
-/// Display server backend detected from the environment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Backend {
-    X11,
-    Wayland,
-    Headless,
-}
-
-/// Detect the active display backend. Wayland takes precedence over X11
-/// (an XWayland session exposes both `WAYLAND_DISPLAY` and `DISPLAY`;
-/// the native Wayland path is preferred there).
+/// Detect the active display backend from one coherent environment snapshot.
 pub fn detect_backend() -> Backend {
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        Backend::Wayland
-    } else if std::env::var_os("DISPLAY").is_some() {
-        Backend::X11
-    } else {
-        Backend::Headless
-    }
+    detect_linux_display_environment().active_server()
 }
 
 /// Synthetic device name for the X11 display at `index`, matching the

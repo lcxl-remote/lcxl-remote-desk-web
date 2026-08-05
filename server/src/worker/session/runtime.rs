@@ -178,6 +178,10 @@ impl WorkerSession {
             init_payload.desktop_name.as_deref(),
             init_payload.host_upstream_url.is_some(),
         );
+        #[cfg(target_os = "linux")]
+        let initial_video_device_list = capabilities.video_device_list.clone();
+        let (capture_geometry_tx, mut capture_geometry_rx) =
+            mpsc::unbounded_channel::<CaptureGeometryReady>();
         // Per-connection input handlers. Constructed once per
         // worker; `start_connection` / `stop_connection` keyed off the
         // same `connection_id` the daemon ships in `StartMedia` /
@@ -186,6 +190,19 @@ impl WorkerSession {
             let desk_settings = shared_settings.read().await.desk.clone();
             Arc::new(InputDispatcher::new(desk_settings))
         };
+        if let Some(producer) = media_producer.as_ref() {
+            let geometry_tx = capture_geometry_tx.clone();
+            producer.set_geometry_update_handler(Arc::new(
+                move |connection_id, generation, rect| {
+                    let _ = geometry_tx.send(CaptureGeometryReady {
+                        connection_id: connection_id.to_string(),
+                        generation,
+                        rect,
+                    });
+                },
+            ));
+        }
+        drop(capture_geometry_tx);
         // Clipboard dispatcher. Construction can fail when
         // the platform host-control helper cannot be initialised
         // (Linux without a clipboard backend, etc.); on failure the
@@ -243,6 +260,78 @@ impl WorkerSession {
             error!("IPC writer task died before Capabilities could be sent; exiting");
             return Ok(());
         }
+
+        #[cfg(target_os = "linux")]
+        let portal_monitor = if detect_linux_display_environment().active_server()
+            == LinuxDisplayServer::Wayland
+            && !initial_video_device_list.contains_key("WAYLANDPORTAL")
+        {
+            let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+            let monitor_writer = writer_tx.clone();
+            let desktop_name = init_payload.desktop_name.clone();
+            let has_tauri = init_payload.host_upstream_url.is_some();
+            let handle = tokio::spawn(async move {
+                let mut backoff_secs = 1_u64;
+                loop {
+                    if *shutdown_rx.borrow() {
+                        return;
+                    }
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => return,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {}
+                    }
+                    let probe = tokio::select! {
+                        _ = shutdown_rx.changed() => return,
+                        result = probe_screencast_monitor(std::time::Duration::from_secs(3)) => result,
+                    };
+                    match probe {
+                        Ok(source_types) => {
+                            info!(
+                                "ScreenCast Portal became available during worker startup recovery (AvailableSourceTypes={source_types})"
+                            );
+                            let build_desktop_name = desktop_name.clone();
+                            let rebuilt = tokio::task::spawn_blocking(move || {
+                                MediaProducer::build_capabilities(
+                                    build_desktop_name.as_deref(),
+                                    has_tauri,
+                                )
+                            })
+                            .await;
+                            match rebuilt {
+                                Ok(capabilities)
+                                    if !capabilities.video_device_list.is_empty()
+                                        && initial_video_device_list.is_empty() =>
+                                {
+                                    if monitor_writer
+                                        .send(WorkerToService::Capabilities(capabilities))
+                                        .is_ok()
+                                    {
+                                        return;
+                                    }
+                                    return;
+                                }
+                                Ok(_) => log::debug!(
+                                    "Portal probe recovered but capability rebuild was empty; retrying"
+                                ),
+                                Err(error) => warn!(
+                                    "Portal capability recovery task failed to rebuild capabilities: {error}"
+                                ),
+                            }
+                            backoff_secs = next_portal_recovery_backoff_secs(backoff_secs);
+                        }
+                        Err(error) => {
+                            log::debug!(
+                                "ScreenCast Portal still unavailable during startup recovery: {error}"
+                            );
+                            backoff_secs = next_portal_recovery_backoff_secs(backoff_secs);
+                        }
+                    }
+                }
+            });
+            Some((shutdown_tx, handle))
+        } else {
+            None
+        };
 
         let mut desk_session = DeskSession::new(
             shared_settings_data.clone(),
@@ -389,6 +478,13 @@ impl WorkerSession {
 
         loop {
             tokio::select! {
+                Some(event) = capture_geometry_rx.recv() => {
+                    input_dispatcher.set_connection_geometry_if_current(
+                        &event.connection_id,
+                        event.generation,
+                        event.rect,
+                    );
+                }
                 msg_result = service_msg_rx.recv() => {
                     match msg_result {
                         Some(Some(msg)) => {
@@ -516,11 +612,21 @@ impl WorkerSession {
                                         // video_device overridden to the
                                         // attached virtual display).
                                         let active = vd_state.record_start(payload);
-                                        // Spin up per-connection input
-                                        // handlers alongside the encoder so
-                                        // mouse / keyboard input is ready as
-                                        // soon as the browser opens its DCs.
-                                        input_dispatcher.start_connection(&active);
+                                        let start_result = producer.start_media_with(active.clone(), |generation| {
+                                            // Register input before the video thread starts, so its first
+                                            // actual-stream geometry event cannot race ahead of this state.
+                                            input_dispatcher.start_connection_with_generation(
+                                                &active,
+                                                generation,
+                                            );
+                                        });
+                                        let StartMediaResult::Accepted(_) = start_result else {
+                                            warn!(
+                                                "Duplicate StartMedia for {}; existing connection state preserved",
+                                                active.connection_id
+                                            );
+                                            continue;
+                                        };
                                         // Subscribe the connection
                                         // to clipboard sync; the dispatcher
                                         // starts its polling loop on the first
@@ -534,7 +640,6 @@ impl WorkerSession {
                                         // Subscribe the connection
                                         // to whiteboard draw commands.
                                         whiteboard_dispatcher.start_connection(&active).await;
-                                        producer.start_media(active);
                                     } else {
                                         warn!(
                                             "Worker received StartMedia but media producer is \
@@ -891,7 +996,13 @@ impl WorkerSession {
                                             producer.stop_media(&StopMediaPayload {
                                                 connection_id: step.connection_id.clone(),
                                             });
-                                            producer.start_media(step.active);
+                                            let connection_id = step.connection_id.clone();
+                                            producer.start_media_with(step.active, |generation| {
+                                                input_dispatcher.set_connection_generation_if_present(
+                                                    &connection_id,
+                                                    generation,
+                                                );
+                                            });
                                         }
                                     }
                                 }
@@ -940,7 +1051,16 @@ impl WorkerSession {
                                                 producer.stop_media(&StopMediaPayload {
                                                     connection_id: step.connection_id.clone(),
                                                 });
-                                                producer.start_media(step.active.clone());
+                                                let connection_id = step.connection_id.clone();
+                                                producer.start_media_with(
+                                                    step.active.clone(),
+                                                    |generation| {
+                                                        input_dispatcher.set_connection_generation_if_present(
+                                                            &connection_id,
+                                                            generation,
+                                                        );
+                                                    },
+                                                );
                                             }
                                             // Mirror the producer Stop+Start
                                             // on the input side: retarget
@@ -1027,7 +1147,16 @@ impl WorkerSession {
                                             producer.stop_media(&StopMediaPayload {
                                                 connection_id: step.connection_id.clone(),
                                             });
-                                            producer.start_media(step.active.clone());
+                                            let connection_id = step.connection_id.clone();
+                                            producer.start_media_with(
+                                                step.active.clone(),
+                                                |generation| {
+                                                    input_dispatcher.set_connection_generation_if_present(
+                                                        &connection_id,
+                                                        generation,
+                                                    );
+                                                },
+                                            );
                                         }
                                         // Detach restores the original
                                         // physical capture target; retarget
@@ -1390,7 +1519,13 @@ impl WorkerSession {
                                 producer.stop_media(&StopMediaPayload {
                                     connection_id: step.connection_id.clone(),
                                 });
-                                producer.start_media(step.active);
+                                let connection_id = step.connection_id.clone();
+                                producer.start_media_with(step.active, |generation| {
+                                    input_dispatcher.set_connection_generation_if_present(
+                                        &connection_id,
+                                        generation,
+                                    );
+                                });
                             }
                         }
                     }
@@ -1412,6 +1547,11 @@ impl WorkerSession {
         // working watcher (Err path during init) this is a cheap
         // no-op.
         drop(display_watcher_handle);
+        #[cfg(target_os = "linux")]
+        if let Some((shutdown_tx, handle)) = portal_monitor {
+            shutdown_tx.send_replace(true);
+            let _ = handle.await;
+        }
         if let Some(producer) = media_producer.as_ref() {
             producer.shutdown();
         }

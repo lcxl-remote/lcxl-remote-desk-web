@@ -49,7 +49,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use desk_capture_engine::{
@@ -62,7 +62,7 @@ use desk_capture_engine::{
 };
 use desk_signal_facade::model::{desk_settings::DeskSettings, image_capture::DisplayInfo};
 use tokio::sync::broadcast;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Identifies one capture instance. Connections sharing the same key
 /// reuse the same capture loop; distinct keys get separate loops.
@@ -393,6 +393,73 @@ fn decide_registry_reuse(
     None
 }
 
+const CAPTURE_ERROR_WARN_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Debug, PartialEq, Eq)]
+enum CaptureErrorLogEvent {
+    First,
+    Debug,
+    Summary {
+        suppressed: u64,
+        total: u64,
+        elapsed: Duration,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CaptureRecoveryLogEvent {
+    total: u64,
+    elapsed: Duration,
+}
+
+#[derive(Default)]
+struct CaptureErrorLogState {
+    started_at: Option<Instant>,
+    last_warn_at: Option<Instant>,
+    total: u64,
+    suppressed_since_warn: u64,
+}
+
+impl CaptureErrorLogState {
+    fn record_error(&mut self, now: Instant) -> CaptureErrorLogEvent {
+        let Some(started_at) = self.started_at else {
+            self.started_at = Some(now);
+            self.last_warn_at = Some(now);
+            self.total = 1;
+            self.suppressed_since_warn = 0;
+            return CaptureErrorLogEvent::First;
+        };
+
+        self.total = self.total.saturating_add(1);
+        self.suppressed_since_warn = self.suppressed_since_warn.saturating_add(1);
+        let last_warn_at = self.last_warn_at.unwrap_or(started_at);
+        if now.saturating_duration_since(last_warn_at) < CAPTURE_ERROR_WARN_INTERVAL {
+            return CaptureErrorLogEvent::Debug;
+        }
+
+        let suppressed = self.suppressed_since_warn;
+        self.suppressed_since_warn = 0;
+        self.last_warn_at = Some(now);
+        CaptureErrorLogEvent::Summary {
+            suppressed,
+            total: self.total,
+            elapsed: now.saturating_duration_since(started_at),
+        }
+    }
+
+    fn record_success(&mut self, now: Instant) -> Option<CaptureRecoveryLogEvent> {
+        let started_at = self.started_at.take()?;
+        let event = CaptureRecoveryLogEvent {
+            total: self.total,
+            elapsed: now.saturating_duration_since(started_at),
+        };
+        self.last_warn_at = None;
+        self.total = 0;
+        self.suppressed_since_warn = 0;
+        Some(event)
+    }
+}
+
 fn run_capture_loop(
     mut capture: Box<dyn ImageCapture + Send>,
     sender: broadcast::Sender<Arc<SharedFrame>>,
@@ -412,6 +479,7 @@ fn run_capture_loop(
     let request = CaptureRequest {
         cursor_mode: CursorCaptureMode::SyncNative,
     };
+    let mut error_log = CaptureErrorLogState::default();
     // We grab `display_info` once at loop start and reuse it for every
     // frame's `SharedFrame::display_info`. Earlier code re-queried via
     // `capture.get_current_output()` on every tick "in case the user
@@ -433,12 +501,35 @@ fn run_capture_loop(
     // `display_info` re-query is removed.
     while !stop_flag.load(Ordering::Acquire) {
         let result = match capture.capture(request) {
-            Ok(r) => r,
+            Ok(r) => {
+                if let Some(recovery) = error_log.record_success(Instant::now()) {
+                    info!(
+                        "[SharedCapture:{}/{}] capture recovered after {} errors over {:?}",
+                        key.backend, key.device_name, recovery.total, recovery.elapsed
+                    );
+                }
+                r
+            }
             Err(e) => {
-                debug!(
-                    "[SharedCapture:{}/{}] capture error: {e}; backing off 16ms",
-                    key.backend, key.device_name
-                );
+                match error_log.record_error(Instant::now()) {
+                    CaptureErrorLogEvent::First => warn!(
+                        "[SharedCapture:{}/{}] capture failed: {e}; backing off 16ms",
+                        key.backend, key.device_name
+                    ),
+                    CaptureErrorLogEvent::Debug => debug!(
+                        "[SharedCapture:{}/{}] capture error: {e}; backing off 16ms",
+                        key.backend, key.device_name
+                    ),
+                    CaptureErrorLogEvent::Summary {
+                        suppressed,
+                        total,
+                        elapsed,
+                    } => warn!(
+                        "[SharedCapture:{}/{}] capture still failing: {e}; {} errors since last \
+                         warning, {} total over {:?}; backing off 16ms",
+                        key.backend, key.device_name, suppressed, total, elapsed
+                    ),
+                }
                 thread::sleep(Duration::from_millis(16));
                 continue;
             }
@@ -490,6 +581,38 @@ mod tests {
     fn empty_registry_has_no_live_captures() {
         let reg = SharedCaptureRegistry::new();
         assert_eq!(reg.live_count(), 0);
+    }
+
+    #[test]
+    fn capture_error_log_is_immediate_then_throttled_and_resets_on_recovery() {
+        let base = Instant::now();
+        let mut state = CaptureErrorLogState::default();
+
+        assert_eq!(state.record_error(base), CaptureErrorLogEvent::First);
+        assert_eq!(
+            state.record_error(base + Duration::from_secs(1)),
+            CaptureErrorLogEvent::Debug
+        );
+        assert_eq!(
+            state.record_error(base + CAPTURE_ERROR_WARN_INTERVAL),
+            CaptureErrorLogEvent::Summary {
+                suppressed: 2,
+                total: 3,
+                elapsed: CAPTURE_ERROR_WARN_INTERVAL,
+            }
+        );
+        assert_eq!(
+            state.record_success(base + Duration::from_secs(31)),
+            Some(CaptureRecoveryLogEvent {
+                total: 3,
+                elapsed: Duration::from_secs(31),
+            })
+        );
+        assert_eq!(
+            state.record_error(base + Duration::from_secs(32)),
+            CaptureErrorLogEvent::First,
+            "a recovered series must not inherit the previous throttle window"
+        );
     }
 
     /// Stale-entry cleanup: a `Weak` whose `Arc` was dropped is

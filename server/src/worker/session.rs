@@ -9,7 +9,7 @@ use crate::{
         desktop_monitor,
         file_transfer_dispatcher::FileTransferDispatcher,
         input_dispatcher::InputDispatcher,
-        media_producer::MediaProducer,
+        media_producer::{MediaProducer, StartMediaResult},
         policy_mirror::PolicyMirror,
         shared_capture::CaptureKey,
         virtual_display::{
@@ -20,6 +20,8 @@ use crate::{
 };
 use actix_web::web;
 use desk_agent_protocol::{AgentOutcome, DeviceAgent};
+#[cfg(target_os = "linux")]
+use desk_capture_engine::image_capture::portal_client::probe_screencast_monitor;
 use desk_input_injection::display_watcher;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
@@ -45,6 +47,8 @@ use desk_signal_facade::model::private_screen::{
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use desk_signal_facade::model::system_info::SystemInfo;
 use desk_signal_facade::model::terminal::{TerminalList, TerminalOutputData};
+#[cfg(target_os = "linux")]
+use desk_utils::linux_display::{LinuxDisplayServer, detect_linux_display_environment};
 use desk_virtual_display::VirtualDisplayController;
 
 /// Whether a daemon command still applies while remote access is locked.
@@ -82,6 +86,8 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(target_os = "linux")]
+use tokio::sync::watch;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::mpsc,
@@ -100,6 +106,18 @@ use tasks::*;
 /// [`Self::run_with_transports`]. The struct exists so the named-pipe
 /// entry point ([`Self::run`]) and the in-process portable entry
 /// ([`Self::run_with_transports`]) share an inherent-method namespace.
+#[derive(Debug)]
+struct CaptureGeometryReady {
+    connection_id: String,
+    generation: u64,
+    rect: (i32, i32, i32, i32),
+}
+
+#[cfg(target_os = "linux")]
+fn next_portal_recovery_backoff_secs(current: u64) -> u64 {
+    current.saturating_mul(2).min(30)
+}
+
 pub struct WorkerSession;
 
 impl Default for WorkerSession {

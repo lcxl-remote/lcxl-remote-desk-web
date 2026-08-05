@@ -1,8 +1,16 @@
 use std::{collections::BTreeMap, str::FromStr};
 
+#[cfg(target_os = "linux")]
+use desk_signal_facade::model::image_capture::DisplayRect;
 use desk_signal_facade::model::{desk_settings::DeskSettings, image_capture::DisplayInfo};
-#[cfg(target_os = "windows")]
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use desk_utils::error::DeskErrorCode;
+#[cfg(target_os = "linux")]
+use desk_utils::linux_display::{
+    LinuxDisplayEnvironment, LinuxDisplayServer, detect_linux_display_environment,
+};
+#[cfg(not(target_os = "linux"))]
 use strum::IntoEnumIterator;
 
 #[cfg(target_os = "macos")]
@@ -17,6 +25,7 @@ use crate::image_capture::{
 };
 #[cfg(target_os = "linux")]
 use crate::image_capture::{
+    wayland_output_geometry::enumerate_wayland_outputs,
     wayland_portal_capture::{WaylandPortalImageCapture, WaylandPortalImageOutputEnumerator},
     x11_capture::{X11ImageCapture, X11ImageOutputEnumerator},
 };
@@ -27,23 +36,68 @@ use crate::{
     },
 };
 
-impl ImageCaptureTypeHelper for DeskSettings {
-    /// Returns the appropriate EncoderType based on the settings.
-    fn get_image_capture_type(&self) -> Result<ImageCaptureType, CaptureError> {
-        if let Some(ref image_capture) = self.image_capture {
-            let result = ImageCaptureType::from_str(image_capture);
-            if let Ok(image_capture_type) = result {
-                return Ok(image_capture_type);
-            } else {
-                log::error!(
-                    "Failed to parse image capture type: {}, use default setting, error: {}",
-                    image_capture,
-                    result.err().unwrap()
-                );
-            }
+fn parse_requested_image_capture(settings: &DeskSettings) -> Option<ImageCaptureType> {
+    let requested = settings.image_capture.as_deref()?;
+    match ImageCaptureType::from_str(requested) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            log::warn!(
+                "Failed to parse image capture type {requested:?}; using the session default: {error}"
+            );
+            None
         }
+    }
+}
 
-        Ok(ImageCaptureType::default())
+#[cfg(target_os = "linux")]
+fn resolve_linux_image_capture(
+    requested: Option<ImageCaptureType>,
+    environment: LinuxDisplayEnvironment,
+) -> Result<ImageCaptureType, CaptureError> {
+    let effective = match environment.active_server() {
+        LinuxDisplayServer::Wayland => ImageCaptureType::WAYLANDPORTAL,
+        LinuxDisplayServer::X11 => ImageCaptureType::X11,
+        LinuxDisplayServer::Headless => {
+            return CaptureError::custom_error(
+                DeskErrorCode::FEATURE_UNAVAILABLE,
+                "no Linux desktop session is available for image capture",
+            );
+        }
+    };
+    if let Some(requested) = requested
+        && requested != effective
+    {
+        log::warn!(
+            "Image capture backend {requested:?} is incompatible with the active Linux session; using {effective:?}"
+        );
+    }
+    Ok(effective)
+}
+
+impl ImageCaptureTypeHelper for DeskSettings {
+    fn get_image_capture_type(&self) -> Result<ImageCaptureType, CaptureError> {
+        let requested = parse_requested_image_capture(self);
+        #[cfg(target_os = "linux")]
+        {
+            resolve_linux_image_capture(requested, detect_linux_display_environment())
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Ok(requested.unwrap_or(ImageCaptureType::DXGI))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Ok(requested.unwrap_or(ImageCaptureType::SCKIT))
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn capture_types_for_environment(environment: LinuxDisplayEnvironment) -> Vec<ImageCaptureType> {
+    match environment.active_server() {
+        LinuxDisplayServer::Wayland => vec![ImageCaptureType::WAYLANDPORTAL],
+        LinuxDisplayServer::X11 => vec![ImageCaptureType::X11],
+        LinuxDisplayServer::Headless => Vec::new(),
     }
 }
 
@@ -120,7 +174,11 @@ pub fn create_image_capture(
 
 pub fn list_image_capture() -> BTreeMap<String, Vec<DisplayInfo>> {
     let mut result = BTreeMap::new();
-    for x in ImageCaptureType::iter() {
+    #[cfg(target_os = "linux")]
+    let capture_types = capture_types_for_environment(detect_linux_display_environment());
+    #[cfg(not(target_os = "linux"))]
+    let capture_types: Vec<_> = ImageCaptureType::iter().collect();
+    for x in capture_types {
         let name: String = Into::<&'static str>::into(x).to_string();
         match list_image_output(x) {
             Ok(output_list) => {
@@ -154,6 +212,56 @@ pub fn list_image_capture() -> BTreeMap<String, Vec<DisplayInfo>> {
         }
     }
     result
+}
+
+pub fn list_desktop_geometry() -> Vec<DisplayInfo> {
+    #[cfg(target_os = "linux")]
+    {
+        match detect_linux_display_environment().active_server() {
+            LinuxDisplayServer::Wayland => match enumerate_wayland_outputs() {
+                Ok(outputs) => outputs
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, output)| output.logical.width() > 0 && output.logical.height() > 0)
+                    .map(|(index, output)| DisplayInfo {
+                        device_name: output
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| format!("wayland-output-{index}")),
+                        display_device_name: output.name,
+                        desktop_coordinates: DisplayRect {
+                            left: output.logical.left,
+                            top: output.logical.top,
+                            right: output.logical.right,
+                            bottom: output.logical.bottom,
+                        },
+                        attached_to_desktop: true,
+                        rotation: 0,
+                        resolutions: vec![],
+                    })
+                    .collect(),
+                Err(error) => {
+                    log::warn!("Failed to enumerate Wayland desktop geometry: {error}");
+                    Vec::new()
+                }
+            },
+            LinuxDisplayServer::X11 => {
+                list_image_output(ImageCaptureType::X11).unwrap_or_else(|error| {
+                    log::warn!("Failed to enumerate X11 desktop geometry: {error}");
+                    Vec::new()
+                })
+            }
+            LinuxDisplayServer::Headless => Vec::new(),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        list_image_capture()
+            .into_values()
+            .flatten()
+            .filter(|display| display.attached_to_desktop)
+            .collect()
+    }
 }
 
 pub async fn list_image_capture_async() -> BTreeMap<String, Vec<DisplayInfo>> {
@@ -239,6 +347,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn missing_requested_backend_defaults_to_dxgi() {
+        let settings = DeskSettings {
+            image_capture: None,
+            ..DeskSettings::default()
+        };
+        assert_eq!(
+            settings.get_image_capture_type().unwrap(),
+            ImageCaptureType::DXGI,
+        );
+    }
+
+    #[test]
     fn is_wgc_unavailable_error_recognizes_feature_unavailable() {
         let err = CaptureError::new_custom_error(
             DeskErrorCode::FEATURE_UNAVAILABLE,
@@ -306,5 +426,81 @@ mod tests {
 
         let other = CaptureError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, "x");
         assert!(fallback_image_output_backend(ImageCaptureType::GDI, &other).is_none());
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+
+    #[test]
+    fn missing_requested_backend_defaults_to_sckit() {
+        let settings = DeskSettings {
+            image_capture: None,
+            ..DeskSettings::default()
+        };
+        assert_eq!(
+            settings.get_image_capture_type().unwrap(),
+            ImageCaptureType::SCKIT,
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use super::*;
+
+    #[test]
+    fn capture_capabilities_follow_the_native_session() {
+        assert_eq!(
+            capture_types_for_environment(LinuxDisplayEnvironment::new(true, true)),
+            vec![ImageCaptureType::WAYLANDPORTAL]
+        );
+        assert_eq!(
+            capture_types_for_environment(LinuxDisplayEnvironment::new(false, true)),
+            vec![ImageCaptureType::X11]
+        );
+        assert!(
+            capture_types_for_environment(LinuxDisplayEnvironment::new(false, false)).is_empty()
+        );
+    }
+
+    #[test]
+    fn missing_requested_backend_uses_native_linux_session() {
+        assert_eq!(
+            resolve_linux_image_capture(None, LinuxDisplayEnvironment::new(true, true)).unwrap(),
+            ImageCaptureType::WAYLANDPORTAL,
+        );
+        assert_eq!(
+            resolve_linux_image_capture(None, LinuxDisplayEnvironment::new(false, true)).unwrap(),
+            ImageCaptureType::X11,
+        );
+    }
+
+    #[test]
+    fn requested_backend_is_corrected_to_the_native_session() {
+        assert_eq!(
+            resolve_linux_image_capture(
+                Some(ImageCaptureType::X11),
+                LinuxDisplayEnvironment::new(true, true),
+            )
+            .unwrap(),
+            ImageCaptureType::WAYLANDPORTAL
+        );
+        assert_eq!(
+            resolve_linux_image_capture(
+                Some(ImageCaptureType::WAYLANDPORTAL),
+                LinuxDisplayEnvironment::new(false, true),
+            )
+            .unwrap(),
+            ImageCaptureType::X11
+        );
+        assert!(
+            resolve_linux_image_capture(
+                Some(ImageCaptureType::X11),
+                LinuxDisplayEnvironment::new(false, false),
+            )
+            .is_err()
+        );
     }
 }

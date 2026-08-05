@@ -189,3 +189,22 @@ pub(super) async fn send_frame(
         }
     }
 }
+
+/// Send one frame unless the connection has already been stopped.
+/// The original watch receiver makes a stop sent before the first poll visible.
+pub(super) async fn send_frame_or_stop(
+    media_sender: &Arc<dyn MediaSender>,
+    error_tx: &mpsc::UnboundedSender<WorkerToService>,
+    connection_id: &str,
+    frame: MediaFrame,
+    stop_rx: &mut watch::Receiver<bool>,
+) -> bool {
+    if *stop_rx.borrow() {
+        return false;
+    }
+    tokio::select! {
+        biased;
+        _ = stop_rx.changed() => false,
+        sent = send_frame(media_sender, error_tx, connection_id, frame) => sent,
+    }
+}

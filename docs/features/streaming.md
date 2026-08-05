@@ -12,7 +12,7 @@ The capture engine supports software and hardware encoding across multiple codec
 | VP8 / VP9 | libvpx |
 | AV1 | SVT-AV1 |
 
-Capture backends: Windows (**DXGI / WGC**), Linux (**X11 / Wayland portal + PipeWire**).
+Capture backends: Windows (**DXGI / WGC**), Linux (**X11 / Wayland portal + PipeWire**). Linux backends are filtered by the active desktop session: native X11 advertises X11, while Wayland advertises only the ScreenCast portal so XWayland is not mistaken for full-desktop capture.
 
 The encoder can be auto-selected or pinned via `desk.video_encoder`. Frame rate (`video_fps`), quality (`video_quality`, 0–63, lower is better), and dirty-rectangle incremental encoding (`enable_dirty_rect`) are all configurable — see the [config.toml Reference](/config/config-toml#desktop-desk).
 
@@ -28,7 +28,7 @@ Mouse and keyboard input are injected on the controlled device over a dedicated 
 
 ## Monitor Selection
 
-`desk.video_device_name` selects which monitor to capture (e.g. `\\.\DISPLAY1` on Windows). An empty value asks the browser to pick on first connection.
+`desk.video_device_name` selects which monitor to capture (e.g. `\\.\DISPLAY1` on Windows). On first connection, the browser automatically selects the first capture mode that has a usable display and then prefers the display at the desktop origin. If a saved mode or display is no longer available, it is corrected to that usable default and the dialog explains the change.
 
 ## Tuning Tips
 

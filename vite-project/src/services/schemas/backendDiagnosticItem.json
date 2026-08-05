@@ -1,0 +1,1 @@
+{"type":"object","required":["key","value","status"],"properties":{"detail":{"type":["string","null"]},"key":{"type":"string"},"status":{"type":"string","enum":["neutral","ready","warning","error"],"x-readme-ref-name":"BackendDiagnosticStatus"},"value":{"type":"string"}},"x-readme-ref-name":"BackendDiagnosticItem"}

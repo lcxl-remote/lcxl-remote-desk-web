@@ -37,7 +37,8 @@
 //! GDI device name the browser picked, so the rect that matches it is
 //! the surface the user actually sees. When no device is selected
 //! (legal during the fresh-install pre-pick state) we fall back to the
-//! first attached display from `desk_capture_engine::list_image_capture()`.
+//! first attached display from the platform geometry source exposed by
+//! `desk_capture_engine::list_desktop_geometry()`.
 //! Display reconfiguration during a session (resolution change, monitor
 //! add) is handled by killing the connection — the browser
 //! re-establishes and we re-query. Live resolution change mid-session
@@ -46,7 +47,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use desk_capture_engine::image_capture::image_capture_factory::list_image_capture;
+use desk_capture_engine::image_capture::image_capture_factory::list_desktop_geometry;
 use desk_input_injection::keyboard_event::keyboard_event_factory::create_keyboard_event_handler;
 use desk_input_injection::model::data_channel::{
     KeyboardEventData, KeyboardEventHandler, MouseEventData, MouseEventHandler,
@@ -65,6 +66,7 @@ use log::{debug, error, info, warn};
 /// `service::keyboard_event` handlers; the difference is the dispatcher
 /// constructs them at `StartMedia` time rather than at first DC open.
 struct ConnectionInputState {
+    generation: u64,
     mouse: Box<dyn MouseEventHandler + Send + Sync>,
     keyboard: Box<dyn KeyboardEventHandler + Send + Sync>,
     /// Last sequence number observed for mouse events. Discards late
@@ -119,6 +121,10 @@ impl InputDispatcher {
     /// gracefully so a transient capture-engine glitch does not crash
     /// the worker.
     pub fn start_connection(&self, payload: &StartMediaPayload) {
+        self.start_connection_with_generation(payload, 0);
+    }
+
+    pub fn start_connection_with_generation(&self, payload: &StartMediaPayload, generation: u64) {
         let (left, top, width, height) =
             display_geometry_for_device(payload.video_device.as_deref());
         let geometry = shared_geometry(MonitorGeometry::new(left, top, width, height));
@@ -149,6 +155,7 @@ impl InputDispatcher {
         let prev = map.insert(
             payload.connection_id.clone(),
             ConnectionInputState {
+                generation,
                 mouse,
                 keyboard,
                 last_mouse_seq: 0,
@@ -209,6 +216,33 @@ impl InputDispatcher {
     pub fn set_connection_geometry(&self, connection_id: &str, rect: (i32, i32, i32, i32)) {
         let map = self.inner.lock().expect("input dispatcher lock poisoned");
         set_connection_geometry_in(&map, connection_id, rect);
+    }
+
+    pub fn set_connection_geometry_if_current(
+        &self,
+        connection_id: &str,
+        generation: u64,
+        rect: (i32, i32, i32, i32),
+    ) {
+        if rect.2 <= 0 || rect.3 <= 0 {
+            return;
+        }
+        let map = self.inner.lock().expect("input dispatcher lock poisoned");
+        let Some(state) = map.get(connection_id) else {
+            return;
+        };
+        if state.generation != generation {
+            return;
+        }
+        let mut geometry = state.geometry.write().expect("monitor geometry poisoned");
+        *geometry = MonitorGeometry::new(rect.0, rect.1, rect.2, rect.3);
+    }
+
+    pub fn set_connection_generation_if_present(&self, connection_id: &str, generation: u64) {
+        let mut map = self.inner.lock().expect("input dispatcher lock poisoned");
+        if let Some(state) = map.get_mut(connection_id) {
+            state.generation = generation;
+        }
     }
 
     /// Retarget one connection to a new video device — used after a
@@ -377,15 +411,14 @@ fn display_geometry_for_device(requested_device_name: Option<&str>) -> (i32, i32
 /// function so future displacement of the capture-engine source-of-
 /// truth is a single-file change.
 fn enumerate_attached_displays() -> Vec<DisplayInfo> {
-    let mut out = Vec::new();
-    for (_backend, displays) in list_image_capture() {
-        for display in displays {
-            if display.attached_to_desktop {
-                out.push(display);
-            }
-        }
-    }
-    out
+    list_desktop_geometry()
+        .into_iter()
+        .filter(|display| {
+            display.attached_to_desktop
+                && display.desktop_coordinates.width() > 0
+                && display.desktop_coordinates.height() > 0
+        })
+        .collect()
 }
 
 /// Pure refresh: walk the connection map and rewrite the geometry of
@@ -733,6 +766,7 @@ mod tests {
         geometry: SharedMonitorGeometry,
     ) -> ConnectionInputState {
         ConnectionInputState {
+            generation: 1,
             mouse: Box::new(NoopMouse),
             keyboard: Box::new(NoopKeyboard),
             last_mouse_seq: 0,
@@ -824,6 +858,51 @@ mod tests {
             *g.read().unwrap(),
             MonitorGeometry::new(0, 0, 1280, 800),
             "no connection matched — nothing written",
+        );
+    }
+
+    #[test]
+    fn actual_stream_geometry_requires_current_generation_and_valid_rect() {
+        let dispatcher = dispatcher();
+        let geometry = shared_geometry(MonitorGeometry::new(0, 0, 1280, 800));
+        dispatcher
+            .inner
+            .lock()
+            .unwrap()
+            .insert("conn-a".to_string(), fake_state(None, geometry.clone()));
+
+        dispatcher.set_connection_geometry_if_current("conn-a", 2, (10, 20, 800, 600));
+        dispatcher.set_connection_geometry_if_current("conn-a", 1, (10, 20, 0, 600));
+        assert_eq!(
+            *geometry.read().unwrap(),
+            MonitorGeometry::new(0, 0, 1280, 800),
+        );
+
+        dispatcher.set_connection_geometry_if_current("conn-a", 1, (10, 20, 800, 600));
+        assert_eq!(
+            *geometry.read().unwrap(),
+            MonitorGeometry::new(10, 20, 800, 600),
+        );
+
+        dispatcher.set_connection_generation_if_present("conn-a", 2);
+        dispatcher.set_connection_geometry_if_current("conn-a", 1, (30, 40, 1024, 768));
+        assert_eq!(
+            *geometry.read().unwrap(),
+            MonitorGeometry::new(10, 20, 800, 600),
+        );
+        dispatcher.set_connection_geometry_if_current("conn-a", 2, (30, 40, 1024, 768));
+        assert_eq!(
+            *geometry.read().unwrap(),
+            MonitorGeometry::new(30, 40, 1024, 768),
+        );
+
+        dispatcher.stop_connection(&StopMediaPayload {
+            connection_id: "conn-a".to_string(),
+        });
+        dispatcher.set_connection_geometry_if_current("conn-a", 2, (50, 60, 1920, 1080));
+        assert_eq!(
+            *geometry.read().unwrap(),
+            MonitorGeometry::new(30, 40, 1024, 768),
         );
     }
 

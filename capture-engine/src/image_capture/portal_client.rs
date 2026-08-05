@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
+
+use desk_utils::error::DeskErrorCode;
 
 use serde::Deserialize;
 use zbus::{
@@ -41,6 +43,12 @@ pub struct ScreenCastStartResponse {
     pub restore_token: Option<String>,
 }
 
+pub const SCREENCAST_SOURCE_TYPE_MONITOR: u32 = 1;
+
+pub const fn screencast_source_types_support_monitor(source_types: u32) -> bool {
+    source_types & SCREENCAST_SOURCE_TYPE_MONITOR != 0
+}
+
 pub struct PortalClient<'a> {
     proxy: Proxy<'a>,
 }
@@ -57,6 +65,10 @@ impl PortalClient<'_> {
         )?;
         log::info!("Wayland portal: ScreenCast proxy is ready");
         Ok(Self { proxy })
+    }
+
+    pub fn available_source_types(&self) -> Result<u32, CaptureError> {
+        Ok(self.proxy.get_property("AvailableSourceTypes")?)
     }
 
     pub fn create_screencast_session(&self) -> Result<PortalSession, CaptureError> {
@@ -165,5 +177,59 @@ impl PortalClient<'_> {
             .call("OpenPipeWireRemote", &(&session.handle, options))?;
         log::info!("Wayland portal: OpenPipeWireRemote succeeded");
         Ok(fd)
+    }
+}
+
+pub fn probe_screencast_monitor_blocking() -> Result<u32, CaptureError> {
+    let connection = zbus::blocking::connection::Builder::session()?
+        .method_timeout(Duration::from_secs(3))
+        .build()?;
+    let proxy = Proxy::new(
+        &connection,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.ScreenCast",
+    )?;
+    let source_types: u32 = proxy.get_property("AvailableSourceTypes")?;
+    if !screencast_source_types_support_monitor(source_types) {
+        return CaptureError::custom_error(
+            DeskErrorCode::FEATURE_UNAVAILABLE,
+            &format!(
+                "ScreenCast portal does not advertise monitor capture (AvailableSourceTypes={source_types})"
+            ),
+        );
+    }
+    Ok(source_types)
+}
+
+pub async fn probe_screencast_monitor(timeout: Duration) -> Result<u32, CaptureError> {
+    match tokio::time::timeout(
+        timeout,
+        tokio::task::spawn_blocking(probe_screencast_monitor_blocking),
+    )
+    .await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => CaptureError::custom_error(
+            DeskErrorCode::SYSTEM_ERROR,
+            &format!("ScreenCast portal probe task failed: {error}"),
+        ),
+        Err(_) => CaptureError::custom_error(
+            DeskErrorCode::FEATURE_UNAVAILABLE,
+            "ScreenCast portal probe timed out",
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitor_source_type_requires_monitor_bit() {
+        assert!(screencast_source_types_support_monitor(1));
+        assert!(screencast_source_types_support_monitor(3));
+        assert!(!screencast_source_types_support_monitor(0));
+        assert!(!screencast_source_types_support_monitor(2));
     }
 }

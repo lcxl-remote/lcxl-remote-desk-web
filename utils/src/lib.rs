@@ -1,4 +1,5 @@
 pub mod error;
+pub mod linux_display;
 pub mod logs;
 pub mod network;
 pub mod permission;

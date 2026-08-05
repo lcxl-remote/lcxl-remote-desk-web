@@ -139,29 +139,39 @@ pub struct ServerInfo {
     pub macos_permissions: Option<MacosPermissions>,
 }
 
-/// Runtime backend diagnostics
+/// Runtime backend diagnostics.
 #[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
 pub struct BackendInfo {
-    /// Current target OS name
     pub os: String,
-    /// Whether WAYLAND_DISPLAY is present
-    pub wayland_env: bool,
-    /// Whether DISPLAY is present
-    pub x11_env: bool,
-    /// Requested image capture from settings
     pub requested_image_capture: Option<String>,
-    /// Resolved image capture backend used by factory
     pub resolved_image_capture: String,
-    /// Resolved input control backend based on wayland_control_mode and environment
     pub resolved_input_control: String,
-    /// Runtime status for input backend (ready/fallback/disabled)
     pub input_backend_runtime_status: String,
-    /// Input backend error detail when not ready
-    pub input_backend_error: Option<String>,
-    /// Whether portal service is reachable
-    pub portal_available: Option<bool>,
-    /// Portal error detail when unavailable
-    pub portal_error: Option<String>,
+    pub platform_diagnostics: Vec<BackendDiagnosticSection>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
+pub struct BackendDiagnosticSection {
+    pub platform: String,
+    pub key: String,
+    pub items: Vec<BackendDiagnosticItem>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
+pub struct BackendDiagnosticItem {
+    pub key: String,
+    pub value: String,
+    pub status: BackendDiagnosticStatus,
+    pub detail: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendDiagnosticStatus {
+    Neutral,
+    Ready,
+    Warning,
+    Error,
 }
 
 impl From<&sysinfo::System> for SystemInfo {

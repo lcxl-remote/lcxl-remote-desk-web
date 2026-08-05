@@ -12,7 +12,7 @@ LCXL Remote Desk 通过 **WebRTC** 串流远端屏幕与音频以实现超低延
 | VP8 / VP9 | libvpx |
 | AV1 | SVT-AV1 |
 
-采集后端：Windows（**DXGI / WGC**）、Linux（**X11 / Wayland portal + PipeWire**）。
+采集后端：Windows（**DXGI / WGC**）、Linux（**X11 / Wayland portal + PipeWire**）。Linux 会按当前桌面会话筛选后端：原生 X11 会话只展示 X11，Wayland 会话只展示 ScreenCast Portal，避免把 XWayland 误认为完整桌面采集能力。
 
 编码器可自动选择，或通过 `desk.video_encoder` 固定。帧率（`video_fps`）、画质（`video_quality`，0–63，越低越好）与脏矩形增量编码（`enable_dirty_rect`）均可配置——见 [config.toml 参考](/zh/config/config-toml#desktop-desk)。
 
@@ -28,7 +28,7 @@ LCXL Remote Desk 通过 **WebRTC** 串流远端屏幕与音频以实现超低延
 
 ## 显示器选择
 
-`desk.video_device_name` 选择要采集的显示器（如 Windows 上的 `\\.\DISPLAY1`）。留空则在首次连接时让浏览器选择。
+`desk.video_device_name` 选择要采集的显示器（如 Windows 上的 `\\.\DISPLAY1`）。首次连接时，浏览器会自动选择第一个包含可用显示器的采集模式，并优先选择桌面原点处的显示器；已保存的模式或显示器失效时会纠正到该可用默认值，并在对话框中说明变更。
 
 ## 调优建议
 

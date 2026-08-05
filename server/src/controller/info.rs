@@ -15,9 +15,15 @@ use desk_server_version::SERVER_API_VERSION;
 use desk_signal_facade::model::desk_settings::DeskSettings;
 
 #[cfg(target_os = "linux")]
-use desk_capture_engine::image_capture::portal_client::PortalClient;
+use crate::model::info::{
+    BackendDiagnosticItem, BackendDiagnosticSection, BackendDiagnosticStatus,
+};
+#[cfg(target_os = "linux")]
+use desk_capture_engine::image_capture::portal_client::probe_screencast_monitor_blocking;
 #[cfg(target_os = "linux")]
 use desk_input_injection::service::wayland_remote_desktop::WaylandRemoteDesktop;
+#[cfg(target_os = "linux")]
+use desk_utils::linux_display::{LinuxDisplayServer, detect_linux_display_environment};
 
 pub const TAG: &str = "System";
 
@@ -229,25 +235,26 @@ pub async fn query_backend_info(
         guard.desk.clone()
     };
 
-    let resolved = desk_settings.get_image_capture_type()?;
-    // Only the `#[cfg(target_os = "linux")]` block below mutates this; on
-    // other platforms the binding is left untouched.
+    let resolved_image_capture = desk_settings
+        .get_image_capture_type()
+        .map(|value| Into::<&'static str>::into(value).to_string())
+        .unwrap_or_else(|error| {
+            log::warn!("Backend diagnostics could not resolve image capture: {error}");
+            "<unavailable>".to_string()
+        });
     #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut backend_info = BackendInfo {
         os: std::env::consts::OS.to_string(),
-        wayland_env: std::env::var("WAYLAND_DISPLAY").is_ok(),
-        x11_env: std::env::var("DISPLAY").is_ok(),
         requested_image_capture: desk_settings.image_capture.clone(),
-        resolved_image_capture: Into::<&'static str>::into(resolved).to_string(),
+        resolved_image_capture,
         resolved_input_control: "native".to_string(),
         input_backend_runtime_status: "ready".to_string(),
-        input_backend_error: None,
-        portal_available: None,
-        portal_error: None,
+        platform_diagnostics: Vec::new(),
     };
 
     #[cfg(target_os = "linux")]
     {
+        let environment = detect_linux_display_environment();
         let mode = desk_settings
             .wayland_control_mode
             .as_deref()
@@ -256,58 +263,118 @@ pub async fn query_backend_info(
             "none" => "none".to_string(),
             "uinput" => "uinput".to_string(),
             "portal" => "portal".to_string(),
-            _ => {
-                if backend_info.wayland_env {
-                    "portal(auto)".to_string()
-                } else {
-                    "uinput(auto)".to_string()
-                }
+            _ if environment.active_server() == LinuxDisplayServer::Wayland => {
+                "portal(auto)".to_string()
             }
+            _ => "uinput(auto)".to_string(),
         };
 
-        let remote_desktop_probe = WaylandRemoteDesktop::probe_portal();
-        match mode {
-            "none" => {
-                backend_info.input_backend_runtime_status = "disabled".to_string();
-            }
-            "uinput" => {
-                backend_info.input_backend_runtime_status = "ready(uinput)".to_string();
-            }
+        let remote_desktop_probe = if matches!(mode, "portal")
+            || (mode == "auto" && environment.active_server() == LinuxDisplayServer::Wayland)
+        {
+            WaylandRemoteDesktop::probe_portal().map(|_| ())
+        } else {
+            Ok(())
+        };
+        let (input_value, input_status, input_detail) = match mode {
+            "none" => (
+                "disabled".to_string(),
+                BackendDiagnosticStatus::Warning,
+                None,
+            ),
+            "uinput" => (
+                "ready(uinput)".to_string(),
+                BackendDiagnosticStatus::Ready,
+                None,
+            ),
             "portal" => match remote_desktop_probe {
-                Ok(_) => {
-                    backend_info.input_backend_runtime_status = "ready(portal)".to_string();
-                }
-                Err(e) => {
-                    backend_info.input_backend_runtime_status = "error(portal)".to_string();
-                    backend_info.input_backend_error = Some(e.to_string());
-                }
+                Ok(()) => (
+                    "ready(portal)".to_string(),
+                    BackendDiagnosticStatus::Ready,
+                    None,
+                ),
+                Err(error) => (
+                    "error(portal)".to_string(),
+                    BackendDiagnosticStatus::Error,
+                    Some(error.to_string()),
+                ),
             },
-            _ => {
-                if backend_info.wayland_env {
-                    match remote_desktop_probe {
-                        Ok(_) => {
-                            backend_info.input_backend_runtime_status =
-                                "ready(portal-auto)".to_string();
-                        }
-                        Err(e) => {
-                            backend_info.input_backend_runtime_status =
-                                "fallback(uinput-auto)".to_string();
-                            backend_info.input_backend_error = Some(e.to_string());
-                        }
-                    }
-                } else {
-                    backend_info.input_backend_runtime_status = "ready(uinput-auto)".to_string();
+            _ if environment.active_server() == LinuxDisplayServer::Wayland => {
+                match remote_desktop_probe {
+                    Ok(()) => (
+                        "ready(portal-auto)".to_string(),
+                        BackendDiagnosticStatus::Ready,
+                        None,
+                    ),
+                    Err(error) => (
+                        "fallback(uinput-auto)".to_string(),
+                        BackendDiagnosticStatus::Warning,
+                        Some(error.to_string()),
+                    ),
                 }
             }
-        }
+            _ => (
+                "ready(uinput-auto)".to_string(),
+                BackendDiagnosticStatus::Ready,
+                None,
+            ),
+        };
+        backend_info.input_backend_runtime_status = input_value.clone();
 
-        match PortalClient::new() {
-            Ok(_) => backend_info.portal_available = Some(true),
-            Err(e) => {
-                backend_info.portal_available = Some(false);
-                backend_info.portal_error = Some(e.to_string());
-            }
-        }
+        let (portal_value, portal_status, portal_detail) =
+            if environment.active_server() == LinuxDisplayServer::Wayland {
+                match probe_screencast_monitor_blocking() {
+                    Ok(source_types) => (
+                        "available".to_string(),
+                        BackendDiagnosticStatus::Ready,
+                        Some(format!("AvailableSourceTypes={source_types}")),
+                    ),
+                    Err(error) => (
+                        "unavailable".to_string(),
+                        BackendDiagnosticStatus::Error,
+                        Some(error.to_string()),
+                    ),
+                }
+            } else {
+                (
+                    "unavailable".to_string(),
+                    BackendDiagnosticStatus::Neutral,
+                    Some("ScreenCast Portal is only advertised in a Wayland session".to_string()),
+                )
+            };
+
+        backend_info
+            .platform_diagnostics
+            .push(BackendDiagnosticSection {
+                platform: "linux".to_string(),
+                key: "linux_display".to_string(),
+                items: vec![
+                    BackendDiagnosticItem {
+                        key: "wayland_display".to_string(),
+                        value: environment.wayland_present.to_string(),
+                        status: BackendDiagnosticStatus::Neutral,
+                        detail: None,
+                    },
+                    BackendDiagnosticItem {
+                        key: "x11_display".to_string(),
+                        value: environment.x11_present.to_string(),
+                        status: BackendDiagnosticStatus::Neutral,
+                        detail: None,
+                    },
+                    BackendDiagnosticItem {
+                        key: "remote_desktop_input".to_string(),
+                        value: input_value,
+                        status: input_status,
+                        detail: input_detail,
+                    },
+                    BackendDiagnosticItem {
+                        key: "screencast_portal".to_string(),
+                        value: portal_value,
+                        status: portal_status,
+                        detail: portal_detail,
+                    },
+                ],
+            });
     }
 
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(backend_info)))

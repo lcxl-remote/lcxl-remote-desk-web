@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest"
 import {
+    canConnectCaptureTarget,
     canEnableAdaptiveResolution,
     DESK_CONFIG_DEFAULTS,
     formatDisplayLabel,
     hasNoDisplaysForMode,
+    normalizeCaptureTarget,
     orderCaptureModes,
     pickDefaultDeviceName,
     toDeskSettings,
@@ -193,5 +195,68 @@ describe("desk config normalization", () => {
         expect(settings.audio_device).toBeNull()
         expect(settings.video_fps).toBeUndefined()
         expect(settings).not.toHaveProperty("enable_audio")
+    })
+})
+
+
+describe("capture target normalization", () => {
+    const primary = makeDisplayInfo({
+        device_name: "primary",
+        desktop_coordinates: { left: 0, top: 0, right: 1280, bottom: 800 },
+    })
+    const secondary = makeDisplayInfo({
+        device_name: "secondary",
+        desktop_coordinates: { left: 1280, top: 0, right: 2560, bottom: 800 },
+    })
+
+    it("selects the first usable mode and primary display for empty saved values", () => {
+        const target = normalizeCaptureTarget("", "", {
+            GDI: [],
+            X11: [secondary, primary],
+            WAYLANDPORTAL: [],
+        })
+        expect(target).toEqual({
+            effectiveMode: "X11",
+            effectiveDeviceName: "primary",
+            staleMode: null,
+            staleDevice: null,
+            hasUsableCaptureTarget: true,
+        })
+    })
+
+    it("uses explicit cross-platform ordering and skips empty preferred modes", () => {
+        expect(orderCaptureModes(["X11", "WAYLANDPORTAL", "GDI"])).toEqual([
+            "GDI",
+            "WAYLANDPORTAL",
+            "X11",
+        ])
+        expect(normalizeCaptureTarget("", "", {
+            WGC: [],
+            DXGI: [primary],
+        }).effectiveMode).toBe("DXGI")
+    })
+
+    it("corrects a stale mode and device while preserving valid values", () => {
+        const corrected = normalizeCaptureTarget("X11", "gone", {
+            WAYLANDPORTAL: [primary],
+        })
+        expect(corrected.effectiveMode).toBe("WAYLANDPORTAL")
+        expect(corrected.effectiveDeviceName).toBe("primary")
+        expect(corrected.staleMode).toBe("X11")
+        expect(corrected.staleDevice).toBe("gone")
+
+        const preserved = normalizeCaptureTarget("WAYLANDPORTAL", "secondary", {
+            WAYLANDPORTAL: [primary, secondary],
+        })
+        expect(preserved.effectiveDeviceName).toBe("secondary")
+        expect(preserved.staleMode).toBeNull()
+        expect(preserved.staleDevice).toBeNull()
+    })
+
+    it("disables connect when no usable target exists or the device is not in the mode", () => {
+        expect(normalizeCaptureTarget("", "", {}).hasUsableCaptureTarget).toBe(false)
+        expect(canConnectCaptureTarget("X11", "primary", { X11: [primary] })).toBe(true)
+        expect(canConnectCaptureTarget("X11", "missing", { X11: [primary] })).toBe(false)
+        expect(canConnectCaptureTarget("", "", { X11: [primary] })).toBe(false)
     })
 })

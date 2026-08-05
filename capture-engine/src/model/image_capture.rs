@@ -109,7 +109,7 @@ pub trait ImageOutputEnumerator {
 }
 
 /// Image Capture Type Enum
-#[derive(EnumIter, IntoStaticStr, EnumString, Debug, Clone, Copy)]
+#[derive(EnumIter, IntoStaticStr, EnumString, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageCaptureType {
     /// Capture image via Windows.Graphics.Capture (WGC).
     /// Declared first so EnumIter visits it before DXGI/GDI; the frontend
@@ -131,17 +131,6 @@ pub enum ImageCaptureType {
     /// Capture image using ScreenCaptureKit
     #[cfg(target_os = "macos")]
     SCKIT,
-}
-
-impl Default for ImageCaptureType {
-    fn default() -> Self {
-        #[cfg(target_os = "windows")]
-        return ImageCaptureType::DXGI;
-        #[cfg(target_os = "linux")]
-        return ImageCaptureType::X11;
-        #[cfg(target_os = "macos")]
-        return ImageCaptureType::SCKIT;
-    }
 }
 
 pub trait ImageCaptureTypeHelper {

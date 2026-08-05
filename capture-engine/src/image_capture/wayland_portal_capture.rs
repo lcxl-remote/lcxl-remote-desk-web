@@ -4,13 +4,16 @@ use desk_signal_facade::model::{
     desk_settings::DeskSettings,
     image_capture::{DisplayInfo, DisplayRect},
 };
-use desk_utils::error::DeskErrorCode;
+use desk_utils::{
+    error::DeskErrorCode,
+    linux_display::{LinuxDisplayServer, detect_linux_display_environment},
+};
 
 use crate::{
     error::CaptureError,
     image_capture::{
         pipewire_capture::{PipewireImageCapture, PipewireSetup},
-        portal_client::PortalClient,
+        portal_client::{PortalClient, probe_screencast_monitor_blocking},
         wayland_output_geometry::{WaylandOutputGeometry, enumerate_wayland_outputs},
     },
     model::image_capture::{
@@ -29,7 +32,7 @@ impl WaylandPortalImageCapture {
             "Wayland capture: initializing, image_capture={:?}",
             desk_settings.image_capture
         );
-        if std::env::var("WAYLAND_DISPLAY").is_err() {
+        if detect_linux_display_environment().active_server() != LinuxDisplayServer::Wayland {
             log::error!("Wayland capture: WAYLAND_DISPLAY is not set");
             return CaptureError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
@@ -37,7 +40,9 @@ impl WaylandPortalImageCapture {
             );
         }
 
-        // Fast fail if portal service is unavailable in current user session.
+        // Verify monitor capture without creating a portal session or showing consent UI.
+        probe_screencast_monitor_blocking()?;
+
         let portal = PortalClient::new()?;
         let session = portal.create_screencast_session()?;
         portal.select_sources(&session)?;
@@ -185,12 +190,14 @@ const WAYLAND_PORTAL_DEVICE_NAME: &str = "wayland-portal-display";
 
 impl ImageOutputEnumerator for WaylandPortalImageOutputEnumerator {
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, CaptureError> {
-        if std::env::var("WAYLAND_DISPLAY").is_err() {
+        if detect_linux_display_environment().active_server() != LinuxDisplayServer::Wayland {
             return CaptureError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
                 "WAYLAND_DISPLAY is not set",
             );
         }
+        probe_screencast_monitor_blocking()?;
+
         // Enumerate outputs without the portal. The screen-cast `Start`
         // handshake pops an interactive "Share Screen" picker and blocks on
         // the user's choice, which must never happen during capability

@@ -1,3 +1,6 @@
+#[cfg(target_os = "linux")]
+use desk_utils::linux_display::{LinuxDisplayServer, detect_linux_display_environment};
+
 use crate::{
     error::InputError,
     model::{data_channel::MouseEventHandler, geometry::SharedMonitorGeometry},
@@ -70,7 +73,7 @@ pub fn create_mouse_event_handler(
             top,
             width,
             height,
-            std::env::var("WAYLAND_DISPLAY").is_ok()
+            detect_linux_display_environment().wayland_present
         );
         match mode {
             "none" => {
@@ -90,7 +93,7 @@ pub fn create_mouse_event_handler(
             _ => {}
         }
 
-        if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        if detect_linux_display_environment().active_server() == LinuxDisplayServer::Wayland {
             match wayland_portal::WaylandPortalMouseEventHandler::new(geometry.clone()) {
                 Ok(handler) => {
                     log::info!("Mouse handler: auto selected wayland portal backend");

@@ -293,6 +293,42 @@ fn start_media_data_channel_only_skips_both_pipelines() {
     );
 }
 
+#[test]
+fn start_media_accepted_callback_runs_once_and_duplicate_preserves_state() {
+    let (sender, _rx) = inprocess::make_media();
+    let (err_tx, _err_rx) = mpsc::unbounded_channel::<WorkerToService>();
+    let producer = MediaProducer::new(DeskSettings::default(), sender, err_tx);
+    let payload = StartMediaPayload {
+        connection_id: "callback".into(),
+        video_codec: MediaCodec::H264,
+        audio_codec: MediaCodec::Opus,
+        video_device: None,
+        audio_device: None,
+        fps: 0,
+        bitrate_kbps: 0,
+        quality: 0,
+        start_video: false,
+        start_audio: false,
+        image_capture: None,
+        enable_dirty_rect: None,
+    };
+    let seen = AtomicU64::new(0);
+
+    let accepted = producer.start_media_with(payload.clone(), |generation| {
+        seen.store(generation, Ordering::SeqCst);
+    });
+    let StartMediaResult::Accepted(generation) = accepted else {
+        panic!("first StartMedia must be accepted");
+    };
+    assert_eq!(seen.load(Ordering::SeqCst), generation);
+
+    let duplicate = producer.start_media_with(payload, |_| {
+        seen.store(u64::MAX, Ordering::SeqCst);
+    });
+    assert!(matches!(duplicate, StartMediaResult::AlreadyRunning));
+    assert_eq!(seen.load(Ordering::SeqCst), generation);
+}
+
 /// Force-keyframe / stop-media on an unknown connection must be a
 /// silent no-op (race with browser drop). The producer has to be
 /// safe to drive from the daemon even when the daemon's view of
@@ -1399,4 +1435,72 @@ fn capturable_device_name_none_for_empty_requested() {
 #[test]
 fn capturable_device_name_none_for_empty_live() {
     assert!(capturable_device_name(&[], r"\\.\DISPLAY1").is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stop_sent_before_video_poll_is_immediately_visible() {
+    let (tx, mut rx) = watch::channel(false);
+    tx.send_replace(true);
+    assert!(*rx.borrow());
+    tokio::time::timeout(Duration::from_millis(50), rx.changed())
+        .await
+        .expect("an unseen pre-poll stop must not remain pending")
+        .expect("sender is still alive");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stop_interrupts_backpressured_i_frame_send_before_timeout() {
+    use desk_ipc_protocol::dual_transport::MEDIA_QUEUE_CAP;
+
+    let (media_sender, _media_rx) = inprocess::make_media();
+    for seq in 0..MEDIA_QUEUE_CAP {
+        media_sender
+            .send_p_frame(build_media_frame(
+                "blocked",
+                seq as u64,
+                1,
+                MediaFrameKind::VideoP,
+                MediaCodec::H264,
+                vec![0],
+            ))
+            .await
+            .unwrap();
+    }
+    let (error_tx, _error_rx) = mpsc::unbounded_channel();
+    let (stop_tx, mut stop_rx) = watch::channel(false);
+    let stopper = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        stop_tx.send_replace(true);
+    });
+    let started = tokio::time::Instant::now();
+    let keep_running = send_frame_or_stop(
+        &media_sender,
+        &error_tx,
+        "blocked",
+        build_media_frame(
+            "blocked",
+            100,
+            1,
+            MediaFrameKind::VideoI,
+            MediaCodec::H264,
+            vec![1],
+        ),
+        &mut stop_rx,
+    )
+    .await;
+    stopper.await.unwrap();
+
+    assert!(!keep_running);
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "stop should preempt the transport 500ms I-frame timeout",
+    );
+}
+
+#[test]
+fn stop_send_replace_succeeds_without_video_receiver() {
+    let (tx, rx) = watch::channel(false);
+    drop(rx);
+    assert!(!tx.send_replace(true));
+    assert!(*tx.borrow());
 }

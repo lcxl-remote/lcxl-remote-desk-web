@@ -15,7 +15,7 @@ use crate::controller::virtual_display::VirtualDisplayDriverStatusResponse;
 use crate::model::{
     data_channel::SignalRequestControlData,
     file_transfer::FileTransferMessage,
-    info::BackendInfo,
+    info::{BackendDiagnosticItem, BackendDiagnosticSection, BackendDiagnosticStatus, BackendInfo},
     security_approval::SecurityApprovalEventPayload,
     settings::{TraversalMode, TurnClientSettings, VirtualDisplaySettings},
 };
@@ -40,6 +40,9 @@ use desk_input_injection::model::data_channel::{KeyboardEventData, MouseEventDat
     DeviceCodeListResult,
     DeviceCodeBatchDeleteParams,
     BackendInfo,
+    BackendDiagnosticSection,
+    BackendDiagnosticItem,
+    BackendDiagnosticStatus,
     SecurityApprovalEventPayload,
     TurnSettings,
     TurnInterface,

@@ -176,60 +176,79 @@ export type Av1EncoderSettings = {
     target_bps?: number;
 };
 
+export const backendDiagnosticStatusEnum = {
+    neutral: "neutral",
+    ready: "ready",
+    warning: "warning",
+    error: "error"
+} as const;
+
+export type BackendDiagnosticStatusEnumKey = (typeof backendDiagnosticStatusEnum)[keyof typeof backendDiagnosticStatusEnum];
+
+export type BackendDiagnosticStatus = BackendDiagnosticStatusEnumKey;
+
+export type BackendDiagnosticItem = {
+    /**
+     * @type string,null
+    */
+    detail?: string | null;
+    /**
+     * @type string
+    */
+    key: string;
+    /**
+     * @type string
+    */
+    status: BackendDiagnosticStatus;
+    /**
+     * @type string
+    */
+    value: string;
+};
+
+export type BackendDiagnosticSection = {
+    /**
+     * @type array
+    */
+    items: BackendDiagnosticItem[];
+    /**
+     * @type string
+    */
+    key: string;
+    /**
+     * @type string
+    */
+    platform: string;
+};
+
 /**
- * @description Runtime backend diagnostics
+ * @description Runtime backend diagnostics.
 */
 export type BackendInfo = {
     /**
-     * @description Input backend error detail when not ready
-     * @type string,null
-    */
-    input_backend_error?: string | null;
-    /**
-     * @description Runtime status for input backend (ready/fallback/disabled)
      * @type string
     */
     input_backend_runtime_status: string;
     /**
-     * @description Current target OS name
      * @type string
     */
     os: string;
     /**
-     * @description Whether portal service is reachable
-     * @type boolean,null
+     * @type array
     */
-    portal_available?: boolean | null;
+    platform_diagnostics: BackendDiagnosticSection[];
     /**
-     * @description Portal error detail when unavailable
-     * @type string,null
-    */
-    portal_error?: string | null;
-    /**
-     * @description Requested image capture from settings
      * @type string,null
     */
     requested_image_capture?: string | null;
     /**
-     * @description Resolved image capture backend used by factory
      * @type string
     */
     resolved_image_capture: string;
     /**
-     * @description Resolved input control backend based on wayland_control_mode and environment
      * @type string
     */
     resolved_input_control: string;
-    /**
-     * @description Whether WAYLAND_DISPLAY is present
-     * @type boolean
-    */
-    wayland_env: boolean;
-    /**
-     * @description Whether DISPLAY is present
-     * @type boolean
-    */
-    x11_env: boolean;
 };
 
 /**
@@ -2298,60 +2317,34 @@ export type RestResponseBackendInfo = {
     */
     code: number;
     /**
-     * @description Runtime backend diagnostics
+     * @description Runtime backend diagnostics.
      * @type object | undefined
     */
     data?: {
         /**
-         * @description Input backend error detail when not ready
-         * @type string,null
-        */
-        input_backend_error?: string | null;
-        /**
-         * @description Runtime status for input backend (ready/fallback/disabled)
          * @type string
         */
         input_backend_runtime_status: string;
         /**
-         * @description Current target OS name
          * @type string
         */
         os: string;
         /**
-         * @description Whether portal service is reachable
-         * @type boolean,null
+         * @type array
         */
-        portal_available?: boolean | null;
+        platform_diagnostics: BackendDiagnosticSection[];
         /**
-         * @description Portal error detail when unavailable
-         * @type string,null
-        */
-        portal_error?: string | null;
-        /**
-         * @description Requested image capture from settings
          * @type string,null
         */
         requested_image_capture?: string | null;
         /**
-         * @description Resolved image capture backend used by factory
          * @type string
         */
         resolved_image_capture: string;
         /**
-         * @description Resolved input control backend based on wayland_control_mode and environment
          * @type string
         */
         resolved_input_control: string;
-        /**
-         * @description Whether WAYLAND_DISPLAY is present
-         * @type boolean
-        */
-        wayland_env: boolean;
-        /**
-         * @description Whether DISPLAY is present
-         * @type boolean
-        */
-        x11_env: boolean;
     };
     /**
      * @type string,null

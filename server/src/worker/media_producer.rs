@@ -99,7 +99,7 @@ use desk_ipc_protocol::message::{
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
 use log::{debug, error, info, warn};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::worker::shared_capture::{CaptureKey, SharedCaptureRegistry};
 
@@ -108,8 +108,17 @@ use crate::worker::shared_capture::{CaptureKey, SharedCaptureRegistry};
 /// flags the event loop flips to drive them. Both pipelines share the
 /// same `stop_flag` so `StopMedia` cleanly tears down both halves at
 /// once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartMediaResult {
+    Accepted(u64),
+    AlreadyRunning,
+}
+
+type GeometryUpdateHandler = dyn Fn(&str, u64, (i32, i32, i32, i32)) + Send + Sync + 'static;
+
 struct ConnectionTask {
     stop_flag: Arc<AtomicBool>,
+    stop_tx: watch::Sender<bool>,
     keyframe_requested: Arc<AtomicBool>,
     /// Live-update channel feeding fresh `UpdateMediaSettingsPayload`
     /// values into the video pipeline thread. `update_settings` posts
@@ -129,12 +138,19 @@ struct ConnectionTask {
     audio_handle: Option<thread::JoinHandle<()>>,
 }
 
+impl ConnectionTask {
+    fn request_stop(&self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        self.stop_tx.send_replace(true);
+    }
+}
+
 impl Drop for ConnectionTask {
     fn drop(&mut self) {
         // Belt-and-braces: setting stop_flag here guarantees both
         // threads observe a stop request even if the caller forgot to
         // call `stop_media` (e.g. supervisor unwinding on a panic).
-        self.stop_flag.store(true, Ordering::Relaxed);
+        self.request_stop();
     }
 }
 
@@ -171,7 +187,8 @@ pub struct MediaProducer {
     /// `CaptureKeyGuard` drop check can distinguish "I wrote this
     /// entry" from "someone overwrote it after me". See the docstring
     /// on `CaptureKeyGuard` for the race this defeats.
-    capture_key_generation: Arc<AtomicU64>,
+    capture_key_generation: AtomicU64,
+    geometry_update_handler: StdMutex<Option<Arc<GeometryUpdateHandler>>>,
     inner: StdMutex<HashMap<String, ConnectionTask>>,
 }
 
@@ -232,7 +249,8 @@ impl MediaProducer {
             error_tx,
             capture_registry: SharedCaptureRegistry::new(),
             capture_keys: Arc::new(StdMutex::new(HashMap::new())),
-            capture_key_generation: Arc::new(AtomicU64::new(0)),
+            capture_key_generation: AtomicU64::new(0),
+            geometry_update_handler: StdMutex::new(None),
             inner: StdMutex::new(HashMap::new()),
         }
     }
@@ -268,6 +286,13 @@ impl MediaProducer {
         self.capture_registry.display_info_for_key(&key)
     }
 
+    pub fn set_geometry_update_handler(&self, handler: Arc<GeometryUpdateHandler>) {
+        *self
+            .geometry_update_handler
+            .lock()
+            .expect("media producer geometry handler lock poisoned") = Some(handler);
+    }
+
     /// Start a per-connection capture + encode pipeline. Idempotent on
     /// duplicate `connection_id` — duplicates log a warning and are
     /// ignored (the daemon should never legitimately double-start).
@@ -283,16 +308,38 @@ impl MediaProducer {
     /// connection still gets a `ConnectionTask` slot so that
     /// `stop_media` is symmetric and so a future protocol-level
     /// renegotiation could light up media on the existing entry.
-    pub fn start_media(&self, payload: StartMediaPayload) {
+    pub fn start_media(&self, payload: StartMediaPayload) -> StartMediaResult {
+        self.start_media_with(payload, |_| {})
+    }
+
+    pub fn start_media_with<F>(
+        &self,
+        payload: StartMediaPayload,
+        on_accepted: F,
+    ) -> StartMediaResult
+    where
+        F: FnOnce(u64),
+    {
         let connection_id = payload.connection_id.clone();
         let mut map = self.inner.lock().expect("media producer lock poisoned");
         if map.contains_key(&connection_id) {
             warn!(
                 "[MediaProducer] StartMedia for already-running connection {connection_id}; ignoring"
             );
-            return;
+            return StartMediaResult::AlreadyRunning;
         }
+        let generation = self
+            .capture_key_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        on_accepted(generation);
+        let geometry_update_handler = self
+            .geometry_update_handler
+            .lock()
+            .expect("media producer geometry handler lock poisoned")
+            .clone();
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let (stop_tx, stop_rx) = watch::channel(false);
         let keyframe_requested = Arc::new(AtomicBool::new(false));
         let (settings_tx, settings_rx) = mpsc::unbounded_channel::<UpdateMediaSettingsPayload>();
         if !payload.start_video && !payload.start_audio {
@@ -308,17 +355,20 @@ impl MediaProducer {
                 Arc::clone(&self.media_sender),
                 self.error_tx.clone(),
                 Arc::clone(&stop_flag),
+                stop_rx,
                 Arc::clone(&keyframe_requested),
                 settings_rx,
                 Arc::clone(&self.capture_registry),
                 Arc::clone(&self.capture_keys),
-                Arc::clone(&self.capture_key_generation),
+                generation,
+                geometry_update_handler,
             ))
         } else {
             // Drain the receiver end so settings updates targeted at this
             // connection don't accumulate unbounded; closing it here is
             // symmetric with not spawning a consumer.
             drop(settings_rx);
+            drop(stop_rx);
             debug!("[MediaProducer] {connection_id}: skipping video pipeline (start_video=false)");
             None
         };
@@ -342,19 +392,21 @@ impl MediaProducer {
             connection_id,
             ConnectionTask {
                 stop_flag,
+                stop_tx,
                 keyframe_requested,
                 settings_tx,
                 video_handle,
                 audio_handle,
             },
         );
+        StartMediaResult::Accepted(generation)
     }
 
     /// Stop a per-connection pipeline. No-op on unknown id.
     pub fn stop_media(&self, payload: &StopMediaPayload) {
         let mut map = self.inner.lock().expect("media producer lock poisoned");
         if let Some(mut task) = map.remove(&payload.connection_id) {
-            task.stop_flag.store(true, Ordering::Relaxed);
+            task.request_stop();
             // We do not block-join the threads here: the worker IPC
             // loop must remain responsive. Both threads observe
             // stop_flag in their capture/sleep cycle and exit within
@@ -440,7 +492,7 @@ impl MediaProducer {
             map.drain().map(|(_, v)| v).collect()
         };
         for task in drained {
-            task.stop_flag.store(true, Ordering::Relaxed);
+            task.request_stop();
             // Drop runs and signals stop_flag again as a fail-safe.
             drop(task);
         }
@@ -501,7 +553,7 @@ mod settings;
 mod video;
 
 use audio::audio_pipeline_loop;
-use frame::{build_media_frame, log_post_rebuild_emit, send_frame};
+use frame::{build_media_frame, log_post_rebuild_emit, send_frame, send_frame_or_stop};
 use pipeline::{spawn_audio_pipeline_thread, spawn_video_pipeline_thread};
 use settings::{
     capturable_device_name, classify_video_frame_kind, codec_from_str, compute_emit_duration_ns,

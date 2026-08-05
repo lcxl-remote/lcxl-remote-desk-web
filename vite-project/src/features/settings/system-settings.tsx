@@ -26,6 +26,7 @@ import { TelemetryDisclosure } from "@/components/telemetry-disclosure"
 import { ServiceInstallDialog } from "@/features/layout/service-install-dialog"
 import { ServiceUninstallDialog } from "@/features/layout/service-uninstall-dialog"
 import { useState } from "react"
+import { BackendDiagnosticsCard } from "@/features/settings/backend-diagnostics-card"
 
 const systemSettingsSchema = z.object({
     enable_ipv6: z.boolean(),
@@ -365,26 +366,12 @@ export function SystemSettings() {
                     <CardTitle>{t("pages.system.settings.backendDiagnostics")}</CardTitle>
                     <CardDescription>{t("pages.system.settings.backendDiagnostics.description")}</CardDescription>
                 </CardHeader>
-                <CardContent className="space-y-2 text-sm">
+                <CardContent className="space-y-3 text-sm">
                     <div><span className="font-medium">OS:</span> {backendInfo?.os ?? "-"}</div>
-                    <div><span className="font-medium">WAYLAND_DISPLAY:</span> {String(backendInfo?.wayland_env ?? false)}</div>
-                    <div><span className="font-medium">DISPLAY:</span> {String(backendInfo?.x11_env ?? false)}</div>
-                    <div><span className="font-medium">Capture Backend:</span> {backendInfo?.resolved_image_capture ?? "-"}</div>
-                    <div><span className="font-medium">Input Backend:</span> {backendInfo?.resolved_input_control ?? "-"}</div>
-                    <div><span className="font-medium">Input Runtime:</span> {backendInfo?.input_backend_runtime_status ?? "-"}</div>
-                    <div><span className="font-medium">Portal Available:</span> {backendInfo?.portal_available === undefined ? "-" : String(backendInfo.portal_available)}</div>
-                    {backendInfo?.input_backend_error && (
-                        <Alert variant="destructive" className="mt-2">
-                            <AlertTitle>{t("pages.system.settings.backendDiagnostics.inputError")}</AlertTitle>
-                            <AlertDescription>{backendInfo.input_backend_error}</AlertDescription>
-                        </Alert>
-                    )}
-                    {backendInfo?.portal_error && (
-                        <Alert variant="destructive" className="mt-2">
-                            <AlertTitle>{t("pages.system.settings.backendDiagnostics.portalError")}</AlertTitle>
-                            <AlertDescription>{backendInfo.portal_error}</AlertDescription>
-                        </Alert>
-                    )}
+                    <div><span className="font-medium">{t("pages.system.settings.backendDiagnostics.captureBackend")}:</span> {backendInfo?.resolved_image_capture ?? "-"}</div>
+                    <div><span className="font-medium">{t("pages.system.settings.backendDiagnostics.inputBackend")}:</span> {backendInfo?.resolved_input_control ?? "-"}</div>
+                    <div><span className="font-medium">{t("pages.system.settings.backendDiagnostics.inputRuntime")}:</span> {backendInfo?.input_backend_runtime_status ?? "-"}</div>
+                    <BackendDiagnosticsCard sections={backendInfo?.platform_diagnostics} />
                 </CardContent>
             </Card>
         </div>

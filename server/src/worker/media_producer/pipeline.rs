@@ -10,11 +10,13 @@ pub(super) fn spawn_video_pipeline_thread(
     media_sender: Arc<dyn MediaSender>,
     error_tx: mpsc::UnboundedSender<WorkerToService>,
     stop_flag: Arc<AtomicBool>,
+    stop_rx: watch::Receiver<bool>,
     keyframe_requested: Arc<AtomicBool>,
     settings_rx: mpsc::UnboundedReceiver<UpdateMediaSettingsPayload>,
     capture_registry: Arc<SharedCaptureRegistry>,
     capture_keys: Arc<StdMutex<HashMap<String, CaptureKeyRecord>>>,
-    capture_key_generation: Arc<AtomicU64>,
+    generation: u64,
+    geometry_update_handler: Option<Arc<GeometryUpdateHandler>>,
 ) -> thread::JoinHandle<()> {
     let connection_id = payload.connection_id.clone();
     let thread_name = format!("media-video-{}", &connection_id);
@@ -42,11 +44,13 @@ pub(super) fn spawn_video_pipeline_thread(
                     media_sender,
                     error_tx,
                     stop_flag,
+                    stop_rx,
                     keyframe_requested,
                     settings_rx,
                     capture_registry,
                     capture_keys,
-                    capture_key_generation,
+                    generation,
+                    geometry_update_handler,
                 )
                 .await
                 {

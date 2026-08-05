@@ -34,14 +34,16 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Slider } from "@/components/ui/slider"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { AlertTriangle } from "lucide-react"
-import type { InitSignalingData, DeskSettings, DisplayInfo } from "@/services/types"
+import type { InitSignalingData, DeskSettings } from "@/services/types"
 import { DeskConfigAdvancedTab } from "./desk-config-advanced-tab"
 import { DeskConfigAudioTab } from "./desk-config-audio-tab"
 import {
+    canConnectCaptureTarget,
     canEnableAdaptiveResolution,
     DESK_CONFIG_DEFAULTS,
     formatDisplayLabel,
     hasNoDisplaysForMode,
+    normalizeCaptureTarget,
     orderCaptureModes,
     pickDefaultDeviceName,
     toDeskSettings,
@@ -103,6 +105,7 @@ export function DeskConfigDialog({
      * different display.
      */
     const [staleSavedDeviceName, setStaleSavedDeviceName] = useState<string | null>(null)
+    const [staleSavedCaptureMode, setStaleSavedCaptureMode] = useState<string | null>(null)
 
     // Auto-resolution semantically targets the IDD; if the captured
     // display is not the IDD, the request would silently change the
@@ -129,27 +132,17 @@ export function DeskConfigDialog({
             return
         }
         const saved = initData.desk_settings
-        const backend = saved.image_capture ?? ""
-        const candidates: ReadonlyArray<DisplayInfo> = (backend &&
-            initData.video_device_list &&
-            initData.video_device_list[backend]) || []
-        const savedName = saved.video_device_name ?? ""
-        let resolvedName = savedName
-        let stale: string | null = null
-        if (savedName === "") {
-            resolvedName = pickDefaultDeviceName(candidates)
-        } else if (!candidates.some((d) => d.device_name === savedName)) {
-            // Saved display is gone (hot-plug / IDD detached / config
-            // edited by hand). Prefill the primary so the user can hit
-            // Connect without re-picking, but surface a warning so they
-            // know we didn't honour their persisted choice.
-            stale = savedName
-            resolvedName = pickDefaultDeviceName(candidates)
-        }
-        setStaleSavedDeviceName(stale)
+        const target = normalizeCaptureTarget(
+            saved.image_capture,
+            saved.video_device_name,
+            initData.video_device_list,
+        )
+        setStaleSavedCaptureMode(target.staleMode)
+        setStaleSavedDeviceName(target.staleDevice)
         form.reset({
             ...saved,
-            video_device_name: resolvedName,
+            image_capture: target.effectiveMode,
+            video_device_name: target.effectiveDeviceName,
             show_mouse: saved.show_mouse ?? true,
             adaptive_web_page_resolution: saved.adaptive_web_page_resolution ?? true,
             video_zoom_ratio: saved.video_zoom_ratio ?? 100,
@@ -166,11 +159,26 @@ export function DeskConfigDialog({
         ? initData.video_device_list[selectedImageCapture]
         : []
     const noDisplaysForMode = hasNoDisplaysForMode(selectedImageCapture, videoDeviceList)
+    const captureTarget = normalizeCaptureTarget(
+        selectedImageCapture,
+        watchedDeviceName,
+        initData?.video_device_list,
+    )
+    const canConnect = !!initData && canConnectCaptureTarget(
+        selectedImageCapture,
+        watchedDeviceName,
+        initData.video_device_list,
+    )
+    const captureUnavailable = !!initData && !captureTarget.hasUsableCaptureTarget
 
     const handleSubmit = (values: DeskConfigFormSettings) => {
         // Defence in depth: never start a session without a display, even if the
         // disabled submit button is bypassed (e.g. implicit Enter-key submit).
-        if (noDisplaysForMode || !values.video_device_name) {
+        if (!canConnectCaptureTarget(
+            values.image_capture,
+            values.video_device_name,
+            initData?.video_device_list,
+        )) {
             return
         }
         onSubmit(toDeskSettings(values))
@@ -234,6 +242,7 @@ export function DeskConfigDialog({
                                                         pickDefaultDeviceName(next),
                                                     )
                                                     setStaleSavedDeviceName(null)
+                                                    setStaleSavedCaptureMode(null)
                                                 }}
                                                 defaultValue={currentValue}
                                             >
@@ -267,6 +276,28 @@ export function DeskConfigDialog({
                                             {t(
                                                 "pages.desk.dxgiVideoBlackBarWarning.body"
                                             )}
+                                        </AlertDescription>
+                                    </Alert>
+                                )}
+
+                                {captureUnavailable && (
+                                    <Alert variant="destructive">
+                                        <AlertTriangle className="h-4 w-4" />
+                                        <AlertTitle>{t("pages.desk.captureUnavailable.title")}</AlertTitle>
+                                        <AlertDescription>
+                                            {t("pages.desk.captureUnavailable.body")}
+                                        </AlertDescription>
+                                    </Alert>
+                                )}
+
+                                {staleSavedCaptureMode && (
+                                    <Alert>
+                                        <AlertTriangle className="h-4 w-4" />
+                                        <AlertTitle>{t("pages.desk.captureModeStaleWarning.title")}</AlertTitle>
+                                        <AlertDescription>
+                                            {t("pages.desk.captureModeStaleWarning.body", {
+                                                name: staleSavedCaptureMode,
+                                            })}
                                         </AlertDescription>
                                     </Alert>
                                 )}
@@ -494,7 +525,7 @@ export function DeskConfigDialog({
                             <Button type="button" variant="outline" onClick={onCancel}>
                                 {t('pages.desk.close')}
                             </Button>
-                            <Button type="submit" disabled={noDisplaysForMode}>
+                            <Button type="submit" disabled={!canConnect}>
                                 {t('pages.desk.connect')}
                             </Button>
                         </DialogFooter>

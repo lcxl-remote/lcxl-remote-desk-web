@@ -62,7 +62,13 @@ export function pickDefaultDeviceName(
     return (primary ?? devices[0]).device_name ?? ""
 }
 
-const CAPTURE_PREFERRED_ORDER = ["WGC", "DXGI", "GDI"] as const
+const CAPTURE_PREFERRED_ORDER = [
+    "WGC",
+    "DXGI",
+    "GDI",
+    "WAYLANDPORTAL",
+    "X11",
+] as const
 
 export function orderCaptureModes(modes: ReadonlyArray<string>): string[] {
     return [
@@ -73,6 +79,59 @@ export function orderCaptureModes(modes: ReadonlyArray<string>): string[] {
             ))
             .sort(),
     ]
+}
+
+export interface CaptureTargetNormalization {
+    effectiveMode: string
+    effectiveDeviceName: string
+    staleMode: string | null
+    staleDevice: string | null
+    hasUsableCaptureTarget: boolean
+}
+
+export type VideoDeviceMap = Readonly<Record<string, ReadonlyArray<DisplayInfo>>>
+
+export function normalizeCaptureTarget(
+    savedMode: string | undefined | null,
+    savedDeviceName: string | undefined | null,
+    videoDeviceList: VideoDeviceMap | undefined | null,
+): CaptureTargetNormalization {
+    const devicesByMode = videoDeviceList ?? {}
+    const usableModes = orderCaptureModes(Object.keys(devicesByMode))
+        .filter((mode) => (devicesByMode[mode]?.length ?? 0) > 0)
+    const requestedMode = savedMode ?? ""
+    const effectiveMode = requestedMode
+        && usableModes.includes(requestedMode)
+        ? requestedMode
+        : usableModes[0] ?? ""
+    const devices = effectiveMode ? devicesByMode[effectiveMode] ?? [] : []
+    const requestedDevice = savedDeviceName ?? ""
+    const effectiveDeviceName = requestedDevice
+        && devices.some((device) => device.device_name === requestedDevice)
+        ? requestedDevice
+        : pickDefaultDeviceName(devices)
+
+    return {
+        effectiveMode,
+        effectiveDeviceName,
+        staleMode: requestedMode && requestedMode !== effectiveMode
+            ? requestedMode
+            : null,
+        staleDevice: requestedDevice && requestedDevice !== effectiveDeviceName
+            ? requestedDevice
+            : null,
+        hasUsableCaptureTarget: !!effectiveMode && !!effectiveDeviceName,
+    }
+}
+
+export function canConnectCaptureTarget(
+    mode: string | undefined | null,
+    deviceName: string | undefined | null,
+    videoDeviceList: VideoDeviceMap | undefined | null,
+): boolean {
+    if (!mode || !deviceName || !videoDeviceList) return false
+    return (videoDeviceList[mode] ?? [])
+        .some((device) => device.device_name === deviceName)
 }
 
 export function toDeskSettings(
