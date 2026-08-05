@@ -101,11 +101,6 @@ mod tasks;
 use outbound::*;
 use tasks::*;
 
-/// Worker-side session. Stateless wrapper — all mutable state lives in the
-/// dispatchers / `DeskSession` instances built per-session inside
-/// [`Self::run_with_transports`]. The struct exists so the named-pipe
-/// entry point ([`Self::run`]) and the in-process portable entry
-/// ([`Self::run_with_transports`]) share an inherent-method namespace.
 #[derive(Debug)]
 struct CaptureGeometryReady {
     connection_id: String,
@@ -118,6 +113,11 @@ fn next_portal_recovery_backoff_secs(current: u64) -> u64 {
     current.saturating_mul(2).min(30)
 }
 
+/// Worker-side session. Stateless wrapper — all mutable state lives in the
+/// dispatchers / `DeskSession` instances built per-session inside
+/// [`Self::run_with_transports`]. The struct exists so the named-pipe
+/// entry point ([`Self::run`]) and the in-process portable entry
+/// ([`Self::run_with_transports`]) share an inherent-method namespace.
 pub struct WorkerSession;
 
 impl Default for WorkerSession {

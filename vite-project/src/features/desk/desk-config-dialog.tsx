@@ -46,6 +46,7 @@ import {
     normalizeCaptureTarget,
     orderCaptureModes,
     pickDefaultDeviceName,
+    shouldShowNoDisplayWarning,
     toDeskSettings,
 } from "./desk-config-model"
 import type { DeskConfigFormSettings } from "./desk-config-model"
@@ -170,6 +171,10 @@ export function DeskConfigDialog({
         initData.video_device_list,
     )
     const captureUnavailable = !!initData && !captureTarget.hasUsableCaptureTarget
+    const showNoDisplaysForMode = shouldShowNoDisplayWarning(
+        captureUnavailable,
+        noDisplaysForMode,
+    )
 
     const handleSubmit = (values: DeskConfigFormSettings) => {
         // Defence in depth: never start a session without a display, even if the
@@ -302,7 +307,7 @@ export function DeskConfigDialog({
                                     </Alert>
                                 )}
 
-                                {noDisplaysForMode && (
+                                {showNoDisplaysForMode && (
                                     <Alert variant="destructive">
                                         <AlertTriangle className="h-4 w-4" />
                                         <AlertTitle>

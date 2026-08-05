@@ -1191,8 +1191,6 @@ export default {
   'pages.system.settings.backendDiagnostics.linuxDisplay': 'Linux 桌面会话',
   'pages.system.settings.backendDiagnostics.remoteDesktopInput': '远程桌面输入',
   'pages.system.settings.backendDiagnostics.screenCastPortal': 'ScreenCast Portal',
-  'pages.system.settings.backendDiagnostics.inputError': '输入后端错误',
-  'pages.system.settings.backendDiagnostics.portalError': 'Portal 错误',
   'pages.user.settings.title': '用户设置',
   // Privacy-mode overlay shown on the controlled host.
   'client.privateScreen.title': '远程桌面隐私模式',

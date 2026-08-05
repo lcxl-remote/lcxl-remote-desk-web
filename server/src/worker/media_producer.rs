@@ -117,6 +117,7 @@ pub enum StartMediaResult {
 type GeometryUpdateHandler = dyn Fn(&str, u64, (i32, i32, i32, i32)) + Send + Sync + 'static;
 
 struct ConnectionTask {
+    generation: u64,
     stop_flag: Arc<AtomicBool>,
     stop_tx: watch::Sender<bool>,
     keyframe_requested: Arc<AtomicBool>,
@@ -321,34 +322,62 @@ impl MediaProducer {
         F: FnOnce(u64),
     {
         let connection_id = payload.connection_id.clone();
-        let mut map = self.inner.lock().expect("media producer lock poisoned");
-        if map.contains_key(&connection_id) {
-            warn!(
-                "[MediaProducer] StartMedia for already-running connection {connection_id}; ignoring"
+        let (generation, stop_flag, stop_tx, stop_rx, keyframe_requested, settings_rx) = {
+            let mut map = self.inner.lock().expect("media producer lock poisoned");
+            if map.contains_key(&connection_id) {
+                warn!(
+                    "[MediaProducer] StartMedia for already-running connection {connection_id}; ignoring"
+                );
+                return StartMediaResult::AlreadyRunning;
+            }
+            let generation = self
+                .capture_key_generation
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1);
+            let stop_flag = Arc::new(AtomicBool::new(false));
+            let (stop_tx, stop_rx) = watch::channel(false);
+            let keyframe_requested = Arc::new(AtomicBool::new(false));
+            let (settings_tx, settings_rx) =
+                mpsc::unbounded_channel::<UpdateMediaSettingsPayload>();
+            map.insert(
+                connection_id.clone(),
+                ConnectionTask {
+                    generation,
+                    stop_flag: Arc::clone(&stop_flag),
+                    stop_tx: stop_tx.clone(),
+                    keyframe_requested: Arc::clone(&keyframe_requested),
+                    settings_tx,
+                    video_handle: None,
+                    audio_handle: None,
+                },
             );
-            return StartMediaResult::AlreadyRunning;
-        }
-        let generation = self
-            .capture_key_generation
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
+            (
+                generation,
+                stop_flag,
+                stop_tx,
+                stop_rx,
+                keyframe_requested,
+                settings_rx,
+            )
+        };
+
+        // The reservation above makes duplicate StartMedia atomic, while
+        // releasing `inner` here keeps input setup (which may wait on a
+        // Wayland RemoteDesktop Portal response) outside the producer lock.
+        // The video thread is started only after the callback, so its first
+        // geometry event cannot outrun input generation registration.
         on_accepted(generation);
         let geometry_update_handler = self
             .geometry_update_handler
             .lock()
             .expect("media producer geometry handler lock poisoned")
             .clone();
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let (stop_tx, stop_rx) = watch::channel(false);
-        let keyframe_requested = Arc::new(AtomicBool::new(false));
-        let (settings_tx, settings_rx) = mpsc::unbounded_channel::<UpdateMediaSettingsPayload>();
         if !payload.start_video && !payload.start_audio {
             info!(
-                "[MediaProducer] StartMedia for {connection_id} requests neither video nor \
-                 audio (DataChannel-only connection); skipping capture pipelines"
+                "[MediaProducer] StartMedia for {connection_id} requests neither video nor audio (DataChannel-only connection); skipping capture pipelines"
             );
         }
-        let video_handle = if payload.start_video {
+        let mut video_handle = if payload.start_video {
             Some(spawn_video_pipeline_thread(
                 self.desk_settings.clone(),
                 payload.clone(),
@@ -372,11 +401,11 @@ impl MediaProducer {
             debug!("[MediaProducer] {connection_id}: skipping video pipeline (start_video=false)");
             None
         };
-        // Audio pipeline runs in its own dedicated thread (WASAPI
+        // The audio pipeline runs in its own dedicated thread (WASAPI
         // / PipeWire / SCKit handles are COM/system-thread-bound the
         // same way as the video capture, so a separate thread + a
         // current-thread Tokio runtime is the right shape).
-        let audio_handle = if payload.start_audio {
+        let mut audio_handle = if payload.start_audio {
             Some(spawn_audio_pipeline_thread(
                 self.desk_settings.clone(),
                 payload,
@@ -388,17 +417,31 @@ impl MediaProducer {
             debug!("[MediaProducer] {connection_id}: skipping audio pipeline (start_audio=false)");
             None
         };
-        map.insert(
-            connection_id,
-            ConnectionTask {
-                stop_flag,
-                stop_tx,
-                keyframe_requested,
-                settings_tx,
-                video_handle,
-                audio_handle,
-            },
-        );
+
+        let handles_installed = {
+            let mut map = self.inner.lock().expect("media producer lock poisoned");
+            match map.get_mut(&connection_id) {
+                Some(task) if task.generation == generation => {
+                    task.video_handle = video_handle.take();
+                    task.audio_handle = audio_handle.take();
+                    true
+                }
+                _ => false,
+            }
+        };
+        if !handles_installed {
+            // StopMedia may run from the callback itself, or another StartMedia
+            // may reserve the same id after a concurrent StopMedia. The
+            // generation fence prevents old thread handles from being attached
+            // to the replacement task.
+            stop_flag.store(true, Ordering::Relaxed);
+            stop_tx.send_replace(true);
+            drop(video_handle);
+            drop(audio_handle);
+            debug!(
+                "[MediaProducer] {connection_id}: start reservation was removed or replaced before pipeline handles were installed"
+            );
+        }
         StartMediaResult::Accepted(generation)
     }
 

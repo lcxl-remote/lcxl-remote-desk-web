@@ -8,6 +8,7 @@ import {
     normalizeCaptureTarget,
     orderCaptureModes,
     pickDefaultDeviceName,
+    shouldShowNoDisplayWarning,
     toDeskSettings,
 } from "./desk-config-model"
 import type { DisplayInfo } from "@/services/types"
@@ -145,6 +146,12 @@ describe("hasNoDisplaysForMode", () => {
         expect(hasNoDisplaysForMode(undefined, [])).toBe(false)
         expect(hasNoDisplaysForMode(null, undefined)).toBe(false)
     })
+
+    it("suppresses the mode warning when capture is globally unavailable", () => {
+        expect(shouldShowNoDisplayWarning(true, true)).toBe(false)
+        expect(shouldShowNoDisplayWarning(false, true)).toBe(true)
+        expect(shouldShowNoDisplayWarning(false, false)).toBe(false)
+    })
 })
 
 describe("desk config normalization", () => {
@@ -197,7 +204,6 @@ describe("desk config normalization", () => {
         expect(settings).not.toHaveProperty("enable_audio")
     })
 })
-
 
 describe("capture target normalization", () => {
     const primary = makeDisplayInfo({

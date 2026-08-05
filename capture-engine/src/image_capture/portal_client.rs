@@ -67,10 +67,6 @@ impl PortalClient<'_> {
         Ok(Self { proxy })
     }
 
-    pub fn available_source_types(&self) -> Result<u32, CaptureError> {
-        Ok(self.proxy.get_property("AvailableSourceTypes")?)
-    }
-
     pub fn create_screencast_session(&self) -> Result<PortalSession, CaptureError> {
         let conn = get_zbus_connection()?;
         let mut options = HashMap::new();

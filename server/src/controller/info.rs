@@ -19,7 +19,7 @@ use crate::model::info::{
     BackendDiagnosticItem, BackendDiagnosticSection, BackendDiagnosticStatus,
 };
 #[cfg(target_os = "linux")]
-use desk_capture_engine::image_capture::portal_client::probe_screencast_monitor_blocking;
+use desk_capture_engine::image_capture::portal_client::probe_screencast_monitor;
 #[cfg(target_os = "linux")]
 use desk_input_injection::service::wayland_remote_desktop::WaylandRemoteDesktop;
 #[cfg(target_os = "linux")]
@@ -272,7 +272,14 @@ pub async fn query_backend_info(
         let remote_desktop_probe = if matches!(mode, "portal")
             || (mode == "auto" && environment.active_server() == LinuxDisplayServer::Wayland)
         {
-            WaylandRemoteDesktop::probe_portal().map(|_| ())
+            match tokio::task::spawn_blocking(|| {
+                WaylandRemoteDesktop::probe_portal().map_err(|error| error.to_string())
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => Err(format!("RemoteDesktop Portal probe task failed: {error}")),
+            }
         } else {
             Ok(())
         };
@@ -323,7 +330,7 @@ pub async fn query_backend_info(
 
         let (portal_value, portal_status, portal_detail) =
             if environment.active_server() == LinuxDisplayServer::Wayland {
-                match probe_screencast_monitor_blocking() {
+                match probe_screencast_monitor(std::time::Duration::from_secs(3)).await {
                     Ok(source_types) => (
                         "available".to_string(),
                         BackendDiagnosticStatus::Ready,
@@ -411,11 +418,11 @@ mod tests {
         assert!(body.data.is_some());
     }
 
-    // Ignored by default: `query_backend_info` probes the input backend via
-    // `WaylandRemoteDesktop::probe_portal()`, which pops an `xdg-desktop-portal`
-    // RemoteDesktop permission dialog on a Wayland session and blocks
-    // indefinitely. Run explicitly with `--ignored` on a non-interactive host.
-    #[ignore = "probes the RemoteDesktop portal; hangs on a Wayland portal prompt"]
+    // Ignored by default because `query_backend_info` performs real
+    // RemoteDesktop and ScreenCast D-Bus health probes. They do not request
+    // permission, but their result depends on the host session bus and portal
+    // services, so this is an explicit environment integration test.
+    #[ignore = "requires a live session D-Bus and desktop portal services"]
     #[actix_web::test]
     async fn test_query_backend_info() {
         let settings = SharedSettings::from(Settings::default());

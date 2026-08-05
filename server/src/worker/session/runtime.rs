@@ -174,12 +174,17 @@ impl WorkerSession {
             }
             None => None,
         };
-        let capabilities = MediaProducer::build_capabilities(
-            init_payload.desktop_name.as_deref(),
-            init_payload.host_upstream_url.is_some(),
-        );
+        let capability_desktop_name = init_payload.desktop_name.clone();
+        let capability_has_tauri = init_payload.host_upstream_url.is_some();
+        let capabilities = tokio::task::spawn_blocking(move || {
+            MediaProducer::build_capabilities(
+                capability_desktop_name.as_deref(),
+                capability_has_tauri,
+            )
+        })
+        .await?;
         #[cfg(target_os = "linux")]
-        let initial_video_device_list = capabilities.video_device_list.clone();
+        let portal_recovery_needed = !capabilities.video_device_list.contains_key("WAYLANDPORTAL");
         let (capture_geometry_tx, mut capture_geometry_rx) =
             mpsc::unbounded_channel::<CaptureGeometryReady>();
         // Per-connection input handlers. Constructed once per
@@ -264,7 +269,7 @@ impl WorkerSession {
         #[cfg(target_os = "linux")]
         let portal_monitor = if detect_linux_display_environment().active_server()
             == LinuxDisplayServer::Wayland
-            && !initial_video_device_list.contains_key("WAYLANDPORTAL")
+            && portal_recovery_needed
         {
             let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
             let monitor_writer = writer_tx.clone();
@@ -299,14 +304,18 @@ impl WorkerSession {
                             .await;
                             match rebuilt {
                                 Ok(capabilities)
-                                    if !capabilities.video_device_list.is_empty()
-                                        && initial_video_device_list.is_empty() =>
+                                    if capabilities
+                                        .video_device_list
+                                        .get("WAYLANDPORTAL")
+                                        .is_some_and(|displays| !displays.is_empty()) =>
                                 {
                                     if monitor_writer
                                         .send(WorkerToService::Capabilities(capabilities))
-                                        .is_ok()
+                                        .is_err()
                                     {
-                                        return;
+                                        warn!(
+                                            "writer task closed; dropping recovered Portal capabilities"
+                                        );
                                     }
                                     return;
                                 }
@@ -1181,18 +1190,29 @@ impl WorkerSession {
                                     // Capabilities the worker sent at
                                     // startup.
                                     info!("Worker received RefreshCapabilities");
-                                    let capabilities = MediaProducer::build_capabilities(
-                                        init_payload.desktop_name.as_deref(),
-                                        init_payload.host_upstream_url.is_some(),
-                                    );
-                                    if writer_tx
-                                        .send(WorkerToService::Capabilities(capabilities))
-                                        .is_err()
+                                    let build_desktop_name =
+                                        init_payload.desktop_name.clone();
+                                    let has_tauri =
+                                        init_payload.host_upstream_url.is_some();
+                                    match tokio::task::spawn_blocking(move || {
+                                        MediaProducer::build_capabilities(
+                                            build_desktop_name.as_deref(),
+                                            has_tauri,
+                                        )
+                                    })
+                                    .await
                                     {
-                                        warn!(
-                                            "writer task closed; dropping refreshed \
-                                             Capabilities"
-                                        );
+                                        Ok(capabilities) => {
+                                            if writer_tx
+                                                .send(WorkerToService::Capabilities(capabilities))
+                                                .is_err()
+                                            {
+                                                warn!("writer task closed; dropping refreshed Capabilities");
+                                            }
+                                        }
+                                        Err(error) => warn!(
+                                            "RefreshCapabilities blocking task failed: {error}"
+                                        ),
                                     }
                                 }
                                 ServiceToWorker::SetVirtualDisplayExclusive(payload) => {

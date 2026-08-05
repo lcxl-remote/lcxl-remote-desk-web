@@ -1200,8 +1200,6 @@ export default {
   'pages.system.settings.backendDiagnostics.linuxDisplay': 'Linux Display Session',
   'pages.system.settings.backendDiagnostics.remoteDesktopInput': 'Remote Desktop Input',
   'pages.system.settings.backendDiagnostics.screenCastPortal': 'ScreenCast Portal',
-  'pages.system.settings.backendDiagnostics.inputError': 'Input Backend Error',
-  'pages.system.settings.backendDiagnostics.portalError': 'Portal Error',
   'pages.user.settings.title': 'User Settings',
   // Privacy-mode overlay shown on the controlled host.
   'client.privateScreen.title': 'Remote Desktop Privacy Mode',

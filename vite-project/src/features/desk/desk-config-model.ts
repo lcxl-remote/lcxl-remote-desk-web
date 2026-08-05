@@ -50,6 +50,13 @@ export function hasNoDisplaysForMode(
     )
 }
 
+export function shouldShowNoDisplayWarning(
+    captureUnavailable: boolean,
+    noDisplaysForMode: boolean,
+): boolean {
+    return noDisplaysForMode && !captureUnavailable
+}
+
 export function pickDefaultDeviceName(
     devices: ReadonlyArray<DisplayInfo>,
 ): string {

@@ -315,6 +315,12 @@ fn start_media_accepted_callback_runs_once_and_duplicate_preserves_state() {
     let seen = AtomicU64::new(0);
 
     let accepted = producer.start_media_with(payload.clone(), |generation| {
+        let map = producer
+            .inner
+            .try_lock()
+            .expect("accepted callback must run without holding the producer lock");
+        let reserved = map.get("callback").expect("connection must be reserved");
+        assert_eq!(reserved.generation, generation);
         seen.store(generation, Ordering::SeqCst);
     });
     let StartMediaResult::Accepted(generation) = accepted else {
