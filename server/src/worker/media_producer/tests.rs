@@ -335,6 +335,40 @@ fn start_media_accepted_callback_runs_once_and_duplicate_preserves_state() {
     assert_eq!(seen.load(Ordering::SeqCst), generation);
 }
 
+#[test]
+fn start_media_reports_cancelled_when_callback_removes_reservation() {
+    let (sender, _rx) = inprocess::make_media();
+    let (err_tx, _err_rx) = mpsc::unbounded_channel::<WorkerToService>();
+    let producer = MediaProducer::new(DeskSettings::default(), sender, err_tx);
+    let payload = StartMediaPayload {
+        connection_id: "cancelled-callback".into(),
+        video_codec: MediaCodec::H264,
+        audio_codec: MediaCodec::Opus,
+        video_device: None,
+        audio_device: None,
+        fps: 0,
+        bitrate_kbps: 0,
+        quality: 0,
+        start_video: false,
+        start_audio: false,
+        image_capture: None,
+        enable_dirty_rect: None,
+    };
+    let stop = StopMediaPayload {
+        connection_id: payload.connection_id.clone(),
+    };
+
+    let result = producer.start_media_with(payload, |_| producer.stop_media(&stop));
+
+    assert!(matches!(result, StartMediaResult::Cancelled(_)));
+    assert!(
+        producer
+            .connection_pipeline_state("cancelled-callback")
+            .is_none(),
+        "cancelled startup must not leave a connection slot"
+    );
+}
+
 /// Force-keyframe / stop-media on an unknown connection must be a
 /// silent no-op (race with browser drop). The producer has to be
 /// safe to drive from the daemon even when the daemon's view of

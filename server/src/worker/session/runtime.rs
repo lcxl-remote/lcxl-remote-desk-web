@@ -629,13 +629,28 @@ impl WorkerSession {
                                                 generation,
                                             );
                                         });
-                                        let StartMediaResult::Accepted(_) = start_result else {
-                                            warn!(
-                                                "Duplicate StartMedia for {}; existing connection state preserved",
-                                                active.connection_id
-                                            );
-                                            continue;
-                                        };
+                                        match start_result {
+                                            StartMediaResult::Accepted(_) => {}
+                                            StartMediaResult::AlreadyRunning => {
+                                                warn!(
+                                                    "Duplicate StartMedia for {}; existing connection state preserved",
+                                                    active.connection_id
+                                                );
+                                                continue;
+                                            }
+                                            StartMediaResult::Cancelled(generation) => {
+                                                vd_state.record_stop(&active.connection_id);
+                                                input_dispatcher.stop_connection_if_generation(
+                                                    &active.connection_id,
+                                                    generation,
+                                                );
+                                                warn!(
+                                                    "StartMedia for {} was cancelled before pipeline startup; dispatcher subscriptions were skipped",
+                                                    active.connection_id
+                                                );
+                                                continue;
+                                            }
+                                        }
                                         // Subscribe the connection
                                         // to clipboard sync; the dispatcher
                                         // starts its polling loop on the first

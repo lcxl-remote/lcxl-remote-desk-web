@@ -112,6 +112,7 @@ use crate::worker::shared_capture::{CaptureKey, SharedCaptureRegistry};
 pub enum StartMediaResult {
     Accepted(u64),
     AlreadyRunning,
+    Cancelled(u64),
 }
 
 type GeometryUpdateHandler = dyn Fn(&str, u64, (i32, i32, i32, i32)) + Send + Sync + 'static;
@@ -441,6 +442,7 @@ impl MediaProducer {
             debug!(
                 "[MediaProducer] {connection_id}: start reservation was removed or replaced before pipeline handles were installed"
             );
+            return StartMediaResult::Cancelled(generation);
         }
         StartMediaResult::Accepted(generation)
     }

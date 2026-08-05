@@ -269,6 +269,23 @@ impl InputDispatcher {
         }
     }
 
+    /// Drop input handlers only when they still belong to the cancelled
+    /// media-start generation. A replacement StartMedia for the same id may
+    /// already have installed newer handlers by the time cancellation is
+    /// observed.
+    pub fn stop_connection_if_generation(&self, connection_id: &str, generation: u64) {
+        let mut map = self.inner.lock().expect("input dispatcher lock poisoned");
+        if map
+            .get(connection_id)
+            .is_some_and(|state| state.generation == generation)
+        {
+            map.remove(connection_id);
+            info!(
+                "[InputDispatcher] {connection_id}: cancelled-generation input handlers released"
+            );
+        }
+    }
+
     /// Drop every per-connection input handler. Called from worker
     /// shutdown so injection threads do not outlive the worker.
     pub fn shutdown(&self) {

@@ -272,16 +272,9 @@ pub async fn query_backend_info(
         let remote_desktop_probe = if matches!(mode, "portal")
             || (mode == "auto" && environment.active_server() == LinuxDisplayServer::Wayland)
         {
-            match tokio::task::spawn_blocking(|| {
-                WaylandRemoteDesktop::probe_portal().map_err(|error| error.to_string())
-            })
-            .await
-            {
-                Ok(result) => result,
-                Err(error) => Err(format!("RemoteDesktop Portal probe task failed: {error}")),
-            }
+            WaylandRemoteDesktop::probe_portal(std::time::Duration::from_secs(3)).await
         } else {
-            Ok(())
+            Ok(0)
         };
         let (input_value, input_status, input_detail) = match mode {
             "none" => (
@@ -295,10 +288,10 @@ pub async fn query_backend_info(
                 None,
             ),
             "portal" => match remote_desktop_probe {
-                Ok(()) => (
+                Ok(device_types) => (
                     "ready(portal)".to_string(),
                     BackendDiagnosticStatus::Ready,
-                    None,
+                    Some(format!("AvailableDeviceTypes={device_types}")),
                 ),
                 Err(error) => (
                     "error(portal)".to_string(),
@@ -308,10 +301,10 @@ pub async fn query_backend_info(
             },
             _ if environment.active_server() == LinuxDisplayServer::Wayland => {
                 match remote_desktop_probe {
-                    Ok(()) => (
+                    Ok(device_types) => (
                         "ready(portal-auto)".to_string(),
                         BackendDiagnosticStatus::Ready,
-                        None,
+                        Some(format!("AvailableDeviceTypes={device_types}")),
                     ),
                     Err(error) => (
                         "fallback(uinput-auto)".to_string(),

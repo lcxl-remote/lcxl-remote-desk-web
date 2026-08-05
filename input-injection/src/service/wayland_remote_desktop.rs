@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
+use desk_utils::error::DeskErrorCode;
 use serde::Deserialize;
 use zbus::{
     blocking::Proxy,
@@ -45,18 +47,55 @@ pub struct WaylandRemoteDesktop {
 
 static SHARED_REMOTE_DESKTOP: OnceLock<Arc<WaylandRemoteDesktop>> = OnceLock::new();
 
+const REMOTE_DESKTOP_DEVICE_TYPE_KEYBOARD: u32 = 1;
+const REMOTE_DESKTOP_DEVICE_TYPE_POINTER: u32 = 2;
+const REQUIRED_REMOTE_DESKTOP_DEVICE_TYPES: u32 =
+    REMOTE_DESKTOP_DEVICE_TYPE_KEYBOARD | REMOTE_DESKTOP_DEVICE_TYPE_POINTER;
+
+pub const fn remote_desktop_device_types_support_input(device_types: u32) -> bool {
+    device_types & REQUIRED_REMOTE_DESKTOP_DEVICE_TYPES == REQUIRED_REMOTE_DESKTOP_DEVICE_TYPES
+}
+
 impl WaylandRemoteDesktop {
-    pub fn probe_portal() -> Result<(), InputError> {
-        let conn = get_zbus_connection()?;
-        log::info!("Wayland RemoteDesktop: probing portal availability");
-        let _proxy = Proxy::new(
-            conn,
+    pub fn probe_portal_blocking() -> Result<u32, InputError> {
+        let connection = zbus::blocking::connection::Builder::session()?
+            .method_timeout(Duration::from_secs(3))
+            .build()?;
+        let proxy = Proxy::new(
+            &connection,
             "org.freedesktop.portal.Desktop",
             "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.RemoteDesktop",
         )?;
-        log::info!("Wayland RemoteDesktop: portal is available");
-        Ok(())
+        let device_types: u32 = proxy.get_property("AvailableDeviceTypes")?;
+        if !remote_desktop_device_types_support_input(device_types) {
+            return InputError::custom_error(
+                DeskErrorCode::FEATURE_UNAVAILABLE,
+                &format!(
+                    "RemoteDesktop portal does not advertise keyboard and pointer input (AvailableDeviceTypes={device_types})"
+                ),
+            );
+        }
+        Ok(device_types)
+    }
+
+    pub async fn probe_portal(timeout: Duration) -> Result<u32, InputError> {
+        match tokio::time::timeout(
+            timeout,
+            tokio::task::spawn_blocking(Self::probe_portal_blocking),
+        )
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => InputError::custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                &format!("RemoteDesktop portal probe task failed: {error}"),
+            ),
+            Err(_) => InputError::custom_error(
+                DeskErrorCode::FEATURE_UNAVAILABLE,
+                "RemoteDesktop portal probe timed out",
+            ),
+        }
     }
 
     pub fn new(types: u32) -> Result<Self, InputError> {
@@ -227,5 +266,25 @@ impl Drop for WaylandRemoteDesktop {
         if let Ok(proxy) = session_proxy {
             let _ = proxy.call_method("Close", &());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_desktop_input_requires_keyboard_and_pointer_bits() {
+        assert!(!remote_desktop_device_types_support_input(0));
+        assert!(!remote_desktop_device_types_support_input(
+            REMOTE_DESKTOP_DEVICE_TYPE_KEYBOARD
+        ));
+        assert!(!remote_desktop_device_types_support_input(
+            REMOTE_DESKTOP_DEVICE_TYPE_POINTER
+        ));
+        assert!(remote_desktop_device_types_support_input(
+            REMOTE_DESKTOP_DEVICE_TYPE_KEYBOARD | REMOTE_DESKTOP_DEVICE_TYPE_POINTER
+        ));
+        assert!(remote_desktop_device_types_support_input(7));
     }
 }
