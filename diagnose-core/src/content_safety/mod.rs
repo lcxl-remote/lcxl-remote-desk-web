@@ -4,8 +4,8 @@
 //! configuration. The manager supplies those concerns; the open-source signal
 //! runtime does not configure or call this seam.
 
-#[cfg(test)]
-mod eval;
+#[cfg(any(test, feature = "content-safety-eval"))]
+pub mod eval;
 pub mod parser;
 pub mod policy;
 pub mod prompt;

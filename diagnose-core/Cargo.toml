@@ -6,6 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+content-safety-eval = []
+
 [dependencies]
 desk-agent-protocol = { workspace = true }
 desk-utils = { workspace = true }
