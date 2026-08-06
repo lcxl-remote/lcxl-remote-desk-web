@@ -445,20 +445,21 @@ async fn same_tool_repeat_circuit_breaks() {
 
     // The skipped over-limit call receives a synthetic result, leaving a valid
     // conversation that a user can continue in the next turn.
-    let persisted = sess.inner.borrow();
-    let last = persisted
-        .as_ref()
-        .unwrap()
-        .conversation
-        .last()
-        .expect("synthetic result persisted");
-    assert_eq!(last.role, ChatRole::Tool);
-    let expected_call_id = format!("c{}", crate::MAX_SAME_TOOL_PER_TURN);
-    assert_eq!(
-        last.tool_call_id.as_deref(),
-        Some(expected_call_id.as_str())
-    );
-    drop(persisted);
+    {
+        let persisted = sess.inner.borrow();
+        let last = persisted
+            .as_ref()
+            .unwrap()
+            .conversation
+            .last()
+            .expect("synthetic result persisted");
+        assert_eq!(last.role, ChatRole::Tool);
+        let expected_call_id = format!("c{}", crate::MAX_SAME_TOOL_PER_TURN);
+        assert_eq!(
+            last.tool_call_id.as_deref(),
+            Some(expected_call_id.as_str())
+        );
+    }
 
     let mut continuation = claim();
     continuation.turn_id = "turn-continued".into();
@@ -2388,6 +2389,193 @@ async fn rejected_tool_image_is_not_persisted_and_remaining_calls_are_paired() {
     assert_eq!(tool_results.len(), 2);
     assert_eq!(tool_results[0].tool_call_id.as_deref(), Some("c1"));
     assert_eq!(tool_results[1].tool_call_id.as_deref(), Some("c2"));
+    assert!(
+        stored
+            .conversation
+            .iter()
+            .all(|message| message.image_data_url.is_none())
+    );
+    let serialized = serde_json::to_string(&stored.conversation).unwrap();
+    assert!(!serialized.contains(&image_data_url));
+    assert!(!serialized.contains(RAW_TOOL_CONTENT));
+}
+
+#[tokio::test]
+async fn rejected_mutating_result_image_is_not_persisted_and_delivery_is_acked() {
+    use desk_agent_protocol::content_safety::{ContentSafetyDecision, ContentSafetyStage};
+
+    const RAW_TOOL_CONTENT: &str = "mutating result next to rejected image";
+    let image_data_url = "data:image/jpeg;base64,AQID".to_string();
+    let sess = MemSession::default();
+    let model = ScriptModel {
+        turns: RefCell::new([tool_use("c1", "exec_command")].into()),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let scripted = tools(vec![ExecOutcome::Executed {
+        output: ToolRunOutput {
+            content: RAW_TOOL_CONTENT.into(),
+            image_data_url: Some(image_data_url.clone()),
+        },
+        event_id: Some("work:8:done".into()),
+    }]);
+    let registry = vec![mutating_tool(
+        "exec_command",
+        Capability::ShellExecConfirmed,
+    )];
+    let safety = SafetyScript {
+        model_turn_results: RefCell::new(
+            [Ok(safety_verdict(
+                ContentSafetyDecision::Allow,
+                ContentSafetyStage::Action,
+            ))]
+            .into(),
+        ),
+        image_results: RefCell::new(
+            [Ok(safety_verdict(
+                ContentSafetyDecision::Block,
+                ContentSafetyStage::Image,
+            ))]
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let clock = || "t".to_string();
+    let mut loop_deps = exec_deps(&sess, &model, &scripted, &registry, &clock);
+    loop_deps.content_safety = crate::content_safety::ContentSafetyMode::Enforced {
+        seam: &safety,
+        context: safety_context(),
+    };
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut sink = SafetyEventLog(events.clone());
+    let outcome = run_agent_turn(
+        &loop_deps,
+        exec_claim(),
+        ChatMessage::text("u", ChatRole::User, "restart it"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        LoopOutcome::ContentRejected(ContentSafetyDecision::Block)
+    );
+    assert_eq!(*scripted.exec_calls.borrow(), vec!["c1"]);
+    assert_eq!(*scripted.acks.borrow(), vec!["work:8:done"]);
+    assert_eq!(safety.image_requests.borrow().len(), 1);
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(stored.turn_state, TurnState::Idle);
+    let tool_result = stored
+        .conversation
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("c1"))
+        .unwrap();
+    assert!(
+        tool_result
+            .text
+            .contains("omitted by content safety policy")
+    );
+    assert!(
+        stored
+            .conversation
+            .iter()
+            .all(|message| message.image_data_url.is_none())
+    );
+    let serialized = serde_json::to_string(&stored.conversation).unwrap();
+    assert!(!serialized.contains(&image_data_url));
+    assert!(!serialized.contains(RAW_TOOL_CONTENT));
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|event| event.starts_with("retracted:PolicyBlocked:"))
+    );
+}
+
+#[tokio::test]
+async fn unavailable_wait_result_image_fails_closed_clears_task_and_acks() {
+    use desk_agent_protocol::content_safety::{ContentSafetyDecision, ContentSafetyStage};
+    use desk_agent_protocol::{AgentError, AgentErrorKind};
+
+    const RAW_TOOL_CONTENT: &str = "wait result next to unreviewed image";
+    let image_data_url = "data:image/jpeg;base64,AQID".to_string();
+    let sess = seeded_executing();
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [tool_use_args(
+                "c2",
+                "wait_for_task",
+                r#"{"task_id":"exec_task9"}"#,
+            )]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let scripted = tools_with_waits(
+        vec![],
+        vec![WaitOutcome::Completed {
+            output: ToolRunOutput {
+                content: RAW_TOOL_CONTENT.into(),
+                image_data_url: Some(image_data_url.clone()),
+            },
+            event_id: Some("work:8:done".into()),
+        }],
+    );
+    let registry = wait_reg();
+    let safety = SafetyScript {
+        model_turn_results: RefCell::new(
+            [Ok(safety_verdict(
+                ContentSafetyDecision::Allow,
+                ContentSafetyStage::Action,
+            ))]
+            .into(),
+        ),
+        image_results: RefCell::new(
+            [Err(AgentError {
+                kind: AgentErrorKind::TransportError,
+                message: "temporary image classifier outage".into(),
+                retryable: true,
+                safe_for_model: false,
+                error_code: None,
+            })]
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let clock = || "t".to_string();
+    let mut loop_deps = exec_deps(&sess, &model, &scripted, &registry, &clock);
+    loop_deps.content_safety = crate::content_safety::ContentSafetyMode::Enforced {
+        seam: &safety,
+        context: safety_context(),
+    };
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    let outcome = run_agent_turn(
+        &loop_deps,
+        exec_claim(),
+        ChatMessage::text("u", ChatRole::User, "wait for it"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+
+    let LoopOutcome::ContentSafetyUnavailable(error) = outcome else {
+        panic!("expected content-safety unavailable");
+    };
+    assert_eq!(error.kind, AgentErrorKind::ContentSafetyUnavailable);
+    assert_eq!(*scripted.wait_calls.borrow(), vec!["exec_task9"]);
+    assert_eq!(*scripted.acks.borrow(), vec!["work:8:done"]);
+    assert_eq!(safety.image_requests.borrow().len(), 1);
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(stored.turn_state, TurnState::Failed);
+    assert_eq!(stored.execution_state, ExecutionState::None);
+    let tool_result = stored
+        .conversation
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("c2"))
+        .unwrap();
+    assert!(tool_result.text.contains("review was unavailable"));
     assert!(
         stored
             .conversation

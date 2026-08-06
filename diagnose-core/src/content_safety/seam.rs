@@ -114,6 +114,33 @@ pub const fn input_stage() -> ContentSafetyStage {
     ContentSafetyStage::Input
 }
 
+/// Closed runtime mode. OSS signal and an explicitly disabled manager pass
+/// `Disabled`; a protected manager turn must carry the complete frozen seam and
+/// context and cannot silently degrade to a no-op implementation.
+pub enum ContentSafetyMode<'a> {
+    Disabled,
+    Enforced {
+        seam: &'a dyn ContentSafetySeam,
+        context: SafetyContext,
+    },
+}
+
+impl ContentSafetyMode<'_> {
+    pub const fn is_enforced(&self) -> bool {
+        matches!(self, Self::Enforced { .. })
+    }
+}
+
+/// Collapse arbitrary seam failures to fixed, non-provider-controlled wire
+/// errors. The image-capability code remains distinct; all other details are
+/// deliberately discarded.
+pub fn normalize_safety_error(error: &AgentError) -> AgentError {
+    if error.error_code == Some(DeskErrorCode::AI_CONTENT_SAFETY_IMAGE_UNSUPPORTED.code()) {
+        return content_safety_image_unsupported();
+    }
+    content_safety_unavailable()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,31 +173,4 @@ mod tests {
             Some(DeskErrorCode::AI_CONTENT_BLOCKED.code())
         );
     }
-}
-
-/// Closed runtime mode. OSS signal and an explicitly disabled manager pass
-/// `Disabled`; a protected manager turn must carry the complete frozen seam and
-/// context and cannot silently degrade to a no-op implementation.
-pub enum ContentSafetyMode<'a> {
-    Disabled,
-    Enforced {
-        seam: &'a dyn ContentSafetySeam,
-        context: SafetyContext,
-    },
-}
-
-impl ContentSafetyMode<'_> {
-    pub const fn is_enforced(&self) -> bool {
-        matches!(self, Self::Enforced { .. })
-    }
-}
-
-/// Collapse arbitrary seam failures to fixed, non-provider-controlled wire
-/// errors. The image-capability code remains distinct; all other details are
-/// deliberately discarded.
-pub fn normalize_safety_error(error: &AgentError) -> AgentError {
-    if error.error_code == Some(DeskErrorCode::AI_CONTENT_SAFETY_IMAGE_UNSUPPORTED.code()) {
-        return content_safety_image_unsupported();
-    }
-    content_safety_unavailable()
 }

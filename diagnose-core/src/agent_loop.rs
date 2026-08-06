@@ -279,6 +279,64 @@ async fn review_image(
     }
 }
 
+#[derive(Debug)]
+enum ToolOutputSafetyFailure {
+    Rejected(ContentSafetyDecision),
+    Unavailable(AgentError),
+}
+
+/// Append one tool result only after its optional image has passed the shared
+/// image gate. Every tool effect uses this entry point so adding an image to a
+/// mutating or wait seam cannot silently bypass manager enforcement later.
+async fn append_reviewed_tool_result(
+    deps: &LoopDeps<'_>,
+    session: &mut crate::session::PersistedAgentSession,
+    message_id: String,
+    call_id: &str,
+    output: crate::seam::ToolRunOutput,
+) -> Result<Option<ToolOutputSafetyFailure>, AgentError> {
+    let crate::seam::ToolRunOutput {
+        content,
+        image_data_url,
+    } = output;
+    let Some(image_data_url) = image_data_url else {
+        // With no new image there is nothing to rotate: any previously retained
+        // session image already satisfies the one-image invariant.
+        session
+            .conversation
+            .push(ChatMessage::tool_result(message_id, call_id, content));
+        return Ok(None);
+    };
+
+    let info =
+        crate::image_input::validate_image_data_url(&image_data_url).map_err(image_input_error)?;
+    match review_image(deps, &image_data_url, &info.media_type).await {
+        Ok(ContentSafetyDecision::Allow) => {
+            let mut message = ChatMessage::tool_result(message_id, call_id, content);
+            message.image_data_url = Some(image_data_url);
+            session.conversation.push(message);
+            retain_latest_session_image(session)?;
+            Ok(None)
+        }
+        Ok(decision) => {
+            session.conversation.push(ChatMessage::tool_result(
+                message_id,
+                call_id,
+                "[image and tool result omitted by content safety policy]",
+            ));
+            Ok(Some(ToolOutputSafetyFailure::Rejected(decision)))
+        }
+        Err(error) => {
+            session.conversation.push(ChatMessage::tool_result(
+                message_id,
+                call_id,
+                "[image and tool result omitted because content safety review was unavailable]",
+            ));
+            Ok(Some(ToolOutputSafetyFailure::Unavailable(error)))
+        }
+    }
+}
+
 const fn retraction_reason(decision: ContentSafetyDecision) -> StreamRetractionReason {
     match decision {
         ContentSafetyDecision::Block => StreamRetractionReason::PolicyBlocked,
@@ -298,6 +356,49 @@ fn append_refusal_placeholder<F: FnMut() -> String>(
             crate::chat::ChatRole::Assistant,
             text,
         ));
+    }
+}
+
+async fn finish_tool_output_safety_failure<F: FnMut() -> String>(
+    deps: &LoopDeps<'_>,
+    session: &mut crate::session::PersistedAgentSession,
+    call_id: &str,
+    remaining_calls: &[crate::chat::ToolCall],
+    mint: &mut F,
+    sink: &mut dyn TurnSink,
+    failure: ToolOutputSafetyFailure,
+) -> Result<LoopOutcome, AgentError> {
+    let skipped_text = match &failure {
+        ToolOutputSafetyFailure::Rejected(_) => {
+            "[tool not run because content safety stopped the turn]"
+        }
+        ToolOutputSafetyFailure::Unavailable(_) => {
+            "[tool not run because content safety review was unavailable]"
+        }
+    };
+    for skipped in remaining_calls {
+        session
+            .conversation
+            .push(ChatMessage::tool_result(mint(), &skipped.id, skipped_text));
+    }
+    if let ToolOutputSafetyFailure::Rejected(decision) = &failure {
+        append_refusal_placeholder(session, mint, *decision);
+    }
+    deps.session_seam.save(session).await?;
+    finish_tool(session, call_id, false, sink);
+
+    match failure {
+        ToolOutputSafetyFailure::Rejected(decision) => {
+            sink.on_turn_retracted(retraction_reason(decision), Some(content_blocked_error()));
+            Ok(LoopOutcome::ContentRejected(decision))
+        }
+        ToolOutputSafetyFailure::Unavailable(error) => {
+            sink.on_turn_retracted(
+                StreamRetractionReason::SafetyUnavailable,
+                Some(error.clone()),
+            );
+            Ok(LoopOutcome::ContentSafetyUnavailable(error))
+        }
     }
 }
 
@@ -503,90 +604,53 @@ async fn run_inner(
                                     false,
                                 ),
                             };
-                            let crate::seam::ToolRunOutput {
-                                content,
-                                image_data_url,
-                            } = out;
-                            if let Some(image_data_url) = image_data_url {
-                                let info =
-                                    crate::image_input::validate_image_data_url(&image_data_url)
-                                        .map_err(image_input_error)?;
-                                match review_image(deps, &image_data_url, &info.media_type).await {
-                                    Ok(ContentSafetyDecision::Allow) => {
-                                        let mut msg =
-                                            ChatMessage::tool_result(mint(), &call.id, content);
-                                        msg.image_data_url = Some(image_data_url);
-                                        session.conversation.push(msg);
-                                        retain_latest_session_image(session)?;
-                                        finish_tool(session, &call.id, ok, sink);
-                                    }
-                                    Ok(decision) => {
-                                        session.conversation.push(ChatMessage::tool_result(
-                                            mint(),
-                                            &call.id,
-                                            "[image and tool result omitted by content safety policy]",
-                                        ));
-                                        for skipped in turn.tool_calls.iter().skip(call_index + 1) {
-                                            session.conversation.push(ChatMessage::tool_result(
-                                                mint(),
-                                                &skipped.id,
-                                                "[tool not run because content safety stopped the turn]",
-                                            ));
-                                        }
-                                        append_refusal_placeholder(session, &mut mint, decision);
-                                        deps.session_seam.save(session).await?;
-                                        finish_tool(session, &call.id, false, sink);
-                                        sink.on_turn_retracted(
-                                            retraction_reason(decision),
-                                            Some(content_blocked_error()),
-                                        );
-                                        return Ok(LoopOutcome::ContentRejected(decision));
-                                    }
-                                    Err(error) => {
-                                        session.conversation.push(ChatMessage::tool_result(
-                                            mint(),
-                                            &call.id,
-                                            "[image and tool result omitted because content safety review was unavailable]",
-                                        ));
-                                        for skipped in turn.tool_calls.iter().skip(call_index + 1) {
-                                            session.conversation.push(ChatMessage::tool_result(
-                                                mint(),
-                                                &skipped.id,
-                                                "[tool not run because content safety review was unavailable]",
-                                            ));
-                                        }
-                                        deps.session_seam.save(session).await?;
-                                        finish_tool(session, &call.id, false, sink);
-                                        sink.on_turn_retracted(
-                                            StreamRetractionReason::SafetyUnavailable,
-                                            Some(error.clone()),
-                                        );
-                                        return Ok(LoopOutcome::ContentSafetyUnavailable(error));
-                                    }
-                                }
-                            } else {
-                                session.conversation.push(ChatMessage::tool_result(
-                                    mint(),
+                            let failure =
+                                append_reviewed_tool_result(deps, session, mint(), &call.id, out)
+                                    .await?;
+                            if let Some(failure) = failure {
+                                return finish_tool_output_safety_failure(
+                                    deps,
+                                    session,
                                     &call.id,
-                                    content,
-                                ));
-                                finish_tool(session, &call.id, ok, sink);
+                                    &turn.tool_calls[call_index + 1..],
+                                    &mut mint,
+                                    sink,
+                                    failure,
+                                )
+                                .await;
                             }
+                            finish_tool(session, &call.id, ok, sink);
                         }
                         ToolEffect::Mutating => {
-                            run_mutating(
+                            if let Some(outcome) = run_mutating(
                                 deps,
                                 session,
                                 turn_id,
                                 call,
+                                &turn.tool_calls[call_index + 1..],
                                 &mut mint,
                                 &mut halted,
                                 sink,
                             )
-                            .await?;
+                            .await?
+                            {
+                                return Ok(outcome);
+                            }
                         }
                         ToolEffect::WaitTask => {
-                            run_wait(deps, session, call, &mut mint, &mut halted, sink).await?;
+                            if let Some(outcome) = run_wait(
+                                deps,
+                                session,
+                                call,
+                                &turn.tool_calls[call_index + 1..],
+                                &mut mint,
+                                &mut halted,
+                                sink,
+                            )
+                            .await?
+                            {
+                                return Ok(outcome);
+                            }
                         }
                     }
                 }
@@ -631,10 +695,11 @@ async fn run_mutating<F: FnMut() -> String>(
     session: &mut crate::session::PersistedAgentSession,
     turn_id: &str,
     call: &crate::chat::ToolCall,
+    remaining_calls: &[crate::chat::ToolCall],
     mint: &mut F,
     halted: &mut Option<String>,
     sink: &mut dyn TurnSink,
-) -> Result<(), AgentError> {
+) -> Result<Option<LoopOutcome>, AgentError> {
     // Defence in depth behind the exposure gate: a mutating tool is never
     // advertised to an automation turn ([`lookup_exposed`] would already reject
     // it), but should one still reach here it is refused before any work is
@@ -647,7 +712,7 @@ async fn run_mutating<F: FnMut() -> String>(
         ));
         finish_tool(session, &call.id, false, sink);
         *halted = Some("not executed: an automation turn cannot start a new command".to_string());
-        return Ok(());
+        return Ok(None);
     }
 
     let ctx = ExecContext {
@@ -674,6 +739,7 @@ async fn run_mutating<F: FnMut() -> String>(
     // Only the foreground-win result (Executed with a delivery id) is acked; a
     // Dispatched outcome deliberately leaves the delivery pending for the publisher.
     let mut ack_event_id: Option<String> = None;
+    let mut terminal_outcome: Option<LoopOutcome> = None;
 
     match outcome {
         Ok(ExecOutcome::Executed { output, event_id }) => {
@@ -685,11 +751,24 @@ async fn run_mutating<F: FnMut() -> String>(
                 None => mint(),
             };
             ack_event_id = event_id;
-            let mut msg = ChatMessage::tool_result(message_id, &call.id, output.content);
-            msg.image_data_url = output.image_data_url;
-            session.conversation.push(msg);
-            retain_latest_session_image(session)?;
-            finish_tool(session, &call.id, true, sink);
+            let failure =
+                append_reviewed_tool_result(deps, session, message_id, &call.id, output).await?;
+            if let Some(failure) = failure {
+                terminal_outcome = Some(
+                    finish_tool_output_safety_failure(
+                        deps,
+                        session,
+                        &call.id,
+                        remaining_calls,
+                        mint,
+                        sink,
+                        failure,
+                    )
+                    .await?,
+                );
+            } else {
+                finish_tool(session, &call.id, true, sink);
+            }
         }
         Ok(ExecOutcome::Rejected { reason }) => {
             let text = match reason {
@@ -792,7 +871,9 @@ async fn run_mutating<F: FnMut() -> String>(
     // Persist the terminal outcome now, before returning to the batch loop, so a
     // crash can never leave the durable execution record ahead of the session (which
     // would strand the tool call and force a conservative unknown-outcome recovery).
-    deps.session_seam.save(session).await?;
+    if terminal_outcome.is_none() {
+        deps.session_seam.save(session).await?;
+    }
 
     // Post-save ack: the result is safely stored, so tell the seam the foreground
     // consumed this delivery. Best-effort — if the ack is lost (0 rows / transport
@@ -802,7 +883,7 @@ async fn run_mutating<F: FnMut() -> String>(
         let _ = deps.tools.ack_delivery(&event_id).await;
     }
 
-    Ok(())
+    Ok(terminal_outcome)
 }
 
 /// Run a `wait_for_task` call: the model actively waits on the background task it
@@ -819,10 +900,11 @@ async fn run_wait<F: FnMut() -> String>(
     deps: &LoopDeps<'_>,
     session: &mut crate::session::PersistedAgentSession,
     call: &crate::chat::ToolCall,
+    remaining_calls: &[crate::chat::ToolCall],
     mint: &mut F,
     halted: &mut Option<String>,
     sink: &mut dyn TurnSink,
-) -> Result<(), AgentError> {
+) -> Result<Option<LoopOutcome>, AgentError> {
     // A model-safe argument error becomes an error tool result; the turn continues.
     let task_id = match crate::wait_tools::parse_wait_task_id(call) {
         Ok(id) => id,
@@ -832,7 +914,7 @@ async fn run_wait<F: FnMut() -> String>(
                 &call.id,
                 format!("wait error: {}", e.message),
             ));
-            return Ok(());
+            return Ok(None);
         }
     };
     // Only the session's own in-flight task may be waited on, matched by its stable
@@ -847,7 +929,7 @@ async fn run_wait<F: FnMut() -> String>(
             &call.id,
             "no background task is running; there is nothing to wait for",
         ));
-        return Ok(());
+        return Ok(None);
     };
     if task_id != exec_request_id {
         session.conversation.push(ChatMessage::tool_result(
@@ -855,7 +937,7 @@ async fn run_wait<F: FnMut() -> String>(
             &call.id,
             format!("no running background task with id `{task_id}`"),
         ));
-        return Ok(());
+        return Ok(None);
     }
 
     sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
@@ -864,6 +946,7 @@ async fn run_wait<F: FnMut() -> String>(
         .wait_for_task(&exec_request_id, &execution_id)
         .await;
     let mut ack_event_id: Option<String> = None;
+    let mut terminal_outcome: Option<LoopOutcome> = None;
     match outcome {
         Ok(WaitOutcome::Completed { output, event_id }) => {
             // Key on the stable delivery id so a racing publisher delivery of the
@@ -873,13 +956,26 @@ async fn run_wait<F: FnMut() -> String>(
                 None => mint(),
             };
             ack_event_id = event_id;
-            let mut msg = ChatMessage::tool_result(message_id, &call.id, output.content);
-            msg.image_data_url = output.image_data_url;
-            session.conversation.push(msg);
-            retain_latest_session_image(session)?;
             // The awaited task settled: a follow-up may mutate again.
             session.execution_state = ExecutionState::None;
-            finish_tool(session, &call.id, true, sink);
+            let failure =
+                append_reviewed_tool_result(deps, session, message_id, &call.id, output).await?;
+            if let Some(failure) = failure {
+                terminal_outcome = Some(
+                    finish_tool_output_safety_failure(
+                        deps,
+                        session,
+                        &call.id,
+                        remaining_calls,
+                        mint,
+                        sink,
+                        failure,
+                    )
+                    .await?,
+                );
+            } else {
+                finish_tool(session, &call.id, true, sink);
+            }
         }
         Ok(WaitOutcome::StillRunning) => {
             session
@@ -925,11 +1021,13 @@ async fn run_wait<F: FnMut() -> String>(
         }
     }
 
-    deps.session_seam.save(session).await?;
+    if terminal_outcome.is_none() {
+        deps.session_seam.save(session).await?;
+    }
     if let Some(event_id) = ack_event_id {
         let _ = deps.tools.ack_delivery(&event_id).await;
     }
-    Ok(())
+    Ok(terminal_outcome)
 }
 
 #[cfg(test)]
