@@ -214,6 +214,28 @@ describe('useTerminalCopilot', () => {
         expect(result.current.state.error).toBe('failed to redact');
     });
 
+    it('keeps a safe redirect reason on an error before any partial', () => {
+        const { result, feed } = renderCopilot();
+        act(() => result.current.ask({ mode: 'how_to', question: 'q', context: ctx }));
+        feed(
+            eventFrame({
+                request_id: 'req-1',
+                seq: 0,
+                kind: 'error',
+                retraction_reason: 'safe_redirect',
+                error: {
+                    kind: 'content_blocked',
+                    message: 'blocked',
+                    retryable: false,
+                    safe_for_model: false,
+                },
+            }),
+        );
+
+        expect(result.current.state.phase).toBe('error');
+        expect(result.current.state.retractionReason).toBe('safe_redirect');
+    });
+
     it('reset sends a cancel for an in-flight ask and clears state', () => {
         const { result } = renderCopilot();
         act(() => result.current.ask({ mode: 'how_to', question: 'q', context: ctx }));

@@ -370,7 +370,7 @@ export function useTerminalCopilot({
                             ...prev,
                             phase: 'error',
                             error: event.error?.message ?? 'copilot failed',
-                            retractionReason: null,
+                            retractionReason: event.retraction_reason ?? null,
                             errorCode: event.error?.error_code ?? null,
                         };
                     default:

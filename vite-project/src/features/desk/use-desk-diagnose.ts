@@ -527,6 +527,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                             phase: 'error',
                             error: event.error?.message ?? 'diagnosis failed',
                             errorCode: event.error?.error_code ?? null,
+                            retractionReason: event.retraction_reason ?? null,
                             pendingExec: null,
                         };
                     case 'turn_started':

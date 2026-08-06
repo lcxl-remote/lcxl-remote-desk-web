@@ -444,15 +444,38 @@ impl<S: CopilotFrameSink> CopilotStreamSink<S> {
 
     /// Emit a terminal `Error` frame, unless a terminal frame was already sent.
     pub fn emit_error(&mut self, error: AgentError) {
+        self.emit_error_with_reason(error, None);
+    }
+
+    /// Emit a policy error while retaining the machine-readable reason when no
+    /// provisional text needs retracting.
+    pub fn emit_error_with_retraction_reason(
+        &mut self,
+        error: AgentError,
+        reason: StreamRetractionReason,
+    ) {
+        self.emit_error_with_reason(error, Some(reason));
+    }
+
+    fn emit_error_with_reason(
+        &mut self,
+        error: AgentError,
+        reason: Option<StreamRetractionReason>,
+    ) {
         if self.terminated {
             return;
         }
         let seq = self.next_seq();
-        self.sink.emit(TerminalCopilotEvent::error(
-            self.request_id.clone(),
-            seq,
-            error,
-        ));
+        let event = match reason {
+            Some(reason) => TerminalCopilotEvent::error_with_retraction_reason(
+                self.request_id.clone(),
+                seq,
+                error,
+                reason,
+            ),
+            None => TerminalCopilotEvent::error(self.request_id.clone(), seq, error),
+        };
+        self.sink.emit(event);
         self.uncommitted_partial = false;
         self.terminated = true;
     }
@@ -519,7 +542,7 @@ impl<S: CopilotFrameSink> TurnSink for CopilotStreamSink<S> {
             self.emitted = 0;
             self.terminated = true;
         } else if let Some(error) = error {
-            self.emit_error(error);
+            self.emit_error_with_retraction_reason(error, reason);
         }
     }
 
@@ -976,19 +999,23 @@ mod tests {
     }
 
     #[test]
-    fn stream_sink_policy_failure_without_partial_is_error() {
+    fn stream_sink_policy_failure_without_partial_is_reasoned_error() {
         use desk_agent_protocol::content_safety::StreamRetractionReason;
 
         let (store, sink) = recorder();
         let mut stream = CopilotStreamSink::new(sink, "r").streaming_text();
         stream.on_turn_retracted(
-            StreamRetractionReason::SafetyUnavailable,
-            Some(crate::content_safety::content_safety_unavailable()),
+            StreamRetractionReason::SafeRedirect,
+            Some(crate::content_safety::content_blocked_error()),
         );
 
         let events = store.borrow();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, TerminalCopilotEventKind::Error);
+        assert_eq!(
+            events[0].retraction_reason,
+            Some(StreamRetractionReason::SafeRedirect)
+        );
         assert!(events[0].is_terminal());
     }
 

@@ -22,6 +22,7 @@ use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_utils::error::DeskErrorCode;
 
 use crate::agent_loop::{CircuitBreakReason, LoopOutcome};
+use crate::content_safety::{content_blocked_error, stream_retraction_reason_for};
 use crate::seam::TurnSink;
 
 /// Emits assembled [`DiagnoseEvent`] frames over a runtime's outbound channel. The
@@ -106,12 +107,21 @@ impl<S: DiagnoseFrameSink> StreamingTurnSink<S> {
     /// (so a save error following a committed answer cannot double-terminate the
     /// stream).
     pub fn error(&mut self, error: AgentError) {
+        self.emit_error(error, None);
+    }
+
+    fn emit_error(&mut self, error: AgentError, reason: Option<StreamRetractionReason>) {
         if self.terminated {
             return;
         }
         let seq = self.next_seq();
-        self.sink
-            .emit(DiagnoseEvent::error(&self.request_id, seq, error));
+        let event = match reason {
+            Some(reason) => {
+                DiagnoseEvent::error_with_retraction_reason(&self.request_id, seq, error, reason)
+            }
+            None => DiagnoseEvent::error(&self.request_id, seq, error),
+        };
+        self.sink.emit(event);
         self.uncommitted_partial = false;
         self.terminated = true;
     }
@@ -120,6 +130,12 @@ impl<S: DiagnoseFrameSink> StreamingTurnSink<S> {
     /// emitted its `Answer` via [`TurnSink::on_answer_committed`], so nothing more
     /// is sent; every other outcome becomes a terminal `Error`.
     pub fn finish_outcome(&mut self, outcome: &LoopOutcome) {
+        if let LoopOutcome::ContentRejected(decision) = outcome
+            && let Some(reason) = stream_retraction_reason_for(*decision)
+        {
+            self.emit_error(content_blocked_error(), Some(reason));
+            return;
+        }
         if let Some(err) = terminal_error_for(outcome) {
             self.error(err);
         }
@@ -169,7 +185,7 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
             self.uncommitted_partial = false;
             self.terminated = true;
         } else if let Some(error) = error {
-            self.error(error);
+            self.emit_error(error, Some(reason));
         }
     }
 
@@ -592,20 +608,43 @@ mod tests {
     }
 
     #[test]
-    fn policy_failure_without_partial_uses_error_not_retracted() {
+    fn policy_failure_without_partial_uses_reasoned_error_not_retracted() {
         use desk_agent_protocol::content_safety::StreamRetractionReason;
 
         let (store, sink) = recorder();
         let mut bridge = StreamingTurnSink::new(sink, "r");
         bridge.on_turn_retracted(
-            StreamRetractionReason::SafetyUnavailable,
-            Some(crate::content_safety::content_safety_unavailable()),
+            StreamRetractionReason::SafeRedirect,
+            Some(crate::content_safety::content_blocked_error()),
         );
 
         let events = store.borrow();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, DiagnoseEventKind::Error);
+        assert_eq!(
+            events[0].retraction_reason,
+            Some(StreamRetractionReason::SafeRedirect)
+        );
         assert!(events[0].is_terminal());
+    }
+
+    #[test]
+    fn input_safe_redirect_outcome_keeps_reason_without_sink_callback() {
+        use desk_agent_protocol::content_safety::{ContentSafetyDecision, StreamRetractionReason};
+
+        let (store, sink) = recorder();
+        let mut bridge = StreamingTurnSink::new(sink, "r");
+        bridge.finish_outcome(&LoopOutcome::ContentRejected(
+            ContentSafetyDecision::SafeRedirect,
+        ));
+
+        let events = store.borrow();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, DiagnoseEventKind::Error);
+        assert_eq!(
+            events[0].retraction_reason,
+            Some(StreamRetractionReason::SafeRedirect)
+        );
     }
 
     #[test]

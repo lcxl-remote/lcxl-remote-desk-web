@@ -18,7 +18,9 @@ pub use prompt::{
     CONTENT_SAFETY_PROMPT_VERSION, SafetyPrompt, build_image_prompt, build_input_prompt,
     build_model_turn_prompt,
 };
-pub use refusal::{RefusalReasonKey, refusal_placeholder_for, refusal_reason_for};
+pub use refusal::{
+    RefusalReasonKey, refusal_placeholder_for, refusal_reason_for, stream_retraction_reason_for,
+};
 pub use seam::{
     ContentSafetyMode, ContentSafetySeam, SafetyContext, SafetyImage, SafetyInput, SafetyModelTurn,
     SafetyToolCall, SafetyVerdict, content_blocked_error, content_safety_image_unsupported,

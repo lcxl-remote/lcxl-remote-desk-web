@@ -334,7 +334,8 @@ pub struct DiagnoseEvent {
     /// `retryable` carry through to the UI).
     #[serde(default)]
     pub error: Option<AgentError>,
-    /// `kind = Retracted`: closed reason for clearing provisional text.
+    /// `kind = Retracted`, or a policy `Error` before/after provisional text:
+    /// closed reason used to select the client-side safety guidance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retraction_reason: Option<StreamRetractionReason>,
     /// `kind = TurnStarted`: the id of the agentic turn that started.
@@ -460,6 +461,22 @@ impl DiagnoseEvent {
     pub fn error(request_id: impl Into<String>, seq: u32, error: AgentError) -> Self {
         Self {
             error: Some(error),
+            ..Self::base(request_id, seq, DiagnoseEventKind::Error)
+        }
+    }
+
+    /// A terminal policy `Error` when no provisional text needs retracting. The
+    /// reason remains machine-readable so `SafeRedirect` is not collapsed into a
+    /// generic blocked message.
+    pub fn error_with_retraction_reason(
+        request_id: impl Into<String>,
+        seq: u32,
+        error: AgentError,
+        reason: StreamRetractionReason,
+    ) -> Self {
+        Self {
+            error: Some(error),
+            retraction_reason: Some(reason),
             ..Self::base(request_id, seq, DiagnoseEventKind::Error)
         }
     }

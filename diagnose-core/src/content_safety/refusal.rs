@@ -1,6 +1,6 @@
 //! Stable, non-model-generated refusal reason keys.
 
-use desk_agent_protocol::content_safety::ContentSafetyDecision;
+use desk_agent_protocol::content_safety::{ContentSafetyDecision, StreamRetractionReason};
 
 /// Stable key selected by server policy and localized by the control end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +24,18 @@ pub const fn refusal_reason_for(decision: ContentSafetyDecision) -> Option<Refus
         ContentSafetyDecision::Allow => None,
         ContentSafetyDecision::Block => Some(RefusalReasonKey::Blocked),
         ContentSafetyDecision::SafeRedirect => Some(RefusalReasonKey::SafeRedirect),
+    }
+}
+
+/// Machine-readable stream reason for a policy refusal. `Allow` does not terminate
+/// a stream and therefore has no retraction reason.
+pub const fn stream_retraction_reason_for(
+    decision: ContentSafetyDecision,
+) -> Option<StreamRetractionReason> {
+    match decision {
+        ContentSafetyDecision::Allow => None,
+        ContentSafetyDecision::Block => Some(StreamRetractionReason::PolicyBlocked),
+        ContentSafetyDecision::SafeRedirect => Some(StreamRetractionReason::SafeRedirect),
     }
 }
 
@@ -60,5 +72,10 @@ mod tests {
             "content_safety.safe_redirect"
         );
         assert!(refusal_reason_for(ContentSafetyDecision::Allow).is_none());
+        assert_eq!(
+            stream_retraction_reason_for(ContentSafetyDecision::SafeRedirect),
+            Some(StreamRetractionReason::SafeRedirect)
+        );
+        assert!(stream_retraction_reason_for(ContentSafetyDecision::Allow).is_none());
     }
 }

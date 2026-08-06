@@ -293,6 +293,28 @@ describe('useDeskDiagnose', () => {
         expect(result.current.state.error).toBe('redaction failed');
     });
 
+    it('keeps a safe redirect reason on an error before any partial', () => {
+        const { result, feed } = renderDiagnose();
+        act(() => result.current.start('why?', {}));
+        feed(
+            frame({
+                request_id: 'req-1',
+                seq: 0,
+                kind: 'error',
+                retraction_reason: 'safe_redirect',
+                error: {
+                    kind: 'content_blocked',
+                    message: 'blocked',
+                    retryable: false,
+                    safe_for_model: false,
+                },
+            }),
+        );
+
+        expect(result.current.state.phase).toBe('error');
+        expect(result.current.state.retractionReason).toBe('safe_redirect');
+    });
+
     it('reset returns to the idle question form', () => {
         const { result } = renderDiagnose();
         act(() => result.current.start('why?', {}));
