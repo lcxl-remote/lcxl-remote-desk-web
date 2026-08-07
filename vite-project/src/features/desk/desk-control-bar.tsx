@@ -9,6 +9,7 @@ import {
     Clipboard,
     ClipboardX,
     Keyboard,
+    Info,
     Loader2,
     Lock,
     Maximize,
@@ -29,6 +30,13 @@ import {
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogHeader,
+    DialogTitle,
+} from "@/components/ui/dialog"
 import type { OperationSystemEnum } from "@/services/types"
 import {
     DropdownMenu,
@@ -52,6 +60,7 @@ import type { useDeskInput } from "./use-desk-input"
 import type { useDeskMicrophone } from "./use-desk-microphone"
 import type { useDeskWhiteboard } from "./use-desk-whiteboard"
 import { getKeyboardShortcuts } from "./keyboard-shortcuts"
+import type { DesktopControllerPlatform } from "./keyboard-mapping"
 
 type DeskControlBarProps = {
     audioVolume: number
@@ -82,6 +91,7 @@ type DeskControlBarProps = {
     setShowStats: (show: boolean) => void
     showDiagnose: boolean
     showStats: boolean
+    macKeyboardMappingController?: DesktopControllerPlatform
     whiteboard: ReturnType<typeof useDeskWhiteboard>
 }
 
@@ -114,13 +124,24 @@ export function DeskControlBar({
     setShowStats,
     showDiagnose,
     showStats,
+    macKeyboardMappingController,
     whiteboard,
 }: DeskControlBarProps) {
     const { t } = useTranslation()
     const [isHovered, setIsHovered] = useState(false)
     const [isMenuOpen, setIsMenuOpen] = useState(false)
     const [isDiagnoseHovered, setIsDiagnoseHovered] = useState(false)
+    const [isKeyboardMappingOpen, setIsKeyboardMappingOpen] = useState(false)
     const isExpanded = isHovered || isMenuOpen || isDragging
+    const keyboardMappingVariables = macKeyboardMappingController === "Linux"
+        ? {
+            controller: t("pages.desk.keyboardMapping.controller.linux"),
+            systemKey: "Super",
+        }
+        : {
+            controller: t("pages.desk.keyboardMapping.controller.windows"),
+            systemKey: "Win",
+        }
 
     return (
         <div
@@ -335,11 +356,18 @@ export function DeskControlBar({
 
                     {hasControl && (
                         <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                                <Button className="controlButton" variant="ghost">
-                                    <Keyboard />
-                                </Button>
-                            </DropdownMenuTrigger>
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <DropdownMenuTrigger asChild>
+                                        <Button className="controlButton" variant="ghost">
+                                            <Keyboard />
+                                        </Button>
+                                    </DropdownMenuTrigger>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                    <p>{t("pages.desk.shortcuts")}</p>
+                                </TooltipContent>
+                            </Tooltip>
                             <DropdownMenuContent
                                 align="end"
                                 className="w-56 border-white/10 bg-background/90 backdrop-blur-md"
@@ -354,6 +382,15 @@ export function DeskControlBar({
                                         {t(shortcut.labelKey)}
                                     </DropdownMenuItem>
                                 ))}
+                                {macKeyboardMappingController && (
+                                    <DropdownMenuItem
+                                        className="mt-1 border-t border-white/10 pt-2"
+                                        onClick={() => setIsKeyboardMappingOpen(true)}
+                                    >
+                                        <Info className="mr-2 h-4 w-4" />
+                                        {t("pages.desk.keyboardMapping.menu")}
+                                    </DropdownMenuItem>
+                                )}
                             </DropdownMenuContent>
                         </DropdownMenu>
                     )}
@@ -404,11 +441,18 @@ export function DeskControlBar({
                     </Tooltip>
 
                     <Popover onOpenChange={setIsMenuOpen}>
-                        <PopoverTrigger asChild>
-                            <Button className="controlButton" variant="ghost">
-                                {isMuted || audioVolume === 0 ? <VolumeX /> : <Volume2 />}
-                            </Button>
-                        </PopoverTrigger>
+                        <Tooltip>
+                            <TooltipTrigger asChild>
+                                <PopoverTrigger asChild>
+                                    <Button className="controlButton" variant="ghost">
+                                        {isMuted || audioVolume === 0 ? <VolumeX /> : <Volume2 />}
+                                    </Button>
+                                </PopoverTrigger>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                                <p>{t("pages.desk.audio")}</p>
+                            </TooltipContent>
+                        </Tooltip>
                         <PopoverContent
                             align="center"
                             className="flex w-32 flex-col items-center gap-2 border-white/10 bg-background/90 px-3 py-4 backdrop-blur-md"
@@ -445,6 +489,42 @@ export function DeskControlBar({
                     </Tooltip>
                 </div>
             </div>
+            <Dialog open={isKeyboardMappingOpen} onOpenChange={setIsKeyboardMappingOpen}>
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>
+                            {t("pages.desk.keyboardMapping.title", keyboardMappingVariables)}
+                        </DialogTitle>
+                        <DialogDescription>
+                            {t("pages.desk.keyboardMapping.description", keyboardMappingVariables)}
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-2 text-sm">
+                        {[
+                            "ctrl",
+                            "alt",
+                            "shift",
+                            "capsLock",
+                            "systemKey",
+                        ].map((key) => (
+                            <div
+                                className="rounded-md border border-border/60 bg-muted/40 px-3 py-2"
+                                key={key}
+                            >
+                                {t(`pages.desk.keyboardMapping.${key}`, keyboardMappingVariables)}
+                            </div>
+                        ))}
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                        {t("pages.desk.keyboardMapping.examples")}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                        {macKeyboardMappingController === "Linux"
+                            ? t("pages.desk.keyboardMapping.linuxSystemKeyNote")
+                            : t("pages.desk.keyboardMapping.windowsSystemKeyNote")}
+                    </p>
+                </DialogContent>
+            </Dialog>
         </div>
     )
 }

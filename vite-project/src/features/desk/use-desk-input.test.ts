@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useDeskInput, buildKeyboardEventSequence, normalizeWheelDelta } from './use-desk-input';
+import { useDeskInput, buildKeyboardEventSequence, buildPhysicalKeyboardEvent, normalizeWheelDelta } from './use-desk-input';
 
 // `useDeskInput` wires DOM listeners onto the <video> element and a few
 // browser globals (ResizeObserver). jsdom does not implement
@@ -199,8 +199,73 @@ describe('buildKeyboardEventSequence — modifier state tracking', () => {
     });
 });
 
+describe('buildPhysicalKeyboardEvent — Windows Ctrl to macOS Command', () => {
+    const keyboardEvent = (overrides: Partial<KeyboardEvent>) => ({
+        key: '',
+        code: '',
+        keyCode: 0,
+        altKey: false,
+        ctrlKey: false,
+        shiftKey: false,
+        metaKey: false,
+        repeat: false,
+        location: 0,
+        isComposing: false,
+        ...overrides,
+    }) as KeyboardEvent;
+
+    it('maps left Ctrl and its modifier flag to Command', () => {
+        expect(buildPhysicalKeyboardEvent('keydown', keyboardEvent({
+            key: 'Control',
+            code: 'ControlLeft',
+            keyCode: 17,
+            ctrlKey: true,
+        }), true)).toMatchObject({
+            key_code: 91,
+            ctrl_key: false,
+            meta_key: true,
+        });
+
+        expect(buildPhysicalKeyboardEvent('keydown', keyboardEvent({
+            key: 'c',
+            code: 'KeyC',
+            keyCode: 67,
+            ctrlKey: true,
+        }), true)).toMatchObject({
+            key_code: 67,
+            ctrl_key: false,
+            meta_key: true,
+        });
+    });
+
+    it('maps right Ctrl to right Command and releases it cleanly', () => {
+        expect(buildPhysicalKeyboardEvent('keydown', keyboardEvent({
+            code: 'ControlRight',
+            keyCode: 17,
+            ctrlKey: true,
+        }), true)).toMatchObject({ key_code: 92, meta_key: true });
+        expect(buildPhysicalKeyboardEvent('keyup', keyboardEvent({
+            code: 'ControlRight',
+            keyCode: 17,
+            ctrlKey: false,
+        }), true)).toMatchObject({ key_code: 92, meta_key: false });
+    });
+
+    it('retains the literal Control mapping when compatibility is disabled', () => {
+        expect(buildPhysicalKeyboardEvent('keydown', keyboardEvent({
+            code: 'ControlLeft',
+            keyCode: 17,
+            ctrlKey: true,
+        }), false)).toMatchObject({
+            key_code: 17,
+            ctrl_key: true,
+            meta_key: false,
+        });
+    });
+});
+
 describe('useDeskInput — hidden page releases held keys', () => {
-    function setup() {
+    function setup(remapCtrlToCommand = false) {
         const handlers: Record<string, Handler[]> = {};
         const element = makeVideo(handlers);
         const keyboardChannel = makeChannel();
@@ -212,6 +277,7 @@ describe('useDeskInput — hidden page releases held keys', () => {
                 mouseChannel: { current: mouseChannel as unknown as RTCDataChannel },
                 keyboardChannel: { current: keyboardChannel as unknown as RTCDataChannel },
                 isConnected: true,
+                remapCtrlToCommand,
             }),
         );
         act(() => {
@@ -246,5 +312,27 @@ describe('useDeskInput — hidden page releases held keys', () => {
         expect(released).toHaveLength(1);
 
         Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+    });
+
+    it('releases remapped Command on blur when Windows Ctrl is held', () => {
+        const { keyboardChannel, fire } = setup(true);
+
+        fire('keydown', {
+            key: 'Control',
+            code: 'ControlLeft',
+            keyCode: 17,
+            ctrlKey: true,
+            metaKey: false,
+        });
+        keyboardChannel.send.mockClear();
+
+        fire('blur', {});
+
+        expect(lastSentPayload(keyboardChannel)).toMatchObject({
+            event: 'keyup',
+            key_code: 91,
+            ctrl_key: false,
+            meta_key: false,
+        });
     });
 });

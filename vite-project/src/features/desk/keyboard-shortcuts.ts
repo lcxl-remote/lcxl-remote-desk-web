@@ -60,6 +60,10 @@ const WINDOWS_SHORTCUTS: KeyboardShortcut[] = [
 const MACOS_SHORTCUTS: KeyboardShortcut[] = [
     { id: "forceQuit", labelKey: "pages.desk.shortcut.forceQuit", events: chord(VK.META, VK.ALT, VK.ESC) },
     { id: "lockScreen", labelKey: "pages.desk.shortcut.lockScreen", events: chord(VK.META, VK.CTRL, VK.Q) },
+    // Send this from the on-screen menu so the Windows controller does not
+    // consume the physical shortcut for its own input method before the
+    // browser can forward it to the macOS host.
+    { id: "switchInputSource", labelKey: "pages.desk.shortcut.switchInputSource", events: chord(VK.CTRL, VK.SPACE) },
     { id: "spotlight", labelKey: "pages.desk.shortcut.spotlight", events: chord(VK.META, VK.SPACE) },
     { id: "switchApp", labelKey: "pages.desk.shortcut.switchApp", events: chord(VK.META, VK.TAB) },
     { id: "missionControl", labelKey: "pages.desk.shortcut.missionControl", events: chord(VK.CTRL, VK.UP) },

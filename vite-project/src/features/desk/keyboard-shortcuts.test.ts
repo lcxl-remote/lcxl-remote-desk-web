@@ -6,6 +6,7 @@ describe('getKeyboardShortcuts', () => {
         const ids = getKeyboardShortcuts('Mac').map(s => s.id);
         expect(ids).toContain('forceQuit');
         expect(ids).toContain('spotlight');
+        expect(ids).toContain('switchInputSource');
         // Windows-only entries must not leak into the macOS menu.
         expect(ids).not.toContain('ctrlAltDel');
         expect(ids).not.toContain('winD');
@@ -29,6 +30,17 @@ describe('getKeyboardShortcuts', () => {
             { event: 'keyup', keyCode: 27 },
             { event: 'keyup', keyCode: 18 },
             { event: 'keyup', keyCode: 91 },
+        ]);
+    });
+
+    it('sends the macOS input-source shortcut as Control + Space', () => {
+        const switchInputSource = getKeyboardShortcuts('Mac')
+            .find(s => s.id === 'switchInputSource')!;
+        expect(switchInputSource.events).toEqual([
+            { event: 'keydown', keyCode: 17 },
+            { event: 'keydown', keyCode: 32 },
+            { event: 'keyup', keyCode: 32 },
+            { event: 'keyup', keyCode: 17 },
         ]);
     });
 

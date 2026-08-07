@@ -7,7 +7,10 @@ use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode, KeyCode};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use desk_utils::error::DeskErrorCode;
 
+#[derive(Default)]
 pub struct MacKeyboardEventHandler {}
+
+const WIN_VK_CAPS_LOCK: u32 = 0x14;
 
 impl MacKeyboardEventHandler {
     pub fn new() -> Self {
@@ -23,6 +26,49 @@ impl MacKeyboardEventHandler {
             ),
         }
     }
+
+    /// macOS handles the "use Caps Lock to switch input sources" preference
+    /// below the ordinary Quartz keyboard-event layer, so a software-generated
+    /// Caps Lock does not reliably reach that preference. The browser-facing
+    /// macOS shortcut menu already proves that Control+Space works through this
+    /// injection path; translate a remote Caps Lock press to the same native
+    /// chord so the physical key remains useful from Windows controllers.
+    fn switch_input_source() -> Result<(), InputError> {
+        let source = Self::create_source()?;
+        let events = caps_lock_input_source_chord()
+            .into_iter()
+            .map(|(keycode, key_down, flags)| {
+                let event = CGEvent::new_keyboard_event(source.clone(), keycode, key_down)
+                    .map_err(|_| {
+                        InputError::new_custom_error(
+                            DeskErrorCode::SYSTEM_ERROR,
+                            "Failed to create macOS input-source shortcut event",
+                        )
+                    })?;
+                event.set_flags(flags | generated_lock_flags(event.get_flags()));
+                Ok(event)
+            })
+            .collect::<Result<Vec<_>, InputError>>()?;
+
+        for event in events {
+            post_remote_input_event(&event);
+        }
+        Ok(())
+    }
+}
+
+fn caps_lock_input_source_chord() -> [(CGKeyCode, bool, CGEventFlags); 4] {
+    let control = CGEventFlags::CGEventFlagControl;
+    [
+        (KeyCode::CONTROL, true, control),
+        (KeyCode::SPACE, true, control),
+        (KeyCode::SPACE, false, control),
+        (KeyCode::CONTROL, false, CGEventFlags::empty()),
+    ]
+}
+
+fn generated_lock_flags(generated_flags: CGEventFlags) -> CGEventFlags {
+    generated_flags & CGEventFlags::CGEventFlagAlphaShift
 }
 
 /// Build the explicit modifier mask for an injected key event from the
@@ -36,7 +82,7 @@ impl MacKeyboardEventHandler {
 /// every later key — e.g. a bare `f` becomes Ctrl+Cmd+F (macOS "Full Screen").
 /// Stamping the flags explicitly makes each keystroke self-describing, so a key
 /// with no modifiers can never inherit a stale flag.
-fn cg_event_flags(event: &KeyboardEventData) -> CGEventFlags {
+fn cg_event_flags(event: &KeyboardEventData, generated_flags: CGEventFlags) -> CGEventFlags {
     let mut flags = CGEventFlags::empty();
     if event.shift_key {
         flags |= CGEventFlags::CGEventFlagShift;
@@ -50,16 +96,31 @@ fn cg_event_flags(event: &KeyboardEventData) -> CGEventFlags {
     if event.meta_key {
         flags |= CGEventFlags::CGEventFlagCommand;
     }
-    flags
+
+    // `CGEvent::new_keyboard_event` represents Caps Lock as a
+    // `FlagsChanged` event and supplies `AlphaShift` itself. The browser wire
+    // format does not carry lock-key state, so replacing every generated flag
+    // with only the four booleans above makes an injected Caps Lock a no-op.
+    // Preserve this persistent lock bit while still discarding inherited
+    // Control/Option/Command/Shift bits that could otherwise become stuck.
+    flags | generated_lock_flags(generated_flags)
 }
 
 impl KeyboardEventHandler for MacKeyboardEventHandler {
     fn handle_key_down(&mut self, event: &KeyboardEventData) -> Result<(), InputError> {
+        if event.key_code == WIN_VK_CAPS_LOCK {
+            if !event.repeat {
+                log::info!("Remote Caps Lock: sending macOS Control+Space input-source shortcut");
+                Self::switch_input_source()?;
+            }
+            return Ok(());
+        }
+
         if let Some(keycode) = win_vk_to_mac_keycode(event.key_code) {
             let source = Self::create_source()?;
             match CGEvent::new_keyboard_event(source, keycode, true) {
                 Ok(cg_event) => {
-                    cg_event.set_flags(cg_event_flags(event));
+                    cg_event.set_flags(cg_event_flags(event, cg_event.get_flags()));
                     post_remote_input_event(&cg_event);
                     Ok(())
                 }
@@ -75,11 +136,17 @@ impl KeyboardEventHandler for MacKeyboardEventHandler {
     }
 
     fn handle_key_up(&mut self, event: &KeyboardEventData) -> Result<(), InputError> {
+        // The matching Control+Space chord is completed synchronously on the
+        // Caps Lock key-down, so its browser key-up has nothing left to inject.
+        if event.key_code == WIN_VK_CAPS_LOCK {
+            return Ok(());
+        }
+
         if let Some(keycode) = win_vk_to_mac_keycode(event.key_code) {
             let source = Self::create_source()?;
             match CGEvent::new_keyboard_event(source, keycode, false) {
                 Ok(cg_event) => {
-                    cg_event.set_flags(cg_event_flags(event));
+                    cg_event.set_flags(cg_event_flags(event, cg_event.get_flags()));
                     post_remote_input_event(&cg_event);
                     Ok(())
                 }
@@ -168,7 +235,6 @@ fn win_vk_to_mac_keycode(vk: u32) -> Option<CGKeyCode> {
         0xA5 => Some(KeyCode::RIGHT_OPTION),  // VK_RMENU
         0x5B => Some(KeyCode::COMMAND),       // VK_LWIN (Command)
         0x5C => Some(KeyCode::RIGHT_COMMAND), // VK_RWIN
-
         // Special Keys
         0x0D => Some(KeyCode::RETURN), // Enter
         0x08 => Some(KeyCode::DELETE), // Backspace (mapped to macOS Delete)
@@ -224,7 +290,10 @@ mod tests {
         // interpret it as Ctrl+Cmd+F (macOS "Full Screen") when modifier state
         // has drifted.
         assert_eq!(
-            cg_event_flags(&key_event(false, false, false, false)),
+            cg_event_flags(
+                &key_event(false, false, false, false),
+                CGEventFlags::empty()
+            ),
             CGEventFlags::empty()
         );
     }
@@ -232,19 +301,19 @@ mod tests {
     #[test]
     fn each_modifier_maps_to_its_flag() {
         assert_eq!(
-            cg_event_flags(&key_event(true, false, false, false)),
+            cg_event_flags(&key_event(true, false, false, false), CGEventFlags::empty()),
             CGEventFlags::CGEventFlagControl
         );
         assert_eq!(
-            cg_event_flags(&key_event(false, true, false, false)),
+            cg_event_flags(&key_event(false, true, false, false), CGEventFlags::empty()),
             CGEventFlags::CGEventFlagShift
         );
         assert_eq!(
-            cg_event_flags(&key_event(false, false, true, false)),
+            cg_event_flags(&key_event(false, false, true, false), CGEventFlags::empty()),
             CGEventFlags::CGEventFlagAlternate
         );
         assert_eq!(
-            cg_event_flags(&key_event(false, false, false, true)),
+            cg_event_flags(&key_event(false, false, false, true), CGEventFlags::empty()),
             CGEventFlags::CGEventFlagCommand
         );
     }
@@ -254,15 +323,43 @@ mod tests {
         // Ctrl+Cmd held together (the real macOS "Full Screen" chord) must
         // produce exactly both flags and nothing else.
         assert_eq!(
-            cg_event_flags(&key_event(true, false, false, true)),
+            cg_event_flags(&key_event(true, false, false, true), CGEventFlags::empty()),
             CGEventFlags::CGEventFlagControl | CGEventFlags::CGEventFlagCommand
         );
         assert_eq!(
-            cg_event_flags(&key_event(true, true, true, true)),
+            cg_event_flags(&key_event(true, true, true, true), CGEventFlags::empty()),
             CGEventFlags::CGEventFlagControl
                 | CGEventFlags::CGEventFlagShift
                 | CGEventFlags::CGEventFlagAlternate
                 | CGEventFlags::CGEventFlagCommand
+        );
+    }
+
+    #[test]
+    fn remote_caps_lock_maps_to_control_space_chord() {
+        assert_eq!(
+            caps_lock_input_source_chord(),
+            [
+                (KeyCode::CONTROL, true, CGEventFlags::CGEventFlagControl),
+                (KeyCode::SPACE, true, CGEventFlags::CGEventFlagControl),
+                (KeyCode::SPACE, false, CGEventFlags::CGEventFlagControl),
+                (KeyCode::CONTROL, false, CGEventFlags::empty()),
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_alpha_shift_but_discards_other_generated_modifiers() {
+        let generated = CGEventFlags::CGEventFlagAlphaShift
+            | CGEventFlags::CGEventFlagCommand
+            | CGEventFlags::CGEventFlagControl;
+        assert_eq!(
+            cg_event_flags(&key_event(false, false, false, false), generated),
+            CGEventFlags::CGEventFlagAlphaShift
+        );
+        assert_eq!(
+            cg_event_flags(&key_event(false, true, false, false), generated),
+            CGEventFlags::CGEventFlagAlphaShift | CGEventFlags::CGEventFlagShift
         );
     }
 }

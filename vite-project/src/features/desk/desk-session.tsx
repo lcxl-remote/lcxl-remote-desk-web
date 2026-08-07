@@ -40,6 +40,7 @@ import {
     ResolutionStatusToast,
 } from "./desk-session-panels"
 import { DeskControlBar } from "./desk-control-bar"
+import { getMacKeyboardMappingController } from "./keyboard-mapping"
 import { useDraggableControlBar } from "./use-draggable-control-bar"
 import {
     SIGNALING_TYPE_CODE_REQUEST_REMOTE,
@@ -329,6 +330,10 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         hasTauri: initData?.has_tauri ?? false,
     });
 
+    const macKeyboardMappingController = getMacKeyboardMappingController(
+        initData?.operation_system,
+    );
+
     const { sendKeyboardEvents } = useDeskInput({
         videoRef,
         mouseChannel,
@@ -336,6 +341,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         mouseMoveChannel,
         isConnected: isRTCConnected && hasControl, // Only enable inputs if we have control
         ignoreInputEvents: !!whiteboard.textInput,
+        remapCtrlToCommand: macKeyboardMappingController !== undefined,
     });
 
     const microphone = useDeskMicrophone({
@@ -1071,6 +1077,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                                 setShowStats={setShowStats}
                                 showDiagnose={showDiagnose}
                                 showStats={showStats}
+                                macKeyboardMappingController={macKeyboardMappingController}
                                 whiteboard={whiteboard}
                             />
                         )}

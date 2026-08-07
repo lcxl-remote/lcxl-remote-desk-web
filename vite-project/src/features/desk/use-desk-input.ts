@@ -79,9 +79,45 @@ type UseDeskInputProps = {
     mouseMoveChannel?: RefObject<RTCDataChannel | null>;
     isConnected: boolean;
     ignoreInputEvents?: boolean; // When true, don't steal focus or send events (e.g. user is typing in UI)
+    remapCtrlToCommand?: boolean; // Windows controller → macOS host compatibility
 };
 
-export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMoveChannel, isConnected, ignoreInputEvents = false }: UseDeskInputProps) {
+function remappedCtrlKeyCode(event: KeyboardEvent): number {
+    return event.code === "ControlRight" || event.keyCode === 0xA3 ? 92 : 91;
+}
+
+export function buildPhysicalKeyboardEvent(
+    eventType: string,
+    event: KeyboardEvent,
+    remapCtrlToCommand: boolean,
+) {
+    const isControlKey = event.code === "ControlLeft"
+        || event.code === "ControlRight"
+        || event.keyCode === 17
+        || event.keyCode === 0xA2
+        || event.keyCode === 0xA3;
+
+    return {
+        event: eventType,
+        key: event.key,
+        code: event.code,
+        key_code: remapCtrlToCommand && isControlKey
+            ? remappedCtrlKeyCode(event)
+            : event.keyCode,
+        alt_key: event.altKey,
+        ctrl_key: remapCtrlToCommand ? false : event.ctrlKey,
+        shift_key: event.shiftKey,
+        // Windows reserves many Win-key chords before the browser sees them.
+        // Treat physical Ctrl as Command for a macOS host while retaining any
+        // Meta state the browser did manage to deliver.
+        meta_key: event.metaKey || (remapCtrlToCommand && event.ctrlKey),
+        repeat: event.repeat,
+        location: event.location,
+        is_composing: event.isComposing,
+    };
+}
+
+export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMoveChannel, isConnected, ignoreInputEvents = false, remapCtrlToCommand = false }: UseDeskInputProps) {
     const dimensionsRef = useRef({ width: 0, height: 0 });
     const sequenceNumberRef = useRef(0);
     const pressedKeysRef = useRef<Set<number>>(new Set());
@@ -183,25 +219,17 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
             if (!keyboardChannel.current || keyboardChannel.current.readyState !== "open") {
                 return;
             }
-            const keyboardEvent = {
-                event: eventType,
-                key: event.key,
-                code: event.code,
-                key_code: event.keyCode,
-                alt_key: event.altKey,
-                ctrl_key: event.ctrlKey,
-                shift_key: event.shiftKey,
-                meta_key: event.metaKey,
-                repeat: event.repeat,
-                location: event.location,
-                is_composing: event.isComposing,
-            };
+            const keyboardEvent = buildPhysicalKeyboardEvent(
+                eventType,
+                event,
+                remapCtrlToCommand,
+            );
             keyboardChannel.current.send(JSON.stringify(keyboardEvent));
 
             if (eventType === "keydown") {
-                pressedKeysRef.current.add(event.keyCode);
+                pressedKeysRef.current.add(keyboardEvent.key_code);
             } else if (eventType === "keyup") {
-                pressedKeysRef.current.delete(event.keyCode);
+                pressedKeysRef.current.delete(keyboardEvent.key_code);
             }
         };
 
@@ -361,7 +389,7 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
             window.removeEventListener("blur", handleBlur);
             document.removeEventListener("visibilitychange", handleVisibilityChange);
         };
-    }, [videoRef, isConnected, mouseChannel, keyboardChannel, mouseMoveChannel, ignoreInputEvents]);
+    }, [videoRef, isConnected, mouseChannel, keyboardChannel, mouseMoveChannel, ignoreInputEvents, remapCtrlToCommand]);
 
     const sendKeyboardEvents = useCallback((events: SyntheticKeyEvent[]) => {
         if (!keyboardChannel.current || keyboardChannel.current.readyState !== "open") {
