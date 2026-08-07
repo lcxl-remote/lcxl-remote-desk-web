@@ -16,6 +16,28 @@ const MODIFIER_KEY_CODES: Record<number, 'shift' | 'ctrl' | 'alt' | 'meta'> = {
 
 export type SyntheticKeyEvent = { event: 'keydown' | 'keyup'; keyCode: number };
 
+const DOM_DELTA_PIXEL = 0;
+const DOM_DELTA_LINE = 1;
+const DOM_DELTA_PAGE = 2;
+// Browsers that report wheel movement in lines commonly emit three lines for
+// one mouse-wheel notch. Forty pixels per line keeps that notch close to the
+// roughly 100-120 pixel deltas emitted by pixel-mode browsers.
+const WHEEL_LINE_HEIGHT_PX = 40;
+
+/** Convert a DOM wheel delta to the pixel unit used on the input wire. */
+export function normalizeWheelDelta(delta: number, deltaMode: number, pageSize: number): number {
+    if (!Number.isFinite(delta)) return 0;
+    switch (deltaMode) {
+        case DOM_DELTA_LINE:
+            return delta * WHEEL_LINE_HEIGHT_PX;
+        case DOM_DELTA_PAGE:
+            return delta * pageSize;
+        case DOM_DELTA_PIXEL:
+        default:
+            return delta;
+    }
+}
+
 /**
  * Expand a synthetic key sequence (ordered down/up events) into full keyboard
  * payloads, tracking modifier state so every event reports the modifiers held
@@ -131,8 +153,11 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
             let delta_y = 0;
             if (eventType === "wheel") {
                 const wheelEvent = event as WheelEvent;
-                delta_x = wheelEvent.deltaX;
-                delta_y = wheelEvent.deltaY;
+                // Read deltaMode before deltaX/deltaY. Some browsers preserve
+                // legacy delta values until the unit has been observed.
+                const deltaMode = wheelEvent.deltaMode;
+                delta_x = normalizeWheelDelta(wheelEvent.deltaX, deltaMode, renderedWidth);
+                delta_y = normalizeWheelDelta(wheelEvent.deltaY, deltaMode, renderedHeight);
             }
             const mouseEvent = {
                 event: eventType,

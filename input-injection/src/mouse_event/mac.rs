@@ -18,11 +18,20 @@ pub struct MacMouseEventHandler {
     /// require a non-zero offset to land the cursor on the right panel.
     /// The worker mutates this on display reconfiguration.
     geometry: SharedMonitorGeometry,
+    /// Core Graphics accepts integer pixel deltas. Preserve fractional
+    /// trackpad movement until it adds up to a whole pixel instead of dropping
+    /// every sub-pixel event during the `f64` to `i32` conversion.
+    wheel_acc_x: f64,
+    wheel_acc_y: f64,
 }
 
 impl MacMouseEventHandler {
     pub fn new(geometry: SharedMonitorGeometry) -> Result<Self, InputError> {
-        Ok(Self { geometry })
+        Ok(Self {
+            geometry,
+            wheel_acc_x: 0.0,
+            wheel_acc_y: 0.0,
+        })
     }
 
     fn get_point(&self, x: f64, y: f64) -> CGPoint {
@@ -100,6 +109,36 @@ fn move_kind_for_buttons(buttons: i32) -> MoveKind {
         MoveKind::OtherDrag
     } else {
         MoveKind::Move
+    }
+}
+
+/// Accumulate browser/controller pixel deltas and return the whole pixels that
+/// Core Graphics can represent. The fractional remainder is retained for the
+/// next event so a high-resolution trackpad cannot starve the remote scroll.
+fn take_whole_pixels(accumulator: &mut f64, delta: f64) -> i32 {
+    if !delta.is_finite() {
+        return 0;
+    }
+    *accumulator += delta;
+    let whole = accumulator.trunc() as i32;
+    *accumulator -= whole as f64;
+    whole
+}
+
+/// Prepare one Core Graphics pixel-scroll event. Axis 2 is only present when
+/// horizontal movement is emitted, hence the dynamic wheel count.
+fn prepare_pixel_scroll(
+    acc_x: &mut f64,
+    acc_y: &mut f64,
+    delta_x: f64,
+    delta_y: f64,
+) -> Option<(u32, i32, i32)> {
+    let dx = take_whole_pixels(acc_x, delta_x);
+    let dy = take_whole_pixels(acc_y, delta_y);
+    if dx == 0 && dy == 0 {
+        None
+    } else {
+        Some((if dx == 0 { 1 } else { 2 }, dy, dx))
     }
 }
 
@@ -186,13 +225,17 @@ impl MouseEventHandler for MacMouseEventHandler {
     }
 
     fn handle_mouse_wheel(&mut self, event: &MouseEventData) -> Result<(), InputError> {
-        // CoreGraphics scroll event
-        // delta_y > 0 means scroll up (content moves down)
-        let wheel_count = 1;
-        let dy = (event.delta_y * 10.0) as i32;
+        let Some((wheel_count, dy, dx)) = prepare_pixel_scroll(
+            &mut self.wheel_acc_x,
+            &mut self.wheel_acc_y,
+            event.delta_x,
+            event.delta_y,
+        ) else {
+            return Ok(());
+        };
 
         let source = Self::create_source()?;
-        match CGEvent::new_scroll_event(source, ScrollEventUnit::PIXEL, wheel_count, dy, 0, 0) {
+        match CGEvent::new_scroll_event(source, ScrollEventUnit::PIXEL, wheel_count, dy, dx, 0) {
             Ok(cg_event) => {
                 post_remote_input_event(&cg_event);
                 Ok(())
@@ -244,6 +287,55 @@ mod tests {
     #[test]
     fn move_kind_right_wins_over_other() {
         assert_eq!(move_kind_for_buttons(2 | 4), MoveKind::RightDrag);
+    }
+
+    #[test]
+    fn pixel_scroll_does_not_amplify_controller_delta() {
+        let (mut acc_x, mut acc_y) = (0.0, 0.0);
+        assert_eq!(
+            prepare_pixel_scroll(&mut acc_x, &mut acc_y, 0.0, 100.0),
+            Some((1, 100, 0))
+        );
+    }
+
+    #[test]
+    fn pixel_scroll_preserves_fractional_trackpad_movement() {
+        let (mut acc_x, mut acc_y) = (0.0, 0.0);
+        assert_eq!(
+            prepare_pixel_scroll(&mut acc_x, &mut acc_y, 0.25, 0.4),
+            None
+        );
+        assert_eq!(
+            prepare_pixel_scroll(&mut acc_x, &mut acc_y, 0.25, 0.4),
+            None
+        );
+        assert_eq!(
+            prepare_pixel_scroll(&mut acc_x, &mut acc_y, 0.5, 0.4),
+            Some((2, 1, 1))
+        );
+        assert!((acc_y - 0.2).abs() < f64::EPSILON * 4.0);
+    }
+
+    #[test]
+    fn pixel_scroll_emits_both_axes_when_horizontal_delta_exists() {
+        let (mut acc_x, mut acc_y) = (0.0, 0.0);
+        assert_eq!(
+            prepare_pixel_scroll(&mut acc_x, &mut acc_y, -12.0, 24.0),
+            Some((2, 24, -12))
+        );
+    }
+
+    #[test]
+    fn pixel_scroll_drops_non_finite_delta_without_poisoning_accumulator() {
+        let (mut acc_x, mut acc_y) = (0.0, 0.0);
+        assert_eq!(
+            prepare_pixel_scroll(&mut acc_x, &mut acc_y, f64::NAN, f64::INFINITY),
+            None
+        );
+        assert_eq!(
+            prepare_pixel_scroll(&mut acc_x, &mut acc_y, 1.0, -1.0),
+            Some((2, -1, 1))
+        );
     }
 
     #[test]

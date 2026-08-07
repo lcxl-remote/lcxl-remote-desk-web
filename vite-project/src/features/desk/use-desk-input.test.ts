@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useDeskInput, buildKeyboardEventSequence } from './use-desk-input';
+import { useDeskInput, buildKeyboardEventSequence, normalizeWheelDelta } from './use-desk-input';
 
 // `useDeskInput` wires DOM listeners onto the <video> element and a few
 // browser globals (ResizeObserver). jsdom does not implement
@@ -55,6 +55,28 @@ beforeEach(() => {
 
 afterEach(() => {
     vi.restoreAllMocks();
+});
+
+describe('normalizeWheelDelta', () => {
+    it('preserves pixel-mode deltas', () => {
+        expect(normalizeWheelDelta(100, WheelEvent.DOM_DELTA_PIXEL, 1080)).toBe(100);
+        expect(normalizeWheelDelta(-2.5, WheelEvent.DOM_DELTA_PIXEL, 1080)).toBe(-2.5);
+    });
+
+    it('normalizes line-mode deltas to pixels', () => {
+        expect(normalizeWheelDelta(3, WheelEvent.DOM_DELTA_LINE, 1080)).toBe(120);
+        expect(normalizeWheelDelta(-3, WheelEvent.DOM_DELTA_LINE, 1080)).toBe(-120);
+    });
+
+    it('normalizes page-mode deltas against the rendered axis', () => {
+        expect(normalizeWheelDelta(1, WheelEvent.DOM_DELTA_PAGE, 1080)).toBe(1080);
+        expect(normalizeWheelDelta(-1, WheelEvent.DOM_DELTA_PAGE, 1920)).toBe(-1920);
+    });
+
+    it('drops non-finite deltas before serialization', () => {
+        expect(normalizeWheelDelta(Number.NaN, WheelEvent.DOM_DELTA_PIXEL, 1080)).toBe(0);
+        expect(normalizeWheelDelta(Number.POSITIVE_INFINITY, WheelEvent.DOM_DELTA_PIXEL, 1080)).toBe(0);
+    });
 });
 
 describe('useDeskInput — blur release uses last known cursor position', () => {
