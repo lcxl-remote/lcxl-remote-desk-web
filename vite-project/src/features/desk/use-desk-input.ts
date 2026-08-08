@@ -79,38 +79,58 @@ type UseDeskInputProps = {
     mouseMoveChannel?: RefObject<RTCDataChannel | null>;
     isConnected: boolean;
     ignoreInputEvents?: boolean; // When true, don't steal focus or send events (e.g. user is typing in UI)
-    remapCtrlToCommand?: boolean; // Windows controller → macOS host compatibility
+    remapCtrlToCommand?: boolean; // Windows/Linux controller → macOS host compatibility
 };
 
-function remappedCtrlKeyCode(event: KeyboardEvent): number {
-    return event.code === "ControlRight" || event.keyCode === 0xA3 ? 92 : 91;
+type PhysicalControlState = {
+    left: boolean;
+    right: boolean;
+};
+
+function isRightControlKey(event: KeyboardEvent): boolean {
+    return event.code === "ControlRight" || event.keyCode === 0xA3;
+}
+
+function isLeftControlKey(event: KeyboardEvent): boolean {
+    return !isRightControlKey(event) && (
+        event.code === "ControlLeft"
+        || event.keyCode === 17
+        || event.keyCode === 0xA2
+    );
+}
+
+function inferredControlState(event: KeyboardEvent): PhysicalControlState {
+    if (isRightControlKey(event)) {
+        return { left: false, right: event.ctrlKey };
+    }
+    return { left: event.ctrlKey, right: false };
 }
 
 export function buildPhysicalKeyboardEvent(
     eventType: string,
     event: KeyboardEvent,
     remapCtrlToCommand: boolean,
+    controlState: PhysicalControlState = inferredControlState(event),
 ) {
-    const isControlKey = event.code === "ControlLeft"
-        || event.code === "ControlRight"
-        || event.keyCode === 17
-        || event.keyCode === 0xA2
-        || event.keyCode === 0xA3;
+    const leftControlKey = isLeftControlKey(event);
+    const rightControlKey = isRightControlKey(event);
 
     return {
         event: eventType,
         key: event.key,
         code: event.code,
-        key_code: remapCtrlToCommand && isControlKey
-            ? remappedCtrlKeyCode(event)
-            : event.keyCode,
+        key_code: remapCtrlToCommand && leftControlKey
+            ? 91
+            : remapCtrlToCommand && rightControlKey
+                ? 17
+                : event.keyCode,
         alt_key: event.altKey,
-        ctrl_key: remapCtrlToCommand ? false : event.ctrlKey,
+        ctrl_key: remapCtrlToCommand ? controlState.right : event.ctrlKey,
         shift_key: event.shiftKey,
         // Windows reserves many Win-key chords before the browser sees them.
-        // Treat physical Ctrl as Command for a macOS host while retaining any
-        // Meta state the browser did manage to deliver.
-        meta_key: event.metaKey || (remapCtrlToCommand && event.ctrlKey),
+        // Treat left Ctrl as Command for a macOS host, while right Ctrl remains
+        // a literal Control for terminal chords such as Control+C.
+        meta_key: event.metaKey || (remapCtrlToCommand && controlState.left),
         repeat: event.repeat,
         location: event.location,
         is_composing: event.isComposing,
@@ -121,6 +141,7 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
     const dimensionsRef = useRef({ width: 0, height: 0 });
     const sequenceNumberRef = useRef(0);
     const pressedKeysRef = useRef<Set<number>>(new Set());
+    const physicalControlStateRef = useRef<PhysicalControlState>({ left: false, right: false });
     const pressedButtonsRef = useRef<Set<number>>(new Set());
     // Last cursor position (normalised ratios) reported to the backend.
     // Reused for the synthetic mouseup sent on blur so the release lands
@@ -219,10 +240,18 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
             if (!keyboardChannel.current || keyboardChannel.current.readyState !== "open") {
                 return;
             }
+            if (remapCtrlToCommand) {
+                if (isRightControlKey(event)) {
+                    physicalControlStateRef.current.right = eventType === "keydown";
+                } else if (isLeftControlKey(event)) {
+                    physicalControlStateRef.current.left = eventType === "keydown";
+                }
+            }
             const keyboardEvent = buildPhysicalKeyboardEvent(
                 eventType,
                 event,
                 remapCtrlToCommand,
+                physicalControlStateRef.current,
             );
             keyboardChannel.current.send(JSON.stringify(keyboardEvent));
 
@@ -342,6 +371,7 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
                 });
             }
             pressedKeysRef.current.clear();
+            physicalControlStateRef.current = { left: false, right: false };
         };
 
         const handleVisibilityChange = () => {

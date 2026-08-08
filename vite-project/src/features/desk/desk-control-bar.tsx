@@ -501,7 +501,8 @@ export function DeskControlBar({
                     </DialogHeader>
                     <div className="space-y-2 text-sm">
                         {[
-                            "ctrl",
+                            "leftCtrl",
+                            "rightCtrl",
                             "alt",
                             "shift",
                             "capsLock",

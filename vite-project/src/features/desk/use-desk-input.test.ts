@@ -199,7 +199,7 @@ describe('buildKeyboardEventSequence — modifier state tracking', () => {
     });
 });
 
-describe('buildPhysicalKeyboardEvent — Windows Ctrl to macOS Command', () => {
+describe('buildPhysicalKeyboardEvent — desktop Ctrl compatibility for macOS', () => {
     const keyboardEvent = (overrides: Partial<KeyboardEvent>) => ({
         key: '',
         code: '',
@@ -238,17 +238,49 @@ describe('buildPhysicalKeyboardEvent — Windows Ctrl to macOS Command', () => {
         });
     });
 
-    it('maps right Ctrl to right Command and releases it cleanly', () => {
+    it('keeps right Ctrl as literal macOS Control for terminal chords', () => {
         expect(buildPhysicalKeyboardEvent('keydown', keyboardEvent({
             code: 'ControlRight',
             keyCode: 17,
             ctrlKey: true,
-        }), true)).toMatchObject({ key_code: 92, meta_key: true });
+        }), true, { left: false, right: true })).toMatchObject({
+            key_code: 17,
+            ctrl_key: true,
+            meta_key: false,
+        });
+
+        expect(buildPhysicalKeyboardEvent('keydown', keyboardEvent({
+            key: 'c',
+            code: 'KeyC',
+            keyCode: 67,
+            ctrlKey: true,
+        }), true, { left: false, right: true })).toMatchObject({
+            key_code: 67,
+            ctrl_key: true,
+            meta_key: false,
+        });
+
         expect(buildPhysicalKeyboardEvent('keyup', keyboardEvent({
             code: 'ControlRight',
             keyCode: 17,
             ctrlKey: false,
-        }), true)).toMatchObject({ key_code: 92, meta_key: false });
+        }), true, { left: false, right: false })).toMatchObject({
+            key_code: 17,
+            ctrl_key: false,
+            meta_key: false,
+        });
+    });
+
+    it('preserves both modifiers when left and right Ctrl are held together', () => {
+        expect(buildPhysicalKeyboardEvent('keydown', keyboardEvent({
+            key: 'k',
+            code: 'KeyK',
+            keyCode: 75,
+            ctrlKey: true,
+        }), true, { left: true, right: true })).toMatchObject({
+            ctrl_key: true,
+            meta_key: true,
+        });
     });
 
     it('retains the literal Control mapping when compatibility is disabled', () => {
@@ -332,6 +364,54 @@ describe('useDeskInput — hidden page releases held keys', () => {
             event: 'keyup',
             key_code: 91,
             ctrl_key: false,
+            meta_key: false,
+        });
+    });
+
+    it('releases literal Control on blur when right Ctrl is held', () => {
+        const { keyboardChannel, fire } = setup(true);
+
+        fire('keydown', {
+            key: 'Control',
+            code: 'ControlRight',
+            keyCode: 17,
+            ctrlKey: true,
+            metaKey: false,
+        });
+        keyboardChannel.send.mockClear();
+
+        fire('blur', {});
+
+        expect(lastSentPayload(keyboardChannel)).toMatchObject({
+            event: 'keyup',
+            key_code: 17,
+            ctrl_key: false,
+            meta_key: false,
+        });
+    });
+
+    it('sends right Ctrl+C as literal macOS Control+C', () => {
+        const { keyboardChannel, fire } = setup(true);
+
+        fire('keydown', {
+            key: 'Control',
+            code: 'ControlRight',
+            keyCode: 17,
+            ctrlKey: true,
+            metaKey: false,
+        });
+        fire('keydown', {
+            key: 'c',
+            code: 'KeyC',
+            keyCode: 67,
+            ctrlKey: true,
+            metaKey: false,
+        });
+
+        expect(lastSentPayload(keyboardChannel)).toMatchObject({
+            event: 'keydown',
+            key_code: 67,
+            ctrl_key: true,
             meta_key: false,
         });
     });
