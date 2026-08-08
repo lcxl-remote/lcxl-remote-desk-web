@@ -1,6 +1,7 @@
 import type {
     DeskSettings,
     DisplayInfo,
+    OperationSystemEnum,
 } from "@/services/types"
 
 export type DeskConfigFormSettings = DeskSettings & {
@@ -55,6 +56,17 @@ export function shouldShowNoDisplayWarning(
     noDisplaysForMode: boolean,
 ): boolean {
     return noDisplaysForMode && !captureUnavailable
+}
+
+export function shouldShowAdminPrivilegeWarning(
+    isAdmin: boolean | undefined,
+    operationSystem: OperationSystemEnum | undefined,
+): boolean {
+    // macOS desktop hosts are expected to run in the signed-in user's
+    // session. Their capabilities are controlled by TCC permissions rather
+    // than by running the server as root, so the generic admin warning does
+    // not apply there.
+    return isAdmin === false && operationSystem !== "Mac"
 }
 
 export function pickDefaultDeviceName(

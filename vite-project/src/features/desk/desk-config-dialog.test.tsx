@@ -8,6 +8,7 @@ import {
     normalizeCaptureTarget,
     orderCaptureModes,
     pickDefaultDeviceName,
+    shouldShowAdminPrivilegeWarning,
     shouldShowNoDisplayWarning,
     toDeskSettings,
 } from "./desk-config-model"
@@ -151,6 +152,22 @@ describe("hasNoDisplaysForMode", () => {
         expect(shouldShowNoDisplayWarning(true, true)).toBe(false)
         expect(shouldShowNoDisplayWarning(false, true)).toBe(true)
         expect(shouldShowNoDisplayWarning(false, false)).toBe(false)
+    })
+})
+
+describe("shouldShowAdminPrivilegeWarning", () => {
+    it("does not warn for a non-root macOS desktop host", () => {
+        expect(shouldShowAdminPrivilegeWarning(false, "Mac")).toBe(false)
+    })
+
+    it("still warns for non-admin Windows, Linux, and legacy hosts", () => {
+        expect(shouldShowAdminPrivilegeWarning(false, "Windows")).toBe(true)
+        expect(shouldShowAdminPrivilegeWarning(false, "Linux")).toBe(true)
+        expect(shouldShowAdminPrivilegeWarning(false, undefined)).toBe(true)
+    })
+
+    it("does not warn when the host has administrative privileges", () => {
+        expect(shouldShowAdminPrivilegeWarning(true, "Windows")).toBe(false)
     })
 })
 

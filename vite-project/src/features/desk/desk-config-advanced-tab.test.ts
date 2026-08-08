@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
     encoderIdForSetting,
     limitsAcceptResolution,
+    shouldShowWaylandControlMode,
 } from "./desk-config-advanced-tab"
 
 const openH264Limits = {
@@ -26,5 +27,14 @@ describe("encoder resolution filtering", () => {
     it("uses portrait limits and rejects misaligned input", () => {
         expect(limitsAcceptResolution(openH264Limits, { width: 2160, height: 3840 })).toBe(true)
         expect(limitsAcceptResolution(openH264Limits, { width: 2159, height: 3840 })).toBe(false)
+    })
+})
+
+describe("Wayland control mode visibility", () => {
+    it("shows the setting only for Linux hosts", () => {
+        expect(shouldShowWaylandControlMode("Linux")).toBe(true)
+        expect(shouldShowWaylandControlMode("Mac")).toBe(false)
+        expect(shouldShowWaylandControlMode("Windows")).toBe(false)
+        expect(shouldShowWaylandControlMode(undefined)).toBe(false)
     })
 })

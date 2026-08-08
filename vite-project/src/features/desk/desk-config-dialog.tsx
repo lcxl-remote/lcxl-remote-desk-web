@@ -46,6 +46,7 @@ import {
     normalizeCaptureTarget,
     orderCaptureModes,
     pickDefaultDeviceName,
+    shouldShowAdminPrivilegeWarning,
     shouldShowNoDisplayWarning,
     toDeskSettings,
 } from "./desk-config-model"
@@ -199,7 +200,10 @@ export function DeskConfigDialog({
                 <DialogHeader>
                     <DialogTitle>{t('pages.desk.deskConfig')}</DialogTitle>
                 </DialogHeader>
-                {initData?.is_admin === false && (
+                {shouldShowAdminPrivilegeWarning(
+                    initData?.is_admin,
+                    initData?.operation_system,
+                ) && (
                     <Alert variant="destructive">
                         <AlertTriangle className="h-4 w-4" />
                         <AlertTitle>{t('pages.system.settings.alert.message')}</AlertTitle>

@@ -20,7 +20,13 @@ import {
 } from "@/components/ui/select"
 import { Slider } from "@/components/ui/slider"
 import { TabsContent } from "@/components/ui/tabs"
-import type { EncoderInputLimits, InitSignalingData, Resolution, VideoEncoderId } from "@/services/types"
+import type {
+    EncoderInputLimits,
+    InitSignalingData,
+    OperationSystemEnum,
+    Resolution,
+    VideoEncoderId,
+} from "@/services/types"
 import type { DeskConfigFormSettings } from "./desk-config-model"
 
 type DeskConfigAdvancedTabProps = {
@@ -112,36 +118,38 @@ export function DeskConfigAdvancedTab({
                 }}
             />
 
-            <FormField
-                control={form.control}
-                name="wayland_control_mode"
-                render={({ field }) => {
-                    const currentValue = field.value || "auto"
-                    return (
-                        <FormItem>
-                            <FormLabel>{t("pages.desk.waylandControlMode")}</FormLabel>
-                            <Select
-                                defaultValue={currentValue}
-                                key={`wayland-control-${currentValue}`}
-                                onValueChange={field.onChange}
-                            >
-                                <FormControl>
-                                    <SelectTrigger>
-                                        <SelectValue placeholder={t("pages.desk.autoBackendControl")} />
-                                    </SelectTrigger>
-                                </FormControl>
-                                <SelectContent>
-                                    <SelectItem value="auto">{t("pages.desk.autoBackendControl")}</SelectItem>
-                                    <SelectItem value="portal">portal</SelectItem>
-                                    <SelectItem value="uinput">uinput</SelectItem>
-                                    <SelectItem value="none">none</SelectItem>
-                                </SelectContent>
-                            </Select>
-                            <FormMessage />
-                        </FormItem>
-                    )
-                }}
-            />
+            {shouldShowWaylandControlMode(initData?.operation_system) && (
+                <FormField
+                    control={form.control}
+                    name="wayland_control_mode"
+                    render={({ field }) => {
+                        const currentValue = field.value || "auto"
+                        return (
+                            <FormItem>
+                                <FormLabel>{t("pages.desk.waylandControlMode")}</FormLabel>
+                                <Select
+                                    defaultValue={currentValue}
+                                    key={`wayland-control-${currentValue}`}
+                                    onValueChange={field.onChange}
+                                >
+                                    <FormControl>
+                                        <SelectTrigger>
+                                            <SelectValue placeholder={t("pages.desk.autoBackendControl")} />
+                                        </SelectTrigger>
+                                    </FormControl>
+                                    <SelectContent>
+                                        <SelectItem value="auto">{t("pages.desk.autoBackendControl")}</SelectItem>
+                                        <SelectItem value="portal">portal</SelectItem>
+                                        <SelectItem value="uinput">uinput</SelectItem>
+                                        <SelectItem value="none">none</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                                <FormMessage />
+                            </FormItem>
+                        )
+                    }}
+                />
+            )}
 
             <FormField
                 control={form.control}
@@ -256,6 +264,12 @@ export function DeskConfigAdvancedTab({
             />
         </TabsContent>
     )
+}
+
+export function shouldShowWaylandControlMode(
+    operationSystem: OperationSystemEnum | undefined,
+): boolean {
+    return operationSystem === "Linux"
 }
 
 export function encoderIdForSetting(settingName: string): VideoEncoderId | undefined {
