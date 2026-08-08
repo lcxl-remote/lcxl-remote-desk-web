@@ -41,6 +41,175 @@ pub(super) fn video_encoder_to_media_codec(t: VideoEncoderType) -> MediaCodec {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct NegotiatedVideo {
+    pub codec: MediaCodec,
+    pub encoder: VideoEncoderId,
+}
+
+pub(super) fn renegotiation_requires_full_reconnect(
+    has_video_track: bool,
+    previous_codec: Option<MediaCodec>,
+    next_codec: Option<MediaCodec>,
+) -> bool {
+    has_video_track
+        && matches!((previous_codec, next_codec), (Some(previous), Some(next)) if previous != next)
+}
+
+pub(super) fn should_restart_negotiated_pipeline(
+    is_first_offer: bool,
+    pipeline_was_retryable: bool,
+    has_video: bool,
+    negotiated_video: Option<NegotiatedVideo>,
+) -> bool {
+    !is_first_offer && pipeline_was_retryable && has_video && negotiated_video.is_some()
+}
+
+pub(super) fn initial_worker_media_flags(
+    cached_start_video: bool,
+    cached_start_audio: bool,
+    video_blocked: bool,
+) -> (bool, bool) {
+    (cached_start_video && !video_blocked, cached_start_audio)
+}
+
+pub(super) fn is_video_offer_blocking_error(code: DeskErrorCode) -> bool {
+    matches!(
+        code,
+        DeskErrorCode::FEATURE_UNAVAILABLE | DeskErrorCode::VIDEO_ENCODER_DIMENSIONS_UNSUPPORTED
+    )
+}
+
+pub(super) fn blocked_offer_state(
+    encoder: Option<VideoEncoderId>,
+    source_resolution: Option<Resolution>,
+    compatible_encoders: Vec<VideoEncoderId>,
+    error: Option<&CustomDeskError>,
+) -> MediaPipelineStateData {
+    let reason_code = error
+        .map(|error| error.error_code)
+        .unwrap_or(DeskErrorCode::VIDEO_ENCODER_DIMENSIONS_UNSUPPORTED);
+    let message = error.map_or_else(
+        || match source_resolution {
+            Some(source) => format!(
+                "No installed encoder with known support can encode {}x{} for this controller",
+                source.width, source.height
+            ),
+            None => "No installed encoder with known support is available for this controller"
+                .to_string(),
+        },
+        |error| error.message.clone(),
+    );
+    MediaPipelineStateData {
+        phase: MediaPipelinePhase::Blocked,
+        encoder,
+        source_resolution,
+        compatible_encoders,
+        reason_code: Some(reason_code),
+        message: Some(message),
+    }
+}
+
+pub(super) fn selected_capture_resolution(
+    settings: &desk_signal_facade::model::desk_settings::DeskSettings,
+    capabilities: &MediaCapabilities,
+) -> Option<Resolution> {
+    let displays = settings
+        .image_capture
+        .as_ref()
+        .and_then(|backend| capabilities.video_device_list.get(backend))
+        .or_else(|| capabilities.video_device_list.values().next())?;
+    let display = if settings.video_device_name.is_empty() {
+        displays.iter().find(|display| display.attached_to_desktop)
+    } else {
+        displays
+            .iter()
+            .find(|display| display.device_name == settings.video_device_name)
+    }?;
+    // Only the capture backend may assert its encoder input size. Desktop
+    // coordinates are layout geometry (and are point-sized on Retina), so a
+    // legacy host that did not publish this field must remain Unknown.
+    display.current_capture_resolution
+}
+
+pub(super) fn select_video_for_offer(
+    requested_setting: Option<&str>,
+    client_codecs: &[MediaCodec],
+    capabilities: &MediaCapabilities,
+    source: Option<Resolution>,
+) -> Result<Option<NegotiatedVideo>, CustomDeskError> {
+    let encoder_capabilities = if capabilities.video_encoder_capabilities.is_empty() {
+        capabilities_for_encoder_names(&capabilities.video_encoders)
+    } else {
+        capabilities.video_encoder_capabilities.clone()
+    };
+    let installed = |id: VideoEncoderId| {
+        capabilities
+            .video_encoders
+            .iter()
+            .any(|name| VideoEncoderId::from_setting_name(name) == Some(id))
+    };
+    let codec_for = |id: VideoEncoderId| video_encoder_to_media_codec(VideoEncoderType::from(id));
+
+    if let Some(requested_setting) = requested_setting {
+        let id = VideoEncoderId::from_setting_name(requested_setting).ok_or_else(|| {
+            CustomDeskError::new(
+                DeskErrorCode::INVALID_PARAMS,
+                &format!("Unknown video encoder {requested_setting}"),
+            )
+        })?;
+        if !installed(id) {
+            return Err(CustomDeskError::new(
+                DeskErrorCode::FEATURE_UNAVAILABLE,
+                &format!("Video encoder {id:?} is not installed on the host"),
+            ));
+        }
+        let codec = codec_for(id);
+        if !client_codecs.contains(&codec) {
+            return Err(CustomDeskError::new(
+                DeskErrorCode::FEATURE_UNAVAILABLE,
+                &format!("The controller cannot decode {codec:?} from encoder {id:?}"),
+            ));
+        }
+        if let Some(source) = source
+            && let Some(capability) = encoder_capabilities.iter().find(|item| item.id == id)
+            && let Err(reason) = check_encoder_input(source, &capability.input_support)
+        {
+            return Err(CustomDeskError::new(
+                DeskErrorCode::VIDEO_ENCODER_DIMENSIONS_UNSUPPORTED,
+                &format!(
+                    "Encoder {id:?} does not support {}x{}: {reason:?}",
+                    source.width, source.height
+                ),
+            ));
+        }
+        return Ok(Some(NegotiatedVideo { codec, encoder: id }));
+    }
+
+    let selected = AUTO_ENCODER_ORDER.iter().copied().find(|id| {
+        if !installed(*id) || !client_codecs.contains(&codec_for(*id)) {
+            return false;
+        }
+        let Some(capability) = encoder_capabilities.iter().find(|item| item.id == *id) else {
+            return false;
+        };
+        match source {
+            Some(source) => {
+                check_encoder_input(source, &capability.input_support)
+                    == Ok(EncoderCompatibility::Compatible)
+            }
+            None => matches!(
+                capability.input_support,
+                desk_signal_facade::model::media_capability::EncoderInputSupport::Known(_)
+            ),
+        }
+    });
+    Ok(selected.map(|encoder| NegotiatedVideo {
+        codec: codec_for(encoder),
+        encoder,
+    }))
+}
+
 /// Daemon side of `SignalingType::Offer`. Adds video / audio tracks
 /// (when the offer SDP carries the matching m-lines) before running
 /// the SDP exchange so the answer comes back with proper media
@@ -100,50 +269,77 @@ pub async fn handle_offer(
     // byte of file data hits the channel.
     log_sdp_max_message_size(from_connection_id, sdp_str);
 
-    // Negotiate the single video codec the host will encode for this
-    // connection: intersect the codecs the client advertised it can decode
-    // (the offer's `m=video` rtpmap) with the codecs the host can encode,
-    // honouring `desk_settings.video_encoder` as a preference hint. This
-    // replaces the legacy "trust the client-asserted codec verbatim" path
-    // so a client never receives a codec it cannot decode (black screen).
-    // Falls back to the configured default only when no codec is shared,
-    // which is effectively impossible since VP8 is a universal baseline.
-    let preferred_codec = offer
-        .desk_settings
-        .get_video_encoder_type()
-        .ok()
-        .map(video_encoder_to_media_codec);
-    let negotiated_video_codec = if has_video {
-        let client_codecs = codec_negotiation::parse_offer_video_codecs(sdp_str);
-        let server_codecs = codec_negotiation::server_encodable_video_codecs();
-        match codec_negotiation::negotiate_video_codec(
+    // Freeze a concrete encoder before adding the SDP track. An explicit
+    // setting may use a RuntimeProbeRequired implementation (the worker probes
+    // that exact encoder); Auto considers only Known-compatible implementations
+    // in its stable order, so a worker-side probe can never change the wire
+    // codec after the answer is committed.
+    let video_encoder_names = list_video_encoder();
+    let media_capabilities =
+        worker_mgr
+            .worker_capabilities()
+            .unwrap_or_else(|| MediaCapabilities {
+                video_encoders: video_encoder_names.clone(),
+                video_encoder_capabilities: capabilities_for_encoder_names(&video_encoder_names),
+                ..Default::default()
+            });
+    let source_resolution = selected_capture_resolution(&offer.desk_settings, &media_capabilities);
+    let client_codecs = codec_negotiation::parse_offer_video_codecs(sdp_str);
+    let mut video_block = None;
+    let negotiated_video = if has_video {
+        match select_video_for_offer(
+            offer.desk_settings.video_encoder.as_deref(),
             &client_codecs,
-            &server_codecs,
-            preferred_codec,
+            &media_capabilities,
+            source_resolution,
         ) {
-            Some(codec) => {
-                log::info!(
-                    "[pc_manager] Negotiated video codec {codec:?} for {from_connection_id} \
-                     (client={client_codecs:?}, preferred={preferred_codec:?})"
-                );
-                codec
+            Ok(video) => video,
+            Err(error) if is_video_offer_blocking_error(error.error_code) => {
+                // An unavailable encoder, unsupported wire codec, or
+                // unsupported dimensions are video pipeline states rather
+                // than whole-SDP failures. Continue the answer without a
+                // video sender so audio and DataChannels remain usable.
+                video_block = Some(error);
+                None
             }
-            None => {
-                let fallback = preferred_codec.unwrap_or(MediaCodec::H264);
-                log::warn!(
-                    "[pc_manager] No video codec shared with {from_connection_id} \
-                     (client={client_codecs:?}, server={server_codecs:?}); falling back to \
-                     {fallback:?} — the client may be unable to decode"
-                );
-                fallback
-            }
+            Err(error) => return Err(DeskError::CustomError(error)),
         }
     } else {
-        preferred_codec.unwrap_or(MediaCodec::H264)
+        None
     };
+    log::info!(
+        "[pc_manager] Video decision for {from_connection_id}: selected={negotiated_video:?}, \
+         source={source_resolution:?}, client={client_codecs:?}, requested={:?}",
+        offer.desk_settings.video_encoder,
+    );
 
-    if has_video && ctx_guard.video_track.is_none() {
-        let video_mime_type = match negotiated_video_codec {
+    let previous_start_media = ctx_guard.cached_start_media.read().await.clone();
+    if renegotiation_requires_full_reconnect(
+        ctx_guard.video_track.is_some(),
+        previous_start_media
+            .as_ref()
+            .map(|payload| payload.video_codec),
+        negotiated_video.map(|video| video.codec),
+    ) {
+        return Err(DeskError::CustomError(CustomDeskError::new(
+            DeskErrorCode::VIDEO_PIPELINE_RENEGOTIATION_REQUIRED,
+            "Changing the wire video codec requires a full remote-session reconnect",
+        )));
+    }
+    let pipeline_was_retryable = matches!(
+        ctx_guard
+            .media_pipeline_state
+            .read()
+            .await
+            .as_ref()
+            .map(|state| state.phase),
+        Some(MediaPipelinePhase::Blocked | MediaPipelinePhase::Failed)
+    );
+
+    if let Some(negotiated_video) = negotiated_video
+        && ctx_guard.video_track.is_none()
+    {
+        let video_mime_type = match negotiated_video.codec {
             MediaCodec::H264 => MIME_TYPE_H264,
             MediaCodec::Vp8 => MIME_TYPE_VP8,
             MediaCodec::Vp9 => MIME_TYPE_VP9,
@@ -215,7 +411,20 @@ pub async fn handle_offer(
     // one negotiated above (client-decodable ∩ host-encodable) so the
     // worker's encoder and the daemon's track always agree. Audio codec
     // is currently fixed to OPUS.
-    let video_codec = negotiated_video_codec;
+    let requested_encoder = offer
+        .desk_settings
+        .video_encoder
+        .as_deref()
+        .and_then(VideoEncoderId::from_setting_name);
+    let payload_video = negotiated_video.or_else(|| {
+        requested_encoder.map(|encoder| NegotiatedVideo {
+            codec: video_encoder_to_media_codec(VideoEncoderType::from(encoder)),
+            encoder,
+        })
+    });
+    let video_codec = payload_video
+        .map(|video| video.codec)
+        .unwrap_or(MediaCodec::H264);
     // v4 capture-selection fix: thread the browser-chosen GDI device
     // name through to the worker so capture binds to the right
     // monitor. See [`video_device_for_payload`] for the empty-string
@@ -224,6 +433,7 @@ pub async fn handle_offer(
     let start_media_payload = StartMediaPayload {
         connection_id: from_connection_id.to_string(),
         video_codec,
+        video_encoder: payload_video.map(|video| video.encoder),
         audio_codec: MediaCodec::Opus,
         video_device,
         audio_device: None,
@@ -235,7 +445,11 @@ pub async fn handle_offer(
         // negotiates a DataChannel-only PC (no `m=video`, no `m=audio`)
         // and must not trigger DXGI / WASAPI capture — see the worker
         // `start_media` doc comment for the rationale.
-        start_video: has_video,
+        // For an explicit incompatible encoder, cache the desired video start
+        // so a later display-mode change or encoder selection can reuse the
+        // single restart primitive. The first command sent below is changed to
+        // audio-only while the pipeline is blocked.
+        start_video: has_video && (negotiated_video.is_some() || video_block.is_some()),
         start_audio: has_audio,
         // Per-connection backend choice — propagating it lets a
         // second browser pick a different backend (e.g. one DXGI +
@@ -262,16 +476,81 @@ pub async fn handle_offer(
     let is_first_offer = ctx_guard
         .record_start_media_was_first(start_media_payload.clone())
         .await;
+    let restart_after_renegotiation = should_restart_negotiated_pipeline(
+        is_first_offer,
+        pipeline_was_retryable,
+        has_video,
+        negotiated_video,
+    );
+    if restart_after_renegotiation {
+        // Reserve this recovery until the worker publishes its next terminal or
+        // Streaming state. A duplicate Retry click cannot race a second restart.
+        *ctx_guard.media_pipeline_state.write().await = None;
+    }
     drop(ctx_guard);
-    if has_video && let Some(activity) = registry.host_activity() {
+    if has_video
+        && negotiated_video.is_some()
+        && let Some(activity) = registry.host_activity()
+    {
         activity.mark_video_negotiated(from_connection_id);
+    }
+    if has_video && negotiated_video.is_none() {
+        let encoder_capabilities = if media_capabilities.video_encoder_capabilities.is_empty() {
+            capabilities_for_encoder_names(&media_capabilities.video_encoders)
+        } else {
+            media_capabilities.video_encoder_capabilities.clone()
+        };
+        let compatible = source_resolution
+            .map(|source| {
+                desk_signal_facade::model::media_capability::compatible_encoders(
+                    source,
+                    &encoder_capabilities,
+                )
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|id| {
+                media_capabilities
+                    .video_encoders
+                    .iter()
+                    .any(|name| VideoEncoderId::from_setting_name(name) == Some(*id))
+                    && client_codecs
+                        .contains(&video_encoder_to_media_codec(VideoEncoderType::from(*id)))
+            })
+            .collect();
+        let data = blocked_offer_state(
+            requested_encoder,
+            source_resolution,
+            compatible,
+            video_block.as_ref(),
+        );
+        registry
+            .record_media_pipeline_state(from_connection_id, data.clone())
+            .await;
+        if let Ok(state_model) = SignalingModel::new_request(
+            SignalingType::MediaPipelineStateChanged,
+            Some(from_connection_id.to_string()),
+            Some(&data),
+        ) && let Ok(text) = serde_json::to_string(&state_model)
+        {
+            let _ = outbound.send(text);
+        }
     }
     // Only the first offer starts the worker's per-connection capture +
     // encode pipeline. A renegotiation (ICE-restart re-offer) finished
     // the SDP exchange above but must not re-issue StartMedia.
     if is_first_offer
         && let Err(e) = worker_mgr
-            .send_to_worker(ServiceToWorker::StartMedia(start_media_payload))
+            .send_to_worker(ServiceToWorker::StartMedia({
+                let mut initial_payload = start_media_payload;
+                (initial_payload.start_video, initial_payload.start_audio) =
+                    initial_worker_media_flags(
+                        initial_payload.start_video,
+                        initial_payload.start_audio,
+                        has_video && negotiated_video.is_none(),
+                    );
+                initial_payload
+            }))
             .await
     {
         log::warn!(
@@ -279,7 +558,62 @@ pub async fn handle_offer(
              (PC is up but no media will flow until worker comes online)"
         );
     }
+    if restart_after_renegotiation {
+        match registry
+            .restart_media_from_cached_payload(
+                from_connection_id,
+                worker_mgr,
+                MediaRestartTrigger::RenegotiatedSettings,
+            )
+            .await
+        {
+            RestartOutcome::Restarted => {}
+            RestartOutcome::NoCachedPayload { left_paused } => {
+                let data = MediaPipelineStateData {
+                    phase: MediaPipelinePhase::Blocked,
+                    encoder: negotiated_video.map(|video| video.encoder),
+                    source_resolution,
+                    compatible_encoders: Vec::new(),
+                    reason_code: Some(DeskErrorCode::VIDEO_PIPELINE_RENEGOTIATION_REQUIRED),
+                    message: Some(format!(
+                        "renegotiated media has no cached payload; left_paused={left_paused}"
+                    )),
+                };
+                publish_offer_media_state(registry, outbound, from_connection_id, data).await;
+            }
+            RestartOutcome::Failed { stage } => {
+                let data = MediaPipelineStateData {
+                    phase: MediaPipelinePhase::Failed,
+                    encoder: negotiated_video.map(|video| video.encoder),
+                    source_resolution,
+                    compatible_encoders: Vec::new(),
+                    reason_code: Some(DeskErrorCode::VIDEO_PIPELINE_RESTART_FAILED),
+                    message: Some(format!("renegotiated media restart failed at {stage:?}")),
+                };
+                publish_offer_media_state(registry, outbound, from_connection_id, data).await;
+            }
+        }
+    }
     Ok(())
+}
+
+async fn publish_offer_media_state(
+    registry: &PcRegistry,
+    outbound: &OutboundSink,
+    connection_id: &str,
+    data: MediaPipelineStateData,
+) {
+    registry
+        .record_media_pipeline_state(connection_id, data.clone())
+        .await;
+    if let Ok(model) = SignalingModel::new_request(
+        SignalingType::MediaPipelineStateChanged,
+        Some(connection_id.to_string()),
+        Some(&data),
+    ) && let Ok(text) = serde_json::to_string(&model)
+    {
+        let _ = outbound.send(text);
+    }
 }
 
 /// Daemon side of `SignalingType::Canid` (ICE candidate). Mirrors the

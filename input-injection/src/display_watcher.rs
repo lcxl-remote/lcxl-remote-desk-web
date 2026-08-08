@@ -17,9 +17,10 @@
 //!   window; Wayland listens on the core `wl_registry` / `wl_output`
 //!   protocol (output add/remove, mode, geometry, scale); a headless
 //!   session (no `DISPLAY` / `WAYLAND_DISPLAY`) returns `Unsupported`.
+//! - **macOS** (`macos.rs`): CoreGraphics display-reconfiguration callback.
 //! - **Other platforms** (`stub.rs`): no-op. `spawn()` returns
 //!   `Err(DisplayWatcherError::Unsupported)` so the caller can degrade
-//!   gracefully. macOS would use `CGDisplayRegisterReconfigurationCallback`.
+//!   gracefully.
 
 mod error;
 
@@ -31,7 +32,10 @@ mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(target_os = "macos")]
+mod macos;
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 mod stub;
 
 #[cfg(target_os = "windows")]
@@ -40,5 +44,8 @@ pub use self::windows::{DisplayChangeEvent, DisplayChangeWatcher, spawn};
 #[cfg(target_os = "linux")]
 pub use self::linux::{DisplayChangeEvent, DisplayChangeWatcher, spawn};
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(target_os = "macos")]
+pub use self::macos::{DisplayChangeEvent, DisplayChangeWatcher, spawn};
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 pub use self::stub::{DisplayChangeEvent, DisplayChangeWatcher, spawn};

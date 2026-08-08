@@ -511,6 +511,7 @@ fn make_step(connection_id: &str, device: &str) -> RestartStep {
         active: StartMediaPayload {
             connection_id: connection_id.to_string(),
             video_codec: MediaCodec::H264,
+            video_encoder: None,
             audio_codec: MediaCodec::Opus,
             video_device: Some(device.to_string()),
             audio_device: None,

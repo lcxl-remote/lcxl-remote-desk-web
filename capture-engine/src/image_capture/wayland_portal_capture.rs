@@ -81,6 +81,7 @@ impl WaylandPortalImageCapture {
             },
             attached_to_desktop: true,
             rotation: 0,
+            current_capture_resolution: None,
             resolutions: vec![],
         };
         let setup = PipewireSetup {
@@ -166,6 +167,7 @@ fn resolve_current_output(
         },
         attached_to_desktop: true,
         rotation: 0,
+        current_capture_resolution: None,
         resolutions: vec![],
     }
 }
@@ -245,6 +247,7 @@ fn portal_outputs_to_display_info(
         desktop_coordinates,
         attached_to_desktop: true,
         rotation: 0,
+        current_capture_resolution: None,
         resolutions: vec![],
     }]
 }
@@ -397,6 +400,7 @@ mod tests {
             },
             attached_to_desktop: true,
             rotation: 0,
+            current_capture_resolution: None,
             resolutions: vec![],
         };
         let out = resolve_current_output(Some(&real), Some((2560, 1440)));
@@ -434,6 +438,7 @@ mod tests {
             },
             attached_to_desktop: true,
             rotation: 0,
+            current_capture_resolution: None,
             resolutions: vec![],
         };
         let out = resolve_current_output(Some(&zero_size), Some((1920, 1080)));

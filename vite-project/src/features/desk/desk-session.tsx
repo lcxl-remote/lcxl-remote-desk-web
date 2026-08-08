@@ -5,6 +5,7 @@ import { AlertTriangle, Loader2 } from "lucide-react"
 import { TooltipProvider } from "@/components/ui/tooltip"
 
 import { Input } from "@/components/ui/input"
+import { Button } from "@/components/ui/button"
 import "./desk-session.css"
 import { useDeskSignaling } from "./use-desk-signaling"
 import type { SignalingMessage } from "./use-desk-signaling"
@@ -26,12 +27,14 @@ import { useAdaptiveResolution, isAdaptiveResolutionGateOpen } from "./use-adapt
 import { useResolutionToast } from "./use-resolution-toast"
 import { isWebRtcAvailable } from "./webrtc-support"
 import { useToast } from "@/hooks/use-toast"
-import type { DeskSettings } from "@/services/types"
+import { deskErrorMessage, type ErrorCodeKeyMap } from "@/lib/desk-error-i18n"
+import type { DeskSettings, MediaPipelineStateData } from "@/services/types"
 import { deskErrorCodeEnum } from "@/services/types"
 import { useRestrictedSession } from "@/features/desk/restricted-session"
 import {
     buildDesktopRequestRemotePayload,
     shouldOpenConfigDialog,
+    shouldShowMediaPipelineOverlay,
 } from "./desk-session-model"
 import {
     ClipboardFallbackToast,
@@ -52,12 +55,23 @@ import {
     SIGNALING_TYPE_CODE_ENABLE_PRIVATE_SCREEN,
     SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED,
     SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_ERROR,
+    SIGNALING_TYPE_CODE_MEDIA_PIPELINE_STATE_CHANGED,
+    SIGNALING_TYPE_CODE_RETRY_MEDIA_PIPELINE,
     SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
     SIGNALING_TYPE_CODE_ERROR,
     SIGNALING_TYPE_CODE_INIT,
+    SIGNALING_TYPE_CODE_OFFER,
 } from "./constants"
 import { AdmissionRetrySchedule } from "./admission-retry"
 import { usePrivateScreenPending } from "./use-private-screen-pending"
+
+const MEDIA_PIPELINE_ERROR_KEYS: ErrorCodeKeyMap = {
+    [deskErrorCodeEnum.VIDEO_ENCODER_DIMENSIONS_UNSUPPORTED]: "pages.desk.mediaPipeline.blockedDescription",
+    [deskErrorCodeEnum.VIDEO_ENCODER_PREPARE_FAILED]: "pages.desk.mediaPipeline.prepareFailedDescription",
+    [deskErrorCodeEnum.VIDEO_PIPELINE_RENEGOTIATION_REQUIRED]: "pages.desk.mediaPipeline.renegotiateDescription",
+    [deskErrorCodeEnum.VIDEO_PIPELINE_RESTART_FAILED]: "pages.desk.mediaPipeline.retryFailedDescription",
+    [deskErrorCodeEnum.VIDEO_PIPELINE_RUNTIME_FAILED]: "pages.desk.mediaPipeline.runtimeFailedDescription",
+}
 
 /** Container props. `orgId` is injected only by the manager console's org view
  *  (via a static wrapper); the open-source standalone app renders `<DeskSession/>`
@@ -138,6 +152,8 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     // does not pop the dialog back up over a connection that is still healing.
     const hasAttemptedConnectRef = useRef(false);
     const [isVideoReady, setIsVideoReady] = useState(false);
+    const [mediaPipelineState, setMediaPipelineState] = useState<MediaPipelineStateData | null>(null);
+    const [mediaRetryPending, setMediaRetryPending] = useState(false);
     const [isMuted, setIsMuted] = useState(() => {
         // Safari/iOS requires muted for autoPlay
         return /Mobile|Android|iP(ad|hone)/.test(navigator.userAgent) ? true : false;
@@ -223,7 +239,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         },
     });
 
-    const { peerConnection, remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, whiteboardChannel, cursorSyncChannel, isRTCConnected, rtcFailed, closeRTC, rtcStats } = useDeskRTC({
+    const { peerConnection, remoteStream, initData, connect, renegotiate, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, whiteboardChannel, cursorSyncChannel, isRTCConnected, rtcFailed, closeRTC, rtcStats } = useDeskRTC({
         deskId: deskId || null,
         subscribe,
         sendMessage,
@@ -395,6 +411,19 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                 } else {
                     clearAdmissionRetry();
                 }
+            } else if (signaling_type === SIGNALING_TYPE_CODE_OFFER
+                && message.response_state
+            ) {
+                setMediaRetryPending(false);
+                setMediaPipelineState({
+                    phase: message.response_state.error_code
+                        === deskErrorCodeEnum.VIDEO_ENCODER_DIMENSIONS_UNSUPPORTED
+                        ? "blocked"
+                        : "failed",
+                    reason_code: message.response_state.error_code as MediaPipelineStateData["reason_code"],
+                    message: message.response_state.message,
+                    compatible_encoders: [],
+                });
             } else if (signaling_type === SIGNALING_TYPE_CODE_ACCEPT_CONTROL) {
                 console.log("Remote control request ACCEPTED by peer.");
                 setHasControl(true);
@@ -427,6 +456,34 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                     console.error("Remote audio playback error:", data.error);
                     forceErrorRef.current(data.error);
                 }
+            } else if (signaling_type === SIGNALING_TYPE_CODE_MEDIA_PIPELINE_STATE_CHANGED) {
+                const state = message.signaling_data as MediaPipelineStateData | null;
+                setMediaRetryPending(false);
+                if (state?.phase === "streaming") {
+                    setMediaPipelineState(null);
+                } else if (state) {
+                    setMediaPipelineState(state);
+                }
+            } else if (signaling_type === SIGNALING_TYPE_CODE_RETRY_MEDIA_PIPELINE
+                && message.response_state
+            ) {
+                setMediaRetryPending(false);
+                const needsRenegotiation = message.response_state.error_code
+                    === deskErrorCodeEnum.VIDEO_PIPELINE_RENEGOTIATION_REQUIRED;
+                if (needsRenegotiation) setIsConfigOpen(true);
+                toast({
+                    title: needsRenegotiation
+                        ? t("pages.desk.mediaPipeline.renegotiateTitle")
+                        : t("pages.desk.mediaPipeline.retryFailedTitle"),
+                    description: deskErrorMessage(
+                        t,
+                        MEDIA_PIPELINE_ERROR_KEYS,
+                        message.response_state.error_code,
+                        message.response_state.message,
+                        t("pages.desk.mediaPipeline.retryFailedDescription"),
+                    ),
+                    variant: "destructive",
+                });
             } else if (signaling_type === SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS) {
                 // Adaptive-resolution echo: the right-bottom status toast
                 // is driven by `useResolutionToast`, which subscribes to
@@ -450,6 +507,8 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
             clearAdmissionRetry();
             clearPrivateScreenPending();
             hasRequestedRef.current = false;
+            setMediaPipelineState(null);
+            setMediaRetryPending(false);
         }
     }, [clearAdmissionRetry, clearPrivateScreenPending, isConnected]);
 
@@ -688,7 +747,19 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         // state happens to change in the same tick (e.g. the user is
         // already connected and only flips display + adaptive toggle).
         setActiveSettings(settingsWithPrefs);
-        if (isRTCConnected && deskId) {
+        if (mediaPipelineState) {
+            // A terminal video pipeline has already released its encoder and
+            // capture subscription. Live UpdateDeskSettings cannot revive it
+            // (and does not carry a concrete encoder id), so renegotiate the
+            // Offer. The daemon restarts the cached worker pipeline when the
+            // wire codec is unchanged and returns a structured reconnect error
+            // when it is not.
+            hasAttemptedConnectRef.current = true;
+            setMediaRetryPending(true);
+            void (isRTCConnected
+                ? renegotiate(settingsWithPrefs)
+                : connect(settingsWithPrefs));
+        } else if (isRTCConnected && deskId) {
             console.log("Updating desk settings dynamically...", settingsWithPrefs);
             sendMessage(SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, settingsWithPrefs, deskId);
             toast({ title: t("pages.desk.settingsSent") });
@@ -753,6 +824,12 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         }
         closeRTC();
         navigate(`/desk/${deskId}`);
+    };
+
+    const handleMediaPipelineRetry = () => {
+        if (!deskId || mediaRetryPending) return;
+        setMediaRetryPending(true);
+        sendMessage(SIGNALING_TYPE_CODE_RETRY_MEDIA_PIPELINE, null, deskId);
     };
 
     const handleTogglePrivateScreen = () => {
@@ -976,6 +1053,64 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                                 )}
                             </div>
                         </div>
+
+                        {shouldShowMediaPipelineOverlay(
+                            mediaPipelineState != null,
+                            isConfigOpen,
+                        ) && mediaPipelineState && (
+                            <div className="absolute inset-0 z-[55] flex items-center justify-center bg-black/80 px-6 text-white backdrop-blur-sm">
+                                <div className="flex max-w-lg flex-col items-center gap-4 rounded-xl border border-amber-300/40 bg-zinc-950/90 p-6 text-center shadow-2xl">
+                                    <AlertTriangle className="h-10 w-10 text-amber-400" />
+                                    <div>
+                                        <h2 className="text-lg font-semibold">
+                                            {t(mediaPipelineState.phase === "blocked"
+                                                ? "pages.desk.mediaPipeline.blockedTitle"
+                                                : "pages.desk.mediaPipeline.failedTitle")}
+                                        </h2>
+                                        <p className="mt-2 text-sm text-zinc-300">
+                                            {deskErrorMessage(
+                                                t,
+                                                MEDIA_PIPELINE_ERROR_KEYS,
+                                                mediaPipelineState.reason_code,
+                                                mediaPipelineState.message,
+                                                t("pages.desk.mediaPipeline.blockedDescription"),
+                                            )}
+                                        </p>
+                                        {mediaPipelineState.reason_code != null && (
+                                            <p className="mt-2 text-xs text-zinc-400">
+                                                {t("pages.desk.mediaPipeline.reasonCode", {
+                                                    code: mediaPipelineState.reason_code,
+                                                })}
+                                            </p>
+                                        )}
+                                        {mediaPipelineState.source_resolution && (
+                                            <p className="mt-2 text-xs text-zinc-400">
+                                                {t("pages.desk.mediaPipeline.sourceResolution", {
+                                                    width: mediaPipelineState.source_resolution.width,
+                                                    height: mediaPipelineState.source_resolution.height,
+                                                })}
+                                            </p>
+                                        )}
+                                        {!!mediaPipelineState.compatible_encoders?.length && (
+                                            <p className="mt-1 text-xs text-zinc-400">
+                                                {t("pages.desk.mediaPipeline.compatibleEncoders", {
+                                                    encoders: mediaPipelineState.compatible_encoders.join(", "),
+                                                })}
+                                            </p>
+                                        )}
+                                    </div>
+                                    <div className="flex gap-3">
+                                        <Button variant="secondary" onClick={() => setIsConfigOpen(true)}>
+                                            {t("pages.desk.mediaPipeline.chooseEncoder")}
+                                        </Button>
+                                        <Button onClick={handleMediaPipelineRetry} disabled={mediaRetryPending}>
+                                            {mediaRetryPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                                            {t("pages.desk.mediaPipeline.retry")}
+                                        </Button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
 
                         {showStats && isConnected && (
                             <DeskSessionStats

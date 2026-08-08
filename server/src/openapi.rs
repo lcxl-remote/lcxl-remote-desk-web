@@ -4,6 +4,7 @@ use desk_signal::controller::device_code::{
 use desk_signal_facade::model::{
     connection::ConnectionList,
     desk_settings::DeskSettings,
+    media_pipeline::MediaPipelineStateData,
     signal::{InitSignalingData, RequestRemoteModel, SignalingModel},
     terminal::{TerminalInputData, TerminalOutputData, TerminalResizeData},
 };
@@ -54,5 +55,6 @@ use desk_input_injection::model::data_channel::{KeyboardEventData, MouseEventDat
     // wire. Publishing the enum anyway is what lets the generated client expose
     // named constants instead of the numbers being mirrored by hand.
     DeskErrorCode,
+    MediaPipelineStateData,
 )))]
 pub struct ExtraSchemas;

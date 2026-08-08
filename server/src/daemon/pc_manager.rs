@@ -23,6 +23,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use desk_signal_facade::model::image_capture::Resolution;
+use desk_signal_facade::model::media_capability::{
+    AUTO_ENCODER_ORDER, EncoderCompatibility, VideoEncoderId, capabilities_for_encoder_names,
+    check_encoder_input,
+};
+use desk_signal_facade::model::media_pipeline::{MediaPipelinePhase, MediaPipelineStateData};
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_signal_facade::model::signal::{
     OfferModel, RequestRemoteModel, SignalingModel, SignalingState, SignalingType,
@@ -58,7 +64,7 @@ use crate::model::security_approval::{
 use crate::model::settings::Settings;
 use crate::service::signaling::{should_short_circuit_clipboard, should_short_circuit_control};
 use desk_capture_engine::audio_encoder::audio_encoder_factory::list_audio_encoder;
-use desk_capture_engine::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
+use desk_capture_engine::model::video_encoder::VideoEncoderType;
 use desk_capture_engine::video_encoder::video_encoder_factory::list_video_encoder;
 use desk_ipc_protocol::message::{
     ClipboardPayload, CursorDataPayload, FileTransferPayload, FileTransferSendErrorKind,
@@ -85,6 +91,44 @@ use webrtc::media::Sample;
 /// footprint bounded at ~960 KB (16 × 60 KB chunk) regardless of
 /// active downloads.
 const FILE_TRANSFER_WRITER_QUEUE_CAP: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaRestartTrigger {
+    TransportStuck,
+    UserRetry,
+    RenegotiatedSettings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaRestartStage {
+    UnknownConnection,
+    StartMedia,
+    ForceKeyframe,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestartOutcome {
+    Restarted,
+    NoCachedPayload { left_paused: bool },
+    Failed { stage: MediaRestartStage },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaRetryAdmission {
+    Accepted,
+    RequiresRenegotiation,
+    Duplicate,
+    NotRetryable,
+    UnknownConnection,
+}
+
+pub(crate) fn retry_requires_renegotiation(
+    has_video_track: bool,
+    cached_start_video: bool,
+    state_has_encoder: bool,
+) -> bool {
+    (!has_video_track && cached_start_video) || !state_has_encoder
+}
 
 /// Rolling per-window accumulator for the daemon-side file-transfer
 /// writer task. Each window flushes one `[ft-metrics-daemon]` INFO
@@ -276,6 +320,11 @@ pub struct PeerConnectionContext {
     /// round-trip. `None` means the offer hasn't been exchanged yet
     /// (PC up but no media negotiated) — resume is a no-op for those.
     pub cached_start_media: Arc<RwLock<Option<StartMediaPayload>>>,
+    /// Last worker-reported pipeline state. Retry is admitted only from a
+    /// blocked/failed phase; keeping it beside the cached payload makes that
+    /// decision connection-scoped and independent of browser claims.
+    pub media_pipeline_state: Arc<RwLock<Option<MediaPipelineStateData>>>,
+    pub last_media_retry_request_id: Arc<RwLock<Option<String>>>,
     /// Per-connection adaptive bitrate-cap state. Shared between the
     /// RTCP feedback task (REMB decisions) and the settings router
     /// (enable/disable edges); see `daemon::bitrate_controller` for
@@ -541,6 +590,63 @@ impl PcRegistry {
 
     pub async fn get(&self, connection_id: &str) -> Option<Arc<RwLock<PeerConnectionContext>>> {
         self.inner.read().await.get(connection_id).cloned()
+    }
+
+    pub async fn record_media_pipeline_state(
+        &self,
+        connection_id: &str,
+        state: MediaPipelineStateData,
+    ) -> bool {
+        let Some(ctx) = self.get(connection_id).await else {
+            return false;
+        };
+        *ctx.read().await.media_pipeline_state.write().await = Some(state);
+        true
+    }
+
+    pub(crate) async fn claim_media_pipeline_retry(
+        &self,
+        connection_id: &str,
+        request_id: &str,
+    ) -> MediaRetryAdmission {
+        let Some(ctx) = self.get(connection_id).await else {
+            return MediaRetryAdmission::UnknownConnection;
+        };
+        let ctx = ctx.read().await;
+        let cached_start_video = ctx
+            .cached_start_media
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|payload| payload.start_video);
+        let has_video_track = ctx.video_track.is_some();
+        let mut last_request_id = ctx.last_media_retry_request_id.write().await;
+        if last_request_id.as_deref() == Some(request_id) {
+            return MediaRetryAdmission::Duplicate;
+        }
+        let mut state = ctx.media_pipeline_state.write().await;
+        if !matches!(
+            state.as_ref().map(|state| state.phase),
+            Some(MediaPipelinePhase::Blocked | MediaPipelinePhase::Failed)
+        ) {
+            return MediaRetryAdmission::NotRetryable;
+        }
+        *last_request_id = Some(request_id.to_string());
+        if retry_requires_renegotiation(
+            has_video_track,
+            cached_start_video,
+            state.as_ref().and_then(|state| state.encoder).is_some(),
+        ) {
+            // Either Auto has no concrete encoder, or the SDP answer was
+            // completed without a video sender. Stop+Start cannot add an RTP
+            // sender after negotiation; the controller must send a fresh
+            // offer instead of receiving a false-success restart.
+            return MediaRetryAdmission::RequiresRenegotiation;
+        }
+        // Reserve the single bounded retry until the worker reports its next
+        // Streaming/Blocked/Failed transition.
+        *state = None;
+        MediaRetryAdmission::Accepted
     }
 
     pub async fn remove(&self, connection_id: &str) -> Option<Arc<RwLock<PeerConnectionContext>>> {
@@ -907,6 +1013,8 @@ impl PcRegistry {
             file_transfer_writer_tx,
             media_paused: Arc::new(AtomicBool::new(false)),
             cached_start_media: Arc::new(RwLock::new(None)),
+            media_pipeline_state: Arc::new(RwLock::new(None)),
+            last_media_retry_request_id: Arc::new(RwLock::new(None)),
             adaptive_bitrate: Arc::new(
                 crate::daemon::bitrate_controller::AdaptiveBitrateShared::new(true),
             ),
@@ -1054,14 +1162,35 @@ impl PcRegistry {
     /// pipeline. PCs without a cached offer (the error fired before the
     /// first StartMedia ever landed) are a no-op other than the StopMedia
     /// to clear any half-built worker state.
-    pub async fn reset_media_for(&self, connection_id: &str, worker_mgr: &WorkerManager) {
+    pub(crate) async fn reset_media_for(
+        &self,
+        connection_id: &str,
+        worker_mgr: &WorkerManager,
+    ) -> RestartOutcome {
+        self.restart_media_from_cached_payload(
+            connection_id,
+            worker_mgr,
+            MediaRestartTrigger::TransportStuck,
+        )
+        .await
+    }
+
+    pub(crate) async fn restart_media_from_cached_payload(
+        &self,
+        connection_id: &str,
+        worker_mgr: &WorkerManager,
+        trigger: MediaRestartTrigger,
+    ) -> RestartOutcome {
         let cached = match self.get(connection_id).await {
             Some(ctx) => ctx.read().await.cached_start_media.read().await.clone(),
             None => {
                 log::debug!(
-                    "[pc_manager] reset_media_for: unknown connection {connection_id}; ignoring"
+                    "[pc_manager] restart_media_from_cached_payload: unknown connection \
+                     {connection_id}; trigger={trigger:?}"
                 );
-                return;
+                return RestartOutcome::Failed {
+                    stage: MediaRestartStage::UnknownConnection,
+                };
             }
         };
 
@@ -1072,8 +1201,8 @@ impl PcRegistry {
         }
 
         log::info!(
-            "[pc_manager] reset_media_for {connection_id}: issuing StopMedia + StartMedia + \
-             ForceKeyframe"
+            "[pc_manager] restart_media_from_cached_payload {connection_id}: trigger={trigger:?}; \
+             issuing StopMedia + StartMedia + ForceKeyframe"
         );
         if let Err(e) = worker_mgr
             .send_to_worker(ServiceToWorker::StopMedia(StopMediaPayload {
@@ -1081,7 +1210,10 @@ impl PcRegistry {
             }))
             .await
         {
-            log::warn!("[pc_manager] reset_media_for {connection_id}: StopMedia failed: {e}");
+            log::warn!(
+                "[pc_manager] restart_media_from_cached_payload {connection_id}: trigger={trigger:?}; \
+                 StopMedia failed: {e}"
+            );
             // Continue anyway — StartMedia is the actual recovery action.
         }
 
@@ -1089,10 +1221,11 @@ impl PcRegistry {
             Some(p) => p,
             None => {
                 log::warn!(
-                    "[pc_manager] reset_media_for {connection_id}: no cached StartMedia (offer \
-                     never landed); leaving connection paused — caller must redo handle_offer"
+                    "[pc_manager] restart_media_from_cached_payload {connection_id}: \
+                     trigger={trigger:?}; no cached StartMedia (offer never landed); leaving \
+                     connection paused — caller must redo handle_offer"
                 );
-                return;
+                return RestartOutcome::NoCachedPayload { left_paused: true };
             }
         };
 
@@ -1100,8 +1233,13 @@ impl PcRegistry {
             .send_to_worker(ServiceToWorker::StartMedia(payload))
             .await
         {
-            log::warn!("[pc_manager] reset_media_for {connection_id}: StartMedia failed: {e}");
-            return;
+            log::warn!(
+                "[pc_manager] restart_media_from_cached_payload {connection_id}: \
+                 trigger={trigger:?}; StartMedia failed: {e}"
+            );
+            return RestartOutcome::Failed {
+                stage: MediaRestartStage::StartMedia,
+            };
         }
         if let Err(e) = worker_mgr
             .send_to_worker(ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
@@ -1109,8 +1247,15 @@ impl PcRegistry {
             }))
             .await
         {
-            log::warn!("[pc_manager] reset_media_for {connection_id}: ForceKeyframe failed: {e}");
+            log::warn!(
+                "[pc_manager] restart_media_from_cached_payload {connection_id}: \
+                 trigger={trigger:?}; ForceKeyframe failed: {e}"
+            );
+            return RestartOutcome::Failed {
+                stage: MediaRestartStage::ForceKeyframe,
+            };
         }
+        RestartOutcome::Restarted
     }
 
     /// Fan out an `UpdateMediaSettings` to every PC that has already

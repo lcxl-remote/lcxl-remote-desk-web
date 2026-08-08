@@ -1,5 +1,8 @@
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::sync::{
+    Arc, Condvar, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{Duration, Instant};
 
 use crate::{
     error::CaptureError,
@@ -53,28 +56,57 @@ unsafe impl Encode for CgSize {
 /// `CGDirectDisplayID` directly. Falls back to 1.0 when the mode is
 /// unavailable. Used to pick the cursor representation that matches the
 /// on-screen pixel size (see `select_rep_index`).
-fn display_backing_scale(display_id: u32) -> f64 {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DisplayModeSignature {
+    pixel_width: usize,
+    pixel_height: usize,
+    backing_scale_milli: u32,
+}
+
+fn display_mode_signature(display_id: u32) -> Option<DisplayModeSignature> {
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
         fn CGDisplayCopyDisplayMode(display: u32) -> *mut core::ffi::c_void;
         fn CGDisplayModeGetWidth(mode: *mut core::ffi::c_void) -> usize;
+        fn CGDisplayModeGetHeight(mode: *mut core::ffi::c_void) -> usize;
         fn CGDisplayModeGetPixelWidth(mode: *mut core::ffi::c_void) -> usize;
+        fn CGDisplayModeGetPixelHeight(mode: *mut core::ffi::c_void) -> usize;
         fn CGDisplayModeRelease(mode: *mut core::ffi::c_void);
     }
     unsafe {
         let mode = CGDisplayCopyDisplayMode(display_id);
         if mode.is_null() {
-            return 1.0;
+            return None;
         }
-        let points = CGDisplayModeGetWidth(mode);
-        let pixels = CGDisplayModeGetPixelWidth(mode);
+        let point_width = CGDisplayModeGetWidth(mode);
+        let point_height = CGDisplayModeGetHeight(mode);
+        let pixel_width = CGDisplayModeGetPixelWidth(mode);
+        let pixel_height = CGDisplayModeGetPixelHeight(mode);
         CGDisplayModeRelease(mode);
-        if points > 0 {
-            pixels as f64 / points as f64
-        } else {
-            1.0
+        if point_width == 0 || point_height == 0 || pixel_width == 0 || pixel_height == 0 {
+            return None;
         }
+        let scale = pixel_width as f64 / point_width as f64;
+        Some(DisplayModeSignature {
+            pixel_width,
+            pixel_height,
+            backing_scale_milli: (scale * 1000.0).round() as u32,
+        })
     }
+}
+
+fn display_backing_scale(display_id: u32) -> f64 {
+    display_mode_signature(display_id)
+        .map(|signature| signature.backing_scale_milli as f64 / 1000.0)
+        .unwrap_or(1.0)
+}
+
+fn stream_configuration(width: u32, height: u32) -> SCStreamConfiguration {
+    SCStreamConfiguration::new()
+        .with_width(width)
+        .with_height(height)
+        .with_pixel_format(PixelFormat::BGRA)
+        .with_shows_cursor(false)
 }
 
 /// Copyable snapshot of a recoverable/terminal stream error. `CaptureError`
@@ -98,6 +130,16 @@ struct SharedInner {
 struct CaptureState {
     inner: Mutex<SharedInner>,
     cond: Condvar,
+    /// Identifies the only stream generation allowed to publish frames or
+    /// errors. ScreenCaptureKit may deliver callbacks after `stop_capture`, so
+    /// every callback must fence itself before touching shared state.
+    generation: AtomicU64,
+}
+
+impl CaptureState {
+    fn is_current_generation(&self, generation: u64) -> bool {
+        self.generation.load(Ordering::Acquire) == generation
+    }
 }
 
 pub struct MacScreencaptureKitImageCapture {
@@ -114,6 +156,8 @@ pub struct MacScreencaptureKitImageCapture {
     /// Last emitted cursor identity; `cursor_update` is only produced (and the
     /// cursor PNG only encoded) when this changes.
     last_cursor_fingerprint: Option<MacCursorFingerprint>,
+    mode_signature: Option<DisplayModeSignature>,
+    last_mode_probe: Instant,
 }
 
 /// Minimal abstraction over "a display with an id", so display selection can be
@@ -330,11 +374,15 @@ fn capture_system_cursor(
 
 struct FrameReceiver {
     shared: Arc<CaptureState>,
+    generation: u64,
 }
 
 impl SCStreamOutputTrait for FrameReceiver {
     fn did_output_sample_buffer(&self, sample_buffer: CMSampleBuffer, of_type: SCStreamOutputType) {
         if of_type != SCStreamOutputType::Screen {
+            return;
+        }
+        if !self.shared.is_current_generation(self.generation) {
             return;
         }
         let Some(pixel_buffer) = sample_buffer.image_buffer() else {
@@ -364,6 +412,9 @@ impl SCStreamOutputTrait for FrameReceiver {
             height,
         };
         let mut inner = self.shared.inner.lock().unwrap();
+        if !self.shared.is_current_generation(self.generation) {
+            return;
+        }
         inner.frame = Some(info);
         self.shared.cond.notify_one();
     }
@@ -371,13 +422,20 @@ impl SCStreamOutputTrait for FrameReceiver {
 
 struct StreamDelegate {
     shared: Arc<CaptureState>,
+    generation: u64,
 }
 
 impl SCStreamDelegateTrait for StreamDelegate {
     fn did_stop_with_error(&self, error: SCError) {
+        if !self.shared.is_current_generation(self.generation) {
+            return;
+        }
         // A stopped stream is recoverable: record the error and wake the
         // consumer so it can drop the dead stream and rebuild on the next call.
         let mut inner = self.shared.inner.lock().unwrap();
+        if !self.shared.is_current_generation(self.generation) {
+            return;
+        }
         inner.error = Some(ErrDesc {
             code: DeskErrorCode::ACTION_NEED_RETRY,
             message: format!("ScreenCaptureKit stream stopped: {error}"),
@@ -439,6 +497,7 @@ impl MacScreencaptureKitImageCapture {
             resolutions: vec![Resolution::new(width, height)],
             attached_to_desktop: true,
             rotation: 0,
+            current_capture_resolution: Some(Resolution::new(width, height)),
         };
 
         Ok(Self {
@@ -449,6 +508,7 @@ impl MacScreencaptureKitImageCapture {
                     error: None,
                 }),
                 cond: Condvar::new(),
+                generation: AtomicU64::new(0),
             }),
             width,
             height,
@@ -457,6 +517,8 @@ impl MacScreencaptureKitImageCapture {
             current_display: display_info,
             backing_scale: display_backing_scale(target_display_id),
             last_cursor_fingerprint: None,
+            mode_signature: display_mode_signature(target_display_id),
+            last_mode_probe: Instant::now(),
         })
     }
 
@@ -465,6 +527,10 @@ impl MacScreencaptureKitImageCapture {
     /// natively by the browser (a follow-up feature) rather than baked into the
     /// frame, so per-connection cursor preferences stay honored.
     fn build_stream(&mut self) -> Result<(), CaptureError> {
+        // Invalidate callbacks from the retired stream before doing any work
+        // that can fail or block. The generation belongs to this build attempt,
+        // so only its receiver/delegate may publish into `shared`.
+        let generation = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let content = SCShareableContent::get().map_err(|e| {
             CaptureError::new_custom_error(DeskErrorCode::PERMISSION_ERROR, &e.to_string())
         })?;
@@ -485,17 +551,17 @@ impl MacScreencaptureKitImageCapture {
         let height = display.height();
         self.width = width;
         self.height = height;
+        self.current_display.desktop_coordinates.right = width as i32;
+        self.current_display.desktop_coordinates.bottom = height as i32;
+        self.current_display.resolutions = vec![Resolution::new(width, height)];
+        self.current_display.current_capture_resolution = Some(Resolution::new(width, height));
 
         let filter = SCContentFilter::create()
             .with_display(display)
             .with_excluding_windows(&[])
             .build();
 
-        let config = SCStreamConfiguration::new()
-            .with_width(width)
-            .with_height(height)
-            .with_pixel_format(PixelFormat::BGRA)
-            .with_shows_cursor(false);
+        let config = stream_configuration(width, height);
 
         // Clear any stale frame/error left from a previous stream instance.
         {
@@ -506,11 +572,13 @@ impl MacScreencaptureKitImageCapture {
 
         let delegate = StreamDelegate {
             shared: self.shared.clone(),
+            generation,
         };
         let mut stream = SCStream::new_with_delegate(&filter, &config, delegate);
 
         let receiver = FrameReceiver {
             shared: self.shared.clone(),
+            generation,
         };
         // `add_output_handler` returns `None` when registration fails; the
         // stream would start but never deliver frames, so treat it as an error.
@@ -528,6 +596,94 @@ impl MacScreencaptureKitImageCapture {
         })?;
 
         self.stream = Some(stream);
+        Ok(())
+    }
+
+    /// Poll the CoreGraphics pixel-mode signature at a low rate. Detection uses
+    /// pixel units, while stream configuration continues to use SCDisplay's
+    /// point dimensions; mixing those units would double Retina capture sizes.
+    fn update_if_display_mode_changed(&mut self) -> Result<(), CaptureError> {
+        // The first capture call builds the stream below. A mode change can be
+        // observed between construction and that call, but there is no live
+        // stream to update yet; `build_stream` re-enumerates the display and
+        // therefore starts with the latest point dimensions.
+        if self.stream.is_none() {
+            return Ok(());
+        }
+        if self.last_mode_probe.elapsed() < Duration::from_millis(250) {
+            return Ok(());
+        }
+        self.last_mode_probe = Instant::now();
+        let signature = display_mode_signature(self.target_display_id);
+        if signature == self.mode_signature {
+            return Ok(());
+        }
+
+        let previous = self.mode_signature;
+        let content = SCShareableContent::get().map_err(|error| {
+            CaptureError::new_custom_error(DeskErrorCode::ACTION_NEED_RETRY, &error.to_string())
+        })?;
+        let displays = content.displays();
+        let index = select_display_index(&displays, self.target_display_id).ok_or_else(|| {
+            CaptureError::new_custom_error(
+                DeskErrorCode::ACTION_NEED_RETRY,
+                &format!(
+                    "selected display id {} is no longer enumerated by ScreenCaptureKit",
+                    self.target_display_id
+                ),
+            )
+        })?;
+        // These are ScreenCaptureKit point dimensions. The CoreGraphics pixel
+        // dimensions above are deliberately used only as the change signature.
+        let width = displays[index].width();
+        let height = displays[index].height();
+        let config = stream_configuration(width, height);
+
+        // Do not let a pre-update frame satisfy the caller while the new
+        // configuration is being applied. If no fresh frame arrives, the
+        // capture timeout below retires the stream and the next call rebuilds.
+        {
+            let mut inner = self.shared.inner.lock().unwrap();
+            inner.frame = None;
+            inner.error = None;
+        }
+        let update_result = self
+            .stream
+            .as_ref()
+            .expect("mode changes are probed only for a live stream")
+            .update_configuration(&config);
+        if let Err(error) = update_result {
+            log::warn!(
+                "ScreenCaptureKit configuration update failed for {} after {:?} -> {:?}: {}; rebuilding stream",
+                self.target_display_id,
+                previous,
+                signature,
+                error,
+            );
+            if let Some(stream) = self.stream.take() {
+                let _ = stream.stop_capture();
+            }
+            self.mode_signature = signature;
+            self.backing_scale = display_backing_scale(self.target_display_id);
+            return self.build_stream();
+        }
+
+        self.mode_signature = signature;
+        self.backing_scale = display_backing_scale(self.target_display_id);
+        self.width = width;
+        self.height = height;
+        self.current_display.desktop_coordinates.right = width as i32;
+        self.current_display.desktop_coordinates.bottom = height as i32;
+        self.current_display.resolutions = vec![Resolution::new(width, height)];
+        self.current_display.current_capture_resolution = Some(Resolution::new(width, height));
+        log::info!(
+            "ScreenCaptureKit display mode changed for {}: {:?} -> {:?}; updated stream to {}x{} points",
+            self.target_display_id,
+            previous,
+            signature,
+            width,
+            height,
+        );
         Ok(())
     }
 
@@ -564,6 +720,7 @@ impl MacScreencaptureKitImageCapture {
 
 impl ImageCapture for MacScreencaptureKitImageCapture {
     fn capture(&mut self, request: CaptureRequest) -> Result<CaptureResult, CaptureError> {
+        self.update_if_display_mode_changed()?;
         if self.stream.is_none() {
             self.build_stream()?;
         }
@@ -577,6 +734,14 @@ impl ImageCapture for MacScreencaptureKitImageCapture {
                 .unwrap();
             inner = guard;
             if result.timed_out() && inner.frame.is_none() && inner.error.is_none() {
+                // A mode update can succeed at the API boundary but never
+                // produce a frame. Retire it here so the next capture attempt
+                // takes the full build_stream path instead of timing out
+                // forever on the accepted-but-stalled stream.
+                drop(inner);
+                if let Some(stream) = self.stream.take() {
+                    let _ = stream.stop_capture();
+                }
                 return Err(CaptureError::new_custom_error(
                     DeskErrorCode::ACTION_NEED_RETRY,
                     "No frame available (timeout)",
@@ -689,6 +854,7 @@ impl ImageOutputEnumerator for MacScreencaptureKitImageOutputEnumerator {
                 resolutions: vec![Resolution::new(width, height)],
                 attached_to_desktop: true,
                 rotation: 0,
+                current_capture_resolution: Some(Resolution::new(width, height)),
             });
         }
 
@@ -751,6 +917,24 @@ mod tests {
         let src: Vec<u8> = (0..12).collect();
         let out = copy_bgra_rows(&src, width, height, bytes_per_row);
         assert_eq!(out, (0u8..12).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn retired_stream_generation_cannot_publish() {
+        let state = CaptureState {
+            inner: Mutex::new(SharedInner {
+                frame: None,
+                error: None,
+            }),
+            cond: Condvar::new(),
+            generation: AtomicU64::new(7),
+        };
+
+        assert!(state.is_current_generation(7));
+        let next = state.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        assert_eq!(next, 8);
+        assert!(!state.is_current_generation(7));
+        assert!(state.is_current_generation(8));
     }
 
     #[test]

@@ -137,6 +137,10 @@ export interface IceRetryCoordinator {
     markOfferSent(requestId: string): void;
     /** Whether an ANSWER belongs to the latest pending OFFER. */
     shouldAcceptAnswer(requestId: string): boolean;
+    /** A matching OFFER received a structured terminal response instead of
+     *  an ANSWER. Stops the watchdog without converting the media-domain
+     *  error into a generic ICE failure. Returns false for stale responses. */
+    onOfferRejected(requestId: string): boolean;
     /** A matching ANSWER was applied: enter `checking`, record its remote
      *  ICE ufrag, arm the ICE-stall watchdog. */
     onAnswerApplied(remoteUfrag: string | null): void;
@@ -308,6 +312,16 @@ export function createIceRetryCoordinator(
 
         shouldAcceptAnswer: (requestId: string) =>
             requestId === pendingOfferRequestId,
+
+        onOfferRejected: (requestId: string) => {
+            if (requestId !== pendingOfferRequestId || phase !== 'awaiting-answer') {
+                return false;
+            }
+            clearTimers();
+            retryInFlight = false;
+            phase = 'failed';
+            return true;
+        },
 
         onAnswerApplied: (remoteUfrag: string | null) => {
             phase = 'checking';

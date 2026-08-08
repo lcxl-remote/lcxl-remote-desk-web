@@ -1506,6 +1506,22 @@ impl WorkerSession {
                         &input_dispatcher,
                         media_producer.as_deref(),
                     );
+                    if let Some(producer) = media_producer.as_ref() {
+                        let retried = producer.retry_blocked_video_after_display_change(
+                            |connection_id, generation| {
+                                input_dispatcher.set_connection_generation_if_present(
+                                    connection_id,
+                                    generation,
+                                );
+                            },
+                        );
+                        if retried > 0 {
+                            info!(
+                                "Display change seq={} restarted {} blocked video pipeline(s)",
+                                evt.seq, retried
+                            );
+                        }
+                    }
                 }
 
                 // The exclusive coordinator posts here after each

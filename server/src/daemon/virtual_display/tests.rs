@@ -462,12 +462,14 @@ fn caps_with_display(display_name: &str) -> desk_ipc_protocol::message::MediaCap
             resolutions: vec![],
             attached_to_desktop: true,
             rotation: 0,
+            current_capture_resolution: None,
         }],
     );
     MediaCapabilities {
         video_codecs: vec![],
         audio_codecs: vec![],
         video_encoders: vec![],
+        video_encoder_capabilities: vec![],
         audio_encoders: vec![],
         video_device_list,
         audio_device_list: std::collections::BTreeMap::new(),

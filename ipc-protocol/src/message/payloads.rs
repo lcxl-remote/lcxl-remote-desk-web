@@ -17,6 +17,9 @@ use desk_signal_facade::model::terminal::{
 use serde::{Deserialize, Serialize};
 use wincode::{SchemaRead, SchemaWrite};
 
+use desk_signal_facade::model::media_capability::{VideoEncoderCapability, VideoEncoderId};
+use desk_signal_facade::model::media_pipeline::MediaPipelineStateData;
+
 #[cfg(doc)]
 use super::{ServiceToWorker, WorkerToService};
 // ==================== Payload Types ====================
@@ -88,6 +91,15 @@ pub struct RemoteAccessStateAppliedPayload {
     pub cancelled_terminals: u32,
     pub cancelled_transfers: u32,
     pub cancelled_execs: u32,
+}
+
+/// Worker → daemon state transition for one browser connection's media
+/// pipeline. The daemon stores the phase for Retry admission and forwards the
+/// data as `SignalingType::MediaPipelineStateChanged`.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+pub struct MediaPipelineStatePayload {
+    pub connection_id: String,
+    pub data: MediaPipelineStateData,
 }
 
 /// Payload for [`WorkerToService::SignalingError`]. Carries the
@@ -182,6 +194,9 @@ pub struct MediaCapabilities {
     /// straight into `InitSignalingData::video_encoder_list`.
     #[serde(default)]
     pub video_encoders: Vec<String>,
+    /// Strongly typed input constraints for each concrete encoder.
+    #[serde(default)]
+    pub video_encoder_capabilities: Vec<VideoEncoderCapability>,
     /// Audio counterpart of `video_encoders`. Today only `"OPUS"` is
     /// reported, but kept symmetrical so a future encoder addition
     /// doesn't need a wire-format bump.
@@ -206,6 +221,11 @@ pub struct MediaCapabilities {
 pub struct StartMediaPayload {
     pub connection_id: String,
     pub video_codec: MediaCodec,
+    /// Concrete implementation selected before the SDP answer is created.
+    /// `None` is reserved for legacy callers and falls back to the codec-based
+    /// mapping in the worker.
+    #[serde(default)]
+    pub video_encoder: Option<VideoEncoderId>,
     pub audio_codec: MediaCodec,
     pub video_device: Option<String>,
     pub audio_device: Option<String>,

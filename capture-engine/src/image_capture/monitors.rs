@@ -240,6 +240,7 @@ pub fn enum_display_infos() -> Result<Vec<DisplayInfo>, CaptureError> {
                 // that only need to bind a HMONITOR (WGC), zero is
                 // the safe identity rotation.
                 rotation: 0,
+                current_capture_resolution: None,
             }
         })
         .collect();

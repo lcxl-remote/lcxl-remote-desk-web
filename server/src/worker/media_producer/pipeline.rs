@@ -17,6 +17,7 @@ pub(super) fn spawn_video_pipeline_thread(
     capture_keys: Arc<StdMutex<HashMap<String, CaptureKeyRecord>>>,
     generation: u64,
     geometry_update_handler: Option<Arc<GeometryUpdateHandler>>,
+    video_state: Arc<AtomicU8>,
 ) -> thread::JoinHandle<()> {
     let connection_id = payload.connection_id.clone();
     let thread_name = format!("media-video-{}", &connection_id);
@@ -51,9 +52,11 @@ pub(super) fn spawn_video_pipeline_thread(
                     capture_keys,
                     generation,
                     geometry_update_handler,
+                    Arc::clone(&video_state),
                 )
                 .await
                 {
+                    video_state.store(VIDEO_STATE_FAILED, Ordering::Release);
                     error!(
                         "[MediaProducer] Video pipeline for {connection_id} exited with error: {e}"
                     );

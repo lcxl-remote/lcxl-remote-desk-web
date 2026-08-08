@@ -17,6 +17,19 @@ export function shouldOpenConfigDialog(args: {
     return !args.hasAttemptedConnect || args.rtcFailed
 }
 
+/**
+ * The blocked-media warning owns the whole video surface. Hide it while the
+ * settings dialog is open so the dialog and its portalled encoder picker are
+ * not covered by the warning's higher stacking layer. The state is retained,
+ * so cancelling the dialog shows the warning again.
+ */
+export function shouldShowMediaPipelineOverlay(
+    hasPipelineState: boolean,
+    isConfigOpen: boolean,
+): boolean {
+    return hasPipelineState && !isConfigOpen
+}
+
 type DesktopRequestRemotePayload = Pick<
     RequestRemoteModel,
     "purpose" | "grant_session_id"

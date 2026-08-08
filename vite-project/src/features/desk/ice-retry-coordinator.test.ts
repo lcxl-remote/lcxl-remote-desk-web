@@ -170,6 +170,21 @@ describe('createIceRetryCoordinator', () => {
         expect(coord.shouldAcceptAnswer('some-stale-id')).toBe(false);
     });
 
+    it('stops retries when the matching OFFER receives a structured rejection', async () => {
+        const { coord, resend, onFailed } = makeCoordinator();
+        coord.resetForNewPc();
+        const id1 = coord.beginOffer();
+        coord.markOfferSent(id1);
+
+        expect(coord.onOfferRejected('stale-request')).toBe(false);
+        expect(coord.onOfferRejected(id1)).toBe(true);
+        await vi.advanceTimersByTimeAsync(ANSWER_MS * 2);
+
+        expect(resend).not.toHaveBeenCalled();
+        expect(onFailed).not.toHaveBeenCalled();
+        expect(coord.snapshot().phase).toBe('failed');
+    });
+
     it('queues candidates before ANSWER, then accepts only the matching ufrag', () => {
         const { coord } = makeCoordinator();
         coord.resetForNewPc();

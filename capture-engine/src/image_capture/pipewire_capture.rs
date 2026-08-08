@@ -79,6 +79,7 @@ fn stream_to_display_info(stream: &ScreenCastStartStream) -> DisplayInfo {
         },
         attached_to_desktop: true,
         rotation: 0,
+        current_capture_resolution: None,
         resolutions: vec![],
     }
 }
@@ -236,6 +237,7 @@ impl ImageOutputEnumerator for PipewireImageOutputEnumerator {
             resolutions: vec![],
             attached_to_desktop: true,
             rotation: 0,
+            current_capture_resolution: None,
         };
         let display_info_list = vec![display_info];
         Ok(display_info_list)

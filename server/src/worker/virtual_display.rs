@@ -836,6 +836,7 @@ mod tests {
         StartMediaPayload {
             connection_id: connection_id.to_string(),
             video_codec: MediaCodec::H264,
+            video_encoder: None,
             audio_codec: MediaCodec::Opus,
             video_device: video_device.map(|s| s.to_string()),
             audio_device: None,

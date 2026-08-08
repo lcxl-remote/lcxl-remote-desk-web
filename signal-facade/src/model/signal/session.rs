@@ -16,6 +16,7 @@ use crate::model::{
     audio_capture::AudioDevice,
     desk_settings::DeskSettings,
     image_capture::DisplayInfo,
+    media_capability::VideoEncoderCapability,
     os::OperationSystemEnum,
     security_settings::SecuritySettings,
     virtual_display::{DEFAULT_ADAPTIVE_DEBOUNCE_MS, DEFAULT_ADAPTIVE_MIN_DELTA_PX},
@@ -152,6 +153,9 @@ pub struct InitSignalingData {
     pub video_device_list: BTreeMap<String, Vec<DisplayInfo>>,
     /// Video encoder list
     pub video_encoder_list: Vec<String>,
+    /// Concrete encoder input constraints. Empty means a legacy host.
+    #[serde(default)]
+    pub video_encoder_capabilities: Vec<VideoEncoderCapability>,
     /// Current desk settings
     pub desk_settings: DeskSettings,
     /// Whether the remote end has Tauri UI support (required for whiteboard overlay)

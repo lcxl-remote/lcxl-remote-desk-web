@@ -22,10 +22,13 @@ pub enum DisplayWatcherError {
     /// `CreateWindowExW` result — usually means an internal panic
     /// inside the thread body.
     ThreadDiedBeforeInit,
-    /// Platform doesn't support a display-change watcher. Stub
-    /// platforms (currently macOS) return this from `spawn()` so callers
-    /// can detect and treat it as "no OS-driven refresh available".
+    /// Platform doesn't support a display-change watcher. Stub platforms
+    /// return this from `spawn()` so callers can detect and treat it as
+    /// "no OS-driven refresh available".
     Unsupported,
+    /// macOS: CoreGraphics rejected callback registration.
+    #[cfg(target_os = "macos")]
+    MacRegistration(i32),
     /// Linux: failed to connect to the X11 display server when starting
     /// the RandR watcher.
     #[cfg(target_os = "linux")]
@@ -55,6 +58,13 @@ impl std::fmt::Display for DisplayWatcherError {
             }
             DisplayWatcherError::Unsupported => {
                 write!(f, "display watcher not supported on this platform")
+            }
+            #[cfg(target_os = "macos")]
+            DisplayWatcherError::MacRegistration(code) => {
+                write!(
+                    f,
+                    "CGDisplayRegisterReconfigurationCallback: CGError {code}"
+                )
             }
             #[cfg(target_os = "linux")]
             DisplayWatcherError::X11Connect(e) => write!(f, "X11 connect: {e}"),

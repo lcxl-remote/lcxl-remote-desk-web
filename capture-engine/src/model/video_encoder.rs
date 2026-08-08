@@ -1,5 +1,7 @@
 use strum_macros::{EnumIter, EnumString, IntoStaticStr};
 
+use desk_signal_facade::model::media_capability::VideoEncoderId;
+
 use crate::error::CaptureError;
 use crate::model::image_capture::ImageInfo;
 
@@ -55,6 +57,30 @@ pub enum VideoEncoderType {
     VP9,
     H264,
     AV1,
+}
+
+impl From<VideoEncoderType> for VideoEncoderId {
+    fn from(value: VideoEncoderType) -> Self {
+        match value {
+            VideoEncoderType::X264 => Self::X264,
+            VideoEncoderType::H264 => Self::OpenH264,
+            VideoEncoderType::VP8 => Self::Vp8,
+            VideoEncoderType::VP9 => Self::Vp9,
+            VideoEncoderType::AV1 => Self::Av1,
+        }
+    }
+}
+
+impl From<VideoEncoderId> for VideoEncoderType {
+    fn from(value: VideoEncoderId) -> Self {
+        match value {
+            VideoEncoderId::X264 => Self::X264,
+            VideoEncoderId::OpenH264 => Self::H264,
+            VideoEncoderId::Vp8 => Self::VP8,
+            VideoEncoderId::Vp9 => Self::VP9,
+            VideoEncoderId::Av1 => Self::AV1,
+        }
+    }
 }
 
 pub trait VideoEncoderTypeHelper {

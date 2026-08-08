@@ -731,6 +731,7 @@ mod tests {
         StartMediaPayload {
             connection_id: connection_id.to_string(),
             video_codec: desk_ipc_protocol::message::MediaCodec::H264,
+            video_encoder: None,
             audio_codec: desk_ipc_protocol::message::MediaCodec::Opus,
             video_device: None,
             audio_device: None,

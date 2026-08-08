@@ -121,6 +121,7 @@ impl ImageOutputEnumerator for X11ImageOutputEnumerator {
                 },
                 attached_to_desktop: true,
                 rotation: 0,
+                current_capture_resolution: None,
                 resolutions: vec![],
             });
         }
@@ -163,6 +164,7 @@ impl ImageCapture for X11ImageCapture {
                 },
                 attached_to_desktop: true,
                 rotation: 0,
+                current_capture_resolution: None,
                 resolutions: vec![],
             })
             .ok_or_else(|| {

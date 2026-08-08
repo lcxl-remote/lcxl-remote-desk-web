@@ -71,7 +71,7 @@
 //! connection's `show_mouse` is on.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -93,11 +93,17 @@ use desk_capture_engine::video_encoder::video_encoder_factory::{
 use desk_ipc_protocol::dual_transport::{MediaSender, TransportError};
 use desk_ipc_protocol::message::{
     ERROR_CODE_MEDIA_TRANSPORT_STUCK, ErrorPayload, MediaCapabilities, MediaCodec, MediaFrame,
-    MediaFrameKind, StartMediaPayload, StopMediaPayload, UpdateMediaSettingsPayload,
-    WorkerToService,
+    MediaFrameKind, MediaPipelineStatePayload, StartMediaPayload, StopMediaPayload,
+    UpdateMediaSettingsPayload, WorkerToService,
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
-use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
+use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect, Resolution};
+use desk_signal_facade::model::media_capability::{
+    EncoderCompatibility, EncoderCompatibilityError, VideoEncoderCapability, VideoEncoderId,
+    capabilities_for_encoder_names, check_encoder_input, compatible_encoders,
+};
+use desk_signal_facade::model::media_pipeline::{MediaPipelinePhase, MediaPipelineStateData};
+use desk_utils::error::DeskErrorCode;
 use log::{debug, error, info, warn};
 use tokio::sync::{broadcast, mpsc, watch};
 
@@ -119,6 +125,7 @@ type GeometryUpdateHandler = dyn Fn(&str, u64, (i32, i32, i32, i32)) + Send + Sy
 
 struct ConnectionTask {
     generation: u64,
+    start_payload: StartMediaPayload,
     stop_flag: Arc<AtomicBool>,
     stop_tx: watch::Sender<bool>,
     keyframe_requested: Arc<AtomicBool>,
@@ -130,6 +137,10 @@ struct ConnectionTask {
     /// frame size + bitrate and a runtime change would require a
     /// separate IPC variant).
     settings_tx: mpsc::UnboundedSender<UpdateMediaSettingsPayload>,
+    /// Updated by the video thread. Only the deterministic `Blocked` value is
+    /// eligible for an OS display-change retry; prepare/runtime failures stay
+    /// user-driven so one event cannot create a restart loop.
+    video_state: Arc<AtomicU8>,
     /// Held so the video task can be joined on `shutdown()`. None
     /// after the thread exits naturally on stop_flag observation.
     video_handle: Option<thread::JoinHandle<()>>,
@@ -138,6 +149,16 @@ struct ConnectionTask {
     /// alongside video, but kept Optional so audio can later be disabled
     /// per connection without changing the field shape.
     audio_handle: Option<thread::JoinHandle<()>>,
+}
+
+const VIDEO_STATE_STARTING: u8 = 0;
+const VIDEO_STATE_STREAMING: u8 = 1;
+const VIDEO_STATE_BLOCKED: u8 = 2;
+const VIDEO_STATE_FAILED: u8 = 3;
+const VIDEO_STATE_DISABLED: u8 = 4;
+
+fn should_retry_blocked_video(state: u8, start_video: bool, thread_finished: bool) -> bool {
+    state == VIDEO_STATE_BLOCKED && start_video && thread_finished
 }
 
 impl ConnectionTask {
@@ -323,7 +344,7 @@ impl MediaProducer {
         F: FnOnce(u64),
     {
         let connection_id = payload.connection_id.clone();
-        let (generation, stop_flag, stop_tx, stop_rx, keyframe_requested, settings_rx) = {
+        let (generation, stop_flag, stop_tx, stop_rx, keyframe_requested, video_state, settings_rx) = {
             let mut map = self.inner.lock().expect("media producer lock poisoned");
             if map.contains_key(&connection_id) {
                 warn!(
@@ -338,16 +359,23 @@ impl MediaProducer {
             let stop_flag = Arc::new(AtomicBool::new(false));
             let (stop_tx, stop_rx) = watch::channel(false);
             let keyframe_requested = Arc::new(AtomicBool::new(false));
+            let video_state = Arc::new(AtomicU8::new(if payload.start_video {
+                VIDEO_STATE_STARTING
+            } else {
+                VIDEO_STATE_DISABLED
+            }));
             let (settings_tx, settings_rx) =
                 mpsc::unbounded_channel::<UpdateMediaSettingsPayload>();
             map.insert(
                 connection_id.clone(),
                 ConnectionTask {
                     generation,
+                    start_payload: payload.clone(),
                     stop_flag: Arc::clone(&stop_flag),
                     stop_tx: stop_tx.clone(),
                     keyframe_requested: Arc::clone(&keyframe_requested),
                     settings_tx,
+                    video_state: Arc::clone(&video_state),
                     video_handle: None,
                     audio_handle: None,
                 },
@@ -358,6 +386,7 @@ impl MediaProducer {
                 stop_tx,
                 stop_rx,
                 keyframe_requested,
+                video_state,
                 settings_rx,
             )
         };
@@ -392,6 +421,7 @@ impl MediaProducer {
                 Arc::clone(&self.capture_keys),
                 generation,
                 geometry_update_handler,
+                video_state,
             ))
         } else {
             // Drain the receiver end so settings updates targeted at this
@@ -445,6 +475,73 @@ impl MediaProducer {
             return StartMediaResult::Cancelled(generation);
         }
         StartMediaResult::Accepted(generation)
+    }
+
+    /// Restart only video pipelines that exited after deterministic dimension
+    /// preflight. The existing audio task, peer connection, and data channels
+    /// stay untouched. This is invoked by the low-frequency OS display watcher
+    /// so returning from an unsupported mode (for example DCI 4K) to a supported
+    /// mode can recover without keeping capture alive while blocked.
+    pub fn retry_blocked_video_after_display_change<F>(&self, mut on_accepted: F) -> usize
+    where
+        F: FnMut(&str, u64),
+    {
+        let geometry_update_handler = self
+            .geometry_update_handler
+            .lock()
+            .expect("media producer geometry handler lock poisoned")
+            .clone();
+        let mut accepted = Vec::new();
+        let mut map = self.inner.lock().expect("media producer lock poisoned");
+        for (connection_id, task) in map.iter_mut() {
+            if !should_retry_blocked_video(
+                task.video_state.load(Ordering::Acquire),
+                task.start_payload.start_video,
+                task.video_handle
+                    .as_ref()
+                    .is_some_and(thread::JoinHandle::is_finished),
+            ) {
+                continue;
+            }
+
+            let generation = self
+                .capture_key_generation
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1);
+            let (settings_tx, settings_rx) =
+                mpsc::unbounded_channel::<UpdateMediaSettingsPayload>();
+            task.generation = generation;
+            task.settings_tx = settings_tx;
+            task.video_state
+                .store(VIDEO_STATE_STARTING, Ordering::Release);
+            task.keyframe_requested.store(true, Ordering::Relaxed);
+            drop(task.video_handle.take());
+            task.video_handle = Some(spawn_video_pipeline_thread(
+                self.desk_settings.clone(),
+                task.start_payload.clone(),
+                Arc::clone(&self.media_sender),
+                self.error_tx.clone(),
+                Arc::clone(&task.stop_flag),
+                task.stop_tx.subscribe(),
+                Arc::clone(&task.keyframe_requested),
+                settings_rx,
+                Arc::clone(&self.capture_registry),
+                Arc::clone(&self.capture_keys),
+                generation,
+                geometry_update_handler.clone(),
+                Arc::clone(&task.video_state),
+            ));
+            accepted.push((connection_id.clone(), generation));
+        }
+        drop(map);
+
+        for (connection_id, generation) in &accepted {
+            on_accepted(connection_id, *generation);
+            info!(
+                "[MediaProducer] Retrying blocked video for {connection_id} after display change (generation={generation})"
+            );
+        }
+        accepted.len()
     }
 
     /// Stop a per-connection pipeline. No-op on unknown id.
@@ -580,6 +677,7 @@ impl MediaProducer {
         MediaCapabilities {
             video_codecs,
             audio_codecs,
+            video_encoder_capabilities: capabilities_for_encoder_names(&video_encoders),
             video_encoders,
             audio_encoders,
             video_device_list,

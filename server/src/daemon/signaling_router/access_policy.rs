@@ -23,6 +23,7 @@ pub(super) fn is_baseline_signaling_type(t: SignalingType) -> bool {
             | SignalingType::ConnectionRemoved
             | SignalingType::Heartbeat
             | SignalingType::SupportCodeIssued
+            | SignalingType::RetryMediaPipeline
     )
 }
 

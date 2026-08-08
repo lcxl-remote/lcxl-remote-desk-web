@@ -1,5 +1,15 @@
 use super::*;
 
+#[test]
+fn offer_only_converts_expected_business_errors_to_responses() {
+    assert!(is_offer_business_error(DeskErrorCode::INVALID_PARAMS));
+    assert!(is_offer_business_error(
+        DeskErrorCode::VIDEO_PIPELINE_RENEGOTIATION_REQUIRED
+    ));
+    assert!(!is_offer_business_error(DeskErrorCode::SYSTEM_ERROR));
+    assert!(!is_offer_business_error(DeskErrorCode::CLIENT_ID_NOT_FOUND));
+}
+
 /// `make_ctx` variant that installs an `Attached`-state supervisor
 /// AND a mock IPC sink so the `ChangeDisplaySettings` auto-path
 /// tests can both (a) reach the new auto-only logic past the
@@ -92,6 +102,7 @@ pub(super) async fn route_swallows_daemon_emitted_variants() {
         SignalingType::DenyControl,
         SignalingType::PrivateScreenStateChanged,
         SignalingType::AudioPlaybackError,
+        SignalingType::MediaPipelineStateChanged,
         SignalingType::ManagerSystemStatue,
         SignalingType::ReplyFromTerminal,
         SignalingType::TerminalStarted,
@@ -129,6 +140,26 @@ pub(super) async fn route_inbound_accept_control_is_swallowed_not_bridged() {
     route(&model, &ctx)
         .await
         .expect("AcceptControl inbound must be swallowed, not surfaced as error");
+}
+
+#[tokio::test]
+pub(super) async fn retry_media_pipeline_is_daemon_owned_and_reports_unknown_connection() {
+    let (ctx, mut rx) = make_ctx_with_rx().await;
+    let model = SignalingModel::new(
+        "retry-unknown",
+        SignalingType::RetryMediaPipeline,
+        Some("missing-connection".to_string()),
+        None,
+        None,
+        None,
+    );
+    route(&model, &ctx).await.expect("retry route must respond");
+    let response = read_response(&mut rx);
+    assert_eq!(response.signaling_type, SignalingType::RetryMediaPipeline);
+    assert_eq!(
+        response.response_state.expect("error state").error_code,
+        DeskErrorCode::CLIENT_ID_NOT_FOUND.code(),
+    );
 }
 
 /// Every terminal-plane request type is handled

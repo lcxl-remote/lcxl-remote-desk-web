@@ -2771,6 +2771,7 @@ dependencies = [
  "serde_json",
  "url",
  "utoipa",
+ "wincode",
  "windows 0.61.3",
 ]
 

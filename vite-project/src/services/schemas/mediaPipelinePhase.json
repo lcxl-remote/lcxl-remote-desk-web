@@ -1,0 +1,1 @@
+{"type":"string","enum":["streaming","blocked","failed"],"x-readme-ref-name":"MediaPipelinePhase"}

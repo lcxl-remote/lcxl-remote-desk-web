@@ -21,6 +21,7 @@ pub(super) async fn video_pipeline_loop(
     capture_keys: Arc<StdMutex<HashMap<String, CaptureKeyRecord>>>,
     generation: u64,
     geometry_update_handler: Option<Arc<GeometryUpdateHandler>>,
+    video_state: Arc<AtomicU8>,
 ) -> Result<(), String> {
     let connection_id = payload.connection_id.clone();
     let codec = payload.video_codec;
@@ -95,7 +96,7 @@ pub(super) async fn video_pipeline_loop(
     };
 
     let mut frame_rx = capture_handle.subscribe();
-    let display_info = capture_handle.display_info().clone();
+    let (mut source_generation, mut display_info) = capture_handle.geometry_snapshot();
     let coordinates = display_info.desktop_coordinates;
     if coordinates.width() > 0
         && coordinates.height() > 0
@@ -119,15 +120,51 @@ pub(super) async fn video_pipeline_loop(
     // encoder_init_size)` so settings_changed / keyframe_requested
     // rebuilds never accidentally drop back to the (stale) subscribe-
     // time resolution after a mid-session display mode change.
-    let mut encoder_init_size: (u32, u32) = (
-        display_info.desktop_coordinates.width() as u32,
-        display_info.desktop_coordinates.height() as u32,
-    );
-    let mut encoder: Box<dyn VideoEncoder> = create_video_encoder(
+    let mut encoder_init_size: (u32, u32) = display_info
+        .current_capture_resolution
+        .map(|resolution| (resolution.width, resolution.height))
+        .unwrap_or_else(|| {
+            (
+                display_info.desktop_coordinates.width().max(0) as u32,
+                display_info.desktop_coordinates.height().max(0) as u32,
+            )
+        });
+    let encoder_id = payload.video_encoder.or_else(|| {
+        merged_settings
+            .video_encoder
+            .as_deref()
+            .and_then(VideoEncoderId::from_setting_name)
+    });
+    if let Err(reason) = preflight_encoder_dimensions(encoder_id, encoder_init_size) {
+        video_state.store(VIDEO_STATE_BLOCKED, Ordering::Release);
+        report_dimension_blocked(
+            &error_tx,
+            &connection_id,
+            encoder_id,
+            encoder_init_size,
+            reason,
+        );
+        return Ok(());
+    }
+    let mut encoder: Box<dyn VideoEncoder> = match create_video_encoder(
         &merged_settings,
         &display_info_for_size(&display_info, encoder_init_size),
-    )
-    .map_err(|e| format!("{e}"))?;
+    ) {
+        Ok(encoder) => encoder,
+        Err(e) => {
+            report_prepare_failed(
+                &video_state,
+                &error_tx,
+                &connection_id,
+                encoder_id,
+                encoder_init_size,
+                format!("{e}"),
+            );
+            return Ok(());
+        }
+    };
+    video_state.store(VIDEO_STATE_STREAMING, Ordering::Release);
+    report_streaming(&error_tx, &connection_id, encoder_id, encoder_init_size);
     let mut next_pass_is_idr = true; // first frame is always I (encoder emits SPS/PPS+IDR)
     let mut seq: u64 = 0;
     let mut frame_interval = merged_settings.get_duration_by_video_fps();
@@ -158,6 +195,7 @@ pub(super) async fn video_pipeline_loop(
     // must be replayed onto every freshly rebuilt encoder. `None` =
     // encoder runs at its initial ceiling.
     let mut current_cap_kbps: Option<u32> = None;
+    let mut consecutive_encode_failures = 0_u8;
 
     while !stop_flag.load(Ordering::Relaxed) {
         // Wait for the next shared frame. The capture loop runs as
@@ -208,6 +246,27 @@ pub(super) async fn video_pipeline_loop(
             break;
         }
 
+        if shared_frame.source_generation != source_generation {
+            source_generation = shared_frame.source_generation;
+            display_info = shared_frame.display_info.clone();
+            let coordinates = display_info.desktop_coordinates;
+            if coordinates.width() > 0
+                && coordinates.height() > 0
+                && let Some(handler) = geometry_update_handler.as_ref()
+            {
+                handler(
+                    &connection_id,
+                    generation,
+                    (
+                        coordinates.left,
+                        coordinates.top,
+                        coordinates.width(),
+                        coordinates.height(),
+                    ),
+                );
+            }
+        }
+
         // Apply any pending live-update settings before honouring
         // the keyframe flag. Coalesce a burst into a single
         // rebuild. NB: backend / output_index changes are out of
@@ -229,11 +288,23 @@ pub(super) async fn video_pipeline_loop(
                 merged_settings.video_quality,
                 merged_settings.enable_dirty_rect
             );
-            encoder = create_video_encoder(
+            encoder = match create_video_encoder(
                 &merged_settings,
                 &display_info_for_size(&display_info, encoder_init_size),
-            )
-            .map_err(|e| format!("{e}"))?;
+            ) {
+                Ok(encoder) => encoder,
+                Err(error) => {
+                    report_prepare_failed(
+                        &video_state,
+                        &error_tx,
+                        &connection_id,
+                        encoder_id,
+                        encoder_init_size,
+                        format!("{error}"),
+                    );
+                    return Ok(());
+                }
+            };
             next_pass_is_idr = true;
             rebuild_pending = true;
             // Reset throttle so the new encoder's first IDR is
@@ -269,11 +340,23 @@ pub(super) async fn video_pipeline_loop(
                 "[MediaProducer:{connection_id}] Keyframe requested; recreating encoder so the \
                  next encode pass emits an IDR"
             );
-            encoder = create_video_encoder(
+            encoder = match create_video_encoder(
                 &merged_settings,
                 &display_info_for_size(&display_info, encoder_init_size),
-            )
-            .map_err(|e| format!("{e}"))?;
+            ) {
+                Ok(encoder) => encoder,
+                Err(error) => {
+                    report_prepare_failed(
+                        &video_state,
+                        &error_tx,
+                        &connection_id,
+                        encoder_id,
+                        encoder_init_size,
+                        format!("{error}"),
+                    );
+                    return Ok(());
+                }
+            };
             replay_bitrate_cap(&mut encoder, current_cap_kbps, &connection_id);
             next_pass_is_idr = true;
             rebuild_pending = true;
@@ -323,9 +406,26 @@ pub(super) async fn video_pipeline_loop(
                 continue;
             }
             let nal_info_vec = match encoder.encode_cached() {
-                Ok(v) => v,
+                Ok(v) => {
+                    consecutive_encode_failures = 0;
+                    v
+                }
                 Err(e) => {
-                    warn!("[MediaProducer:{connection_id}] encode_cached error: {e}; continuing");
+                    if record_encode_failure(&mut consecutive_encode_failures) {
+                        report_runtime_failed(
+                            &video_state,
+                            &error_tx,
+                            &connection_id,
+                            encoder_id,
+                            encoder_init_size,
+                            format!("encode_cached failed three consecutive times: {e}"),
+                        );
+                        return Ok(());
+                    }
+                    warn!(
+                        "[MediaProducer:{connection_id}] transient encode_cached error \
+                         ({consecutive_encode_failures}/3): {e}"
+                    );
                     continue;
                 }
             };
@@ -408,12 +508,37 @@ pub(super) async fn video_pipeline_loop(
             // Update encoder_init_size FIRST so the synthetic
             // DisplayInfo built below carries the new dimensions.
             encoder_init_size = (new_w, new_h);
-            encoder = create_video_encoder(
+            if let Err(reason) = preflight_encoder_dimensions(encoder_id, encoder_init_size) {
+                video_state.store(VIDEO_STATE_BLOCKED, Ordering::Release);
+                report_dimension_blocked(
+                    &error_tx,
+                    &connection_id,
+                    encoder_id,
+                    encoder_init_size,
+                    reason,
+                );
+                return Ok(());
+            }
+            encoder = match create_video_encoder(
                 &merged_settings,
                 &display_info_for_size(&display_info, encoder_init_size),
-            )
-            .map_err(|e| format!("{e}"))?;
+            ) {
+                Ok(encoder) => encoder,
+                Err(error) => {
+                    report_prepare_failed(
+                        &video_state,
+                        &error_tx,
+                        &connection_id,
+                        encoder_id,
+                        encoder_init_size,
+                        format!("{error}"),
+                    );
+                    return Ok(());
+                }
+            };
+            video_state.store(VIDEO_STATE_STREAMING, Ordering::Release);
             replay_bitrate_cap(&mut encoder, current_cap_kbps, &connection_id);
+            report_streaming(&error_tx, &connection_id, encoder_id, encoder_init_size);
             next_pass_is_idr = true;
             rebuild_pending = true;
             last_emit_for_throttle = std::time::Instant::now()
@@ -433,9 +558,26 @@ pub(super) async fn video_pipeline_loop(
             shared_frame.as_ref() as &dyn ImageInfo,
             merged_settings.enable_dirty_rect,
         ) {
-            Ok(v) => v,
+            Ok(v) => {
+                consecutive_encode_failures = 0;
+                v
+            }
             Err(e) => {
-                warn!("[MediaProducer:{connection_id}] encode error: {e}; continuing");
+                if record_encode_failure(&mut consecutive_encode_failures) {
+                    report_runtime_failed(
+                        &video_state,
+                        &error_tx,
+                        &connection_id,
+                        encoder_id,
+                        encoder_init_size,
+                        format!("encode failed three consecutive times: {e}"),
+                    );
+                    return Ok(());
+                }
+                warn!(
+                    "[MediaProducer:{connection_id}] transient encode error \
+                     ({consecutive_encode_failures}/3): {e}"
+                );
                 continue;
             }
         };
@@ -494,4 +636,122 @@ pub(super) async fn video_pipeline_loop(
 
     info!("[MediaProducer:{connection_id}] Pipeline exiting (stop_flag observed)");
     Ok(())
+}
+
+fn preflight_encoder_dimensions(
+    encoder_id: Option<VideoEncoderId>,
+    size: (u32, u32),
+) -> Result<EncoderCompatibility, EncoderCompatibilityError> {
+    let Some(encoder_id) = encoder_id else {
+        return Ok(EncoderCompatibility::RuntimeProbeRequired);
+    };
+    let capability = VideoEncoderCapability::for_id(encoder_id);
+    check_encoder_input(Resolution::new(size.0, size.1), &capability.input_support)
+}
+
+pub(super) fn record_encode_failure(consecutive_failures: &mut u8) -> bool {
+    *consecutive_failures = consecutive_failures.saturating_add(1);
+    *consecutive_failures >= 3
+}
+
+pub(super) fn report_dimension_blocked(
+    error_tx: &mpsc::UnboundedSender<WorkerToService>,
+    connection_id: &str,
+    encoder_id: Option<VideoEncoderId>,
+    size: (u32, u32),
+    reason: EncoderCompatibilityError,
+) {
+    let source_resolution = Resolution::new(size.0, size.1);
+    let capabilities = capabilities_for_encoder_names(list_video_encoder());
+    let message = format!(
+        "video encoder preflight blocked: encoder={encoder_id:?}, source={}x{}, reason={reason:?}",
+        size.0, size.1
+    );
+    warn!("[MediaProducer:{connection_id}] {message}");
+    let _ = error_tx.send(WorkerToService::MediaPipelineState(
+        MediaPipelineStatePayload {
+            connection_id: connection_id.to_string(),
+            data: MediaPipelineStateData::blocked_dimensions(
+                encoder_id,
+                source_resolution,
+                compatible_encoders(source_resolution, &capabilities),
+                message,
+            ),
+        },
+    ));
+}
+
+pub(super) fn report_prepare_failed(
+    video_state: &AtomicU8,
+    error_tx: &mpsc::UnboundedSender<WorkerToService>,
+    connection_id: &str,
+    encoder_id: Option<VideoEncoderId>,
+    size: (u32, u32),
+    message: String,
+) {
+    video_state.store(VIDEO_STATE_FAILED, Ordering::Release);
+    let message = format!(
+        "video encoder prepare failed: encoder={encoder_id:?}, source={}x{}: {message}",
+        size.0, size.1
+    );
+    error!("[MediaProducer:{connection_id}] {message}");
+    let _ = error_tx.send(WorkerToService::MediaPipelineState(
+        MediaPipelineStatePayload {
+            connection_id: connection_id.to_string(),
+            data: MediaPipelineStateData {
+                phase: MediaPipelinePhase::Failed,
+                encoder: encoder_id,
+                source_resolution: Some(Resolution::new(size.0, size.1)),
+                compatible_encoders: Vec::new(),
+                reason_code: Some(DeskErrorCode::VIDEO_ENCODER_PREPARE_FAILED),
+                message: Some(message),
+            },
+        },
+    ));
+}
+
+pub(super) fn report_runtime_failed(
+    video_state: &AtomicU8,
+    error_tx: &mpsc::UnboundedSender<WorkerToService>,
+    connection_id: &str,
+    encoder_id: Option<VideoEncoderId>,
+    size: (u32, u32),
+    message: String,
+) {
+    video_state.store(VIDEO_STATE_FAILED, Ordering::Release);
+    error!("[MediaProducer:{connection_id}] {message}");
+    let _ = error_tx.send(WorkerToService::MediaPipelineState(
+        MediaPipelineStatePayload {
+            connection_id: connection_id.to_string(),
+            data: MediaPipelineStateData {
+                phase: MediaPipelinePhase::Failed,
+                encoder: encoder_id,
+                source_resolution: Some(Resolution::new(size.0, size.1)),
+                compatible_encoders: Vec::new(),
+                reason_code: Some(DeskErrorCode::VIDEO_PIPELINE_RUNTIME_FAILED),
+                message: Some(message),
+            },
+        },
+    ));
+}
+
+fn report_streaming(
+    error_tx: &mpsc::UnboundedSender<WorkerToService>,
+    connection_id: &str,
+    encoder_id: Option<VideoEncoderId>,
+    size: (u32, u32),
+) {
+    let _ = error_tx.send(WorkerToService::MediaPipelineState(
+        MediaPipelineStatePayload {
+            connection_id: connection_id.to_string(),
+            data: MediaPipelineStateData {
+                phase: MediaPipelinePhase::Streaming,
+                encoder: encoder_id,
+                source_resolution: Some(Resolution::new(size.0, size.1)),
+                compatible_encoders: Vec::new(),
+                reason_code: None,
+                message: None,
+            },
+        },
+    ));
 }

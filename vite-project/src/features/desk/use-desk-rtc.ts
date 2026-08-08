@@ -242,6 +242,15 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
             console.log('Received INIT', signaling_data);
             setInitData(signaling_data);
 
+        } else if (
+            signaling_type === SIGNALING_TYPE_CODE_OFFER
+            && message.response_state
+            && message.request_id
+        ) {
+            // A media preflight/negotiation rejection is a terminal response
+            // to this OFFER, not lost signaling. Stop the ANSWER watchdog so it
+            // does not resend the same incompatible encoder configuration.
+            coordinatorRef.current?.onOfferRejected(message.request_id);
         } else if (signaling_type === SIGNALING_TYPE_CODE_ANSWER) {
             console.log('Received ANSWER');
             const coordinator = coordinatorRef.current;
@@ -261,6 +270,15 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
                 await pc.setRemoteDescription(new RTCSessionDescription(signaling_data));
                 const ufrag = parseIceUfrag(signaling_data?.sdp);
                 coordinator?.onAnswerApplied(ufrag);
+                // A settings-only renegotiation reuses the already-connected
+                // ICE transport. In that case applying the new ANSWER does not
+                // emit another `iceconnectionstatechange`, so leaving the
+                // coordinator in `checking` would fire its stall watchdog five
+                // seconds later and start an unnecessary ICE restart. Reconcile
+                // the current state synchronously after every ANSWER; initial
+                // negotiation still reports `new`/`checking`, while a stable
+                // transport immediately clears the watchdog as connected.
+                coordinator?.onIceStateChange(pc.iceConnectionState);
                 console.log(`[WebRTC] Remote description set (ufrag=${ufrag}). Flushing ${remoteCandidatesQueue.current.length} queued candidates.`);
 
                 // Flush queued candidates, keeping only those that belong
@@ -346,7 +364,8 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
 
         // Fresh PeerConnection: roll the coordinator's epoch (invalidating
         // any prior PC's late callbacks) and reset the retry budget.
-        const coordinator = coordinatorRef.current!;
+        const coordinator = coordinatorRef.current;
+        if (!coordinator) return;
         coordinator.resetForNewPc();
         const epoch = coordinator.currentEpoch();
 
@@ -471,6 +490,37 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
         });
 
     }, [initData, deskId, sendMessage, sendTracked]);
+
+    const renegotiate = useCallback(async (settings: any) => {
+        const pc = peerConnection.current;
+        if (!pc || pc.signalingState !== 'stable') {
+            // An initial Offer rejection leaves the PC in `have-local-offer`;
+            // only a fresh PC can recover that case safely.
+            await connect(settings);
+            return;
+        }
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        const offerModel = {
+            offer: pc.localDescription,
+            desk_settings: settings,
+        };
+        rtcDeps.current.settings = settings;
+        rtcDeps.current.cachedOfferModel = offerModel;
+
+        const coordinator = coordinatorRef.current;
+        if (!coordinator) return;
+        const requestId = coordinator.beginOffer();
+        sendTracked({
+            type: SIGNALING_TYPE_CODE_OFFER,
+            data: offerModel,
+            toConnectionId: deskId ?? undefined,
+            requestId,
+            replaceKey: offerReplaceKey(deskId),
+            onSent: (id) => coordinator.markOfferSent(id),
+        });
+    }, [connect, deskId, sendTracked]);
 
     const closeRTC = useCallback(() => {
         // Tear down auto-retry first: bump the epoch so any in-flight
@@ -682,6 +732,7 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
         remoteStream,
         initData,
         connect,
+        renegotiate,
         closeRTC,
         mouseChannel,
         keyboardChannel,

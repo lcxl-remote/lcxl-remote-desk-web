@@ -332,6 +332,10 @@ pub enum WorkerToService {
     /// signaling websocket.
     PrivateScreenStateChanged(PrivateScreenStateChangedPayload),
 
+    /// Worker → daemon media state transition. Kept on the reliable event lane
+    /// so a blocked notification cannot be dropped behind video backpressure.
+    MediaPipelineState(MediaPipelineStatePayload),
+
     // ---------- Manager plane (typed) ----------
     /// Worker → daemon response to
     /// [`ServiceToWorker::ManagerSystemInfoRequest`]. Daemon

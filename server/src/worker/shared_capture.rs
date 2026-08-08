@@ -1,4 +1,4 @@
-﻿//! Shared image-capture broadcaster for the worker side.
+//! Shared image-capture broadcaster for the worker side.
 //!
 //! Two browsers connecting to the same desktop both want a frame
 //! stream from `(backend, output_index)` — but the OS-level capture
@@ -89,7 +89,48 @@ pub struct SharedFrame {
     pub dirty_rects: Option<Vec<DirtyRect>>,
     pub content_changed: bool,
     pub cursor_update: Option<CursorSyncData>,
+    /// Monotonically increasing within one shared-capture instance. A frame
+    /// and its geometry snapshot always carry the same generation.
+    pub source_generation: u64,
     pub display_info: DisplayInfo,
+}
+
+#[derive(Clone)]
+struct SharedGeometrySnapshot {
+    generation: u64,
+    display_info: DisplayInfo,
+}
+
+struct SharedGeometryState {
+    snapshot: StdMutex<SharedGeometrySnapshot>,
+}
+
+impl SharedGeometryState {
+    fn new(display_info: DisplayInfo) -> Arc<Self> {
+        Arc::new(Self {
+            snapshot: StdMutex::new(SharedGeometrySnapshot {
+                generation: 1,
+                display_info,
+            }),
+        })
+    }
+
+    fn read(&self) -> SharedGeometrySnapshot {
+        self.snapshot
+            .lock()
+            .expect("shared capture geometry lock poisoned")
+            .clone()
+    }
+
+    fn publish(&self, display_info: DisplayInfo) -> SharedGeometrySnapshot {
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .expect("shared capture geometry lock poisoned");
+        snapshot.generation = snapshot.generation.saturating_add(1);
+        snapshot.display_info = display_info;
+        snapshot.clone()
+    }
 }
 
 impl ImageInfo for SharedFrame {
@@ -118,7 +159,7 @@ struct SharedInner {
     sender: broadcast::Sender<Arc<SharedFrame>>,
     stop_flag: Arc<AtomicBool>,
     join_handle: StdMutex<Option<JoinHandle<()>>>,
-    display_info: DisplayInfo,
+    geometry: Arc<SharedGeometryState>,
     key: CaptureKey,
     /// Weak so registry can outlive an inner that is being dropped
     /// (and so an inner being dropped can call back into the registry
@@ -160,8 +201,9 @@ impl SharedCaptureHandle {
         self.inner.sender.subscribe()
     }
 
-    pub fn display_info(&self) -> &DisplayInfo {
-        &self.inner.display_info
+    pub fn geometry_snapshot(&self) -> (u64, DisplayInfo) {
+        let snapshot = self.inner.geometry.read();
+        (snapshot.generation, snapshot.display_info)
     }
 
     pub fn key(&self) -> &CaptureKey {
@@ -241,11 +283,12 @@ impl SharedCaptureRegistry {
 
         let (sender, _) = broadcast::channel::<Arc<SharedFrame>>(8);
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let geometry = SharedGeometryState::new(display_info);
 
         let sender_for_thread = sender.clone();
         let stop_for_thread = Arc::clone(&stop_flag);
         let key_for_thread = effective_key.clone();
-        let display_info_for_thread = display_info.clone();
+        let geometry_for_thread = Arc::clone(&geometry);
         let join = thread::Builder::new()
             .name(format!(
                 "shared-capture-{}-{}",
@@ -257,7 +300,7 @@ impl SharedCaptureRegistry {
                     sender_for_thread,
                     stop_for_thread,
                     key_for_thread,
-                    display_info_for_thread,
+                    geometry_for_thread,
                 );
             })
             .expect("spawn shared capture thread");
@@ -266,7 +309,7 @@ impl SharedCaptureRegistry {
             sender,
             stop_flag,
             join_handle: StdMutex::new(Some(join)),
-            display_info,
+            geometry,
             key: effective_key.clone(),
             registry: Arc::downgrade(self),
         });
@@ -334,7 +377,7 @@ impl SharedCaptureRegistry {
         let g = self.map.lock().expect("shared capture registry poisoned");
         g.get(key)
             .and_then(|weak| weak.upgrade())
-            .map(|inner| inner.display_info.clone())
+            .map(|inner| inner.geometry.read().display_info)
     }
 
     /// Diagnostic / test introspection: count of live capture loops.
@@ -465,7 +508,7 @@ fn run_capture_loop(
     sender: broadcast::Sender<Arc<SharedFrame>>,
     stop_flag: Arc<AtomicBool>,
     key: CaptureKey,
-    initial_display_info: DisplayInfo,
+    geometry: Arc<SharedGeometryState>,
 ) {
     info!(
         "[SharedCapture:{}/{}] capture loop starting",
@@ -480,25 +523,17 @@ fn run_capture_loop(
         cursor_mode: CursorCaptureMode::SyncNative,
     };
     let mut error_log = CaptureErrorLogState::default();
-    // We grab `display_info` once at loop start and reuse it for every
-    // frame's `SharedFrame::display_info`. Earlier code re-queried via
-    // `capture.get_current_output()` on every tick "in case the user
-    // resized the source display", but:
+    // Geometry is re-queried only on a captured-size edge. This keeps new
+    // subscribers and the frame metadata live without performing expensive
+    // display enumeration at the OS frame rate.
     //
-    //   1. No downstream consumer reads `SharedFrame.display_info` —
-    //      `media_producer` already snapshots `display_info` once at
-    //      pipeline start via `SharedCaptureHandle::display_info()`.
-    //   2. On Windows, `get_current_output` calls `EnumOutputs` +
+    // On Windows, `get_current_output` calls `EnumOutputs` +
     //      `EnumDisplayDevicesW` + `EnumDisplaySettingsW` per call,
     //      each emitting INFO logs from `desk-capture-engine`. At the
     //      OS refresh rate (60+ Hz) this floods the log file at
     //      ~20-25 enumerate-events/second per active capture, which
     //      is what the user observed.
     //
-    // Per-frame `width`/`height`/`stride` continue to come from
-    // `result.image`, so a runtime resolution change is still
-    // reflected in the frame payload — only the unused
-    // `display_info` re-query is removed.
     while !stop_flag.load(Ordering::Acquire) {
         let result = match capture.capture(request) {
             Ok(r) => {
@@ -545,6 +580,27 @@ fn run_capture_loop(
         let height = result.image.get_height();
         let image_type = result.image.get_type();
         let data = Bytes::copy_from_slice(result.image.get_data());
+        let mut geometry_snapshot = geometry.read();
+        if geometry_snapshot
+            .display_info
+            .current_capture_resolution
+            .map(|resolution| (resolution.width, resolution.height))
+            != Some((width, height))
+        {
+            let refreshed = capture.get_current_output().unwrap_or_else(|error| {
+                debug!(
+                    "[SharedCapture:{}/{}] geometry refresh after size edge failed: {error}",
+                    key.backend, key.device_name
+                );
+                geometry_snapshot.display_info.clone()
+            });
+            geometry_snapshot =
+                geometry.publish(display_info_for_frame_size(refreshed, width, height));
+            info!(
+                "[SharedCapture:{}/{}] source geometry generation {} is now {}x{}",
+                key.backend, key.device_name, geometry_snapshot.generation, width, height
+            );
+        }
 
         let frame = Arc::new(SharedFrame {
             data,
@@ -555,7 +611,8 @@ fn run_capture_loop(
             dirty_rects: result.dirty_rects,
             content_changed: result.content_changed,
             cursor_update: result.cursor_update,
-            display_info: initial_display_info.clone(),
+            source_generation: geometry_snapshot.generation,
+            display_info: geometry_snapshot.display_info,
         });
 
         // No subscribers right now is OK — the capture loop only
@@ -570,9 +627,65 @@ fn run_capture_loop(
     );
 }
 
+fn display_info_for_frame_size(
+    mut display_info: DisplayInfo,
+    width: u32,
+    height: u32,
+) -> DisplayInfo {
+    let width_i32 = i32::try_from(width).unwrap_or(i32::MAX);
+    let height_i32 = i32::try_from(height).unwrap_or(i32::MAX);
+    display_info.desktop_coordinates.right = display_info
+        .desktop_coordinates
+        .left
+        .saturating_add(width_i32);
+    display_info.desktop_coordinates.bottom = display_info
+        .desktop_coordinates
+        .top
+        .saturating_add(height_i32);
+    display_info.current_capture_resolution = Some(
+        desk_signal_facade::model::image_capture::Resolution::new(width, height),
+    );
+    display_info
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geometry_publication_is_generation_fenced_and_uses_frame_dimensions() {
+        let initial = DisplayInfo {
+            device_name: "display-1".to_string(),
+            current_capture_resolution: Some(
+                desk_signal_facade::model::image_capture::Resolution::new(1920, 1080),
+            ),
+            ..Default::default()
+        };
+        let geometry = SharedGeometryState::new(initial);
+        let refreshed = display_info_for_frame_size(geometry.read().display_info, 4096, 2160);
+        let published = geometry.publish(refreshed);
+
+        assert_eq!(published.generation, 2);
+        assert_eq!(
+            published.display_info.current_capture_resolution,
+            Some(desk_signal_facade::model::image_capture::Resolution::new(
+                4096, 2160
+            ))
+        );
+        assert_eq!(published.display_info.desktop_coordinates.width(), 4096);
+        assert_eq!(published.display_info.desktop_coordinates.height(), 2160);
+
+        let subscriber_snapshot = geometry.read();
+        assert_eq!(subscriber_snapshot.generation, published.generation);
+        assert_eq!(
+            subscriber_snapshot.display_info.current_capture_resolution,
+            published.display_info.current_capture_resolution
+        );
+        assert_eq!(
+            subscriber_snapshot.display_info.desktop_coordinates.width(),
+            published.display_info.desktop_coordinates.width()
+        );
+    }
 
     /// Smoke test: registry construction is cheap and `live_count`
     /// starts at zero. Guards against an accidental `lazy_static`
@@ -702,7 +815,7 @@ mod tests {
             sender,
             stop_flag: Arc::new(AtomicBool::new(false)),
             join_handle: StdMutex::new(None),
-            display_info: DisplayInfo::default(),
+            geometry: SharedGeometryState::new(DisplayInfo::default()),
             key,
             registry: Weak::new(),
         })
@@ -724,7 +837,7 @@ mod tests {
             sender,
             stop_flag: Arc::new(AtomicBool::new(false)),
             join_handle: StdMutex::new(None),
-            display_info: DisplayInfo::default(),
+            geometry: SharedGeometryState::new(DisplayInfo::default()),
             key,
             registry: Arc::downgrade(registry),
         })
@@ -1058,20 +1171,17 @@ mod tests {
         };
         let initial = DisplayInfo {
             device_name: "test-display".into(),
+            current_capture_resolution: Some(
+                desk_signal_facade::model::image_capture::Resolution::new(4, 4),
+            ),
             ..DisplayInfo::default()
         };
 
         let stop_for_thread = Arc::clone(&stop);
-        let initial_for_thread = initial.clone();
+        let geometry = SharedGeometryState::new(initial);
         let key_for_thread = key.clone();
         let join = std::thread::spawn(move || {
-            run_capture_loop(
-                mock,
-                sender,
-                stop_for_thread,
-                key_for_thread,
-                initial_for_thread,
-            );
+            run_capture_loop(mock, sender, stop_for_thread, key_for_thread, geometry);
         });
 
         for i in 0..5 {

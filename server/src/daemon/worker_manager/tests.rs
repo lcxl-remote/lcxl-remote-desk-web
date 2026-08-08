@@ -241,6 +241,7 @@ async fn worker_capabilities_round_trip() {
         ],
         audio_codecs: vec![desk_ipc_protocol::message::MediaCodec::Opus],
         video_encoders: vec!["X264".to_string(), "H264".to_string(), "VP9".to_string()],
+        video_encoder_capabilities: vec![],
         audio_encoders: vec!["OPUS".to_string()],
         video_device_list: std::collections::BTreeMap::new(),
         audio_device_list: std::collections::BTreeMap::new(),
@@ -284,12 +285,14 @@ async fn set_worker_capabilities_increments_version_and_notifies_watchers() {
             resolutions: vec![],
             attached_to_desktop: true,
             rotation: 0,
+            current_capture_resolution: None,
         }],
     );
     let caps = MediaCapabilities {
         video_codecs: vec![],
         audio_codecs: vec![],
         video_encoders: vec![],
+        video_encoder_capabilities: vec![],
         audio_encoders: vec![],
         video_device_list,
         audio_device_list: std::collections::BTreeMap::new(),
@@ -310,6 +313,7 @@ async fn set_worker_capabilities_increments_version_and_notifies_watchers() {
         video_codecs: vec![],
         audio_codecs: vec![],
         video_encoders: vec![],
+        video_encoder_capabilities: vec![],
         audio_encoders: vec![],
         video_device_list: std::collections::BTreeMap::new(),
         audio_device_list: std::collections::BTreeMap::new(),
@@ -352,6 +356,7 @@ async fn capabilities_contains_display_handles_unset_and_per_backend_buckets() {
         resolutions: vec![],
         attached_to_desktop: true,
         rotation: 0,
+        current_capture_resolution: None,
     };
     video_device_list.insert("wgc".to_string(), vec![display_info("\\\\.\\DISPLAY1")]);
     video_device_list.insert("dxgi".to_string(), vec![display_info("\\\\.\\DISPLAY2")]);
@@ -359,6 +364,7 @@ async fn capabilities_contains_display_handles_unset_and_per_backend_buckets() {
         video_codecs: vec![],
         audio_codecs: vec![],
         video_encoders: vec![],
+        video_encoder_capabilities: vec![],
         audio_encoders: vec![],
         video_device_list,
         audio_device_list: std::collections::BTreeMap::new(),

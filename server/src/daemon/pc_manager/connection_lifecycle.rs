@@ -249,16 +249,41 @@ pub(super) fn register_peer_connection_state_cleanup(
     virtual_display: Option<Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
     connection_id: String,
 ) {
+    // A real ICE restart can temporarily make the RTP path unavailable while
+    // the worker keeps encoding. The first decodable frame after connectivity
+    // returns may therefore be a P-frame whose reference IDR was lost. Track
+    // whether this PC has connected before so every *subsequent* Connected
+    // transition requests a fresh keyframe; the initial connection continues
+    // to rely on StartMedia's normal first-IDR path.
+    let has_connected_once = Arc::new(AtomicBool::new(false));
     pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
         let registry = registry.clone();
         let worker_mgr = worker_mgr.clone();
         let virtual_display = virtual_display.clone();
         let connection_id = connection_id.clone();
+        let has_connected_once = Arc::clone(&has_connected_once);
         Box::pin(async move {
             match state {
                 RTCPeerConnectionState::Connected => {
                     if let Some(activity) = registry.host_activity() {
                         activity.set_pc_connected(&connection_id, true);
+                    }
+                    if mark_connected_and_should_force_keyframe(&has_connected_once) {
+                        log::info!(
+                            "[pc_manager] PC for {connection_id} reconnected; requesting a fresh keyframe"
+                        );
+                        if let Err(e) = worker_mgr
+                            .send_to_worker(ServiceToWorker::ForceKeyframe(
+                                ForceKeyframePayload {
+                                    connection_id: connection_id.clone(),
+                                },
+                            ))
+                            .await
+                        {
+                            log::debug!(
+                                "[pc_manager] reconnect ForceKeyframe for {connection_id} could not reach worker: {e}"
+                            );
+                        }
                     }
                 }
                 RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
@@ -279,6 +304,10 @@ pub(super) fn register_peer_connection_state_cleanup(
             }
         })
     }));
+}
+
+fn mark_connected_and_should_force_keyframe(has_connected_once: &AtomicBool) -> bool {
+    has_connected_once.swap(true, Ordering::AcqRel)
 }
 
 /// Daemon side of `SignalingType::CloseControl`. Removes the
@@ -340,4 +369,21 @@ pub async fn handle_connection_removed(
     // `CloseControl` path — deliberately leaves the admission intact.
     registry.clear_admission(from_connection_id).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_reconnected_peer_requires_an_extra_keyframe() {
+        let has_connected_once = AtomicBool::new(false);
+
+        assert!(!mark_connected_and_should_force_keyframe(
+            &has_connected_once
+        ));
+        assert!(mark_connected_and_should_force_keyframe(
+            &has_connected_once
+        ));
+    }
 }

@@ -16,7 +16,13 @@ Capture backends: Windows (**DXGI / WGC**), Linux (**X11 / Wayland portal + Pipe
 
 The encoder can be auto-selected or pinned via `desk.video_encoder`. Frame rate (`video_fps`), quality (`video_quality`, 0–63, lower is better), and dirty-rectangle incremental encoding (`enable_dirty_rect`) are all configurable — see the [config.toml Reference](/config/config-toml#desktop-desk).
 
-The configured encoder is a **preference**, not an absolute choice: when a client (browser, Android, or iOS) connects, the host negotiates the actual video codec against the codecs that client advertises it can decode in its WebRTC offer. The preferred encoder is honoured when the client can decode it; otherwise the host automatically falls back to the best codec both sides support. This means a client is never sent a codec it cannot decode — no per-client capability configuration is required.
+When the encoder is set to **Auto**, the host selects the first installed encoder whose declared limits accept the selected display resolution and whose codec the controller can decode. The order is stable and runtime-probe-only encoders are not selected automatically. When an encoder is selected explicitly, that choice is strict: the host does not silently substitute another implementation or codec.
+
+### Resolution changes and encoder limits
+
+If the selected encoder cannot accept the current capture dimensions, the host stops before encoding instead of producing an empty video or repeatedly retrying every frame. The browser shows the current resolution, compatible encoders when known, and actions to choose another encoder or retry after changing the host display mode. A mid-session resolution change uses the same check; returning to a supported mode requires **Retry video** unless the platform reports the mode transition automatically.
+
+No CPU-side frame scaling is performed. This avoids the high memory-bandwidth cost of scaling 4K BGRA frames and keeps the captured desktop geometry exact.
 
 ## Audio
 

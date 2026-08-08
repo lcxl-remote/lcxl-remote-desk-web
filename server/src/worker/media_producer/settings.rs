@@ -218,9 +218,10 @@ pub(super) fn replay_bitrate_cap(
 /// encoder default" per the IPC docstring.
 pub(super) fn payload_overrides(base: &DeskSettings, payload: &StartMediaPayload) -> DeskSettings {
     let mut s = base.clone();
-    if let Some(name) = video_codec_name(payload.video_codec) {
-        s.video_encoder = Some(name.to_string());
-    }
+    s.video_encoder = payload
+        .video_encoder
+        .map(|encoder| encoder.setting_name().to_string())
+        .or_else(|| video_codec_name(payload.video_codec).map(str::to_string));
     if payload.fps > 0 {
         s.video_fps = payload.fps;
     }
@@ -294,6 +295,9 @@ pub(super) fn display_info_for_size(base: &DisplayInfo, size: (u32, u32)) -> Dis
         right: left + size.0 as i32,
         bottom: top + size.1 as i32,
     };
+    di.current_capture_resolution = Some(
+        desk_signal_facade::model::image_capture::Resolution::new(size.0, size.1),
+    );
     di
 }
 

@@ -237,6 +237,7 @@ pub fn list_desktop_geometry() -> Vec<DisplayInfo> {
                         },
                         attached_to_desktop: true,
                         rotation: 0,
+                        current_capture_resolution: None,
                         resolutions: vec![],
                     })
                     .collect(),

@@ -12,6 +12,11 @@ import {
 // assert that `setRemoteDescription` precedes every `addIceCandidate`, and
 // that no candidate of a burst was dropped.
 let callLog: string[] = [];
+let peerConnectionCount = 0;
+let peerConnectionCloseCount = 0;
+let latestPeerConnection: MockRTCPeerConnection | null = null;
+let deferSetRemoteDescription = true;
+let iceRestartOfferCount = 0;
 // Captured resolver for the deferred `setRemoteDescription`, so a test can
 // hold the ANSWER handler mid-flight while a candidate burst arrives.
 let resolveSetRemote: (() => void) | null = null;
@@ -42,13 +47,17 @@ class MockRTCPeerConnection {
     localDescription: any = null;
     remoteDescription: any = null;
 
-    constructor(_config: any) {}
+    constructor(_config: any) {
+        peerConnectionCount += 1;
+        latestPeerConnection = this;
+    }
 
     addTransceiver() {}
     createDataChannel() {
         return { onopen: null } as any;
     }
-    async createOffer() {
+    async createOffer(options?: RTCOfferOptions) {
+        if (options?.iceRestart) iceRestartOfferCount += 1;
         return { type: 'offer', sdp: 'v=0\r\na=ice-ufrag:LOCAL\r\n' };
     }
     async setLocalDescription(desc: any) {
@@ -57,6 +66,7 @@ class MockRTCPeerConnection {
     setRemoteDescription(desc: any) {
         callLog.push('setRemote');
         this.remoteDescription = { type: desc.type };
+        if (!deferSetRemoteDescription) return Promise.resolve();
         // Deferred: stays pending until the test resolves it, modelling the
         // async gap during which a trickled candidate burst arrives.
         return new Promise<void>((resolve) => {
@@ -66,7 +76,9 @@ class MockRTCPeerConnection {
     async addIceCandidate(cand: any) {
         callLog.push(`addIce:${cand.candidate}`);
     }
-    close() {}
+    close() {
+        peerConnectionCloseCount += 1;
+    }
 }
 
 function makeSignalingHarness() {
@@ -91,6 +103,11 @@ describe('useDeskRTC inbound signaling drain', () => {
     beforeEach(() => {
         vi.useFakeTimers();
         callLog = [];
+        peerConnectionCount = 0;
+        peerConnectionCloseCount = 0;
+        latestPeerConnection = null;
+        deferSetRemoteDescription = true;
+        iceRestartOfferCount = 0;
         resolveSetRemote = null;
         originalPC = (globalThis as any).RTCPeerConnection;
         originalSDP = (globalThis as any).RTCSessionDescription;
@@ -189,5 +206,89 @@ describe('useDeskRTC inbound signaling drain', () => {
             'addIce:c3',
             'addIce:c4',
         ]);
+    });
+
+    it('renegotiates a stable pipeline without replacing the PeerConnection', async () => {
+        const sendTracked = vi.fn((opts: any) => {
+            opts.onSent?.(opts.requestId);
+            return { requestId: opts.requestId, disposition: 'sent' as const };
+        });
+        const { subscribe, emit } = makeSignalingHarness();
+        const { result } = renderHook(() =>
+            useDeskRTC({
+                deskId: 'desk-1',
+                subscribe,
+                sendMessage: vi.fn(() => 'msg-id'),
+                sendTracked,
+                cancelQueued: vi.fn(),
+            }),
+        );
+
+        await act(async () => {
+            emit({
+                signaling_type: SIGNALING_TYPE_CODE_INIT,
+                signaling_data: { ice_servers: [] },
+            });
+        });
+        await act(async () => {
+            await result.current.connect({ video_encoder: 'H264' });
+            await result.current.renegotiate({ video_encoder: 'X264' });
+        });
+
+        expect(sendTracked).toHaveBeenCalledTimes(2);
+        expect(peerConnectionCount).toBe(1);
+        expect(peerConnectionCloseCount).toBe(0);
+    });
+
+    it('does not ICE-restart after a settings-only renegotiation on an already connected transport', async () => {
+        const requestIds: string[] = [];
+        const sendTracked = vi.fn((opts: any) => {
+            requestIds.push(opts.requestId);
+            opts.onSent?.(opts.requestId);
+            return { requestId: opts.requestId, disposition: 'sent' as const };
+        });
+        const { subscribe, emit } = makeSignalingHarness();
+        const { result } = renderHook(() =>
+            useDeskRTC({
+                deskId: 'desk-1',
+                subscribe,
+                sendMessage: vi.fn(() => 'msg-id'),
+                sendTracked,
+                cancelQueued: vi.fn(),
+            }),
+        );
+
+        await act(async () => {
+            emit({
+                signaling_type: SIGNALING_TYPE_CODE_INIT,
+                signaling_data: { ice_servers: [] },
+            });
+        });
+        await act(async () => {
+            await result.current.connect({ video_encoder: 'H264' });
+            await result.current.renegotiate({ video_encoder: 'X264' });
+        });
+
+        // This is the exact encoder-switch shape from the repro: SDP changes
+        // while the existing ICE transport is still connected. Browsers do
+        // not emit a new state-change event merely because the ANSWER landed.
+        expect(latestPeerConnection).not.toBeNull();
+        latestPeerConnection!.iceConnectionState = 'connected';
+        deferSetRemoteDescription = false;
+        await act(async () => {
+            emit({
+                request_id: requestIds[1],
+                signaling_type: SIGNALING_TYPE_CODE_ANSWER,
+                signaling_data: { type: 'answer', sdp: 'a=ice-ufrag:REMOTE-2\r\n' },
+            });
+            await Promise.resolve();
+        });
+
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(5001);
+        });
+
+        expect(iceRestartOfferCount).toBe(0);
+        expect(sendTracked).toHaveBeenCalledTimes(2);
     });
 });

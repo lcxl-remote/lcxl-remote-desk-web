@@ -126,6 +126,10 @@ mod init_signaling_data_tests {
         // the browser falls back to a generic (Windows) shortcut menu rather
         // than mislabelling the host.
         assert_eq!(data.operation_system, OperationSystemEnum::Other);
+        assert!(
+            data.video_encoder_capabilities.is_empty(),
+            "legacy Init payloads must decode missing encoder capabilities as unknown"
+        );
     }
 
     /// A host that advertises its OS must round-trip so the browser can tailor

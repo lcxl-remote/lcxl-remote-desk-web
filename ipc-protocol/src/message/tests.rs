@@ -1,6 +1,9 @@
 use super::*;
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
+use desk_signal_facade::model::image_capture::Resolution;
+use desk_signal_facade::model::media_capability::VideoEncoderId;
+use desk_signal_facade::model::media_pipeline::{MediaPipelinePhase, MediaPipelineStateData};
 use desk_signal_facade::model::policy_snapshot::{PolicyGenerations, PolicySnapshot};
 use desk_signal_facade::model::private_screen::PrivateScreenStateChangedData;
 use desk_signal_facade::model::security_settings::{SecurityPermissionType, SecuritySettings};
@@ -131,6 +134,7 @@ fn start_media_round_trips_wincode() {
     let msg = ServiceToWorker::StartMedia(StartMediaPayload {
         connection_id: "conn-1".to_string(),
         video_codec: MediaCodec::H264,
+        video_encoder: Some(VideoEncoderId::X264),
         audio_codec: MediaCodec::Opus,
         video_device: Some("\\\\.\\DISPLAY1".to_string()),
         audio_device: None,
@@ -146,6 +150,7 @@ fn start_media_round_trips_wincode() {
         ServiceToWorker::StartMedia(p) => {
             assert_eq!(p.connection_id, "conn-1");
             assert_eq!(p.video_codec, MediaCodec::H264);
+            assert_eq!(p.video_encoder, Some(VideoEncoderId::X264));
             assert_eq!(p.audio_codec, MediaCodec::Opus);
             assert_eq!(p.fps, 60);
             assert!(p.start_video);
@@ -169,6 +174,7 @@ fn start_media_data_channel_only_round_trips() {
     let msg = ServiceToWorker::StartMedia(StartMediaPayload {
         connection_id: "conn-files".to_string(),
         video_codec: MediaCodec::H264,
+        video_encoder: None,
         audio_codec: MediaCodec::Opus,
         video_device: None,
         audio_device: None,
@@ -336,6 +342,7 @@ fn capabilities_round_trips_wincode() {
             resolutions: vec![],
             attached_to_desktop: true,
             rotation: 0,
+            current_capture_resolution: None,
         }],
     );
     let mut audio_device_list: BTreeMap<String, Vec<AudioDevice>> = BTreeMap::new();
@@ -352,6 +359,7 @@ fn capabilities_round_trips_wincode() {
         video_codecs: vec![MediaCodec::H264, MediaCodec::Vp9],
         audio_codecs: vec![MediaCodec::Opus],
         video_encoders: vec!["X264".to_string(), "H264".to_string(), "VP9".to_string()],
+        video_encoder_capabilities: vec![],
         audio_encoders: vec!["OPUS".to_string()],
         video_device_list: video_device_list.clone(),
         audio_device_list: audio_device_list.clone(),
@@ -1066,6 +1074,7 @@ fn service_to_worker_all_variants_round_trip() {
         ServiceToWorker::StartMedia(StartMediaPayload {
             connection_id: "c".to_string(),
             video_codec: MediaCodec::H264,
+            video_encoder: None,
             audio_codec: MediaCodec::Opus,
             video_device: None,
             audio_device: None,
@@ -1419,6 +1428,17 @@ fn worker_to_service_all_variants_round_trip() {
                 error_msg: None,
             },
         }),
+        WorkerToService::MediaPipelineState(MediaPipelineStatePayload {
+            connection_id: "c".to_string(),
+            data: MediaPipelineStateData {
+                phase: MediaPipelinePhase::Blocked,
+                encoder: Some(VideoEncoderId::OpenH264),
+                source_resolution: Some(Resolution::new(4096, 2160)),
+                compatible_encoders: vec![VideoEncoderId::X264],
+                reason_code: None,
+                message: Some("unsupported dimensions".to_string()),
+            },
+        }),
         WorkerToService::ManagerSystemInfoResponse(ManagerSystemInfoResponsePayload {
             request_id: "r".to_string(),
             connection_id: Some("c".to_string()),
@@ -1557,6 +1577,8 @@ fn signaling_error_round_trips_wincode_for_every_signaling_type() {
         SignalingType::EnablePrivateScreen,
         SignalingType::PrivateScreenStateChanged,
         SignalingType::AudioPlaybackError,
+        SignalingType::MediaPipelineStateChanged,
+        SignalingType::RetryMediaPipeline,
         SignalingType::UpdateDeskSettings,
         SignalingType::ManagerSystemInfo,
         SignalingType::ManagerSystemStatue,
@@ -1577,7 +1599,7 @@ fn signaling_error_round_trips_wincode_for_every_signaling_type() {
     ];
     assert_eq!(
         all_types.len(),
-        34,
+        36,
         "SignalingType variant count drift — add new variant + tag here"
     );
     for ty in all_types {

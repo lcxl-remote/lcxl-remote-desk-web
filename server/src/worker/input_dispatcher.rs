@@ -556,6 +556,7 @@ mod tests {
         StartMediaPayload {
             connection_id: connection_id.to_string(),
             video_codec: desk_ipc_protocol::message::MediaCodec::H264,
+            video_encoder: None,
             audio_codec: desk_ipc_protocol::message::MediaCodec::Opus,
             video_device: None,
             audio_device: None,
@@ -667,6 +668,7 @@ mod tests {
             display_device_name: None,
             attached_to_desktop: true,
             rotation: 0,
+            current_capture_resolution: None,
             resolutions: Vec::new(),
             desktop_coordinates: DisplayRect {
                 left,

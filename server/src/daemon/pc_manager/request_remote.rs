@@ -171,6 +171,7 @@ pub async fn handle_request_remote(
     let (
         audio_encoder_list,
         video_encoder_list,
+        video_encoder_capabilities,
         audio_device_list,
         video_device_list,
         is_admin_value,
@@ -200,18 +201,25 @@ pub async fn handle_request_remote(
         (
             audio_encoder_list,
             video_encoder_list,
+            caps.video_encoder_capabilities.clone(),
             caps.audio_device_list.clone(),
             caps.video_device_list.clone(),
             caps.is_admin,
         )
     } else {
-        (
-            list_audio_encoder(),
-            list_video_encoder(),
-            std::collections::BTreeMap::new(),
-            std::collections::BTreeMap::new(),
-            desk_utils::permission::is_admin(),
-        )
+        {
+            let video_encoder_list = list_video_encoder();
+            (
+                list_audio_encoder(),
+                video_encoder_list.clone(),
+                desk_signal_facade::model::media_capability::capabilities_for_encoder_names(
+                    &video_encoder_list,
+                ),
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeMap::new(),
+                desk_utils::permission::is_admin(),
+            )
+        }
     };
     // Adaptive-resolution metadata. The browser hook uses
     // `virtual_display_active` to decide whether to start its
@@ -244,6 +252,7 @@ pub async fn handle_request_remote(
         audio_encoder_list,
         video_device_list,
         video_encoder_list,
+        video_encoder_capabilities,
         desk_settings: settings.desk.clone(),
         has_tauri,
         is_admin: is_admin_value,

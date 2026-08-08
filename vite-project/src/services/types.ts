@@ -676,6 +676,11 @@ export const deskErrorCodeEnum = {
     AI_CONTENT_BLOCKED: 86,
     AI_CONTENT_SAFETY_UNAVAILABLE: 87,
     AI_CONTENT_SAFETY_IMAGE_UNSUPPORTED: 88,
+    VIDEO_ENCODER_DIMENSIONS_UNSUPPORTED: 89,
+    VIDEO_ENCODER_PREPARE_FAILED: 90,
+    VIDEO_PIPELINE_RENEGOTIATION_REQUIRED: 91,
+    VIDEO_PIPELINE_RESTART_FAILED: 92,
+    VIDEO_PIPELINE_RUNTIME_FAILED: 93,
     CONNECTION_UNREACHABLE: 64,
     CONNECTION_NOT_SIGNALING: 65,
     CONNECTION_AUTH_FAILED: 66,
@@ -1205,6 +1210,24 @@ export type DiagnoseSessionSnapshotDto = {
 };
 
 /**
+ * @description Resolution Struct
+*/
+export type Resolution = {
+    /**
+     * @description Height of the resolution in pixels
+     * @minLength 0
+     * @type integer, int32
+    */
+    height: number;
+    /**
+     * @description Width of the resolution in pixels
+     * @minLength 0
+     * @type integer, int32
+    */
+    width: number;
+};
+
+/**
  * @description Display Rectangle Struct
 */
 export type DisplayRect = {
@@ -1231,24 +1254,6 @@ export type DisplayRect = {
 };
 
 /**
- * @description Resolution Struct
-*/
-export type Resolution = {
-    /**
-     * @description Height of the resolution in pixels
-     * @minLength 0
-     * @type integer, int32
-    */
-    height: number;
-    /**
-     * @description Width of the resolution in pixels
-     * @minLength 0
-     * @type integer, int32
-    */
-    width: number;
-};
-
-/**
  * @description Display Info
 */
 export type DisplayInfo = {
@@ -1257,6 +1262,7 @@ export type DisplayInfo = {
      * @type boolean
     */
     attached_to_desktop: boolean;
+    current_capture_resolution?: (null | Resolution);
     /**
      * @description Display Rectangle Struct
      * @type object
@@ -1325,6 +1331,34 @@ export type DownloadResponse = {
  * @description Marker used only to describe an envelope whose `data` member is null.
 */
 export type EmptyResponseDto = object;
+
+export type EncoderInputLimits = {
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    height_alignment: number;
+    max_landscape?: (null | Resolution);
+    max_portrait?: (null | Resolution);
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    width_alignment: number;
+};
+
+export const encoderInputSupportEnum = {
+    RuntimeProbeRequired: "RuntimeProbeRequired"
+} as const;
+
+export type EncoderInputSupportEnumKey = (typeof encoderInputSupportEnum)[keyof typeof encoderInputSupportEnum];
+
+export type EncoderInputSupport = ({
+    /**
+     * @type object
+    */
+    Known: EncoderInputLimits;
+} | EncoderInputSupportEnumKey);
 
 export type UploadRequest = {
     /**
@@ -1538,6 +1572,30 @@ export type LcxlRTCIceServer = {
     username: string;
 };
 
+export const videoEncoderIdEnum = {
+    X264: "X264",
+    OpenH264: "OpenH264",
+    VP8: "VP8",
+    VP9: "VP9",
+    AV1: "AV1"
+} as const;
+
+export type VideoEncoderIdEnumKey = (typeof videoEncoderIdEnum)[keyof typeof videoEncoderIdEnum];
+
+/**
+ * @description Concrete video encoder implementation.\n\nThis is intentionally distinct from the RTP codec: X264 and OpenH264\nboth produce H.264, but the worker must preserve which implementation\nthe controller selected.
+*/
+export type VideoEncoderId = VideoEncoderIdEnumKey;
+
+export type VideoEncoderCapability = {
+    /**
+     * @description Concrete video encoder implementation.\n\nThis is intentionally distinct from the RTP codec: X264 and OpenH264\nboth produce H.264, but the worker must preserve which implementation\nthe controller selected.
+     * @type string
+    */
+    id: VideoEncoderId;
+    input_support: EncoderInputSupport;
+};
+
 /**
  * @description InitSignalingData is used to initialize signaling data.\ndesk server -> signaling server -> web browser\nSee <https://github.com/webrtc-rs/webrtc/blob/254bdd5d970933e847dc000de9545040ce16f19f/webrtc/src/peer_connection/configuration.rs>.
 */
@@ -1595,6 +1653,11 @@ export type InitSignalingData = {
     video_device_list: {
         [key: string]: DisplayInfo[];
     };
+    /**
+     * @description Concrete encoder input constraints. Empty means a legacy host.
+     * @type array | undefined
+    */
+    video_encoder_capabilities?: VideoEncoderCapability[];
     /**
      * @description Video encoder list
      * @type array
@@ -1875,6 +1938,37 @@ export type ManagerLinkStatus = {
      * @type string,null
     */
     message?: string | null;
+};
+
+export const mediaPipelinePhaseEnum = {
+    streaming: "streaming",
+    blocked: "blocked",
+    failed: "failed"
+} as const;
+
+export type MediaPipelinePhaseEnumKey = (typeof mediaPipelinePhaseEnum)[keyof typeof mediaPipelinePhaseEnum];
+
+export type MediaPipelinePhase = MediaPipelinePhaseEnumKey;
+
+/**
+ * @description Browser-visible state for one host-side media pipeline.\n\nA blocked pipeline is deliberately not represented as an empty video: the\ncontroller receives this typed state even when the SDP answer contains no\nactive video track or the worker exits before its first encoded frame.
+*/
+export type MediaPipelineStateData = {
+    /**
+     * @type array | undefined
+    */
+    compatible_encoders?: VideoEncoderId[];
+    encoder?: (null | VideoEncoderId);
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type string
+    */
+    phase: MediaPipelinePhase;
+    reason_code?: (null | DeskErrorCode);
+    source_resolution?: (null | Resolution);
 };
 
 export const responseFormatModeEnum = {

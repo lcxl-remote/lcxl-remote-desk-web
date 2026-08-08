@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/select"
 import { Slider } from "@/components/ui/slider"
 import { TabsContent } from "@/components/ui/tabs"
-import type { InitSignalingData } from "@/services/types"
+import type { EncoderInputLimits, InitSignalingData, Resolution, VideoEncoderId } from "@/services/types"
 import type { DeskConfigFormSettings } from "./desk-config-model"
 
 type DeskConfigAdvancedTabProps = {
@@ -41,6 +41,30 @@ export function DeskConfigAdvancedTab({
     onAdaptiveQualityChange,
 }: DeskConfigAdvancedTabProps) {
     const { t } = useTranslation()
+    const captureMode = form.watch("image_capture")
+    const deviceName = form.watch("video_device_name")
+    const display = captureMode
+        ? initData?.video_device_list?.[captureMode]?.find(
+            candidate => candidate.device_name === deviceName,
+        )
+        : undefined
+    const sourceResolution = display?.current_capture_resolution ?? (
+        display && display.desktop_coordinates.right > display.desktop_coordinates.left
+            && display.desktop_coordinates.bottom > display.desktop_coordinates.top
+            ? {
+                width: display.desktop_coordinates.right - display.desktop_coordinates.left,
+                height: display.desktop_coordinates.bottom - display.desktop_coordinates.top,
+            }
+            : undefined
+    )
+
+    const encoderCompatible = (settingName: string) => {
+        if (!sourceResolution) return true
+        const id = encoderIdForSetting(settingName)
+        const capability = initData?.video_encoder_capabilities?.find(item => item.id === id)
+        if (!capability || capability.input_support === "RuntimeProbeRequired") return true
+        return limitsAcceptResolution(capability.input_support.Known, sourceResolution)
+    }
 
     return (
         <TabsContent className="space-y-4 pt-4" value="advanced">
@@ -69,8 +93,15 @@ export function DeskConfigAdvancedTab({
                                         {t("pages.desk.autoBackendControl")}
                                     </SelectItem>
                                     {initData?.video_encoder_list?.map((encoder) => (
-                                        <SelectItem key={encoder} value={encoder}>
+                                        <SelectItem
+                                            disabled={!encoderCompatible(encoder)}
+                                            key={encoder}
+                                            value={encoder}
+                                        >
                                             {encoder}
+                                            {!encoderCompatible(encoder)
+                                                ? ` — ${t("pages.desk.mediaPipeline.unsupportedAtResolution")}`
+                                                : ""}
                                         </SelectItem>
                                     ))}
                                 </SelectContent>
@@ -225,4 +256,26 @@ export function DeskConfigAdvancedTab({
             />
         </TabsContent>
     )
+}
+
+export function encoderIdForSetting(settingName: string): VideoEncoderId | undefined {
+    switch (settingName.toUpperCase()) {
+        case "X264": return "X264"
+        case "H264":
+        case "OPENH264": return "OpenH264"
+        case "VP8": return "VP8"
+        case "VP9": return "VP9"
+        case "AV1": return "AV1"
+        default: return undefined
+    }
+}
+
+export function limitsAcceptResolution(limits: EncoderInputLimits, source: Resolution): boolean {
+    if (source.width <= 0 || source.height <= 0) return false
+    if (limits.width_alignment > 1 && source.width % limits.width_alignment !== 0) return false
+    if (limits.height_alignment > 1 && source.height % limits.height_alignment !== 0) return false
+    const maximum = source.width >= source.height
+        ? limits.max_landscape
+        : limits.max_portrait
+    return !maximum || (source.width <= maximum.width && source.height <= maximum.height)
 }

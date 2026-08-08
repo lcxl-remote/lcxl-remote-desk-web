@@ -29,12 +29,27 @@ fn owner_plane_frames_are_classified_for_code_session_denial() {
         ManagerFileDelete,
         EnablePrivateScreen,
         UpdateDeskSettings,
+        RetryMediaPipeline,
     ] {
         assert!(
             !is_owner_plane_management_frame(t),
             "{t:?} must NOT be owner-plane (a code-session legitimately uses it)"
         );
     }
+}
+
+#[test]
+fn media_pipeline_signaling_discriminants_are_stable() {
+    assert_eq!(SignalingType::MediaPipelineStateChanged as i32, 217);
+    assert_eq!(SignalingType::RetryMediaPipeline as i32, 218);
+    assert_eq!(
+        serde_json::to_string(&SignalingType::MediaPipelineStateChanged).unwrap(),
+        "217"
+    );
+    assert!(matches!(
+        serde_json::from_str::<SignalingType>("218").unwrap(),
+        SignalingType::RetryMediaPipeline
+    ));
 }
 
 /// `ConnectionRemoved` is the wire-level marker the daemon's

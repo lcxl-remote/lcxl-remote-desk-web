@@ -1,8 +1,23 @@
 use super::*;
 use crate::model::settings::{SharedSettings, StartupMode, SystemSettings, TraversalMode};
 use desk_ipc_protocol::message::MediaCodec;
+use desk_signal_facade::model::media_capability::{VideoEncoderCapability, VideoEncoderId};
 use desk_signal_facade::model::signal::{LcxlRTCIceServer, RemoteSessionPurpose};
 use desk_turn::model::TurnSettings;
+
+fn encoder_for_negotiated_codec(
+    preferred: VideoEncoderType,
+    codec: MediaCodec,
+) -> Option<VideoEncoderId> {
+    if video_encoder_to_media_codec(preferred) == codec {
+        return Some(preferred.into());
+    }
+
+    list_video_encoder()
+        .iter()
+        .filter_map(|name| VideoEncoderId::from_setting_name(name))
+        .find(|id| video_encoder_to_media_codec(VideoEncoderType::from(*id)) == codec)
+}
 
 // ============== DaemonFtWindow ==============
 
@@ -42,6 +57,47 @@ fn start_media_payload_video_device_is_some_when_settings_set() {
         video_device_for_payload(r"\\.\DISPLAY7"),
         Some(r"\\.\DISPLAY7".to_string())
     );
+}
+
+#[test]
+fn blocked_same_codec_renegotiation_restarts_but_codec_change_requires_reconnect() {
+    let x264 = NegotiatedVideo {
+        codec: MediaCodec::H264,
+        encoder: VideoEncoderId::X264,
+    };
+    assert!(should_restart_negotiated_pipeline(
+        false,
+        true,
+        true,
+        Some(x264),
+    ));
+    assert!(!renegotiation_requires_full_reconnect(
+        true,
+        Some(MediaCodec::H264),
+        Some(MediaCodec::H264),
+    ));
+    assert!(renegotiation_requires_full_reconnect(
+        true,
+        Some(MediaCodec::H264),
+        Some(MediaCodec::Vp9),
+    ));
+}
+
+#[test]
+fn blocked_video_initial_start_preserves_requested_audio() {
+    assert_eq!(initial_worker_media_flags(true, true, true), (false, true));
+    assert_eq!(
+        initial_worker_media_flags(true, false, true),
+        (false, false)
+    );
+    assert_eq!(initial_worker_media_flags(true, true, false), (true, true));
+}
+
+#[test]
+fn retry_requires_a_fresh_offer_when_sdp_has_no_video_sender() {
+    assert!(retry_requires_renegotiation(false, true, true));
+    assert!(retry_requires_renegotiation(false, false, false));
+    assert!(!retry_requires_renegotiation(true, true, true));
 }
 
 // ============== SDP max-message-size parser ==============
@@ -713,6 +769,7 @@ fn start_media_payload_for(connection_id: &str) -> StartMediaPayload {
     StartMediaPayload {
         connection_id: connection_id.to_string(),
         video_codec: MediaCodec::H264,
+        video_encoder: None,
         audio_codec: MediaCodec::Opus,
         video_device: None,
         audio_device: None,
@@ -1135,7 +1192,12 @@ async fn reset_media_for_pauses_pc_even_without_cached_offer() {
     let settings = actix_web::web::Data::new(shared);
     let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
 
-    registry.reset_media_for("conn-stuck", &worker_mgr).await;
+    let outcome = registry.reset_media_for("conn-stuck", &worker_mgr).await;
+
+    assert_eq!(
+        outcome,
+        RestartOutcome::NoCachedPayload { left_paused: true }
+    );
 
     let ctx = registry.get("conn-stuck").await.unwrap();
     assert!(
@@ -1317,6 +1379,7 @@ async fn handle_request_remote_uses_worker_capabilities_when_present() {
         video_codecs: vec![MediaCodec::Vp9, MediaCodec::Av1],
         audio_codecs: vec![MediaCodec::Opus],
         video_encoders: vec!["VP9".to_string(), "AV1".to_string()],
+        video_encoder_capabilities: vec![],
         audio_encoders: vec!["OPUS".to_string()],
         video_device_list: std::collections::BTreeMap::new(),
         audio_device_list: std::collections::BTreeMap::new(),
@@ -1605,6 +1668,7 @@ async fn handle_request_remote_preserves_x264_h264_distinction_in_encoder_list()
         audio_codecs: vec![MediaCodec::Opus],
         // UI layer: both implementations remain distinct.
         video_encoders: vec!["X264".to_string(), "VP9".to_string(), "H264".to_string()],
+        video_encoder_capabilities: vec![],
         audio_encoders: vec!["OPUS".to_string()],
         video_device_list: std::collections::BTreeMap::new(),
         audio_device_list: std::collections::BTreeMap::new(),
@@ -2382,9 +2446,8 @@ fn media_codec_to_str_is_total_over_known_codecs() {
     }
 }
 
-/// `video_encoder_to_media_codec` must collapse X264 + H264 to
-/// the same `MediaCodec::H264` (both are H.264 encoders, the
-/// daemon doesn't differentiate them on the wire).
+/// X264 and OpenH264 share the RTP codec while retaining distinct concrete
+/// identities for the worker payload.
 #[test]
 fn video_encoder_to_media_codec_collapses_x264_and_h264() {
     assert_eq!(
@@ -2399,6 +2462,143 @@ fn video_encoder_to_media_codec_collapses_x264_and_h264() {
         video_encoder_to_media_codec(VideoEncoderType::VP8),
         MediaCodec::Vp8
     );
+    assert_eq!(
+        encoder_for_negotiated_codec(VideoEncoderType::X264, MediaCodec::H264),
+        Some(VideoEncoderId::X264)
+    );
+    assert_eq!(
+        encoder_for_negotiated_codec(VideoEncoderType::H264, MediaCodec::H264),
+        Some(VideoEncoderId::OpenH264)
+    );
+}
+
+#[test]
+fn auto_encoder_uses_known_compatible_order_before_sdp_freeze() {
+    let capabilities = MediaCapabilities {
+        video_encoders: vec!["H264".to_string(), "X264".to_string(), "VP8".to_string()],
+        video_encoder_capabilities: vec![
+            VideoEncoderCapability::for_id(VideoEncoderId::OpenH264),
+            VideoEncoderCapability::for_id(VideoEncoderId::X264),
+            VideoEncoderCapability::for_id(VideoEncoderId::Vp8),
+        ],
+        ..Default::default()
+    };
+    let selected = select_video_for_offer(
+        None,
+        &[MediaCodec::H264, MediaCodec::Vp8],
+        &capabilities,
+        Some(Resolution::new(4096, 2160)),
+    )
+    .unwrap();
+    assert_eq!(
+        selected,
+        Some(NegotiatedVideo {
+            codec: MediaCodec::H264,
+            encoder: VideoEncoderId::X264,
+        })
+    );
+}
+
+#[test]
+fn auto_skips_runtime_probe_and_reports_no_candidate() {
+    let capabilities = MediaCapabilities {
+        video_encoders: vec!["H264".to_string(), "VP8".to_string()],
+        video_encoder_capabilities: vec![
+            VideoEncoderCapability::for_id(VideoEncoderId::OpenH264),
+            VideoEncoderCapability::for_id(VideoEncoderId::Vp8),
+        ],
+        ..Default::default()
+    };
+    assert_eq!(
+        select_video_for_offer(
+            None,
+            &[MediaCodec::H264, MediaCodec::Vp8],
+            &capabilities,
+            Some(Resolution::new(4096, 2160)),
+        )
+        .unwrap(),
+        None,
+    );
+}
+
+#[test]
+fn explicit_openh264_rejects_dci_4k_without_falling_to_another_codec() {
+    let capabilities = MediaCapabilities {
+        video_encoders: vec!["H264".to_string(), "X264".to_string()],
+        video_encoder_capabilities: vec![
+            VideoEncoderCapability::for_id(VideoEncoderId::OpenH264),
+            VideoEncoderCapability::for_id(VideoEncoderId::X264),
+        ],
+        ..Default::default()
+    };
+    let error = select_video_for_offer(
+        Some("H264"),
+        &[MediaCodec::H264],
+        &capabilities,
+        Some(Resolution::new(4096, 2160)),
+    )
+    .expect_err("explicit OpenH264 must fail instead of silently switching implementation");
+    assert_eq!(
+        error.error_code,
+        DeskErrorCode::VIDEO_ENCODER_DIMENSIONS_UNSUPPORTED
+    );
+}
+
+#[test]
+fn unavailable_encoder_is_a_video_block_with_its_original_reason_code() {
+    let capabilities = MediaCapabilities {
+        video_encoders: vec!["X264".to_string()],
+        video_encoder_capabilities: vec![VideoEncoderCapability::for_id(VideoEncoderId::X264)],
+        ..Default::default()
+    };
+    let error = select_video_for_offer(
+        Some("H264"),
+        &[MediaCodec::H264],
+        &capabilities,
+        Some(Resolution::new(1920, 1080)),
+    )
+    .expect_err("an uninstalled explicit encoder must be blocked");
+    assert!(is_video_offer_blocking_error(error.error_code));
+
+    let state = blocked_offer_state(
+        Some(VideoEncoderId::OpenH264),
+        Some(Resolution::new(1920, 1080)),
+        vec![VideoEncoderId::X264],
+        Some(&error),
+    );
+    assert_eq!(state.phase, MediaPipelinePhase::Blocked);
+    assert_eq!(state.reason_code, Some(DeskErrorCode::FEATURE_UNAVAILABLE));
+    assert_eq!(state.encoder, Some(VideoEncoderId::OpenH264));
+    assert_eq!(state.compatible_encoders, vec![VideoEncoderId::X264]);
+}
+
+#[test]
+fn unknown_encoder_remains_an_invalid_offer_instead_of_a_video_block() {
+    assert!(!is_video_offer_blocking_error(
+        DeskErrorCode::INVALID_PARAMS
+    ));
+}
+
+#[test]
+fn legacy_display_geometry_does_not_masquerade_as_capture_resolution() {
+    let mut settings = desk_signal_facade::model::desk_settings::DeskSettings::default();
+    settings.image_capture = Some("TEST".to_string());
+    settings.video_device_name = "display-1".to_string();
+
+    let mut display = desk_signal_facade::model::image_capture::DisplayInfo {
+        device_name: "display-1".to_string(),
+        attached_to_desktop: true,
+        current_capture_resolution: None,
+        ..Default::default()
+    };
+    display.desktop_coordinates.right = 4096;
+    display.desktop_coordinates.bottom = 2160;
+    let capabilities = MediaCapabilities {
+        video_device_list: std::collections::BTreeMap::from([("TEST".to_string(), vec![display])]),
+        ..Default::default()
+    };
+
+    assert_eq!(selected_capture_resolution(&settings, &capabilities), None);
 }
 
 // ============== DataChannel routing tests ==============

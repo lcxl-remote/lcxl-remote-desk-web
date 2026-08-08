@@ -87,6 +87,7 @@ fn test_display_info() -> DisplayInfo {
         resolutions: vec![],
         attached_to_desktop: true,
         rotation: 0,
+        current_capture_resolution: None,
     }
 }
 

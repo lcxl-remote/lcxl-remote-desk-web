@@ -56,6 +56,7 @@ use desk_ipc_protocol::message::{
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams};
+use desk_signal_facade::model::media_pipeline::{MediaPipelinePhase, MediaPipelineStateData};
 use desk_signal_facade::model::private_screen::EnablePrivateScreenData;
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_signal_facade::model::signal::{
@@ -69,7 +70,9 @@ use desk_utils::error::DeskErrorCode;
 use desk_virtual_display::{VirtualDisplayMode, validate_mode};
 use tokio::sync::broadcast;
 
-use crate::daemon::pc_manager::{self, PcRegistry};
+use crate::daemon::pc_manager::{
+    self, MediaRestartStage, MediaRestartTrigger, MediaRetryAdmission, PcRegistry, RestartOutcome,
+};
 use crate::daemon::virtual_display::{EnsureAttachedOutcome, VirtualDisplaySupervisor};
 use crate::daemon::worker_manager::WorkerManager;
 use crate::diagnose::DiagnoseOrchestrator;
@@ -178,6 +181,7 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         //   inbound copy is a protocol error — swallow.
         SignalingType::PrivateScreenStateChanged
         | SignalingType::AudioPlaybackError
+        | SignalingType::MediaPipelineStateChanged
         | SignalingType::ManagerSystemStatue
         | SignalingType::ReplyFromTerminal
         | SignalingType::TerminalStarted
@@ -190,6 +194,11 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::ExecResult
         | SignalingType::ExecLifecycle
         | SignalingType::ExecStateReply => RouteOwnership::Daemon,
+
+        // Browser → daemon media control. This is a local bounded restart of
+        // the already-negotiated pipeline and never enters the worker's generic
+        // signaling dispatcher.
+        SignalingType::RetryMediaPipeline => RouteOwnership::Daemon,
 
         // AI Diagnose request: control end → daemon. Unlike `AgentRequest`
         // (worker-bound raw capability call), the diagnose orchestrator runs
@@ -815,9 +824,35 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             if offer.offer.sdp.contains("m=video") {
                 promote_desktop_resources(model, ctx, "video offer").await?;
             }
-            pc_manager::handle_offer(&ctx.pc_registry, &ctx.outbound_tx, &ctx.worker_mgr, model)
-                .await?;
-            Ok(())
+            match pc_manager::handle_offer(
+                &ctx.pc_registry,
+                &ctx.outbound_tx,
+                &ctx.worker_mgr,
+                model,
+            )
+            .await
+            {
+                Ok(()) => Ok(()),
+                Err(DeskError::CustomError(error))
+                    if is_offer_business_error(error.error_code) =>
+                {
+                    let response = SignalingModel::error(
+                        &model.request_id,
+                        SignalingType::Offer,
+                        None,
+                        model.from_connection_id.clone(),
+                        error.error_code,
+                        &error.message,
+                    );
+                    if let Ok(response) = response
+                        && let Ok(text) = serde_json::to_string(&response)
+                    {
+                        let _ = ctx.outbound_tx.send(text);
+                    }
+                    Ok(())
+                }
+                Err(error) => Err(error.into()),
+            }
         }
         SignalingType::Canid => {
             pc_manager::handle_canid(&ctx.pc_registry, model).await?;
@@ -864,6 +899,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             update_exclusive_after_control_change(ctx, &outcome).await;
             Ok(())
         }
+        SignalingType::RetryMediaPipeline => handle_retry_media_pipeline(ctx, model).await,
         // Daemon-emitted or dead inbound; the browser should never
         // send these at us but if it does, swallow rather than
         // routing onward. See classify() doc-comments for per-variant
@@ -876,6 +912,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         | SignalingType::DenyControl
         | SignalingType::PrivateScreenStateChanged
         | SignalingType::AudioPlaybackError
+        | SignalingType::MediaPipelineStateChanged
         | SignalingType::ManagerSystemStatue
         | SignalingType::ReplyFromTerminal
         | SignalingType::TerminalStarted
@@ -1019,6 +1056,173 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // RemoteToolResponse is emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never consumes its own stream).
         SignalingType::RemoteToolResponse => Ok(()),
+    }
+}
+
+fn is_offer_business_error(code: DeskErrorCode) -> bool {
+    matches!(
+        code,
+        DeskErrorCode::INVALID_PARAMS
+            | DeskErrorCode::FEATURE_UNAVAILABLE
+            | DeskErrorCode::VIDEO_ENCODER_DIMENSIONS_UNSUPPORTED
+            | DeskErrorCode::VIDEO_PIPELINE_RENEGOTIATION_REQUIRED
+    )
+}
+
+async fn handle_retry_media_pipeline(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let Some(connection_id) = model.from_connection_id.as_deref() else {
+        send_media_retry_error(
+            ctx,
+            model,
+            DeskErrorCode::INVALID_PARAMS,
+            "RetryMediaPipeline requires a source connection",
+        );
+        return Ok(());
+    };
+
+    match ctx
+        .pc_registry
+        .claim_media_pipeline_retry(connection_id, &model.request_id)
+        .await
+    {
+        MediaRetryAdmission::Duplicate => return Ok(()),
+        MediaRetryAdmission::UnknownConnection => {
+            send_media_retry_error(
+                ctx,
+                model,
+                DeskErrorCode::CLIENT_ID_NOT_FOUND,
+                "media connection no longer exists",
+            );
+            return Ok(());
+        }
+        MediaRetryAdmission::NotRetryable => {
+            send_media_retry_error(
+                ctx,
+                model,
+                DeskErrorCode::INVALID_STATE,
+                "media pipeline is not blocked or failed",
+            );
+            return Ok(());
+        }
+        MediaRetryAdmission::RequiresRenegotiation => {
+            send_media_retry_error(
+                ctx,
+                model,
+                DeskErrorCode::VIDEO_PIPELINE_RENEGOTIATION_REQUIRED,
+                "media retry requires choosing an encoder and sending a fresh offer",
+            );
+            return Ok(());
+        }
+        MediaRetryAdmission::Accepted => {}
+    }
+
+    let outcome = ctx
+        .pc_registry
+        .restart_media_from_cached_payload(
+            connection_id,
+            &ctx.worker_mgr,
+            MediaRestartTrigger::UserRetry,
+        )
+        .await;
+    match outcome {
+        RestartOutcome::Restarted => Ok(()),
+        RestartOutcome::NoCachedPayload { left_paused } => {
+            let message =
+                format!("media retry requires a fresh offer; connection left_paused={left_paused}");
+            publish_media_pipeline_state(
+                ctx,
+                connection_id,
+                MediaPipelinePhase::Blocked,
+                DeskErrorCode::VIDEO_PIPELINE_RENEGOTIATION_REQUIRED,
+                message.clone(),
+            )
+            .await;
+            send_media_retry_error(
+                ctx,
+                model,
+                DeskErrorCode::VIDEO_PIPELINE_RENEGOTIATION_REQUIRED,
+                &message,
+            );
+            Ok(())
+        }
+        RestartOutcome::Failed { stage } => {
+            let message = format!("media retry failed during {}", restart_stage_name(stage));
+            publish_media_pipeline_state(
+                ctx,
+                connection_id,
+                MediaPipelinePhase::Failed,
+                DeskErrorCode::VIDEO_PIPELINE_RESTART_FAILED,
+                message.clone(),
+            )
+            .await;
+            send_media_retry_error(
+                ctx,
+                model,
+                DeskErrorCode::VIDEO_PIPELINE_RESTART_FAILED,
+                &message,
+            );
+            Ok(())
+        }
+    }
+}
+
+const fn restart_stage_name(stage: MediaRestartStage) -> &'static str {
+    match stage {
+        MediaRestartStage::UnknownConnection => "connection lookup",
+        MediaRestartStage::StartMedia => "StartMedia",
+        MediaRestartStage::ForceKeyframe => "ForceKeyframe",
+    }
+}
+
+async fn publish_media_pipeline_state(
+    ctx: &RouterContext,
+    connection_id: &str,
+    phase: MediaPipelinePhase,
+    reason_code: DeskErrorCode,
+    message: String,
+) {
+    let data = MediaPipelineStateData {
+        phase,
+        encoder: None,
+        source_resolution: None,
+        compatible_encoders: Vec::new(),
+        reason_code: Some(reason_code),
+        message: Some(message),
+    };
+    ctx.pc_registry
+        .record_media_pipeline_state(connection_id, data.clone())
+        .await;
+    if let Ok(model) = SignalingModel::new_request(
+        SignalingType::MediaPipelineStateChanged,
+        Some(connection_id.to_string()),
+        Some(&data),
+    ) && let Ok(text) = serde_json::to_string(&model)
+    {
+        let _ = ctx.outbound_tx.send(text);
+    }
+}
+
+fn send_media_retry_error(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+    code: DeskErrorCode,
+    message: &str,
+) {
+    let response = SignalingModel::error(
+        &model.request_id,
+        SignalingType::RetryMediaPipeline,
+        None,
+        model.from_connection_id.clone(),
+        code,
+        message,
+    );
+    if let Ok(response) = response
+        && let Ok(text) = serde_json::to_string(&response)
+    {
+        let _ = ctx.outbound_tx.send(text);
     }
 }
 

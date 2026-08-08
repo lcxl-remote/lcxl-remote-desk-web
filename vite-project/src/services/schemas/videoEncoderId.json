@@ -1,0 +1,1 @@
+{"type":"string","description":"Concrete video encoder implementation.\n\nThis is intentionally distinct from the RTP codec: X264 and OpenH264\nboth produce H.264, but the worker must preserve which implementation\nthe controller selected.","enum":["X264","OpenH264","VP8","VP9","AV1"],"x-readme-ref-name":"VideoEncoderId"}

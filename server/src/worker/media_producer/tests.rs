@@ -1,6 +1,7 @@
 use super::*;
 use desk_ipc_protocol::dual_transport::inprocess;
 use desk_signal_facade::model::desk_settings::DeskSettings;
+use desk_signal_facade::model::media_capability::VideoEncoderId;
 
 impl MediaProducer {
     fn connection_pipeline_state(&self, connection_id: &str) -> Option<(bool, bool)> {
@@ -8,6 +9,106 @@ impl MediaProducer {
         map.get(connection_id)
             .map(|task| (task.video_handle.is_some(), task.audio_handle.is_some()))
     }
+}
+
+#[test]
+fn display_change_retries_only_finished_dimension_blocked_video() {
+    assert!(should_retry_blocked_video(VIDEO_STATE_BLOCKED, true, true));
+    assert!(!should_retry_blocked_video(
+        VIDEO_STATE_BLOCKED,
+        true,
+        false
+    ));
+    assert!(!should_retry_blocked_video(VIDEO_STATE_FAILED, true, true));
+    assert!(!should_retry_blocked_video(
+        VIDEO_STATE_BLOCKED,
+        false,
+        true
+    ));
+}
+
+#[test]
+fn unsupported_dimensions_emit_one_typed_blocked_event() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    video::report_dimension_blocked(
+        &tx,
+        "conn-4k",
+        Some(VideoEncoderId::OpenH264),
+        (4096, 2160),
+        EncoderCompatibilityError::DimensionsExceeded {
+            max_width: 3840,
+            max_height: 2160,
+        },
+    );
+
+    let event = rx.try_recv().expect("blocked event");
+    match event {
+        WorkerToService::MediaPipelineState(payload) => {
+            assert_eq!(payload.connection_id, "conn-4k");
+            assert_eq!(payload.data.phase, MediaPipelinePhase::Blocked);
+            assert_eq!(
+                payload.data.reason_code,
+                Some(DeskErrorCode::VIDEO_ENCODER_DIMENSIONS_UNSUPPORTED)
+            );
+            assert_eq!(
+                payload.data.source_resolution,
+                Some(Resolution::new(4096, 2160))
+            );
+            assert_eq!(payload.data.encoder, Some(VideoEncoderId::OpenH264));
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+    assert!(rx.try_recv().is_err(), "preflight must emit exactly once");
+}
+
+#[test]
+fn encoder_rebuild_failure_emits_one_typed_failed_event() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let video_state = AtomicU8::new(VIDEO_STATE_STREAMING);
+    video::report_prepare_failed(
+        &video_state,
+        &tx,
+        "conn-rebuild",
+        Some(VideoEncoderId::Vp9),
+        (4096, 2160),
+        "runtime probe rejected dimensions".to_string(),
+    );
+
+    let event = rx.try_recv().expect("failed event");
+    match event {
+        WorkerToService::MediaPipelineState(payload) => {
+            assert_eq!(payload.connection_id, "conn-rebuild");
+            assert_eq!(payload.data.phase, MediaPipelinePhase::Failed);
+            assert_eq!(
+                payload.data.reason_code,
+                Some(DeskErrorCode::VIDEO_ENCODER_PREPARE_FAILED)
+            );
+            assert_eq!(payload.data.encoder, Some(VideoEncoderId::Vp9));
+            assert_eq!(
+                payload.data.source_resolution,
+                Some(Resolution::new(4096, 2160))
+            );
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+    assert!(
+        rx.try_recv().is_err(),
+        "prepare failure must emit exactly once"
+    );
+    assert_eq!(video_state.load(Ordering::Acquire), VIDEO_STATE_FAILED);
+}
+
+#[test]
+fn transient_encode_failures_clear_on_success_and_fail_on_third_consecutive_error() {
+    let mut failures = 0;
+    assert!(!video::record_encode_failure(&mut failures));
+    assert!(!video::record_encode_failure(&mut failures));
+
+    // A successful encode clears the transient window.
+    failures = 0;
+    assert!(!video::record_encode_failure(&mut failures));
+    assert!(!video::record_encode_failure(&mut failures));
+    assert!(video::record_encode_failure(&mut failures));
 }
 
 /// Walk a typical IDR access unit (SPS + PPS + IDR slice) and verify
@@ -109,6 +210,7 @@ fn payload_overrides_apply_codec_and_fps() {
     let payload = StartMediaPayload {
         connection_id: "c1".into(),
         video_codec: MediaCodec::Vp9,
+        video_encoder: None,
         audio_codec: MediaCodec::Opus,
         video_device: Some(r"\\.\DISPLAY7".to_string()),
         audio_device: None,
@@ -145,6 +247,7 @@ fn payload_overrides_preserves_base_video_device_name_when_payload_is_none() {
     let payload = StartMediaPayload {
         connection_id: "c1".into(),
         video_codec: MediaCodec::Vp9,
+        video_encoder: None,
         audio_codec: MediaCodec::Opus,
         video_device: None,
         audio_device: None,
@@ -176,6 +279,7 @@ fn payload_overrides_apply_per_connection_image_capture() {
     let payload = StartMediaPayload {
         connection_id: "c2".into(),
         video_codec: MediaCodec::H264,
+        video_encoder: None,
         audio_codec: MediaCodec::Opus,
         video_device: None,
         audio_device: None,
@@ -208,6 +312,7 @@ fn payload_overrides_image_capture_none_preserves_base() {
     let payload = StartMediaPayload {
         connection_id: "c3".into(),
         video_codec: MediaCodec::H264,
+        video_encoder: None,
         audio_codec: MediaCodec::Opus,
         video_device: None,
         audio_device: None,
@@ -232,6 +337,7 @@ fn payload_overrides_fps_zero_keeps_default() {
     let payload = StartMediaPayload {
         connection_id: "c1".into(),
         video_codec: MediaCodec::H264,
+        video_encoder: None,
         audio_codec: MediaCodec::Opus,
         video_device: None,
         audio_device: None,
@@ -262,6 +368,7 @@ fn start_media_data_channel_only_skips_both_pipelines() {
     producer.start_media(StartMediaPayload {
         connection_id: "files".into(),
         video_codec: MediaCodec::H264,
+        video_encoder: None,
         audio_codec: MediaCodec::Opus,
         video_device: None,
         audio_device: None,
@@ -301,6 +408,7 @@ fn start_media_accepted_callback_runs_once_and_duplicate_preserves_state() {
     let payload = StartMediaPayload {
         connection_id: "callback".into(),
         video_codec: MediaCodec::H264,
+        video_encoder: None,
         audio_codec: MediaCodec::Opus,
         video_device: None,
         audio_device: None,
@@ -343,6 +451,7 @@ fn start_media_reports_cancelled_when_callback_removes_reservation() {
     let payload = StartMediaPayload {
         connection_id: "cancelled-callback".into(),
         video_codec: MediaCodec::H264,
+        video_encoder: None,
         audio_codec: MediaCodec::Opus,
         video_device: None,
         audio_device: None,
@@ -560,6 +669,7 @@ fn payload_overrides_applies_enable_dirty_rect() {
     let payload = StartMediaPayload {
         connection_id: "c-dr".into(),
         video_codec: MediaCodec::H264,
+        video_encoder: None,
         audio_codec: MediaCodec::Opus,
         video_device: None,
         audio_device: None,
@@ -585,6 +695,33 @@ fn payload_overrides_applies_enable_dirty_rect() {
     };
     let merged_none = payload_overrides(&base, &payload_none);
     assert!(merged_none.enable_dirty_rect);
+}
+
+#[test]
+fn payload_overrides_prefers_concrete_encoder_over_wire_codec() {
+    let base = DeskSettings::default();
+    let mut payload = StartMediaPayload {
+        connection_id: "concrete-encoder".into(),
+        video_codec: MediaCodec::H264,
+        video_encoder: Some(VideoEncoderId::X264),
+        audio_codec: MediaCodec::Opus,
+        video_device: None,
+        audio_device: None,
+        fps: 0,
+        bitrate_kbps: 0,
+        quality: 0,
+        start_video: true,
+        start_audio: false,
+        image_capture: None,
+        enable_dirty_rect: None,
+    };
+
+    let x264 = payload_overrides(&base, &payload);
+    assert_eq!(x264.video_encoder.as_deref(), Some("X264"));
+
+    payload.video_encoder = Some(VideoEncoderId::OpenH264);
+    let openh264 = payload_overrides(&base, &payload);
+    assert_eq!(openh264.video_encoder.as_deref(), Some("H264"));
 }
 
 /// `drain_settings_updates` ignores `fps = 0` (sentinel for "use
@@ -1151,6 +1288,7 @@ fn make_base_display_info() -> DisplayInfo {
         ],
         attached_to_desktop: true,
         rotation: 90,
+        current_capture_resolution: None,
     }
 }
 
@@ -1388,6 +1526,7 @@ fn disp(name: &str, left: i32, top: i32, width: i32, height: i32, attached: bool
         resolutions: Vec::new(),
         attached_to_desktop: attached,
         rotation: 0,
+        current_capture_resolution: None,
     }
 }
 

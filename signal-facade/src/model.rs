@@ -8,6 +8,8 @@ pub mod credential_heartbeat;
 pub mod desk_settings;
 pub mod files;
 pub mod image_capture;
+pub mod media_capability;
+pub mod media_pipeline;
 pub mod os;
 pub mod policy_snapshot;
 pub mod private_screen;

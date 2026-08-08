@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -7,8 +7,14 @@ import DeskSession from './desk-session';
 import {
   buildDesktopRequestRemotePayload,
   shouldOpenConfigDialog,
+  shouldShowMediaPipelineOverlay,
 } from './desk-session-model';
 import React from 'react';
+import { SIGNALING_TYPE_CODE_MEDIA_PIPELINE_STATE_CHANGED } from './constants';
+
+const signalingHarness = vi.hoisted(() => ({
+  subscribers: new Set<(message: any) => void>(),
+}));
 
 // Mock routing
 vi.mock('react-router-dom', () => ({
@@ -19,7 +25,8 @@ vi.mock('react-router-dom', () => ({
 // Mock translations
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string, fallback: string) => fallback,
+    t: (key: string, fallback?: unknown) =>
+      typeof fallback === 'string' ? fallback : key,
   }),
 }));
 
@@ -27,7 +34,10 @@ vi.mock('react-i18next', () => ({
 vi.mock('./use-desk-signaling', () => ({
   useDeskSignaling: () => ({
     isConnected: true, // Force connected state to show control bar
-    subscribe: () => () => {}, // no-op subscription returning an unsubscribe
+    subscribe: (handler: (message: any) => void) => {
+      signalingHarness.subscribers.add(handler);
+      return () => signalingHarness.subscribers.delete(handler);
+    },
     sendMessage: vi.fn(),
     sendTracked: vi.fn(() => ({ requestId: 'r', disposition: 'sent' })),
     cancelQueued: vi.fn(),
@@ -237,6 +247,17 @@ describe('shouldOpenConfigDialog', () => {
   });
 });
 
+describe('shouldShowMediaPipelineOverlay', () => {
+  it('hides the blocked warning while the encoder dialog is open', () => {
+    expect(shouldShowMediaPipelineOverlay(true, false)).toBe(true);
+    expect(shouldShowMediaPipelineOverlay(true, true)).toBe(false);
+  });
+
+  it('does not show an overlay without pipeline state', () => {
+    expect(shouldShowMediaPipelineOverlay(false, false)).toBe(false);
+  });
+});
+
 describe('buildDesktopRequestRemotePayload', () => {
   it('always identifies desktop sessions explicitly', () => {
     expect(buildDesktopRequestRemotePayload('desk-1', null)).toEqual({
@@ -284,5 +305,40 @@ describe('DeskSession Video Sizing', () => {
     expect(wrapperBlock![1]).toMatch(/position\s*:\s*absolute/);
     expect(wrapperBlock![1]).toMatch(/inset\s*:\s*0/);
     expect(wrapperBlock![1]).not.toMatch(/height\s*:\s*100%/);
+  });
+
+  it('does not put the black placeholder back over an already-ready video during pipeline recovery', async () => {
+    const { container } = render(<DeskSession />);
+    const video = container.querySelector('video.videoElement');
+    const placeholder = container.querySelector('.videoPlaceholder');
+    expect(video).not.toBeNull();
+    expect(placeholder).not.toBeNull();
+
+    fireEvent.canPlay(video!);
+    expect(placeholder).toHaveClass('hidden');
+
+    await act(async () => {
+      [...signalingHarness.subscribers].forEach((handler) => handler({
+        signaling_type: SIGNALING_TYPE_CODE_MEDIA_PIPELINE_STATE_CHANGED,
+        signaling_data: {
+          phase: 'blocked',
+          reason_code: 1,
+          compatible_encoders: ['X264'],
+        },
+      }));
+    });
+    expect(placeholder).toHaveClass('hidden');
+
+    await act(async () => {
+      [...signalingHarness.subscribers].forEach((handler) => handler({
+        signaling_type: SIGNALING_TYPE_CODE_MEDIA_PIPELINE_STATE_CHANGED,
+        signaling_data: {
+          phase: 'streaming',
+          encoder: 'X264',
+          compatible_encoders: [],
+        },
+      }));
+    });
+    expect(placeholder).toHaveClass('hidden');
   });
 });

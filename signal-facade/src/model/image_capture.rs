@@ -89,6 +89,10 @@ pub struct DisplayInfo {
     pub attached_to_desktop: bool,
     /// Display rotation angle in degrees, e.g. 0, 90, 180, 270
     pub rotation: i32,
+    /// Expected encoder input size for this capture backend. `None` means a
+    /// legacy backend or a backend that can only determine it from a frame.
+    #[serde(default)]
+    pub current_capture_resolution: Option<Resolution>,
 }
 
 #[cfg(test)]
@@ -118,6 +122,7 @@ mod wincode_tests {
             resolutions: vec![Resolution::new(1920, 1080), Resolution::new(2560, 1440)],
             attached_to_desktop: true,
             rotation: 90,
+            current_capture_resolution: None,
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
@@ -131,6 +136,20 @@ mod wincode_tests {
         assert_eq!(back.resolutions[1].height, 1440);
         assert!(back.attached_to_desktop);
         assert_eq!(back.rotation, 90);
+    }
+
+    #[test]
+    fn legacy_display_info_json_defaults_capture_resolution_to_unknown() {
+        let raw = r#"{
+            "device_name": "display-1",
+            "display_device_name": null,
+            "desktop_coordinates": {"left": 0, "top": 0, "right": 1920, "bottom": 1080},
+            "resolutions": [],
+            "attached_to_desktop": true,
+            "rotation": 0
+        }"#;
+        let decoded: DisplayInfo = serde_json::from_str(raw).expect("legacy DisplayInfo decodes");
+        assert_eq!(decoded.current_capture_resolution, None);
     }
 
     /// `DisplayRect` gained `PartialEq` / `Eq` so callers (the GDI

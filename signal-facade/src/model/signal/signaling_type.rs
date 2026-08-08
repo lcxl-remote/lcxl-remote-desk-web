@@ -139,6 +139,16 @@ pub enum SignalingType {
     #[wincode(tag = 216)]
     TerminateRemotePeerAck = 216,
 
+    /// Host → controller notification for a streaming, blocked, or failed
+    /// capture/encoder pipeline.
+    #[wincode(tag = 217)]
+    MediaPipelineStateChanged = 217,
+
+    /// Controller → host request to retry a blocked or failed media pipeline
+    /// using the already-negotiated codec and concrete encoder.
+    #[wincode(tag = 218)]
+    RetryMediaPipeline = 218,
+
     #[wincode(tag = 301)]
     UpdateDeskSettings = 301,
 

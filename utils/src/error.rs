@@ -38,7 +38,18 @@ pub fn format_debug_backtrace<E: fmt::Debug>(
 /// the declared ones: a peer running a newer build may send a code this one has
 /// never heard of, and rejecting the whole frame over an unrecognized code
 /// would lose the error it was reporting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    wincode::SchemaWrite,
+    wincode::SchemaRead,
+)]
 #[serde(transparent)]
 pub struct DeskErrorCode(i32);
 
@@ -406,6 +417,23 @@ desk_error_codes! {
     /// the user-selected main model, while this code describes the mandatory
     /// platform reviewer.
     AI_CONTENT_SAFETY_IMAGE_UNSUPPORTED = 88,
+
+    // ---- Video media pipeline ----
+    /// The selected encoder cannot accept the capture frame dimensions. The
+    /// controller should choose one of the compatible encoders reported by the
+    /// host, or change the display mode before retrying.
+    VIDEO_ENCODER_DIMENSIONS_UNSUPPORTED = 89,
+    /// The selected encoder's runtime prepare probe failed for the current
+    /// capture dimensions. This is distinct from a declared size limit because
+    /// the implementation exposes no stable maximum ahead of construction.
+    VIDEO_ENCODER_PREPARE_FAILED = 90,
+    /// A media retry could not reuse an earlier StartMedia payload, so a fresh
+    /// SDP offer is required before the host can restart the pipeline.
+    VIDEO_PIPELINE_RENEGOTIATION_REQUIRED = 91,
+    /// A bounded media retry failed while restarting the cached pipeline.
+    VIDEO_PIPELINE_RESTART_FAILED = 92,
+    /// A running encoder returned three consecutive frame-encode failures.
+    VIDEO_PIPELINE_RUNTIME_FAILED = 93,
 
     /// A connection-verify probe could not reach the target at all (DNS failure,
     /// connection refused, TLS handshake failure). Carried inside the

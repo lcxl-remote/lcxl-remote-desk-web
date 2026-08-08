@@ -19,6 +19,8 @@ pub(super) fn classify_daemon_owned_types() {
         SignalingType::DenyControl,
         SignalingType::PrivateScreenStateChanged,
         SignalingType::AudioPlaybackError,
+        SignalingType::MediaPipelineStateChanged,
+        SignalingType::RetryMediaPipeline,
         SignalingType::ManagerSystemStatue,
         SignalingType::ReplyFromTerminal,
         SignalingType::TerminalStarted,

@@ -775,6 +775,37 @@ pub async fn run_signaling_proxy(
                     ),
                 }
             }
+            WorkerToService::MediaPipelineState(payload) => {
+                if !pc_registry
+                    .record_media_pipeline_state(&payload.connection_id, payload.data.clone())
+                    .await
+                {
+                    debug!(
+                        "[SignalingProxy] dropping MediaPipelineState for unknown connection {}",
+                        payload.connection_id
+                    );
+                    continue;
+                }
+                match SignalingModel::new_request(
+                    SignalingType::MediaPipelineStateChanged,
+                    Some(payload.connection_id.clone()),
+                    Some(&payload.data),
+                ) {
+                    Ok(model) => match serde_json::to_string(&model) {
+                        Ok(text) => {
+                            let _ = outbound_tx.send(text);
+                        }
+                        Err(e) => warn!(
+                            "[SignalingProxy] Failed to serialise MediaPipelineStateChanged for {}: {e}",
+                            payload.connection_id
+                        ),
+                    },
+                    Err(e) => warn!(
+                        "[SignalingProxy] Failed to build MediaPipelineStateChanged for {}: {e}",
+                        payload.connection_id
+                    ),
+                }
+            }
             WorkerToService::FileManagerOpened(payload) => {
                 host_activity.file_manager_opened(&payload.connection_id);
                 log::info!(

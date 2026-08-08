@@ -907,6 +907,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::PrivateScreenStateChanged
             | SignalingType::TerminalStarted
             | SignalingType::AudioPlaybackError
+            | SignalingType::MediaPipelineStateChanged
+            | SignalingType::RetryMediaPipeline
             | SignalingType::DesktopSwitching
             | SignalingType::DesktopReady
             // AI host → control-end responses are plain relayed types (no
