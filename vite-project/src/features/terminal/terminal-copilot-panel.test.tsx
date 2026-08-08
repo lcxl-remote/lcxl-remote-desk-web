@@ -14,8 +14,10 @@ const baseState: CopilotState = {
     mode: "how_to",
     turns: [],
     partialText: "",
+    committedText: "",
     tools: [],
     error: null,
+    errorCode: null,
 };
 
 function suggestion(overrides: Partial<CommandSuggestion> = {}): CommandSuggestion {
