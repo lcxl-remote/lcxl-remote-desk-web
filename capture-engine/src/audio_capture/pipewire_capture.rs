@@ -66,8 +66,6 @@ impl AudioDeviceEnumerator for PipewireAudioDeviceEnumerator {
 
 struct UserData {
     format: AudioInfoRaw,
-    cursor_move: bool,
-    captured_count: u64,
     main_sender: std::sync::mpsc::Sender<PipewireCallback>,
 }
 
@@ -94,9 +92,7 @@ fn inner_pw_thread(
     let core = context.connect(None)?;
     let data = UserData {
         format: Default::default(),
-        cursor_move: false,
         main_sender,
-        captured_count: 0,
     };
 
     let registry = core.get_registry()?;
@@ -222,7 +218,6 @@ fn inner_pw_thread(
                 }
 
                 let data = &mut datas[0];
-                let n_channels = user_data.format.channels();
                 let n_samples = data.chunk().size() / (mem::size_of::<f32>() as u32);
 
                 if let Some(samples) = data.data() {
@@ -231,39 +226,6 @@ fn inner_pw_thread(
                         .main_sender
                         .send(PipewireCallback::Stream(samples[0..end_index].to_vec()))
                         .expect("Failed to send audio samples to main thread");
-                    if user_data.cursor_move {
-                        user_data.captured_count = 0;
-                        print!("\x1B[{}A", n_channels + 1);
-                    }
-                    user_data.captured_count += 1;
-                    println!(
-                        "captured {} samples, total count: {}",
-                        n_samples / n_channels,
-                        user_data.captured_count
-                    );
-                    for c in 0..n_channels {
-                        let mut max: f32 = 0.0;
-                        for n in (c..n_samples).step_by(n_channels as usize) {
-                            let start = n as usize * mem::size_of::<f32>();
-                            let end = start + mem::size_of::<f32>();
-                            let chan = &samples[start..end];
-                            let f = f32::from_le_bytes(chan.try_into().unwrap());
-                            max = max.max(f.abs());
-                        }
-
-                        let peak = ((max * 30.0) as usize).clamp(0, 39);
-
-                        println!(
-                            "channel {}: |{:>w1$}{:w2$}| peak:{}",
-                            c,
-                            "*",
-                            "",
-                            max,
-                            w1 = peak + 1,
-                            w2 = 40 - peak
-                        );
-                    }
-                    user_data.cursor_move = true;
                 }
             }
         })
@@ -502,6 +464,14 @@ mod tests {
             // initialization code here
             let _ = init_logs(LevelFilter::Debug);
         });
+    }
+
+    #[test]
+    fn pipewire_capture_does_not_write_audio_frames_to_console() {
+        let source = include_str!("pipewire_capture.rs");
+
+        assert!(!source.contains(concat!("pri", "nt!(")));
+        assert!(!source.contains(concat!("print", "ln!(")));
     }
 
     // Requires a live PipeWire daemon; blocks waiting on real audio frames, so
