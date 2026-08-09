@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 import { useDeskRTC } from './use-desk-rtc';
+import useDeskRtcSource from './use-desk-rtc.ts?raw';
 import type { SignalingMessage } from './use-desk-signaling';
 import {
     SIGNALING_TYPE_CODE_INIT,
@@ -17,9 +18,27 @@ let peerConnectionCloseCount = 0;
 let latestPeerConnection: MockRTCPeerConnection | null = null;
 let deferSetRemoteDescription = true;
 let iceRestartOfferCount = 0;
+let createOfferCount = 0;
+let createOfferError: Error | null = null;
+let setLocalDescriptionError: Error | null = null;
+let offerSdp = '';
 // Captured resolver for the deferred `setRemoteDescription`, so a test can
 // hold the ANSWER handler mid-flight while a candidate burst arrives.
 let resolveSetRemote: (() => void) | null = null;
+
+const LIVE_OFFER_SDP = [
+    'v=0',
+    'a=ice-ufrag:LOCAL',
+    'm=audio 9 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126',
+    'a=mid:1',
+    'a=sendrecv',
+    'a=rtpmap:111 opus/48000/2',
+    'a=rtcp-fb:111 transport-cc',
+    'a=fmtp:111 minptime=10;useinbandfec=1',
+    'a=rtpmap:63 red/48000/2',
+    'a=fmtp:63 111/111',
+    '',
+].join('\r\n');
 
 class MockRTCSessionDescription {
     constructor(init: any) {
@@ -57,10 +76,13 @@ class MockRTCPeerConnection {
         return { onopen: null } as any;
     }
     async createOffer(options?: RTCOfferOptions) {
+        createOfferCount += 1;
         if (options?.iceRestart) iceRestartOfferCount += 1;
-        return { type: 'offer', sdp: 'v=0\r\na=ice-ufrag:LOCAL\r\n' };
+        if (createOfferError) throw createOfferError;
+        return { type: 'offer', sdp: offerSdp };
     }
     async setLocalDescription(desc: any) {
+        if (setLocalDescriptionError) throw setLocalDescriptionError;
         this.localDescription = desc;
     }
     setRemoteDescription(desc: any) {
@@ -108,6 +130,10 @@ describe('useDeskRTC inbound signaling drain', () => {
         latestPeerConnection = null;
         deferSetRemoteDescription = true;
         iceRestartOfferCount = 0;
+        createOfferCount = 0;
+        createOfferError = null;
+        setLocalDescriptionError = null;
+        offerSdp = LIVE_OFFER_SDP;
         resolveSetRemote = null;
         originalPC = (globalThis as any).RTCPeerConnection;
         originalSDP = (globalThis as any).RTCSessionDescription;
@@ -240,6 +266,175 @@ describe('useDeskRTC inbound signaling drain', () => {
         expect(peerConnectionCloseCount).toBe(0);
     });
 
+    it('normalizes initial and renegotiated Offers without changing RED', async () => {
+        const sendTracked = vi.fn((opts: any) => {
+            opts.onSent?.(opts.requestId);
+            return { requestId: opts.requestId, disposition: 'sent' as const };
+        });
+        const { subscribe, emit } = makeSignalingHarness();
+        const { result } = renderHook(() =>
+            useDeskRTC({
+                deskId: 'desk-1',
+                subscribe,
+                sendMessage: vi.fn(() => 'msg-id'),
+                sendTracked,
+                cancelQueued: vi.fn(),
+            }),
+        );
+
+        await act(async () => {
+            emit({
+                signaling_type: SIGNALING_TYPE_CODE_INIT,
+                signaling_data: { ice_servers: [] },
+            });
+        });
+        await act(async () => {
+            await result.current.connect({ video_encoder: 'H264' });
+            await result.current.renegotiate({ video_encoder: 'X264' });
+        });
+
+        expect(createOfferCount).toBe(2);
+        expect(sendTracked).toHaveBeenCalledTimes(2);
+        for (const [options] of sendTracked.mock.calls) {
+            expect(options.data.offer.sdp).toContain(
+                'a=fmtp:111 minptime=10;useinbandfec=1;stereo=1\r\n',
+            );
+            expect(options.data.offer.sdp).toContain('a=fmtp:63 111/111\r\n');
+        }
+    });
+
+    it('re-sends the cached normalized Offer without creating a new one', async () => {
+        const sendTracked = vi.fn((opts: any) => {
+            opts.onSent?.(opts.requestId);
+            return { requestId: opts.requestId, disposition: 'sent' as const };
+        });
+        const { subscribe, emit } = makeSignalingHarness();
+        const { result } = renderHook(() =>
+            useDeskRTC({
+                deskId: 'desk-1',
+                subscribe,
+                sendMessage: vi.fn(() => 'msg-id'),
+                sendTracked,
+                cancelQueued: vi.fn(),
+            }),
+        );
+
+        await act(async () => {
+            emit({
+                signaling_type: SIGNALING_TYPE_CODE_INIT,
+                signaling_data: { ice_servers: [] },
+            });
+        });
+        await act(async () => {
+            await result.current.connect({ video_encoder: 'H264' });
+        });
+        const cachedOffer = sendTracked.mock.calls[0][0].data;
+
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(5000);
+        });
+
+        expect(createOfferCount).toBe(1);
+        expect(sendTracked).toHaveBeenCalledTimes(2);
+        expect(sendTracked.mock.calls[1][0].data).toBe(cachedOffer);
+        expect(sendTracked.mock.calls[1][0].data.offer.sdp).toContain('stereo=1');
+    });
+
+    it('normalizes an ICE-restart Offer and preserves the iceRestart option', async () => {
+        const sendTracked = vi.fn((opts: any) => {
+            opts.onSent?.(opts.requestId);
+            return { requestId: opts.requestId, disposition: 'sent' as const };
+        });
+        const { subscribe, emit } = makeSignalingHarness();
+        const { result } = renderHook(() =>
+            useDeskRTC({
+                deskId: 'desk-1',
+                subscribe,
+                sendMessage: vi.fn(() => 'msg-id'),
+                sendTracked,
+                cancelQueued: vi.fn(),
+            }),
+        );
+
+        await act(async () => {
+            emit({
+                signaling_type: SIGNALING_TYPE_CODE_INIT,
+                signaling_data: { ice_servers: [] },
+            });
+        });
+        await act(async () => {
+            await result.current.connect({ video_encoder: 'H264' });
+        });
+        await act(async () => {
+            latestPeerConnection!.iceConnectionState = 'failed';
+            latestPeerConnection!.oniceconnectionstatechange?.();
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(createOfferCount).toBe(2);
+        expect(iceRestartOfferCount).toBe(1);
+        expect(sendTracked).toHaveBeenCalledTimes(2);
+        expect(sendTracked.mock.calls[1][0].data.offer.sdp).toContain('stereo=1');
+    });
+
+    it('continues to propagate native Offer and local-description failures', async () => {
+        const { subscribe, emit } = makeSignalingHarness();
+        const { result } = renderHook(() =>
+            useDeskRTC({
+                deskId: 'desk-1',
+                subscribe,
+                sendMessage: vi.fn(() => 'msg-id'),
+                sendTracked: vi.fn(() => ({ requestId: 'id', disposition: 'sent' as const })),
+                cancelQueued: vi.fn(),
+            }),
+        );
+
+        await act(async () => {
+            emit({
+                signaling_type: SIGNALING_TYPE_CODE_INIT,
+                signaling_data: { ice_servers: [] },
+            });
+        });
+
+        createOfferError = new Error('createOffer failed');
+        await expect(result.current.connect({})).rejects.toThrow('createOffer failed');
+
+        createOfferError = null;
+        setLocalDescriptionError = new Error('setLocalDescription failed');
+        await expect(result.current.connect({})).rejects.toThrow('setLocalDescription failed');
+    });
+
+    it('passes through an Offer without audio when stereo normalization is inapplicable', async () => {
+        offerSdp = 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n';
+        const sendTracked = vi.fn((opts: any) => ({
+            requestId: opts.requestId,
+            disposition: 'sent' as const,
+        }));
+        const { subscribe, emit } = makeSignalingHarness();
+        const { result } = renderHook(() =>
+            useDeskRTC({
+                deskId: 'desk-1',
+                subscribe,
+                sendMessage: vi.fn(() => 'msg-id'),
+                sendTracked,
+                cancelQueued: vi.fn(),
+            }),
+        );
+
+        await act(async () => {
+            emit({
+                signaling_type: SIGNALING_TYPE_CODE_INIT,
+                signaling_data: { ice_servers: [] },
+            });
+        });
+        await act(async () => {
+            await result.current.connect({});
+        });
+
+        expect(sendTracked.mock.calls[0][0].data.offer.sdp).toBe(offerSdp);
+    });
+
     it('does not ICE-restart after a settings-only renegotiation on an already connected transport', async () => {
         const requestIds: string[] = [];
         const sendTracked = vi.fn((opts: any) => {
@@ -290,5 +485,18 @@ describe('useDeskRTC inbound signaling drain', () => {
 
         expect(iceRestartOfferCount).toBe(0);
         expect(sendTracked).toHaveBeenCalledTimes(2);
+    });
+});
+
+describe('useDeskRTC Offer creation guard', () => {
+    it('allows exactly one direct pc.createOffer call inside the stereo wrapper', () => {
+        const occurrences = [...useDeskRtcSource.matchAll(/\bpc\.createOffer\s*\(/g)];
+        const wrapperStart = useDeskRtcSource.indexOf('async function createAndSetStereoOffer');
+        const hookStart = useDeskRtcSource.indexOf('export function useDeskRTC');
+
+        expect(occurrences).toHaveLength(1);
+        expect(wrapperStart).toBeGreaterThanOrEqual(0);
+        expect(occurrences[0].index).toBeGreaterThan(wrapperStart);
+        expect(occurrences[0].index).toBeLessThan(hookStart);
     });
 });

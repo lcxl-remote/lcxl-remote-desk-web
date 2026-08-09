@@ -26,7 +26,7 @@ No CPU-side frame scaling is performed. This avoids the high memory-bandwidth co
 
 ## Audio
 
-System audio is captured and encoded with **Opus** (libopus). Capture backends: Windows (**WASAPI**), Linux (**ALSA / PipeWire**).
+System audio is captured and encoded with **Opus** (libopus). The Web controller explicitly requests stereo Opus reception; audible channel separation still depends on the captured source and the controller's output device. Capture backends: Windows (**WASAPI**), Linux (**ALSA / PipeWire**).
 
 ## Input
 

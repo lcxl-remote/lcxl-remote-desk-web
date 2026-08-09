@@ -26,7 +26,7 @@ LCXL Remote Desk 通过 **WebRTC** 串流远端屏幕与音频以实现超低延
 
 ## 音频
 
-系统音频用 **Opus**（libopus）采集并编码。采集后端：Windows（**WASAPI**）、Linux（**ALSA / PipeWire**）。
+系统音频用 **Opus**（libopus）采集并编码。Web 控制端会明确请求以立体声接收 Opus；实际声道分离效果仍取决于被控端采集源和控制端输出设备。采集后端：Windows（**WASAPI**）、Linux（**ALSA / PipeWire**）。
 
 ## 输入
 

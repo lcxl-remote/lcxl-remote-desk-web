@@ -17,6 +17,7 @@ import {
     createIceRetryCoordinator,
     type IceRetryCoordinator,
 } from './ice-retry-coordinator';
+import { normalizeOpusStereoSdp } from './opus-sdp';
 
 // Auto-retry tuning. With lossless candidate delivery in place a healthy
 // attempt completes its ICE checks in well under a couple of seconds on a
@@ -31,6 +32,18 @@ const ICE_ANSWER_TIMEOUT_MS = 5000;
 const ICE_STALL_BASE_MS = 5000;
 const ICE_STALL_MAX_MS = 15000;
 const MAX_ICE_RETRY = 4;
+
+async function createAndSetStereoOffer(
+    pc: RTCPeerConnection,
+    options?: RTCOfferOptions,
+): Promise<void> {
+    const offer = await pc.createOffer(options);
+    const normalizedSdp = normalizeOpusStereoSdp(offer.sdp);
+    const normalizedOffer = normalizedSdp === offer.sdp
+        ? offer
+        : { ...offer, sdp: normalizedSdp };
+    await pc.setLocalDescription(normalizedOffer);
+}
 
 /** Pull the `ice-ufrag` out of an SDP blob so trickled candidates can be
  *  matched to the generation they belong to. */
@@ -166,8 +179,7 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
             sendIceRestartOffer: async (requestId, onSent) => {
                 const pc = peerConnection.current;
                 if (!pc) throw new Error('No peer connection for ICE restart');
-                const offer = await pc.createOffer({ iceRestart: true });
-                await pc.setLocalDescription(offer);
+                await createAndSetStereoOffer(pc, { iceRestart: true });
                 const d = rtcDeps.current;
                 const offerModel = {
                     offer: pc.localDescription,
@@ -464,8 +476,7 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
         cursorSyncChannel.current.onopen = () => console.log("Cursor Sync channel open");
 
         // Create Offer
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
+        await createAndSetStereoOffer(pc);
 
         // Cache the immutable OfferModel so the coordinator can re-send it
         // verbatim on an awaiting-answer timeout (signaling loss).
@@ -500,8 +511,7 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
             return;
         }
 
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
+        await createAndSetStereoOffer(pc);
         const offerModel = {
             offer: pc.localDescription,
             desk_settings: settings,
