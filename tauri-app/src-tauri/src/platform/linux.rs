@@ -1,5 +1,36 @@
 use std::sync::{Mutex, OnceLock};
 
+pub fn prepare_tauri_window_backend() {
+    let should_use_x11 = should_default_tauri_to_x11(
+        std::env::var_os("GDK_BACKEND").is_some(),
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        std::env::var_os("DISPLAY").is_some(),
+    );
+    if !should_use_x11 {
+        return;
+    }
+
+    // GTK3's native Wayland backend creates ordinary xdg_toplevel surfaces.
+    // That protocol has no standard requests for skip-taskbar/skip-overview or
+    // always-on-top, so GNOME ignores the hints used by the status indicator.
+    // XWayland exposes the EWMH states that Tauri already sets for those two
+    // behaviours. This only selects the GUI backend; WAYLAND_DISPLAY remains
+    // intact, so capture and input continue to use the Wayland Portal.
+    //
+    // Safety: run() invokes this before Tauri initializes GTK or starts any
+    // application threads, so no other thread can read the environment while
+    // it is being changed.
+    unsafe { std::env::set_var("GDK_BACKEND", "x11") };
+}
+
+fn should_default_tauri_to_x11(
+    has_explicit_backend: bool,
+    has_wayland_display: bool,
+    has_x11_display: bool,
+) -> bool {
+    !has_explicit_backend && has_wayland_display && has_x11_display
+}
+
 struct LinuxGrabber {
     grabbed_devices: Vec<evdev::Device>,
 }
@@ -77,4 +108,25 @@ pub fn block_input(block: bool) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_default_tauri_to_x11;
+
+    #[test]
+    fn defaults_wayland_session_with_xwayland_to_x11() {
+        assert!(should_default_tauri_to_x11(false, true, true));
+    }
+
+    #[test]
+    fn preserves_explicit_gdk_backend() {
+        assert!(!should_default_tauri_to_x11(true, true, true));
+    }
+
+    #[test]
+    fn does_not_select_unavailable_x11_backend() {
+        assert!(!should_default_tauri_to_x11(false, true, false));
+        assert!(!should_default_tauri_to_x11(false, false, true));
+    }
 }

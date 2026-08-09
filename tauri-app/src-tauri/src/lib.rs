@@ -185,6 +185,7 @@ fn build_tauri_context() -> tauri::Context {
 }
 
 pub fn run() -> Result<(), DeskTauriError> {
+    platform::prepare_tauri_window_backend();
     let args = Args::parse();
 
     // Before anything that depends on a stable bundle path (TCC prompts,

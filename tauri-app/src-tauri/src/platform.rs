@@ -16,6 +16,13 @@ mod windows;
 /// dismissal, so waiting on it would deadlock.
 pub type LocalEscapeCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
+/// Select any platform-specific native window backend before Tauri initializes
+/// the GUI toolkit. Must run before the first Tauri/GTK call.
+pub fn prepare_tauri_window_backend() {
+    #[cfg(target_os = "linux")]
+    linux::prepare_tauri_window_backend();
+}
+
 /// System-level input blocking.
 ///
 /// Only macOS routes `on_local_escape`; the other platforms rely on the Tauri
