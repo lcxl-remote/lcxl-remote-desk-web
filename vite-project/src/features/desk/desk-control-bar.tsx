@@ -42,6 +42,8 @@ import {
     DropdownMenu,
     DropdownMenuContent,
     DropdownMenuItem,
+    DropdownMenuLabel,
+    DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
@@ -370,8 +372,16 @@ export function DeskControlBar({
                             </Tooltip>
                             <DropdownMenuContent
                                 align="end"
-                                className="w-56 border-white/10 bg-background/90 backdrop-blur-md"
+                                className="w-64 border-white/10 bg-background/90 backdrop-blur-md"
                             >
+                                {operationSystem === "Linux" && (
+                                    <>
+                                        <DropdownMenuLabel className="whitespace-normal text-xs font-normal text-muted-foreground">
+                                            {t("pages.desk.shortcut.linuxSuperHint")}
+                                        </DropdownMenuLabel>
+                                        <DropdownMenuSeparator />
+                                    </>
+                                )}
                                 {getKeyboardShortcuts(operationSystem, {
                                     includeEscape: !keyboardLockSupported,
                                 }).map((shortcut) => (

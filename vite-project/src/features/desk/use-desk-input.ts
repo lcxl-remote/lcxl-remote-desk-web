@@ -39,6 +39,7 @@ const DOM_CODE_BY_KEY_CODE: Record<number, string> = {
     38: 'ArrowUp',
     39: 'ArrowRight',
     40: 'ArrowDown',
+    44: 'PrintScreen',
     45: 'Insert',
     46: 'Delete',
     91: 'MetaLeft',

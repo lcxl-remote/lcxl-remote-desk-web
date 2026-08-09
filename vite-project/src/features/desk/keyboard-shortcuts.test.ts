@@ -12,8 +12,26 @@ describe('getKeyboardShortcuts', () => {
         expect(ids).not.toContain('winD');
     });
 
-    it('falls back to the Windows set for non-macOS and unknown hosts', () => {
-        for (const os of ['Windows', 'Linux', 'Other', undefined] as const) {
+    it('returns Linux desktop shortcuts without Windows-only entries', () => {
+        const shortcuts = getKeyboardShortcuts('Linux');
+        const ids = shortcuts.map(s => s.id);
+
+        expect(ids).toEqual([
+            'linuxTerminal',
+            'linuxRun',
+            'altF4',
+            'altTab',
+            'linuxSuper',
+            'linuxLock',
+            'linuxScreenshot',
+        ]);
+        expect(ids).not.toContain('ctrlAltDel');
+        expect(ids).not.toContain('taskManager');
+        expect(ids).not.toContain('winR');
+    });
+
+    it('falls back to the Windows set for unknown hosts', () => {
+        for (const os of ['Windows', 'Other', undefined] as const) {
             const ids = getKeyboardShortcuts(os).map(s => s.id);
             expect(ids).toContain('ctrlAltDel');
             expect(ids).not.toContain('forceQuit');
@@ -44,8 +62,21 @@ describe('getKeyboardShortcuts', () => {
         ]);
     });
 
+    it('sends the Linux terminal shortcut as Control + Alt + T', () => {
+        const terminal = getKeyboardShortcuts('Linux')
+            .find(s => s.id === 'linuxTerminal')!;
+        expect(terminal.events).toEqual([
+            { event: 'keydown', keyCode: 17 },
+            { event: 'keydown', keyCode: 18 },
+            { event: 'keydown', keyCode: 84 },
+            { event: 'keyup', keyCode: 84 },
+            { event: 'keyup', keyCode: 18 },
+            { event: 'keyup', keyCode: 17 },
+        ]);
+    });
+
     it('appends an Esc entry only when includeEscape is set', () => {
-        for (const os of ['Mac', 'Windows', undefined] as const) {
+        for (const os of ['Mac', 'Windows', 'Linux', undefined] as const) {
             expect(getKeyboardShortcuts(os).some(s => s.id === 'escape')).toBe(false);
             const withEsc = getKeyboardShortcuts(os, { includeEscape: true });
             const esc = withEsc.find(s => s.id === 'escape');
@@ -60,7 +91,7 @@ describe('getKeyboardShortcuts', () => {
     });
 
     it('gives every shortcut a unique id and an i18n label key', () => {
-        for (const os of ['Mac', 'Windows'] as const) {
+        for (const os of ['Mac', 'Windows', 'Linux'] as const) {
             const shortcuts = getKeyboardShortcuts(os);
             const ids = shortcuts.map(s => s.id);
             expect(new Set(ids).size).toBe(ids.length);

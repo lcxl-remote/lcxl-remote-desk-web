@@ -198,6 +198,11 @@ describe('buildKeyboardEventSequence — modifier state tracking', () => {
             meta_key: false,
         });
     });
+
+    it('adds the DOM code required by Linux Portal for PrintScreen', () => {
+        const [event] = buildKeyboardEventSequence([{ event: 'keydown', keyCode: 44 }]);
+        expect(event).toMatchObject({ code: 'PrintScreen', key_code: 44 });
+    });
 });
 
 describe('buildPhysicalKeyboardEvent — desktop Ctrl compatibility for macOS', () => {

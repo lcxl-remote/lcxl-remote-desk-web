@@ -12,6 +12,8 @@ const VK = {
     ESC: 27,
     TAB: 9,
     SPACE: 32,
+    PRINT_SCREEN: 44,
+    F2: 113,
     F4: 115,
     UP: 38,
     DIGIT4: 52,
@@ -20,6 +22,7 @@ const VK = {
     L: 76,
     Q: 81,
     R: 82,
+    T: 84,
     W: 87,
     DEL: 46,
 } as const;
@@ -57,6 +60,16 @@ const WINDOWS_SHORTCUTS: KeyboardShortcut[] = [
     { id: "winL", labelKey: "pages.desk.shortcut.winL", events: chord(VK.META, VK.L) },
 ];
 
+const LINUX_SHORTCUTS: KeyboardShortcut[] = [
+    { id: "linuxTerminal", labelKey: "pages.desk.shortcut.linuxTerminal", events: chord(VK.CTRL, VK.ALT, VK.T) },
+    { id: "linuxRun", labelKey: "pages.desk.shortcut.linuxRun", events: chord(VK.ALT, VK.F2) },
+    { id: "altF4", labelKey: "pages.desk.shortcut.altF4", events: chord(VK.ALT, VK.F4) },
+    { id: "altTab", labelKey: "pages.desk.shortcut.altTab", events: chord(VK.ALT, VK.TAB) },
+    { id: "linuxSuper", labelKey: "pages.desk.shortcut.linuxSuper", events: chord(VK.META) },
+    { id: "linuxLock", labelKey: "pages.desk.shortcut.linuxLock", events: chord(VK.META, VK.L) },
+    { id: "linuxScreenshot", labelKey: "pages.desk.shortcut.linuxScreenshot", events: chord(VK.PRINT_SCREEN) },
+];
+
 const MACOS_SHORTCUTS: KeyboardShortcut[] = [
     { id: "forceQuit", labelKey: "pages.desk.shortcut.forceQuit", events: chord(VK.META, VK.ALT, VK.ESC) },
     { id: "lockScreen", labelKey: "pages.desk.shortcut.lockScreen", events: chord(VK.META, VK.CTRL, VK.Q) },
@@ -87,16 +100,19 @@ export type KeyboardShortcutOptions = {
 };
 
 /**
- * Host-targeted keyboard-shortcut menu for the given remote OS. macOS hosts get
- * the Command-based set; every other (or unknown) host falls back to the
- * Windows set, which is also a reasonable default for Linux desktops. When
- * `includeEscape` is set, an Esc entry is appended so the user can still send
- * Escape to the host where the Keyboard Lock API cannot capture it.
+ * Host-targeted keyboard-shortcut menu for the given remote OS. Windows,
+ * Linux, and macOS hosts get their own sets; unknown hosts fall back to the
+ * Windows set. When `includeEscape` is set, an Esc entry is appended so the
+ * user can still send Escape where the Keyboard Lock API cannot capture it.
  */
 export function getKeyboardShortcuts(
     os: OperationSystemEnum | undefined,
     options: KeyboardShortcutOptions = {},
 ): KeyboardShortcut[] {
-    const base = os === "Mac" ? MACOS_SHORTCUTS : WINDOWS_SHORTCUTS;
+    const base = os === "Mac"
+        ? MACOS_SHORTCUTS
+        : os === "Linux"
+            ? LINUX_SHORTCUTS
+            : WINDOWS_SHORTCUTS;
     return options.includeEscape ? [...base, ESCAPE_SHORTCUT] : base;
 }
