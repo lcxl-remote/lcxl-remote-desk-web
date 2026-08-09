@@ -1,4 +1,4 @@
-use std::os::fd::OwnedFd as StdOwnedFd;
+use std::sync::Arc;
 
 use desk_signal_facade::model::{
     desk_settings::DeskSettings,
@@ -8,12 +8,13 @@ use desk_utils::{
     error::DeskErrorCode,
     linux_display::{LinuxDisplayServer, detect_linux_display_environment},
 };
+use desk_wayland_portal::LivePortalSession;
 
 use crate::{
     error::CaptureError,
     image_capture::{
         pipewire_capture::{PipewireImageCapture, PipewireSetup},
-        portal_client::{PortalClient, probe_screencast_monitor_blocking},
+        portal_client::probe_screencast_monitor_blocking,
         wayland_output_geometry::{WaylandOutputGeometry, enumerate_wayland_outputs},
     },
     model::image_capture::{
@@ -24,55 +25,38 @@ use crate::{
 
 pub struct WaylandPortalImageCapture {
     inner: PipewireImageCapture,
+    _session: Arc<dyn LivePortalSession>,
 }
 
 impl WaylandPortalImageCapture {
-    pub fn new(desk_settings: &DeskSettings) -> Result<Self, CaptureError> {
-        log::info!(
-            "Wayland capture: initializing, image_capture={:?}",
-            desk_settings.image_capture
-        );
+    pub fn new(
+        desk_settings: &DeskSettings,
+        session: Arc<dyn LivePortalSession>,
+    ) -> Result<Self, CaptureError> {
         if detect_linux_display_environment().active_server() != LinuxDisplayServer::Wayland {
-            log::error!("Wayland capture: WAYLAND_DISPLAY is not set");
             return CaptureError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
                 "WAYLAND_DISPLAY is not set, cannot use wayland portal capture",
             );
         }
-
-        // Verify monitor capture without creating a portal session or showing consent UI.
-        probe_screencast_monitor_blocking()?;
-
-        let portal = PortalClient::new()?;
-        let session = portal.create_screencast_session()?;
-        portal.select_sources(&session)?;
-        let response = portal.start(&session)?;
-        let remote_fd: StdOwnedFd = portal.open_pipewire_remote(&session)?.into();
-        log::info!(
-            "Wayland capture: portal flow completed, session={}",
-            session.handle.as_str()
-        );
-        let selected_stream = response
-            .streams
-            .and_then(|mut streams| streams.drain(..).next())
-            .ok_or(CaptureError::ZbusError(zbus::Error::Failure(
-                "portal did not return stream".to_owned(),
-            )))?;
-        log::info!(
-            "Wayland capture: selected stream id={}, stream_info={:?}",
-            selected_stream.0,
-            selected_stream.1
-        );
-
-        let (left, top) = selected_stream.1.position.unwrap_or((0, 0));
-        let (width, height) = selected_stream.1.size.unwrap_or((0, 0));
+        let stream = session.stream();
+        if stream.node_id == 0 {
+            return CaptureError::custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                "Wayland Portal broker returned an invalid stream id",
+            );
+        }
+        let remote_fd = session.duplicate_pipewire_fd().map_err(|error| {
+            CaptureError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.to_string())
+        })?;
+        let (left, top) = stream.position.unwrap_or((0, 0));
+        let (width, height) = stream.size.unwrap_or((0, 0));
         let output = DisplayInfo {
-            device_name: selected_stream
-                .1
+            device_name: stream
                 .id
                 .clone()
                 .unwrap_or_else(|| "wayland-portal-display".to_string()),
-            display_device_name: selected_stream.1.mapping_id.clone(),
+            display_device_name: stream.mapping_id.clone(),
             desktop_coordinates: DisplayRect {
                 left,
                 top,
@@ -85,14 +69,16 @@ impl WaylandPortalImageCapture {
             resolutions: vec![],
         };
         let setup = PipewireSetup {
-            stream_id: selected_stream.0,
+            stream_id: stream.node_id,
             current_output: Some(output),
-            portal_session: Some(session.handle),
+            portal_session: None,
             remote_fd: Some(remote_fd),
         };
         let inner = PipewireImageCapture::new_with_setup(desk_settings, setup)?;
-        log::info!("Wayland capture: PipeWire capture created successfully");
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            _session: session,
+        })
     }
 }
 

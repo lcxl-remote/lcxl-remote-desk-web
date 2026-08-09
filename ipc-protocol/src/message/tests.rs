@@ -1,5 +1,5 @@
 use super::*;
-use desk_signal_facade::model::desk_settings::DeskSettings;
+use desk_signal_facade::model::desk_settings::{DeskSettings, LinuxInputControlMode};
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
 use desk_signal_facade::model::image_capture::Resolution;
 use desk_signal_facade::model::media_capability::VideoEncoderId;
@@ -144,6 +144,7 @@ fn start_media_round_trips_wincode() {
         start_video: true,
         start_audio: true,
         image_capture: None,
+        resolved_wayland_control_mode: Some(LinuxInputControlMode::Portal),
         enable_dirty_rect: Some(false),
     });
     match wincode_round_trip(&msg) {
@@ -152,6 +153,10 @@ fn start_media_round_trips_wincode() {
             assert_eq!(p.video_codec, MediaCodec::H264);
             assert_eq!(p.video_encoder, Some(VideoEncoderId::X264));
             assert_eq!(p.audio_codec, MediaCodec::Opus);
+            assert_eq!(
+                p.resolved_wayland_control_mode,
+                Some(LinuxInputControlMode::Portal)
+            );
             assert_eq!(p.fps, 60);
             assert!(p.start_video);
             assert!(p.start_audio);
@@ -184,6 +189,7 @@ fn start_media_data_channel_only_round_trips() {
         start_video: false,
         start_audio: false,
         image_capture: None,
+        resolved_wayland_control_mode: None,
         enable_dirty_rect: None,
     });
     match wincode_round_trip(&msg) {
@@ -1038,6 +1044,41 @@ fn list_terminal_response_round_trips_wincode() {
 
 // === ServiceToWorker / WorkerToService full-variant coverage ===
 
+#[test]
+fn wayland_portal_commands_and_status_keep_operation_fencing() {
+    let authorize = ServiceToWorker::AuthorizeWaylandPortal(AuthorizeWaylandPortalPayload {
+        operation_id: "portal-op-7".to_string(),
+        target: desk_wayland_portal::AuthorizationTarget::ScreenAndInput,
+    });
+    match wincode_round_trip(&authorize) {
+        ServiceToWorker::AuthorizeWaylandPortal(payload) => {
+            assert_eq!(payload.operation_id, "portal-op-7");
+            assert_eq!(
+                payload.target,
+                desk_wayland_portal::AuthorizationTarget::ScreenAndInput
+            );
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    let mut snapshot = desk_wayland_portal::PortalSnapshot::not_configured(
+        desk_wayland_portal::PortalAvailability::default(),
+    );
+    snapshot.operation_id = Some("portal-op-7".to_string());
+    snapshot.generation = 7;
+    let status = WorkerToService::WaylandPortalStatus(WaylandPortalStatusPayload { snapshot });
+    match wincode_round_trip(&status) {
+        WorkerToService::WaylandPortalStatus(payload) => {
+            assert_eq!(
+                payload.snapshot.operation_id.as_deref(),
+                Some("portal-op-7")
+            );
+            assert_eq!(payload.snapshot.generation, 7);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
 /// Exhaustive `ServiceToWorker` round-trip. Per-variant tests above
 /// cover the field-level invariants for the high-traffic variants;
 /// this table-driven test guarantees **every** variant — including
@@ -1084,6 +1125,7 @@ fn service_to_worker_all_variants_round_trip() {
             start_video: true,
             start_audio: true,
             image_capture: None,
+            resolved_wayland_control_mode: None,
             enable_dirty_rect: None,
         }),
         ServiceToWorker::StopMedia(StopMediaPayload {
@@ -1207,6 +1249,14 @@ fn service_to_worker_all_variants_round_trip() {
         ServiceToWorker::UpdateSecurityPolicy(UpdateSecurityPolicyPayload {
             operation_id: "op-policy".to_string(),
             snapshot: PolicySnapshot::new(SecuritySettings::default()),
+        }),
+        ServiceToWorker::AuthorizeWaylandPortal(AuthorizeWaylandPortalPayload {
+            operation_id: "op-wayland".to_string(),
+            target: desk_wayland_portal::AuthorizationTarget::ScreenAndInput,
+        }),
+        ServiceToWorker::CancelWaylandPortal(CancelWaylandPortalPayload {
+            operation_id: "op-wayland".to_string(),
+            generation: 4,
         }),
     ];
     for case in &cases {
@@ -1375,6 +1425,11 @@ fn worker_to_service_all_variants_round_trip() {
     let cases: Vec<WorkerToService> = vec![
         WorkerToService::Ready,
         WorkerToService::Capabilities(MediaCapabilities::default()),
+        WorkerToService::WaylandPortalStatus(WaylandPortalStatusPayload {
+            snapshot: desk_wayland_portal::PortalSnapshot::not_configured(
+                desk_wayland_portal::PortalAvailability::default(),
+            ),
+        }),
         WorkerToService::SignalingError(SignalingErrorPayload {
             request_id: "r".to_string(),
             connection_id: "c".to_string(),

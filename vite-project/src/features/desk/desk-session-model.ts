@@ -32,7 +32,7 @@ export function shouldShowMediaPipelineOverlay(
 
 type DesktopRequestRemotePayload = Pick<
     RequestRemoteModel,
-    "purpose" | "grant_session_id"
+    "purpose" | "grant_session_id" | "requested_wayland_control_mode"
 > & {
     connection_id: string
 }
@@ -40,10 +40,33 @@ type DesktopRequestRemotePayload = Pick<
 export function buildDesktopRequestRemotePayload(
     connectionId: string,
     grantSessionId: string | null,
+    requestedWaylandControlMode: string,
 ): DesktopRequestRemotePayload {
     return {
         connection_id: connectionId,
         purpose: "remote_desktop",
+        requested_wayland_control_mode: requestedWaylandControlMode,
         ...(grantSessionId ? { grant_session_id: grantSessionId } : {}),
+    }
+}
+
+const WAYLAND_MODE_STORAGE_PREFIX = "lcxl-desk-wayland-control-mode:"
+const WAYLAND_MODES = new Set(["auto", "none", "uinput", "portal"])
+
+export function loadRequestedWaylandControlMode(connectionId: string): string {
+    try {
+        const value = localStorage.getItem(`${WAYLAND_MODE_STORAGE_PREFIX}${connectionId}`)
+        return value && WAYLAND_MODES.has(value) ? value : "auto"
+    } catch {
+        return "auto"
+    }
+}
+
+export function saveRequestedWaylandControlMode(connectionId: string, mode: string): void {
+    if (!WAYLAND_MODES.has(mode)) return
+    try {
+        localStorage.setItem(`${WAYLAND_MODE_STORAGE_PREFIX}${connectionId}`, mode)
+    } catch {
+        // The current connection remains valid; only the next-session preference is lost.
     }
 }

@@ -23,6 +23,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+#[cfg(target_os = "linux")]
+use desk_signal_facade::model::desk_settings::LinuxInputControlMode;
 use desk_signal_facade::model::image_capture::Resolution;
 use desk_signal_facade::model::media_capability::{
     AUTO_ENCODER_ORDER, EncoderCompatibility, VideoEncoderId, capabilities_for_encoder_names,
@@ -34,6 +36,8 @@ use desk_signal_facade::model::signal::{
     OfferModel, RequestRemoteModel, SignalingModel, SignalingState, SignalingType,
 };
 use desk_utils::error::{CustomDeskError, DeskErrorCode};
+#[cfg(target_os = "linux")]
+use desk_utils::linux_display::LinuxDisplayServer;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use webrtc::api::media_engine::{
     MIME_TYPE_AV1, MIME_TYPE_H264, MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9,

@@ -184,8 +184,7 @@ mod tests {
     use desk_signal_facade::model::policy_snapshot::PolicySnapshot;
 
     fn coordinator_at(path: &std::path::Path) -> Arc<SettingsCoordinator> {
-        let mut settings = Settings::default();
-        settings.args.config_file_path = path.to_string_lossy().into_owned();
+        let settings = Settings::for_test_config(path);
         let security = settings.security.clone();
         Arc::new(SettingsCoordinator::new(
             Arc::new(SharedSettings::from(settings)),

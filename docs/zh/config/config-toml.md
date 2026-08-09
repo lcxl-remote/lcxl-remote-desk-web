@@ -1,6 +1,6 @@
 # config.toml 参考
 
-服务端设置通过 `conf/config.toml` 管理。配置文件路径可用 `-c, --config-file-path <PATH>` 覆盖。
+服务端设置使用与启动模式无关的平台默认路径：Windows 为 `%ProgramData%\LCXL Remote Desktop\config\config.toml`；Linux 普通用户为 `XDG_CONFIG_HOME/lcxl-remote-desk/config.toml`（未设置时 `~/.config/lcxl-remote-desk/config.toml`），root 为 `/etc/lcxl-remote-desk/config.toml`；macOS 为 `~/Library/Application Support/com.lcxl.remote-desk/config/config.toml`。`-c, --config-file-path <PATH>` 用于显式选择其他 profile；只有显式传值时服务或 LaunchAgent 才继承该路径。系统不会自动发现或迁移旧的 cwd 相对 `conf/config.toml`。
 
 ## 系统 `[system]`
 

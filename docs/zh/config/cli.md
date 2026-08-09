@@ -6,7 +6,7 @@ cargo run -- --help
 
 ## 参数
 
-- `-c, --config-file-path <PATH>`——配置文件路径（默认：`conf/config`）。
+- `-c, --config-file-path <PATH>`——配置文件路径（无默认值；用于覆盖统一的平台 profile）。
 - `-s, --startup-mode <MODE>`——启动模式：
   - `default`——含信令与被控端的完整模式。
   - `signaling`——仅信令模式（信令 + TURN）。

@@ -85,10 +85,14 @@ pub async fn update_settings(
     // Linux keep the prior behavior via the same call; config_file_path is only
     // consumed on macOS to write an absolute --config-file-path into the plist.)
     if let Some(auto_start_enable) = params.auto_start {
-        let config_file_path = settings.read().await.args.config_file_path.clone();
-        if let Err(e) =
-            update_auto_start_status(auto_start_enable, std::path::Path::new(&config_file_path))
-        {
+        let config_override = {
+            let settings = settings.read().await;
+            settings
+                .paths()
+                .explicit_config_file()
+                .map(std::path::Path::to_path_buf)
+        };
+        if let Err(e) = update_auto_start_status(auto_start_enable, config_override.as_deref()) {
             log::error!("Failed to update auto start status: {:?}", e);
             return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
                 DeskErrorCode::AUTO_START_ERROR,
@@ -620,9 +624,8 @@ mod tests {
     /// it; a not-yet-selectable mode is ignored.
     #[actix_web::test]
     async fn update_ai_policy_settings_applies_update() {
-        let mut settings = Settings::default();
         let tmp = std::env::temp_dir().join(format!("lrd-pr0-{}.toml", uuid::Uuid::new_v4()));
-        settings.args.config_file_path = tmp.to_string_lossy().into_owned();
+        let settings = Settings::for_test_config(&tmp);
         let shared = web::Data::new(SharedSettings::from(settings));
 
         let app = test::init_service(
@@ -759,14 +762,9 @@ mod tests {
     }
 
     fn settings_with_temp_path() -> SharedSettings {
-        let mut settings = Settings::default();
         let mut temp_path = std::env::temp_dir();
         temp_path.push(format!("desk_settings_test_{}.toml", uuid::Uuid::new_v4()));
-        settings.args = crate::model::settings::Args {
-            config_file_path: temp_path.to_string_lossy().to_string(),
-            ..Default::default()
-        };
-        SharedSettings::from(settings)
+        SharedSettings::from(Settings::for_test_config(&temp_path))
     }
 
     #[actix_web::test]
@@ -829,9 +827,8 @@ mod tests {
         use desk_turn::supervisor::{BackoffConfig, DesiredState, spawn};
         use std::time::Duration;
 
-        let mut settings = Settings::default();
         let tmp = std::env::temp_dir().join(format!("lrd-turn-{}.toml", uuid::Uuid::new_v4()));
-        settings.args.config_file_path = tmp.to_string_lossy().into_owned();
+        let settings = Settings::for_test_config(&tmp);
         let shared = web::Data::new(SharedSettings::from(settings));
 
         let connection_map = web::Data::new(desk_signal::model::SharedConnectionMap::from(
@@ -930,14 +927,13 @@ mod tests {
     /// server never received and the file never recorded.
     #[actix_web::test]
     async fn a_turn_write_that_cannot_be_saved_changes_nothing() {
-        let mut settings = Settings::default();
-        settings.turn.realm = "before".into();
         // A regular file where a directory would have to be: the save fails on
         // its first step, before anything is written anywhere.
         let blocker =
             std::env::temp_dir().join(format!("lrd-turn-blocked-{}", uuid::Uuid::new_v4()));
         std::fs::write(&blocker, b"not a directory").unwrap();
-        settings.args.config_file_path = blocker.join("config.toml").to_string_lossy().into_owned();
+        let mut settings = Settings::for_test_config(&blocker.join("config.toml"));
+        settings.turn.realm = "before".into();
         let shared = web::Data::new(SharedSettings::from(settings));
 
         let app = test::init_service(

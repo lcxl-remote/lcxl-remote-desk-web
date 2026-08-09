@@ -3,6 +3,7 @@ pub use windows_impl::*;
 
 #[cfg(target_os = "windows")]
 mod windows_impl {
+    use desk_utils::host_data_paths::HostDataPaths;
     use desk_virtual_display_driver_ops::{DriverInstallerOps, RealInstaller};
     use log::{error, info};
     use std::ffi::OsString;
@@ -108,8 +109,22 @@ mod windows_impl {
     pub fn install_service(
         install_dir: &str,
         install_idd_driver: bool,
+        config_override: Option<&Path>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        install_service_with(install_dir, install_idd_driver, &RealInstaller)
+        let explicit_config = match config_override {
+            Some(path) => Some(
+                HostDataPaths::resolve_current(Some(path))?
+                    .config_file()
+                    .to_path_buf(),
+            ),
+            None => None,
+        };
+        install_service_with(
+            install_dir,
+            install_idd_driver,
+            explicit_config.as_deref(),
+            &RealInstaller,
+        )
     }
 
     /// Test seam used by [`install_service`]. Allows the file-copy +
@@ -119,6 +134,7 @@ mod windows_impl {
     pub fn install_service_with(
         install_dir: &str,
         install_idd_driver: bool,
+        config_override: Option<&Path>,
         installer: &dyn DriverInstallerOps,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let src_exe = std::env::current_exe()?;
@@ -185,13 +201,14 @@ mod windows_impl {
             ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
         )?;
 
-        // Store config in ProgramData (consistent with the log directory location)
-        // so the daemon is not sensitive to its working directory.
-        let config_path = service_data_dir()
-            .join("conf")
-            .join("config")
-            .to_string_lossy()
-            .into_owned();
+        let mut launch_arguments = vec![
+            OsString::from("--startup-mode"),
+            OsString::from("service-daemon"),
+        ];
+        if let Some(path) = config_override {
+            launch_arguments.push(OsString::from("--config-file-path"));
+            launch_arguments.push(path.as_os_str().to_os_string());
+        }
 
         let info = ServiceInfo {
             name: OsString::from(SERVICE_NAME),
@@ -200,12 +217,7 @@ mod windows_impl {
             start_type: ServiceStartType::AutoStart,
             error_control: ServiceErrorControl::Normal,
             executable_path: dst_exe,
-            launch_arguments: vec![
-                OsString::from("--startup-mode"),
-                OsString::from("service-daemon"),
-                OsString::from("--config-file-path"),
-                OsString::from(&config_path),
-            ],
+            launch_arguments,
             dependencies: vec![],
             account_name: None,
             account_password: None,
@@ -366,23 +378,6 @@ mod windows_impl {
                 log::warn!("[uninstall] driver uninstall failed: {e}; continuing with SCM cleanup")
             }
         }
-    }
-
-    /// Returns the canonical config file path used by the service daemon.
-    ///
-    /// Both the daemon (via `--config-file-path` launch argument) and the Tauri app
-    /// use this function so they always agree on the same file.
-    pub fn get_service_config_path() -> Option<std::path::PathBuf> {
-        Some(service_data_dir().join("conf").join("config"))
-    }
-
-    /// Returns the service data directory: `%ProgramData%\LCXL Remote Desktop`.
-    /// Config and logs are stored here, consistent across service restarts and
-    /// independent of the working directory Windows assigns to the service process.
-    pub fn service_data_dir() -> std::path::PathBuf {
-        let program_data =
-            std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
-        std::path::PathBuf::from(program_data).join("LCXL Remote Desktop")
     }
 
     fn copy_dir_recursive(
@@ -610,17 +605,6 @@ mod windows_impl {
             assert_eq!(*installer.uninstall_count.lock().unwrap(), 1);
         }
     }
-}
-
-/// Returns None on non-Windows (no service daemon concept).
-#[cfg(not(target_os = "windows"))]
-pub fn get_service_config_path() -> Option<std::path::PathBuf> {
-    None
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn service_data_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from("/var/lib/lcxl-remote-desk")
 }
 
 /// Returns the default service installation directory for this platform.

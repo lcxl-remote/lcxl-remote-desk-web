@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use desk_utils::host_data_paths::HostDataPaths;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -33,18 +34,18 @@ pub enum NativeLocalAccessResponse {
     Error { message: String },
 }
 
-pub fn endpoint_for_config(config_file_path: &str) -> PathBuf {
+pub fn endpoint_for_paths(paths: &HostDataPaths) -> PathBuf {
     #[cfg(target_os = "windows")]
     {
-        let _ = config_file_path;
+        let _ = paths;
         PathBuf::from(LOCAL_ACCESS_CONTROL_ENDPOINT)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Path::new(config_file_path)
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("remote-access-control.sock")
+        paths
+            .local_access_endpoint()
+            .expect("non-Windows host paths must have a local-access endpoint")
+            .to_path_buf()
     }
 }
 

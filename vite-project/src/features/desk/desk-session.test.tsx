@@ -260,13 +260,15 @@ describe('shouldShowMediaPipelineOverlay', () => {
 
 describe('buildDesktopRequestRemotePayload', () => {
   it('always identifies desktop sessions explicitly', () => {
-    expect(buildDesktopRequestRemotePayload('desk-1', null)).toEqual({
+    expect(buildDesktopRequestRemotePayload('desk-1', null, 'auto')).toEqual({
       connection_id: 'desk-1',
       purpose: 'remote_desktop',
+      requested_wayland_control_mode: 'auto',
     });
-    expect(buildDesktopRequestRemotePayload('desk-1', 'grant-1')).toEqual({
+    expect(buildDesktopRequestRemotePayload('desk-1', 'grant-1', 'uinput')).toEqual({
       connection_id: 'desk-1',
       purpose: 'remote_desktop',
+      requested_wayland_control_mode: 'uinput',
       grant_session_id: 'grant-1',
     });
   });

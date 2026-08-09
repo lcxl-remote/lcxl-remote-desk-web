@@ -156,16 +156,6 @@ impl From<x11rb::errors::ReplyError> for InputError {
     }
 }
 
-/// Bridge capture-engine errors raised by the shared Wayland portal
-/// helpers (`pipewire_utils`) into the input-injection error type,
-/// preserving the original [`DeskErrorCode`].
-#[cfg(target_os = "linux")]
-impl From<desk_capture_engine::error::CaptureError> for InputError {
-    fn from(err: desk_capture_engine::error::CaptureError) -> Self {
-        InputError::new_custom_error(err.to_error_code(), &err.to_string())
-    }
-}
-
 impl std::error::Error for InputError {}
 
 #[cfg(test)]
@@ -189,7 +179,7 @@ mod tests {
     use super::*;
 
     /// A raw zbus error must surface as `InputError::ZbusError` so the
-    /// Wayland portal `?` propagation in `service::wayland_remote_desktop`
+    /// Wayland portal `?` propagation
     /// keeps the original D-Bus failure text.
     #[test]
     fn zbus_error_maps_to_zbus_variant() {
@@ -218,19 +208,5 @@ mod tests {
         let err: InputError = x11rb::errors::ConnectionError::UnknownError.into();
         assert!(matches!(err, InputError::X11ConnectionError(_)));
         assert_eq!(err.to_error_code(), DeskErrorCode::SYSTEM_ERROR);
-    }
-
-    /// Capture-engine errors raised by the shared `pipewire_utils` helpers
-    /// must keep their original [`DeskErrorCode`] after bridging into
-    /// `InputError`, so portal probes report the right code upstream.
-    #[test]
-    fn capture_error_bridge_preserves_error_code() {
-        let capture_err = desk_capture_engine::error::CaptureError::new_custom_error(
-            DeskErrorCode::FEATURE_UNAVAILABLE,
-            "portal missing",
-        );
-        let err: InputError = capture_err.into();
-        assert_eq!(err.to_error_code(), DeskErrorCode::FEATURE_UNAVAILABLE);
-        assert!(err.to_string().contains("portal missing"));
     }
 }

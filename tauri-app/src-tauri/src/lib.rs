@@ -197,16 +197,7 @@ pub fn run() -> Result<(), DeskTauriError> {
 
     if desk_utils::permission::is_service_running(SERVICE_NAME) {
         log::info!("ServiceDaemon is running — launching as service shell (no embedded server)");
-        // Load settings from the daemon's config file (absolute path stored in SCM).
-        // This ensures the IPC token matches the one the daemon generated and persisted.
-        let daemon_settings =
-            lcxl_remote_desk_server::daemon::windows_service::get_service_config_path()
-                .and_then(|p| {
-                    let mut a = args.clone();
-                    a.config_file_path = p.to_string_lossy().into_owned();
-                    Settings::new(&a).ok()
-                })
-                .unwrap_or_else(|| Settings::new(&args).unwrap_or_default());
+        let daemon_settings = Settings::new(&args)?;
         run_tauri_service_shell(&daemon_settings)?;
     } else {
         let settings = Settings::new(&args)?;
@@ -231,6 +222,7 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
     // early would close the non-blocking writer thread mid-run.
     let _telemetry_guard = match lcxl_remote_desk_server::telemetry::init_tauri_shell_telemetry(
         &settings.log.log_level,
+        settings.paths().log_dir(),
     ) {
         Ok(g) => Some(g),
         Err(e) => {
@@ -243,7 +235,7 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
 
     log::info!("[ServiceShell] starting; daemon ws endpoint = ws://127.0.0.1:8082/ws/tauri_ipc");
     let ipc_token = settings.system.tauri_ipc_token.clone().unwrap_or_default();
-    let remote_access_config_path = settings.args.config_file_path.clone();
+    let remote_access_paths = settings.paths().clone();
     log::info!(
         "[ServiceShell] ipc_token len={} (empty={})",
         ipc_token.len(),
@@ -296,9 +288,12 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
     });
 
     // Service-op handler (ShellExecute runas — does not need Tauri handle).
+    let service_config_override = remote_access_paths
+        .explicit_config_file()
+        .map(std::path::Path::to_path_buf);
     std::thread::spawn(move || {
         while let Ok(op) = svc_op_rx.recv() {
-            handle_service_op(op);
+            handle_service_op(op, service_config_override.as_deref());
         }
     });
 
@@ -326,7 +321,7 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
             host_access_status::HostAccessStatusManager::new(
                 handle.clone(),
                 daemon_url.clone(),
-                &remote_access_config_path,
+                &remote_access_paths,
             )
             .start(host_access_rx);
 
@@ -510,7 +505,10 @@ fn find_server_binary() -> std::path::PathBuf {
 }
 
 /// Elevate and run `lcxl-remote-desk-server <args>` to install or uninstall the OS service.
-fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
+fn handle_service_op(
+    op: lcxl_remote_desk_server::ServiceOp,
+    config_override: Option<&std::path::Path>,
+) {
     let sidecar = find_server_binary();
 
     #[cfg(target_os = "windows")]
@@ -531,6 +529,10 @@ fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
                 );
                 if *install_idd_driver {
                     s.push_str(" --install-idd-driver");
+                }
+                if let Some(path) = config_override {
+                    s.push_str(" --config-file-path ");
+                    s.push_str(&quote_cmd_arg(&path.to_string_lossy()));
                 }
                 s
             }
@@ -576,6 +578,9 @@ fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
                     .arg(install_path);
                 if *install_idd_driver {
                     cmd.arg("--install-idd-driver");
+                }
+                if let Some(path) = config_override {
+                    cmd.arg("--config-file-path").arg(path);
                 }
             }
             lcxl_remote_desk_server::ServiceOp::Uninstall => {
@@ -799,14 +804,18 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
             host_access_status::HostAccessStatusManager::new(
                 handle.clone(),
                 frontend_url.clone(),
-                &settings.args.config_file_path,
+                settings.paths(),
             )
             .start(host_access_rx);
 
             // Spawn handler for Install / Uninstall operations.
+            let service_config_override = settings
+                .paths()
+                .explicit_config_file()
+                .map(std::path::Path::to_path_buf);
             std::thread::spawn(move || {
                 while let Ok(op) = svc_op_rx.recv() {
-                    handle_service_op(op);
+                    handle_service_op(op, service_config_override.as_deref());
                 }
             });
 

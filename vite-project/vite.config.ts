@@ -21,7 +21,10 @@ export default defineConfig({
         proxy: {
             '/api': {
                 target: 'http://localhost:8081/',
-                changeOrigin: true,
+                // Keep the browser-facing Host so local permission endpoints can
+                // verify Origin === Host. Rewriting it to the backend target makes
+                // a Tauri dev origin such as 127.0.0.1:5174 look cross-origin.
+                changeOrigin: false,
                 ws: true,
                 xfwd: true,
             }

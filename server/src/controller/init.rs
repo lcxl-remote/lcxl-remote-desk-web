@@ -117,7 +117,7 @@ pub async fn init_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::settings::{Args, Settings};
+    use crate::model::settings::Settings;
     use actix_web::{App, test, web};
     use std::env;
 
@@ -138,16 +138,11 @@ mod tests {
     }
 
     async fn build_test_settings() -> SharedSettings {
-        let mut settings = Settings::default();
-        // Ensure it's not "initialized"
-        settings.user.login_password = "".to_string();
-
         let mut temp_path = env::temp_dir();
         temp_path.push(format!("desk_init_test_{}.toml", uuid::Uuid::new_v4()));
-        settings.args = Args {
-            config_file_path: temp_path.to_string_lossy().to_string(),
-            ..Default::default()
-        };
+        let mut settings = Settings::for_test_config(&temp_path);
+        // Ensure it's not "initialized"
+        settings.user.login_password = "".to_string();
 
         SharedSettings::from(settings)
     }

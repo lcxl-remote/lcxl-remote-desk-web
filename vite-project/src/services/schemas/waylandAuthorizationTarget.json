@@ -1,0 +1,1 @@
+{"type":"string","description":"Local Wayland Portal authorization target.","enum":["screen_only","screen_and_input"],"x-readme-ref-name":"WaylandAuthorizationTarget"}

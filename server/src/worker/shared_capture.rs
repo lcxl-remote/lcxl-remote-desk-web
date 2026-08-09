@@ -52,6 +52,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+#[cfg(target_os = "linux")]
+use desk_capture_engine::image_capture::image_capture_factory::create_image_capture_with_portal;
+#[cfg(target_os = "linux")]
+use desk_wayland_portal::WaylandPortalBroker;
+
 use desk_capture_engine::{
     error::CaptureError,
     image_capture::image_capture_factory::create_image_capture,
@@ -215,10 +220,25 @@ impl SharedCaptureHandle {
 /// output_index)`. Construct once per worker; share via `Arc`.
 pub struct SharedCaptureRegistry {
     map: StdMutex<HashMap<CaptureKey, Weak<SharedInner>>>,
+    #[cfg(target_os = "linux")]
+    portal_broker: Option<Arc<WaylandPortalBroker>>,
 }
 
 impl SharedCaptureRegistry {
     pub fn new() -> Arc<Self> {
+        Self::new_with_portal(None)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn new_with_portal(portal_broker: Option<Arc<WaylandPortalBroker>>) -> Arc<Self> {
+        Arc::new(Self {
+            map: StdMutex::new(HashMap::new()),
+            portal_broker,
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn new_with_portal(_: Option<()>) -> Arc<Self> {
         Arc::new(Self {
             map: StdMutex::new(HashMap::new()),
         })
@@ -257,6 +277,30 @@ impl SharedCaptureRegistry {
         // WGC 鈫?DXGI when the WGC RuntimeBroker is unavailable in
         // SYSTEM/Winlogon contexts), so the effective backend is
         // queried below and used to key the registry slot.
+        #[cfg(target_os = "linux")]
+        let initial_capture =
+            if settings.get_image_capture_type()? == ImageCaptureType::WAYLANDPORTAL {
+                let session = self
+                    .portal_broker
+                    .as_ref()
+                    .ok_or_else(|| {
+                        CaptureError::new_custom_error(
+                            desk_utils::error::DeskErrorCode::FEATURE_UNAVAILABLE,
+                            "Wayland Portal authorization is required on the host",
+                        )
+                    })?
+                    .try_borrow_session(false)
+                    .map_err(|error| {
+                        CaptureError::new_custom_error(
+                            desk_utils::error::DeskErrorCode::FEATURE_UNAVAILABLE,
+                            &error.to_string(),
+                        )
+                    })?;
+                create_image_capture_with_portal(settings, session)?
+            } else {
+                create_image_capture(settings)?
+            };
+        #[cfg(not(target_os = "linux"))]
         let initial_capture = create_image_capture(settings)?;
         let effective_type = initial_capture.get_capture_type();
         // Key by the device_name the capture instance actually realised

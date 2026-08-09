@@ -59,6 +59,8 @@ use desk_input_injection::mouse_event::mouse_event_factory::create_mouse_event_h
 use desk_ipc_protocol::message::{InputPayload, StartMediaPayload, StopMediaPayload};
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::image_capture::DisplayInfo;
+#[cfg(target_os = "linux")]
+use desk_wayland_portal::{PortalInputSender, WaylandPortalBroker};
 use log::{debug, error, info, warn};
 
 /// Per-connection injection state. Mirrors the per-DC `Arc<Mutex<...>>`
@@ -91,19 +93,33 @@ struct ConnectionInputState {
 /// IPC loop can take a clone for each branch.
 #[derive(Clone)]
 pub struct InputDispatcher {
-    /// Initial DeskSettings; used to pull `wayland_control_mode`. The
-    /// dispatcher does not refresh this snapshot mid-session — settings
-    /// changes that affect input semantics (e.g. wayland mode flip)
-    /// are not currently supported and would require an explicit IPC
-    /// notify path anyway.
-    desk_settings: DeskSettings,
+    /// Shared Portal owner used only when the daemon froze this connection's
+    /// input mode to `portal`. Mode selection itself comes from each
+    /// `StartMediaPayload`; the worker never re-resolves `auto`.
+    #[cfg(target_os = "linux")]
+    portal_broker: Option<Arc<WaylandPortalBroker>>,
     inner: Arc<StdMutex<HashMap<String, ConnectionInputState>>>,
 }
 
 impl InputDispatcher {
-    pub fn new(desk_settings: DeskSettings) -> Self {
+    pub fn new(_desk_settings: DeskSettings) -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            Self::new_with_portal(_desk_settings, None)
+        }
+        #[cfg(not(target_os = "linux"))]
         Self {
-            desk_settings,
+            inner: Arc::new(StdMutex::new(HashMap::new())),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn new_with_portal(
+        _desk_settings: DeskSettings,
+        portal_broker: Option<Arc<WaylandPortalBroker>>,
+    ) -> Self {
+        Self {
+            portal_broker,
             inner: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -128,8 +144,27 @@ impl InputDispatcher {
         let (left, top, width, height) =
             display_geometry_for_device(payload.video_device.as_deref());
         let geometry = shared_geometry(MonitorGeometry::new(left, top, width, height));
-        let wayland_mode = self.desk_settings.wayland_control_mode.as_deref();
-        let mouse = match create_mouse_event_handler(geometry.clone(), wayland_mode) {
+        #[cfg(target_os = "linux")]
+        let wayland_mode = Some(
+            payload
+                .resolved_wayland_control_mode
+                .unwrap_or(desk_signal_facade::model::desk_settings::LinuxInputControlMode::None)
+                .as_str(),
+        );
+        #[cfg(not(target_os = "linux"))]
+        let wayland_mode = None;
+        #[cfg(target_os = "linux")]
+        let portal = self
+            .portal_broker
+            .as_ref()
+            .and_then(|broker| broker.try_borrow_session(true).ok())
+            .map(PortalInputSender::new);
+        let mouse = match create_mouse_event_handler(
+            geometry.clone(),
+            wayland_mode,
+            #[cfg(target_os = "linux")]
+            portal.clone(),
+        ) {
             Ok(h) => h,
             Err(e) => {
                 error!(
@@ -140,7 +175,11 @@ impl InputDispatcher {
                 return;
             }
         };
-        let keyboard = match create_keyboard_event_handler(wayland_mode) {
+        let keyboard = match create_keyboard_event_handler(
+            wayland_mode,
+            #[cfg(target_os = "linux")]
+            portal,
+        ) {
             Ok(h) => h,
             Err(e) => {
                 error!(
@@ -554,6 +593,7 @@ mod tests {
 
     fn start_payload(connection_id: &str) -> StartMediaPayload {
         StartMediaPayload {
+            resolved_wayland_control_mode: None,
             connection_id: connection_id.to_string(),
             video_codec: desk_ipc_protocol::message::MediaCodec::H264,
             video_encoder: None,
@@ -618,11 +658,6 @@ mod tests {
     /// triggering the "duplicate" warning path (we can't observe the
     /// warning directly but we can verify the entry is in / out by
     /// re-stopping).
-    // Ignored by default: `start_connection` builds real mouse/keyboard input
-    // handlers; in Wayland auto mode that opens an `xdg-desktop-portal`
-    // RemoteDesktop permission dialog and blocks indefinitely. Run with
-    // `--ignored` on a non-interactive host (or one where input goes via uinput).
-    #[ignore = "start_connection opens the RemoteDesktop portal; hangs on a Wayland portal prompt"]
     #[test]
     fn start_then_stop_releases_state() {
         let d = dispatcher();
@@ -640,9 +675,6 @@ mod tests {
 
     /// `shutdown` clears every connection. Subsequent dispatches all
     /// see "unknown connection" and silently drop.
-    // Ignored by default: see `start_then_stop_releases_state` — `start_connection`
-    // opens the RemoteDesktop portal on a Wayland session and blocks.
-    #[ignore = "start_connection opens the RemoteDesktop portal; hangs on a Wayland portal prompt"]
     #[test]
     fn shutdown_clears_state() {
         let d = dispatcher();
@@ -987,6 +1019,7 @@ mod tests {
         map.insert("conn-z".to_string(), state);
 
         let new_payload = StartMediaPayload {
+            resolved_wayland_control_mode: None,
             connection_id: "conn-z".to_string(),
             video_device: Some(r"\\.\DISPLAY9".to_string()),
             ..start_payload("conn-z")
@@ -1016,6 +1049,7 @@ mod tests {
         );
 
         let new_payload = StartMediaPayload {
+            resolved_wayland_control_mode: None,
             connection_id: "ghost".to_string(),
             video_device: Some(r"\\.\DISPLAY9".to_string()),
             ..start_payload("ghost")

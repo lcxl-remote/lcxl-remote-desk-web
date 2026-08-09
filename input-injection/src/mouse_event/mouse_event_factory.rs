@@ -1,5 +1,5 @@
 #[cfg(target_os = "linux")]
-use desk_utils::linux_display::{LinuxDisplayServer, detect_linux_display_environment};
+use desk_wayland_portal::PortalInputSender;
 
 use crate::{
     error::InputError,
@@ -36,6 +36,7 @@ use crate::mouse_event::mac;
 pub fn create_mouse_event_handler(
     geometry: SharedMonitorGeometry,
     wayland_control_mode: Option<&str>,
+    #[cfg(target_os = "linux")] portal: Option<PortalInputSender>,
 ) -> Result<Box<dyn MouseEventHandler + Send + Sync>, InputError> {
     #[cfg(target_os = "windows")]
     {
@@ -61,19 +62,18 @@ pub fn create_mouse_event_handler(
             }
         }
 
-        let mode = wayland_control_mode.unwrap_or("auto");
+        let mode = wayland_control_mode.unwrap_or("none");
         let (left, top, width, height) = {
             let g = geometry.read().expect("monitor geometry poisoned");
             (g.left, g.top, g.width, g.height)
         };
         log::info!(
-            "Mouse handler: selecting linux backend, mode={}, rect=({},{},{}x{}), WAYLAND_DISPLAY={}",
+            "Mouse handler: selecting frozen linux backend, mode={}, rect=({},{},{}x{})",
             mode,
             left,
             top,
             width,
-            height,
-            detect_linux_display_environment().wayland_present
+            height
         );
         match mode {
             "none" => {
@@ -87,25 +87,24 @@ pub fn create_mouse_event_handler(
             "portal" => {
                 log::info!("Mouse handler: using forced wayland portal backend");
                 return Ok(Box::new(
-                    wayland_portal::WaylandPortalMouseEventHandler::new(geometry)?,
+                    wayland_portal::WaylandPortalMouseEventHandler::new(
+                        geometry,
+                        portal.clone().ok_or_else(|| {
+                            InputError::new_custom_error(
+                                desk_utils::error::DeskErrorCode::FEATURE_UNAVAILABLE,
+                                "Wayland Portal authorization is required on the host",
+                            )
+                        })?,
+                    )?,
                 ));
             }
-            _ => {}
-        }
-
-        if detect_linux_display_environment().active_server() == LinuxDisplayServer::Wayland {
-            match wayland_portal::WaylandPortalMouseEventHandler::new(geometry.clone()) {
-                Ok(handler) => {
-                    log::info!("Mouse handler: auto selected wayland portal backend");
-                    return Ok(Box::new(handler));
-                }
-                Err(e) => {
-                    log::warn!("Wayland portal mouse handler init failed, fallback to uinput: {e}");
-                }
+            _ => {
+                return Err(InputError::new_custom_error(
+                    desk_utils::error::DeskErrorCode::INVALID_PARAMS,
+                    "Linux input requires a frozen mode of none, uinput, or portal",
+                ));
             }
         }
-        log::info!("Mouse handler: fallback to uinput backend");
-        Ok(Box::new(linux::UinputMouseEventHandler::new(geometry)?))
     }
     #[cfg(target_os = "macos")]
     {

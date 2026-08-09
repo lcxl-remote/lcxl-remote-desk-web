@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use desk_signal_facade::model::audio_capture::AudioDevice;
-use desk_signal_facade::model::desk_settings::DeskSettings;
+use desk_signal_facade::model::desk_settings::{DeskSettings, LinuxInputControlMode};
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
 use desk_signal_facade::model::image_capture::DisplayInfo;
 use desk_signal_facade::model::policy_snapshot::{PolicyGenerations, PolicySnapshot};
@@ -19,6 +19,7 @@ use wincode::{SchemaRead, SchemaWrite};
 
 use desk_signal_facade::model::media_capability::{VideoEncoderCapability, VideoEncoderId};
 use desk_signal_facade::model::media_pipeline::MediaPipelineStateData;
+use desk_wayland_portal::{AuthorizationTarget, PortalSnapshot};
 
 #[cfg(doc)]
 use super::{ServiceToWorker, WorkerToService};
@@ -264,6 +265,8 @@ pub struct StartMediaPayload {
     /// connection cannot pick a different backend than the first.
     #[serde(default)]
     pub image_capture: Option<String>,
+    /// Linux input mode frozen by daemon admission; Offer cannot override it.
+    pub resolved_wayland_control_mode: Option<LinuxInputControlMode>,
     /// Per-connection override for the BGRA→YUV dirty-rect fast path
     /// in `PersistentYuvBuffer`. `None` means "use the worker's base
     /// `DeskSettings.enable_dirty_rect`" (back-compat with older
@@ -279,6 +282,23 @@ pub struct StartMediaPayload {
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+pub struct AuthorizeWaylandPortalPayload {
+    pub operation_id: String,
+    pub target: AuthorizationTarget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+pub struct CancelWaylandPortalPayload {
+    pub operation_id: String,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+pub struct WaylandPortalStatusPayload {
+    pub snapshot: PortalSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]

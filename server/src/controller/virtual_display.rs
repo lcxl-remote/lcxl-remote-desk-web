@@ -437,14 +437,10 @@ mod tests {
     fn build_settings_with_config(
         mode: StartupMode,
         enabled: bool,
-        config_file_path: String,
+        config_file_path: std::path::PathBuf,
     ) -> Arc<SharedSettings> {
-        let mut settings = Settings::default();
-        settings.args = Args {
-            startup_mode: mode,
-            config_file_path,
-            ..Default::default()
-        };
+        let mut settings = Settings::for_test_config(&config_file_path);
+        settings.args.startup_mode = mode;
         settings.virtual_display.enabled = enabled;
         Arc::new(SharedSettings::from(settings))
     }
@@ -613,12 +609,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
 
-        let mut settings_value = Settings::default();
-        settings_value.args = Args {
-            startup_mode: StartupMode::Default,
-            config_file_path: cfg.to_string_lossy().into_owned(),
-            ..Default::default()
-        };
+        let mut settings_value = Settings::for_test_config(&cfg);
+        settings_value.args.startup_mode = StartupMode::Default;
         settings_value.virtual_display.enabled = true;
         let settings: Arc<SharedSettings> = Arc::new(SharedSettings::from(settings_value));
 
@@ -699,11 +691,7 @@ mod tests {
     async fn update_virtual_display_settings_persists_exclusive_and_prompt_ms() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
-        let settings = build_settings_with_config(
-            StartupMode::Default,
-            false,
-            cfg.to_string_lossy().into_owned(),
-        );
+        let settings = build_settings_with_config(StartupMode::Default, false, cfg.clone());
 
         let app = test::init_service(build_app(Arc::clone(&settings), Some(true))).await;
         let req = test::TestRequest::post()
@@ -736,11 +724,7 @@ mod tests {
     async fn update_virtual_display_settings_clamps_prompt_ms_above_maximum() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
-        let settings = build_settings_with_config(
-            StartupMode::Default,
-            false,
-            cfg.to_string_lossy().into_owned(),
-        );
+        let settings = build_settings_with_config(StartupMode::Default, false, cfg.clone());
 
         let app = test::init_service(build_app(Arc::clone(&settings), Some(true))).await;
         let req = test::TestRequest::post()

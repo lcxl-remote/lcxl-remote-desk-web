@@ -143,6 +143,30 @@ export type AudioDevice = {
     id: string;
 };
 
+export const waylandAuthorizationTargetEnum = {
+    screen_only: "screen_only",
+    screen_and_input: "screen_and_input"
+} as const;
+
+export type WaylandAuthorizationTargetEnumKey = (typeof waylandAuthorizationTargetEnum)[keyof typeof waylandAuthorizationTargetEnum];
+
+/**
+ * @description Local Wayland Portal authorization target.
+*/
+export type WaylandAuthorizationTarget = WaylandAuthorizationTargetEnumKey;
+
+export type AuthorizeWaylandRequest = {
+    /**
+     * @type string
+    */
+    operation_id: string;
+    /**
+     * @description Local Wayland Portal authorization target.
+     * @type string
+    */
+    target: WaylandAuthorizationTarget;
+};
+
 /**
  * @description AV1 encoder settings (SVT-AV1)
 */
@@ -270,6 +294,18 @@ export type BackgroundStart = {
      * @type boolean
     */
     path_valid: boolean;
+};
+
+export type CancelWaylandRequest = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    generation: number;
+    /**
+     * @type string
+    */
+    operation_id: string;
 };
 
 /**
@@ -611,6 +647,7 @@ export const deskErrorCodeEnum = {
     UNKNOWN_SIGNALING_TYPE: 6,
     FEATURE_UNAVAILABLE: 7,
     PRECONDITION_FAILED: 8,
+    WAYLAND_PORTAL_AUTHORIZATION_REQUIRED: 9,
     FILE_PATH_NOT_FOUND: 11,
     CLIENT_ID_NOT_FOUND: 12,
     REVISION_CONFLICT: 13,
@@ -681,6 +718,10 @@ export const deskErrorCodeEnum = {
     VIDEO_PIPELINE_RENEGOTIATION_REQUIRED: 91,
     VIDEO_PIPELINE_RESTART_FAILED: 92,
     VIDEO_PIPELINE_RUNTIME_FAILED: 93,
+    WAYLAND_PORTAL_INPUT_PERMISSION_REQUIRED: 94,
+    WAYLAND_PORTAL_AUTHORIZATION_CANCELLED: 95,
+    WAYLAND_PORTAL_SESSION_CLOSED: 96,
+    WAYLAND_PORTAL_BACKEND_FAILED: 97,
     CONNECTION_UNREACHABLE: 64,
     CONNECTION_NOT_SIGNALING: 65,
     CONNECTION_AUTH_FAILED: 66,
@@ -2369,6 +2410,10 @@ export type RequestRemoteModel = {
      * @type string
     */
     purpose: RemoteSessionPurpose;
+    /**
+     * @type string,null
+    */
+    requested_wayland_control_mode?: string | null;
 };
 
 export type RestResponseAiExecutionPolicyPublic = {
@@ -3133,6 +3178,53 @@ export type RestResponseSecuritySettings = {
     success: boolean;
 };
 
+/**
+ * @description Non-sensitive readiness snapshot for the local host UI.
+*/
+export type WaylandPortalInfo = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    generation: number;
+    /**
+     * @type boolean
+    */
+    input_ready: boolean;
+    /**
+     * @type string,null
+    */
+    operation_id?: string | null;
+    /**
+     * @type boolean
+    */
+    persistent_restore: boolean;
+    /**
+     * @type string
+    */
+    phase: string;
+    /**
+     * @description Diagnostic detail only. User interfaces must render `reason_code`\nthrough their localized domain mapping instead of displaying this text.
+     * @type string,null
+    */
+    reason?: string | null;
+    reason_code?: (null | DeskErrorCode);
+    /**
+     * @description Local Wayland Portal authorization target.
+     * @type string
+    */
+    recommended_target: WaylandAuthorizationTarget;
+    /**
+     * @type boolean
+    */
+    requires_local_action: boolean;
+    /**
+     * @type boolean
+    */
+    screen_ready: boolean;
+    target?: (null | WaylandAuthorizationTarget);
+};
+
 export type RestResponseServerInfo = {
     /**
      * @type integer, int32
@@ -3166,6 +3258,11 @@ export type RestResponseServerInfo = {
         is_admin: boolean;
         macos_permissions?: (null | MacosPermissions);
         /**
+         * @description Rust target operating-system name used for local host UI branching.
+         * @type string
+        */
+        platform: string;
+        /**
          * @description Whether the server binary is available for service installation.\nTrue when lcxl-remote-desk-server(.exe) exists alongside the current\nexecutable (both binaries share the same target directory in dev and\nthe same install directory in production).
          * @type boolean
         */
@@ -3176,10 +3273,16 @@ export type RestResponseServerInfo = {
         */
         service_installed: boolean;
         /**
+         * @description Whether the Windows service is currently running.
+         * @type boolean
+        */
+        service_running: boolean;
+        /**
          * @description The form a server process runs as: which subsystems it started, and\ntherefore what a peer can expect of it. A server reports its own mode, and a\nhost reports its mode to control ends, which is how one tells what the\n*target* machine is rather than what the server in between happens to be.
          * @type string
         */
         startup_mode: StartupMode;
+        wayland_portal?: (null | WaylandPortalInfo);
     };
     /**
      * @type string,null
@@ -4004,6 +4107,11 @@ export type ServerInfo = {
     is_admin: boolean;
     macos_permissions?: (null | MacosPermissions);
     /**
+     * @description Rust target operating-system name used for local host UI branching.
+     * @type string
+    */
+    platform: string;
+    /**
      * @description Whether the server binary is available for service installation.\nTrue when lcxl-remote-desk-server(.exe) exists alongside the current\nexecutable (both binaries share the same target directory in dev and\nthe same install directory in production).
      * @type boolean
     */
@@ -4014,10 +4122,16 @@ export type ServerInfo = {
     */
     service_installed: boolean;
     /**
+     * @description Whether the Windows service is currently running.
+     * @type boolean
+    */
+    service_running: boolean;
+    /**
      * @description The form a server process runs as: which subsystems it started, and\ntherefore what a peer can expect of it. A server reports its own mode, and a\nhost reports its mode to control ends, which is how one tells what the\n*target* machine is rather than what the server in between happens to be.
      * @type string
     */
     startup_mode: StartupMode;
+    wayland_portal?: (null | WaylandPortalInfo);
 };
 
 /**
@@ -5368,6 +5482,48 @@ export type ListTerminalQuery = {
     Response: ListTerminal200;
     PathParams: ListTerminalPathParams;
     QueryParams: ListTerminalQueryParams;
+    Errors: any;
+};
+
+/**
+ * @description Permission request started
+*/
+export type RequestMacosPermissions202 = any;
+
+export type RequestMacosPermissionsMutationResponse = RequestMacosPermissions202;
+
+export type RequestMacosPermissionsMutation = {
+    Response: RequestMacosPermissions202;
+    Errors: any;
+};
+
+/**
+ * @description Authorization command queued
+*/
+export type AuthorizeWayland202 = any;
+
+export type AuthorizeWaylandMutationRequest = AuthorizeWaylandRequest;
+
+export type AuthorizeWaylandMutationResponse = AuthorizeWayland202;
+
+export type AuthorizeWaylandMutation = {
+    Response: AuthorizeWayland202;
+    Request: AuthorizeWaylandMutationRequest;
+    Errors: any;
+};
+
+/**
+ * @description Cancellation command queued
+*/
+export type CancelWayland202 = any;
+
+export type CancelWaylandMutationRequest = CancelWaylandRequest;
+
+export type CancelWaylandMutationResponse = CancelWayland202;
+
+export type CancelWaylandMutation = {
+    Response: CancelWayland202;
+    Request: CancelWaylandMutationRequest;
     Errors: any;
 };
 

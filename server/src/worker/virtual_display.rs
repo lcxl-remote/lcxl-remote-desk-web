@@ -834,6 +834,7 @@ mod tests {
 
     fn make_payload(connection_id: &str, video_device: Option<&str>) -> StartMediaPayload {
         StartMediaPayload {
+            resolved_wayland_control_mode: None,
             connection_id: connection_id.to_string(),
             video_codec: MediaCodec::H264,
             video_encoder: None,

@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge"
 import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
 import { Skeleton } from "@/components/ui/skeleton"
 import { clearSessionGrant } from "@/features/desk/session-grant"
+import { HostReadinessBanners } from "@/features/desk/host-readiness-banners"
 
 export default function DeskList() {
     const { t } = useTranslation()
@@ -32,10 +33,13 @@ export default function DeskList() {
 
     if (isLoading) {
         return (
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            <div className="space-y-4">
+                <HostReadinessBanners />
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {[...Array(6)].map((_, i) => (
                     <Skeleton key={i} className="h-[200px] w-full rounded-xl" />
                 ))}
+                </div>
             </div>
         )
     }
@@ -57,6 +61,8 @@ export default function DeskList() {
                     </Button>
                 </div>
             </div>
+
+            <HostReadinessBanners />
 
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {connections?.length === 0 && (

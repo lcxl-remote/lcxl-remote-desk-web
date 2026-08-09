@@ -18,12 +18,15 @@ use std::path::Path;
 /// `config_file_path` is unused there (those binaries run from a fixed install
 /// dir, so the relative default config path still resolves).
 #[cfg(target_os = "macos")]
-pub fn update_auto_start_status(enable: bool, config_file_path: &Path) -> Result<(), DeskError> {
+pub fn update_auto_start_status(
+    enable: bool,
+    config_override: Option<&Path>,
+) -> Result<(), DeskError> {
     use log::info;
 
     info!("Updating auto-start status (macOS LaunchAgent), enable: {enable}");
     if enable {
-        let spec = crate::macos_agent::current_spec(config_file_path)?;
+        let spec = crate::macos_agent::current_spec(config_override)?;
         crate::macos_agent::enable(&spec)?;
         info!("Successfully enabled auto-start LaunchAgent");
     } else {
@@ -34,7 +37,10 @@ pub fn update_auto_start_status(enable: bool, config_file_path: &Path) -> Result
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn update_auto_start_status(enable: bool, _config_file_path: &Path) -> Result<(), DeskError> {
+pub fn update_auto_start_status(
+    enable: bool,
+    _config_override: Option<&Path>,
+) -> Result<(), DeskError> {
     use auto_launch::AutoLaunchBuilder;
     use desk_utils::error::DeskErrorCode;
     use log::info;

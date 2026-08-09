@@ -52,6 +52,40 @@ async fn a_replaced_worker_is_not() {
     assert!(manager.note_message_from(incoming).await);
 }
 
+/// Portal authorization is owned by the user-session worker. Replacing that
+/// worker must invalidate both ready and in-flight snapshots; otherwise the
+/// daemon could keep reporting Pending forever or admit against a dead session.
+#[tokio::test]
+async fn a_replacement_clears_the_previous_workers_portal_snapshot() {
+    let (manager, _worker_rx) = test_manager();
+    install_worker(&manager).await;
+    manager.set_wayland_portal_snapshot(desk_wayland_portal::PortalSnapshot {
+        phase: desk_wayland_portal::PortalPhase::Preparing,
+        capabilities: desk_wayland_portal::PortalCapabilities::default(),
+        availability: desk_wayland_portal::PortalAvailability::default(),
+        target: Some(desk_wayland_portal::AuthorizationTarget::ScreenAndInput),
+        operation_id: Some("op-7".to_string()),
+        generation: 3,
+        restore_token_persisted: false,
+        requires_local_action: true,
+        reason_code: None,
+        reason: None,
+    });
+    assert!(manager.wayland_portal_snapshot().is_some());
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        manager.linux_display_server(),
+        desk_utils::linux_display::LinuxDisplayServer::Wayland
+    );
+
+    install_worker(&manager).await;
+
+    assert!(
+        manager.wayland_portal_snapshot().is_none(),
+        "a replacement starts NotConfigured until it publishes its own snapshot",
+    );
+}
+
 /// Every message counts as a sign of life, but only for the worker that sent
 /// it. A replaced worker's backlog arriving must not stand in for a replacement
 /// that has never spoken — that is exactly the case the watchdog exists to
@@ -179,6 +213,7 @@ mod lanes {
 
     async fn paused_connection(registry: &PcRegistry, connection_id: &str) {
         let request_remote = RequestRemoteModel {
+            requested_wayland_control_mode: Some("auto".to_string()),
             purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,

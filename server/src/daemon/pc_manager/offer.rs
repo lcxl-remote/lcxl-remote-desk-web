@@ -233,11 +233,6 @@ pub async fn handle_offer(
     let mut ctx_guard = ctx.write().await;
 
     {
-        let mut s = ctx_guard.signaling_state.write().await;
-        s.wayland_control_mode = offer.desk_settings.wayland_control_mode.clone();
-    }
-
-    {
         // Apply the browser's adaptive-bitrate preference for this
         // connection before the RTCP reader spawns, so the first REMB
         // decision already sees the right flag. On renegotiation a
@@ -430,6 +425,11 @@ pub async fn handle_offer(
     // monitor. See [`video_device_for_payload`] for the empty-string
     // semantics (legal-but-unselected fresh install case).
     let video_device = video_device_for_payload(&offer.desk_settings.video_device_name);
+    let resolved_wayland_control_mode = ctx_guard
+        .signaling_state
+        .read()
+        .await
+        .resolved_wayland_control_mode;
     let start_media_payload = StartMediaPayload {
         connection_id: from_connection_id.to_string(),
         video_codec,
@@ -457,6 +457,7 @@ pub async fn handle_offer(
         // DuplicateOutput. The worker falls back to its own settings
         // when this is `None`.
         image_capture: offer.desk_settings.image_capture.clone(),
+        resolved_wayland_control_mode,
         // Thread the Advanced-tab dirty-rect kill-switch from the
         // browser offer through to the worker on the *first*
         // StartMedia. Without this the worker's `merged_settings`

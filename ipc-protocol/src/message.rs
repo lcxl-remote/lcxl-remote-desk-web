@@ -257,6 +257,12 @@ pub enum ServiceToWorker {
     /// higher-sequence policy and answers on
     /// [`WorkerToService::SecurityPolicyApplied`] with what it ended up holding.
     UpdateSecurityPolicy(UpdateSecurityPolicyPayload),
+
+    /// Local host UI requested Wayland Portal authorization.
+    AuthorizeWaylandPortal(AuthorizeWaylandPortalPayload),
+
+    /// Local host UI cancelled the matching in-flight Portal operation.
+    CancelWaylandPortal(CancelWaylandPortalPayload),
 }
 
 /// Messages sent from Worker process to Service Core (daemon) over the
@@ -271,6 +277,9 @@ pub enum WorkerToService {
     /// devices it can drive). The daemon uses this to pick the SDP m-line
     /// codec for new offers and to populate the UI's device pickers.
     Capabilities(MediaCapabilities),
+
+    /// Worker mirrors non-sensitive Wayland Portal readiness to the daemon.
+    WaylandPortalStatus(WaylandPortalStatusPayload),
 
     /// Worker → daemon error response carrying the original
     /// `SignalingType` + a `DeskErrorCode` numeric code + an optional

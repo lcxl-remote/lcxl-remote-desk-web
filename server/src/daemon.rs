@@ -29,8 +29,9 @@ use crate::daemon::pc_manager::PcRegistry;
 use crate::host_control::HostControlHub;
 use crate::model::settings::{Args, Settings, SharedSettings};
 use actix_web::web;
+use desk_utils::host_data_paths::HostDataPaths;
 use log::{error, info, warn};
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tauri_ipc::TauriIpcBridge;
 use tokio::sync::oneshot;
 
@@ -71,6 +72,7 @@ pub async fn run_service_daemon_inner(
     shutdown_signal: Option<oneshot::Receiver<()>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::new(&args).map_err(|e| format!("Failed to load settings: {e}"))?;
+    let paths = settings.paths().clone();
     let shared_settings = Arc::new(SharedSettings::from(settings.clone()));
     let shared_settings_data = web::Data::from(shared_settings.clone());
     // The host's authoritative security policy and single durable commit path
@@ -92,16 +94,12 @@ pub async fn run_service_daemon_inner(
     // Initialize the signal database (same SQLite used by the Default/Signaling modes).
     // Required because open_signaling_handle calls get_or_create_device_code() which
     // calls get_db() and panics if the DB has not been initialized.
-    let signal_db_dir = Path::new(&settings.args.config_file_path)
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_string_lossy()
-        .to_string();
+    let signal_db_dir = paths.signal_db_dir().to_string_lossy().to_string();
     let signal_db = desk_signal::db::init_db(&signal_db_dir)
         .await
         .map_err(|e| format!("Failed to init signal DB: {e}"))?;
     info!("Signal database initialized at {signal_db_dir}");
-    let exec_ledger = open_exec_ledger(&settings.args.config_file_path).await?;
+    let exec_ledger = open_exec_ledger(&paths).await?;
     // Age-based retention cleanup for the local usage rollups (collect-only
     // telemetry, no billing coupling). One task per process; the delete is idempotent.
     tokio::spawn(desk_signal::usage_retention::run_retention_cleanup_loop(
@@ -129,7 +127,7 @@ pub async fn run_service_daemon_inner(
     host_control_hub
         .host_activity()
         .set_indicator_enabled(settings.system.host_access_indicator_enabled);
-    initialize_remote_access(&settings.args.config_file_path, &host_control_hub);
+    initialize_remote_access(&paths, &host_control_hub);
 
     // Host→manager link status, shared between the signaling proxy (records a fatal
     // device-quota rejection, parks until manual retry) and the local API (surfaces
@@ -371,13 +369,9 @@ const EXEC_RESULT_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::fro
 /// ran here" answerable across a crash, so a host that failed to open one must
 /// not start rather than silently execute unrecorded.
 async fn open_exec_ledger(
-    config_file_path: &str,
+    paths: &HostDataPaths,
 ) -> Result<Arc<crate::daemon::exec_ledger::ExecLedger>, String> {
-    let dir = Path::new(config_file_path)
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_string_lossy()
-        .to_string();
+    let dir = paths.exec_ledger_dir().to_string_lossy().to_string();
     let ledger = crate::daemon::exec_ledger::ExecLedger::open(&dir)
         .await
         .map_err(|e| format!("Failed to open the exec ledger in {dir}: {e}"))?;
@@ -466,9 +460,10 @@ pub async fn start_inprocess_daemon(
     host_control_hub
         .host_activity()
         .set_indicator_enabled(settings.read().await.system.host_access_indicator_enabled);
-    initialize_remote_access(&args.config_file_path, &host_control_hub);
+    let paths = settings.read().await.paths().clone();
+    initialize_remote_access(&paths, &host_control_hub);
 
-    let exec_ledger = open_exec_ledger(&args.config_file_path).await?;
+    let exec_ledger = open_exec_ledger(&paths).await?;
 
     // Endpoints of this node's own bundled TURN, read from the running runtime
     // on each use (empty when no embedded TURN is serving) so the PC manager
@@ -541,8 +536,9 @@ pub async fn start_inprocess_daemon(
     Ok(())
 }
 
-fn initialize_remote_access(config_file_path: &str, host_control_hub: &HostControlHub) {
-    let store = remote_access::RemoteAccessStateStore::for_config_file(config_file_path);
+fn initialize_remote_access(paths: &HostDataPaths, host_control_hub: &HostControlHub) {
+    let store =
+        remote_access::RemoteAccessStateStore::new(paths.remote_access_state_file().to_path_buf());
     let state = store.load_or_initialize();
     host_control_hub
         .remote_access_gate()
@@ -559,8 +555,7 @@ fn initialize_remote_access(config_file_path: &str, host_control_hub: &HostContr
         coordinator.clone(),
         Arc::new(local_access_control::ElevatedPeerAuthenticator),
     ));
-    let local_access_endpoint =
-        local_access_control_transport::endpoint_for_config(config_file_path);
+    let local_access_endpoint = local_access_control_transport::endpoint_for_paths(paths);
     actix_web::rt::spawn(async move {
         if let Err(error) =
             local_access_control_transport::serve(local_access_endpoint, local_access_service).await

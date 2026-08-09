@@ -1,4 +1,6 @@
+pub mod durable_file;
 pub mod error;
+pub mod host_data_paths;
 pub mod linux_display;
 pub mod logs;
 pub mod network;

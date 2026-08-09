@@ -36,3 +36,61 @@ pub fn probe() -> MacosPermissions {
         accessibility,
     }
 }
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
+
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    static kAXTrustedCheckOptionPrompt: *const std::ffi::c_void;
+    fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    static kCFBooleanTrue: *const std::ffi::c_void;
+    fn CFDictionaryCreate(
+        allocator: *const std::ffi::c_void,
+        keys: *const *const std::ffi::c_void,
+        values: *const *const std::ffi::c_void,
+        count: isize,
+        key_callbacks: *const std::ffi::c_void,
+        value_callbacks: *const std::ffi::c_void,
+    ) -> *const std::ffi::c_void;
+    fn CFRelease(value: *const std::ffi::c_void);
+}
+
+/// Ask macOS to present the system-owned Screen Recording and Accessibility
+/// consent flows. The return values are deliberately ignored: `/api/server_info`
+/// re-runs the non-prompting preflight and remains the only readiness truth.
+pub fn request() {
+    // SAFETY: the CoreGraphics call has no arguments and only asks TCC to show
+    // its standard consent UI for this process.
+    let _ = unsafe { CGRequestScreenCaptureAccess() };
+
+    // The dictionary contains two immortal framework constants. Null callback
+    // tables are intentional: the temporary dictionary neither owns nor
+    // releases them, and pointer identity is the contract for this AX option.
+    let keys = [unsafe { kAXTrustedCheckOptionPrompt }];
+    let values = [unsafe { kCFBooleanTrue }];
+    // SAFETY: both arrays remain alive for the call and contain one valid
+    // CoreFoundation object pointer each.
+    let options = unsafe {
+        CFDictionaryCreate(
+            std::ptr::null(),
+            keys.as_ptr(),
+            values.as_ptr(),
+            1,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if !options.is_null() {
+        // SAFETY: `options` is a +1 object returned by CFDictionaryCreate and
+        // remains valid until the matching release below.
+        let _ = unsafe { AXIsProcessTrustedWithOptions(options) };
+        unsafe { CFRelease(options) };
+    }
+}

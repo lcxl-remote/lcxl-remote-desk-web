@@ -20,8 +20,6 @@ use crate::{
 };
 use actix_web::web;
 use desk_agent_protocol::{AgentOutcome, DeviceAgent};
-#[cfg(target_os = "linux")]
-use desk_capture_engine::image_capture::portal_client::probe_screencast_monitor;
 use desk_input_injection::display_watcher;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
@@ -86,8 +84,6 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-#[cfg(target_os = "linux")]
-use tokio::sync::watch;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::mpsc,
@@ -106,11 +102,6 @@ struct CaptureGeometryReady {
     connection_id: String,
     generation: u64,
     rect: (i32, i32, i32, i32),
-}
-
-#[cfg(target_os = "linux")]
-fn next_portal_recovery_backoff_secs(current: u64) -> u64 {
-    current.saturating_mul(2).min(30)
 }
 
 /// Worker-side session. Stateless wrapper — all mutable state lives in the

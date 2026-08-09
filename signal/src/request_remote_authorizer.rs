@@ -357,6 +357,7 @@ mod tests {
     fn request_remote(request_id: &str, to: Option<&str>) -> SignalingModel {
         let data = serde_json::to_value(desk_signal_facade::model::signal::RequestRemoteModel {
             purpose: desk_signal_facade::model::signal::RemoteSessionPurpose::RemoteDesktop,
+            requested_wayland_control_mode: Some("portal".to_string()),
             ..Default::default()
         })
         .unwrap();
@@ -602,6 +603,8 @@ mod tests {
         assert_eq!(frame.to_connection_id.as_deref(), Some("edge-1"));
         let wrapper: AuthorizedRequestRemote =
             serde_json::from_value(frame.get_raw_data().clone().unwrap()).unwrap();
+        assert_eq!(wrapper.inner, model.get_raw_data().clone().unwrap());
+        assert_eq!(wrapper.inner["requested_wayland_control_mode"], "portal");
         // Owner session: no ceiling, no revocable grant.
         assert_eq!(wrapper.authz.access_ceiling, None);
         assert_eq!(wrapper.authz.grant_session_id, None);

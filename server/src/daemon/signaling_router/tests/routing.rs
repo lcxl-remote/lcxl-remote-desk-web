@@ -568,6 +568,7 @@ pub(super) async fn route_revoke_access_grant_session_scoped_closes_only_that_gr
     let ctx = make_ctx().await;
     let s = crate::model::settings::Settings::default();
     let rr = RequestRemoteModel {
+        requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: Some("GS-supp".to_string()),
@@ -649,6 +650,7 @@ pub(super) async fn update_desk_settings_adaptive_bitrate_scopes_to_source_conne
 
     let ctx = make_ctx().await;
     let request_remote = desk_signal_facade::model::signal::RequestRemoteModel {
+        requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,

@@ -5,6 +5,59 @@ use utoipa::ToSchema;
 
 use crate::model::{audio_capture::SelectedAudioDevice, image_capture::DisplayInfo};
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    ToSchema,
+    wincode::SchemaWrite,
+    wincode::SchemaRead,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LinuxInputControlMode {
+    Auto,
+    None,
+    Uinput,
+    Portal,
+}
+
+impl LinuxInputControlMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "none" => Some(Self::None),
+            "uinput" => Some(Self::Uinput),
+            "portal" => Some(Self::Portal),
+            _ => None,
+        }
+    }
+
+    pub const fn resolve(self, wayland: bool) -> Self {
+        match (self, wayland) {
+            (Self::Auto, true) => Self::Portal,
+            (Self::Auto, false) => Self::Uinput,
+            (mode, _) => mode,
+        }
+    }
+
+    pub const fn needs_portal_input(self) -> bool {
+        matches!(self, Self::Portal)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::None => "none",
+            Self::Uinput => "uinput",
+            Self::Portal => "portal",
+        }
+    }
+}
+
 /// X264 encoder settings
 #[derive(
     Clone,

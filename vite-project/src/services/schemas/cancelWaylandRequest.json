@@ -1,0 +1,1 @@
+{"type":"object","required":["operation_id","generation"],"properties":{"generation":{"type":"integer","format":"int64","minimum":0},"operation_id":{"type":"string"}},"x-readme-ref-name":"CancelWaylandRequest"}

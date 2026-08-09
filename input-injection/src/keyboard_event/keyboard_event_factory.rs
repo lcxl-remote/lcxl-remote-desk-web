@@ -1,5 +1,5 @@
 #[cfg(target_os = "linux")]
-use desk_utils::linux_display::{LinuxDisplayServer, detect_linux_display_environment};
+use desk_wayland_portal::PortalInputSender;
 
 #[cfg(target_os = "linux")]
 use crate::model::data_channel::KeyboardEventData;
@@ -17,6 +17,7 @@ use crate::keyboard_event::mac;
 
 pub fn create_keyboard_event_handler(
     _wayland_control_mode: Option<&str>,
+    #[cfg(target_os = "linux")] portal: Option<PortalInputSender>,
 ) -> Result<Box<dyn KeyboardEventHandler + Send + Sync>, InputError> {
     #[cfg(target_os = "windows")]
     {
@@ -35,12 +36,8 @@ pub fn create_keyboard_event_handler(
             }
         }
 
-        let mode = _wayland_control_mode.unwrap_or("auto");
-        log::info!(
-            "Keyboard handler: selecting linux backend, mode={}, WAYLAND_DISPLAY={}",
-            mode,
-            detect_linux_display_environment().wayland_present
-        );
+        let mode = _wayland_control_mode.unwrap_or("none");
+        log::info!("Keyboard handler: selecting frozen linux backend, mode={mode}");
         match mode {
             "none" => {
                 log::info!("Keyboard handler: using noop backend");
@@ -53,27 +50,23 @@ pub fn create_keyboard_event_handler(
             "portal" => {
                 log::info!("Keyboard handler: using forced wayland portal backend");
                 return Ok(Box::new(
-                    wayland_portal::WaylandPortalKeyboardEventHandler::new()?,
+                    wayland_portal::WaylandPortalKeyboardEventHandler::new(
+                        portal.clone().ok_or_else(|| {
+                            InputError::new_custom_error(
+                                desk_utils::error::DeskErrorCode::FEATURE_UNAVAILABLE,
+                                "Wayland Portal authorization is required on the host",
+                            )
+                        })?,
+                    )?,
                 ));
             }
-            _ => {}
-        }
-
-        if detect_linux_display_environment().active_server() == LinuxDisplayServer::Wayland {
-            match wayland_portal::WaylandPortalKeyboardEventHandler::new() {
-                Ok(handler) => {
-                    log::info!("Keyboard handler: auto selected wayland portal backend");
-                    return Ok(Box::new(handler));
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Wayland portal keyboard handler init failed, fallback to uinput: {e}"
-                    );
-                }
+            _ => {
+                return Err(InputError::new_custom_error(
+                    desk_utils::error::DeskErrorCode::INVALID_PARAMS,
+                    "Linux input requires a frozen mode of none, uinput, or portal",
+                ));
             }
         }
-        log::info!("Keyboard handler: fallback to uinput backend");
-        Ok(Box::new(linux::UinputKeyboardEventHandler::new()?))
     }
     #[cfg(target_os = "macos")]
     {

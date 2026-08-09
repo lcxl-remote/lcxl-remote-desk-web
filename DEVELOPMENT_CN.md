@@ -105,7 +105,7 @@ cd lcxl-remote-desk-web
 
 #### 配置服务器
 
-编辑 `conf/config.toml` 文件，根据需要调整配置：
+首次启动后编辑当前平台统一 profile 中的 `config.toml`；也可在开发命令中用 `-c, --config-file-path <PATH>` 显式选择一个测试 profile：
 
 ```toml
 [system]
@@ -139,7 +139,7 @@ show_mouse = true             # 是否显示鼠标指针
 enabled = false               # 是否启用虚拟显示器
 ```
 
-> 实际首次启动会自动生成包含全部字段的 `conf/config.toml`，上面仅列出常用项。
+> 实际首次启动会在平台默认 profile 生成包含全部字段的 `config.toml`。默认路径不随 portable、desk-server、service-daemon、MCP 等启动模式变化；旧 cwd `conf/config.toml` 不会自动迁移。上面仅列出常用项。
 
 #### 构建并运行服务器
 
@@ -191,7 +191,7 @@ npm run build
 
 ## 开发配置详解
 
-### 服务器配置 (conf/config.toml)
+### 服务器配置（统一平台 profile 的 config.toml）
 
 #### 系统设置 [system]
 
@@ -463,7 +463,7 @@ cargo run -- --help
 
 可用参数：
 
-- `-c, --config-file-path <PATH>`: 配置文件路径 (默认: conf/config)
+- `-c, --config-file-path <PATH>`: 显式覆盖统一的平台配置 profile（未传时与启动模式无关）
 - `-s, --startup-mode <MODE>`: 启动模式
   - `default`: 默认模式，包含信令和桌面服务器
   - `signaling`: 仅信令模式 (信令 + TURN)

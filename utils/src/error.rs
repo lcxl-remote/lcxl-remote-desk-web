@@ -104,6 +104,8 @@ desk_error_codes! {
     /// staged). Use this when the right resolution is "make the
     /// precondition true and retry," not "fix the request body."
     PRECONDITION_FAILED = 8,
+    /// The host is running Wayland but the locally owned Portal session does not yet provide the capabilities required by this connection.
+    WAYLAND_PORTAL_AUTHORIZATION_REQUIRED = 9,
 
     FILE_PATH_NOT_FOUND = 11,
     CLIENT_ID_NOT_FOUND = 12,
@@ -434,6 +436,19 @@ desk_error_codes! {
     VIDEO_PIPELINE_RESTART_FAILED = 92,
     /// A running encoder returned three consecutive frame-encode failures.
     VIDEO_PIPELINE_RUNTIME_FAILED = 93,
+
+    // ---- Wayland Portal host readiness ----
+    /// A ScreenAndInput request completed without both keyboard and pointer
+    /// permission. The local user must grant both or choose a non-Portal input
+    /// mode before Portal input can become ready.
+    WAYLAND_PORTAL_INPUT_PERMISSION_REQUIRED = 94,
+    /// The local user cancelled an in-progress Portal authorization.
+    WAYLAND_PORTAL_AUTHORIZATION_CANCELLED = 95,
+    /// A previously ready Portal session was closed or revoked.
+    WAYLAND_PORTAL_SESSION_CLOSED = 96,
+    /// The Portal backend failed to create or validate a usable session. Raw
+    /// backend details are diagnostic-only; UIs localize this code.
+    WAYLAND_PORTAL_BACKEND_FAILED = 97,
 
     /// A connection-verify probe could not reach the target at all (DNS failure,
     /// connection refused, TLS handshake failure). Carried inside the

@@ -10,6 +10,7 @@ members = [
     "capture-engine",
     "input-injection",
     "ipc-protocol",
+    "wayland-portal",
     "tauri-app/src-tauri",
     "virtual-display",
     "virtual-display-driver-ops",
@@ -33,6 +34,7 @@ rust-version = "1.90"
 
 [workspace.dependencies]
 desk-ipc-protocol = { path = "ipc-protocol" }
+desk-wayland-portal = { path = "wayland-portal" }
 desk-utils = { path = "utils" }
 desk-turn = { path = "turn" }
 desk-signal-facade = { path = "signal-facade" }

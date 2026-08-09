@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 desk-signal-facade = { workspace = true }
 desk-agent-protocol = { workspace = true }
+desk-wayland-portal = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

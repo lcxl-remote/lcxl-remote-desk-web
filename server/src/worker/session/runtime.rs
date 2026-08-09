@@ -77,6 +77,40 @@ impl WorkerSession {
         )));
         let shared_settings = Arc::new(SharedSettings::from(settings));
         let shared_settings_data = web::Data::from(shared_settings.clone());
+
+        #[cfg(target_os = "linux")]
+        let (portal_broker, portal_unavailable_snapshot) = if detect_linux_display_environment()
+            .active_server()
+            == LinuxDisplayServer::Wayland
+        {
+            let backend = Arc::new(desk_wayland_portal::XdgPortalBackend::new(
+                "com.lcxl.remote-desk",
+            ));
+            match desk_wayland_portal::WaylandPortalBroker::new(
+                backend,
+                desk_wayland_portal::RestoreTokenStore::for_current_user("com.lcxl.remote-desk"),
+            )
+            .await
+            {
+                Ok(broker) => {
+                    if let Err(error) = broker.restore_if_available().await {
+                        warn!("Could not start Wayland Portal authorization restore: {error}");
+                    }
+                    (Some(broker), None)
+                }
+                Err(error) => {
+                    warn!("Wayland Portal broker unavailable: {error}");
+                    (
+                        None,
+                        Some(desk_wayland_portal::PortalSnapshot::unsupported(
+                            error.user_reason(),
+                        )),
+                    )
+                }
+            }
+        } else {
+            (None, None)
+        };
         let remote_access_locked = Arc::new(AtomicBool::new(init_payload.remote_access_locked));
         let remote_access_state_version =
             Arc::new(AtomicU64::new(init_payload.remote_access_state_version));
@@ -153,6 +187,36 @@ impl WorkerSession {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WorkerToService>();
         let writer_task = spawn_event_forwarder_task(writer_rx, Arc::clone(&event_tx));
 
+        #[cfg(target_os = "linux")]
+        let portal_status_task = if let Some(broker) = portal_broker.as_ref() {
+            let mut snapshots = broker.subscribe();
+            let portal_writer = writer_tx.clone();
+            let initial = snapshots.borrow().clone();
+            let _ = portal_writer.send(WorkerToService::WaylandPortalStatus(
+                desk_ipc_protocol::message::WaylandPortalStatusPayload { snapshot: initial },
+            ));
+            Some(tokio::spawn(async move {
+                while snapshots.changed().await.is_ok() {
+                    let snapshot = snapshots.borrow_and_update().clone();
+                    if portal_writer
+                        .send(WorkerToService::WaylandPortalStatus(
+                            desk_ipc_protocol::message::WaylandPortalStatusPayload { snapshot },
+                        ))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }))
+        } else {
+            if let Some(snapshot) = portal_unavailable_snapshot {
+                let _ = writer_tx.send(WorkerToService::WaylandPortalStatus(
+                    desk_ipc_protocol::message::WaylandPortalStatusPayload { snapshot },
+                ));
+            }
+            None
+        };
+
         // What every permission gate in this worker reads: the mirror the daemon
         // publishes to, with remembered answers travelling back on the same
         // event lane everything else uses.
@@ -166,11 +230,32 @@ impl WorkerSession {
         let media_producer: Option<Arc<MediaProducer>> = match media_sender {
             Some(sender) => {
                 let desk_settings = shared_settings.read().await.desk.clone();
-                Some(Arc::new(MediaProducer::new(
-                    desk_settings,
-                    sender,
-                    writer_tx.clone(),
-                )))
+                {
+                    #[cfg(target_os = "linux")]
+                    {
+                        match portal_broker.clone() {
+                            Some(broker) => Some(Arc::new(MediaProducer::new_with_portal(
+                                desk_settings,
+                                sender,
+                                writer_tx.clone(),
+                                broker,
+                            ))),
+                            None => Some(Arc::new(MediaProducer::new(
+                                desk_settings,
+                                sender,
+                                writer_tx.clone(),
+                            ))),
+                        }
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        Some(Arc::new(MediaProducer::new(
+                            desk_settings,
+                            sender,
+                            writer_tx.clone(),
+                        )))
+                    }
+                }
             }
             None => None,
         };
@@ -183,8 +268,6 @@ impl WorkerSession {
             )
         })
         .await?;
-        #[cfg(target_os = "linux")]
-        let portal_recovery_needed = !capabilities.video_device_list.contains_key("WAYLANDPORTAL");
         let (capture_geometry_tx, mut capture_geometry_rx) =
             mpsc::unbounded_channel::<CaptureGeometryReady>();
         // Per-connection input handlers. Constructed once per
@@ -193,8 +276,49 @@ impl WorkerSession {
         // `StopMedia`.
         let input_dispatcher = {
             let desk_settings = shared_settings.read().await.desk.clone();
-            Arc::new(InputDispatcher::new(desk_settings))
+            {
+                #[cfg(target_os = "linux")]
+                {
+                    Arc::new(InputDispatcher::new_with_portal(
+                        desk_settings,
+                        portal_broker.clone(),
+                    ))
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Arc::new(InputDispatcher::new(desk_settings))
+                }
+            }
         };
+        #[cfg(target_os = "linux")]
+        let portal_revocation_task = portal_broker.as_ref().map(|broker| {
+            let mut snapshots = broker.subscribe();
+            let producer = media_producer.clone();
+            let input_dispatcher = Arc::clone(&input_dispatcher);
+            tokio::spawn(async move {
+                let mut was_screen_ready = snapshots.borrow().admits(false);
+                while snapshots.changed().await.is_ok() {
+                    let is_screen_ready = snapshots.borrow_and_update().admits(false);
+                    if was_screen_ready && !is_screen_ready {
+                        let mut connection_ids = input_dispatcher
+                            .connection_ids()
+                            .into_iter()
+                            .collect::<std::collections::HashSet<_>>();
+                        if let Some(producer) = producer.as_ref() {
+                            connection_ids.extend(producer.stop_all_media());
+                        }
+                        for connection_id in connection_ids {
+                            input_dispatcher.stop_connection(&StopMediaPayload { connection_id });
+                        }
+                        warn!(
+                            "Wayland Portal session lost; stopped all active media and input pipelines"
+                        );
+                    }
+                    was_screen_ready = is_screen_ready;
+                }
+            })
+        });
+
         if let Some(producer) = media_producer.as_ref() {
             let geometry_tx = capture_geometry_tx.clone();
             producer.set_geometry_update_handler(Arc::new(
@@ -265,82 +389,6 @@ impl WorkerSession {
             error!("IPC writer task died before Capabilities could be sent; exiting");
             return Ok(());
         }
-
-        #[cfg(target_os = "linux")]
-        let portal_monitor = if detect_linux_display_environment().active_server()
-            == LinuxDisplayServer::Wayland
-            && portal_recovery_needed
-        {
-            let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-            let monitor_writer = writer_tx.clone();
-            let desktop_name = init_payload.desktop_name.clone();
-            let has_tauri = init_payload.host_upstream_url.is_some();
-            let handle = tokio::spawn(async move {
-                let mut backoff_secs = 1_u64;
-                loop {
-                    if *shutdown_rx.borrow() {
-                        return;
-                    }
-                    tokio::select! {
-                        _ = shutdown_rx.changed() => return,
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {}
-                    }
-                    let probe = tokio::select! {
-                        _ = shutdown_rx.changed() => return,
-                        result = probe_screencast_monitor(std::time::Duration::from_secs(3)) => result,
-                    };
-                    match probe {
-                        Ok(source_types) => {
-                            info!(
-                                "ScreenCast Portal became available during worker startup recovery (AvailableSourceTypes={source_types})"
-                            );
-                            let build_desktop_name = desktop_name.clone();
-                            let rebuilt = tokio::task::spawn_blocking(move || {
-                                MediaProducer::build_capabilities(
-                                    build_desktop_name.as_deref(),
-                                    has_tauri,
-                                )
-                            })
-                            .await;
-                            match rebuilt {
-                                Ok(capabilities)
-                                    if capabilities
-                                        .video_device_list
-                                        .get("WAYLANDPORTAL")
-                                        .is_some_and(|displays| !displays.is_empty()) =>
-                                {
-                                    if monitor_writer
-                                        .send(WorkerToService::Capabilities(capabilities))
-                                        .is_err()
-                                    {
-                                        warn!(
-                                            "writer task closed; dropping recovered Portal capabilities"
-                                        );
-                                    }
-                                    return;
-                                }
-                                Ok(_) => log::debug!(
-                                    "Portal probe recovered but capability rebuild was empty; retrying"
-                                ),
-                                Err(error) => warn!(
-                                    "Portal capability recovery task failed to rebuild capabilities: {error}"
-                                ),
-                            }
-                            backoff_secs = next_portal_recovery_backoff_secs(backoff_secs);
-                        }
-                        Err(error) => {
-                            log::debug!(
-                                "ScreenCast Portal still unavailable during startup recovery: {error}"
-                            );
-                            backoff_secs = next_portal_recovery_backoff_secs(backoff_secs);
-                        }
-                    }
-                }
-            });
-            Some((shutdown_tx, handle))
-        } else {
-            None
-        };
 
         let mut desk_session = DeskSession::new(
             shared_settings_data.clone(),
@@ -523,6 +571,32 @@ impl WorkerSession {
                                         "Security policy update reached the main loop; \
                                          the policy mirror was not updated"
                                     );
+                                }
+                                ServiceToWorker::AuthorizeWaylandPortal(payload) => {
+                                    #[cfg(target_os = "linux")]
+                                    match portal_broker.as_ref() {
+                                        Some(broker) => {
+                                            if let Err(error) = broker
+                                                .authorize(payload.operation_id, payload.target)
+                                                .await
+                                            {
+                                                warn!("Wayland Portal authorize command failed: {error}");
+                                            }
+                                        }
+                                        None => warn!("Wayland Portal authorize command received without a Wayland broker"),
+                                    }
+                                    #[cfg(not(target_os = "linux"))]
+                                    warn!("Wayland Portal authorize command ignored on this platform");
+                                }
+                                ServiceToWorker::CancelWaylandPortal(payload) => {
+                                    #[cfg(target_os = "linux")]
+                                    if let Some(broker) = portal_broker.as_ref() {
+                                        let _ = broker
+                                            .cancel(&payload.operation_id, payload.generation)
+                                            .await;
+                                    }
+                                    #[cfg(not(target_os = "linux"))]
+                                    warn!("Wayland Portal cancel command ignored on this platform");
                                 }
                                 ServiceToWorker::SetRemoteAccessState(payload) => {
                                     let current_version =
@@ -1592,17 +1666,20 @@ impl WorkerSession {
         // own writer_tx so the event-pipe writer task observes "all
         // senders gone" and exits cleanly.
         heartbeat_task.abort();
+        #[cfg(target_os = "linux")]
+        if let Some(task) = portal_status_task {
+            task.abort();
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(task) = portal_revocation_task {
+            task.abort();
+        }
         // Drop the display watcher early so its message-pump thread
         // unblocks before the rest of the shutdown chain runs. The
         // Drop impl posts `WM_CLOSE` and joins the thread; absent a
         // working watcher (Err path during init) this is a cheap
         // no-op.
         drop(display_watcher_handle);
-        #[cfg(target_os = "linux")]
-        if let Some((shutdown_tx, handle)) = portal_monitor {
-            shutdown_tx.send_replace(true);
-            let _ = handle.await;
-        }
         if let Some(producer) = media_producer.as_ref() {
             producer.shutdown();
         }

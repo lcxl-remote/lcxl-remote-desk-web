@@ -79,6 +79,95 @@ pub struct MacosPermissions {
     pub accessibility: bool,
 }
 
+/// Local Wayland Portal authorization target.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WaylandAuthorizationTarget {
+    ScreenOnly,
+    ScreenAndInput,
+}
+
+impl From<WaylandAuthorizationTarget> for desk_wayland_portal::AuthorizationTarget {
+    fn from(value: WaylandAuthorizationTarget) -> Self {
+        match value {
+            WaylandAuthorizationTarget::ScreenOnly => Self::ScreenOnly,
+            WaylandAuthorizationTarget::ScreenAndInput => Self::ScreenAndInput,
+        }
+    }
+}
+
+/// Non-sensitive readiness snapshot for the local host UI.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, ToSchema)]
+pub struct WaylandPortalInfo {
+    pub phase: String,
+    pub screen_ready: bool,
+    pub input_ready: bool,
+    pub target: Option<WaylandAuthorizationTarget>,
+    pub recommended_target: WaylandAuthorizationTarget,
+    pub operation_id: Option<String>,
+    pub generation: u64,
+    pub persistent_restore: bool,
+    pub requires_local_action: bool,
+    /// Shared error code used by local control surfaces for localization.
+    pub reason_code: Option<desk_utils::error::DeskErrorCode>,
+    /// Diagnostic detail only. User interfaces must render `reason_code`
+    /// through their localized domain mapping instead of displaying this text.
+    pub reason: Option<String>,
+}
+
+impl WaylandPortalInfo {
+    pub fn worker_unavailable() -> Self {
+        Self {
+            phase: "not_configured".into(),
+            screen_ready: false,
+            input_ready: false,
+            target: None,
+            recommended_target: WaylandAuthorizationTarget::ScreenAndInput,
+            operation_id: None,
+            generation: 0,
+            persistent_restore: false,
+            requires_local_action: true,
+            reason_code: Some(desk_utils::error::DeskErrorCode::PRECONDITION_FAILED),
+            reason: Some("No active desktop worker is available".into()),
+        }
+    }
+}
+
+impl From<desk_wayland_portal::PortalSnapshot> for WaylandPortalInfo {
+    fn from(snapshot: desk_wayland_portal::PortalSnapshot) -> Self {
+        let phase = match snapshot.phase {
+            desk_wayland_portal::PortalPhase::Unsupported => "unsupported",
+            desk_wayland_portal::PortalPhase::NotConfigured => "not_configured",
+            desk_wayland_portal::PortalPhase::Restoring => "restoring",
+            desk_wayland_portal::PortalPhase::Preparing => "preparing",
+            desk_wayland_portal::PortalPhase::Ready => "ready",
+            desk_wayland_portal::PortalPhase::NeedsAuthorization => "needs_authorization",
+            desk_wayland_portal::PortalPhase::Failed => "failed",
+        };
+        let target = snapshot.target.map(|target| match target {
+            desk_wayland_portal::AuthorizationTarget::ScreenOnly => {
+                WaylandAuthorizationTarget::ScreenOnly
+            }
+            desk_wayland_portal::AuthorizationTarget::ScreenAndInput => {
+                WaylandAuthorizationTarget::ScreenAndInput
+            }
+        });
+        Self {
+            phase: phase.into(),
+            screen_ready: snapshot.capabilities.screen_ready,
+            input_ready: snapshot.capabilities.input_ready,
+            target,
+            recommended_target: WaylandAuthorizationTarget::ScreenAndInput,
+            operation_id: snapshot.operation_id,
+            generation: snapshot.generation,
+            persistent_restore: snapshot.restore_token_persisted,
+            requires_local_action: snapshot.requires_local_action,
+            reason_code: snapshot.reason_code,
+            reason: snapshot.reason,
+        }
+    }
+}
+
 /// macOS automatic-login helper state, surfaced to the settings page.
 ///
 /// Automatic login is the unattended fallback on macOS (pre-login capture is
@@ -115,6 +204,8 @@ pub struct MacosAutologin {
 /// Server information
 #[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
 pub struct ServerInfo {
+    /// Rust target operating-system name used for local host UI branching.
+    pub platform: String,
     /// Startup mode of the server. Typed rather than free-form so the generated
     /// client gets the exact set of mode names to compare against.
     pub startup_mode: StartupMode,
@@ -124,6 +215,8 @@ pub struct ServerInfo {
     pub initialized: bool,
     /// Whether the OS system service (LcxlDeskService) is installed
     pub service_installed: bool,
+    /// Whether the Windows service is currently running.
+    pub service_running: bool,
     /// Whether the current process has admin/root privileges
     pub is_admin: bool,
     /// Whether the server binary is available for service installation.
@@ -137,6 +230,8 @@ pub struct ServerInfo {
     pub background_start: Option<BackgroundStart>,
     /// macOS TCC permission grants; `None` on non-macOS.
     pub macos_permissions: Option<MacosPermissions>,
+    /// Wayland Portal readiness; `None` outside a Wayland desktop session.
+    pub wayland_portal: Option<WaylandPortalInfo>,
 }
 
 /// Runtime backend diagnostics.
@@ -207,6 +302,7 @@ impl From<&sysinfo::System> for SystemInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use desk_utils::error::DeskErrorCode;
 
     /// `startup_mode` carries a typed enum, but the JSON it produces is the
     /// same kebab-case name the field held when it was a free-form string.
@@ -222,15 +318,18 @@ mod tests {
             (StartupMode::McpStdio, "mcp-stdio"),
         ] {
             let info = ServerInfo {
+                platform: "test".into(),
                 startup_mode: mode.clone(),
                 api_version: 1,
                 initialized: true,
                 service_installed: false,
+                service_running: false,
                 is_admin: false,
                 server_binary_available: false,
                 default_install_path: String::new(),
                 background_start: None,
                 macos_permissions: None,
+                wayland_portal: None,
             };
             assert_eq!(
                 serde_json::to_value(&info).unwrap()["startup_mode"],
@@ -241,5 +340,31 @@ mod tests {
             // client sees a spelling different from before the field was typed.
             assert_eq!(mode.as_ref(), expected);
         }
+    }
+
+    #[test]
+    fn wayland_reason_code_is_numeric_and_diagnostic_detail_is_separate() {
+        let info = WaylandPortalInfo::from(desk_wayland_portal::PortalSnapshot {
+            phase: desk_wayland_portal::PortalPhase::NeedsAuthorization,
+            capabilities: desk_wayland_portal::PortalCapabilities::default(),
+            availability: desk_wayland_portal::PortalAvailability::default(),
+            target: Some(desk_wayland_portal::AuthorizationTarget::ScreenAndInput),
+            operation_id: None,
+            generation: 4,
+            restore_token_persisted: false,
+            requires_local_action: true,
+            reason_code: Some(DeskErrorCode::WAYLAND_PORTAL_INPUT_PERMISSION_REQUIRED),
+            reason: Some("diagnostic-only backend detail".into()),
+        });
+
+        let json = serde_json::to_value(info).expect("serialize");
+        assert!(json["reason_code"].is_i64());
+        assert_eq!(
+            json["reason_code"],
+            serde_json::to_value(DeskErrorCode::WAYLAND_PORTAL_INPUT_PERMISSION_REQUIRED)
+                .expect("serialize error code"),
+            "DeskErrorCode must remain a bare integer on the REST wire"
+        );
+        assert_eq!(json["reason"], "diagnostic-only backend detail");
     }
 }

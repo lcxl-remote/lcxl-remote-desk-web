@@ -2541,6 +2541,7 @@ dependencies = [
  "cpal",
  "desk-signal-facade",
  "desk-utils",
+ "desk-wayland-portal",
  "hound",
  "image",
  "libc",
@@ -2601,9 +2602,9 @@ dependencies = [
  "arboard",
  "core-foundation 0.9.4",
  "core-graphics 0.23.2",
- "desk-capture-engine",
  "desk-signal-facade",
  "desk-utils",
+ "desk-wayland-portal",
  "evdev",
  "libc",
  "log",
@@ -2630,6 +2631,7 @@ dependencies = [
  "bytes",
  "desk-agent-protocol",
  "desk-signal-facade",
+ "desk-wayland-portal",
  "futures",
  "log",
  "serde",
@@ -2769,6 +2771,7 @@ dependencies = [
  "rand 0.9.4",
  "serde",
  "serde_json",
+ "tempfile",
  "url",
  "utoipa",
  "wincode",
@@ -2797,6 +2800,25 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "desk-wayland-portal"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "desk-utils",
+ "futures-util",
+ "log",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "wincode",
+ "zbus",
 ]
 
 [[package]]
@@ -4898,6 +4920,7 @@ dependencies = [
  "desk-utils",
  "desk-virtual-display",
  "desk-virtual-display-driver-ops",
+ "desk-wayland-portal",
  "encoding_rs",
  "evdev",
  "futures",
@@ -9931,6 +9954,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

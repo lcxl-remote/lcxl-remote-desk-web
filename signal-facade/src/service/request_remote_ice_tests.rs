@@ -75,3 +75,33 @@ async fn none_when_provider_declines() {
             .is_none()
     );
 }
+
+#[test]
+fn turn_rebuild_preserves_requested_wayland_control_mode() {
+    let payload = RequestRemoteModel {
+        purpose: crate::model::signal::RemoteSessionPurpose::RemoteDesktop,
+        requested_wayland_control_mode: Some("uinput".to_string()),
+        ..RequestRemoteModel::default()
+    };
+    let original = SignalingModel::new(
+        "req-wayland",
+        SignalingType::RequestRemote,
+        Some("browser-conn".to_string()),
+        Some("host-1".to_string()),
+        Some(serde_json::to_value(payload).unwrap()),
+        None,
+    );
+    let ice = LcxlRTCIceServer {
+        urls: vec!["turn:host:3478".to_string()],
+        username: "host-1".to_string(),
+        credential: "secret".to_string(),
+    };
+
+    let rebuilt = rebuild_request_remote_with_ice(&original, Some(ice)).unwrap();
+    let rebuilt_payload = rebuilt.get_data::<RequestRemoteModel>().unwrap();
+    assert_eq!(
+        rebuilt_payload.requested_wayland_control_mode.as_deref(),
+        Some("uinput")
+    );
+    assert_eq!(rebuilt_payload.ice_servers.len(), 1);
+}

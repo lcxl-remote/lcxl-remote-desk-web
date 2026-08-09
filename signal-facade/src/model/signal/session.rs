@@ -92,6 +92,8 @@ pub struct RequestRemoteModel {
     /// Required session purpose hint. It only controls resource preparation and
     /// never grants a capability.
     pub purpose: RemoteSessionPurpose,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_wayland_control_mode: Option<String>,
     /// ICE servers, the value comes from signaling server
     #[serde(default)]
     pub ice_servers: Vec<LcxlRTCIceServer>,
@@ -275,8 +277,8 @@ pub struct SignalingState {
     pub grant_session_id: Option<String>,
     /// current display info
     pub display_info: DisplayInfo,
-    /// wayland control mode: portal/uinput/auto/none
-    pub wayland_control_mode: Option<String>,
+    /// Input mode parsed and frozen when RequestRemote was admitted.
+    pub resolved_wayland_control_mode: Option<crate::model::desk_settings::LinuxInputControlMode>,
 }
 
 /// Offer Model

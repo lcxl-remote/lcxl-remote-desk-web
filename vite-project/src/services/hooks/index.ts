@@ -23,6 +23,9 @@ export type { GetDiagnoseSessionQueryKey } from "./diagnoseSessionController/use
 export type { GetDiagnoseSessionSuspenseQueryKey } from "./diagnoseSessionController/useGetDiagnoseSessionSuspense.ts";
 export type { ListDiagnoseSessionsQueryKey } from "./diagnoseSessionController/useListDiagnoseSessions.ts";
 export type { ListDiagnoseSessionsSuspenseQueryKey } from "./diagnoseSessionController/useListDiagnoseSessionsSuspense.ts";
+export type { AuthorizeWaylandMutationKey } from "./hostReadinessController/useAuthorizeWayland.ts";
+export type { CancelWaylandMutationKey } from "./hostReadinessController/useCancelWayland.ts";
+export type { RequestMacosPermissionsMutationKey } from "./hostReadinessController/useRequestMacosPermissions.ts";
 export type { QueryLogSettingsQueryKey } from "./logController/useQueryLogSettings.ts";
 export type { QueryLogSettingsSuspenseQueryKey } from "./logController/useQueryLogSettingsSuspense.ts";
 export type { UpdateLogSettingsMutationKey } from "./logController/useUpdateLogSettings.ts";
@@ -169,6 +172,15 @@ export { useListDiagnoseSessions } from "./diagnoseSessionController/useListDiag
 export { listDiagnoseSessionsSuspenseQueryKey } from "./diagnoseSessionController/useListDiagnoseSessionsSuspense.ts";
 export { listDiagnoseSessionsSuspenseQueryOptions } from "./diagnoseSessionController/useListDiagnoseSessionsSuspense.ts";
 export { useListDiagnoseSessionsSuspense } from "./diagnoseSessionController/useListDiagnoseSessionsSuspense.ts";
+export { authorizeWaylandMutationKey } from "./hostReadinessController/useAuthorizeWayland.ts";
+export { authorizeWaylandMutationOptions } from "./hostReadinessController/useAuthorizeWayland.ts";
+export { useAuthorizeWayland } from "./hostReadinessController/useAuthorizeWayland.ts";
+export { cancelWaylandMutationKey } from "./hostReadinessController/useCancelWayland.ts";
+export { cancelWaylandMutationOptions } from "./hostReadinessController/useCancelWayland.ts";
+export { useCancelWayland } from "./hostReadinessController/useCancelWayland.ts";
+export { requestMacosPermissionsMutationKey } from "./hostReadinessController/useRequestMacosPermissions.ts";
+export { requestMacosPermissionsMutationOptions } from "./hostReadinessController/useRequestMacosPermissions.ts";
+export { useRequestMacosPermissions } from "./hostReadinessController/useRequestMacosPermissions.ts";
 export { queryLogSettingsQueryKey } from "./logController/useQueryLogSettings.ts";
 export { queryLogSettingsQueryOptions } from "./logController/useQueryLogSettings.ts";
 export { useQueryLogSettings } from "./logController/useQueryLogSettings.ts";

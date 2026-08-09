@@ -6,96 +6,85 @@ use crate::{
     TauriIsAdminOverride,
     error::DeskError,
     model::{
-        info::{BackendInfo, MacosAutologin, ServerInfo, SystemInfo},
+        info::{BackendInfo, MacosAutologin, ServerInfo, SystemInfo, WaylandPortalInfo},
         settings::{SharedSettings, StartupMode},
     },
 };
 use desk_capture_engine::model::image_capture::ImageCaptureTypeHelper as _;
 use desk_server_version::SERVER_API_VERSION;
-use desk_signal_facade::model::desk_settings::DeskSettings;
+use desk_signal_facade::model::desk_settings::{DeskSettings, LinuxInputControlMode};
 
 #[cfg(target_os = "linux")]
 use crate::model::info::{
     BackendDiagnosticItem, BackendDiagnosticSection, BackendDiagnosticStatus,
 };
 #[cfg(target_os = "linux")]
-use desk_capture_engine::image_capture::portal_client::probe_screencast_monitor;
-#[cfg(target_os = "linux")]
-use desk_input_injection::{
-    error::InputError, service::wayland_remote_desktop::WaylandRemoteDesktop,
-};
-#[cfg(target_os = "linux")]
 use desk_utils::linux_display::{LinuxDisplayServer, detect_linux_display_environment};
+#[cfg(target_os = "linux")]
+use desk_wayland_portal::{PortalPhase, PortalSnapshot};
 
 #[cfg(target_os = "linux")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LinuxInputControlMode {
-    Auto,
-    None,
-    Uinput,
-    Portal,
+fn configured_input_mode(value: Option<&str>) -> LinuxInputControlMode {
+    value
+        .and_then(LinuxInputControlMode::parse)
+        .unwrap_or(LinuxInputControlMode::Auto)
 }
 
 #[cfg(target_os = "linux")]
-impl LinuxInputControlMode {
-    fn from_configured(value: Option<&str>) -> Self {
-        match value.unwrap_or("auto") {
-            "none" => Self::None,
-            "uinput" => Self::Uinput,
-            "portal" => Self::Portal,
-            _ => Self::Auto,
+fn resolved_input_control_label(
+    mode: LinuxInputControlMode,
+    active_server: LinuxDisplayServer,
+) -> &'static str {
+    match mode {
+        LinuxInputControlMode::Auto if matches!(active_server, LinuxDisplayServer::Wayland) => {
+            "portal(auto)"
         }
-    }
-
-    const fn resolved(self, active_server: LinuxDisplayServer) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Uinput => "uinput",
-            Self::Portal => "portal",
-            Self::Auto if matches!(active_server, LinuxDisplayServer::Wayland) => "portal(auto)",
-            Self::Auto => "uinput(auto)",
-        }
-    }
-
-    const fn requires_portal_probe(self, active_server: LinuxDisplayServer) -> bool {
-        matches!(self, Self::Portal)
-            || (matches!(self, Self::Auto) && matches!(active_server, LinuxDisplayServer::Wayland))
+        LinuxInputControlMode::Auto => "uinput(auto)",
+        mode => mode.as_str(),
     }
 }
 
 #[cfg(target_os = "linux")]
 fn remote_desktop_diagnostic(
-    probe: Option<Result<u32, InputError>>,
+    snapshot: Option<&PortalSnapshot>,
     automatic: bool,
 ) -> (String, BackendDiagnosticStatus, Option<String>) {
     let (ready_value, error_value, error_status) = if automatic {
         (
             "ready(portal-auto)",
-            "fallback(uinput-auto)",
+            "waiting(portal-auto)",
             BackendDiagnosticStatus::Warning,
         )
     } else {
         (
             "ready(portal)",
-            "error(portal)",
+            "waiting(portal)",
             BackendDiagnosticStatus::Error,
         )
     };
-    match probe {
-        Some(Ok(device_types)) => (
+    match snapshot {
+        Some(snapshot) if snapshot.admits(true) => (
             ready_value.to_string(),
             BackendDiagnosticStatus::Ready,
-            Some(format!("AvailableDeviceTypes={device_types}")),
+            Some(format!(
+                "Portal generation {} is ready",
+                snapshot.generation
+            )),
         ),
-        Some(Err(error)) => (
+        Some(snapshot) => (
             error_value.to_string(),
             error_status,
-            Some(error.to_string()),
+            Some(
+                snapshot
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| format!("Portal session state is {:?}", snapshot.phase)),
+            ),
         ),
         None => (
             error_value.to_string(),
             error_status,
-            Some("RemoteDesktop Portal probe was not executed".to_string()),
+            Some("Desktop worker has not reported Portal readiness".to_string()),
         ),
     }
 }
@@ -155,15 +144,19 @@ pub async fn query_sysinfo(
 pub async fn query_server_info(
     settings: web::Data<SharedSettings>,
     tauri_is_admin: Option<web::Data<TauriIsAdminOverride>>,
+    coordinator: web::Data<crate::model::settings_coordinator::SettingsCoordinator>,
 ) -> Result<HttpResponse, DeskError> {
-    let (startup_mode, initialized) = {
+    let (startup_mode, initialized, wayland_default_mode) = {
         let settings = settings.read().await;
         let mode = settings.args.startup_mode.clone();
         let init = !settings.user.login_password.is_empty();
-        (mode, init)
+        (mode, init, settings.desk.wayland_control_mode.clone())
     };
+    #[cfg(not(target_os = "linux"))]
+    let _ = &wayland_default_mode;
 
     let service_installed = desk_utils::permission::is_service_installed("LcxlDeskService");
+    let service_running = desk_utils::permission::is_service_running("LcxlDeskService");
     // In ServiceDaemon mode the process runs as SYSTEM (is_admin always true).
     // Use the override reported by the Tauri process when available.
     let is_admin = tauri_is_admin
@@ -190,16 +183,40 @@ pub async fn query_server_info(
     #[cfg(not(target_os = "macos"))]
     let (background_start, macos_permissions) = (None, None);
 
+    #[cfg(target_os = "linux")]
+    let wayland_portal = if coordinator
+        .worker_manager()
+        .is_some_and(|worker| worker.linux_display_server() == LinuxDisplayServer::Wayland)
+    {
+        let mut info = coordinator
+            .worker_manager()
+            .and_then(|worker| worker.wayland_portal_snapshot())
+            .map(WaylandPortalInfo::from)
+            .unwrap_or_else(WaylandPortalInfo::worker_unavailable);
+        info.recommended_target = match wayland_default_mode.as_deref() {
+            Some("none" | "uinput") => crate::model::info::WaylandAuthorizationTarget::ScreenOnly,
+            _ => crate::model::info::WaylandAuthorizationTarget::ScreenAndInput,
+        };
+        Some(info)
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    let wayland_portal = None;
+
     let info = ServerInfo {
+        platform: std::env::consts::OS.to_string(),
         startup_mode,
         api_version: SERVER_API_VERSION,
         initialized,
         service_installed,
+        service_running,
         is_admin,
         server_binary_available,
         default_install_path,
         background_start,
         macos_permissions,
+        wayland_portal,
     };
 
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(info)))
@@ -304,6 +321,7 @@ fn server_binary_available() -> bool {
 #[get("/backend_info")]
 pub async fn query_backend_info(
     settings: web::Data<SharedSettings>,
+    coordinator: web::Data<crate::model::settings_coordinator::SettingsCoordinator>,
 ) -> Result<HttpResponse, DeskError> {
     let desk_settings: DeskSettings = {
         let guard = settings.read().await;
@@ -331,7 +349,7 @@ pub async fn query_backend_info(
     {
         let environment = detect_linux_display_environment();
         let configured_mode = desk_settings.wayland_control_mode.as_deref();
-        let mode = LinuxInputControlMode::from_configured(configured_mode);
+        let mode = configured_input_mode(configured_mode);
         if configured_mode
             .is_some_and(|value| !matches!(value, "auto" | "none" | "uinput" | "portal"))
         {
@@ -341,13 +359,12 @@ pub async fn query_backend_info(
             );
         }
         let active_server = environment.active_server();
-        backend_info.resolved_input_control = mode.resolved(active_server).to_string();
+        backend_info.resolved_input_control =
+            resolved_input_control_label(mode, active_server).to_string();
 
-        let remote_desktop_probe = if mode.requires_portal_probe(active_server) {
-            Some(WaylandRemoteDesktop::probe_portal(std::time::Duration::from_secs(3)).await)
-        } else {
-            None
-        };
+        let portal_snapshot = coordinator
+            .worker_manager()
+            .and_then(|worker| worker.wayland_portal_snapshot());
         let (input_value, input_status, input_detail) = match mode {
             LinuxInputControlMode::None => (
                 "disabled".to_string(),
@@ -359,9 +376,11 @@ pub async fn query_backend_info(
                 BackendDiagnosticStatus::Ready,
                 None,
             ),
-            LinuxInputControlMode::Portal => remote_desktop_diagnostic(remote_desktop_probe, false),
+            LinuxInputControlMode::Portal => {
+                remote_desktop_diagnostic(portal_snapshot.as_ref(), false)
+            }
             LinuxInputControlMode::Auto if matches!(active_server, LinuxDisplayServer::Wayland) => {
-                remote_desktop_diagnostic(remote_desktop_probe, true)
+                remote_desktop_diagnostic(portal_snapshot.as_ref(), true)
             }
             LinuxInputControlMode::Auto => (
                 "ready(uinput-auto)".to_string(),
@@ -373,16 +392,31 @@ pub async fn query_backend_info(
 
         let (portal_value, portal_status, portal_detail) =
             if environment.active_server() == LinuxDisplayServer::Wayland {
-                match probe_screencast_monitor(std::time::Duration::from_secs(3)).await {
-                    Ok(source_types) => (
-                        "available".to_string(),
-                        BackendDiagnosticStatus::Ready,
-                        Some(format!("AvailableSourceTypes={source_types}")),
-                    ),
-                    Err(error) => (
+                match portal_snapshot.as_ref() {
+                    Some(snapshot)
+                        if snapshot.phase != PortalPhase::Unsupported
+                            && snapshot.availability.monitor_available =>
+                    {
+                        (
+                            "available".to_string(),
+                            BackendDiagnosticStatus::Ready,
+                            Some(format!(
+                                "AvailableSourceTypes={}",
+                                snapshot.availability.available_source_types
+                            )),
+                        )
+                    }
+                    Some(snapshot) => (
                         "unavailable".to_string(),
                         BackendDiagnosticStatus::Error,
-                        Some(error.to_string()),
+                        snapshot.reason.clone().or_else(|| {
+                            Some(format!("Portal session state is {:?}", snapshot.phase))
+                        }),
+                    ),
+                    None => (
+                        "unavailable".to_string(),
+                        BackendDiagnosticStatus::Error,
+                        Some("Desktop worker has not reported Portal readiness".to_string()),
                     ),
                 }
             } else {
@@ -439,46 +473,47 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[actix_web::test]
     async fn linux_input_control_mode_normalizes_unknown_values_to_auto() {
+        assert_eq!(configured_input_mode(None), LinuxInputControlMode::Auto);
         assert_eq!(
-            LinuxInputControlMode::from_configured(None),
+            configured_input_mode(Some("auto")),
             LinuxInputControlMode::Auto
         );
         assert_eq!(
-            LinuxInputControlMode::from_configured(Some("auto")),
+            configured_input_mode(Some("future-value")),
             LinuxInputControlMode::Auto
         );
         assert_eq!(
-            LinuxInputControlMode::from_configured(Some("future-value")),
-            LinuxInputControlMode::Auto
-        );
-        assert_eq!(
-            LinuxInputControlMode::from_configured(Some("portal")),
+            configured_input_mode(Some("portal")),
             LinuxInputControlMode::Portal
         );
     }
 
     #[cfg(target_os = "linux")]
     #[actix_web::test]
-    async fn normalized_auto_mode_probes_portal_only_in_wayland_sessions() {
-        let mode = LinuxInputControlMode::from_configured(Some("unknown"));
-        assert_eq!(mode.resolved(LinuxDisplayServer::Wayland), "portal(auto)");
-        assert!(mode.requires_portal_probe(LinuxDisplayServer::Wayland));
-        assert_eq!(mode.resolved(LinuxDisplayServer::X11), "uinput(auto)");
-        assert!(!mode.requires_portal_probe(LinuxDisplayServer::X11));
-        assert!(!mode.requires_portal_probe(LinuxDisplayServer::Headless));
-        assert!(LinuxInputControlMode::Portal.requires_portal_probe(LinuxDisplayServer::Headless));
-        assert!(!LinuxInputControlMode::None.requires_portal_probe(LinuxDisplayServer::Wayland));
-        assert!(!LinuxInputControlMode::Uinput.requires_portal_probe(LinuxDisplayServer::Wayland));
+    async fn normalized_auto_mode_resolves_from_the_display_server() {
+        let mode = configured_input_mode(Some("unknown"));
+        assert_eq!(
+            resolved_input_control_label(mode, LinuxDisplayServer::Wayland),
+            "portal(auto)"
+        );
+        assert_eq!(
+            resolved_input_control_label(mode, LinuxDisplayServer::X11),
+            "uinput(auto)"
+        );
+        assert_eq!(
+            resolved_input_control_label(mode, LinuxDisplayServer::Headless),
+            "uinput(auto)"
+        );
     }
 
     #[cfg(target_os = "linux")]
     #[actix_web::test]
     async fn missing_portal_probe_never_reports_ready_or_zero_device_types() {
         let (value, status, detail) = remote_desktop_diagnostic(None, true);
-        assert_eq!(value, "fallback(uinput-auto)");
+        assert_eq!(value, "waiting(portal-auto)");
         assert_eq!(status, BackendDiagnosticStatus::Warning);
-        let detail = detail.expect("missing probe must explain the fallback");
-        assert!(detail.contains("not executed"));
+        let detail = detail.expect("missing broker snapshot must explain the wait");
+        assert!(detail.contains("has not reported"));
         assert!(!detail.contains("AvailableDeviceTypes=0"));
     }
 
@@ -507,17 +542,17 @@ mod tests {
         assert!(body.data.is_some());
     }
 
-    // Ignored by default because `query_backend_info` performs real
-    // RemoteDesktop and ScreenCast D-Bus health probes. They do not request
-    // permission, but their result depends on the host session bus and portal
-    // services, so this is an explicit environment integration test.
-    #[ignore = "requires a live session D-Bus and desktop portal services"]
     #[actix_web::test]
     async fn test_query_backend_info() {
-        let settings = SharedSettings::from(Settings::default());
+        let settings = std::sync::Arc::new(SharedSettings::from(Settings::default()));
+        let coordinator = crate::model::settings_coordinator::SettingsCoordinator::from_settings(
+            settings.clone(),
+        )
+        .await;
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(settings))
+                .app_data(web::Data::from(settings))
+                .app_data(web::Data::new(coordinator))
                 .service(query_backend_info),
         )
         .await;

@@ -1,11 +1,11 @@
-use std::{fs, ops::Deref, path::PathBuf};
+use std::{ops::Deref, sync::Arc};
 
 use config::{Config, Environment, File};
 use desk_signal_facade::model::{
     desk_settings::DeskSettings, security_settings::SecuritySettings, terminal::TerminalSettings,
 };
 use desk_turn::model::TurnSettings;
-use desk_utils::error::DeskErrorCode;
+use desk_utils::host_data_paths::HostDataPaths;
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -29,6 +29,32 @@ pub use system::*;
 pub use turn_client::*;
 pub use user::*;
 pub use virtual_display::*;
+
+#[derive(Clone, Debug)]
+pub struct SettingsStore {
+    paths: Arc<HostDataPaths>,
+}
+
+impl SettingsStore {
+    pub fn resolve(args: &Args) -> Result<Self, std::io::Error> {
+        let paths = HostDataPaths::resolve_current(args.config_file_path.as_deref())
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Self::new(paths)
+    }
+
+    pub fn new(paths: HostDataPaths) -> Result<Self, std::io::Error> {
+        paths
+            .ensure_directories()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(Self {
+            paths: Arc::new(paths),
+        })
+    }
+
+    pub fn paths(&self) -> &HostDataPaths {
+        &self.paths
+    }
+}
 
 /// Desk Settings
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
@@ -71,21 +97,30 @@ pub struct Settings {
     /// Command line arguments, come from clap and do not load from or save to config file
     #[serde(skip)]
     pub args: Args,
+
+    #[serde(skip)]
+    store: Option<SettingsStore>,
 }
 
 impl Settings {
     pub fn new(args: &Args) -> Result<Self, DeskError> {
+        let store = SettingsStore::resolve(args)?;
+        Self::new_with_store(args, store)
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub fn new_with_store(args: &Args, store: SettingsStore) -> Result<Self, DeskError> {
         info!(
             "Loading config file from: {}",
-            args.config_file_path.as_str()
+            store.paths().config_file().display()
         );
-        // Load settings from config file
         let config = Config::builder()
-            .add_source(File::with_name(args.config_file_path.as_str()).required(false))
+            .add_source(File::from(store.paths().config_file()).required(false))
             .add_source(Environment::with_prefix("LRD"))
             .build()?;
         let mut settings = config.try_deserialize::<Settings>()?;
         settings.args = args.clone();
+        settings.store = Some(store);
         if settings.system.get_client_id().is_err() {
             settings.system.generate_client_id();
             settings.save()?;
@@ -160,13 +195,47 @@ impl Settings {
     /// persisted policy is needed (e.g. the MCP server re-checking live
     /// permission on each tool call) and writing back is undesirable.
     pub fn load_readonly(args: &Args) -> Result<Self, DeskError> {
+        let store = SettingsStore::resolve(args)?;
+        Self::load_readonly_from_store(args, store)
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub fn load_readonly_from_store(args: &Args, store: SettingsStore) -> Result<Self, DeskError> {
         let config = Config::builder()
-            .add_source(File::with_name(args.config_file_path.as_str()).required(false))
+            .add_source(File::from(store.paths().config_file()).required(false))
             .add_source(Environment::with_prefix("LRD"))
             .build()?;
         let mut settings = config.try_deserialize::<Settings>()?;
         settings.args = args.clone();
+        settings.store = Some(store);
         Ok(settings)
+    }
+
+    pub fn store(&self) -> &SettingsStore {
+        self.store
+            .as_ref()
+            .expect("Settings loaded for runtime must have a SettingsStore")
+    }
+
+    pub fn paths(&self) -> &HostDataPaths {
+        self.store().paths()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_config(path: &std::path::Path) -> Self {
+        let args = Args {
+            config_file_path: Some(path.to_path_buf()),
+            ..Args::default()
+        };
+        let paths = HostDataPaths::resolve_current(args.config_file_path.as_deref())
+            .expect("test config path must resolve");
+        Self {
+            args,
+            store: Some(SettingsStore {
+                paths: Arc::new(paths),
+            }),
+            ..Self::default()
+        }
     }
 
     pub fn save(&self) -> Result<(), DeskError> {
@@ -174,36 +243,19 @@ impl Settings {
     }
 
     fn save_inner(&self) -> Result<(), DeskError> {
-        let mut config_file_path = PathBuf::from(self.args.config_file_path.as_str());
-        config_file_path.set_extension("toml");
-        let parent_path = if let Some(parent_path) = config_file_path.parent() {
-            parent_path
-        } else {
-            return DeskError::custom_error(
-                DeskErrorCode::FILE_PATH_NOT_FOUND,
-                &format!(
-                    "the parent of path '{}' is not found",
-                    config_file_path.display()
-                ),
-            );
-        };
-        if !parent_path.exists() {
-            info!("Creating config directory: {}", parent_path.display());
-            fs::create_dir_all(parent_path)?;
-        }
+        let store = self.store();
+        let config_file_path = store.paths().config_file();
 
         // One process writes this file at a time. The daemon owns the security
         // policy and the locale, and a session worker no longer writes either,
         // so there is nothing left to merge — but the lock still keeps two
         // concurrent saves from interleaving. The lock file is intentionally
         // stable and retained.
-        let mut lock_path = config_file_path.clone();
-        lock_path.set_extension("locale.lock");
         let lock_file = std::fs::File::options()
             .create(true)
             .read(true)
             .write(true)
-            .open(lock_path)?;
+            .open(store.paths().config_lock_file())?;
         lock_file.lock()?;
 
         let toml_str = toml::to_string(self)?;
@@ -218,7 +270,7 @@ impl Settings {
         // file reachable by whichever role wrote it first: the daemon runs as
         // SYSTEM / root while a portable host runs as the desktop user, and both
         // read this same path.
-        durable_atomic_write(&config_file_path, toml_str.as_bytes(), FileMode::Preserve)?;
+        durable_atomic_write(config_file_path, toml_str.as_bytes(), FileMode::Preserve)?;
         Ok(())
     }
 }
@@ -244,8 +296,7 @@ mod tests {
     use super::*;
 
     fn settings_at(path: &std::path::Path, locale: &str) -> Settings {
-        let mut settings = Settings::default();
-        settings.args.config_file_path = path.to_string_lossy().into_owned();
+        let mut settings = Settings::for_test_config(path);
         settings.system.locale = Some(locale.to_string());
         settings
     }
@@ -289,7 +340,7 @@ enable_turn = false
         .unwrap();
 
         let args = Args {
-            config_file_path: path.to_string_lossy().into_owned(),
+            config_file_path: Some(path.to_path_buf()),
             ..Args::default()
         };
         let loaded = Settings::load_readonly(&args).unwrap();
@@ -310,7 +361,7 @@ enable_turn = false
         std::fs::write(path.with_extension("toml"), "[system]\nport = 8080\n").unwrap();
 
         let args = Args {
-            config_file_path: path.to_string_lossy().into_owned(),
+            config_file_path: Some(path.to_path_buf()),
             ..Args::default()
         };
         let loaded = Settings::load_readonly(&args).unwrap();

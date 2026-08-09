@@ -51,6 +51,7 @@ windows-core = { workspace = true }
 windows-numerics = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+desk-wayland-portal = { workspace = true }
 x11rb = { workspace = true }
 libc = { workspace = true }
 alsa = { workspace = true }

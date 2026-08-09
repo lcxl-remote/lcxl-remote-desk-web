@@ -3,6 +3,10 @@ use std::{collections::BTreeMap, str::FromStr};
 #[cfg(target_os = "linux")]
 use desk_signal_facade::model::image_capture::DisplayRect;
 use desk_signal_facade::model::{desk_settings::DeskSettings, image_capture::DisplayInfo};
+#[cfg(target_os = "linux")]
+use desk_wayland_portal::LivePortalSession;
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use desk_utils::error::DeskErrorCode;
@@ -125,6 +129,26 @@ fn is_wgc_unavailable_error(err: &CaptureError) -> bool {
 pub fn create_image_capture(
     desk_settings: &DeskSettings,
 ) -> Result<Box<dyn ImageCapture + Send>, CaptureError> {
+    #[cfg(target_os = "linux")]
+    {
+        create_image_capture_impl(desk_settings, None)
+    }
+    #[cfg(not(target_os = "linux"))]
+    create_image_capture_impl(desk_settings)
+}
+
+#[cfg(target_os = "linux")]
+pub fn create_image_capture_with_portal(
+    desk_settings: &DeskSettings,
+    session: Arc<dyn LivePortalSession>,
+) -> Result<Box<dyn ImageCapture + Send>, CaptureError> {
+    create_image_capture_impl(desk_settings, Some(session))
+}
+
+fn create_image_capture_impl(
+    desk_settings: &DeskSettings,
+    #[cfg(target_os = "linux")] portal_session: Option<Arc<dyn LivePortalSession>>,
+) -> Result<Box<dyn ImageCapture + Send>, CaptureError> {
     let image_capture_type = desk_settings.get_image_capture_type()?;
     let capture: Box<dyn ImageCapture + Send> = match image_capture_type {
         #[cfg(target_os = "windows")]
@@ -157,7 +181,15 @@ pub fn create_image_capture(
         #[cfg(target_os = "linux")]
         ImageCaptureType::X11 => Box::new(X11ImageCapture::new(desk_settings)?),
         #[cfg(target_os = "linux")]
-        ImageCaptureType::WAYLANDPORTAL => Box::new(WaylandPortalImageCapture::new(desk_settings)?),
+        ImageCaptureType::WAYLANDPORTAL => {
+            let session = portal_session.ok_or_else(|| {
+                CaptureError::new_custom_error(
+                    DeskErrorCode::FEATURE_UNAVAILABLE,
+                    "Wayland Portal authorization is required on the host",
+                )
+            })?;
+            Box::new(WaylandPortalImageCapture::new(desk_settings, session)?)
+        }
         #[cfg(target_os = "macos")]
         ImageCaptureType::SCKIT => Box::new(MacScreencaptureKitImageCapture::new(desk_settings)?),
     };

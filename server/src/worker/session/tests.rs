@@ -63,18 +63,6 @@ fn telemetry_init_skipped_when_shared_hub_present() {
     assert!(should_init_worker_telemetry(false));
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn portal_recovery_backoff_doubles_and_caps_at_thirty_seconds() {
-    let mut delay = 1;
-    let mut observed = vec![delay];
-    for _ in 0..6 {
-        delay = next_portal_recovery_backoff_secs(delay);
-        observed.push(delay);
-    }
-    assert_eq!(observed, vec![1, 2, 4, 8, 16, 30, 30]);
-}
-
 /// Forwarder hub built without an auth token still works (passes empty
 /// string to ws task — daemon will reject the handshake, which is the
 /// intended fail-fast behaviour).
@@ -509,6 +497,7 @@ fn make_step(connection_id: &str, device: &str) -> RestartStep {
     RestartStep {
         connection_id: connection_id.to_string(),
         active: StartMediaPayload {
+            resolved_wayland_control_mode: None,
             connection_id: connection_id.to_string(),
             video_codec: MediaCodec::H264,
             video_encoder: None,

@@ -81,10 +81,8 @@ mod tests {
     fn shared_settings(local_token: Option<String>) -> SharedSettings {
         let mut system = SystemSettings::default();
         system.local_signaling_token = local_token;
-        let settings = Settings {
-            system,
-            ..Settings::default()
-        };
+        let mut settings = Settings::default();
+        settings.system = system;
         SharedSettings::from(settings)
     }
 

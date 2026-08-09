@@ -19,6 +19,7 @@ desk-server-user = { workspace = true }
 desk-capture-engine = { workspace = true }
 desk-input-injection = { workspace = true }
 desk-ipc-protocol = { workspace = true }
+desk-wayland-portal = { workspace = true }
 desk-agent-protocol = { workspace = true }
 desk-diagnose-core = { workspace = true }
 desk-mcp-server = { workspace = true }

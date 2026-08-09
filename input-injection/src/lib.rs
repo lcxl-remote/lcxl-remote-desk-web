@@ -23,6 +23,3 @@ pub mod linux_display;
 
 #[cfg(target_os = "macos")]
 pub mod macos_event;
-
-#[cfg(target_os = "linux")]
-pub mod service;

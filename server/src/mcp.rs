@@ -24,7 +24,7 @@ use desk_agent_protocol::{
 use desk_mcp_server::{McpPolicy, McpServer, ReadContextProvider, serve_stdio};
 
 use crate::error::DeskError;
-use crate::model::settings::{Args, Settings, SharedSettings, StartupMode};
+use crate::model::settings::{Args, Settings, SettingsStore, SharedSettings, StartupMode};
 use crate::telemetry;
 use crate::worker::agent::LocalDeviceAgent;
 use crate::worker::agent::audit_sink::LogAuditSink;
@@ -73,6 +73,7 @@ impl ReadContextProvider for ServerReadProvider {
 /// existing settings intact).
 struct ConfigPolicy {
     args: Args,
+    store: SettingsStore,
     settings: Arc<SharedSettings>,
 }
 
@@ -82,10 +83,13 @@ impl ConfigPolicy {
     /// (in which case the shared settings are left unchanged).
     async fn refresh(&self) -> Option<Settings> {
         let args = self.args.clone();
-        let loaded = tokio::task::spawn_blocking(move || Settings::load_readonly(&args).ok())
-            .await
-            .ok()
-            .flatten()?;
+        let store = self.store.clone();
+        let loaded = tokio::task::spawn_blocking(move || {
+            Settings::load_readonly_from_store(&args, store).ok()
+        })
+        .await
+        .ok()
+        .flatten()?;
         *self.settings.write().await = loaded.clone();
         Some(loaded)
     }
@@ -139,14 +143,22 @@ fn build_read_envelope(cap: Capability, input: OperationInput) -> AgentEnvelope 
 /// the startup snapshot used to construct the agent; the policy gate
 /// ([`ConfigPolicy`]) instead re-reads the persisted config per call so a
 /// permission change takes effect without restarting the MCP process.
-async fn build_mcp_server(args: Args, settings: Arc<SharedSettings>) -> McpServer {
+async fn build_mcp_server(
+    args: Args,
+    store: SettingsStore,
+    settings: Arc<SharedSettings>,
+) -> McpServer {
     let audit: Arc<dyn AuditSink> = Arc::new(LogAuditSink);
     let agent =
         Arc::new(LocalDeviceAgent::with_settings(settings.clone()).with_audit(audit.clone()));
 
     McpServer::new(
         Arc::new(ServerReadProvider { agent }),
-        Arc::new(ConfigPolicy { args, settings }),
+        Arc::new(ConfigPolicy {
+            args,
+            store,
+            settings,
+        }),
     )
 }
 
@@ -155,6 +167,7 @@ async fn build_mcp_server(args: Args, settings: Arc<SharedSettings>) -> McpServe
 /// (stdout is the protocol channel).
 pub fn run_mcp_stdio(args: Args) -> Result<(), DeskError> {
     let settings = Settings::new(&args)?;
+    let store = settings.store().clone();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -162,7 +175,8 @@ pub fn run_mcp_stdio(args: Args) -> Result<(), DeskError> {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let shared = Arc::new(SharedSettings::from(settings));
         let _guard = telemetry::init_telemetry(shared.clone(), &StartupMode::McpStdio).await?;
-        let server = build_mcp_server(shared.read().await.args.clone(), shared.clone()).await;
+        let server =
+            build_mcp_server(shared.read().await.args.clone(), store, shared.clone()).await;
         serve_stdio(server).await.map_err(|e| {
             DeskError::from(std::io::Error::other(format!("mcp stdio server: {e}")))
         })?;
@@ -184,12 +198,14 @@ mod tests {
         let base = dir.join("config");
         let toml_path = dir.join("config.toml");
         let args = Args {
-            config_file_path: base.to_string_lossy().to_string(),
+            config_file_path: Some(base.clone()),
             ..Default::default()
         };
+        let initial = Settings::for_test_config(&base);
         let policy = ConfigPolicy {
             args,
-            settings: Arc::new(SharedSettings::from(Settings::default())),
+            store: initial.store().clone(),
+            settings: Arc::new(SharedSettings::from(initial)),
         };
 
         std::fs::write(&toml_path, "[collection_policy]\nallow_logs = false\n").unwrap();

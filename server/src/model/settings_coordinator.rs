@@ -127,6 +127,11 @@ impl SettingsCoordinator {
         let _ = self.worker_manager.set(manager);
     }
 
+    /// Return the currently bound desktop worker manager for local host actions.
+    pub fn worker_manager(&self) -> Option<WorkerManager> {
+        self.worker_manager.get().cloned()
+    }
+
     pub fn snapshot(&self) -> PolicySnapshot {
         self.policy.read().expect("settings coordinator").clone()
     }
@@ -359,8 +364,7 @@ mod tests {
     use std::sync::Arc;
 
     fn coordinator_at(path: &std::path::Path) -> SettingsCoordinator {
-        let mut settings = Settings::default();
-        settings.args.config_file_path = path.to_string_lossy().into_owned();
+        let mut settings = Settings::for_test_config(path);
         settings.system.locale = Some("zh-CN".to_string());
         let security = settings.security.clone();
         SettingsCoordinator::new(Arc::new(SharedSettings::from(settings)), security)

@@ -11,6 +11,9 @@ use desk_ipc_protocol::{
     transport::{read_message, write_message},
 };
 use desk_signal_facade::model::policy_snapshot::PolicySnapshot;
+#[cfg(target_os = "linux")]
+use desk_utils::linux_display::{LinuxDisplayServer, detect_linux_display_environment};
+use desk_wayland_portal::PortalSnapshot;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -161,6 +164,9 @@ pub struct WorkerManager {
     /// of its Init handshake. Read by `pc_manager::handle_request_remote`
     /// to populate the daemon's `Init` reply with codec / device data.
     worker_capabilities: Arc<StdMutex<Option<MediaCapabilities>>>,
+    wayland_portal_snapshot: Arc<StdMutex<Option<PortalSnapshot>>>,
+    #[cfg(target_os = "linux")]
+    linux_display_server: Arc<StdMutex<LinuxDisplayServer>>,
     /// Monotonic counter bumped every time [`Self::set_worker_capabilities`]
     /// installs a fresh snapshot. Paired with [`Self::capabilities_version_tx`]
     /// so async callers can wait until the cache reflects a known-newer
@@ -358,6 +364,11 @@ impl WorkerManager {
             current_incarnation: Arc::new(AtomicU64::new(0)),
             pc_registry,
             worker_capabilities: Arc::new(StdMutex::new(None)),
+            wayland_portal_snapshot: Arc::new(StdMutex::new(None)),
+            #[cfg(target_os = "linux")]
+            linux_display_server: Arc::new(StdMutex::new(
+                detect_linux_display_environment().active_server(),
+            )),
             capabilities_version: Arc::new(AtomicU64::new(0)),
             policy_applied_seq: Arc::new(AtomicU64::new(0)),
             capabilities_version_tx: Arc::new(cap_version_tx),
@@ -432,6 +443,12 @@ impl WorkerManager {
         // device list rather than an old (potentially wrong-desktop)
         // snapshot.
         *self.worker_capabilities.lock().unwrap() = None;
+        *self.wayland_portal_snapshot.lock().unwrap() = None;
+        #[cfg(target_os = "linux")]
+        {
+            *self.linux_display_server.lock().unwrap() =
+                detect_linux_display_environment().active_server();
+        }
 
         let mut inner = self.inner.lock().await;
 
@@ -560,6 +577,12 @@ impl WorkerManager {
         // to a `RequestRemote` that lands between Init and the worker's
         // first `Capabilities` emission.
         *self.worker_capabilities.lock().unwrap() = None;
+        *self.wayland_portal_snapshot.lock().unwrap() = None;
+        #[cfg(target_os = "linux")]
+        {
+            *self.linux_display_server.lock().unwrap() =
+                detect_linux_display_environment().active_server();
+        }
 
         let mut inner = self.inner.lock().await;
 
@@ -753,6 +776,23 @@ impl WorkerManager {
         self.worker_capabilities.lock().unwrap().clone()
     }
 
+    pub fn set_wayland_portal_snapshot(&self, snapshot: PortalSnapshot) {
+        *self.wayland_portal_snapshot.lock().unwrap() = Some(snapshot);
+        #[cfg(target_os = "linux")]
+        {
+            *self.linux_display_server.lock().unwrap() = LinuxDisplayServer::Wayland;
+        }
+    }
+
+    pub fn wayland_portal_snapshot(&self) -> Option<PortalSnapshot> {
+        self.wayland_portal_snapshot.lock().unwrap().clone()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn linux_display_server(&self) -> LinuxDisplayServer {
+        *self.linux_display_server.lock().unwrap()
+    }
+
     /// Snapshot of the monotonic counter bumped by every
     /// [`Self::set_worker_capabilities`] call. Starts at 0 before any
     /// capabilities have been installed.
@@ -802,6 +842,13 @@ impl WorkerManager {
         ipc_tx: mpsc::UnboundedSender<ServiceToWorker>,
     ) -> WorkerIncarnation {
         let incarnation = self.mint_worker().incarnation();
+        *self.worker_capabilities.lock().unwrap() = None;
+        *self.wayland_portal_snapshot.lock().unwrap() = None;
+        #[cfg(target_os = "linux")]
+        {
+            *self.linux_display_server.lock().unwrap() =
+                detect_linux_display_environment().active_server();
+        }
         let mut inner = self.inner.lock().await;
         inner.active_worker = Some(WorkerHandle {
             incarnation,

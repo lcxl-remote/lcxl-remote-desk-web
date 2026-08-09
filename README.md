@@ -73,7 +73,7 @@ cargo tauri dev
 
 ## Configuration
 
-Controlled-device settings are loaded from `conf/config.toml`; the path can be changed with `-c`, and `LRD_*` environment variables can override settings. The local console persists host settings such as:
+Controlled-device settings use one platform default profile across portable, desk-server, service-daemon, MCP, and local access commands. Use `-c, --config-file-path` only for an explicit profile override; `LRD_*` environment variables can still override individual settings. The local console persists host settings such as:
 
 - **System & Connectivity**: Listen address, ports, local/remote signaling, manager links, logging, and bundled TURN interfaces.
 - **Desktop & Encoding**: Display, frame rate, encoder, cursor, audio, and per-session media settings.

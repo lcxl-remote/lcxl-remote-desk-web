@@ -1,0 +1,26 @@
+[package]
+name = "desk-wayland-portal"
+description = "Shared xdg-desktop-portal session broker for Lcxl Remote Desk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+desk-utils = { workspace = true }
+log = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "2"
+tokio = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
+wincode = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+futures-util = { workspace = true }
+zbus = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

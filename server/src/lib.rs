@@ -28,7 +28,6 @@ use std::{
     env,
     fs::{File, TryLockError},
     io::ErrorKind,
-    path::Path,
     sync::Arc,
 };
 
@@ -37,6 +36,7 @@ use crate::{
     controller::{
         api_token::create_token,
         connection::verify_connection,
+        host_readiness::{authorize_wayland, cancel_wayland, request_macos_permissions},
         info::{query_backend_info, query_macos_autologin, query_server_info, query_sysinfo},
         init::init_system,
         login::{change_password, login_account, login_tauri, logout_account},
@@ -230,6 +230,9 @@ pub fn configure_api_surface(
             .service(install_virtual_display_driver)
             .service(uninstall_virtual_display_driver)
             .service(change_password)
+            .service(authorize_wayland)
+            .service(cancel_wayland)
+            .service(request_macos_permissions)
             .configure(move |cfg| {
                 // Host signaling-token issuance is only meaningful where a
                 // co-located signaling server exists for the host to connect to
@@ -530,9 +533,9 @@ pub async fn run_with_hub(
 
     // init desk_signal db
     if startup_mode_has_signal_db(&startup_mode) {
-        let settings_dir = Path::new(&settings.args.config_file_path)
-            .parent()
-            .unwrap_or(Path::new("."))
+        let settings_dir = settings
+            .paths()
+            .signal_db_dir()
             .to_string_lossy()
             .to_string();
 

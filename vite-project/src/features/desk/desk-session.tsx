@@ -33,6 +33,8 @@ import { deskErrorCodeEnum } from "@/services/types"
 import { useRestrictedSession } from "@/features/desk/restricted-session"
 import {
     buildDesktopRequestRemotePayload,
+    loadRequestedWaylandControlMode,
+    saveRequestedWaylandControlMode,
     shouldOpenConfigDialog,
     shouldShowMediaPipelineOverlay,
 } from "./desk-session-model"
@@ -102,6 +104,9 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     // Restriction state derived from the redeemed grant (if any) for this target.
     const restricted = useRestrictedSession(deskId);
     const grantSessionId = restricted.grantSessionId;
+    const admittedWaylandModeRef = useRef(
+        loadRequestedWaylandControlMode(deskId ?? "unknown"),
+    );
 
     const clearAdmissionRetry = useCallback(() => {
         const state = admissionRetryRef.current;
@@ -120,7 +125,11 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         if (newLogicalAttempt) {
             clearAdmissionRetry();
         }
-        const requestData = buildDesktopRequestRemotePayload(deskId, grantSessionId)
+        const requestData = buildDesktopRequestRemotePayload(
+            deskId,
+            grantSessionId,
+            admittedWaylandModeRef.current,
+        )
         const requestId = sendMessage(
             SIGNALING_TYPE_CODE_REQUEST_REMOTE,
             requestData,
@@ -410,6 +419,15 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                     }
                 } else {
                     clearAdmissionRetry();
+                    if (message.response_state?.error_code
+                        === deskErrorCodeEnum.WAYLAND_PORTAL_AUTHORIZATION_REQUIRED
+                    ) {
+                        toast({
+                            title: t("pages.desk.waylandAuthorizationRequiredTitle"),
+                            description: t("pages.desk.waylandAuthorizationRequiredDescription"),
+                            variant: "destructive",
+                        });
+                    }
                 }
             } else if (signaling_type === SIGNALING_TYPE_CODE_OFFER
                 && message.response_state
@@ -737,9 +755,20 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         // Inject the parent-owned adaptive-bitrate preference so it
         // rides the offer (new connection init) and UpdateDeskSettings
         // (live toggle for this connection on the daemon side).
+        const requestedMode = settings.wayland_control_mode ?? "auto";
+        if (deskId && requestedMode !== admittedWaylandModeRef.current) {
+            saveRequestedWaylandControlMode(deskId, requestedMode);
+            toast({
+                title: t("pages.desk.waylandModeNextConnectionTitle"),
+                description: t("pages.desk.waylandModeNextConnectionDescription"),
+            });
+        }
         const settingsWithPrefs: DeskSettings = {
             ...settings,
             adaptive_bitrate: adaptiveBitrateEnabled,
+            // RequestRemote froze this mode before the PeerConnection existed.
+            // A changed choice is persisted for the next logical connection.
+            wayland_control_mode: admittedWaylandModeRef.current,
         };
         lastSettingsRef.current = settingsWithPrefs;
         // Mirror to state so `useAdaptiveResolution` re-evaluates its

@@ -1,6 +1,7 @@
 use clap::Parser;
 use desk_utils::error::DeskErrorCode;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -21,8 +22,8 @@ pub use desk_signal_facade::model::startup_mode::StartupMode;
 ))]
 pub struct Args {
     /// Config file path
-    #[clap(short, long, default_value = "conf/config")]
-    pub config_file_path: String,
+    #[clap(short, long)]
+    pub config_file_path: Option<PathBuf>,
 
     /// Startup mode
     #[clap(short, long, default_value_t, value_enum)]

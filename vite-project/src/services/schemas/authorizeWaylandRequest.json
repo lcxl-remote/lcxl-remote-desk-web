@@ -1,0 +1,1 @@
+{"type":"object","required":["operation_id","target"],"properties":{"operation_id":{"type":"string"},"target":{"type":"string","description":"Local Wayland Portal authorization target.","enum":["screen_only","screen_and_input"],"x-readme-ref-name":"WaylandAuthorizationTarget"}},"x-readme-ref-name":"AuthorizeWaylandRequest"}

@@ -1,13 +1,14 @@
+use desk_utils::host_data_paths::HostDataPaths;
 use lcxl_remote_desk_server::{
     daemon::{
         local_access_control::HostAccessControlAction,
-        local_access_control_transport::{endpoint_for_config, execute_native},
+        local_access_control_transport::{endpoint_for_paths, execute_native},
     },
     host_control::{HostAccessSnapshot, HostRemoteAccessMode},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{
     AppHandle, Listener, LogicalSize, Manager, Monitor, PhysicalPosition, WebviewUrl,
     WebviewWindow, WebviewWindowBuilder,
@@ -35,7 +36,7 @@ pub struct HostAccessStatusManager {
     app_handle: AppHandle,
     frontend_url: String,
     control_endpoint: PathBuf,
-    control_config: String,
+    control_config_override: Option<PathBuf>,
 }
 
 const CONTROL_EVENT: &str = "lcxl-host-access-control";
@@ -73,12 +74,12 @@ struct StatusState {
 }
 
 impl HostAccessStatusManager {
-    pub fn new(app_handle: AppHandle, frontend_url: String, config_file_path: &str) -> Self {
+    pub fn new(app_handle: AppHandle, frontend_url: String, paths: &HostDataPaths) -> Self {
         Self {
             app_handle,
             frontend_url,
-            control_endpoint: endpoint_for_config(config_file_path),
-            control_config: config_file_path.to_string(),
+            control_endpoint: endpoint_for_paths(paths),
+            control_config_override: paths.explicit_config_file().map(Path::to_path_buf),
         }
     }
 
@@ -86,7 +87,7 @@ impl HostAccessStatusManager {
         install_control_listener(
             &self.app_handle,
             self.control_endpoint.clone(),
-            self.control_config.clone(),
+            self.control_config_override.clone(),
         );
         let app_handle = self.app_handle.clone();
         let frontend_url = self.frontend_url.clone();
@@ -163,7 +164,11 @@ impl HostAccessStatusManager {
     }
 }
 
-fn install_control_listener(app_handle: &AppHandle, endpoint: PathBuf, config_file_path: String) {
+fn install_control_listener(
+    app_handle: &AppHandle,
+    endpoint: PathBuf,
+    config_override: Option<PathBuf>,
+) {
     let handle = app_handle.clone();
     app_handle.listen(CONTROL_EVENT, move |event| {
         let request = match serde_json::from_str::<UiControlRequest>(event.payload()) {
@@ -192,11 +197,11 @@ fn install_control_listener(app_handle: &AppHandle, endpoint: PathBuf, config_fi
         }
 
         let endpoint = endpoint.clone();
-        let config_file_path = config_file_path.clone();
+        let config_override = config_override.clone();
         let handle = handle.clone();
         std::thread::spawn(move || {
             let request_id = request.request_id.clone();
-            let result = execute_ui_control(&endpoint, &config_file_path, request);
+            let result = execute_ui_control(&endpoint, config_override.as_deref(), request);
             dispatch_control_result(
                 &handle,
                 &UiControlResult {
@@ -211,7 +216,7 @@ fn install_control_listener(app_handle: &AppHandle, endpoint: PathBuf, config_fi
 
 fn execute_ui_control(
     endpoint: &std::path::Path,
-    config_file_path: &str,
+    config_override: Option<&std::path::Path>,
     request: UiControlRequest,
 ) -> anyhow::Result<()> {
     let action = match request.action {
@@ -242,7 +247,7 @@ fn execute_ui_control(
         }
         UiControlAction::Unlock { expected_version } => {
             if !desk_utils::permission::is_admin() {
-                return execute_elevated_unlock(config_file_path, expected_version);
+                return execute_elevated_unlock(config_override, expected_version);
             }
             HostAccessControlAction::Unlock { expected_version }
         }
@@ -338,12 +343,11 @@ fn sidecar_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(name))
 }
 
-fn absolute_config_path(config_file_path: &str) -> PathBuf {
-    std::path::absolute(config_file_path).unwrap_or_else(|_| PathBuf::from(config_file_path))
-}
-
 #[cfg(target_os = "windows")]
-fn execute_elevated_unlock(config_file_path: &str, expected_version: u64) -> anyhow::Result<()> {
+fn execute_elevated_unlock(
+    config_override: Option<&std::path::Path>,
+    expected_version: u64,
+) -> anyhow::Result<()> {
     use std::os::windows::ffi::OsStrExt as _;
     use windows::Win32::{
         Foundation::{CloseHandle, WAIT_OBJECT_0},
@@ -356,9 +360,16 @@ fn execute_elevated_unlock(config_file_path: &str, expected_version: u64) -> any
     use windows::core::PCWSTR;
 
     let sidecar = sidecar_path();
-    let config = crate::quote_cmd_arg(&absolute_config_path(config_file_path).to_string_lossy());
-    let params =
-        format!("access --config-file-path {config} unlock --expected-version {expected_version}");
+    let config = config_override.map(|path| {
+        format!(
+            " --config-file-path {}",
+            crate::quote_cmd_arg(&path.to_string_lossy())
+        )
+    });
+    let params = format!(
+        "access{} unlock --expected-version {expected_version}",
+        config.as_deref().unwrap_or("")
+    );
     let verb: Vec<u16> = "runas\0".encode_utf16().collect();
     let file: Vec<u16> = sidecar.as_os_str().encode_wide().chain(Some(0)).collect();
     let parameters: Vec<u16> = params.encode_utf16().chain(Some(0)).collect();
@@ -394,12 +405,16 @@ fn execute_elevated_unlock(config_file_path: &str, expected_version: u64) -> any
 }
 
 #[cfg(target_os = "linux")]
-fn execute_elevated_unlock(config_file_path: &str, expected_version: u64) -> anyhow::Result<()> {
-    let status = std::process::Command::new("pkexec")
-        .arg(sidecar_path())
-        .arg("access")
-        .arg("--config-file-path")
-        .arg(absolute_config_path(config_file_path))
+fn execute_elevated_unlock(
+    config_override: Option<&std::path::Path>,
+    expected_version: u64,
+) -> anyhow::Result<()> {
+    let mut command = std::process::Command::new("pkexec");
+    command.arg(sidecar_path()).arg("access");
+    if let Some(path) = config_override {
+        command.arg("--config-file-path").arg(path);
+    }
+    let status = command
         .arg("unlock")
         .arg("--expected-version")
         .arg(expected_version.to_string())
@@ -411,17 +426,28 @@ fn execute_elevated_unlock(config_file_path: &str, expected_version: u64) -> any
 }
 
 #[cfg(target_os = "macos")]
-fn execute_elevated_unlock(config_file_path: &str, expected_version: u64) -> anyhow::Result<()> {
+fn execute_elevated_unlock(
+    config_override: Option<&std::path::Path>,
+    expected_version: u64,
+) -> anyhow::Result<()> {
     // `quoted form of` is implemented here without invoking a shell before the
     // OS authentication dialog. The resulting shell command contains only
     // single-quoted literal arguments.
     fn shell_quote(value: &str) -> String {
         format!("'{}'", value.replace('\'', "'\\''"))
     }
+    let config = config_override
+        .map(|path| {
+            format!(
+                " --config-file-path {}",
+                shell_quote(&path.to_string_lossy())
+            )
+        })
+        .unwrap_or_default();
     let command = format!(
-        "{} access --config-file-path {} unlock --expected-version {}",
+        "{} access{} unlock --expected-version {}",
         shell_quote(&sidecar_path().to_string_lossy()),
-        shell_quote(&absolute_config_path(config_file_path).to_string_lossy()),
+        config,
         expected_version
     );
     let script = format!(

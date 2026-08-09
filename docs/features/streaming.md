@@ -32,6 +32,23 @@ System audio is captured and encoded with **Opus** (libopus). Capture backends: 
 
 Mouse and keyboard input are injected on the controlled device over a dedicated data channel. In service-daemon mode, injection runs inside the user's desktop session — see [Startup Modes](/guide/startup-modes).
 
+## Prepare the controlled host
+
+The controlled host's home page shows the local actions required before it can accept a desktop session. Windows keeps the **Install service** action there; macOS reports Screen Recording and Accessibility separately and can open their system permission prompts from the same area.
+
+On a logged-in Wayland desktop, click **Enable Wayland remote access** locally before connecting from another device. The requested scope follows the host's input mode:
+
+- `none` and `uinput` request screen sharing only;
+- `portal` and Wayland `auto` request screen sharing plus keyboard and pointer control.
+
+The Portal picker is owned by the local desktop. A remote controller cannot open or accept it. Until the required screen/input components are ready, a remote request fails immediately with an instruction to prepare the host; it does not wait for the picker or enter WebRTC/ICE retry.
+
+The host keeps the selected Portal session alive between remote connections. Where the desktop supports persistent restore and the packaged application has a stable identity, the next application launch attempts to restore it; otherwise the home page states that authorization lasts only for the current run. Revoking permission, restarting the Portal backend, or losing the selected source returns the host to **Needs authorization**.
+
+The long-lived session keeps the monitor chosen in the Portal picker. Both **Enable input control** and **Change shared screen / Reauthorize** create a replacement Portal session, reopen the local system prompt, and stop active media/input pipelines first. Reconnect after authorization. No remote connection can trigger either action or upgrade screen-only authorization implicitly.
+
+Wayland support here covers an already logged-in graphical user session. It does not cover GDM, a login screen, a headless host, or unattended operation without a graphical user session.
+
 ## Monitor Selection
 
 `desk.video_device_name` selects which monitor to capture (e.g. `\\.\DISPLAY1` on Windows). On first connection, the browser automatically selects the first capture mode that has a usable display and then prefers the display at the desktop origin. If a saved mode or display is no longer available, it is corrected to that usable default and the dialog explains the change.

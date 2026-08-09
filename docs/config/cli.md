@@ -6,7 +6,7 @@ cargo run -- --help
 
 ## Arguments
 
-- `-c, --config-file-path <PATH>` — path to configuration file (default: `conf/config`).
+- `-c, --config-file-path <PATH>` — path to configuration file (no default; overrides the unified platform profile).
 - `-s, --startup-mode <MODE>` — startup mode:
   - `default` — full mode with signaling and desk server.
   - `signaling` — signaling mode only (Signaling + TURN).

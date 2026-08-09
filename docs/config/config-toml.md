@@ -1,6 +1,6 @@
 # config.toml Reference
 
-Server settings are managed via `conf/config.toml`. The config file path can be overridden with `-c, --config-file-path <PATH>`.
+Server settings use a startup-mode-independent platform default: `%ProgramData%\LCXL Remote Desktop\config\config.toml` on Windows, `XDG_CONFIG_HOME/lcxl-remote-desk/config.toml` (or `~/.config/lcxl-remote-desk/config.toml`) for a non-root Linux user, `/etc/lcxl-remote-desk/config.toml` for Linux root, and `~/Library/Application Support/com.lcxl.remote-desk/config/config.toml` on macOS. `-c, --config-file-path <PATH>` explicitly selects another profile; services and LaunchAgents inherit it only when it was explicitly supplied. Old cwd-relative `conf/config.toml` files are not discovered or migrated automatically.
 
 ## System `[system]`
 

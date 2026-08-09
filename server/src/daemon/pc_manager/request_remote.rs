@@ -2,6 +2,40 @@
 
 use super::*;
 
+#[cfg(target_os = "linux")]
+fn resolve_wayland_control_mode_for_admission(
+    request_remote: &RequestRemoteModel,
+    wayland: bool,
+    portal_snapshot: Option<&desk_wayland_portal::PortalSnapshot>,
+) -> Result<Option<LinuxInputControlMode>, CustomDeskError> {
+    if request_remote.purpose
+        != desk_signal_facade::model::signal::RemoteSessionPurpose::RemoteDesktop
+    {
+        return Ok(None);
+    }
+
+    let requested = request_remote
+        .requested_wayland_control_mode
+        .as_deref()
+        .and_then(LinuxInputControlMode::parse)
+        .ok_or_else(|| {
+            CustomDeskError::new(
+                DeskErrorCode::INVALID_PARAMS,
+                "Linux remote desktop requires requested_wayland_control_mode=auto|none|uinput|portal",
+            )
+        })?;
+    let resolved = requested.resolve(wayland);
+    if wayland
+        && !portal_snapshot.is_some_and(|snapshot| snapshot.admits(resolved.needs_portal_input()))
+    {
+        return Err(CustomDeskError::new(
+            DeskErrorCode::WAYLAND_PORTAL_AUTHORIZATION_REQUIRED,
+            "Wayland remote access must be enabled on the host before connecting",
+        ));
+    }
+    Ok(Some(resolved))
+}
+
 /// Daemon side of `SignalingType::RequestRemote`. Creates the PC and
 /// emits the matching `Init` reply. Mirrors the worker's
 /// `init_ptc_peer_connection` minus the preapproved restoration (PC
@@ -40,6 +74,24 @@ pub async fn handle_request_remote(
 ) -> Result<(), DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
     let request_remote = model.get_data::<RequestRemoteModel>()?;
+
+    #[cfg(target_os = "linux")]
+    let resolved_wayland_control_mode = {
+        let portal_snapshot = worker_mgr.and_then(WorkerManager::wayland_portal_snapshot);
+        let wayland = worker_mgr
+            .is_some_and(|manager| manager.linux_display_server() == LinuxDisplayServer::Wayland)
+            || portal_snapshot.is_some()
+            || capabilities
+                .is_some_and(|caps| caps.video_device_list.contains_key("WAYLANDPORTAL"));
+        resolve_wayland_control_mode_for_admission(
+            &request_remote,
+            wayland,
+            portal_snapshot.as_ref(),
+        )
+        .map_err(DeskError::CustomError)?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let resolved_wayland_control_mode = None;
 
     // Register the validated ceiling with the worker's per-connection ceiling map
     // ahead of any worker-bound frame for this connection, so the worker-side
@@ -104,6 +156,7 @@ pub async fn handle_request_remote(
         let ctx_guard = ctx.read().await;
         let mut st = ctx_guard.signaling_state.write().await;
         st.purpose = request_remote.purpose;
+        st.resolved_wayland_control_mode = resolved_wayland_control_mode;
         st.access_ceiling = access_ceiling;
         st.grant_session_id = grant_session_id.clone();
     }
@@ -280,4 +333,93 @@ pub async fn handle_request_remote(
         from_connection_id,
         Some(&init_data),
     )
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use desk_wayland_portal::{
+        AuthorizationTarget, PortalAvailability, PortalCapabilities, PortalPhase, PortalSnapshot,
+    };
+
+    fn request(mode: Option<&str>) -> RequestRemoteModel {
+        RequestRemoteModel {
+            purpose: desk_signal_facade::model::signal::RemoteSessionPurpose::RemoteDesktop,
+            requested_wayland_control_mode: mode.map(str::to_string),
+            ..RequestRemoteModel::default()
+        }
+    }
+
+    fn ready_snapshot(input_ready: bool) -> PortalSnapshot {
+        PortalSnapshot {
+            phase: PortalPhase::Ready,
+            capabilities: PortalCapabilities {
+                screen_ready: true,
+                input_ready,
+            },
+            availability: PortalAvailability::default(),
+            target: Some(if input_ready {
+                AuthorizationTarget::ScreenAndInput
+            } else {
+                AuthorizationTarget::ScreenOnly
+            }),
+            operation_id: None,
+            generation: 1,
+            restore_token_persisted: false,
+            requires_local_action: false,
+            reason_code: None,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn screen_only_readiness_admits_none_and_uinput_but_not_portal() {
+        let snapshot = ready_snapshot(false);
+        for mode in ["none", "uinput"] {
+            let resolved = resolve_wayland_control_mode_for_admission(
+                &request(Some(mode)),
+                true,
+                Some(&snapshot),
+            )
+            .expect("screen-only mode should be admitted");
+            assert_eq!(resolved.expect("resolved").as_str(), mode);
+        }
+
+        let error = resolve_wayland_control_mode_for_admission(
+            &request(Some("portal")),
+            true,
+            Some(&snapshot),
+        )
+        .expect_err("Portal input requires input readiness");
+        assert_eq!(
+            error.error_code,
+            DeskErrorCode::WAYLAND_PORTAL_AUTHORIZATION_REQUIRED
+        );
+    }
+
+    #[test]
+    fn auto_freezes_to_portal_on_wayland_and_requires_input_readiness() {
+        let snapshot = ready_snapshot(true);
+        assert_eq!(
+            resolve_wayland_control_mode_for_admission(
+                &request(Some("auto")),
+                true,
+                Some(&snapshot),
+            )
+            .expect("ready")
+            .expect("resolved"),
+            LinuxInputControlMode::Portal
+        );
+    }
+
+    #[test]
+    fn missing_mode_is_a_protocol_error_before_peer_creation() {
+        let error = resolve_wayland_control_mode_for_admission(
+            &request(None),
+            true,
+            Some(&ready_snapshot(true)),
+        )
+        .expect_err("mode is mandatory for Linux remote desktop");
+        assert_eq!(error.error_code, DeskErrorCode::INVALID_PARAMS);
+    }
 }

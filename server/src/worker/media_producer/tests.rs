@@ -208,6 +208,7 @@ fn payload_overrides_apply_codec_and_fps() {
         ..DeskSettings::default()
     };
     let payload = StartMediaPayload {
+        resolved_wayland_control_mode: None,
         connection_id: "c1".into(),
         video_codec: MediaCodec::Vp9,
         video_encoder: None,
@@ -245,6 +246,7 @@ fn payload_overrides_preserves_base_video_device_name_when_payload_is_none() {
         ..DeskSettings::default()
     };
     let payload = StartMediaPayload {
+        resolved_wayland_control_mode: None,
         connection_id: "c1".into(),
         video_codec: MediaCodec::Vp9,
         video_encoder: None,
@@ -277,6 +279,7 @@ fn payload_overrides_apply_per_connection_image_capture() {
         ..DeskSettings::default()
     };
     let payload = StartMediaPayload {
+        resolved_wayland_control_mode: None,
         connection_id: "c2".into(),
         video_codec: MediaCodec::H264,
         video_encoder: None,
@@ -310,6 +313,7 @@ fn payload_overrides_image_capture_none_preserves_base() {
         ..DeskSettings::default()
     };
     let payload = StartMediaPayload {
+        resolved_wayland_control_mode: None,
         connection_id: "c3".into(),
         video_codec: MediaCodec::H264,
         video_encoder: None,
@@ -335,6 +339,7 @@ fn payload_overrides_fps_zero_keeps_default() {
         ..DeskSettings::default()
     };
     let payload = StartMediaPayload {
+        resolved_wayland_control_mode: None,
         connection_id: "c1".into(),
         video_codec: MediaCodec::H264,
         video_encoder: None,
@@ -366,6 +371,7 @@ fn start_media_data_channel_only_skips_both_pipelines() {
     let (err_tx, _err_rx) = mpsc::unbounded_channel::<WorkerToService>();
     let producer = MediaProducer::new(DeskSettings::default(), sender, err_tx);
     producer.start_media(StartMediaPayload {
+        resolved_wayland_control_mode: None,
         connection_id: "files".into(),
         video_codec: MediaCodec::H264,
         video_encoder: None,
@@ -406,6 +412,7 @@ fn start_media_accepted_callback_runs_once_and_duplicate_preserves_state() {
     let (err_tx, _err_rx) = mpsc::unbounded_channel::<WorkerToService>();
     let producer = MediaProducer::new(DeskSettings::default(), sender, err_tx);
     let payload = StartMediaPayload {
+        resolved_wayland_control_mode: None,
         connection_id: "callback".into(),
         video_codec: MediaCodec::H264,
         video_encoder: None,
@@ -449,6 +456,7 @@ fn start_media_reports_cancelled_when_callback_removes_reservation() {
     let (err_tx, _err_rx) = mpsc::unbounded_channel::<WorkerToService>();
     let producer = MediaProducer::new(DeskSettings::default(), sender, err_tx);
     let payload = StartMediaPayload {
+        resolved_wayland_control_mode: None,
         connection_id: "cancelled-callback".into(),
         video_codec: MediaCodec::H264,
         video_encoder: None,
@@ -667,6 +675,7 @@ fn payload_overrides_applies_enable_dirty_rect() {
         ..DeskSettings::default()
     };
     let payload = StartMediaPayload {
+        resolved_wayland_control_mode: None,
         connection_id: "c-dr".into(),
         video_codec: MediaCodec::H264,
         video_encoder: None,
@@ -690,6 +699,7 @@ fn payload_overrides_applies_enable_dirty_rect() {
     // `None` preserves base — back-compat path with older daemons
     // that do not yet sniff the field.
     let payload_none = StartMediaPayload {
+        resolved_wayland_control_mode: None,
         enable_dirty_rect: None,
         ..payload
     };
@@ -701,6 +711,7 @@ fn payload_overrides_applies_enable_dirty_rect() {
 fn payload_overrides_prefers_concrete_encoder_over_wire_codec() {
     let base = DeskSettings::default();
     let mut payload = StartMediaPayload {
+        resolved_wayland_control_mode: None,
         connection_id: "concrete-encoder".into(),
         video_codec: MediaCodec::H264,
         video_encoder: Some(VideoEncoderId::X264),

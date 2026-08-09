@@ -46,6 +46,27 @@ async fn build_request_remote_ice(
     turn?.get_rest_ice_servers(to_connection_id, ttl_secs).await
 }
 
+/// Rebuild a `RequestRemote` after optionally injecting recipient TURN data.
+/// Keeping this seam separate makes every browser-supplied admission field part
+/// of the regression surface instead of relying on an authorizer to preserve it.
+fn rebuild_request_remote_with_ice(
+    model: &SignalingModel,
+    ice_server: Option<LcxlRTCIceServer>,
+) -> Result<SignalingModel, DeskSignalFacadeError> {
+    let mut data = model.get_data_with_default::<RequestRemoteModel>()?;
+    if let Some(ice_server) = ice_server {
+        data.ice_servers.push(ice_server);
+    }
+    Ok(SignalingModel::new(
+        model.request_id.as_str(),
+        model.signaling_type,
+        model.from_connection_id.clone(),
+        model.to_connection_id.clone(),
+        Some(serde_json::to_value(data)?),
+        model.response_state.clone(),
+    ))
+}
+
 #[cfg(test)]
 mod request_remote_ice_tests;
 
@@ -776,31 +797,20 @@ impl<U: SignalingUser> SignalingHandler<U> {
             }
 
             SignalingType::RequestRemote => {
-                let mut data = signaling_model.get_data_with_default::<RequestRemoteModel>()?;
                 // Inject a TURN REST ICE server for the RECIPIENT (the desk
                 // server / host this REQUEST_REMOTE is forwarded to) so it can
                 // gather srflx/relay candidates for NAT traversal. Keyed on
                 // `to_connection_id`, not the sender: a browser requester has no
                 // usable TURN identity, which would otherwise leave the host
                 // with no ICE servers (`iceServers=0`).
-                if let Some(ice_server) = build_request_remote_ice(
+                let ice_server = build_request_remote_ice(
                     &signaling_model,
                     self.turn.as_ref(),
                     REQUEST_REMOTE_TURN_TTL_SECS,
                 )
-                .await
-                {
-                    data.ice_servers.push(ice_server);
-                }
-                let data = Some(serde_json::to_value(data)?);
-                let new_signaling_model = SignalingModel::new(
-                    signaling_model.request_id.as_str(),
-                    signaling_model.signaling_type,
-                    signaling_model.from_connection_id,
-                    signaling_model.to_connection_id,
-                    data,
-                    signaling_model.response_state,
-                );
+                .await;
+                let new_signaling_model =
+                    rebuild_request_remote_with_ice(&signaling_model, ice_server)?;
                 // Stamp the trusted capability ceiling (owner → none / grant →
                 // ceiling / neither → default-deny) before relaying. With no
                 // authorizer the frame relays unstamped.

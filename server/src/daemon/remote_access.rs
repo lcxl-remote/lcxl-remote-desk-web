@@ -13,6 +13,7 @@ use crate::host_activity::HostActivityRegistry;
 use crate::host_control::{CentralSyncState, HostRemoteAccessMode, HostRemoteAccessStatus};
 
 const FORMAT_VERSION: u32 = 1;
+#[cfg(test)]
 const STATE_FILE_NAME: &str = "remote-access-state.toml";
 const WORKER_STATE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const RESTARTED_WORKER_STATE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -215,14 +216,6 @@ pub struct RemoteAccessStateStore {
 }
 
 impl RemoteAccessStateStore {
-    pub fn for_config_file(config_file_path: impl AsRef<Path>) -> Self {
-        let parent = config_file_path
-            .as_ref()
-            .parent()
-            .unwrap_or_else(|| Path::new("."));
-        Self::new(parent.join(STATE_FILE_NAME))
-    }
-
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }

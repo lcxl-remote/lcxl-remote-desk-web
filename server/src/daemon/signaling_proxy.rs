@@ -567,6 +567,9 @@ pub async fn run_signaling_proxy(
             WorkerToService::Ready => {
                 info!("[SignalingProxy] Worker is Ready");
             }
+            WorkerToService::WaylandPortalStatus(payload) => {
+                worker_mgr.set_wayland_portal_snapshot(payload.snapshot);
+            }
             WorkerToService::Capabilities(caps) => {
                 info!(
                     "[SignalingProxy] Worker reported capabilities: video={:?}, audio={:?}, \

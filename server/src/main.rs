@@ -1,5 +1,7 @@
 use clap::Parser as _;
+use desk_utils::host_data_paths::HostDataPaths;
 use lcxl_remote_desk_server::model::settings::{Args, StartupMode};
+use std::path::PathBuf;
 
 /// Extra flags for install/uninstall — parsed before the main startup-mode dispatch.
 #[derive(clap::Parser, Debug, Default)]
@@ -19,6 +21,11 @@ struct ServerArgs {
     #[cfg(target_os = "windows")]
     #[arg(long)]
     install_path: Option<String>,
+
+    /// Explicit host config override inherited by the installed service.
+    #[cfg(target_os = "windows")]
+    #[arg(long)]
+    config_file_path: Option<PathBuf>,
 
     /// Also stage the LcxlVirtualDisplay IDD driver during
     /// `--install-service`. Ignored unless `--install-service` is set.
@@ -43,8 +50,8 @@ struct DumpOpenapiCli {
 #[derive(clap::Parser, Debug)]
 struct AccessCli {
     /// Config path used to locate the daemon's native control endpoint.
-    #[arg(short, long, default_value = "conf/config")]
-    config_file_path: String,
+    #[arg(short, long)]
+    config_file_path: Option<PathBuf>,
 
     #[command(subcommand)]
     command: AccessCommand,
@@ -68,17 +75,18 @@ enum AccessCommand {
 fn run_access_cli(cli: AccessCli) -> anyhow::Result<()> {
     use lcxl_remote_desk_server::daemon::local_access_control::HostAccessControlAction;
     use lcxl_remote_desk_server::daemon::local_access_control_transport::{
-        endpoint_for_config, execute_native, query_native,
+        endpoint_for_paths, execute_native, query_native,
     };
 
-    let endpoint = endpoint_for_config(&cli.config_file_path);
+    let paths = HostDataPaths::resolve_current(cli.config_file_path.as_deref())?;
+    let endpoint = endpoint_for_paths(&paths);
     actix_web::rt::System::new().block_on(async move {
         if matches!(cli.command, AccessCommand::Status) {
             let status = match query_native(&endpoint).await {
                 Ok(status) => status,
                 Err(_) => {
-                    let state = lcxl_remote_desk_server::daemon::remote_access::RemoteAccessStateStore::for_config_file(
-                        &cli.config_file_path,
+                    let state = lcxl_remote_desk_server::daemon::remote_access::RemoteAccessStateStore::new(
+                        paths.remote_access_state_file().to_path_buf(),
                     )
                     .load_read_only();
                     (&state).into()
@@ -174,7 +182,11 @@ fn main() {
             };
             let default_dir = default_install_dir();
             let dir = server_args.install_path.as_deref().unwrap_or(&default_dir);
-            if let Err(e) = install_service(dir, server_args.install_idd_driver) {
+            if let Err(e) = install_service(
+                dir,
+                server_args.install_idd_driver,
+                server_args.config_file_path.as_deref(),
+            ) {
                 eprintln!("Failed to install service: {e}");
                 std::process::exit(1);
             }

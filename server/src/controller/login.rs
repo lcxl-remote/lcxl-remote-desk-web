@@ -249,7 +249,7 @@ pub async fn login_tauri(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::settings::{Args, Settings, SharedSettings};
+    use crate::model::settings::{Settings, SharedSettings};
     use actix_session::{SessionMiddleware, storage::CookieSessionStore};
     use actix_web::{
         App,
@@ -260,17 +260,12 @@ mod tests {
     use std::env;
 
     fn create_test_settings() -> SharedSettings {
-        let mut settings = Settings::default();
-        settings.user.login_user_name = "admin".to_string();
-        settings.user.login_password = "password".to_string();
-
         // Use a temp file for config to avoid overwriting real config
         let mut temp_path = env::temp_dir();
         temp_path.push(format!("desk_test_config_{}.toml", uuid::Uuid::new_v4()));
-        settings.args = Args {
-            config_file_path: temp_path.to_string_lossy().to_string(),
-            ..Default::default()
-        };
+        let mut settings = Settings::for_test_config(&temp_path);
+        settings.user.login_user_name = "admin".to_string();
+        settings.user.login_password = "password".to_string();
 
         SharedSettings::from(settings)
     }

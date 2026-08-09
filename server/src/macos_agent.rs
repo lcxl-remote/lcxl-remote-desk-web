@@ -31,7 +31,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use desk_utils::error::DeskErrorCode;
+use desk_utils::{
+    error::DeskErrorCode,
+    host_data_paths::{HostDataPaths, HostDataScope},
+};
 
 use crate::error::DeskError;
 
@@ -45,10 +48,9 @@ pub struct AgentSpec {
     /// Absolute path to the executable launchd will exec — the current process's
     /// own executable (the Tauri main binary, which embeds the server).
     pub program: PathBuf,
-    /// Absolute `--config-file-path`. Required because launchd starts the job
-    /// with cwd `/`, so the relative default (`conf/config`) would resolve to
-    /// `/conf/config` and fail.
-    pub config_file_path: PathBuf,
+    /// Absolute explicit `--config-file-path`. `None` keeps the shared platform default.
+    /// launchd receives no config argument for the default profile.
+    pub config_file_path: Option<PathBuf>,
     /// Absolute directory for the agent's stdout/stderr logs.
     pub log_dir: PathBuf,
 }
@@ -99,22 +101,22 @@ fn service_target() -> String {
 
 /// Default absolute log directory for the agent: `~/Library/Logs/lcxl-remote-desk`.
 fn default_log_dir() -> Result<PathBuf, DeskError> {
-    Ok(home_dir()?
-        .join("Library")
-        .join("Logs")
-        .join("lcxl-remote-desk"))
+    HostDataPaths::resolve(HostDataScope::User, None)
+        .map(|paths| paths.log_dir().to_path_buf())
+        .map_err(|error| err(&format!("failed to resolve log directory: {error}")))
 }
 
 /// Build an [`AgentSpec`] for the current process: launchd should re-exec this
 /// very binary (the Tauri main binary, which embeds the server) with `--hidden`.
-/// `config_file_path` is resolved to an absolute path against the current cwd —
-/// launchd starts jobs with cwd `/`, so a relative path must not survive into
-/// the plist.
-pub fn current_spec(config_file_path: &Path) -> Result<AgentSpec, DeskError> {
+/// The optional config override has already been normalized by `HostDataPaths`;
+/// only that explicit override is persisted in the plist.
+pub fn current_spec(config_override: Option<&Path>) -> Result<AgentSpec, DeskError> {
     let program = std::env::current_exe()
         .map_err(|e| err(&format!("failed to get current executable path: {e}")))?;
-    let config_file_path = std::path::absolute(config_file_path)
-        .map_err(|e| err(&format!("failed to resolve absolute config path: {e}")))?;
+    if config_override.is_some_and(|path| !path.is_absolute()) {
+        return Err(err("explicit config path must be absolute"));
+    }
+    let config_file_path = config_override.map(Path::to_path_buf);
     Ok(AgentSpec {
         program,
         config_file_path,
@@ -144,7 +146,16 @@ fn xml_unescape(s: &str) -> String {
 /// Render the LaunchAgent plist for `spec`.
 pub fn build_plist(spec: &AgentSpec) -> String {
     let program = xml_escape(&spec.program.to_string_lossy());
-    let config = xml_escape(&spec.config_file_path.to_string_lossy());
+    let config_arguments = spec
+        .config_file_path
+        .as_ref()
+        .map(|path| {
+            format!(
+                "\n        <string>--config-file-path</string>\n        <string>{}</string>",
+                xml_escape(&path.to_string_lossy())
+            )
+        })
+        .unwrap_or_default();
     let out_log = xml_escape(&spec.log_dir.join("auto-start.out.log").to_string_lossy());
     let err_log = xml_escape(&spec.log_dir.join("auto-start.err.log").to_string_lossy());
 
@@ -158,9 +169,7 @@ pub fn build_plist(spec: &AgentSpec) -> String {
     <key>ProgramArguments</key>
     <array>
         <string>{program}</string>
-        <string>--hidden</string>
-        <string>--config-file-path</string>
-        <string>{config}</string>
+        <string>--hidden</string>{config_arguments}
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -358,7 +367,9 @@ mod tests {
             program: PathBuf::from(
                 "/Applications/LCXL Remote Desktop.app/Contents/MacOS/lcxl-remote-desk-server",
             ),
-            config_file_path: PathBuf::from("/Users/x/Library/Application Support/lcxl/config"),
+            config_file_path: Some(PathBuf::from(
+                "/Users/x/Library/Application Support/lcxl/config",
+            )),
             log_dir: PathBuf::from("/Users/x/Library/Logs/lcxl"),
         }
     }
@@ -385,10 +396,18 @@ mod tests {
     }
 
     #[test]
+    fn default_profile_omits_config_override() {
+        let mut value = spec();
+        value.config_file_path = None;
+        let data = build_plist(&value);
+        assert!(!data.contains("--config-file-path"));
+    }
+
+    #[test]
     fn plist_escapes_xml_special_chars_in_paths() {
         let s = AgentSpec {
             program: PathBuf::from("/Applications/A&B.app/Contents/MacOS/exe"),
-            config_file_path: PathBuf::from("/tmp/<weird>/\"cfg\"/config"),
+            config_file_path: Some(PathBuf::from("/tmp/<weird>/\"cfg\"/config")),
             log_dir: PathBuf::from("/tmp/logs"),
         };
         let data = build_plist(&s);
@@ -462,7 +481,7 @@ mod tests {
     fn parse_program_unescapes() {
         let data = build_plist(&AgentSpec {
             program: PathBuf::from("/Applications/A&B.app/Contents/MacOS/exe"),
-            config_file_path: PathBuf::from("/tmp/config"),
+            config_file_path: Some(PathBuf::from("/tmp/config")),
             log_dir: PathBuf::from("/tmp/logs"),
         });
         let prog = parse_program_from_plist(&data).expect("program parsed");

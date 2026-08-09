@@ -108,6 +108,8 @@ use log::{debug, error, info, warn};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::worker::shared_capture::{CaptureKey, SharedCaptureRegistry};
+#[cfg(target_os = "linux")]
+use desk_wayland_portal::WaylandPortalBroker;
 
 /// Per-connection media context. Holds the dedicated threads running
 /// the capture + encode loops (one for video, one for audio) plus the
@@ -266,11 +268,44 @@ impl MediaProducer {
         media_sender: Arc<dyn MediaSender>,
         error_tx: mpsc::UnboundedSender<WorkerToService>,
     ) -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            Self::new_impl(desk_settings, media_sender, error_tx, None)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Self::new_impl(desk_settings, media_sender, error_tx)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn new_with_portal(
+        desk_settings: DeskSettings,
+        media_sender: Arc<dyn MediaSender>,
+        error_tx: mpsc::UnboundedSender<WorkerToService>,
+        portal_broker: Arc<WaylandPortalBroker>,
+    ) -> Self {
+        Self::new_impl(desk_settings, media_sender, error_tx, Some(portal_broker))
+    }
+
+    fn new_impl(
+        desk_settings: DeskSettings,
+        media_sender: Arc<dyn MediaSender>,
+        error_tx: mpsc::UnboundedSender<WorkerToService>,
+        #[cfg(target_os = "linux")] portal_broker: Option<Arc<WaylandPortalBroker>>,
+    ) -> Self {
         Self {
             desk_settings,
             media_sender,
             error_tx,
-            capture_registry: SharedCaptureRegistry::new(),
+            capture_registry: {
+                #[cfg(target_os = "linux")]
+                {
+                    SharedCaptureRegistry::new_with_portal(portal_broker)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    SharedCaptureRegistry::new()
+                }
+            },
             capture_keys: Arc::new(StdMutex::new(HashMap::new())),
             capture_key_generation: AtomicU64::new(0),
             geometry_update_handler: StdMutex::new(None),
@@ -566,6 +601,22 @@ impl MediaProducer {
                 payload.connection_id
             );
         }
+    }
+
+    /// Stop every active per-connection pipeline and return the affected ids.
+    /// Used when the desktop Portal revokes the shared screen session: no
+    /// connection may keep a stale capture or input pipeline alive.
+    pub fn stop_all_media(&self) -> Vec<String> {
+        let connection_ids = {
+            let map = self.inner.lock().expect("media producer lock poisoned");
+            map.keys().cloned().collect::<Vec<_>>()
+        };
+        for connection_id in &connection_ids {
+            self.stop_media(&StopMediaPayload {
+                connection_id: connection_id.clone(),
+            });
+        }
+        connection_ids
     }
 
     /// Flag the next encode pass on the per-connection encoder to

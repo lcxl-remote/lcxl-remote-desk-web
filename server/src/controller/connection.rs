@@ -824,7 +824,7 @@ mod tests {
         let mut temp_path = std::env::temp_dir();
         temp_path.push(format!("desk_verify_test_{}.toml", uuid::Uuid::new_v4()));
         settings.args = Args {
-            config_file_path: temp_path.to_string_lossy().to_string(),
+            config_file_path: Some(temp_path.clone()),
             ..Default::default()
         };
         web::Data::new(SharedSettings::from(settings))

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use desk_wayland_portal::PortalInputSender;
 
 use crate::{
     error::InputError,
@@ -6,11 +6,10 @@ use crate::{
         data_channel::{MouseEventData, MouseEventHandler},
         geometry::SharedMonitorGeometry,
     },
-    service::wayland_remote_desktop::WaylandRemoteDesktop,
 };
 
 pub struct WaylandPortalMouseEventHandler {
-    portal: Arc<WaylandRemoteDesktop>,
+    portal: PortalInputSender,
     /// Shared, hot-updatable monitor rect. Only `width` / `height` are
     /// consumed — the xdg-desktop-portal `NotifyPointerMotionAbsolute`
     /// call takes a `stream_id` that already pins the output and
@@ -22,7 +21,10 @@ pub struct WaylandPortalMouseEventHandler {
 impl WaylandPortalMouseEventHandler {
     /// `left` / `top` inside `geometry` are intentionally unused; see
     /// the field doc.
-    pub fn new(geometry: SharedMonitorGeometry) -> Result<Self, InputError> {
+    pub fn new(
+        geometry: SharedMonitorGeometry,
+        portal: PortalInputSender,
+    ) -> Result<Self, InputError> {
         {
             let g = geometry.read().expect("monitor geometry poisoned");
             log::info!(
@@ -31,7 +33,6 @@ impl WaylandPortalMouseEventHandler {
                 g.height
             );
         }
-        let portal = WaylandRemoteDesktop::shared()?;
         log::info!("Wayland portal mouse handler: ready");
         Ok(Self { portal, geometry })
     }
@@ -59,7 +60,9 @@ fn to_absolute_in(width: i32, height: i32, x: f64, y: f64) -> (f64, f64) {
 impl MouseEventHandler for WaylandPortalMouseEventHandler {
     fn handle_mouse_move(&mut self, event: &MouseEventData) -> Result<(), InputError> {
         let (x, y) = self.to_absolute(event.x, event.y);
-        self.portal.notify_pointer_motion_absolute(x, y)
+        self.portal
+            .notify_pointer_motion_absolute(x, y)
+            .map_err(portal_input_error)
     }
 
     fn handle_mouse_down(&mut self, event: &MouseEventData) -> Result<(), InputError> {
@@ -69,7 +72,9 @@ impl MouseEventHandler for WaylandPortalMouseEventHandler {
             2 => 0x111, // BTN_RIGHT
             _ => return Ok(()),
         };
-        self.portal.notify_pointer_button(button, 1)
+        self.portal
+            .notify_pointer_button(button, 1)
+            .map_err(portal_input_error)
     }
 
     fn handle_mouse_up(&mut self, event: &MouseEventData) -> Result<(), InputError> {
@@ -79,13 +84,23 @@ impl MouseEventHandler for WaylandPortalMouseEventHandler {
             2 => 0x111, // BTN_RIGHT
             _ => return Ok(()),
         };
-        self.portal.notify_pointer_button(button, 0)
+        self.portal
+            .notify_pointer_button(button, 0)
+            .map_err(portal_input_error)
     }
 
     fn handle_mouse_wheel(&mut self, event: &MouseEventData) -> Result<(), InputError> {
         self.portal
             .notify_pointer_axis(event.delta_x, event.delta_y)
+            .map_err(portal_input_error)
     }
+}
+
+fn portal_input_error(error: desk_wayland_portal::PortalError) -> InputError {
+    InputError::new_custom_error(
+        desk_utils::error::DeskErrorCode::SYSTEM_ERROR,
+        &error.to_string(),
+    )
 }
 
 #[cfg(test)]

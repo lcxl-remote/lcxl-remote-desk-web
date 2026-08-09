@@ -13,6 +13,22 @@ async fn make_ctx() -> RouterContext {
     );
     let pc_registry = PcRegistry::new();
     let (worker_mgr, _) = WorkerManager::new(settings.clone(), pc_registry.clone());
+    #[cfg(target_os = "linux")]
+    worker_mgr.set_wayland_portal_snapshot(desk_wayland_portal::PortalSnapshot {
+        phase: desk_wayland_portal::PortalPhase::Ready,
+        capabilities: desk_wayland_portal::PortalCapabilities {
+            screen_ready: true,
+            input_ready: true,
+        },
+        availability: desk_wayland_portal::PortalAvailability::default(),
+        target: Some(desk_wayland_portal::AuthorizationTarget::ScreenAndInput),
+        operation_id: None,
+        generation: 1,
+        restore_token_persisted: false,
+        requires_local_action: false,
+        reason_code: None,
+        reason: None,
+    });
     let host_control_hub = Arc::new(HostControlHub::new_local());
     host_control_hub
         .remote_access_gate()

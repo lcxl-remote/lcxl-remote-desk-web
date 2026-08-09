@@ -55,9 +55,13 @@ pub async fn init_telemetry(
     shared_settings: Arc<SharedSettings>,
     startup_mode: &StartupMode,
 ) -> Result<Option<TelemetryGuards>> {
-    let (mut system_settings, log_settings) = {
+    let (mut system_settings, log_settings, log_dir) = {
         let settings_guard = shared_settings.read().await;
-        (settings_guard.system.clone(), settings_guard.log.clone())
+        (
+            settings_guard.system.clone(),
+            settings_guard.log.clone(),
+            settings_guard.paths().log_dir().to_path_buf(),
+        )
     };
 
     // 1. Create a Resource with Service Info, OS Info, and Custom Tags
@@ -150,14 +154,13 @@ pub async fn init_telemetry(
             .with_filter(make_env_filter())
     });
 
-    let log_dir = log_directory();
     let _ = std::fs::create_dir_all(&log_dir);
 
     // Determine log file name based on startup mode
     let log_file_name = log_file_name_for(startup_mode);
 
     // File appender
-    let file_appender = tracing_appender::rolling::daily(log_dir, log_file_name);
+    let file_appender = tracing_appender::rolling::daily(&log_dir, log_file_name);
     let (non_blocking, guard) = non_blocking_writer(file_appender);
     guards.push(guard);
     let file_layer = fmt::layer()
@@ -262,7 +265,7 @@ pub async fn init_telemetry(
     // 5. Spawn log cleanup task, but only in a process that owns the log
     //    directory (see `owns_log_cleanup`).
     if owns_log_cleanup(startup_mode) {
-        spawn_log_cleanup_task(shared_settings.clone());
+        spawn_log_cleanup_task(shared_settings.clone(), log_dir.clone());
     }
 
     Ok(Some(TelemetryGuards { _guards: guards }))
@@ -287,93 +290,11 @@ pub fn owns_log_cleanup(startup_mode: &StartupMode) -> bool {
     )
 }
 
-/// Returns the canonical log directory used by every component (daemon,
-/// embedded server, session worker, Tauri shell). Centralised so the
-/// install / uninstall flow can clean every component's logs in one place
-/// and so callers can't drift apart on the path layout.
-pub fn log_directory() -> std::path::PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        let program_data =
-            std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
-        std::path::PathBuf::from(program_data)
-            .join("LCXL Remote Desktop")
-            .join("logs")
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        // Privileged system services (ServiceDaemon / SessionWorker, typically
-        // euid 0 with no usable `$HOME`) keep the system-wide `/var/log`
-        // location. Unprivileged desktop / dev runs cannot create `/var/log`
-        // subdirectories, so they fall back to the user's XDG state directory.
-        let xdg_state_home = std::env::var("XDG_STATE_HOME").ok();
-        let home = std::env::var("HOME").ok();
-        xdg_state_log_dir(
-            xdg_state_home.as_deref(),
-            home.as_deref(),
-            current_process_is_root(),
-        )
-        .unwrap_or_else(|| std::path::PathBuf::from("/var/log/lcxl-remote-desk"))
-    }
-}
-
-/// Resolve the per-user log directory on non-Windows platforms following the
-/// XDG Base Directory Specification.
-///
-/// Returns `None` when the caller should fall back to the system-wide
-/// `/var/log` location — i.e. when running as a privileged system service
-/// (`is_root`) or when no per-user home can be determined.
-///
-/// Kept as a pure function of its inputs so the resolution rules can be unit
-/// tested without mutating the real process environment.
-#[cfg(not(target_os = "windows"))]
-fn xdg_state_log_dir(
-    xdg_state_home: Option<&str>,
-    home: Option<&str>,
-    is_root: bool,
-) -> Option<std::path::PathBuf> {
-    if is_root {
-        return None;
-    }
-    // The XDG spec mandates absolute paths; a relative `$XDG_STATE_HOME` must be
-    // ignored as if it were unset.
-    if let Some(state) = xdg_state_home.filter(|s| !s.is_empty()) {
-        let state = std::path::Path::new(state);
-        if state.is_absolute() {
-            return Some(state.join("lcxl-remote-desk"));
-        }
-    }
-    let home = home.filter(|s| !s.is_empty())?;
-    Some(
-        std::path::Path::new(home)
-            .join(".local/state")
-            .join("lcxl-remote-desk"),
-    )
-}
-
-/// Whether the current process runs with root privileges. Used to keep
-/// system-service logs under `/var/log` while routing unprivileged runs to the
-/// user's XDG state directory.
-#[cfg(target_os = "linux")]
-fn current_process_is_root() -> bool {
-    // SAFETY: `geteuid` takes no arguments, never fails, and has no
-    // preconditions.
-    unsafe { libc::geteuid() == 0 }
-}
-
-/// Non-Linux Unix targets (macOS) ship desktop apps that run unprivileged;
-/// treat them as non-root so logs land under the user's home rather than
-/// `/var/log`.
-#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
-fn current_process_is_root() -> bool {
-    false
-}
-
 /// Log file name written by the Tauri shell, which has no startup mode of its
 /// own but shares the log directory with every other component.
 const TAURI_SHELL_LOG_FILE_NAME: &str = "desk-tauri.log";
 
-/// Every rolling log base name this project writes into [`log_directory`]: one
+/// Every rolling log base name this project writes into the resolved host log directory: one
 /// per startup mode plus the Tauri shell's.
 ///
 /// The cleanup sweep deletes only rolls of these names, so an unrelated file
@@ -388,7 +309,7 @@ const MANAGED_LOG_BASE_NAMES: &[&str] = &[
     TAURI_SHELL_LOG_FILE_NAME,
 ];
 
-/// Standard log file name for a given startup mode. Kept beside `log_directory`
+/// Standard log file name for a given startup mode. Kept beside the managed-name list
 /// so the rotation appender uses identical naming everywhere.
 pub fn log_file_name_for(startup_mode: &StartupMode) -> &'static str {
     match startup_mode {
@@ -417,7 +338,7 @@ pub fn is_headless_startup_mode(startup_mode: &StartupMode) -> bool {
 /// periodic cleanup task — none of which fit a UI shell that has no console
 /// (Windows `windows_subsystem = "windows"`) and no need to export traces.
 /// This routine sets up just the daily-rolling file appender plus a tracing
-/// `Registry`, writing to `desk-tauri.log` under [`log_directory`] so the
+/// `Registry`, writing to `desk-tauri.log` under the resolved host log directory so the
 /// daemon's existing cleanup task scrubs them alongside `desk-daemon.log`.
 ///
 /// The returned [`WorkerGuard`] must be kept alive for the lifetime of the
@@ -430,9 +351,11 @@ pub fn is_headless_startup_mode(startup_mode: &StartupMode) -> bool {
 /// the embedded server in-process, so the conflict is structurally
 /// impossible there — but the error is propagated rather than swallowed so
 /// integration regressions surface immediately.
-pub fn init_tauri_shell_telemetry(log_level: &str) -> Result<WorkerGuard> {
-    let log_dir = log_directory();
-    std::fs::create_dir_all(&log_dir)?;
+pub fn init_tauri_shell_telemetry(
+    log_level: &str,
+    log_dir: &std::path::Path,
+) -> Result<WorkerGuard> {
+    std::fs::create_dir_all(log_dir)?;
 
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
@@ -462,7 +385,7 @@ const DISABLED_CLEANUP_RECHECK: Duration = Duration::from_secs(3600);
 /// The appender rolls on the **UTC** date, so the sweep compares against UTC too.
 const LOG_DATE_FORMAT: &str = "%Y-%m-%d";
 
-fn spawn_log_cleanup_task(shared_settings: Arc<SharedSettings>) {
+fn spawn_log_cleanup_task(shared_settings: Arc<SharedSettings>, log_dir: std::path::PathBuf) {
     tokio::spawn(async move {
         loop {
             let (interval_hours, retention_days, threshold_percent) = {
@@ -495,9 +418,10 @@ fn spawn_log_cleanup_task(shared_settings: Arc<SharedSettings>) {
 
             // Directory scans and unlinks are blocking syscalls, so they stay off
             // the runtime's worker threads.
+            let sweep_log_dir = log_dir.clone();
             let swept = tokio::task::spawn_blocking(move || {
                 cleanup_logs(
-                    &log_directory(),
+                    &sweep_log_dir,
                     chrono::Utc::now().date_naive(),
                     retention_days,
                     threshold_percent,
@@ -699,7 +623,7 @@ mod tests {
         assert_eq!(rolled_log_date("desk-server.log.2026-07-28.gz"), None);
     }
 
-    /// The sweep runs against [`log_directory`] and covers every component's
+    /// The sweep runs against the resolved host log directory and covers every component's
     /// rolls, keeps the retention window and the live files, and leaves foreign
     /// files alone. A zero threshold disables the disk-usage stage, so this
     /// asserts age-based deletion in isolation.
@@ -831,82 +755,6 @@ mod tests {
             cleanup_logs(&missing, day("2026-07-28"), 7, 0).expect("cleanup"),
             0
         );
-    }
-
-    /// Every component (daemon, embedded server, worker, Tauri shell) must
-    /// agree on the log root so the daemon's cleanup task can prune them all.
-    #[test]
-    fn log_directory_resolves_to_program_data_subtree_on_windows() {
-        let dir = log_directory();
-        #[cfg(target_os = "windows")]
-        {
-            assert!(
-                dir.ends_with(std::path::Path::new("LCXL Remote Desktop").join("logs")),
-                "unexpected log dir: {dir:?}"
-            );
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            // The resolved root depends on privilege / environment (XDG state
-            // dir for unprivileged runs, `/var/log` for system services), but
-            // every component must agree on the same leaf so the cleanup task
-            // can prune them together.
-            assert!(
-                dir.ends_with("lcxl-remote-desk"),
-                "unexpected log dir: {dir:?}"
-            );
-        }
-    }
-
-    /// Unprivileged runs honour an absolute `$XDG_STATE_HOME`.
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn xdg_state_log_dir_prefers_absolute_xdg_state_home() {
-        let dir = xdg_state_log_dir(Some("/run/user/1000/state"), Some("/home/alice"), false);
-        assert_eq!(
-            dir,
-            Some(std::path::PathBuf::from(
-                "/run/user/1000/state/lcxl-remote-desk"
-            ))
-        );
-    }
-
-    /// A missing / empty / relative `$XDG_STATE_HOME` falls back to
-    /// `$HOME/.local/state` per the XDG spec.
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn xdg_state_log_dir_falls_back_to_home_local_state() {
-        let expected = Some(std::path::PathBuf::from(
-            "/home/alice/.local/state/lcxl-remote-desk",
-        ));
-        assert_eq!(
-            xdg_state_log_dir(None, Some("/home/alice"), false),
-            expected
-        );
-        assert_eq!(
-            xdg_state_log_dir(Some(""), Some("/home/alice"), false),
-            expected
-        );
-        // Relative XDG_STATE_HOME is ignored as if unset.
-        assert_eq!(
-            xdg_state_log_dir(Some("relative/path"), Some("/home/alice"), false),
-            expected
-        );
-    }
-
-    /// Root processes (system services) and homeless environments fall through
-    /// to the system-wide `/var/log` location signalled by `None`.
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn xdg_state_log_dir_returns_none_for_root_or_homeless() {
-        // Root always uses /var/log, even with XDG / HOME set.
-        assert_eq!(
-            xdg_state_log_dir(Some("/run/user/0/state"), Some("/root"), true),
-            None
-        );
-        // No HOME and no usable XDG_STATE_HOME -> system fallback.
-        assert_eq!(xdg_state_log_dir(None, None, false), None);
-        assert_eq!(xdg_state_log_dir(Some(""), Some(""), false), None);
     }
 
     /// Mode-to-file-name mapping is part of the install-time contract: the
