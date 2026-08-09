@@ -295,7 +295,7 @@ impl LivePortalSession for XdgLiveSession {
         Ok(())
     }
 
-    async fn notify_pointer_button(&self, button: u32, state: u32) -> Result<(), PortalError> {
+    async fn notify_pointer_button(&self, button: i32, state: u32) -> Result<(), PortalError> {
         let options: HashMap<&str, Value<'_>> = HashMap::new();
         self.remote_proxy()
             .await?

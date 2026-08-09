@@ -167,12 +167,12 @@ describe('buildKeyboardEventSequence — modifier state tracking', () => {
         ]);
 
         // Ctrl keydown: its own event already reflects ctrl held.
-        expect(seq[0]).toMatchObject({ key_code: 17, ctrl_key: true, alt_key: false });
+        expect(seq[0]).toMatchObject({ code: 'ControlLeft', key_code: 17, ctrl_key: true, alt_key: false });
         // Alt keydown: both modifiers now held.
         expect(seq[1]).toMatchObject({ key_code: 18, ctrl_key: true, alt_key: true });
         // Del down/up: carries both modifiers (previously hard-coded to false,
         // which dropped the chord on the macOS host).
-        expect(seq[2]).toMatchObject({ key_code: 46, ctrl_key: true, alt_key: true });
+        expect(seq[2]).toMatchObject({ code: 'Delete', key_code: 46, ctrl_key: true, alt_key: true });
         expect(seq[3]).toMatchObject({ key_code: 46, ctrl_key: true, alt_key: true });
         // Alt release clears only alt.
         expect(seq[4]).toMatchObject({ key_code: 18, ctrl_key: true, alt_key: false });
@@ -190,6 +190,7 @@ describe('buildKeyboardEventSequence — modifier state tracking', () => {
     it('leaves a plain key with no modifiers', () => {
         const [event] = buildKeyboardEventSequence([{ event: 'keydown', keyCode: 70 }]); // F
         expect(event).toMatchObject({
+            code: 'KeyF',
             key_code: 70,
             ctrl_key: false,
             shift_key: false,
@@ -342,6 +343,7 @@ describe('useDeskInput — hidden page releases held keys', () => {
             .map(call => JSON.parse(call[0] as string))
             .filter(payload => payload.event === 'keyup' && payload.key_code === 91);
         expect(released).toHaveLength(1);
+        expect(released[0].code).toBe('MetaLeft');
 
         Object.defineProperty(document, 'hidden', { value: false, configurable: true });
     });
@@ -362,6 +364,7 @@ describe('useDeskInput — hidden page releases held keys', () => {
 
         expect(lastSentPayload(keyboardChannel)).toMatchObject({
             event: 'keyup',
+            code: 'ControlLeft',
             key_code: 91,
             ctrl_key: false,
             meta_key: false,
@@ -384,6 +387,7 @@ describe('useDeskInput — hidden page releases held keys', () => {
 
         expect(lastSentPayload(keyboardChannel)).toMatchObject({
             event: 'keyup',
+            code: 'ControlRight',
             key_code: 17,
             ctrl_key: false,
             meta_key: false,

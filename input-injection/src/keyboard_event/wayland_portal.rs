@@ -5,6 +5,8 @@ use crate::{
     model::data_channel::{KeyboardEventData, KeyboardEventHandler},
 };
 
+use super::keyboard_event_to_evdev;
+
 pub struct WaylandPortalKeyboardEventHandler {
     portal: PortalInputSender,
 }
@@ -18,15 +20,21 @@ impl WaylandPortalKeyboardEventHandler {
 
 impl KeyboardEventHandler for WaylandPortalKeyboardEventHandler {
     fn handle_key_down(&mut self, event: &KeyboardEventData) -> Result<(), InputError> {
-        self.portal
-            .notify_keyboard_keycode(event.key_code as i32, 1)
-            .map_err(portal_input_error)
+        if let Some(evdev_code) = keyboard_event_to_evdev(event) {
+            self.portal
+                .notify_keyboard_keycode(i32::from(evdev_code), 1)
+                .map_err(portal_input_error)?;
+        }
+        Ok(())
     }
 
     fn handle_key_up(&mut self, event: &KeyboardEventData) -> Result<(), InputError> {
-        self.portal
-            .notify_keyboard_keycode(event.key_code as i32, 0)
-            .map_err(portal_input_error)
+        if let Some(evdev_code) = keyboard_event_to_evdev(event) {
+            self.portal
+                .notify_keyboard_keycode(i32::from(evdev_code), 0)
+                .map_err(portal_input_error)?;
+        }
+        Ok(())
     }
 }
 

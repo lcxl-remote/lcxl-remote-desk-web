@@ -16,6 +16,48 @@ const MODIFIER_KEY_CODES: Record<number, 'shift' | 'ctrl' | 'alt' | 'meta'> = {
 
 export type SyntheticKeyEvent = { event: 'keydown' | 'keyup'; keyCode: number };
 
+type PressedKey = {
+    key_code: number;
+    code: string;
+};
+
+const DOM_CODE_BY_KEY_CODE: Record<number, string> = {
+    8: 'Backspace',
+    9: 'Tab',
+    13: 'Enter',
+    16: 'ShiftLeft',
+    17: 'ControlLeft',
+    18: 'AltLeft',
+    20: 'CapsLock',
+    27: 'Escape',
+    32: 'Space',
+    33: 'PageUp',
+    34: 'PageDown',
+    35: 'End',
+    36: 'Home',
+    37: 'ArrowLeft',
+    38: 'ArrowUp',
+    39: 'ArrowRight',
+    40: 'ArrowDown',
+    45: 'Insert',
+    46: 'Delete',
+    91: 'MetaLeft',
+    92: 'MetaRight',
+};
+
+function keyCodeToDomCode(keyCode: number): string {
+    if (keyCode >= 65 && keyCode <= 90) {
+        return `Key${String.fromCharCode(keyCode)}`;
+    }
+    if (keyCode >= 48 && keyCode <= 57) {
+        return `Digit${String.fromCharCode(keyCode)}`;
+    }
+    if (keyCode >= 112 && keyCode <= 123) {
+        return `F${keyCode - 111}`;
+    }
+    return DOM_CODE_BY_KEY_CODE[keyCode] ?? '';
+}
+
 const DOM_DELTA_PIXEL = 0;
 const DOM_DELTA_LINE = 1;
 const DOM_DELTA_PAGE = 2;
@@ -59,7 +101,7 @@ export function buildKeyboardEventSequence(events: SyntheticKeyEvent[]) {
         return {
             event: ev.event,
             key: '',
-            code: '',
+            code: keyCodeToDomCode(ev.keyCode),
             key_code: ev.keyCode,
             alt_key: state.alt,
             ctrl_key: state.ctrl,
@@ -140,7 +182,7 @@ export function buildPhysicalKeyboardEvent(
 export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMoveChannel, isConnected, ignoreInputEvents = false, remapCtrlToCommand = false }: UseDeskInputProps) {
     const dimensionsRef = useRef({ width: 0, height: 0 });
     const sequenceNumberRef = useRef(0);
-    const pressedKeysRef = useRef<Set<number>>(new Set());
+    const pressedKeysRef = useRef<Map<string, PressedKey>>(new Map());
     const physicalControlStateRef = useRef<PhysicalControlState>({ left: false, right: false });
     const pressedButtonsRef = useRef<Set<number>>(new Set());
     // Last cursor position (normalised ratios) reported to the backend.
@@ -255,10 +297,14 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
             );
             keyboardChannel.current.send(JSON.stringify(keyboardEvent));
 
+            const pressedKeyId = keyboardEvent.code || `keyCode:${keyboardEvent.key_code}`;
             if (eventType === "keydown") {
-                pressedKeysRef.current.add(keyboardEvent.key_code);
+                pressedKeysRef.current.set(pressedKeyId, {
+                    key_code: keyboardEvent.key_code,
+                    code: keyboardEvent.code,
+                });
             } else if (eventType === "keyup") {
-                pressedKeysRef.current.delete(keyboardEvent.key_code);
+                pressedKeysRef.current.delete(pressedKeyId);
             }
         };
 
@@ -353,12 +399,12 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
 
             // Release all pressed keys
             if (keyboardChannel.current && keyboardChannel.current.readyState === "open") {
-                pressedKeysRef.current.forEach(keyCode => {
+                pressedKeysRef.current.forEach(pressedKey => {
                     const kbEvent = {
                         event: "keyup",
                         key: "",
-                        code: "",
-                        key_code: keyCode,
+                        code: pressedKey.code,
+                        key_code: pressedKey.key_code,
                         alt_key: false,
                         ctrl_key: false,
                         shift_key: false,

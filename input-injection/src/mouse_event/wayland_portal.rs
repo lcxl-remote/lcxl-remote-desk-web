@@ -48,13 +48,23 @@ impl WaylandPortalMouseEventHandler {
     }
 }
 
-/// Pure helper: clamp `(x, y) ∈ [0, 1]` into the stream's pixel space.
+/// Pure helper: clamp `(x, y) ∈ [0, 1]` into the stream's logical space.
 /// Does **not** apply `left` / `top` — the portal stream pins the
 /// output. Extracted so unit tests don't need a live D-Bus session.
 fn to_absolute_in(width: i32, height: i32, x: f64, y: f64) -> (f64, f64) {
-    let abs_x = (x * width as f64).clamp(0.0, width as f64);
-    let abs_y = (y * height as f64).clamp(0.0, height as f64);
+    let abs_x = scale_portal_coordinate(x, width);
+    let abs_y = scale_portal_coordinate(y, height);
     (abs_x, abs_y)
+}
+
+fn scale_portal_coordinate(value: f64, extent: i32) -> f64 {
+    let extent = extent.max(0);
+    let last_valid = extent.saturating_sub(1).max(0) as f64;
+    if value.is_finite() {
+        (value * extent as f64).clamp(0.0, last_valid)
+    } else {
+        0.0
+    }
 }
 
 impl MouseEventHandler for WaylandPortalMouseEventHandler {
@@ -118,8 +128,18 @@ mod tests {
     #[test]
     fn to_absolute_does_not_apply_virtual_desktop_offset() {
         assert_eq!(to_absolute_in(1500, 900, 0.5, 0.5), (750.0, 450.0));
-        // Clamps over-the-edge inputs.
-        assert_eq!(to_absolute_in(1500, 900, 2.0, -0.5), (1500.0, 0.0));
+        // Portal coordinates use an exclusive upper bound.
+        assert_eq!(to_absolute_in(1500, 900, 1.0, 1.0), (1499.0, 899.0));
+        assert_eq!(to_absolute_in(1500, 900, 2.0, -0.5), (1499.0, 0.0));
+    }
+
+    #[test]
+    fn to_absolute_sanitizes_degenerate_and_non_finite_input() {
+        assert_eq!(to_absolute_in(0, -1, 1.0, 1.0), (0.0, 0.0));
+        assert_eq!(
+            to_absolute_in(1280, 800, f64::NAN, f64::INFINITY),
+            (0.0, 0.0)
+        );
     }
 
     /// Hot-update path: even though the handler can't be instantiated

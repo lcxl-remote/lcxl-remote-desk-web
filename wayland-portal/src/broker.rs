@@ -18,7 +18,7 @@ pub trait LivePortalSession: Send + Sync {
     fn duplicate_pipewire_fd(&self) -> Result<std::os::fd::OwnedFd, PortalError>;
 
     async fn notify_pointer_motion_absolute(&self, x: f64, y: f64) -> Result<(), PortalError>;
-    async fn notify_pointer_button(&self, button: u32, state: u32) -> Result<(), PortalError>;
+    async fn notify_pointer_button(&self, button: i32, state: u32) -> Result<(), PortalError>;
     async fn notify_pointer_axis(&self, delta_x: f64, delta_y: f64) -> Result<(), PortalError>;
     async fn notify_keyboard_keycode(&self, keycode: i32, state: u32) -> Result<(), PortalError>;
     /// Resolves when the desktop Portal closes or loses this session.
@@ -521,7 +521,7 @@ mod tests {
         async fn notify_pointer_motion_absolute(&self, _: f64, _: f64) -> Result<(), PortalError> {
             Ok(())
         }
-        async fn notify_pointer_button(&self, _: u32, _: u32) -> Result<(), PortalError> {
+        async fn notify_pointer_button(&self, _: i32, _: u32) -> Result<(), PortalError> {
             Ok(())
         }
         async fn notify_pointer_axis(&self, _: f64, _: f64) -> Result<(), PortalError> {

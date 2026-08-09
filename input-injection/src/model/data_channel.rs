@@ -58,7 +58,8 @@ pub struct KeyboardEventData {
     pub key: String,
     /// key code, e.g. "KeyA", "Enter", see https://developer.mozilla.org/zh-CN/docs/Web/API/KeyboardEvent/code#code_values
     pub code: String,
-    /// physical key code, e.g. 65 for "a", see https://developer.mozilla.org/zh-CN/docs/Web/API/KeyboardEvent/keyCode
+    /// Legacy browser/Windows virtual-key code, e.g. 65 for "a". This is not a Linux evdev code.
+    /// See https://developer.mozilla.org/zh-CN/docs/Web/API/KeyboardEvent/keyCode
     pub key_code: u32,
     /// whether the key is a system key
     pub alt_key: bool,

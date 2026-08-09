@@ -505,25 +505,38 @@ struct CaptureErrorLogState {
     last_warn_at: Option<Instant>,
     total: u64,
     suppressed_since_warn: u64,
+    warned: bool,
 }
 
 impl CaptureErrorLogState {
-    fn record_error(&mut self, now: Instant) -> CaptureErrorLogEvent {
+    fn record_error(&mut self, now: Instant, warn_immediately: bool) -> CaptureErrorLogEvent {
         let Some(started_at) = self.started_at else {
             self.started_at = Some(now);
             self.last_warn_at = Some(now);
             self.total = 1;
             self.suppressed_since_warn = 0;
-            return CaptureErrorLogEvent::First;
+            self.warned = warn_immediately;
+            return if warn_immediately {
+                CaptureErrorLogEvent::First
+            } else {
+                CaptureErrorLogEvent::Debug
+            };
         };
 
         self.total = self.total.saturating_add(1);
         self.suppressed_since_warn = self.suppressed_since_warn.saturating_add(1);
+        if warn_immediately && !self.warned {
+            self.warned = true;
+            self.last_warn_at = Some(now);
+            self.suppressed_since_warn = 0;
+            return CaptureErrorLogEvent::First;
+        }
         let last_warn_at = self.last_warn_at.unwrap_or(started_at);
         if now.saturating_duration_since(last_warn_at) < CAPTURE_ERROR_WARN_INTERVAL {
             return CaptureErrorLogEvent::Debug;
         }
 
+        self.warned = true;
         let suppressed = self.suppressed_since_warn;
         self.suppressed_since_warn = 0;
         self.last_warn_at = Some(now);
@@ -536,14 +549,15 @@ impl CaptureErrorLogState {
 
     fn record_success(&mut self, now: Instant) -> Option<CaptureRecoveryLogEvent> {
         let started_at = self.started_at.take()?;
-        let event = CaptureRecoveryLogEvent {
+        let event = self.warned.then_some(CaptureRecoveryLogEvent {
             total: self.total,
             elapsed: now.saturating_duration_since(started_at),
-        };
+        });
         self.last_warn_at = None;
         self.total = 0;
         self.suppressed_since_warn = 0;
-        Some(event)
+        self.warned = false;
+        event
     }
 }
 
@@ -590,15 +604,18 @@ fn run_capture_loop(
                 r
             }
             Err(e) => {
-                match error_log.record_error(Instant::now()) {
+                let warn_immediately =
+                    e.to_error_code() != desk_utils::error::DeskErrorCode::ACTION_NEED_RETRY;
+                match error_log.record_error(Instant::now(), warn_immediately) {
                     CaptureErrorLogEvent::First => warn!(
                         "[SharedCapture:{}/{}] capture failed: {e}; backing off 16ms",
                         key.backend, key.device_name
                     ),
-                    CaptureErrorLogEvent::Debug => debug!(
+                    CaptureErrorLogEvent::Debug if warn_immediately => debug!(
                         "[SharedCapture:{}/{}] capture error: {e}; backing off 16ms",
                         key.backend, key.device_name
                     ),
+                    CaptureErrorLogEvent::Debug => {}
                     CaptureErrorLogEvent::Summary {
                         suppressed,
                         total,
@@ -745,13 +762,13 @@ mod tests {
         let base = Instant::now();
         let mut state = CaptureErrorLogState::default();
 
-        assert_eq!(state.record_error(base), CaptureErrorLogEvent::First);
+        assert_eq!(state.record_error(base, true), CaptureErrorLogEvent::First);
         assert_eq!(
-            state.record_error(base + Duration::from_secs(1)),
+            state.record_error(base + Duration::from_secs(1), true),
             CaptureErrorLogEvent::Debug
         );
         assert_eq!(
-            state.record_error(base + CAPTURE_ERROR_WARN_INTERVAL),
+            state.record_error(base + CAPTURE_ERROR_WARN_INTERVAL, true),
             CaptureErrorLogEvent::Summary {
                 suppressed: 2,
                 total: 3,
@@ -766,9 +783,45 @@ mod tests {
             })
         );
         assert_eq!(
-            state.record_error(base + Duration::from_secs(32)),
+            state.record_error(base + Duration::from_secs(32), true),
             CaptureErrorLogEvent::First,
             "a recovered series must not inherit the previous throttle window"
+        );
+    }
+
+    #[test]
+    fn short_retryable_capture_gap_is_debug_only() {
+        let base = Instant::now();
+        let mut state = CaptureErrorLogState::default();
+
+        assert_eq!(state.record_error(base, false), CaptureErrorLogEvent::Debug);
+        assert_eq!(
+            state.record_error(base + Duration::from_millis(16), false),
+            CaptureErrorLogEvent::Debug
+        );
+        assert_eq!(state.record_success(base + Duration::from_millis(32)), None);
+    }
+
+    #[test]
+    fn sustained_retryable_capture_gap_warns_and_reports_recovery() {
+        let base = Instant::now();
+        let mut state = CaptureErrorLogState::default();
+
+        assert_eq!(state.record_error(base, false), CaptureErrorLogEvent::Debug);
+        assert_eq!(
+            state.record_error(base + CAPTURE_ERROR_WARN_INTERVAL, false),
+            CaptureErrorLogEvent::Summary {
+                suppressed: 1,
+                total: 2,
+                elapsed: CAPTURE_ERROR_WARN_INTERVAL,
+            }
+        );
+        assert_eq!(
+            state.record_success(base + CAPTURE_ERROR_WARN_INTERVAL + Duration::from_secs(1)),
+            Some(CaptureRecoveryLogEvent {
+                total: 2,
+                elapsed: CAPTURE_ERROR_WARN_INTERVAL + Duration::from_secs(1),
+            })
         );
     }
 
