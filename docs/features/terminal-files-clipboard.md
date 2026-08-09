@@ -10,6 +10,12 @@ When you connect by redeeming an [access code](/guide/access-codes) (a device or
 
 A built-in [xterm.js](https://xtermjs.org/) terminal supports full shell interactions over a dedicated data channel. Use it for command-line work without leaving the browser session.
 
+The terminal displays an LCXL Remote Desk welcome banner while connecting. After
+the host confirms that the terminal session has started, closing or reloading the
+page triggers the browser's leave confirmation because disconnecting ends that
+remote shell and any processes running inside it. The shell-selection page and a
+terminal that has already closed do not trigger this prompt.
+
 ## File Management
 
 Manage files on the remote device directly from the browser:

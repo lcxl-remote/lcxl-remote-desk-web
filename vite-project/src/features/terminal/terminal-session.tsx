@@ -24,6 +24,8 @@ import {
     commonCommandsFor,
     type TerminalCompletionContext,
 } from "./use-terminal-complete"
+import { terminalWelcomeBanner } from "./terminal-welcome"
+import { useTerminalSessionGuard } from "./use-terminal-session-guard"
 
 // Max bytes of recent terminal scrollback kept as a non-authoritative copilot
 // prompt hint (the server re-redacts and re-caps it). Bounded so the ring buffer
@@ -50,6 +52,7 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
     const resizeObserverRef = useRef<ResizeObserver | null>(null)
     const terminalStarted = useRef<boolean>(false)
     const heartbeatTimerRef = useRef<number | null>(null)
+    const { markStarted: markTerminalStarted, markClosed: markTerminalClosed } = useTerminalSessionGuard()
 
     // Copilot: a control-plane signaling connection (separate from the terminal
     // I/O WS above) plus a bounded ring buffer of recent output and the last
@@ -218,6 +221,9 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
             }
         }
 
+        safeFit()
+        term.write(terminalWelcomeBanner(term.cols))
+
         // Initial fit delay
         setTimeout(safeFit, 100)
 
@@ -321,10 +327,13 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
                                         admissionRetryTimer = null
                                     }
                                     terminalStarted.current = true
+                                    markTerminalStarted()
                                     // Send resize again after started to be safe
                                     sendResize({ rows: term.rows, cols: term.cols })
                                 } else if (msg.signaling_type === SIGNALING_TYPE_CODE_TERMINAL_CLOSED) {
                                     console.log("terminal closed")
+                                    terminalStarted.current = false
+                                    markTerminalClosed()
                                     term.write('\r\n\x1b[31mTerminal connection closed by server.\x1b[0m\r\n')
                                     ws?.close()
                                 }
@@ -352,6 +361,7 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
                             term.write('\r\n\x1b[31mDisconnected. Returning to shell selection...\x1b[0m\r\n')
                         }
                         terminalStarted.current = false
+                        markTerminalClosed()
 
                         // Trigger onClose after a brief delay so the user sees the disconnect message
                         setTimeout(() => {
@@ -448,6 +458,8 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
         return () => {
             console.log("Cleaning up terminal session")
             disposed = true;
+            terminalStarted.current = false
+            markTerminalClosed()
             clearTimeout(connectTimer);
             if (admissionRetryTimer !== null) {
                 clearTimeout(admissionRetryTimer)
@@ -471,7 +483,7 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
             xtermRef.current = null
             term.dispose()
         }
-    }, [connectionId, deviceId, command, onClose, t])
+    }, [connectionId, deviceId, command, onClose, t, markTerminalStarted, markTerminalClosed])
 
     return (
         <div className="h-full w-full flex bg-[#1e1e1e] overflow-hidden">
