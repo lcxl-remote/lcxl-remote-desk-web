@@ -305,13 +305,13 @@ export default function InitPage() {
     }
 
     return (
-        <div className="flex h-screen w-full items-center justify-center bg-[url('https://mdn.alipayobjects.com/yuyan_qk0oxh/afts/img/V-_oS6r-i7wAAAAAAAAAAAAAFl94AQBr')] bg-cover bg-center">
+        <div className="relative flex min-h-screen w-full flex-col bg-[url('https://mdn.alipayobjects.com/yuyan_qk0oxh/afts/img/V-_oS6r-i7wAAAAAAAAAAAAAFl94AQBr')] bg-cover bg-center">
             <div className="absolute top-4 right-4 flex items-center gap-2">
                 <LanguageToggle />
                 <ModeToggle />
             </div>
 
-            <div className="flex flex-col items-center animate-in fade-in slide-in-from-bottom-8 duration-1000 px-4">
+            <main className="flex w-full flex-1 flex-col items-center justify-center px-4 py-20 animate-in fade-in slide-in-from-bottom-8 duration-1000">
                 <div className="text-center mb-6 space-y-2">
                     <div className="flex justify-center mb-4">
                         <div className="p-3 bg-white/20 backdrop-blur-md rounded-2xl shadow-xl border border-white/30">
@@ -495,11 +495,11 @@ export default function InitPage() {
                         )}
                     </CardContent>
                 </Card>
-            </div>
+            </main>
 
-            <div className="fixed bottom-6 w-full text-center text-sm font-medium text-white/60 drop-shadow-md">
+            <footer className="w-full px-4 pb-6 text-center text-sm font-medium text-white/60 drop-shadow-md">
                 © {new Date().getFullYear()} LCXL Team. Built with Passion.
-            </div>
+            </footer>
         </div>
     )
 }
