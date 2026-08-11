@@ -8,6 +8,8 @@ services:
     volumes:
       - ./conf:/app/conf
       - ./logs:/app/logs
+    environment:
+      LRD_BOOTSTRAP_TOKEN: ${LRD_BOOTSTRAP_TOKEN:?Set LRD_BOOTSTRAP_TOKEN in .env before starting}
     restart: always
     # Default command is defined in Dockerfile, but can be overridden here
     # command: ["./lcxl-remote-desk-server", "--startup-mode", "default"]

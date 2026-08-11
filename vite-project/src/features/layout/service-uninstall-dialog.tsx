@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog"
 import { useToast } from "@/hooks/use-toast"
 import { deskErrorCodeEnum } from "@/services/types"
+import { serviceManagementErrorMessage } from "@/features/layout/service-management-error"
 
 /**
  * Shared "uninstall service" confirmation dialog. Uninstalling the
@@ -52,8 +53,10 @@ export function ServiceUninstallDialog(props: ServiceUninstallDialogProps) {
                     variant: "destructive",
                     title: t("pages.system.settings.error"),
                     description:
-                        body?.message ??
-                        t(
+                        serviceManagementErrorMessage(
+                            t,
+                            body?.code,
+                            body?.message,
                             "pages.system.settings.serviceManagement.uninstallError",
                         ),
                 })

@@ -7,10 +7,15 @@ There are three ways to get LCXL Remote Desk running, depending on your goal.
 Start the service using Docker Compose:
 
 ```bash
+printf 'LRD_BOOTSTRAP_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
 docker-compose up -d
 ```
 
-Access `http://localhost:8081`. On your first visit a short setup wizard walks you through three steps: (1) create the admin account and accept the agreements, (2) optionally point the host at a manager (enter its domain — the wizard resolves `wss`/`ws` and verifies the API token, and warns you if the manager answers only over plaintext `ws`/`http` rather than blocking it — or skip it), and (3) choose the inbound security switches and the telemetry option, then finish.
+Access `http://localhost:8081`. In the first step, enter the deployment token
+saved in `.env`, create the admin account, and accept the agreements. The wizard
+then optionally connects a manager and finally configures inbound security and
+telemetry. Keep `.env` after initialization because Compose validates the
+required variable on every startup.
 
 ## Option 2: Tauri Desktop Client
 

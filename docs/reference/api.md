@@ -46,12 +46,21 @@ Browser/controller authentication uses one canonical JSON surface:
 - `GET /api/auth/me`
 - `PATCH /api/auth/credentials`
 - `POST /api/auth/tauri-login` (standalone desktop host only)
+- `GET /api/init/requirements` (public, read-only; reports whether a bootstrap token is required)
+- `POST /api/init` (public before initialization, optionally bootstrap-token gated)
 
 Every response uses `RestResponse`. Credential/business failures from login and
 credentials remain HTTP 200 with `success=false`; an absent or expired session
 on `/api/auth/me` is HTTP 401 with the same JSON envelope. Public fields use
 snake_case. OAuth authorization/callback continuation remains under
 `/api/oauth/*` and is not part of this route family.
+
+Account login failures keep HTTP 200. `ILLEGAL_CREDENTIALS` does not distinguish
+the username from the password. At the configured threshold the response code is
+`ACCOUNT_LOCKED` and `LoginOutcomeDto.retry_after_sec` carries the remaining
+whole-second lock time; `captcha_required` is explicitly `false` in the
+standalone build. Bootstrap failures use `PERMISSION_ERROR`, while an exhausted
+bootstrap/probe quota uses `TOO_MANY_ATTEMPTS`.
 
 ## Error Codes
 

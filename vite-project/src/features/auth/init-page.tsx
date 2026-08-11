@@ -15,6 +15,7 @@ import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { useToast } from "@/hooks/use-toast"
 import { useInitSystem } from "@/services/hooks/systemController/useInitSystem"
+import { useInitRequirements } from "@/services/hooks/systemController/useInitRequirements"
 import { useVerifyConnection } from "@/services/hooks/connectionController/useVerifyConnection"
 import { ModeToggle } from "@/components/mode-toggle"
 import { LanguageToggle } from "@/components/language-toggle"
@@ -26,10 +27,12 @@ import {
     buildSecurityPayload,
     isInsecureConnection,
     isInsecureTransportRefused,
+    isAccountStepValid,
     isManagerConfigured,
     managerNextDecision,
 } from "@/features/auth/init/wizard-logic"
-import type { ConnectionVerifyResult } from "@/services/types"
+import { deskErrorCodeEnum, type ConnectionVerifyResult } from "@/services/types"
+import { deskErrorMessage, errorCodeOf, type ErrorCodeKeyMap } from "@/lib/desk-error-i18n"
 
 // Default manager domain prefilled into the wizard's domain field.
 const DEFAULT_MANAGER_DOMAIN = "lcxbox.app"
@@ -37,6 +40,11 @@ const DEFAULT_MANAGER_DOMAIN = "lcxbox.app"
 // Light host[:port] validation: a bare host with an optional port, no scheme or
 // path (the backend resolves wss/ws from this).
 const DOMAIN_RE = /^[a-zA-Z0-9.-]+(:\d{1,5})?$/
+
+const INIT_AUTH_ERROR_KEYS: ErrorCodeKeyMap = {
+    [deskErrorCodeEnum.PERMISSION_ERROR]: "pages.init.bootstrap.invalid",
+    [deskErrorCodeEnum.TOO_MANY_ATTEMPTS]: "pages.init.bootstrap.tooManyAttempts",
+}
 
 type SchemeStatus =
     | { kind: "idle" }
@@ -52,6 +60,15 @@ export default function InitPage() {
 
     const { mutateAsync: initSystem } = useInitSystem()
     const { mutateAsync: verifyConnection } = useVerifyConnection()
+    const {
+        data: requirementsResponse,
+        isLoading: requirementsLoading,
+        isError: requirementsQueryError,
+        refetch: refetchRequirements,
+    } = useInitRequirements()
+    const bootstrapTokenRequired = requirementsResponse?.data?.bootstrap_token_required === true
+    const requirementsError =
+        requirementsQueryError || (!requirementsLoading && requirementsResponse == null)
 
     // Message for a failed probe: a public plaintext refusal gets an actionable,
     // localized hint (use https/wss, or disable the switch in settings); other
@@ -70,6 +87,7 @@ export default function InitPage() {
     const [password, setPassword] = useState("")
     const [confirmPassword, setConfirmPassword] = useState("")
     const [agreementAccepted, setAgreementAccepted] = useState(false)
+    const [bootstrapToken, setBootstrapToken] = useState("")
 
     // Step 2: manager
     const [domain, setDomain] = useState(DEFAULT_MANAGER_DOMAIN)
@@ -100,13 +118,45 @@ export default function InitPage() {
     const [hostAccessIndicatorEnabled, setHostAccessIndicatorEnabled] = useState(true)
     const [submitting, setSubmitting] = useState(false)
 
-    const accountValid =
+    const accountFieldsValid =
         username.trim().length >= 3 &&
         password.length >= 6 &&
         confirmPassword === password &&
         agreementAccepted
+    const accountValid = isAccountStepValid(
+        accountFieldsValid,
+        {
+            loading: requirementsLoading,
+            error: requirementsError,
+            bootstrapTokenRequired,
+        },
+        bootstrapToken,
+    )
 
     const managerConfigured = isManagerConfigured(managerUrl, managerToken)
+
+    const bootstrapPayload = bootstrapTokenRequired ? bootstrapToken.trim() : undefined
+
+    const handleBootstrapGateError = (error: unknown): boolean => {
+        const code = errorCodeOf(error)
+        if (
+            code !== deskErrorCodeEnum.PERMISSION_ERROR &&
+            code !== deskErrorCodeEnum.TOO_MANY_ATTEMPTS
+        ) {
+            return false
+        }
+        const description = deskErrorMessage(
+            t,
+            INIT_AUTH_ERROR_KEYS,
+            code,
+            error instanceof Error ? error.message : undefined,
+            t("pages.init.bootstrap.invalid"),
+        )
+        setSchemeStatus({ kind: "idle" })
+        setStep(1)
+        toast({ variant: "destructive", title: t("pages.init.failure"), description })
+        return true
+    }
 
     // Resolve the scheme (wss/ws) for the bare domain on blur, writing the full
     // resolved URL into the hidden manager URL field.
@@ -122,7 +172,7 @@ export default function InitPage() {
         }
         setSchemeStatus({ kind: "checking" })
         try {
-            const res = await verifyConnection({ data: { target: "manager", input: value } })
+            const res = await verifyConnection({ data: { target: "manager", input: value, bootstrap_token: bootstrapPayload } })
             const result = res.data
             if (result?.reached && result.resolved_url) {
                 setManagerUrl(result.resolved_url)
@@ -137,7 +187,8 @@ export default function InitPage() {
                     message: verifyFailureMessage(result),
                 })
             }
-        } catch {
+        } catch (error) {
+            if (handleBootstrapGateError(error)) return
             setSchemeStatus({ kind: "error", message: t("pages.init.manager.unreachable") })
         }
     }
@@ -151,7 +202,7 @@ export default function InitPage() {
         }
         setSchemeStatus({ kind: "checking" })
         try {
-            const res = await verifyConnection({ data: { target: "manager", input: value } })
+            const res = await verifyConnection({ data: { target: "manager", input: value, bootstrap_token: bootstrapPayload } })
             const result = res.data
             if (result?.reached) {
                 setSchemeStatus({
@@ -165,7 +216,8 @@ export default function InitPage() {
                     message: verifyFailureMessage(result),
                 })
             }
-        } catch {
+        } catch (error) {
+            if (handleBootstrapGateError(error)) return
             setSchemeStatus({ kind: "error", message: t("pages.init.manager.unreachable") })
         }
     }
@@ -178,7 +230,7 @@ export default function InitPage() {
         setManagerNextError(null)
         try {
             const res = await verifyConnection({
-                data: { target: "manager", input: managerUrl.trim(), token: managerToken.trim() },
+                data: { target: "manager", input: managerUrl.trim(), token: managerToken.trim(), bootstrap_token: bootstrapPayload },
             })
             const result = res.data
             const decision = managerNextDecision(result)
@@ -198,7 +250,8 @@ export default function InitPage() {
             } else {
                 setManagerNextError(verifyFailureMessage(result))
             }
-        } catch {
+        } catch (error) {
+            if (handleBootstrapGateError(error)) return
             setManagerNextError(t("pages.init.manager.unreachable"))
         } finally {
             setVerifyingToken(false)
@@ -238,7 +291,7 @@ export default function InitPage() {
         setManagerNextError(null)
         try {
             const res = await verifyConnection({
-                data: { target: "manager", input: managerUrl.trim(), token: managerToken.trim() },
+                data: { target: "manager", input: managerUrl.trim(), token: managerToken.trim(), bootstrap_token: bootstrapPayload },
             })
             const result = res.data
             const decision = managerNextDecision(result)
@@ -257,7 +310,8 @@ export default function InitPage() {
             } else {
                 setManagerNextError(verifyFailureMessage(result))
             }
-        } catch {
+        } catch (error) {
+            if (handleBootstrapGateError(error)) return
             setManagerNextError(t("pages.init.manager.unreachable"))
         } finally {
             setAdvancingManager(false)
@@ -288,12 +342,15 @@ export default function InitPage() {
                     manager_url: url || undefined,
                     manager_api_token: token || undefined,
                     security: buildSecurityPayload(security),
+                    bootstrap_token: bootstrapPayload,
                 },
             })
+            setBootstrapToken("")
             queryClient.removeQueries({ queryKey: queryServerInfoQueryKey() })
             toast({ title: t("pages.init.success") })
             navigate("/")
         } catch (error) {
+            if (handleBootstrapGateError(error)) return
             toast({
                 variant: "destructive",
                 title: t("pages.init.failure"),
@@ -361,6 +418,35 @@ export default function InitPage() {
                                 </div>
                                 {confirmPassword.length > 0 && confirmPassword !== password && (
                                     <p className="text-xs text-destructive">{t('pages.init.confirmPassword.match')}</p>
+                                )}
+                                {requirementsLoading && (
+                                    <p className="text-xs text-muted-foreground">{t('pages.init.bootstrap.loading')}</p>
+                                )}
+                                {requirementsError && (
+                                    <div className="flex items-center justify-between gap-2 rounded-md border border-destructive/40 p-3">
+                                        <p className="text-xs text-destructive">{t('pages.init.bootstrap.loadError')}</p>
+                                        <Button type="button" variant="outline" size="sm" onClick={() => void refetchRequirements()}>
+                                            {t('pages.init.bootstrap.retry')}
+                                        </Button>
+                                    </div>
+                                )}
+                                {bootstrapTokenRequired && (
+                                    <div className="space-y-2">
+                                        <Label htmlFor="bootstrap-token">{t('pages.init.bootstrap.label')}</Label>
+                                        <div className="relative group">
+                                            <Lock className="absolute left-3 top-3 h-4 w-4 text-muted-foreground group-focus-within:text-primary transition-colors" />
+                                            <Input
+                                                id="bootstrap-token"
+                                                type="password"
+                                                autoComplete="off"
+                                                value={bootstrapToken}
+                                                onChange={event => setBootstrapToken(event.target.value)}
+                                                placeholder={t('pages.init.bootstrap.placeholder')}
+                                                className="pl-9 h-11"
+                                            />
+                                        </div>
+                                        <p className="text-xs text-muted-foreground">{t('pages.init.bootstrap.description')}</p>
+                                    </div>
                                 )}
                                 <AgreementConsent checked={agreementAccepted} onCheckedChange={setAgreementAccepted} />
                                 <Button className="w-full h-11 text-base font-semibold" disabled={!accountValid} onClick={() => setStep(2)}>

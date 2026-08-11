@@ -1,3 +1,5 @@
+export type { InitRequirementsQueryKey } from "./useInitRequirements.ts";
+export type { InitRequirementsSuspenseQueryKey } from "./useInitRequirementsSuspense.ts";
 export type { InitSystemMutationKey } from "./useInitSystem.ts";
 export type { QueryBackendInfoQueryKey } from "./useQueryBackendInfo.ts";
 export type { QueryBackendInfoSuspenseQueryKey } from "./useQueryBackendInfoSuspense.ts";
@@ -7,6 +9,12 @@ export type { QueryServerInfoQueryKey } from "./useQueryServerInfo.ts";
 export type { QueryServerInfoSuspenseQueryKey } from "./useQueryServerInfoSuspense.ts";
 export type { QuerySysinfoQueryKey } from "./useQuerySysinfo.ts";
 export type { QuerySysinfoSuspenseQueryKey } from "./useQuerySysinfoSuspense.ts";
+export { initRequirementsQueryKey } from "./useInitRequirements.ts";
+export { initRequirementsQueryOptions } from "./useInitRequirements.ts";
+export { useInitRequirements } from "./useInitRequirements.ts";
+export { initRequirementsSuspenseQueryKey } from "./useInitRequirementsSuspense.ts";
+export { initRequirementsSuspenseQueryOptions } from "./useInitRequirementsSuspense.ts";
+export { useInitRequirementsSuspense } from "./useInitRequirementsSuspense.ts";
 export { initSystemMutationKey } from "./useInitSystem.ts";
 export { initSystemMutationOptions } from "./useInitSystem.ts";
 export { useInitSystem } from "./useInitSystem.ts";

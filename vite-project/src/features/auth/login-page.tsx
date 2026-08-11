@@ -27,6 +27,13 @@ import { saveSessionGrant, clearSessionGrant } from "@/features/desk/session-gra
 import { ModeToggle } from "@/components/mode-toggle"
 import { LanguageToggle } from "@/components/language-toggle"
 import { AsyncButton } from "@/components/async-button"
+import { deskErrorMessage, errorCodeOf, type ErrorCodeKeyMap } from "@/lib/desk-error-i18n"
+import { deskErrorCodeEnum, type LoginOutcomeDto } from "@/services/types"
+
+const LOGIN_ERROR_KEYS: ErrorCodeKeyMap = {
+    [deskErrorCodeEnum.ILLEGAL_CREDENTIALS]: "pages.login.accountLogin.errorMessage",
+    [deskErrorCodeEnum.ACCOUNT_LOCKED]: "pages.login.accountLogin.locked",
+}
 
 const formSchema = z.object({
     username: z.string().optional(),
@@ -45,6 +52,19 @@ export default function LoginPage() {
     const [activeTab, setActiveTab] = useState("account")
     const [tauriAutoLoginPending, setTauriAutoLoginPending] = useState(false)
     const tauriAutoLoginTokenRef = useRef<string | null>(null)
+    const [lockedUntilMs, setLockedUntilMs] = useState(0)
+    const [nowMs, setNowMs] = useState(() => Date.now())
+    const lockedRemainingSec = Math.max(0, Math.ceil((lockedUntilMs - nowMs) / 1000))
+
+    useEffect(() => {
+        if (lockedUntilMs <= Date.now()) return
+        const timer = window.setInterval(() => {
+            const now = Date.now()
+            setNowMs(now)
+            if (now >= lockedUntilMs) window.clearInterval(timer)
+        }, 1000)
+        return () => window.clearInterval(timer)
+    }, [lockedUntilMs])
 
     const { mutateAsync: login } = useLoginAccount()
     const { mutateAsync: loginTauri } = useLoginTauri()
@@ -139,6 +159,7 @@ export default function LoginPage() {
 
     async function onSubmit(values: FormValues) {
         if (tauriAutoLoginTokenRef.current !== null) return
+        if (values.type !== "device_code" && lockedRemainingSec > 0) return
         try {
             if (values.type === "device_code") {
                 await onRedeemCode(values)
@@ -158,13 +179,22 @@ export default function LoginPage() {
 
             const redirect = searchParams.get("redirect") || "/"
             navigate(redirect)
-        } catch (error: any) {
-            let errorMsg = error?.message || "Unknown error";
-            if (error?.response?.data?.message) {
-                errorMsg = error.response.data.message;
-            } else if (typeof error?.response?.data === 'string') {
-                errorMsg = error.response.data;
+        } catch (error: unknown) {
+            const code = errorCodeOf(error)
+            const errorData = (error as { data?: LoginOutcomeDto | null })?.data
+            if (code === deskErrorCodeEnum.ACCOUNT_LOCKED) {
+                const retryAfterSec = Math.max(1, errorData?.retry_after_sec ?? 1)
+                const now = Date.now()
+                setNowMs(now)
+                setLockedUntilMs(now + retryAfterSec * 1000)
             }
+            const errorMsg = deskErrorMessage(
+                t,
+                LOGIN_ERROR_KEYS,
+                code,
+                error instanceof Error ? error.message : undefined,
+                t("pages.login.failure"),
+            )
 
             toast({
                 variant: "destructive",
@@ -238,10 +268,13 @@ export default function LoginPage() {
                                     <AsyncButton
                                         type="submit"
                                         className="w-full"
+                                        disabled={lockedRemainingSec > 0}
                                         pending={form.formState.isSubmitting || tauriAutoLoginPending}
                                         pendingLabel={t('pages.login.loggingIn')}
                                     >
-                                        {t('pages.login.submit')}
+                                        {lockedRemainingSec > 0
+                                            ? t('pages.login.accountLogin.retryAfter', { seconds: lockedRemainingSec })
+                                            : t('pages.login.submit')}
                                     </AsyncButton>
                                 </form>
                             </Form>

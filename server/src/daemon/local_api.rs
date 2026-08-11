@@ -78,6 +78,18 @@ pub async fn run_local_api(
     let manager_link_state_data = web::Data::new(manager_link_state);
     let support_link_state_data = web::Data::new(support_link_state);
     let manager_link_gate_data = web::Data::new(manager_link_gate);
+    let client_ip_extractor_data = web::Data::new(
+        crate::service::client_ip::ClientIpExtractor::from_env()
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?,
+    );
+    let auth_rate_limiter_data = web::Data::new(Arc::new(
+        crate::service::rate_limit::AuthRateLimiter::from_env()
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?,
+    ));
+    let bootstrap_token_data = web::Data::new(
+        crate::service::bootstrap::BootstrapToken::from_env()
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?,
+    );
 
     // Share the bridge's TauriLoginToken clone with the HTTP server so that
     // refresh() calls from the WS handler are visible to the login controller.
@@ -127,6 +139,9 @@ pub async fn run_local_api(
             .app_data(manager_link_state_data.clone())
             .app_data(support_link_state_data.clone())
             .app_data(manager_link_gate_data.clone())
+            .app_data(client_ip_extractor_data.clone())
+            .app_data(auth_rate_limiter_data.clone())
+            .app_data(bootstrap_token_data.clone())
             // The daemon hosts no TURN runtime, and says so rather than leaving
             // the runtime endpoints without the state they extract.
             .app_data(actix_web::web::Data::new(

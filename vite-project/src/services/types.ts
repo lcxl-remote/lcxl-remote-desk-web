@@ -490,6 +490,11 @@ export type ConnectionList = {
 
 export type ConnectionVerifyParams = {
     /**
+     * @description Deployment bootstrap token used only while the standalone server is not\ninitialized and was started with `LRD_BOOTSTRAP_TOKEN`.
+     * @type string,null
+    */
+    bootstrap_token?: string | null;
+    /**
      * @description Either a bare `host[:port]` (the wizard\'s domain field — the backend then\nresolves `wss`→`ws`) or a full `ws(s)://host[:port]/path` URL (advanced /\ndesk-connection settings — probed as-is with no fallback).
      * @type string
     */
@@ -1564,6 +1569,11 @@ export type FileTransferMessage = ((DownloadRequest & {
 
 export type InitParams = {
     /**
+     * @description Deployment bootstrap token. Required only when the server process was\nstarted with `LRD_BOOTSTRAP_TOKEN`.
+     * @type string,null
+    */
+    bootstrap_token?: string | null;
+    /**
      * @type boolean
     */
     host_access_indicator_enabled: boolean;
@@ -1590,6 +1600,13 @@ export type InitParams = {
      * @type string
     */
     username: string;
+};
+
+export type InitRequirementsDto = {
+    /**
+     * @type boolean
+    */
+    bootstrap_token_required: boolean;
 };
 
 /**
@@ -1773,7 +1790,7 @@ export type KeyboardEventData = {
     */
     key: string;
     /**
-     * @description physical key code, e.g. 65 for \"a\", see https://developer.mozilla.org/zh-CN/docs/Web/API/KeyboardEvent/keyCode
+     * @description Legacy browser/Windows virtual-key code, e.g. 65 for \"a\". This is not a Linux evdev code.\nSee https://developer.mozilla.org/zh-CN/docs/Web/API/KeyboardEvent/keyCode
      * @minLength 0
      * @type integer, int32
     */
@@ -2743,6 +2760,30 @@ export type RestResponseEmptyResponseDto = {
      * @type object | undefined
     */
     data?: object;
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseInitRequirementsDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type boolean
+        */
+        bootstrap_token_required: boolean;
+    };
     /**
      * @type string,null
     */
@@ -5545,6 +5586,18 @@ export type InitSystemMutation = {
     Response: InitSystem200;
     Request: InitSystemMutationRequest;
     Errors: InitSystem403;
+};
+
+/**
+ * @description Initialization requirements
+*/
+export type InitRequirements200 = RestResponseInitRequirementsDto;
+
+export type InitRequirementsQueryResponse = InitRequirements200;
+
+export type InitRequirementsQuery = {
+    Response: InitRequirements200;
+    Errors: any;
 };
 
 /**

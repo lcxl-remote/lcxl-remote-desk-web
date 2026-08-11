@@ -35,10 +35,13 @@ LCXL Remote Desk Web 是一款 **AI 原生（AI-Native）**的开源高性能远
 仓库提供的镜像默认以 `signaling` 模式启动，承载 Web 控制台、信令与可选 TURN 中继；桌面采集和输入注入仍由容器外的被控设备完成。
 
 ```bash
+printf 'LRD_BOOTSTRAP_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
 docker compose up -d
 ```
 
-启动后访问 `http://localhost:8081`，首次访问时创建管理员账号。
+启动后访问 `http://localhost:8081`，创建管理员账号，并填写 `.env` 中保存的令牌。
+请长期保留该值：服务器初始化完成后令牌不再授权任何操作，但 Compose 每次启动时仍会
+校验这个必填变量。
 
 ### 方式 2：Tauri 桌面客户端
 

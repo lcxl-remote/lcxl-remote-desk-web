@@ -1,6 +1,8 @@
-import { act, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, useLocation } from "react-router-dom"
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import { RestResponseError } from "@/lib/kubb-client"
+import { deskErrorCodeEnum } from "@/services/types"
 
 vi.mock("react-i18next", () =>
     import("@/test-utils/i18n-mock").then((module) => module.reactI18nextMock()),
@@ -13,8 +15,9 @@ vi.mock("@/services/hooks/authController/useLoginTauri", () => ({
     useLoginTauri: () => ({ mutateAsync: tauriLogin }),
 }))
 const fetchUserInfo = vi.hoisted(() => vi.fn())
+const accountLogin = vi.hoisted(() => vi.fn())
 vi.mock("@/services/hooks/authController/useLoginAccount", () => ({
-    useLoginAccount: () => ({ mutateAsync: vi.fn() }),
+    useLoginAccount: () => ({ mutateAsync: accountLogin }),
 }))
 vi.mock("@/services/hooks/authController/useRedeemCode", () => ({
     useRedeemCode: () => ({ mutateAsync: vi.fn() }),
@@ -50,6 +53,7 @@ describe("LoginPage Tauri auto-login", () => {
     beforeEach(() => {
         tauriLogin.mockReset()
         fetchUserInfo.mockReset()
+        accountLogin.mockReset()
     })
 
     it("blocks normal login until auto-login, user refresh, and navigation complete", async () => {
@@ -88,5 +92,35 @@ describe("LoginPage Tauri auto-login", () => {
 
         await waitFor(() => expect(tauriLogin).toHaveBeenCalledWith({ params: { token: "bad-token" } }))
         await waitFor(() => expect(screen.getByRole("button", { name: "Login" })).toBeEnabled())
+    })
+
+    it("disables account login for the server-provided lock duration", async () => {
+        const clearInterval = vi.spyOn(window, "clearInterval")
+        accountLogin.mockRejectedValue(
+            new RestResponseError("locked", deskErrorCodeEnum.ACCOUNT_LOCKED, {
+                retry_after_sec: 1,
+            }),
+        )
+        render(
+            <MemoryRouter initialEntries={["/user/login"]}>
+                <LoginPage />
+            </MemoryRouter>,
+        )
+
+        fireEvent.change(screen.getByPlaceholderText("Please input your username"), {
+            target: { value: "admin" },
+        })
+        fireEvent.change(screen.getByPlaceholderText("Please input your password"), {
+            target: { value: "password" },
+        })
+        fireEvent.click(screen.getByRole("button", { name: "Login" }))
+
+        await waitFor(() => expect(accountLogin).toHaveBeenCalledTimes(1))
+        expect(screen.getByRole("button", { name: "Try again in 1s" })).toBeDisabled()
+        await waitFor(() => expect(screen.getByRole("button", { name: "Login" })).toBeEnabled(), {
+            timeout: 2500,
+        })
+        expect(clearInterval).toHaveBeenCalled()
+        clearInterval.mockRestore()
     })
 })

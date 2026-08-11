@@ -35,10 +35,14 @@ LCXL Remote Desk Web is an **AI-native**, open-source high-performance remote de
 The provided image starts in `signaling` mode. It hosts the web control plane, signaling, and optional TURN relay; desktop capture and input injection still run on controlled devices outside the container.
 
 ```bash
+printf 'LRD_BOOTSTRAP_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
 docker compose up -d
 ```
 
-Open `http://localhost:8081` and create the admin account on the first visit.
+Open `http://localhost:8081`, create the admin account, and enter the token saved
+in `.env`. Keep that value in `.env`: Compose validates the required variable on
+every startup even though the token no longer authorizes operations after the
+server has been initialized.
 
 ### Option 2: Tauri Desktop Client
 

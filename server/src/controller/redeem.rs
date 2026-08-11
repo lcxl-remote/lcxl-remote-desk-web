@@ -17,9 +17,7 @@
 
 use actix_session::Session;
 use actix_web::{Error as AWError, HttpRequest, HttpResponse, post, web};
-use std::collections::HashMap;
-use std::time::Instant;
-use tokio::sync::RwLock;
+use std::sync::Arc;
 
 use desk_signal_facade::grant::{AccessGrantStore, GrantPrincipal, GrantSessionRecord};
 use desk_signal_facade::model::code_session::{CODE_SESSION_KEY, CodeSessionCookie};
@@ -28,17 +26,17 @@ use desk_signal_facade::model::signal::RemoteDeskTypeEnum;
 use desk_utils::error::DeskErrorCode;
 use desk_utils::rest::RestResponse;
 
-use crate::model::settings::SharedSettings;
+use crate::{
+    model::settings::SharedSettings,
+    service::{
+        client_ip::ClientIpExtractor,
+        rate_limit::{AuthRateLimiter, QuotaDecision},
+    },
+};
 
 /// Server-minted code-session principal length (characters). High-entropy so a
 /// principal cannot be guessed by another anonymous session.
 const CODE_SESSION_ID_LEN: usize = 32;
-
-/// Anti-enumeration limit: redeem attempts per client IP per minute.
-const REDEEM_ATTEMPTS_PER_MINUTE: u32 = 5;
-
-static REDEEM_RATE_LIMIT: std::sync::LazyLock<RwLock<HashMap<String, (u32, Instant)>>> =
-    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
 pub const TAG: &str = "Auth";
 
@@ -78,6 +76,8 @@ pub async fn redeem_code(
     body: web::Json<RedeemCodeParams>,
     settings: web::Data<SharedSettings>,
     connection_map: web::Data<desk_signal::model::SharedConnectionMap>,
+    client_ip: web::Data<ClientIpExtractor>,
+    rate_limiter: web::Data<Arc<AuthRateLimiter>>,
     session: Session,
 ) -> Result<HttpResponse, AWError> {
     let params = body.into_inner();
@@ -99,9 +99,9 @@ pub async fn redeem_code(
         )));
     }
 
-    // Per-IP anti-enumeration rate limit (peer address, never a spoofable
-    // `X-Forwarded-For`).
-    if redeem_rate_limited(&req).await {
+    // Count before parsing or looking up the secret code. Trusted proxy handling
+    // and IPv6 prefix aggregation are shared with account login.
+    if rate_limiter.consume_redeem(client_ip.network_key(&req)) == QuotaDecision::Limited {
         return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
             DeskErrorCode::TOO_MANY_ATTEMPTS,
             "Too many attempts. Please try again later.".to_string(),
@@ -283,6 +283,8 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(settings))
                 .app_data(connection_map)
+                .app_data(web::Data::new(ClientIpExtractor::default()))
+                .app_data(web::Data::new(Arc::new(AuthRateLimiter::new(64))))
                 .wrap(SessionMiddleware::new(
                     CookieSessionStore::default(),
                     Key::generate(),
@@ -397,38 +399,5 @@ mod tests {
                 .await
                 .unwrap()
         );
-    }
-}
-
-/// Record a redeem attempt and report whether the client IP is over the limit.
-/// Uses the real TCP peer address, deliberately ignoring a spoofable
-/// `X-Forwarded-For` header (mirrors the login rate limiter).
-async fn redeem_rate_limited(req: &HttpRequest) -> bool {
-    let ip = req
-        .peer_addr()
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    let now = Instant::now();
-    let mut limit = REDEEM_RATE_LIMIT.write().await;
-    // Drop entries whose window has elapsed so the map cannot grow without bound
-    // on a long-lived public server (each distinct IP would otherwise leak a slot).
-    limit.retain(|_, (_, last_time)| now.duration_since(*last_time).as_secs() < 60);
-    match limit.get_mut(&ip) {
-        Some((count, last_time)) if now.duration_since(*last_time).as_secs() < 60 => {
-            if *count >= REDEEM_ATTEMPTS_PER_MINUTE {
-                return true;
-            }
-            *count += 1;
-            false
-        }
-        Some((count, last_time)) => {
-            *count = 1;
-            *last_time = now;
-            false
-        }
-        None => {
-            limit.insert(ip, (1, now));
-            false
-        }
     }
 }

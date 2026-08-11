@@ -3,10 +3,12 @@
 ## Docker（推荐）
 
 ```bash
+printf 'LRD_BOOTSTRAP_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
 docker-compose up -d
 ```
 
-访问 `http://localhost:8081`，首次访问时设置管理员账户。如需自定义镜像，使用 `./build_docker.sh`。
+访问 `http://localhost:8081`，填写 `.env` 中的令牌并设置管理员账户。初始化后仍需保留
+`.env`，Compose 每次启动都会校验该必填变量。如需自定义镜像，使用 `./build_docker.sh`。
 
 ## 从源码构建生产版本
 
@@ -70,9 +72,15 @@ server 内置信令、STUN 与 TURN。跨 NAT 连接时：
 把 server 暴露到公网时（通常置于终结 TLS 的反向代理之后），注意：
 
 - **`LRD_COOKIE_SECURE`**——控制会话 Cookie 的 `Secure` 属性。默认 `false`，以便本地 / 局域网 HTTP 访问保留会话。HTTPS 部署应设 `LRD_COOKIE_SECURE=true`，使 Cookie 仅经 HTTPS 发送。
+- **`LRD_BOOTSTRAP_TOKEN`**——在 Compose 示例以外是可选项；配置后，初始化向导及初始化前的连接探测都必须携带该值。变量存在但为空会导致启动失败。请使用至少 32 个随机字节，不要放入 URL 或日志。Compose 示例通过 `${...:?}` 强制要求它。
+- **`LRD_TRUSTED_PROXIES`**——逗号分隔的代理 IP/CIDR。默认信任回环地址（`127.0.0.0/8`、`::1`），其他代理或容器网段必须显式配置。只有可信 peer 才能提供 `X-Forwarded-For`。除非服务器只能经会覆盖 XFF 的代理访问，否则不要使用 `*`。
+- **`LRD_AUTH_IPV6_PREFIX_LEN`**——IPv6 限流前缀，默认 `64`，合法范围 `1..=128`；IPv4 固定为 `/32`。
+- **`LRD_AUTH_RATE_LIMIT_MAX_BUCKETS`**——登录和 redeem 的有界容量档位，默认 `65536`，普通部署无需调整。
 - **`LRD_PROVIDER_SSRF_MODE`**——防护中心大脑代用户拨号其配置的模型供应商 `base_url` 时的 SSRF（指向内网服务或云元数据端点）。**只管私网可达性**（与下方 TLS 开关正交）；云元数据段在任何模式下都被拦截。取值：
   - `relaxed`（默认）——允许私网 / 回环目标（本地模型网关，如 `http://localhost:11434`）。
   - `strict`——拒绝私网 / 回环 / CGNAT / ULA 目标；连接期再校验解析到的 IP（防 DNS 重绑定）。当不可信用户可配置供应商时使用。
 - **`LRD_ENFORCE_PUBLIC_TLS`**——是否允许以**明文**（`http`）拨号**公网**目标。默认 `true`（仅显式设为 `false` / `0` / `no` / `off` 才关闭）。开启时，对公网地址的明文拨号会在连接前被拒（api_key 绝不明文外泄）；私网 / 回环 / 局域网目标始终豁免，云元数据段无论如何始终拦截。与 SSRF 模式正交：要放行公网明文供应商，关闭本开关即可，**无需**切到 `relaxed`（那会额外放开私网目标）。
 - **运行时不再提供 API 文档端点**（Swagger UI / ReDoc / RapiDoc / Scalar / `/openapi.json`）；用离线 `dump-openapi` 生成规范（见 [REST API 参考](/zh/reference/api)）。
 - 把 server 置于反向代理之后，由其终结 TLS、透传 `Host`，并为信令转发 WebSocket `Upgrade` 头。
+- 同机原生反向代理通常从 loopback 连接，可直接使用默认信任；代理容器通常从 bridge/container 地址连接，必须显式加入其实际 peer CIDR。若 Docker 或四层代理已经丢失真实源地址且不提供 XFF，应用无法恢复，所有客户端只能共享一个限流 bucket。
+- server 当前没有 CORS 中间件，浏览器无法通过跨源预检向 loopback peer 发送自定义 XFF。未来增加 CORS、Private Network Access 放行或 XFF 请求头放行时，必须重新评审默认 loopback 信任边界。

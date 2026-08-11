@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { useToast } from "@/hooks/use-toast"
 import { deskErrorCodeEnum } from "@/services/types"
+import { serviceManagementErrorMessage } from "@/features/layout/service-management-error"
 
 /**
  * Shared "install service" confirmation dialog. Used by both the
@@ -112,8 +113,10 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
                     variant: "destructive",
                     title: t("pages.system.settings.error"),
                     description:
-                        body?.message ??
-                        t(
+                        serviceManagementErrorMessage(
+                            t,
+                            code,
+                            body?.message,
                             "pages.system.settings.serviceManagement.installError",
                         ),
                 })

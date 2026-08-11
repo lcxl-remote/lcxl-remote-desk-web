@@ -7,10 +7,13 @@
 使用 Docker Compose 启动服务：
 
 ```bash
+printf 'LRD_BOOTSTRAP_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
 docker-compose up -d
 ```
 
-访问 `http://localhost:8081`。首次访问时，设置向导会引导你完成三个步骤：① 创建管理员账户并同意协议；② 可选地连接 Manager，填写域名后由向导自动选择 `wss` 或 `ws`，并校验 API 令牌；如果 Manager 只提供未加密的 `ws` 或 `http` 连接，向导会显示安全警告，也可以跳过这一步；③ 选择入站安全设置和遥测选项，完成初始化。
+访问 `http://localhost:8081`。第一步填写 `.env` 中保存的部署初始化令牌、创建管理员
+账户并同意协议；之后可选地连接 Manager，最后设置入站安全策略和遥测选项。初始化后
+仍需保留 `.env`，因为 Compose 每次启动都会校验该必填变量。
 
 ## 方式二：Tauri 桌面客户端
 

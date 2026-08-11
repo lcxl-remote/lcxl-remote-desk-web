@@ -1,11 +1,14 @@
 /// Service management endpoints — available in all modes but only functional
-/// when running inside Tauri. After the host-control-hub unification (Step 6)
+/// when running inside Tauri. After host-control-hub unification,
 /// the install / uninstall command travels over the same `/ws/tauri_ipc` link
 /// as every other Tauri-bound command, so the endpoint just publishes a hub
 /// message and returns 202.
 use std::sync::Arc;
 
-use actix_web::{HttpResponse, post, web};
+use actix_session::Session;
+use actix_web::{Error as AWError, HttpResponse, post, web};
+use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
+use desk_signal_facade::model::code_session::{CODE_SESSION_KEY, CodeSessionCookie};
 use desk_utils::rest::RestResponse;
 use serde::Deserialize;
 use utoipa::ToSchema;
@@ -14,6 +17,7 @@ use crate::{
     daemon::windows_service::default_install_dir,
     error::DeskError,
     host_control::{HostControlHub, HostControlMessage, ServiceOpKind},
+    model::settings::SharedSettings,
 };
 use desk_utils::error::DeskErrorCode;
 
@@ -78,13 +82,18 @@ fn validate_install_path(path: &str) -> Result<(), DeskError> {
 #[post("/api/service/install")]
 pub async fn install_service(
     hub: web::Data<Option<Arc<HostControlHub>>>,
+    settings: web::Data<SharedSettings>,
+    session: Session,
     req: Option<web::Json<InstallServiceRequest>>,
-) -> Result<HttpResponse, DeskError> {
+) -> Result<HttpResponse, AWError> {
+    if let Some(response) = authorize_service_management(&settings, &session).await? {
+        return Ok(response);
+    }
     let body = req.map(|r| r.into_inner()).unwrap_or_default();
     let install_path = body.install_path.unwrap_or_else(default_install_dir);
     validate_install_path(&install_path)?;
 
-    dispatch_service_op(
+    Ok(dispatch_service_op(
         hub.as_ref().as_ref(),
         HostControlMessage::ServiceOp {
             op: ServiceOpKind::Install,
@@ -92,7 +101,7 @@ pub async fn install_service(
             install_idd_driver: body.install_idd_driver,
         },
         "Install request accepted",
-    )
+    )?)
 }
 
 /// Request the host (Tauri) to uninstall the OS system service.
@@ -107,8 +116,13 @@ pub async fn install_service(
 #[post("/api/service/uninstall")]
 pub async fn uninstall_service(
     hub: web::Data<Option<Arc<HostControlHub>>>,
-) -> Result<HttpResponse, DeskError> {
-    dispatch_service_op(
+    settings: web::Data<SharedSettings>,
+    session: Session,
+) -> Result<HttpResponse, AWError> {
+    if let Some(response) = authorize_service_management(&settings, &session).await? {
+        return Ok(response);
+    }
+    Ok(dispatch_service_op(
         hub.as_ref().as_ref(),
         HostControlMessage::ServiceOp {
             op: ServiceOpKind::Uninstall,
@@ -116,7 +130,39 @@ pub async fn uninstall_service(
             install_idd_driver: false,
         },
         "Uninstall request accepted",
-    )
+    )?)
+}
+
+async fn authorize_service_management(
+    settings: &SharedSettings,
+    session: &Session,
+) -> Result<Option<HttpResponse>, AWError> {
+    if settings.read().await.user.login_password.is_empty() {
+        return Ok(Some(HttpResponse::Ok().json(RestResponse::<()>::failed(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "Initialize the system before managing the service".to_string(),
+        ))));
+    }
+    if session.get_current_user::<CurrentUser>()?.is_some() {
+        return Ok(None);
+    }
+    if session
+        .get::<CodeSessionCookie>(CODE_SESSION_KEY)?
+        .is_some()
+    {
+        return Ok(Some(HttpResponse::Forbidden().json(
+            RestResponse::<()>::failed(
+                DeskErrorCode::PERMISSION_ERROR,
+                "Code sessions cannot manage the system service".to_string(),
+            ),
+        )));
+    }
+    Ok(Some(HttpResponse::Unauthorized().json(
+        RestResponse::<()>::failed(
+            DeskErrorCode::PERMISSION_ERROR,
+            "Owner session required".to_string(),
+        ),
+    )))
 }
 
 fn dispatch_service_op(
@@ -160,7 +206,32 @@ fn dispatch_service_op(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{App, test};
+    use actix_session::{SessionExt as _, SessionMiddleware, storage::CookieSessionStore};
+    use actix_web::{App, cookie::Key, dev::Service as _, test};
+
+    fn settings_data(initialized: bool) -> web::Data<SharedSettings> {
+        let mut settings = crate::model::settings::Settings::default();
+        settings.user.login_password = if initialized {
+            "initialized".to_string()
+        } else {
+            String::new()
+        };
+        web::Data::new(SharedSettings::from(settings))
+    }
+
+    async fn seed_code_session(session: Session) -> HttpResponse {
+        session
+            .insert(
+                CODE_SESSION_KEY,
+                CodeSessionCookie {
+                    code_session_id: "code".to_string(),
+                    grant_session_id: "grant".to_string(),
+                    target_connection_id: "target".to_string(),
+                },
+            )
+            .unwrap();
+        HttpResponse::Ok().finish()
+    }
 
     fn build_app(
         hub: Option<Arc<HostControlHub>>,
@@ -175,8 +246,95 @@ mod tests {
     > {
         App::new()
             .app_data(web::Data::new(hub))
+            .app_data(settings_data(true))
             .service(install_service)
             .service(uninstall_service)
+            .wrap_fn(|req, service| {
+                req.get_session()
+                    .set_current_user(&CurrentUser::new_admin("owner"))
+                    .expect("seed owner session");
+                service.call(req)
+            })
+            .wrap(SessionMiddleware::new(
+                CookieSessionStore::default(),
+                Key::generate(),
+            ))
+    }
+
+    #[actix_web::test]
+    async fn service_management_is_preconditioned_then_owner_only() {
+        let preinit = test::init_service(
+            App::new()
+                .app_data(web::Data::new(None::<Arc<HostControlHub>>))
+                .app_data(settings_data(false))
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                ))
+                .service(install_service),
+        )
+        .await;
+        let response = test::call_service(
+            &preinit,
+            test::TestRequest::post()
+                .uri("/api/service/install")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+        let body: RestResponse<()> = test::read_body_json(response).await;
+        assert_eq!(body.code, DeskErrorCode::PRECONDITION_FAILED.code());
+
+        let initialized = test::init_service(
+            App::new()
+                .app_data(web::Data::new(None::<Arc<HostControlHub>>))
+                .app_data(settings_data(true))
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                ))
+                .service(install_service),
+        )
+        .await;
+        let response = test::call_service(
+            &initialized,
+            test::TestRequest::post()
+                .uri("/api/service/install")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn code_session_cannot_manage_service() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(None::<Arc<HostControlHub>>))
+                .app_data(settings_data(true))
+                .route("/seed-code", web::post().to(seed_code_session))
+                .service(uninstall_service)
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                )),
+        )
+        .await;
+        let seed = test::call_service(
+            &app,
+            test::TestRequest::post().uri("/seed-code").to_request(),
+        )
+        .await;
+        let cookie = seed.response().cookies().next().unwrap().into_owned();
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/service/uninstall")
+                .cookie(cookie)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), actix_web::http::StatusCode::FORBIDDEN);
     }
 
     /// Without a hub configured, both install and uninstall return 503 with a

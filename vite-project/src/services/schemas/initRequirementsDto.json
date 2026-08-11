@@ -1,0 +1,1 @@
+{"type":"object","required":["bootstrap_token_required"],"properties":{"bootstrap_token_required":{"type":"boolean"}},"x-readme-ref-name":"InitRequirementsDto"}

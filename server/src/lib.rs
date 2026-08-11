@@ -38,7 +38,7 @@ use crate::{
         connection::verify_connection,
         host_readiness::{authorize_wayland, cancel_wayland, request_macos_permissions},
         info::{query_backend_info, query_macos_autologin, query_server_info, query_sysinfo},
-        init::init_system,
+        init::{init_requirements, init_system},
         login::{change_password, login_account, login_tauri, logout_account},
         manager_link::{query_manager_link_status, retry_manager_link},
         redeem::redeem_code,
@@ -203,6 +203,7 @@ pub fn configure_api_surface(
         .service(query_server_info)
         .service(install_service)
         .service(uninstall_service)
+        .service(init_requirements)
         .service(init_system)
         // Connection-verify performs its own self-authentication (open before the
         // system is initialized, session-gated after), so it is registered outside
@@ -531,6 +532,18 @@ pub async fn run_with_hub(
     // logs make it to disk.
     let telemetry_guard = telemetry::init_telemetry(shared_settings.clone(), &startup_mode).await?;
 
+    // Create metric instruments only after telemetry installed the process meter
+    // provider; otherwise they would remain bound to the initial no-op provider.
+    let client_ip_extractor = service::client_ip::ClientIpExtractor::from_env()
+        .map_err(|message| std::io::Error::new(ErrorKind::InvalidInput, message))?;
+    let auth_rate_limiter = service::rate_limit::AuthRateLimiter::from_env()
+        .map_err(|message| std::io::Error::new(ErrorKind::InvalidInput, message))?;
+    let bootstrap_token = service::bootstrap::BootstrapToken::from_env()
+        .map_err(|message| std::io::Error::new(ErrorKind::InvalidInput, message))?;
+    let client_ip_extractor_data = web::Data::new(client_ip_extractor);
+    let auth_rate_limiter_data = web::Data::new(Arc::new(auth_rate_limiter));
+    let bootstrap_token_data = web::Data::new(bootstrap_token);
+
     // init desk_signal db
     if startup_mode_has_signal_db(&startup_mode) {
         let settings_dir = settings
@@ -800,6 +813,9 @@ pub async fn run_with_hub(
         let support_link_state_data = support_link_state_data.clone();
         let manager_link_gate_data = manager_link_gate_data.clone();
         let host_control_endpoint_state = host_control_endpoint_state.clone();
+        let client_ip_extractor_data = client_ip_extractor_data.clone();
+        let auth_rate_limiter_data = auth_rate_limiter_data.clone();
+        let bootstrap_token_data = bootstrap_token_data.clone();
         let surface_opts = ApiSurfaceOpts {
             include_signaling: matches!(
                 startup_mode,
@@ -862,6 +878,9 @@ pub async fn run_with_hub(
             .app_data(turn_runtime_view.clone())
             .app_data(turn_control.clone())
             .app_data(turn_stop_guard.clone())
+            .app_data(client_ip_extractor_data)
+            .app_data(auth_rate_limiter_data)
+            .app_data(bootstrap_token_data)
             .app_data(api_json_config()) // limit payload size + uniform error body
             .configure(|cfg| {
                 if let Some(state) = host_control_endpoint_state.clone() {

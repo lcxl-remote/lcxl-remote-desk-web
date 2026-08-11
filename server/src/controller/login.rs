@@ -1,5 +1,5 @@
 use actix_session::Session;
-use actix_web::{Error as AWError, HttpResponse, patch, post, web};
+use actix_web::{Error as AWError, HttpRequest, HttpResponse, patch, post, web};
 use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 use desk_server_version::SERVER_API_VERSION;
 use desk_signal_facade::model::auth::{
@@ -7,7 +7,14 @@ use desk_signal_facade::model::auth::{
 };
 use log::{error, info};
 
-use crate::{error::DeskErrorCode, model::settings::SharedSettings};
+use crate::{
+    error::DeskErrorCode,
+    model::settings::SharedSettings,
+    service::{
+        client_ip::ClientIpExtractor,
+        rate_limit::{AuthRateLimiter, LoginFailureResult},
+    },
+};
 use desk_utils::rest::RestResponse;
 
 pub const TAG: &str = "Auth";
@@ -23,45 +30,60 @@ pub const TAG: &str = "Auth";
 )]
 #[post("/api/auth/login")]
 pub async fn login_account(
+    req: HttpRequest,
     request_json: web::Json<LoginRequest>,
     settings: web::Data<SharedSettings>,
+    client_ip: web::Data<ClientIpExtractor>,
+    rate_limiter: web::Data<std::sync::Arc<AuthRateLimiter>>,
     session: Session,
 ) -> Result<HttpResponse, AWError> {
     let params = request_json.into_inner();
+    let network_key = client_ip.network_key(&req);
     let startup_mode = {
         let settings = settings.read().await;
         settings.args.startup_mode.clone()
     };
 
+    if let Some(retry_after_sec) = rate_limiter.login_lock_ttl(&network_key) {
+        return Ok(login_failure_response(
+            DeskErrorCode::ACCOUNT_LOCKED,
+            "Too many attempts. Please try again later.",
+            startup_mode,
+            Some(retry_after_sec),
+        ));
+    }
+
     // Device-code redemption no longer logs in as a full account. An anonymous
     // redeemer is a capability-scoped code-session minted by `redeem_code`
     // (`/api/desk/redeem-code`), never the owner. Account login is
     // username/password only.
-    {
+    let credentials_match = {
         let settings = settings.read().await;
-        if settings.user.login_user_name != params.username {
-            error!("Username does not match");
-            return Ok(
-                HttpResponse::Ok().json(RestResponse::<LoginOutcomeDto>::failed_with_data(
+        settings.user.login_user_name == params.username
+            && settings.user.login_password == params.password
+    };
+    if !credentials_match {
+        error!("Account login credentials do not match");
+        return Ok(match rate_limiter.record_login_failure(network_key) {
+            LoginFailureResult::Locked { retry_after_sec } => login_failure_response(
+                DeskErrorCode::ACCOUNT_LOCKED,
+                "Too many attempts. Please try again later.",
+                startup_mode,
+                Some(retry_after_sec),
+            ),
+            LoginFailureResult::Recorded | LoginFailureResult::UntrackedCapacity => {
+                login_failure_response(
                     DeskErrorCode::ILLEGAL_CREDENTIALS,
-                    Some("Illegal username or password".to_string()),
+                    "Illegal username or password",
+                    startup_mode,
                     None,
-                )),
-            );
-        }
-        if settings.user.login_password != params.password {
-            error!("Password does not match");
-            return Ok(
-                HttpResponse::Ok().json(RestResponse::<LoginOutcomeDto>::failed_with_data(
-                    DeskErrorCode::ILLEGAL_CREDENTIALS,
-                    Some("Illegal username or password".to_string()),
-                    None,
-                )),
-            );
-        }
+                )
+            }
+        });
     }
+    rate_limiter.clear_login(&network_key);
     let result = LoginOutcomeDto {
-        captcha_required: None,
+        captcha_required: Some(false),
         retry_after_sec: None,
         api_version: Some(SERVER_API_VERSION),
         startup_mode: Some(startup_mode),
@@ -71,6 +93,24 @@ pub async fn login_account(
     session.set_current_user(&user_info)?;
     info!("Login successful, username: {}", params.username);
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(result)))
+}
+
+fn login_failure_response(
+    code: DeskErrorCode,
+    message: &str,
+    startup_mode: crate::model::settings::StartupMode,
+    retry_after_sec: Option<u64>,
+) -> HttpResponse {
+    HttpResponse::Ok().json(RestResponse::<LoginOutcomeDto>::failed_with_data(
+        code,
+        Some(message.to_string()),
+        Some(LoginOutcomeDto {
+            captcha_required: Some(false),
+            retry_after_sec,
+            api_version: Some(SERVER_API_VERSION),
+            startup_mode: Some(startup_mode),
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -270,12 +310,25 @@ mod tests {
         SharedSettings::from(settings)
     }
 
+    fn auth_data() -> (
+        web::Data<ClientIpExtractor>,
+        web::Data<std::sync::Arc<AuthRateLimiter>>,
+    ) {
+        (
+            web::Data::new(ClientIpExtractor::default()),
+            web::Data::new(std::sync::Arc::new(AuthRateLimiter::new(64))),
+        )
+    }
+
     #[actix_web::test]
     async fn test_login_success() {
         let settings = create_test_settings();
+        let (client_ip, limiter) = auth_data();
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(settings))
+                .app_data(client_ip)
+                .app_data(limiter)
                 .wrap(SessionMiddleware::new(
                     CookieSessionStore::default(),
                     Key::generate(),
@@ -291,6 +344,7 @@ mod tests {
         };
 
         let req = TestRequest::post()
+            .peer_addr("192.0.2.1:1234".parse().unwrap())
             .uri("/api/auth/login")
             .set_json(&params)
             .to_request();
@@ -305,9 +359,12 @@ mod tests {
     #[actix_web::test]
     async fn test_login_failure() {
         let settings = create_test_settings();
+        let (client_ip, limiter) = auth_data();
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(settings))
+                .app_data(client_ip)
+                .app_data(limiter)
                 .wrap(SessionMiddleware::new(
                     CookieSessionStore::default(),
                     Key::generate(),
@@ -323,6 +380,7 @@ mod tests {
         };
 
         let req = TestRequest::post()
+            .peer_addr("192.0.2.2:1234".parse().unwrap())
             .uri("/api/auth/login")
             .set_json(&params)
             .to_request();
@@ -332,6 +390,100 @@ mod tests {
         let body: RestResponse<LoginOutcomeDto> = test::read_body_json(resp).await;
         assert!(!body.success);
         assert_eq!(body.code, DeskErrorCode::ILLEGAL_CREDENTIALS.code());
+    }
+
+    #[actix_web::test]
+    async fn twentieth_failure_locks_before_a_correct_password_is_checked() {
+        let settings = create_test_settings();
+        let (client_ip, limiter) = auth_data();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(settings))
+                .app_data(client_ip)
+                .app_data(limiter)
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                ))
+                .service(login_account),
+        )
+        .await;
+
+        for attempt in 1..=20 {
+            let req = TestRequest::post()
+                .peer_addr("192.0.2.20:1234".parse().unwrap())
+                .uri("/api/auth/login")
+                .set_json(&LoginRequest {
+                    username: "admin".to_string(),
+                    password: "wrong".to_string(),
+                    captcha_token: None,
+                })
+                .to_request();
+            let body: RestResponse<LoginOutcomeDto> =
+                test::call_and_read_body_json(&app, req).await;
+            if attempt < 20 {
+                assert_eq!(body.code, DeskErrorCode::ILLEGAL_CREDENTIALS.code());
+            } else {
+                assert_eq!(body.code, DeskErrorCode::ACCOUNT_LOCKED.code());
+                assert!(
+                    body.data
+                        .unwrap()
+                        .retry_after_sec
+                        .is_some_and(|ttl| ttl > 0)
+                );
+            }
+        }
+
+        let correct = TestRequest::post()
+            .peer_addr("192.0.2.20:1234".parse().unwrap())
+            .uri("/api/auth/login")
+            .set_json(&LoginRequest {
+                username: "admin".to_string(),
+                password: "password".to_string(),
+                captcha_token: None,
+            })
+            .to_request();
+        let body: RestResponse<LoginOutcomeDto> =
+            test::call_and_read_body_json(&app, correct).await;
+        assert_eq!(body.code, DeskErrorCode::ACCOUNT_LOCKED.code());
+    }
+
+    #[actix_web::test]
+    async fn cross_origin_xff_preflight_is_not_allowed() {
+        let settings = create_test_settings();
+        let (client_ip, limiter) = auth_data();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(settings))
+                .app_data(client_ip)
+                .app_data(limiter)
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                ))
+                .service(login_account),
+        )
+        .await;
+        let req = TestRequest::default()
+            .method(actix_web::http::Method::OPTIONS)
+            .uri("/api/auth/login")
+            .insert_header(("origin", "https://evil.example"))
+            .insert_header(("access-control-request-method", "POST"))
+            .insert_header(("access-control-request-headers", "x-forwarded-for"))
+            .to_request();
+        let response = test::call_service(&app, req).await;
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none()
+        );
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-headers")
+                .is_none()
+        );
     }
 
     #[actix_web::test]

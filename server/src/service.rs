@@ -1,6 +1,9 @@
 pub mod audio_playback;
 pub mod auto_start;
+pub mod bootstrap;
+pub mod client_ip;
 pub mod file_manager;
+pub mod rate_limit;
 pub mod signaling;
 pub mod terminal;
 pub mod turn_lifecycle;

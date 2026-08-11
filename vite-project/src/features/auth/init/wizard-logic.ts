@@ -18,6 +18,23 @@ export const SECURITY_CAPABILITIES = [
 export type SecurityCapability = (typeof SECURITY_CAPABILITIES)[number]
 export type SecurityToggles = Record<SecurityCapability, boolean>
 
+export type InitRequirementsState = {
+    loading: boolean
+    error: boolean
+    bootstrapTokenRequired: boolean
+}
+
+/** Fail-closed Step 1 gate while requirements are unavailable. */
+export function isAccountStepValid(
+    accountFieldsValid: boolean,
+    requirements: InitRequirementsState,
+    bootstrapToken: string,
+): boolean {
+    if (requirements.loading || requirements.error) return false
+    if (requirements.bootstrapTokenRequired && bootstrapToken.trim().length === 0) return false
+    return accountFieldsValid
+}
+
 /** Whether the manager step has both a resolved URL and a token (gate for Next). */
 export function isManagerConfigured(url: string, token: string): boolean {
     return url.trim().length > 0 && token.trim().length > 0

@@ -6,10 +6,25 @@ import {
     buildSecurityPayload,
     isInsecureConnection,
     isInsecureTransportRefused,
+    isAccountStepValid,
     isManagerConfigured,
     managerNextDecision,
     type SecurityToggles,
 } from "./wizard-logic"
+
+describe("isAccountStepValid", () => {
+    it("fails closed while requirements are loading or unavailable", () => {
+        expect(isAccountStepValid(true, { loading: true, error: false, bootstrapTokenRequired: false }, "")).toBe(false)
+        expect(isAccountStepValid(true, { loading: false, error: true, bootstrapTokenRequired: false }, "")).toBe(false)
+    })
+
+    it("requires a non-blank bootstrap token only when configured", () => {
+        const required = { loading: false, error: false, bootstrapTokenRequired: true }
+        expect(isAccountStepValid(true, required, "   ")).toBe(false)
+        expect(isAccountStepValid(true, required, "secret")).toBe(true)
+        expect(isAccountStepValid(true, { ...required, bootstrapTokenRequired: false }, "")).toBe(true)
+    })
+})
 
 const allOff: SecurityToggles = {
     allow_remote_control: false,

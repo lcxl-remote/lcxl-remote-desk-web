@@ -56,6 +56,7 @@ const enSidebar = [
     items: [
       { text: 'AI Security Model', link: '/security/ai-security-model' },
       { text: 'Signaling Authentication', link: '/security/signaling-auth' },
+      { text: 'Local Account Security', link: '/security/local-account-security' },
       { text: 'Vulnerability Disclosure', link: '/security/disclosure' },
     ],
   },
@@ -118,6 +119,7 @@ const zhSidebar = [
     items: [
       { text: 'AI 安全模型', link: '/zh/security/ai-security-model' },
       { text: '信令鉴权', link: '/zh/security/signaling-auth' },
+      { text: '本地账户安全', link: '/zh/security/local-account-security' },
       { text: '漏洞披露', link: '/zh/security/disclosure' },
     ],
   },

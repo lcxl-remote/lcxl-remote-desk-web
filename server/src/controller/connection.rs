@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use actix_session::Session;
-use actix_web::{Error as AWError, HttpResponse, post, web};
+use actix_web::{Error as AWError, HttpRequest, HttpResponse, post, web};
 use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 use desk_signal_facade::model::{
     probe::{SIGNALING_PROBE_HEADER, SIGNALING_PROBE_HEADER_VALUE},
@@ -35,7 +35,14 @@ use log::debug;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::model::settings::SharedSettings;
+use crate::{
+    model::settings::SharedSettings,
+    service::{
+        bootstrap::BootstrapToken,
+        client_ip::ClientIpExtractor,
+        rate_limit::{AuthRateLimiter, BootstrapAttempt, QuotaDecision},
+    },
+};
 
 pub const TAG: &str = "Connection";
 
@@ -56,6 +63,10 @@ pub struct ConnectionVerifyParams {
     /// API token to authenticate the probe. Omitted during pure scheme resolution
     /// (domain-field blur), supplied when checking whether the token is accepted.
     pub token: Option<String>,
+    /// Deployment bootstrap token used only while the standalone server is not
+    /// initialized and was started with `LRD_BOOTSTRAP_TOKEN`.
+    #[serde(default)]
+    pub bootstrap_token: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug, Default)]
@@ -476,8 +487,12 @@ async fn resolve_bare_host(
 )]
 #[post("/api/connection/verify")]
 pub async fn verify_connection(
+    req: HttpRequest,
     request_json: web::Json<ConnectionVerifyParams>,
     settings: web::Data<SharedSettings>,
+    bootstrap: web::Data<BootstrapToken>,
+    client_ip: web::Data<ClientIpExtractor>,
+    rate_limiter: web::Data<Arc<AuthRateLimiter>>,
     session: Session,
 ) -> Result<HttpResponse, AWError> {
     let params = request_json.into_inner();
@@ -512,6 +527,43 @@ pub async fn verify_connection(
                 None,
             ),
         ));
+    }
+    if !initialized {
+        let network_key = client_ip.network_key(&req);
+        match bootstrap.evaluate(
+            rate_limiter.get_ref().as_ref(),
+            network_key,
+            params.bootstrap_token.as_deref(),
+        ) {
+            BootstrapAttempt::Allowed => {}
+            BootstrapAttempt::Invalid => {
+                return Ok(HttpResponse::Ok().json(
+                    RestResponse::<ConnectionVerifyResult>::failed_with_data(
+                        DeskErrorCode::PERMISSION_ERROR,
+                        Some("Invalid bootstrap token".to_string()),
+                        None,
+                    ),
+                ));
+            }
+            BootstrapAttempt::Limited => {
+                return Ok(HttpResponse::Ok().json(
+                    RestResponse::<ConnectionVerifyResult>::failed_with_data(
+                        DeskErrorCode::TOO_MANY_ATTEMPTS,
+                        Some("Too many attempts. Please try again later.".to_string()),
+                        None,
+                    ),
+                ));
+            }
+        }
+        if rate_limiter.consume_probe(network_key) == QuotaDecision::Limited {
+            return Ok(HttpResponse::Ok().json(
+                RestResponse::<ConnectionVerifyResult>::failed_with_data(
+                    DeskErrorCode::TOO_MANY_ATTEMPTS,
+                    Some("Too many connection probes. Please try again later.".to_string()),
+                    None,
+                ),
+            ));
+        }
     }
     let token = params.token.as_deref().filter(|t| !t.is_empty());
     let is_manager = params.target.eq_ignore_ascii_case("manager");
@@ -830,13 +882,29 @@ mod tests {
         web::Data::new(SharedSettings::from(settings))
     }
 
+    fn verify_auth_data() -> (
+        web::Data<BootstrapToken>,
+        web::Data<ClientIpExtractor>,
+        web::Data<Arc<AuthRateLimiter>>,
+    ) {
+        (
+            web::Data::new(BootstrapToken::disabled()),
+            web::Data::new(ClientIpExtractor::default()),
+            web::Data::new(Arc::new(AuthRateLimiter::new(64))),
+        )
+    }
+
     #[actix_web::test]
     async fn verify_requires_session_once_initialized() {
         use actix_session::{SessionMiddleware, storage::CookieSessionStore};
         use actix_web::{App, cookie::Key, test};
+        let (bootstrap, client_ip, limiter) = verify_auth_data();
         let app = test::init_service(
             App::new()
                 .app_data(settings_for_verify(true))
+                .app_data(bootstrap)
+                .app_data(client_ip)
+                .app_data(limiter)
                 .wrap(SessionMiddleware::new(
                     CookieSessionStore::default(),
                     Key::generate(),
@@ -850,8 +918,10 @@ mod tests {
             target: "signaling".to_string(),
             input: "1.2.3.4".to_string(),
             token: None,
+            bootstrap_token: None,
         };
         let req = test::TestRequest::post()
+            .peer_addr("192.0.2.1:1234".parse().unwrap())
             .uri("/api/connection/verify")
             .set_json(&params)
             .to_request();
@@ -866,9 +936,13 @@ mod tests {
         // The probe client builds a rustls config; production installs the process
         // default provider at startup, so mirror that here (idempotent).
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let (bootstrap, client_ip, limiter) = verify_auth_data();
         let app = test::init_service(
             App::new()
                 .app_data(settings_for_verify(false))
+                .app_data(bootstrap)
+                .app_data(client_ip)
+                .app_data(limiter)
                 .wrap(SessionMiddleware::new(
                     CookieSessionStore::default(),
                     Key::generate(),
@@ -883,8 +957,10 @@ mod tests {
             target: "signaling".to_string(),
             input: "169.254.169.254".to_string(),
             token: None,
+            bootstrap_token: None,
         };
         let req = test::TestRequest::post()
+            .peer_addr("192.0.2.2:1234".parse().unwrap())
             .uri("/api/connection/verify")
             .set_json(&params)
             .to_request();
@@ -897,13 +973,57 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn wrong_bootstrap_token_does_not_consume_probe_quota() {
+        use actix_session::{SessionMiddleware, storage::CookieSessionStore};
+        use actix_web::{App, cookie::Key, test};
+        let limiter = Arc::new(AuthRateLimiter::new(64));
+        let extractor = ClientIpExtractor::default();
+        let peer = "192.0.2.44:1234".parse().unwrap();
+        let app = test::init_service(
+            App::new()
+                .app_data(settings_for_verify(false))
+                .app_data(web::Data::new(BootstrapToken::required("correct-token")))
+                .app_data(web::Data::new(extractor.clone()))
+                .app_data(web::Data::new(Arc::clone(&limiter)))
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                ))
+                .service(verify_connection),
+        )
+        .await;
+        let params = ConnectionVerifyParams {
+            target: "signaling".to_string(),
+            input: "169.254.169.254".to_string(),
+            token: None,
+            bootstrap_token: Some("wrong-token".to_string()),
+        };
+        let req = test::TestRequest::post()
+            .peer_addr(peer)
+            .uri("/api/connection/verify")
+            .set_json(&params)
+            .to_request();
+        let response = test::call_service(&app, req).await;
+        let body: RestResponse<ConnectionVerifyResult> = test::read_body_json(response).await;
+        assert_eq!(body.code, DeskErrorCode::PERMISSION_ERROR.code());
+        let request = test::TestRequest::default()
+            .peer_addr(peer)
+            .to_http_request();
+        assert_eq!(limiter.probe_count(&extractor.network_key(&request)), 0);
+    }
+
+    #[actix_web::test]
     async fn verify_uninitialized_allows_private_target() {
         use actix_session::{SessionMiddleware, storage::CookieSessionStore};
         use actix_web::{App, cookie::Key, test};
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let (bootstrap, client_ip, limiter) = verify_auth_data();
         let app = test::init_service(
             App::new()
                 .app_data(settings_for_verify(false))
+                .app_data(bootstrap)
+                .app_data(client_ip)
+                .app_data(limiter)
                 .wrap(SessionMiddleware::new(
                     CookieSessionStore::default(),
                     Key::generate(),
@@ -920,8 +1040,10 @@ mod tests {
             target: "manager".to_string(),
             input: "ws://127.0.0.1:9/api/desk/signaling".to_string(),
             token: None,
+            bootstrap_token: None,
         };
         let req = test::TestRequest::post()
+            .peer_addr("192.0.2.3:1234".parse().unwrap())
             .uri("/api/connection/verify")
             .set_json(&params)
             .to_request();

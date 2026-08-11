@@ -46,11 +46,18 @@ Kubb 的版本被精确钉死，且以 `npx --no-install` 调用，因此生成�
 - `GET /api/auth/me`
 - `PATCH /api/auth/credentials`
 - `POST /api/auth/tauri-login`（仅独立桌面被控端）
+- `GET /api/init/requirements`（公开只读，只说明是否需要 bootstrap token）
+- `POST /api/init`（初始化前公开，可选 bootstrap token gate）
 
 所有响应都使用 `RestResponse`。登录和改密的凭据/业务失败保持 HTTP 200 且
 `success=false`；`/api/auth/me` 在登录会话缺失或过期时返回 HTTP 401，但响应正文仍为
 同一 JSON 包络。公开字段统一使用 snake_case。OAuth authorize/callback continuation
 继续位于 `/api/oauth/*`，不属于这组基础认证路由。
+
+账户登录失败仍使用 HTTP 200。`ILLEGAL_CREDENTIALS` 不区分用户名或密码；达到阈值时
+返回 `ACCOUNT_LOCKED`，`LoginOutcomeDto.retry_after_sec` 给出向上取整的剩余锁定秒数；
+独立服务器明确返回 `captcha_required=false`。bootstrap 校验失败使用
+`PERMISSION_ERROR`，bootstrap/probe 配额耗尽使用 `TOO_MANY_ATTEMPTS`。
 
 ## 错误码
 

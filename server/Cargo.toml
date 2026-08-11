@@ -98,6 +98,8 @@ opusic-c = { workspace = true }
 codepage = { workspace = true }
 encoding_rs = { workspace = true }
 regex = { workspace = true }
+ipnet = { workspace = true }
+lru = { workspace = true }
 prometheus = { workspace = true }
 png = { workspace = true }
 
