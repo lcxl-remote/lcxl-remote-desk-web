@@ -804,4 +804,32 @@ describe("DiagnosePanel", () => {
         expect(root.className).toContain("max-h-[calc(100%-2rem)]");
         expect(root.className).not.toContain("max-h-[85vh]");
     });
+
+    it("can be resized and offers a jump to the latest content after the user scrolls up", () => {
+        const { container } = render(
+            <DiagnosePanel
+                state={{ ...baseState, phase: "running", status: "modeling" }}
+                onStart={vi.fn()}
+                onReset={vi.fn()}
+                onClose={vi.fn()}
+            />,
+        );
+        const root = container.firstElementChild as HTMLElement;
+        expect(root.className).toContain("resize");
+        expect(root.className).toContain("overflow-hidden");
+
+        const scrollArea = screen.getByTestId("diagnose-scroll-area");
+        Object.defineProperties(scrollArea, {
+            scrollHeight: { configurable: true, value: 900 },
+            clientHeight: { configurable: true, value: 300 },
+        });
+        scrollArea.scrollTop = 200;
+        fireEvent.scroll(scrollArea);
+
+        fireEvent.click(screen.getByRole("button", { name: "Scroll to latest" }));
+        expect(scrollArea.scrollTop).toBe(900);
+        expect(
+            screen.queryByRole("button", { name: "Scroll to latest" }),
+        ).not.toBeInTheDocument();
+    });
 });

@@ -281,4 +281,35 @@ describe("TerminalCopilotPanel exec promotion", () => {
             screen.getByText("AI can make mistakes. Please double-check its responses."),
         ).toBeInTheDocument();
     });
+
+    it("preserves history reading and offers a jump to the latest content", () => {
+        renderPanel([suggestion()]);
+        const scrollArea = screen.getByTestId("terminal-copilot-scroll-area");
+        Object.defineProperties(scrollArea, {
+            scrollHeight: { configurable: true, value: 800 },
+            clientHeight: { configurable: true, value: 240 },
+        });
+        scrollArea.scrollTop = 120;
+        fireEvent.scroll(scrollArea);
+
+        fireEvent.click(screen.getByRole("button", { name: "Scroll to latest" }));
+        expect(scrollArea.scrollTop).toBe(800);
+        expect(
+            screen.queryByRole("button", { name: "Scroll to latest" }),
+        ).not.toBeInTheDocument();
+    });
+
+    it("can be widened by dragging its left separator", () => {
+        renderPanel([suggestion()]);
+        const separator = screen.getByRole("separator", {
+            name: "Resize Terminal Copilot panel",
+        }) as HTMLDivElement;
+        separator.setPointerCapture = vi.fn();
+        separator.hasPointerCapture = vi.fn(() => false);
+
+        fireEvent.pointerDown(separator, { clientX: 320, pointerId: 1 });
+        fireEvent.pointerMove(separator, { clientX: 200, pointerId: 1 });
+
+        expect(separator.parentElement).toHaveStyle({ width: "440px" });
+    });
 });

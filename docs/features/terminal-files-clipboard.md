@@ -16,6 +16,11 @@ page triggers the browser's leave confirmation because disconnecting ends that
 remote shell and any processes running inside it. The shell-selection page and a
 terminal that has already closed do not trigger this prompt.
 
+The Terminal Copilot side panel can be widened or narrowed by dragging its left
+edge. Its conversation follows new streaming text only while the reader remains
+at the bottom; after the reader scrolls up, a down-arrow button returns to the
+latest content instead of forcibly moving the current view.
+
 ## File Management
 
 Manage files on the remote device directly from the browser:

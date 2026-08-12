@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { type PointerEvent as ReactPointerEvent, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
     Sparkles,
@@ -10,6 +10,7 @@ import {
     CornerDownLeft,
     Ban,
     Play,
+    ArrowDown,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -24,6 +25,7 @@ import type {
 import { ExecLifecycle } from '../exec/exec-lifecycle';
 import type { ExecEntry, ExecRequestInput } from '../exec/use-confirm-exec';
 import { ModelSelector } from '../desk/model-selector';
+import { useFollowLatest } from '@/hooks/use-follow-latest';
 
 /** Confirmed-execution controls, shared with the diagnose panel via
  *  `useConfirmExec`. Omitted when the copilot is rendered suggest-only. */
@@ -41,6 +43,8 @@ export type CopilotExecControls = {
  *  (`turnIndex * stride + rowIndex`). A turn never proposes anywhere near this
  *  many commands. */
 const COPILOT_INDEX_STRIDE = 100;
+const COPILOT_MIN_WIDTH = 280;
+const COPILOT_MAX_WIDTH = 720;
 
 /** Map a suggested-command risk level to a badge colour (mirrors the diagnose
  *  panel so the two AI surfaces read consistently). */
@@ -214,18 +218,51 @@ export function TerminalCopilotPanel({
     const [question, setQuestion] = useState('');
     // The manager-selected agent model, or null when the selector is hidden.
     const [modelId, setModelId] = useState<number | null>(null);
+    const [panelWidth, setPanelWidth] = useState(320);
+    const resizeStartRef = useRef<{ x: number; width: number } | null>(null);
 
     const running = state.phase === 'running';
     const streamedText =
         state.committedText + (running ? state.partialText : '');
 
-    // The conversation scrolls above a bottom-pinned composer; keep the newest
-    // turn (and streaming text) in view as it grows, mirroring a chat log.
-    const logRef = useRef<HTMLDivElement>(null);
-    useEffect(() => {
-        const log = logRef.current;
-        if (log) log.scrollTop = log.scrollHeight;
-    }, [state.turns, state.committedText, state.partialText, state.phase]);
+    // Follow streaming output only while the reader remains at the bottom. If
+    // they scroll up to inspect an earlier turn, preserve that position and
+    // offer an explicit jump back to the latest content.
+    const {
+        scrollRef,
+        onScroll,
+        showJumpToLatest,
+        jumpToLatest,
+    } = useFollowLatest();
+
+    const onResizePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+        resizeStartRef.current = { x: event.clientX, width: panelWidth };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        event.preventDefault();
+    };
+
+    const onResizePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+        const start = resizeStartRef.current;
+        if (!start) return;
+        const containerLimit = Math.max(
+            COPILOT_MIN_WIDTH,
+            Math.floor(window.innerWidth * 0.7),
+        );
+        setPanelWidth(
+            Math.min(
+                COPILOT_MAX_WIDTH,
+                containerLimit,
+                Math.max(COPILOT_MIN_WIDTH, start.width + start.x - event.clientX),
+            ),
+        );
+    };
+
+    const onResizePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+        resizeStartRef.current = null;
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+    };
 
     const submit = () => {
         if (running) return;
@@ -234,7 +271,20 @@ export function TerminalCopilotPanel({
     };
 
     return (
-        <div className="flex h-full w-80 flex-col border-l border-border bg-card text-card-foreground">
+        <div
+            className="relative flex h-full shrink-0 flex-col overflow-hidden border-l border-border bg-card text-card-foreground"
+            style={{ width: panelWidth }}
+        >
+            <div
+                role="separator"
+                aria-orientation="vertical"
+                aria-label={t('pages.deskTerminal.copilot.resizePanel')}
+                className="absolute inset-y-0 left-0 z-20 w-1 cursor-col-resize touch-none bg-transparent transition-colors hover:bg-primary/40"
+                onPointerDown={onResizePointerDown}
+                onPointerMove={onResizePointerMove}
+                onPointerUp={onResizePointerUp}
+                onPointerCancel={onResizePointerUp}
+            />
             <div className="flex items-center justify-between border-b border-border px-3 py-2">
                 <div className="flex items-center gap-2 font-medium">
                     <Sparkles className="h-4 w-4 text-primary" />
@@ -245,7 +295,13 @@ export function TerminalCopilotPanel({
                 </Button>
             </div>
 
-            <div ref={logRef} className="flex-1 space-y-4 overflow-y-auto p-3">
+            <div className="relative min-h-0 flex-1">
+                <div
+                    ref={scrollRef}
+                    onScroll={onScroll}
+                    data-testid="terminal-copilot-scroll-area"
+                    className="h-full space-y-4 overflow-y-auto p-3"
+                >
                 {/* AI interaction disclosure: informs the user, from the first interaction
                     and for every session, that they are interacting with an AI assistant.
                     Standing element at the top of the log (never a one-time, dismissible
@@ -359,6 +415,20 @@ export function TerminalCopilotPanel({
                         </div>
                     );
                 })}
+                </div>
+                {showJumpToLatest && (
+                    <Button
+                        type="button"
+                        variant="secondary"
+                        size="icon"
+                        className="absolute right-3 bottom-3 h-9 w-9 rounded-full shadow-lg"
+                        onClick={jumpToLatest}
+                        aria-label={t('pages.deskTerminal.copilot.scrollToLatest')}
+                        title={t('pages.deskTerminal.copilot.scrollToLatest')}
+                    >
+                        <ArrowDown className="h-4 w-4" />
+                    </Button>
+                )}
             </div>
 
             <div className="border-t border-border p-3">

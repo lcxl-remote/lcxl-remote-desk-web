@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 import {
     AlertCircle,
+    ArrowDown,
     History,
     Loader2,
     Stethoscope,
@@ -13,6 +14,7 @@ import { Badge } from "@/components/ui/badge"
 import { AiGeneratedMark } from "@/components/ai-generated-mark"
 import { MarkdownContent } from "@/components/markdown-content"
 import { agentErrorMessage, contentRetractionMessage } from "@/lib/agent-error-i18n"
+import { useFollowLatest } from "@/hooks/use-follow-latest"
 import {
     extractStreamingSummary,
     type DiagnoseState,
@@ -89,6 +91,12 @@ export function DiagnosePanel({
     )
     const [showHistory, setShowHistory] = useState(false)
     const [signalSupportsImage, setSignalSupportsImage] = useState<boolean | null>(null)
+    const {
+        scrollRef,
+        onScroll,
+        showJumpToLatest,
+        jumpToLatest,
+    } = useFollowLatest(!showHistory && state.phase !== "idle")
 
     useEffect(() => {
         let cancelled = false
@@ -160,7 +168,7 @@ export function DiagnosePanel({
     const streamingSummary = extractStreamingSummary(state.partialSummary)
 
     return (
-        <div className="absolute top-4 right-4 z-50 flex w-[380px] max-w-[90vw] max-h-[calc(100%-2rem)] flex-col rounded-lg border border-white/20 bg-black/70 text-white shadow-xl backdrop-blur-md select-text">
+        <div className="absolute top-4 right-4 z-50 flex h-[720px] min-h-[min(280px,calc(100%-2rem))] w-[380px] min-w-[min(320px,calc(100%-2rem))] max-w-[calc(100%-2rem)] max-h-[calc(100%-2rem)] resize flex-col overflow-hidden rounded-lg border border-white/20 bg-black/70 text-white shadow-xl backdrop-blur-md select-text">
             {/* Header */}
             <div className="flex items-center justify-between border-b border-white/15 px-4 py-3">
                 <div className="flex items-center gap-2 text-sm font-bold text-white/90">
@@ -176,7 +184,13 @@ export function DiagnosePanel({
                 </button>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-sm">
+            <div className="relative min-h-0 flex-1">
+                <div
+                    ref={scrollRef}
+                    onScroll={onScroll}
+                    data-testid="diagnose-scroll-area"
+                    className="h-full overflow-y-auto px-4 py-3 text-sm"
+                >
                 {/* AI interaction disclosure: informs the user, from the first interaction
                     and for every session, that they are interacting with an AI assistant.
                     Kept as a standing element at the top of the panel (never a one-time,
@@ -639,6 +653,18 @@ export function DiagnosePanel({
                     </div>
                 )}
                     </>
+                )}
+                </div>
+                {showJumpToLatest && (
+                    <button
+                        type="button"
+                        onClick={jumpToLatest}
+                        className="absolute right-3 bottom-3 flex h-9 w-9 items-center justify-center rounded-full border border-white/25 bg-black/85 text-white shadow-lg transition-colors hover:bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+                        aria-label={t("pages.desk.diagnose.scrollToLatest")}
+                        title={t("pages.desk.diagnose.scrollToLatest")}
+                    >
+                        <ArrowDown className="h-4 w-4" />
+                    </button>
                 )}
             </div>
 

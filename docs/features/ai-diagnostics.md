@@ -30,6 +30,11 @@ graph LR
 4. The central brain runs a multi-turn tool loop and streams the answer back to the browser.
 5. If the model requests `exec_command`, the loop parks. The browser shows the complete shell, command, working directory, timeout, and server-authoritative risk; only an explicit approval resumes dispatch.
 
+The diagnosis panel can be resized from its lower-right corner. While the view is
+at the bottom, streaming output follows the latest text automatically. Scrolling
+up pauses that behavior and shows a down-arrow button that returns to the latest
+content without losing the reader's place unexpectedly.
+
 ## Key Properties
 
 - **Thin Edge** — the device never runs model inference or holds provider credentials; it only collects and redacts evidence when the central brain asks.
