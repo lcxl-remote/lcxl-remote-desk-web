@@ -30,10 +30,13 @@ graph LR
 4. The central brain runs a multi-turn tool loop and streams the answer back to the browser.
 5. If the model requests `exec_command`, the loop parks. The browser shows the complete shell, command, working directory, timeout, and server-authoritative risk; only an explicit approval resumes dispatch.
 
-The diagnosis panel can be resized from its lower-right corner. While the view is
-at the bottom, streaming output follows the latest text automatically. Scrolling
-up pauses that behavior and shows a down-arrow button that returns to the latest
-content without losing the reader's place unexpectedly.
+The diagnosis panel has explicit resize handles: drag its left edge to change
+the width, its bottom edge to change the height, or its lower-left corner to
+change both. Drag the title bar to move the panel anywhere within the remote
+desktop view. While the view is at the bottom, streaming output follows the
+latest text automatically. Scrolling up pauses that behavior and shows a
+down-arrow button that returns to the latest content without losing the
+reader's place unexpectedly.
 
 ## Key Properties
 

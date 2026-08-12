@@ -1,4 +1,10 @@
-import { useEffect, useState } from "react"
+import {
+    type PointerEvent as ReactPointerEvent,
+    useEffect,
+    useLayoutEffect,
+    useRef,
+    useState,
+} from "react"
 import { useTranslation } from "react-i18next"
 import {
     AlertCircle,
@@ -62,6 +68,14 @@ type DiagnosePanelProps = {
     canContinue?: boolean
 }
 
+type ResizeDirection = "width" | "height" | "both"
+
+const DEFAULT_PANEL_WIDTH = 380
+const DEFAULT_PANEL_HEIGHT = 720
+const MIN_PANEL_WIDTH = 320
+const MIN_PANEL_HEIGHT = 280
+const PANEL_VIEWPORT_GAP = 16
+
 export function DiagnosePanel({
     state,
     onStart,
@@ -91,6 +105,29 @@ export function DiagnosePanel({
     )
     const [showHistory, setShowHistory] = useState(false)
     const [signalSupportsImage, setSignalSupportsImage] = useState<boolean | null>(null)
+    const panelRef = useRef<HTMLDivElement>(null)
+    const [panelSize, setPanelSize] = useState({
+        width: DEFAULT_PANEL_WIDTH,
+        height: DEFAULT_PANEL_HEIGHT,
+    })
+    const [panelOffset, setPanelOffset] = useState({ x: 0, y: 0 })
+    const dragStartRef = useRef<{
+        x: number
+        y: number
+        offsetX: number
+        offsetY: number
+        left: number
+        top: number
+        right: number
+        bottom: number
+    } | null>(null)
+    const resizeStartRef = useRef<{
+        direction: ResizeDirection
+        x: number
+        y: number
+        width: number
+        height: number
+    } | null>(null)
     const {
         scrollRef,
         onScroll,
@@ -167,17 +204,250 @@ export function DiagnosePanel({
     // model emits under a constrained `response_format`.
     const streamingSummary = extractStreamingSummary(state.partialSummary)
 
+    const panelBounds = () => {
+        const rect = panelRef.current?.getBoundingClientRect()
+        if (rect && rect.width > 0 && rect.height > 0) return rect
+
+        const right = window.innerWidth - PANEL_VIEWPORT_GAP + panelOffset.x
+        const top = PANEL_VIEWPORT_GAP + panelOffset.y
+        return {
+            left: right - panelSize.width,
+            top,
+            right,
+            bottom: top + panelSize.height,
+            width: panelSize.width,
+            height: panelSize.height,
+        }
+    }
+
+    const parentBounds = () => {
+        const rect = panelRef.current?.parentElement?.getBoundingClientRect()
+        if (rect && rect.width > 0 && rect.height > 0) return rect
+        return {
+            left: 0,
+            top: 0,
+            right: window.innerWidth,
+            bottom: window.innerHeight,
+            width: window.innerWidth,
+            height: window.innerHeight,
+        }
+    }
+
+    const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+        if ((event.target as Element).closest("button")) return
+        const rect = panelBounds()
+        dragStartRef.current = {
+            x: event.clientX,
+            y: event.clientY,
+            offsetX: panelOffset.x,
+            offsetY: panelOffset.y,
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        }
+        event.currentTarget.setPointerCapture(event.pointerId)
+        event.preventDefault()
+    }
+
+    const continueDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+        const start = dragStartRef.current
+        if (!start) return
+        const parent = parentBounds()
+        const requestedX = event.clientX - start.x
+        const requestedY = event.clientY - start.y
+        const deltaX = Math.min(
+            parent.right - PANEL_VIEWPORT_GAP - start.right,
+            Math.max(
+                parent.left + PANEL_VIEWPORT_GAP - start.left,
+                requestedX,
+            ),
+        )
+        const deltaY = Math.min(
+            parent.bottom - PANEL_VIEWPORT_GAP - start.bottom,
+            Math.max(
+                parent.top + PANEL_VIEWPORT_GAP - start.top,
+                requestedY,
+            ),
+        )
+        setPanelOffset({
+            x: start.offsetX + deltaX,
+            y: start.offsetY + deltaY,
+        })
+    }
+
+    const finishDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+        dragStartRef.current = null
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId)
+        }
+    }
+
+    const startResize = (
+        direction: ResizeDirection,
+        event: ReactPointerEvent<HTMLDivElement>,
+    ) => {
+        const rect = panelRef.current?.getBoundingClientRect()
+        resizeStartRef.current = {
+            direction,
+            x: event.clientX,
+            y: event.clientY,
+            width: rect && rect.width > 0 ? rect.width : panelSize.width,
+            height: rect && rect.height > 0 ? rect.height : panelSize.height,
+        }
+        event.currentTarget.setPointerCapture(event.pointerId)
+        event.preventDefault()
+    }
+
+    const continueResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+        const start = resizeStartRef.current
+        if (!start) return
+
+        const parent = parentBounds()
+        const panel = panelBounds()
+        const maxWidth = Math.max(
+            1,
+            panel.right - parent.left - PANEL_VIEWPORT_GAP,
+        )
+        const maxHeight = Math.max(
+            1,
+            parent.bottom - PANEL_VIEWPORT_GAP - panel.top,
+        )
+        const minWidth = Math.min(MIN_PANEL_WIDTH, maxWidth)
+        const minHeight = Math.min(MIN_PANEL_HEIGHT, maxHeight)
+
+        setPanelSize((current) => ({
+            width:
+                start.direction === "height"
+                    ? current.width
+                    : Math.min(
+                          maxWidth,
+                          Math.max(
+                              minWidth,
+                              start.width + start.x - event.clientX,
+                          ),
+                      ),
+            height:
+                start.direction === "width"
+                    ? current.height
+                    : Math.min(
+                          maxHeight,
+                          Math.max(
+                              minHeight,
+                              start.height + event.clientY - start.y,
+                          ),
+                      ),
+        }))
+    }
+
+    const finishResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+        resizeStartRef.current = null
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId)
+        }
+    }
+
+    useLayoutEffect(() => {
+        const panel = panelRef.current
+        const parent = panel?.parentElement
+        if (!panel || !parent) return
+
+        const keepInsideParent = () => {
+            const panelRect = panel.getBoundingClientRect()
+            const parentRect = parent.getBoundingClientRect()
+            if (
+                panelRect.width <= 0 ||
+                panelRect.height <= 0 ||
+                parentRect.width <= 0 ||
+                parentRect.height <= 0
+            ) {
+                return
+            }
+
+            let deltaX = 0
+            let deltaY = 0
+            if (panelRect.left < parentRect.left + PANEL_VIEWPORT_GAP) {
+                deltaX = parentRect.left + PANEL_VIEWPORT_GAP - panelRect.left
+            } else if (panelRect.right > parentRect.right - PANEL_VIEWPORT_GAP) {
+                deltaX = parentRect.right - PANEL_VIEWPORT_GAP - panelRect.right
+            }
+            if (panelRect.top < parentRect.top + PANEL_VIEWPORT_GAP) {
+                deltaY = parentRect.top + PANEL_VIEWPORT_GAP - panelRect.top
+            } else if (panelRect.bottom > parentRect.bottom - PANEL_VIEWPORT_GAP) {
+                deltaY = parentRect.bottom - PANEL_VIEWPORT_GAP - panelRect.bottom
+            }
+
+            if (deltaX !== 0 || deltaY !== 0) {
+                setPanelOffset((current) => ({
+                    x: current.x + deltaX,
+                    y: current.y + deltaY,
+                }))
+            }
+        }
+
+        keepInsideParent()
+        if (typeof ResizeObserver === "undefined") return
+        const observer = new ResizeObserver(keepInsideParent)
+        observer.observe(parent)
+        observer.observe(panel)
+        return () => observer.disconnect()
+    }, [panelSize.height, panelSize.width])
+
     return (
-        <div className="absolute top-4 right-4 z-50 flex h-[720px] min-h-[min(280px,calc(100%-2rem))] w-[380px] min-w-[min(320px,calc(100%-2rem))] max-w-[calc(100%-2rem)] max-h-[calc(100%-2rem)] resize flex-col overflow-hidden rounded-lg border border-white/20 bg-black/70 text-white shadow-xl backdrop-blur-md select-text">
+        <div
+            ref={panelRef}
+            className="absolute top-4 right-4 z-50 flex min-h-[min(280px,calc(100%-2rem))] min-w-[min(320px,calc(100%-2rem))] max-w-[calc(100%-2rem)] max-h-[calc(100%-2rem)] flex-col overflow-hidden rounded-lg border border-white/20 bg-black/70 text-white shadow-xl backdrop-blur-md select-text"
+            style={{
+                width: panelSize.width,
+                height: panelSize.height,
+                transform: `translate(${panelOffset.x}px, ${panelOffset.y}px)`,
+            }}
+        >
+            <div
+                role="separator"
+                aria-orientation="vertical"
+                aria-label={t("pages.desk.diagnose.resizeWidth")}
+                className="absolute inset-y-0 left-0 z-[2] w-1.5 cursor-col-resize touch-none bg-transparent transition-colors hover:bg-white/30"
+                onPointerDown={(event) => startResize("width", event)}
+                onPointerMove={continueResize}
+                onPointerUp={finishResize}
+                onPointerCancel={finishResize}
+            />
+            <div
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label={t("pages.desk.diagnose.resizeHeight")}
+                className="absolute inset-x-0 bottom-0 z-[2] h-1.5 cursor-row-resize touch-none bg-transparent transition-colors hover:bg-white/30"
+                onPointerDown={(event) => startResize("height", event)}
+                onPointerMove={continueResize}
+                onPointerUp={finishResize}
+                onPointerCancel={finishResize}
+            />
+            <div
+                role="separator"
+                aria-label={t("pages.desk.diagnose.resizeBoth")}
+                className="absolute bottom-0 left-0 z-[3] h-4 w-4 cursor-nesw-resize touch-none rounded-tr bg-white/20 transition-colors hover:bg-white/50"
+                onPointerDown={(event) => startResize("both", event)}
+                onPointerMove={continueResize}
+                onPointerUp={finishResize}
+                onPointerCancel={finishResize}
+            />
             {/* Header */}
-            <div className="flex items-center justify-between border-b border-white/15 px-4 py-3">
+            <div
+                data-testid="diagnose-drag-handle"
+                className="flex cursor-grab touch-none select-none items-center justify-between border-b border-white/15 px-4 py-3 active:cursor-grabbing"
+                onPointerDown={startDrag}
+                onPointerMove={continueDrag}
+                onPointerUp={finishDrag}
+                onPointerCancel={finishDrag}
+            >
                 <div className="flex items-center gap-2 text-sm font-bold text-white/90">
                     <Stethoscope className="h-4 w-4" style={{ stroke: "url(#ai-rainbow-gradient)" }} />
                     {t("pages.desk.diagnose.title")}
                 </div>
                 <button
                     onClick={onClose}
-                    className="text-gray-400 transition-colors hover:text-white"
+                    className="cursor-pointer text-gray-400 transition-colors hover:text-white"
                     aria-label={t("pages.desk.diagnose.close")}
                 >
                     <X className="h-4 w-4" />

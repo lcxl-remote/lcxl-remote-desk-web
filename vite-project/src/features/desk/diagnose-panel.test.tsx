@@ -805,7 +805,7 @@ describe("DiagnosePanel", () => {
         expect(root.className).not.toContain("max-h-[85vh]");
     });
 
-    it("can be resized and offers a jump to the latest content after the user scrolls up", () => {
+    it("can be resized from explicit handles and offers a jump to the latest content after the user scrolls up", () => {
         const { container } = render(
             <DiagnosePanel
                 state={{ ...baseState, phase: "running", status: "modeling" }}
@@ -815,8 +815,24 @@ describe("DiagnosePanel", () => {
             />,
         );
         const root = container.firstElementChild as HTMLElement;
-        expect(root.className).toContain("resize");
         expect(root.className).toContain("overflow-hidden");
+        const widthHandle = screen.getByRole("separator", {
+            name: "Resize diagnosis panel width",
+        }) as HTMLDivElement;
+        widthHandle.setPointerCapture = vi.fn();
+        widthHandle.hasPointerCapture = vi.fn(() => false);
+        fireEvent.pointerDown(widthHandle, { clientX: 380, clientY: 100, pointerId: 1 });
+        fireEvent.pointerMove(widthHandle, { clientX: 260, clientY: 100, pointerId: 1 });
+        expect(root).toHaveStyle({ width: "500px", height: "720px" });
+
+        const cornerHandle = screen.getByRole("separator", {
+            name: "Resize diagnosis panel width and height",
+        }) as HTMLDivElement;
+        cornerHandle.setPointerCapture = vi.fn();
+        cornerHandle.hasPointerCapture = vi.fn(() => false);
+        fireEvent.pointerDown(cornerHandle, { clientX: 260, clientY: 720, pointerId: 2 });
+        fireEvent.pointerMove(cornerHandle, { clientX: 200, clientY: 620, pointerId: 2 });
+        expect(root).toHaveStyle({ width: "560px", height: "620px" });
 
         const scrollArea = screen.getByTestId("diagnose-scroll-area");
         Object.defineProperties(scrollArea, {
@@ -831,5 +847,122 @@ describe("DiagnosePanel", () => {
         expect(
             screen.queryByRole("button", { name: "Scroll to latest" }),
         ).not.toBeInTheDocument();
+    });
+
+    it("can be dragged by its header without turning the close button into a drag handle", () => {
+        const onClose = vi.fn();
+        const { container } = render(
+            <DiagnosePanel
+                state={{ ...baseState, phase: "running", status: "modeling" }}
+                onStart={vi.fn()}
+                onReset={vi.fn()}
+                onClose={onClose}
+            />,
+        );
+        const root = container.firstElementChild as HTMLElement;
+        const dragHandle = screen.getByTestId("diagnose-drag-handle");
+        dragHandle.setPointerCapture = vi.fn();
+        dragHandle.hasPointerCapture = vi.fn(() => false);
+
+        fireEvent.pointerDown(dragHandle, {
+            clientX: 800,
+            clientY: 40,
+            pointerId: 1,
+        });
+        fireEvent.pointerMove(dragHandle, {
+            clientX: 700,
+            clientY: 60,
+            pointerId: 1,
+        });
+        fireEvent.pointerUp(dragHandle, { pointerId: 1 });
+        expect(root).toHaveStyle({ transform: "translate(-100px, 16px)" });
+
+        const close = screen.getByRole("button", { name: "Close" });
+        fireEvent.pointerDown(close, {
+            clientX: 700,
+            clientY: 60,
+            pointerId: 2,
+        });
+        fireEvent.pointerMove(dragHandle, {
+            clientX: 600,
+            clientY: 100,
+            pointerId: 2,
+        });
+        expect(root).toHaveStyle({ transform: "translate(-100px, 16px)" });
+        fireEvent.click(close);
+        expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the entire panel inside its remote-desktop parent while dragging", () => {
+        const { container } = render(
+            <DiagnosePanel
+                state={{ ...baseState, phase: "running", status: "modeling" }}
+                onStart={vi.fn()}
+                onReset={vi.fn()}
+                onClose={vi.fn()}
+            />,
+        );
+        const root = container.firstElementChild as HTMLElement;
+        const parent = root.parentElement as HTMLElement;
+        vi.spyOn(parent, "getBoundingClientRect").mockReturnValue({
+            left: 100,
+            top: 50,
+            right: 900,
+            bottom: 1050,
+            width: 800,
+            height: 1000,
+            x: 100,
+            y: 50,
+            toJSON: () => ({}),
+        });
+        vi.spyOn(root, "getBoundingClientRect").mockImplementation(() => {
+            const match = root.style.transform.match(
+                /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/,
+            );
+            const offsetX = Number(match?.[1] ?? 0);
+            const offsetY = Number(match?.[2] ?? 0);
+            const left = 504 + offsetX;
+            const top = 66 + offsetY;
+            return {
+                left,
+                top,
+                right: left + 380,
+                bottom: top + 720,
+                width: 380,
+                height: 720,
+                x: left,
+                y: top,
+                toJSON: () => ({}),
+            };
+        });
+
+        const dragHandle = screen.getByTestId("diagnose-drag-handle");
+        dragHandle.setPointerCapture = vi.fn();
+        dragHandle.hasPointerCapture = vi.fn(() => false);
+
+        fireEvent.pointerDown(dragHandle, {
+            clientX: 700,
+            clientY: 80,
+            pointerId: 1,
+        });
+        fireEvent.pointerMove(dragHandle, {
+            clientX: -300,
+            clientY: 1080,
+            pointerId: 1,
+        });
+        fireEvent.pointerUp(dragHandle, { pointerId: 1 });
+        expect(root).toHaveStyle({ transform: "translate(-388px, 248px)" });
+
+        fireEvent.pointerDown(dragHandle, {
+            clientX: 200,
+            clientY: 400,
+            pointerId: 2,
+        });
+        fireEvent.pointerMove(dragHandle, {
+            clientX: 1200,
+            clientY: -600,
+            pointerId: 2,
+        });
+        expect(root).toHaveStyle({ transform: "translate(0px, 0px)" });
     });
 });
