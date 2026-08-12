@@ -16,7 +16,7 @@ pub struct StartTerminalSession {
     /// `RequestRemoteModel::grant_session_id`. A capability-scoped code-session
     /// carries the grant it redeemed so the central can look up and stamp the
     /// code's capability ceiling onto the `StartTerminal` frame (the terminal WS is
-    /// a distinct connection that never does a `RequestRemote`, so it cannot inherit
+    /// a distinct connection that never does a `RequestRemoteAccess`, so it cannot inherit
     /// the control session's stamp). It is only a lookup key: the authorization fact
     /// is the server-side principal / target / generation check. `None` for an owner
     /// session (stamped with no ceiling).
@@ -70,7 +70,7 @@ pub struct StartTerminalPath {
     pub connection_id: String,
 }
 
-/// SignalingType::SendDataToTerminal
+/// SignalingType::SendTerminalInput
 #[derive(
     Debug, Clone, Serialize, Deserialize, ToSchema, wincode::SchemaWrite, wincode::SchemaRead,
 )]
@@ -137,7 +137,7 @@ mod wincode_tests {
 
     /// PTY content frequently carries escape codes — verify they
     /// survive wincode round-trip verbatim. A regression here would
-    /// silently corrupt terminal output in the `ReplyFromTerminal`
+    /// silently corrupt terminal output in the `TerminalOutputProduced`
     /// IPC payload.
     #[test]
     fn terminal_input_data_preserves_escape_sequences() {

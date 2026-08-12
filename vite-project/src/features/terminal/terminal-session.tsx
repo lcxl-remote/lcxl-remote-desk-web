@@ -38,7 +38,7 @@ const SIGNALING_TYPE_CODE_DATA = 10008
 const SIGNALING_TYPE_CODE_RESIZE = 10009
 const SIGNALING_TYPE_CODE_TERMINAL_STARTED = 10013
 const SIGNALING_TYPE_CODE_TERMINAL_CLOSED = 10014
-const SIGNALING_TYPE_CODE_HEARTBEAT = 1
+const SIGNALING_TYPE_CODE_SEND_HEARTBEAT = 1
 const SIGNALING_TYPE_CODE_ERROR = -1
 const TERMINAL_HEARTBEAT_INTERVAL_MS = 30_000
 
@@ -252,7 +252,7 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
             if (deviceId) url.searchParams.append("device_id", deviceId);
             // A capability-scoped code-session carries the grant it redeemed so the
             // central can stamp the terminal with the code's ceiling (the terminal WS
-            // is a distinct connection that never does a RequestRemote). An owner
+            // is a distinct connection that never does a RequestRemoteAccess). An owner
             // session has no grant and omits it (stamped with full control).
             const grant = readSessionGrant(connectionId);
             if (grant?.grantSessionId) {
@@ -281,7 +281,7 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
                             if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
                                 const heartbeat = {
                                     request_id: v4(),
-                                    signaling_type: SIGNALING_TYPE_CODE_HEARTBEAT,
+                                    signaling_type: SIGNALING_TYPE_CODE_SEND_HEARTBEAT,
                                     signaling_data: null,
                                 };
                                 socketRef.current.send(JSON.stringify(heartbeat));

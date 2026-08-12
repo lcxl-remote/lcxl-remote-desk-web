@@ -15,7 +15,7 @@
 //!
 //! The [`PcRegistry`] holds per-`SignalingType` handlers for the five
 //! WebRTC SDP/ICE messages the daemon owns
-//! (`RequestRemote` / `Offer` / `Answer` / `Canid` / `CloseControl`),
+//! (`RequestRemoteAccess` / `Offer` / `Answer` / `IceCandidate` / `CloseRemoteSession`),
 //! feeds the worker's media transport into the per-PC tracks it holds,
 //! and registers the DataChannel handlers on top.
 
@@ -76,7 +76,7 @@ use desk_ipc_protocol::message::{
     MediaFrameKind, ServiceToWorker, StartMediaPayload, StopMediaPayload,
     UpdateMediaSettingsPayload,
 };
-use desk_signal_facade::model::signal::InitSignalingData;
+use desk_signal_facade::model::signal::RemoteAccessInitializedData;
 use std::time::{Duration, Instant};
 use webrtc::media::Sample;
 
@@ -254,7 +254,7 @@ pub use ice::{
 /// gets exactly one of these; multi-browser concurrency = many
 /// `PeerConnectionContext`s sharing the same daemon process.
 ///
-/// `pc` + `signaling_state` are populated on `RequestRemote` / `Offer`,
+/// `pc` + `signaling_state` are populated on `RequestRemoteAccess` / `Offer`,
 /// along with (when the offer includes media) `video_track` /
 /// `audio_track`, which are fed samples from worker `MediaFrame`s. The
 /// `on_data_channel` handler routes browser DC traffic over IPC to the
@@ -363,9 +363,9 @@ impl PeerConnectionContext {
     }
 }
 
-/// How a signaling connection was admitted, recorded when its `RequestRemote`
+/// How a signaling connection was admitted, recorded when its `RequestRemoteAccess`
 /// is authorized and consulted by the router's first door. Independent of the
-/// PC's lifecycle so it survives a `CloseControl` PC teardown (see
+/// PC's lifecycle so it survives a `CloseRemoteSession` PC teardown (see
 /// [`PcRegistry::admissions`]).
 #[derive(Debug, Clone)]
 pub enum Admission {
@@ -413,7 +413,7 @@ struct AdmissionRegistry {
 /// "log + drop" behaviour.
 /// One entry of the grant-session reverse index: the generation the grant was
 /// minted at plus every live connection sharing it. All connections of one grant
-/// share the same generation (the central stamps it per RequestRemote); a directed
+/// share the same generation (the central stamps it per RequestRemoteAccess); a directed
 /// teardown closes them together.
 #[derive(Debug, Default)]
 struct GrantSessionEntry {
@@ -436,7 +436,7 @@ pub struct PcRegistry {
     /// registry it installed itself into and holding it strongly would make the
     /// pair immortal.
     host_control_hub: Arc<tokio::sync::OnceCell<std::sync::Weak<HostControlHub>>>,
-    /// Counts in-flight `RequestRemote` handlers that have not yet
+    /// Counts in-flight `RequestRemoteAccess` handlers that have not yet
     /// registered a [`PeerConnectionContext`]. Used by
     /// [`crate::daemon::pc_manager::cleanup_pc`] to suppress N→0
     /// virtual-display detach while a new browser is mid-`ensure_attached`
@@ -465,20 +465,20 @@ pub struct PcRegistry {
     /// teardown. Shared via `Arc` so registry clones stay consistent.
     grant_sessions: Arc<RwLock<HashMap<String, GrantSessionEntry>>>,
     /// Signaling-connection admission classes, keyed by the server-authoritative
-    /// `from_connection_id`. Recorded when a connection's `RequestRemote` is
+    /// `from_connection_id`. Recorded when a connection's `RequestRemoteAccess` is
     /// authorized (owner → [`Admission::OwnerFull`]; redeemed grant / legacy
     /// support → [`Admission::Capped`] with the ceiling) and — crucially — kept for
     /// the whole **signaling** connection, i.e. **not** cleared when the PC is torn
-    /// down by `CloseControl` / [`cleanup_pc`], only by
+    /// down by `CloseRemoteSession` / [`cleanup_pc`], only by
     /// [`Self::clear_admission`] on the real `ConnectionRemoved` (or a grant
     /// revoke). This outlives the PC so the router's first door still classifies a
     /// capped connection as capped after it drops its PC — closing the
-    /// post-teardown escalation where a capped client sends `CloseControl` then
+    /// post-teardown escalation where a capped client sends `CloseRemoteSession` then
     /// reuses the same connection id for owner-plane frames. Shared via `Arc` so
     /// registry clones stay consistent.
     admissions: Arc<RwLock<AdmissionRegistry>>,
     /// Connection ids that are **terminal** WS connections (a distinct connection
-    /// per open terminal, admitted via `StartTerminal` rather than `RequestRemote`
+    /// per open terminal, admitted via `StartTerminal` rather than `RequestRemoteAccess`
     /// and holding no PC). Tracked so a teardown — the connection's own
     /// `CloseTerminal`, or a grant-directed revocation sweeping [`cleanup_pc`] — can
     /// kill the worker-side shell and clear the connection's ceiling / admission,
@@ -505,7 +505,7 @@ type RegistryResult<T> = Result<T, DeskError>;
 /// RAII guard returned by [`PcRegistry::enter_pending`]. While held
 /// the registry's `pending_requests` counter stays incremented;
 /// `Drop` decrements it. Guarantees the counter survives panics and
-/// early returns inside the `RequestRemote` handler.
+/// early returns inside the `RequestRemoteAccess` handler.
 pub struct PendingRequestGuard {
     counter: Arc<AtomicUsize>,
 }
@@ -749,7 +749,7 @@ impl PcRegistry {
     }
 
     /// Record how `connection_id` was admitted (owner vs. capped). Called from
-    /// [`handle_request_remote`] when the connection's `RequestRemote` is
+    /// [`handle_request_remote`] when the connection's `RequestRemoteAccess` is
     /// authorized. Kept for the whole signaling connection — see
     /// [`Self::admissions`].
     pub async fn record_admission(&self, connection_id: &str, admission: Admission) {
@@ -789,9 +789,9 @@ impl PcRegistry {
         );
     }
 
-    /// The admission class of `connection_id`, if its `RequestRemote` was
+    /// The admission class of `connection_id`, if its `RequestRemoteAccess` was
     /// authorized on this instance. `None` for a connection that never did an
-    /// authorized `RequestRemote` (e.g. a central/owner management-only connection
+    /// authorized `RequestRemoteAccess` (e.g. a central/owner management-only connection
     /// whose privileged frames are gated by their own source/authz gates).
     pub async fn admission(&self, connection_id: &str) -> Option<Admission> {
         self.admissions
@@ -817,7 +817,7 @@ impl PcRegistry {
 
     /// Drop `connection_id`'s admission record. Called only when the signaling
     /// connection truly ends (`ConnectionRemoved`) or its grant is revoked — never
-    /// on a `CloseControl` PC teardown, so a capped connection stays classified as
+    /// on a `CloseRemoteSession` PC teardown, so a capped connection stays classified as
     /// capped for the life of its signaling connection.
     pub async fn clear_admission(&self, connection_id: &str) {
         let mut registry = self.admissions.write().await;
@@ -928,7 +928,7 @@ impl PcRegistry {
         self.inner.read().await.is_empty()
     }
 
-    /// Mark the start of a new `RequestRemote` handler that has not yet
+    /// Mark the start of a new `RequestRemoteAccess` handler that has not yet
     /// inserted into the registry. The returned [`PendingRequestGuard`]
     /// decrements the counter on `Drop`, so RAII covers normal returns,
     /// `?` early-exits, and panics. The counter is read by
@@ -942,7 +942,7 @@ impl PcRegistry {
         }
     }
 
-    /// Snapshot of in-flight `RequestRemote` handlers (those holding a
+    /// Snapshot of in-flight `RequestRemoteAccess` handlers (those holding a
     /// live [`PendingRequestGuard`]).
     pub fn pending_requests(&self) -> usize {
         self.pending_requests.load(Ordering::SeqCst)
@@ -958,9 +958,9 @@ impl PcRegistry {
     /// 2. `build_peer_connection` with the daemon defaults.
     /// 3. Insert empty-state `PeerConnectionContext` into the map.
     ///
-    /// Init reply (codecs / device list) is intentionally NOT sent
+    /// RemoteAccessInitialized response (codecs / device list) is intentionally NOT sent
     /// here — that requires `MediaCapabilities` from the worker, which
-    /// the caller folds into the Init reply once the worker reports them.
+    /// the caller folds into the RemoteAccessInitialized response once the worker reports them.
     pub async fn create_for_request_remote(
         &self,
         connection_id: &str,
@@ -1379,7 +1379,7 @@ pub(crate) async fn send_cap_directive(
 ///   send happen under the state lock (see `send_cap_directive`).
 ///
 /// Exits when `read_rtcp` returns `Err` — that happens on PC close /
-/// CloseControl, which is the natural lifetime of the task. A noisy
+/// CloseRemoteSession, which is the natural lifetime of the task. A noisy
 /// transient read error logs at warn level and continues, because the
 /// rtp_sender survives single bad reads (e.g. malformed RTCP packet
 /// from a buggy proxy).

@@ -14,7 +14,7 @@ use super::*;
 /// `signaling_proxy::run_signaling_proxy` from head-of-line blocking
 /// behind a slow / stalled DataChannel: a 989 MB transfer that fills
 /// SCTP send buffers no longer delays unrelated typed-IPC traffic
-/// (`ManagerFileListResponse`, `Heartbeat`, ...). The dispatch itself
+/// (`FilesListed`, `Heartbeat`, ...). The dispatch itself
 /// is `O(1)` — registry lookup + non-blocking
 /// `UnboundedSender::send`.
 ///
@@ -33,7 +33,7 @@ use super::*;
 ///
 /// Silent-drop branches at this layer:
 ///
-/// - Unknown `connection_id` — race against `CloseControl`; trace.
+/// - Unknown `connection_id` — race against `CloseRemoteSession`; trace.
 /// - Writer task gone (sender disconnected) — debug. Happens during
 ///   teardown when the context has dropped but a stale payload was
 ///   already in the daemon's `worker_rx` queue.

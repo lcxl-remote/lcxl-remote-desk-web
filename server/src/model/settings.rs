@@ -183,7 +183,7 @@ impl Settings {
 
         // Clamp hand-edited adaptive-resolution knobs to a safe range
         // (warn-log per clamped field). Must happen before any caller
-        // hands the settings to the daemon / router / Init reply so the
+        // hands the settings to the daemon / router / RemoteAccessInitialized response so the
         // browser only ever sees sanitised values.
         settings.virtual_display.sanitize();
 

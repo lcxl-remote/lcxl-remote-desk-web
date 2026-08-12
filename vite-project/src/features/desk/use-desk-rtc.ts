@@ -2,10 +2,10 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { v4 } from 'uuid';
 import {
-    SIGNALING_TYPE_CODE_INIT,
+    SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
     SIGNALING_TYPE_CODE_OFFER,
     SIGNALING_TYPE_CODE_ANSWER,
-    SIGNALING_TYPE_CODE_CANID,
+    SIGNALING_TYPE_CODE_ICE_CANDIDATE,
 } from './constants';
 import type {
     SignalingMessage,
@@ -250,8 +250,8 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
         // session change). Browser-facing DesktopSwitching /
         // DesktopReady signals are no longer emitted, so the
         // tear-down-and-reconnect path that lived here is gone.
-        if (signaling_type === SIGNALING_TYPE_CODE_INIT) {
-            console.log('Received INIT', signaling_data);
+        if (signaling_type === SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED) {
+            console.log('Received REMOTE_ACCESS_INITIALIZED', signaling_data);
             setInitData(signaling_data);
 
         } else if (
@@ -310,7 +310,7 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
                     }
                 }
             }
-        } else if (signaling_type === SIGNALING_TYPE_CODE_CANID) {
+        } else if (signaling_type === SIGNALING_TYPE_CODE_ICE_CANDIDATE) {
             const pc = peerConnection.current;
             if (pc) {
                 const coordinator = coordinatorRef.current;
@@ -391,7 +391,7 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
         pc.onicecandidate = (event) => {
             if (event.candidate !== null) {
                 console.log("[WebRTC] Send ICE canididate:", event.candidate);
-                sendMessage(SIGNALING_TYPE_CODE_CANID, event.candidate, deskId);
+                sendMessage(SIGNALING_TYPE_CODE_ICE_CANDIDATE, event.candidate, deskId);
             }
         };
 

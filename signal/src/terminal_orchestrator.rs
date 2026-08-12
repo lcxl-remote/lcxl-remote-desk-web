@@ -261,7 +261,7 @@ pub async fn run_completion(
         connection_map.as_ref(),
         &browser_connection_id,
         &request_id,
-        SignalingType::TerminalCompleteResult,
+        SignalingType::TerminalCompletionsGenerated,
         &result,
     )
     .await;
@@ -290,7 +290,7 @@ pub async fn run_copilot(
                 forward_map.as_ref(),
                 &forward_browser,
                 &event.request_id,
-                SignalingType::TerminalCopilotEvent,
+                SignalingType::TerminalCopilotUpdated,
                 &event,
             )
             .await;

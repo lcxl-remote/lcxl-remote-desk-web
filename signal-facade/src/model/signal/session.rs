@@ -111,7 +111,7 @@ pub struct RequestRemoteModel {
 
 /// Browser-facing knobs that drive the adaptive-resolution hook. Server
 /// sources these from `Settings.virtual_display.adaptive_*` and ships
-/// them through `InitSignalingData` so each browser session uses the
+/// them through `RemoteAccessInitializedData` so each browser session uses the
 /// host operator's preference without round-tripping a separate REST
 /// query.
 ///
@@ -138,11 +138,11 @@ impl Default for AdaptiveResolutionParams {
     }
 }
 
-/// InitSignalingData is used to initialize signaling data.
+/// RemoteAccessInitializedData is used to initialize signaling data.
 /// desk server -> signaling server -> web browser
 /// See <https://github.com/webrtc-rs/webrtc/blob/254bdd5d970933e847dc000de9545040ce16f19f/webrtc/src/peer_connection/configuration.rs>.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct InitSignalingData {
+pub struct RemoteAccessInitializedData {
     // ICE servers, the value comes from signaling server
     pub ice_servers: Vec<LcxlRTCIceServer>,
     /// User name for signaling.
@@ -261,7 +261,7 @@ pub struct SignalingState {
     pub accept_control: bool,
     /// accept clipboard sync from remote peer
     pub accept_clipboard_sync: bool,
-    /// Session purpose selected during RequestRemote. It is a resource hint only.
+    /// Session purpose selected during RequestRemoteAccess. It is a resource hint only.
     pub purpose: RemoteSessionPurpose,
     /// The validated capability ceiling for this connection, unwrapped from the
     /// `RequestRemoteAuthz` stamp by the host gate. `None` for a central-verified
@@ -277,7 +277,7 @@ pub struct SignalingState {
     pub grant_session_id: Option<String>,
     /// current display info
     pub display_info: DisplayInfo,
-    /// Input mode parsed and frozen when RequestRemote was admitted.
+    /// Input mode parsed and frozen when RequestRemoteAccess was admitted.
     pub resolved_wayland_control_mode: Option<crate::model::desk_settings::LinuxInputControlMode>,
 }
 
@@ -319,7 +319,7 @@ pub enum RemoteDeskTypeEnum {
 
 /// Request remote access model.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct RequestRemote {
+pub struct RequestRemoteAccess {
     pub connection_id: String,
 }
 

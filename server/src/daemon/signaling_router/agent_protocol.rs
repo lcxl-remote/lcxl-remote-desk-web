@@ -21,7 +21,9 @@ pub(super) fn agent_error(
 /// parse error (which would arrive too late to build a graceful
 /// outcome). Descends both the outer `operation.input.kind` and — for
 /// `read_context` — the inner `operation.input.params.kind.kind`.
-pub(super) fn validate_agent_request_kinds(raw: &serde_json::Value) -> Result<(), AgentError> {
+pub(super) fn validate_invoke_agent_capability_kinds(
+    raw: &serde_json::Value,
+) -> Result<(), AgentError> {
     let outer = raw
         .get("operation")
         .and_then(|o| o.get("input"))
@@ -112,7 +114,7 @@ pub(super) fn server_actor() -> ActorRef {
     }
 }
 
-/// Emit an `AgentResponse(AgentOutcome::Err)` back to the control end.
+/// Emit an `AgentCapabilityCompleted(AgentOutcome::Err)` back to the control end.
 /// Business / capability-level failures ride the `signaling_data`
 /// `AgentOutcome`, not `SignalingResponseState`, so the
 /// control-end UI receives the full structured error. Build / serialise
@@ -121,7 +123,7 @@ pub(super) fn emit_agent_error(ctx: &RouterContext, model: &SignalingModel, erro
     let outcome = AgentOutcome::Err(error);
     match SignalingModel::success_response(
         &model.request_id,
-        SignalingType::AgentResponse,
+        SignalingType::AgentCapabilityCompleted,
         None,
         model.from_connection_id.clone(),
         Some(&outcome),
@@ -131,12 +133,12 @@ pub(super) fn emit_agent_error(ctx: &RouterContext, model: &SignalingModel, erro
                 let _ = ctx.outbound_tx.send(text);
             }
             Err(e) => log::warn!(
-                "[router] failed to serialise AgentResponse error: {e} (request_id={})",
+                "[router] failed to serialise AgentCapabilityCompleted error: {e} (request_id={})",
                 model.request_id,
             ),
         },
         Err(e) => log::warn!(
-            "[router] failed to build AgentResponse error: {e} (request_id={})",
+            "[router] failed to build AgentCapabilityCompleted error: {e} (request_id={})",
             model.request_id,
         ),
     }
@@ -163,7 +165,7 @@ pub(super) fn send_diagnose_frame(
     };
     let frame = SignalingModel::new(
         &request_id,
-        SignalingType::DiagnoseEvent,
+        SignalingType::DiagnosisUpdated,
         None,
         to_connection_id,
         Some(data),
@@ -307,15 +309,15 @@ pub(crate) fn send_exec_preview(
     send_notification(
         outbound_tx,
         request_id,
-        SignalingType::ExecPreview,
+        SignalingType::ExecutionPreviewGenerated,
         to_connection_id,
         &preview,
         "ExecPreview",
     );
 }
 
-/// Send an `ExecResult(609)` to the control end as a notification-style frame.
-pub(super) fn send_exec_result(
+/// Send an `ExecutionCompleted(609)` to the control end as a notification-style frame.
+pub(super) fn send_execution_completed(
     outbound_tx: &broadcast::Sender<String>,
     request_id: &str,
     to_connection_id: Option<String>,
@@ -324,10 +326,10 @@ pub(super) fn send_exec_result(
     send_notification(
         outbound_tx,
         request_id,
-        SignalingType::ExecResult,
+        SignalingType::ExecutionCompleted,
         to_connection_id,
         &payload,
-        "ExecResult",
+        "ExecutionCompleted",
     );
 }
 

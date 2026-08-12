@@ -897,7 +897,7 @@ async fn concurrent_offers_mark_first_once() {
 }
 
 /// `PendingRequestGuard` is the RAII vehicle used by the router's
-/// `RequestRemote` branch to suppress N→0 virtual-display detach
+/// `RequestRemoteAccess` branch to suppress N→0 virtual-display detach
 /// while a new browser is mid-`ensure_attached`. Verify the
 /// counter is properly bumped on construction and decremented on
 /// `Drop` (including across nesting and early exits).
@@ -920,7 +920,7 @@ fn pending_request_guard_increments_and_decrements_counter() {
 }
 
 /// Frames addressed to a connection that is not in the registry
-/// (race against `CloseControl` / browser drop) must be silently
+/// (race against `CloseRemoteSession` / browser drop) must be silently
 /// dropped — never panic. The daemon's media-receiver loop runs
 /// for the lifetime of the worker and a single panic there would
 /// kill all media flow.
@@ -1091,7 +1091,7 @@ async fn write_video_frame_paused_i_frame_clears_flag() {
 
 /// `resume_active_media` over an empty registry must be a
 /// silent no-op (no WorkerManager IPC, no panic). Guards the
-/// post-shutdown / pre-first-RequestRemote race window.
+/// post-shutdown / pre-first-RequestRemoteAccess race window.
 #[tokio::test]
 async fn resume_active_media_empty_registry_is_noop() {
     let registry = PcRegistry::new();
@@ -1412,7 +1412,7 @@ async fn write_video_frame_audio_kind_uses_audio_track_slot() {
 }
 
 /// `handle_request_remote` with a populated capabilities snapshot
-/// uses the worker's reported codecs in the Init reply. This is
+/// uses the worker's reported codecs in the RemoteAccessInitialized response. This is
 /// the path the daemon takes once the worker has sent its first
 /// `WorkerToService::Capabilities`.
 #[tokio::test]
@@ -1435,7 +1435,7 @@ async fn handle_request_remote_uses_worker_capabilities_when_present() {
     };
     let model = SignalingModel::new(
         "req-init",
-        SignalingType::RequestRemote,
+        SignalingType::RequestRemoteAccess,
         Some("conn-init".to_string()),
         None,
         Some(
@@ -1472,9 +1472,9 @@ async fn handle_request_remote_uses_worker_capabilities_when_present() {
         .await
         .expect("init reply must be broadcast");
     let reply: SignalingModel = serde_json::from_str(&text).expect("Init JSON must round-trip");
-    assert_eq!(reply.signaling_type, SignalingType::Init);
-    let init: InitSignalingData = reply
-        .get_data::<InitSignalingData>()
+    assert_eq!(reply.signaling_type, SignalingType::RemoteAccessInitialized);
+    let init: RemoteAccessInitializedData = reply
+        .get_data::<RemoteAccessInitializedData>()
         .expect("Init payload present");
     // Worker said Vp9, Av1 → daemon should ship those strings.
     assert_eq!(init.video_encoder_list, vec!["VP9", "AV1"]);
@@ -1495,7 +1495,7 @@ async fn handle_request_remote_falls_back_when_no_capabilities() {
     let worker_mgr = request_test_worker_mgr(&s, &registry);
     let model = SignalingModel::new(
         "req-init-2",
-        SignalingType::RequestRemote,
+        SignalingType::RequestRemoteAccess,
         Some("conn-init-2".to_string()),
         None,
         Some(
@@ -1529,7 +1529,9 @@ async fn handle_request_remote_falls_back_when_no_capabilities() {
 
     let text = outbound_rx.recv().await.expect("init reply");
     let reply: SignalingModel = serde_json::from_str(&text).unwrap();
-    let init: InitSignalingData = reply.get_data::<InitSignalingData>().expect("Init payload");
+    let init: RemoteAccessInitializedData = reply
+        .get_data::<RemoteAccessInitializedData>()
+        .expect("Init payload");
     // Static fallback comes from `list_video_encoder()` /
     // `list_audio_encoder()` — both must be populated regardless
     // of test platform; we only check non-emptiness rather than
@@ -1538,7 +1540,7 @@ async fn handle_request_remote_falls_back_when_no_capabilities() {
     assert!(!init.audio_encoder_list.is_empty());
 }
 
-/// A redeemed-grant `RequestRemote` carries a validated capability ceiling and
+/// A redeemed-grant `RequestRemoteAccess` carries a validated capability ceiling and
 /// a grant-session id; `handle_request_remote` must (a) register the ceiling
 /// with the worker's per-connection map ahead of any worker-bound frame and
 /// (b) stamp all three (`restricted` / `access_ceiling` / `grant_session_id`)
@@ -1565,7 +1567,7 @@ async fn handle_request_remote_stamps_ceiling_and_grant_onto_signaling_state() {
 
     let model = SignalingModel::new(
         "req-grant-1",
-        SignalingType::RequestRemote,
+        SignalingType::RequestRemoteAccess,
         Some("conn-grant-1".to_string()),
         None,
         Some(
@@ -1602,7 +1604,7 @@ async fn handle_request_remote_stamps_ceiling_and_grant_onto_signaling_state() {
     .await
     .expect("handle ok");
 
-    // Drain the Init reply so the broadcast channel does not lag.
+    // Drain the RemoteAccessInitialized response so the broadcast channel does not lag.
     let _ = outbound_rx.recv().await.expect("init reply");
 
     // The worker received the ceiling registration for this connection.
@@ -1644,7 +1646,7 @@ async fn handle_request_remote_stamps_ceiling_and_grant_onto_signaling_state() {
     assert!(registry.grants_up_to_generation(4).await.is_empty());
 }
 
-/// A grant `RequestRemote` (ceiling `Some`) is fail-closed when the daemon has
+/// A grant `RequestRemoteAccess` (ceiling `Some`) is fail-closed when the daemon has
 /// no worker to receive the ceiling registration: `handle_request_remote`
 /// returns an error and registers no connection, so a capped session can never
 /// run without its worker-side cap in place.
@@ -1655,7 +1657,7 @@ async fn handle_request_remote_grant_fails_closed_without_worker() {
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     let model = SignalingModel::new(
         "req-grant-2",
-        SignalingType::RequestRemote,
+        SignalingType::RequestRemoteAccess,
         Some("conn-grant-2".to_string()),
         None,
         Some(
@@ -1703,7 +1705,7 @@ async fn handle_request_remote_grant_fails_closed_without_worker() {
 
 /// Regression: when the worker reports `X264` and `H264` as two
 /// separate concrete encoders (libx264 vs OpenH264), the daemon
-/// must surface both strings in `InitSignalingData::
+/// must surface both strings in `RemoteAccessInitializedData::
 /// video_encoder_list`. Previously `video_codecs` (used for SDP
 /// negotiation) collapsed both onto `MediaCodec::H264`, and the
 /// daemon mapped that back through `media_codec_to_str` to two
@@ -1732,7 +1734,7 @@ async fn handle_request_remote_preserves_x264_h264_distinction_in_encoder_list()
     };
     let model = SignalingModel::new(
         "req-init-3",
-        SignalingType::RequestRemote,
+        SignalingType::RequestRemoteAccess,
         Some("conn-init-3".to_string()),
         None,
         Some(
@@ -1766,7 +1768,9 @@ async fn handle_request_remote_preserves_x264_h264_distinction_in_encoder_list()
 
     let text = outbound_rx.recv().await.expect("init reply");
     let reply: SignalingModel = serde_json::from_str(&text).unwrap();
-    let init: InitSignalingData = reply.get_data::<InitSignalingData>().expect("Init payload");
+    let init: RemoteAccessInitializedData = reply
+        .get_data::<RemoteAccessInitializedData>()
+        .expect("Init payload");
     assert_eq!(
         init.video_encoder_list,
         vec!["X264", "VP9", "H264"],
@@ -1778,14 +1782,14 @@ async fn handle_request_remote_preserves_x264_h264_distinction_in_encoder_list()
 
 /// Regression: the daemon-side PC must publish locally-gathered
 /// ICE candidates back through the signaling channel as
-/// `SignalingType::Canid`. Without this the browser only learns
+/// `SignalingType::IceCandidate`. Without this the browser only learns
 /// about the daemon's transport addresses via peer-reflexive
 /// discovery, which times out after 30 s of `checking` for
 /// multi-m-line PCs (video+audio+DC). The portable mode log
 /// signature was: file-management (DC-only) connected, but the
 /// remote-desktop page consistently failed ICE.
 #[tokio::test]
-async fn local_ice_candidate_forwarder_publishes_canid_to_outbound() {
+async fn local_ice_candidate_forwarder_publishes_ice_candidate_to_outbound() {
     use std::time::Duration;
     use tokio::time::timeout;
 
@@ -1814,29 +1818,29 @@ async fn local_ice_candidate_forwarder_publishes_canid_to_outbound() {
         .await
         .expect("set local desc starts gathering");
 
-    let mut canid_count = 0usize;
+    let mut ice_candidate_count = 0usize;
     let deadline = Duration::from_secs(5);
     loop {
         match timeout(deadline, outbound_rx.recv()).await {
             Ok(Ok(text)) => {
                 let m: SignalingModel =
                     serde_json::from_str(&text).expect("outbound text must be a SignalingModel");
-                if m.signaling_type != SignalingType::Canid {
+                if m.signaling_type != SignalingType::IceCandidate {
                     continue;
                 }
                 assert_eq!(
                     m.to_connection_id.as_deref(),
                     Some("conn-trickle"),
-                    "Canid must target the originating browser connection"
+                    "IceCandidate must target the originating browser connection"
                 );
                 let init: RTCIceCandidateInit = m
                     .get_data::<RTCIceCandidateInit>()
-                    .expect("Canid payload must be RTCIceCandidateInit");
+                    .expect("IceCandidate payload must be RTCIceCandidateInit");
                 assert!(
                     !init.candidate.is_empty(),
                     "forwarded candidate string must be non-empty"
                 );
-                canid_count += 1;
+                ice_candidate_count += 1;
                 // Stop after the first one to keep the test fast;
                 // counting the rest only adds flakiness.
                 break;
@@ -1845,9 +1849,9 @@ async fn local_ice_candidate_forwarder_publishes_canid_to_outbound() {
         }
     }
     assert!(
-        canid_count >= 1,
-        "register_local_ice_candidate_forwarder must publish at least one Canid \
-             after set_local_description triggers gathering; got {canid_count}"
+        ice_candidate_count >= 1,
+        "register_local_ice_candidate_forwarder must publish at least one IceCandidate \
+             after set_local_description triggers gathering; got {ice_candidate_count}"
     );
 }
 
@@ -1856,7 +1860,7 @@ async fn local_ice_candidate_forwarder_publishes_canid_to_outbound() {
 /// (kicked off by the browser's Offer) ships candidates back to the
 /// browser. We exercise this end-to-end by manually triggering
 /// gathering on the registry-stored PC after `handle_request_remote`
-/// returns and asserting Canid messages arrive on `outbound`.
+/// returns and asserting IceCandidate messages arrive on `outbound`.
 #[tokio::test]
 async fn handle_request_remote_registers_ice_candidate_forwarder() {
     use std::time::Duration;
@@ -1868,7 +1872,7 @@ async fn handle_request_remote_registers_ice_candidate_forwarder() {
     let worker_mgr = request_test_worker_mgr(&s, &registry);
     let model = SignalingModel::new(
         "req-init-ice",
-        SignalingType::RequestRemote,
+        SignalingType::RequestRemoteAccess,
         Some("conn-init-ice".to_string()),
         None,
         Some(
@@ -1900,10 +1904,13 @@ async fn handle_request_remote_registers_ice_candidate_forwarder() {
     .await
     .expect("handle ok");
 
-    // Drain the Init reply.
+    // Drain the RemoteAccessInitialized response.
     let init_text = outbound_rx.recv().await.expect("init reply");
     let init_reply: SignalingModel = serde_json::from_str(&init_text).unwrap();
-    assert_eq!(init_reply.signaling_type, SignalingType::Init);
+    assert_eq!(
+        init_reply.signaling_type,
+        SignalingType::RemoteAccessInitialized
+    );
 
     // Now trigger gathering on the PC the registry holds. This is
     // what the Offer handler does in production; we do it directly
@@ -1923,7 +1930,7 @@ async fn handle_request_remote_registers_ice_candidate_forwarder() {
         match timeout(deadline, outbound_rx.recv()).await {
             Ok(Ok(text)) => {
                 let m: SignalingModel = serde_json::from_str(&text).unwrap();
-                if m.signaling_type == SignalingType::Canid {
+                if m.signaling_type == SignalingType::IceCandidate {
                     assert_eq!(m.to_connection_id.as_deref(), Some("conn-init-ice"));
                     got_canid = true;
                     break;
@@ -1934,7 +1941,7 @@ async fn handle_request_remote_registers_ice_candidate_forwarder() {
     }
     assert!(
         got_canid,
-        "handle_request_remote must register the ICE forwarder so gathering ships Canid"
+        "handle_request_remote must register the ICE forwarder so gathering ships IceCandidate"
     );
 }
 
@@ -2007,7 +2014,7 @@ async fn peer_connection_state_change_terminal_removes_registry_entry() {
 
 /// `cleanup_pc` on an unknown connection_id must be a silent no-op:
 /// the on_peer_connection_state_change callback can race a manual
-/// CloseControl, and we don't want one path's success to drag the
+/// CloseRemoteSession, and we don't want one path's success to drag the
 /// other into a panic / error log spam.
 #[tokio::test]
 async fn cleanup_pc_unknown_connection_is_silent_noop() {
@@ -2212,7 +2219,7 @@ async fn cleanup_pc_keeps_supervisor_when_other_pcs_remain() {
 }
 
 /// A held `PendingRequestGuard` represents a new
-/// `RequestRemote` mid-`ensure_attached` that hasn't registered a
+/// `RequestRemoteAccess` mid-`ensure_attached` that hasn't registered a
 /// PC yet. Cleanup of an old PC during this window must NOT detach
 /// the IDD — the new connection is about to use it.
 #[tokio::test]
@@ -2239,7 +2246,7 @@ async fn cleanup_pc_keeps_supervisor_when_pending_request_active() {
         "SWD\\TEST\\TEST",
     ));
 
-    // Simulate a new RequestRemote in the ensure_attached window:
+    // Simulate a new RequestRemoteAccess in the ensure_attached window:
     // PC not yet created, but a pending guard is live.
     let _pending = registry.enter_pending();
 
@@ -2497,7 +2504,7 @@ async fn cleanup_pc_skips_supervisor_when_none() {
 }
 
 /// Codec round-trip: every IPC `MediaCodec` must map to a
-/// non-empty string for the Init reply path. Pin so adding a new
+/// non-empty string for the RemoteAccessInitialized response path. Pin so adding a new
 /// codec to the IPC enum forces an update on the daemon side.
 #[test]
 fn media_codec_to_str_is_total_over_known_codecs() {
@@ -2989,7 +2996,7 @@ async fn cleanup_pc_unindexes_grant_connection() {
 /// physically end an open **terminal** connection of that grant — not just its
 /// PC-bearing connections. The terminal WS holds no PC, so `cleanup_pc`'s PC /
 /// media steps are no-ops for it; the terminal-aware branch must still send the
-/// worker a `CloseTerminalRequest` (kill the shell) and a `SetConnectionCeiling`
+/// worker a `CloseTerminal` (kill the shell) and a `SetConnectionCeiling`
 /// clear, and drop the connection's admission / terminal mark / grant index.
 /// Without this, a revoked code's terminals would keep running.
 #[tokio::test]
@@ -3020,7 +3027,7 @@ async fn close_grant_session_tears_down_terminal_connection() {
     let mut saw_ceiling_clear = false;
     while let Ok(msg) = ipc_rx.try_recv() {
         match msg {
-            ServiceToWorker::CloseTerminalRequest(p) if p.connection_id == "term-1" => {
+            ServiceToWorker::CloseTerminal(p) if p.connection_id == "term-1" => {
                 saw_close = true;
             }
             ServiceToWorker::SetConnectionCeiling(p)
@@ -3114,7 +3121,7 @@ async fn force_disconnect_closes_terminal_without_peer_connection() {
     while let Ok(message) = ipc_rx.try_recv() {
         if matches!(
             message,
-            ServiceToWorker::CloseTerminalRequest(payload)
+            ServiceToWorker::CloseTerminal(payload)
                 if payload.connection_id == "term-host"
         ) {
             saw_close_terminal = true;
@@ -3123,10 +3130,10 @@ async fn force_disconnect_closes_terminal_without_peer_connection() {
     assert!(saw_close_terminal);
 }
 
-/// A capped connection's admission record survives a `CloseControl` PC teardown
+/// A capped connection's admission record survives a `CloseRemoteSession` PC teardown
 /// (via `cleanup_pc`) and is only dropped when the signaling connection truly
 /// ends (`ConnectionRemoved` → `handle_connection_removed`). This closes the
-/// post-teardown escalation where a capped client sends `CloseControl` to drop
+/// post-teardown escalation where a capped client sends `CloseRemoteSession` to drop
 /// its PC and then reuses the same connection id for owner-plane frames: the
 /// first door still classifies it as capped.
 #[tokio::test]
@@ -3151,7 +3158,7 @@ async fn admission_survives_close_control_but_cleared_on_connection_removed() {
     let settings = actix_web::web::Data::new(shared);
     let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
 
-    // CloseControl-style teardown drops the PC but must NOT clear the admission.
+    // CloseRemoteSession-style teardown drops the PC but must NOT clear the admission.
     cleanup_pc(&registry, &worker_mgr, None, "conn-cap", "close_control").await;
     assert!(registry.get("conn-cap").await.is_none(), "PC torn down");
     assert!(
@@ -3159,7 +3166,7 @@ async fn admission_survives_close_control_but_cleared_on_connection_removed() {
             registry.admission("conn-cap").await,
             Some(Admission::Capped(_))
         ),
-        "admission must survive a CloseControl PC teardown"
+        "admission must survive a CloseRemoteSession PC teardown"
     );
 
     // ConnectionRemoved ends the signaling connection → admission cleared.
@@ -3214,7 +3221,7 @@ async fn register_data_channel_router_smoke() {
 /// `write_cursor_data` for an unknown connection_id is a silent
 /// no-op (no panic). Critical: the IPC receiver loop must keep
 /// draining cursor packets even after a connection has been
-/// closed (race against `CloseControl`).
+/// closed (race against `CloseRemoteSession`).
 #[tokio::test]
 async fn write_cursor_data_unknown_connection_is_silent_noop() {
     let registry = PcRegistry::new();
@@ -3285,7 +3292,7 @@ async fn write_cursor_data_invalid_utf8_is_silent_noop() {
 // ============== write_clipboard_data ==============
 
 /// `write_clipboard_data` for an unknown connection_id is a silent
-/// no-op — race against `CloseControl` must not panic.
+/// no-op — race against `CloseRemoteSession` must not panic.
 #[tokio::test]
 async fn write_clipboard_data_unknown_connection_is_silent_noop() {
     let registry = PcRegistry::new();
@@ -3387,7 +3394,7 @@ async fn write_clipboard_data_invalid_utf8_is_silent_noop() {
 // ============== write_file_transfer_data ==============
 
 /// `write_file_transfer_data` for an unknown connection_id is a
-/// silent no-op — race against `CloseControl` must not panic.
+/// silent no-op — race against `CloseRemoteSession` must not panic.
 #[tokio::test]
 async fn write_file_transfer_data_unknown_connection_is_silent_noop() {
     let registry = PcRegistry::new();
@@ -3478,7 +3485,7 @@ async fn write_file_transfer_data_binary_no_dc_is_silent_noop() {
 /// Pre-fix the daemon's main IPC loop awaited `dc.send` for each
 /// chunk, and a slow / blocked DataChannel head-of-line blocked
 /// every other `WorkerToService` variant — including the
-/// `ManagerFileListResponse` the file manager UI was waiting on,
+/// `FilesListed` the file manager UI was waiting on,
 /// causing 30-second `deadline elapsed` errors.
 ///
 /// Post-fix the dispatch is `O(1)` (registry lookup + non-blocking
@@ -3929,11 +3936,7 @@ fn settings_with_security(
     (shared, policy)
 }
 
-fn require_control_model(
-    from_connection_id: &str,
-    accept: bool,
-    accept_clipboard_sync: bool,
-) -> SignalingModel {
+fn require_control_model(from_connection_id: &str, accept_clipboard_sync: bool) -> SignalingModel {
     SignalingModel::new(
         "req-rc",
         SignalingType::RequireControl,
@@ -3941,12 +3944,22 @@ fn require_control_model(
         None,
         Some(
             serde_json::to_value(SignalRequestControlData {
-                accept,
                 accept_file_transfer: false,
                 accept_clipboard_sync,
             })
             .unwrap(),
         ),
+        None,
+    )
+}
+
+fn release_control_model(from_connection_id: &str) -> SignalingModel {
+    SignalingModel::new(
+        "req-release",
+        SignalingType::ReleaseControl,
+        Some(from_connection_id.to_string()),
+        None,
+        None,
         None,
     )
 }
@@ -4010,7 +4023,7 @@ async fn tearing_down_a_connection_denies_its_pending_approval() {
 
 /// Auto-allow happy path: settings.security.allow_remote_control =
 /// Some(true) + browser asks for both control and clipboard. State
-/// flips, daemon emits AcceptControl back through outbound.
+/// flips, daemon emits ControlAccepted back through outbound.
 #[tokio::test]
 async fn handle_require_control_auto_allows_and_emits_accept() {
     let registry = PcRegistry::new();
@@ -4029,17 +4042,17 @@ async fn handle_require_control_auto_allows_and_emits_accept() {
         .await
         .expect("seed pc");
 
-    let model = require_control_model("conn-rc", true, true);
+    let model = require_control_model("conn-rc", true);
     handle_require_control(&registry, &outbound_tx, &policy, &hub, &model)
         .await
         .expect("handle ok");
 
-    let text = outbound_rx.recv().await.expect("AcceptControl reply");
+    let text = outbound_rx.recv().await.expect("ControlAccepted reply");
     let reply: SignalingModel = serde_json::from_str(&text).expect("decode reply");
     assert_eq!(
         reply.signaling_type,
-        SignalingType::AcceptControl,
-        "expected AcceptControl, got {:?}",
+        SignalingType::ControlAccepted,
+        "expected ControlAccepted, got {:?}",
         reply.signaling_type,
     );
     let ctx = registry.get("conn-rc").await.unwrap();
@@ -4051,7 +4064,7 @@ async fn handle_require_control_auto_allows_and_emits_accept() {
     );
 }
 
-/// Control denied via settings: state stays false, DenyControl
+/// Control denied via settings: state stays false, ControlDenied
 /// reply. Subsequent mouse / keyboard IPC must remain blocked
 /// because the daemon's permission gate reads from the same state.
 #[tokio::test]
@@ -4072,17 +4085,17 @@ async fn handle_require_control_auto_denies_and_emits_deny() {
         .await
         .expect("seed pc");
 
-    let model = require_control_model("conn-deny", true, false);
+    let model = require_control_model("conn-deny", false);
     handle_require_control(&registry, &outbound_tx, &policy, &hub, &model)
         .await
         .expect("handle ok");
 
-    let text = outbound_rx.recv().await.expect("DenyControl reply");
+    let text = outbound_rx.recv().await.expect("ControlDenied reply");
     let reply: SignalingModel = serde_json::from_str(&text).expect("decode");
     assert_eq!(
         reply.signaling_type,
-        SignalingType::DenyControl,
-        "expected DenyControl, got {:?}",
+        SignalingType::ControlDenied,
+        "expected ControlDenied, got {:?}",
         reply.signaling_type,
     );
     let ctx = registry.get("conn-deny").await.unwrap();
@@ -4128,7 +4141,7 @@ async fn handle_require_control_meets_ceiling_and_denies_when_ceiling_denies() {
         st.grant_session_id = Some("GS-cap".to_string());
     }
 
-    let model = require_control_model("conn-cap", true, true);
+    let model = require_control_model("conn-cap", true);
     handle_require_control(&registry, &outbound_tx, &policy, &hub, &model)
         .await
         .expect("handle ok");
@@ -4137,7 +4150,7 @@ async fn handle_require_control_meets_ceiling_and_denies_when_ceiling_denies() {
     let reply: SignalingModel = serde_json::from_str(&text).expect("decode");
     assert_eq!(
         reply.signaling_type,
-        SignalingType::DenyControl,
+        SignalingType::ControlDenied,
         "ceiling denial must override an allowing global"
     );
     let s = ctx.read().await.signaling_state.read().await.clone();
@@ -4145,18 +4158,12 @@ async fn handle_require_control_meets_ceiling_and_denies_when_ceiling_denies() {
     assert!(!s.accept_clipboard_sync, "clipboard must stay false");
 }
 
-/// Release path: browser sends RequireControl{accept=false} to
-/// release a previously-granted control. State goes false +
-/// CloseControl reply. The short-circuit helper must NOT
-/// short-circuit the release (would leave the worker stuck with
-/// accept_control=true) — covered by `should_short_circuit_*`
-/// helper tests in service::signaling, but verified end-to-end here.
+/// Release path uses its own request and response types while keeping the PC alive.
 #[tokio::test]
-async fn handle_require_control_release_emits_close_and_resets_state() {
+async fn handle_release_control_emits_result_and_resets_state() {
     let registry = PcRegistry::new();
     let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
-    let (settings, policy) = settings_with_security(Some(true), Some(true));
-    let hub = Arc::new(HostControlHub::new_local());
+    let (settings, _policy) = settings_with_security(Some(true), Some(true));
 
     let request_remote = RequestRemoteModel {
         requested_wayland_control_mode: Some("auto".to_string()),
@@ -4177,17 +4184,17 @@ async fn handle_require_control_release_emits_close_and_resets_state() {
         s.accept_clipboard_sync = true;
     }
 
-    let model = require_control_model("conn-release", false, false);
-    handle_require_control(&registry, &outbound_tx, &policy, &hub, &model)
+    let model = release_control_model("conn-release");
+    handle_release_control(&registry, &outbound_tx, &model)
         .await
         .expect("handle ok");
 
-    let text = outbound_rx.recv().await.expect("CloseControl reply");
+    let text = outbound_rx.recv().await.expect("ControlReleased reply");
     let reply: SignalingModel = serde_json::from_str(&text).expect("decode");
     assert_eq!(
         reply.signaling_type,
-        SignalingType::CloseControl,
-        "expected CloseControl, got {:?}",
+        SignalingType::ControlReleased,
+        "expected ControlReleased, got {:?}",
         reply.signaling_type,
     );
     let s = ctx.read().await.signaling_state.read().await.clone();
@@ -4199,19 +4206,17 @@ async fn handle_require_control_release_emits_close_and_resets_state() {
 }
 
 /// Regression: releasing control must NEVER prompt the host, even when
-/// `allow_remote_control = None` (the default "ask" mode). The browser sends
-/// RequireControl{accept=false} when the user clicks "cancel control"; if the
-/// release path consulted the approval hub it would pop a spurious
+/// `allow_remote_control = None` (the default "ask" mode). If the release path
+/// consulted the approval hub it would pop a spurious
 /// authorization dialog and block on the UI-readiness probe with no Tauri
 /// shell connected. Asserting it resolves well under the probe timeout proves
 /// the hub was never consulted.
 #[tokio::test]
-async fn handle_require_control_release_does_not_prompt_when_ask_mode() {
+async fn handle_release_control_does_not_prompt_when_ask_mode() {
     let registry = PcRegistry::new();
     let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
     // None = "ask the user" — the path that previously triggered the dialog.
-    let (settings, policy) = settings_with_security(None, None);
-    let hub = Arc::new(HostControlHub::new_local());
+    let (settings, _policy) = settings_with_security(None, None);
 
     let request_remote = RequestRemoteModel {
         requested_wayland_control_mode: Some("auto".to_string()),
@@ -4230,24 +4235,24 @@ async fn handle_require_control_release_does_not_prompt_when_ask_mode() {
         s.accept_clipboard_sync = true;
     }
 
-    let model = require_control_model("conn-ask-release", false, false);
+    let model = release_control_model("conn-ask-release");
     // Must resolve promptly: the real UI-readiness probe is 10s, so a 1s
     // budget fails loudly if the release ever routes through the hub.
     let model_ref = &model;
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        handle_require_control(&registry, &outbound_tx, &policy, &hub, model_ref),
+        handle_release_control(&registry, &outbound_tx, model_ref),
     )
     .await
     .expect("release must not block on the approval hub")
     .expect("handle ok");
 
-    let text = outbound_rx.recv().await.expect("CloseControl reply");
+    let text = outbound_rx.recv().await.expect("ControlReleased reply");
     let reply: SignalingModel = serde_json::from_str(&text).expect("decode");
     assert_eq!(
         reply.signaling_type,
-        SignalingType::CloseControl,
-        "expected CloseControl, got {:?}",
+        SignalingType::ControlReleased,
+        "expected ControlReleased, got {:?}",
         reply.signaling_type,
     );
     let s = ctx.read().await.signaling_state.read().await.clone();
@@ -4261,7 +4266,7 @@ async fn handle_require_control_release_does_not_prompt_when_ask_mode() {
 /// Re-grant of an already-accepted control short-circuits — the
 /// helper returns true without prompting the user (would race
 /// against any in-flight Tauri dialog otherwise). State stays
-/// true, AcceptControl reply emitted.
+/// true, ControlAccepted reply emitted.
 #[tokio::test]
 async fn handle_require_control_regrant_short_circuits() {
     let registry = PcRegistry::new();
@@ -4290,7 +4295,7 @@ async fn handle_require_control_regrant_short_circuits() {
         s.accept_clipboard_sync = true;
     }
 
-    let model = require_control_model("conn-regrant", true, true);
+    let model = require_control_model("conn-regrant", true);
     // Short timeout so a regression that bypasses the
     // short-circuit and falls into the hub call (which would
     // never complete in this test fixture) fails loudly.
@@ -4302,14 +4307,14 @@ async fn handle_require_control_regrant_short_circuits() {
     .expect("handle_require_control must short-circuit, not block on hub")
     .expect("handle ok");
 
-    let text = outbound_rx.recv().await.expect("AcceptControl reply");
+    let text = outbound_rx.recv().await.expect("ControlAccepted reply");
     let reply: SignalingModel = serde_json::from_str(&text).expect("decode");
-    assert_eq!(reply.signaling_type, SignalingType::AcceptControl);
+    assert_eq!(reply.signaling_type, SignalingType::ControlAccepted);
 }
 
 /// RequireControl for an unknown `connection_id` returns an error
 /// (browser sent a grant for a PC the daemon never created — most
-/// likely the matching RequestRemote was rejected upstream). The
+/// likely the matching RequestRemoteAccess was rejected upstream). The
 /// router relays the error to the upstream signaling so the
 /// browser can re-issue cleanly.
 #[tokio::test]
@@ -4319,7 +4324,7 @@ async fn handle_require_control_unknown_connection_errors() {
     let (_settings, policy) = settings_with_security(Some(true), Some(true));
     let hub = Arc::new(HostControlHub::new_local());
 
-    let model = require_control_model("ghost", true, true);
+    let model = require_control_model("ghost", true);
     let result = handle_require_control(&registry, &outbound_tx, &policy, &hub, &model).await;
     assert!(result.is_err(), "unknown connection must surface an error");
 }

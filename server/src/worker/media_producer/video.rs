@@ -34,7 +34,7 @@ pub(super) async fn video_pipeline_loop(
     );
 
     // Guard against a stale capability snapshot: an IDD virtual display can be
-    // advertised in INIT (and chosen by the client) yet be gone by capture
+    // advertised in REMOTE_ACCESS_INITIALIZED (and chosen by the client) yet be gone by capture
     // time. Substitute a live, capturable display instead of hard-erroring,
     // mirroring the input dispatcher's geometry fallback.
     if !merged_settings.video_device_name.is_empty()

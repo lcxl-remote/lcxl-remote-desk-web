@@ -68,7 +68,7 @@ pub(super) fn build_virtual_display_response(
             };
             SignalingModel::success_response(
                 &payload.request_id,
-                SignalingType::ChangeDisplaySettings,
+                SignalingType::DisplaySettingsChanged,
                 None,
                 connection_id,
                 Some(&response),
@@ -76,7 +76,7 @@ pub(super) fn build_virtual_display_response(
         }
         VirtualDisplayModeOutcome::Failed(reason) => SignalingModel::error(
             &payload.request_id,
-            SignalingType::ChangeDisplaySettings,
+            SignalingType::DisplaySettingsChanged,
             None,
             connection_id,
             DeskErrorCode::INVALID_STATE,
@@ -92,7 +92,7 @@ pub(super) fn build_virtual_display_response(
 ///
 /// `from_connection_id` is left `None` (the daemon is the responder
 /// here, not a peer browser); `to_connection_id` is `Option<String>`
-/// because manager-plane / `ListTerminal` requests can be HTTP-API-
+/// because manager-plane / `ListTerminalCommands` requests can be HTTP-API-
 /// triggered without an originating browser PC — in that case the
 /// signal/manager server matches the response by `request_id` alone
 /// (see `signal-facade::model::connection::request_callback_map`).
@@ -131,7 +131,7 @@ pub(super) fn send_manager_response<T>(
 
 /// Build a server-initiated `new_request` `SignalingModel` (no `request_id`
 /// correlation — the daemon mints a fresh one inside `new_request`)
-/// for terminal-plane notifications (`ReplyFromTerminal`,
+/// for terminal-plane notifications (`TerminalOutputProduced`,
 /// `TerminalClosed`) and broadcast it to the browser via
 /// `outbound_tx`. Build / serialise failures are non-fatal —
 /// log + drop, no panic on the bus. Mirrors the shape

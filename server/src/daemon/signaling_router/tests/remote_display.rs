@@ -1,7 +1,7 @@
 use super::routing::make_change_display_settings_model;
 use super::*;
 
-// ===== RequestRemote virtual-display lifecycle =====
+// ===== RequestRemoteAccess virtual-display lifecycle =====
 
 pub(super) fn make_request_remote_model(connection_id: &str) -> SignalingModel {
     make_request_remote_model_with_purpose(connection_id, RemoteSessionPurpose::RemoteDesktop)
@@ -14,7 +14,7 @@ pub(super) fn make_request_remote_model_with_purpose(
     use desk_signal_facade::model::signal::RequestRemoteModel;
     SignalingModel::new(
         "req-vd-lazy",
-        SignalingType::RequestRemote,
+        SignalingType::RequestRemoteAccess,
         Some(connection_id.to_string()),
         None,
         Some(
@@ -187,7 +187,7 @@ pub(super) async fn request_remote_invokes_ensure_when_enabled_and_supervisor_at
 
 /// Provider returns NotSupported: ensure_attached resolves as
 /// Unavailable instantly and the route falls through to the
-/// capabilities-without-IDD Init reply. PC must still be
+/// capabilities-without-IDD RemoteAccessInitialized response. PC must still be
 /// registered.
 #[tokio::test]
 pub(super) async fn request_remote_continues_when_provider_not_supported() {

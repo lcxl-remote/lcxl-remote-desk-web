@@ -29,7 +29,11 @@ use utoipa_repr::ToSchema_repr;
 pub enum SignalingType {
     /// Heartbeat for keeping WebSocket alive through reverse proxies
     #[wincode(tag = 1)]
-    Heartbeat = 1,
+    SendHeartbeat = 1,
+
+    /// Response to [`Self::SendHeartbeat`].
+    #[wincode(tag = 2)]
+    HeartbeatAcknowledged = 2,
 
     // /// API version, should not be used
     // Version = 11,
@@ -39,7 +43,7 @@ pub enum SignalingType {
 
     /// Response session list
     #[wincode(tag = 22)]
-    ConnectionList = 22,
+    ConnectionsFetched = 22,
 
     /// Signaling server → Server peers: a connection has just left the
     /// server's connection map. The signaling server fans this out
@@ -54,40 +58,40 @@ pub enum SignalingType {
 
     /// WebRTC request remote access
     #[wincode(tag = 100)]
-    RequestRemote = 100,
+    RequestRemoteAccess = 100,
     /// WebRTC init signaling type
     #[wincode(tag = 101)]
-    Init = 101,
+    RemoteAccessInitialized = 101,
     /// WebRTC offer signaling type
     #[wincode(tag = 102)]
     Offer = 102,
     /// WebRTC answer signaling type
     #[wincode(tag = 103)]
     Answer = 103,
-    /// WebRTC CANID signaling type
+    /// WebRTC IceCandidate signaling type
     #[wincode(tag = 104)]
-    Canid = 104,
+    IceCandidate = 104,
 
     #[wincode(tag = 201)]
     RequireControl = 201,
     #[wincode(tag = 202)]
-    AcceptControl = 202,
+    ControlAccepted = 202,
     #[wincode(tag = 203)]
-    DenyControl = 203,
+    ControlDenied = 203,
     #[wincode(tag = 204)]
-    CloseControl = 204,
+    ReleaseControl = 204,
     #[wincode(tag = 205)]
     ChangeDisplaySettings = 205,
 
     /// Enable or disable private screen mode
     #[wincode(tag = 206)]
-    EnablePrivateScreen = 206,
+    SetPrivateScreenVisibility = 206,
     /// Private screen state changed notification
     #[wincode(tag = 207)]
     PrivateScreenStateChanged = 207,
     /// Audio playback error notification
     #[wincode(tag = 208)]
-    AudioPlaybackError = 208,
+    AudioPlaybackFailed = 208,
 
     /// Host (desk server) → central brain (manager) over its regular `Server`
     /// upstream: a request to mint a temporary support code for this connection's
@@ -125,19 +129,19 @@ pub enum SignalingType {
 
     /// Host → central durable mirror update for emergency remote-access lock.
     #[wincode(tag = 213)]
-    HostRemoteAccessLockRequest = 213,
+    UpdateRemoteAccessLock = 213,
 
     /// Central → host acknowledgement of a committed lock-mirror update.
     #[wincode(tag = 214)]
-    HostRemoteAccessLockAck = 214,
+    RemoteAccessLockUpdated = 214,
 
     /// Host → central request to close one browser peer after local teardown.
     #[wincode(tag = 215)]
-    TerminateRemotePeerRequest = 215,
+    TerminateRemotePeer = 215,
 
     /// Central → host delivery outcome for a peer termination request.
     #[wincode(tag = 216)]
-    TerminateRemotePeerAck = 216,
+    RemotePeerTerminationResolved = 216,
 
     /// Host → controller notification for a streaming, blocked, or failed
     /// capture/encoder pipeline.
@@ -149,24 +153,44 @@ pub enum SignalingType {
     #[wincode(tag = 218)]
     RetryMediaPipeline = 218,
 
+    /// Response to [`Self::ReleaseControl`].
+    #[wincode(tag = 219)]
+    ControlReleased = 219,
+
+    /// Response to [`Self::ChangeDisplaySettings`].
+    #[wincode(tag = 220)]
+    DisplaySettingsChanged = 220,
+
+    /// Tear down the peer connection and all per-connection resources.
+    #[wincode(tag = 221)]
+    CloseRemoteSession = 221,
+
+    /// Response to [`Self::SetPrivateScreenVisibility`].
+    #[wincode(tag = 222)]
+    PrivateScreenVisibilitySet = 222,
+
+    /// Response to [`Self::RetryMediaPipeline`].
+    #[wincode(tag = 223)]
+    MediaPipelineRetryCompleted = 223,
+
     #[wincode(tag = 301)]
     UpdateDeskSettings = 301,
 
     #[wincode(tag = 10003)]
-    ManagerSystemInfo = 10003,
+    GetSystemInfo = 10003,
     #[wincode(tag = 10004)]
-    ManagerSystemStatue = 10004,
+    SystemInfoRetrieved = 10004,
 
     #[wincode(tag = 10005)]
-    ManagerFileList = 10005,
+    ListFiles = 10005,
     #[wincode(tag = 10006)]
-    ManagerFileDelete = 10006,
+    DeleteFile = 10006,
     /// Start terminal
     #[wincode(tag = 10007)]
     StartTerminal = 10007,
     /// Send data to terminal
     #[wincode(tag = 10008)]
-    SendDataToTerminal = 10008,
+    SendTerminalInput = 10008,
     /// Resize terminal
     #[wincode(tag = 10009)]
     ResizeTerminal = 10009,
@@ -175,16 +199,28 @@ pub enum SignalingType {
     CloseTerminal = 10010,
     /// Reply from terminal
     #[wincode(tag = 10011)]
-    ReplyFromTerminal = 10011,
+    TerminalOutputProduced = 10011,
     /// List terminal
     #[wincode(tag = 10012)]
-    ListTerminal = 10012,
+    ListTerminalCommands = 10012,
     /// Terminal started
     #[wincode(tag = 10013)]
     TerminalStarted = 10013,
     /// Terminal closed
     #[wincode(tag = 10014)]
     TerminalClosed = 10014,
+
+    /// Response to [`Self::ListFiles`].
+    #[wincode(tag = 10015)]
+    FilesListed = 10015,
+
+    /// Response to [`Self::DeleteFile`].
+    #[wincode(tag = 10016)]
+    FileDeleted = 10016,
+
+    /// Response to [`Self::ListTerminalCommands`].
+    #[wincode(tag = 10017)]
+    TerminalCommandsListed = 10017,
 
     /// ServiceDaemon → Browser: desktop is switching, WebRTC will drop shortly
     #[wincode(tag = 500)]
@@ -196,53 +232,53 @@ pub enum SignalingType {
     /// AI agent capability request (control end / orchestrator → host).
     /// Carries `desk_agent_protocol::AgentRequestData` as signaling_data;
     /// the daemon stamps the trusted fields and forwards a typed
-    /// `ServiceToWorker::AgentRequest` to the worker.
+    /// `ServiceToWorker::InvokeAgentCapability` to the worker.
     #[wincode(tag = 600)]
-    AgentRequest = 600,
+    InvokeAgentCapability = 600,
     /// AI agent capability response (host → control end). Carries
     /// `desk_agent_protocol::AgentOutcome` as signaling_data.
     #[wincode(tag = 601)]
-    AgentResponse = 601,
+    AgentCapabilityCompleted = 601,
 
     /// AI Diagnose request (control end → host). Carries
     /// `desk_agent_protocol::diagnose::DiagnoseRequestData` as signaling_data;
     /// the daemon runs the diagnose orchestrator (Default / DeskServer) or
     /// replies `FEATURE_UNAVAILABLE` (ServiceDaemon).
     #[wincode(tag = 602)]
-    Diagnose = 602,
+    DiagnoseDevice = 602,
     /// AI Diagnose streamed event (host → control end). Carries
     /// `desk_agent_protocol::diagnose::DiagnoseEvent` as signaling_data.
     /// Notification-style (`response_state = None`) so multiple frames reach
     /// the control end instead of being consumed by the one-shot callback map.
     #[wincode(tag = 603)]
-    DiagnoseEvent = 603,
+    DiagnosisUpdated = 603,
     /// AI Diagnose cancellation (control end → host / manager). Sent when the
     /// operator starts over while a diagnosis is still running. Carries no
     /// payload; the message `request_id` correlates the cancelled diagnosis so
     /// pending collection, approval, and model work can be stopped and audited.
     #[wincode(tag = 604)]
-    DiagnoseCancel = 604,
+    CancelDiagnosis = 604,
 
     /// AI confirmed-execution: classify/preview request (control end → host).
     /// Carries `desk_agent_protocol::exec::ConfirmExecData` as signaling_data;
     /// the daemon classifies the command and replies with `ExecPreview`.
     #[wincode(tag = 605)]
-    ConfirmExec = 605,
+    PreviewExecution = 605,
     /// AI confirmed-execution: preview result (host → control end). Carries
     /// `desk_agent_protocol::exec::ExecPreview`. Notification-style
     /// (`response_state = None`); daemon-owned, never accepted inbound.
     #[wincode(tag = 606)]
-    ExecPreview = 606,
+    ExecutionPreviewGenerated = 606,
     /// AI confirmed-execution: approve / reject a previewed execution
     /// (control end → host). Carries `desk_agent_protocol::exec::ResolveExecData`.
     #[wincode(tag = 607)]
-    ResolveExec = 607,
+    ResolveExecution = 607,
     /// AI confirmed-execution: execution result (host → control end). Carries
     /// `desk_agent_protocol::exec::ExecResultPayload` (tagged with
     /// `exec_request_id` for row backfill). Notification-style
     /// (`response_state = None`); daemon-owned, never accepted inbound.
     #[wincode(tag = 609)]
-    ExecResult = 609,
+    ExecutionCompleted = 609,
     /// AI audit event (host → manager only). Carries
     /// `desk_agent_protocol::audit::AiAuditEventPayload`. Reported by a desk
     /// server to its manager for persistence into `ai_audit_event`; consumed by
@@ -250,7 +286,7 @@ pub enum SignalingType {
     /// re-enter the control-end broadcast lane). Notification-style
     /// (`response_state = None`).
     #[wincode(tag = 608)]
-    AiAuditEvent = 608,
+    ReportAiAuditEvent = 608,
     /// Command-template sync (manager → desk-server daemon only). Carries
     /// `desk_agent_protocol::command_template::CommandTemplateSyncPayload`: the
     /// full enabled operator template set. The manager pushes it on link
@@ -260,7 +296,7 @@ pub enum SignalingType {
     /// drops it from any other source). Notification-style
     /// (`response_state = None`).
     #[wincode(tag = 610)]
-    CommandTemplateSync = 610,
+    SyncCommandTemplates = 610,
     /// Remote-collect request (manager → desk-server daemon only). Carries
     /// `desk_agent_protocol::diagnose::CollectRequest`. In the thin-edge model
     /// the diagnose orchestrator runs centrally; the manager pushes this over the
@@ -269,14 +305,14 @@ pub enum SignalingType {
     /// source gate drops it from any other source). Notification-style
     /// (`response_state = None`).
     #[wincode(tag = 611)]
-    CollectRequest = 611,
+    CollectEvidence = 611,
     /// Remote-collect response (desk-server daemon → manager only). Carries
     /// `desk_agent_protocol::diagnose::CollectResponse` (a chunk of the evidence
     /// snapshot or a wholesale error). Consumed by the manager's orchestrator
     /// pending store, never relayed to a browser or another peer. Notification-
     /// style (`response_state = None`).
     #[wincode(tag = 612)]
-    CollectResponse = 612,
+    EvidenceCollectionUpdated = 612,
 
     /// Fleet batch-execution request (manager → desk-server daemon only).
     /// Carries `AuthorizedControlPayload<desk_agent_protocol::exec::ExecPlan>` —
@@ -289,14 +325,14 @@ pub enum SignalingType {
     /// a protocol error and is swallowed. Notification-style
     /// (`response_state = None`).
     #[wincode(tag = 613)]
-    EdgeExecRequest = 613,
+    ExecuteEdgePlan = 613,
     /// Fleet batch-execution result (desk-server daemon → manager only). Carries
     /// `desk_agent_protocol::edge_exec::EdgeExecResultPayload` (the per-attempt
     /// `request_id` + a structured `EdgeExecDisposition`). Consumed by the
     /// manager's execution pending store, never relayed to a browser or another
     /// peer. Notification-style (`response_state = None`).
     #[wincode(tag = 614)]
-    EdgeExecResult = 614,
+    EdgeExecutionCompleted = 614,
 
     /// Remote read-tool request (manager owner instance → desk-server daemon
     /// only). Carries `desk_agent_protocol::remote_tool::RemoteToolRequest`: one
@@ -305,14 +341,14 @@ pub enum SignalingType {
     /// the edge's session; a client sending it inbound to the signaling server is a
     /// protocol error and is swallowed. Notification-style (`response_state = None`).
     #[wincode(tag = 615)]
-    RemoteToolRequest = 615,
+    InvokeRemoteTool = 615,
     /// Remote read-tool response (desk-server daemon → manager owner instance
     /// only). Carries `desk_agent_protocol::remote_tool::RemoteToolResponse` (a
     /// chunk of the already-redacted result or a wholesale error). Consumed by the
     /// manager's remote-tool pending store, never relayed to a browser or another
     /// peer. Notification-style (`response_state = None`).
     #[wincode(tag = 616)]
-    RemoteToolResponse = 616,
+    RemoteToolOutputUpdated = 616,
 
     /// In-terminal AI copilot request (control end → host / manager). Carries
     /// `desk_agent_protocol::terminal_copilot::TerminalCopilotAsk` as
@@ -321,18 +357,18 @@ pub enum SignalingType {
     /// server (no authorizer) it relays to the host that runs the copilot. The
     /// target device rides the outer `to_connection_id`, not the payload.
     #[wincode(tag = 617)]
-    TerminalCopilotAsk = 617,
+    AskTerminalCopilot = 617,
     /// In-terminal AI copilot streamed event (host / manager → control end).
     /// Carries `desk_agent_protocol::terminal_copilot::TerminalCopilotEvent`.
     /// Notification-style (`response_state = None`) so multiple frames reach the
     /// control end instead of being consumed by the one-shot callback map.
     #[wincode(tag = 618)]
-    TerminalCopilotEvent = 618,
+    TerminalCopilotUpdated = 618,
     /// In-terminal AI copilot cancellation (control end → host / manager). Sent
     /// when the operator dismisses an in-flight copilot turn; the message
     /// `request_id` correlates the cancelled turn. Routed like `DiagnoseCancel`.
     #[wincode(tag = 619)]
-    TerminalCopilotCancel = 619,
+    CancelTerminalCopilot = 619,
 
     /// In-terminal AI command completion request (control end → host / manager).
     /// Carries `desk_agent_protocol::terminal_complete::TerminalCompleteAsk` as
@@ -341,14 +377,14 @@ pub enum SignalingType {
     /// signal server (no authorizer) it relays to the host that completes it. The
     /// target device rides the outer `to_connection_id`, not the payload.
     #[wincode(tag = 620)]
-    TerminalCompleteAsk = 620,
+    GenerateTerminalCompletions = 620,
     /// In-terminal AI command completion response (host / manager → control end).
     /// Carries `desk_agent_protocol::terminal_complete::TerminalCompleteResult`.
     /// Non-streaming (one response per ask); the `response_state = None`
     /// notification lane keeps it off the one-shot callback map, and the control
     /// end discards a result whose `request_id` is no longer the active one.
     #[wincode(tag = 621)]
-    TerminalCompleteResult = 621,
+    TerminalCompletionsGenerated = 621,
 
     /// Command-blocklist sync (manager → desk-server daemon only). Carries
     /// `desk_agent_protocol::command_blocklist::CommandBlocklistSyncPayload`: the
@@ -359,14 +395,14 @@ pub enum SignalingType {
     /// Accepted only from the trusted manager link (the inbound source gate drops
     /// it from any other source). Notification-style (`response_state = None`).
     #[wincode(tag = 622)]
-    CommandBlocklistSync = 622,
+    SyncCommandBlocklist = 622,
 
     /// Upstream → host: act on an execution already in flight. Carries
     /// `desk_agent_protocol::exec_lifecycle::ExecControlPayload` — either a
     /// cancel or a state query, both fenced by `execution_generation`. The host
-    /// answers both with [`SignalingType::ExecStateReply`].
+    /// answers both with [`SignalingType::ExecutionStateReported`].
     #[wincode(tag = 623)]
-    ExecControl = 623,
+    ControlExecution = 623,
 
     /// Host → upstream: what the host's durable ledger says about one execution
     /// generation. Carries `desk_agent_protocol::exec_lifecycle::
@@ -374,14 +410,14 @@ pub enum SignalingType {
     /// an upstream has one rule to implement: keep asking until the state is
     /// settled. Notification-style (`response_state = None`).
     #[wincode(tag = 624)]
-    ExecStateReply = 624,
+    ExecutionStateReported = 624,
 
     /// Host → upstream: an execution progressed without finishing. Carries
     /// `desk_agent_protocol::exec_lifecycle::ExecLifecyclePayload` (accepted, or
     /// still running). Removes the guessing an upstream had to do from a clock
     /// while it heard nothing. Notification-style (`response_state = None`).
     #[wincode(tag = 625)]
-    ExecLifecycle = 625,
+    ExecutionProgressUpdated = 625,
 
     /// Error
     #[wincode(tag = -1)]

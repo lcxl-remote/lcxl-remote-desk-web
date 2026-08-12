@@ -84,19 +84,19 @@ mod wincode_tests {
 }
 
 #[cfg(test)]
-mod init_signaling_data_tests {
+mod remote_access_initialized_data_tests {
     use super::*;
     use crate::model::os::OperationSystemEnum;
     use crate::model::virtual_display::{
         DEFAULT_ADAPTIVE_DEBOUNCE_MS, DEFAULT_ADAPTIVE_MIN_DELTA_PX,
     };
 
-    /// Pre-adaptive-resolution peers ship `InitSignalingData` JSON without
+    /// Pre-adaptive-resolution peers ship `RemoteAccessInitializedData` JSON without
     /// the three new fields. `#[serde(default)]` must populate them with
     /// sensible defaults so the daemon stays compatible with anyone still
     /// running the previous release of the signaling facade.
     #[test]
-    fn init_signaling_data_legacy_json_defaults_new_fields() {
+    fn remote_access_initialized_data_legacy_json_defaults_new_fields() {
         let raw = r#"{
             "ice_servers": [],
             "user_name": "tester",
@@ -107,7 +107,7 @@ mod init_signaling_data_tests {
             "desk_settings": {},
             "is_admin": false
         }"#;
-        let data: InitSignalingData = serde_json::from_str(raw).expect("decode");
+        let data: RemoteAccessInitializedData = serde_json::from_str(raw).expect("decode");
         assert!(!data.virtual_display_active);
         assert_eq!(data.virtual_display_current_refresh_hz, 0);
         assert!(
@@ -135,7 +135,7 @@ mod init_signaling_data_tests {
     /// A host that advertises its OS must round-trip so the browser can tailor
     /// host-targeted UI (e.g. macOS shortcuts) instead of assuming Windows.
     #[test]
-    fn init_signaling_data_round_trips_host_os() {
+    fn remote_access_initialized_data_round_trips_host_os() {
         let raw = r#"{
             "ice_servers": [],
             "user_name": "tester",
@@ -147,11 +147,12 @@ mod init_signaling_data_tests {
             "is_admin": false,
             "operation_system": "Mac"
         }"#;
-        let data: InitSignalingData = serde_json::from_str(raw).expect("decode");
+        let data: RemoteAccessInitializedData = serde_json::from_str(raw).expect("decode");
         assert_eq!(data.operation_system, OperationSystemEnum::Mac);
 
         let encoded = serde_json::to_string(&data).expect("encode");
-        let decoded: InitSignalingData = serde_json::from_str(&encoded).expect("re-decode");
+        let decoded: RemoteAccessInitializedData =
+            serde_json::from_str(&encoded).expect("re-decode");
         assert_eq!(decoded.operation_system, OperationSystemEnum::Mac);
     }
 

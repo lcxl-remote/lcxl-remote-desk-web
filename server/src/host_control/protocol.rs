@@ -167,10 +167,16 @@ pub enum HostControlMessage {
     GlobalLocaleChanged { locale: String },
 
     /// Show private-screen overlay.
-    PrivateScreenShow { connection_id: String },
+    PrivateScreenShow {
+        connection_id: String,
+        request_id: String,
+    },
 
     /// Hide private-screen overlay.
-    PrivateScreenHide { connection_id: String },
+    PrivateScreenHide {
+        connection_id: String,
+        request_id: String,
+    },
 
     /// Show whiteboard overlay.
     WhiteboardShow { connection_id: String },
@@ -225,7 +231,10 @@ pub enum HostControlMessage {
     /// Forward Tauri-reported state changes to the worker.
     PrivateScreenStateChangedToWorker {
         connection_id: String,
+        request_id: Option<String>,
         visible: bool,
+        is_supported: bool,
+        error_msg: Option<String>,
     },
 
     // ========================= Client → Server =========================
@@ -240,7 +249,10 @@ pub enum HostControlMessage {
     /// Tauri reports a private-screen visibility change.
     PrivateScreenStateChanged {
         connection_id: String,
+        request_id: Option<String>,
         visible: bool,
+        is_supported: bool,
+        error_msg: Option<String>,
     },
 
     // ====================== Forwarder → Aggregator ======================
@@ -299,9 +311,11 @@ mod tests {
             },
             HostControlMessage::PrivateScreenShow {
                 connection_id: "c1".to_string(),
+                request_id: "r-show".to_string(),
             },
             HostControlMessage::PrivateScreenHide {
                 connection_id: "c1".to_string(),
+                request_id: "r-hide".to_string(),
             },
             HostControlMessage::WhiteboardShow {
                 connection_id: "c1".to_string(),
@@ -331,7 +345,10 @@ mod tests {
             },
             HostControlMessage::PrivateScreenStateChangedToWorker {
                 connection_id: "c1".to_string(),
+                request_id: Some("r-state".to_string()),
                 visible: true,
+                is_supported: true,
+                error_msg: None,
             },
             HostControlMessage::ServiceOp {
                 op: ServiceOpKind::Install,
@@ -377,7 +394,10 @@ mod tests {
             },
             HostControlMessage::PrivateScreenStateChanged {
                 connection_id: "c1".to_string(),
+                request_id: None,
                 visible: false,
+                is_supported: true,
+                error_msg: None,
             },
             HostControlMessage::SecurityApprovalResolved {
                 req_id: "r1".to_string(),
@@ -476,6 +496,7 @@ mod tests {
 
         let show = HostControlMessage::PrivateScreenShow {
             connection_id: "c1".to_string(),
+            request_id: "r-show".to_string(),
         };
         assert!(!show.is_replayable_for_tauri());
     }
@@ -494,6 +515,7 @@ mod tests {
 
         let msg = HostControlMessage::PrivateScreenShow {
             connection_id: "c1".to_string(),
+            request_id: "r-show".to_string(),
         };
         assert_eq!(msg.req_id(), None);
     }

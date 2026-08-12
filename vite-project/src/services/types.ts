@@ -5,7 +5,7 @@
 
 
 /**
- * @description Browser-facing knobs that drive the adaptive-resolution hook. Server\nsources these from `Settings.virtual_display.adaptive_*` and ships\nthem through `InitSignalingData` so each browser session uses the\nhost operator\'s preference without round-tripping a separate REST\nquery.\n\n`adaptive_throttle_ms` is intentionally NOT included — it is the\ndaemon\'s defensive rate limit and the browser does not need to know\nit.
+ * @description Browser-facing knobs that drive the adaptive-resolution hook. Server\nsources these from `Settings.virtual_display.adaptive_*` and ships\nthem through `RemoteAccessInitializedData` so each browser session uses the\nhost operator\'s preference without round-tripping a separate REST\nquery.\n\n`adaptive_throttle_ms` is intentionally NOT included — it is the\ndaemon\'s defensive rate limit and the browser does not need to know\nit.
 */
 export type AdaptiveResolutionParams = {
     /**
@@ -470,24 +470,6 @@ export type ConnectionModel = {
     version_info: VersionInfo;
 };
 
-/**
- * @description Connection list information
-*/
-export type ConnectionList = {
-    /**
-     * @description Connection map
-     * @type object
-    */
-    connection_map: {
-        [key: string]: ConnectionModel;
-    };
-    /**
-     * @description Current connection ID
-     * @type string
-    */
-    current_connection_id: string;
-};
-
 export type ConnectionVerifyParams = {
     /**
      * @description Deployment bootstrap token used only while the standalone server is not\ninitialized and was started with `LRD_BOOTSTRAP_TOKEN`.
@@ -557,6 +539,24 @@ export type ConnectionVerifyResult = {
      * @type boolean
     */
     secure: boolean;
+};
+
+/**
+ * @description Connection list information
+*/
+export type ConnectionsFetchedData = {
+    /**
+     * @description Connection map
+     * @type object
+    */
+    connection_map: {
+        [key: string]: ConnectionModel;
+    };
+    /**
+     * @description Current connection ID
+     * @type string
+    */
+    current_connection_id: string;
 };
 
 /**
@@ -1610,136 +1610,6 @@ export type InitRequirementsDto = {
 };
 
 /**
- * @description RTC IceServer
-*/
-export type LcxlRTCIceServer = {
-    /**
-     * @description Credential for the ICE server, if any.
-     * @type string
-    */
-    credential: string;
-    /**
-     * @description List of URLs associated with the ICE server, e.g. [\"stun:stun.l.google.com:19302\"]
-     * @type array
-    */
-    urls: string[];
-    /**
-     * @description Username for the ICE server, if any.
-     * @type string
-    */
-    username: string;
-};
-
-export const videoEncoderIdEnum = {
-    X264: "X264",
-    OpenH264: "OpenH264",
-    VP8: "VP8",
-    VP9: "VP9",
-    AV1: "AV1"
-} as const;
-
-export type VideoEncoderIdEnumKey = (typeof videoEncoderIdEnum)[keyof typeof videoEncoderIdEnum];
-
-/**
- * @description Concrete video encoder implementation.\n\nThis is intentionally distinct from the RTP codec: X264 and OpenH264\nboth produce H.264, but the worker must preserve which implementation\nthe controller selected.
-*/
-export type VideoEncoderId = VideoEncoderIdEnumKey;
-
-export type VideoEncoderCapability = {
-    /**
-     * @description Concrete video encoder implementation.\n\nThis is intentionally distinct from the RTP codec: X264 and OpenH264\nboth produce H.264, but the worker must preserve which implementation\nthe controller selected.
-     * @type string
-    */
-    id: VideoEncoderId;
-    input_support: EncoderInputSupport;
-};
-
-/**
- * @description InitSignalingData is used to initialize signaling data.\ndesk server -> signaling server -> web browser\nSee <https://github.com/webrtc-rs/webrtc/blob/254bdd5d970933e847dc000de9545040ce16f19f/webrtc/src/peer_connection/configuration.rs>.
-*/
-export type InitSignalingData = {
-    /**
-     * @description Browser-facing knobs that drive the adaptive-resolution hook. Server\nsources these from `Settings.virtual_display.adaptive_*` and ships\nthem through `InitSignalingData` so each browser session uses the\nhost operator\'s preference without round-tripping a separate REST\nquery.\n\n`adaptive_throttle_ms` is intentionally NOT included — it is the\ndaemon\'s defensive rate limit and the browser does not need to know\nit.
-     * @type object | undefined
-    */
-    adaptive_resolution?: AdaptiveResolutionParams;
-    /**
-     * @description Audio device list
-     * @type object
-    */
-    audio_device_list: {
-        [key: string]: AudioDevice[];
-    };
-    /**
-     * @description Audio encoder list
-     * @type array
-    */
-    audio_encoder_list: string[];
-    /**
-     * @description Desk settings
-     * @type object
-    */
-    desk_settings: DeskSettings;
-    /**
-     * @description Whether the remote end has Tauri UI support (required for whiteboard overlay)
-     * @type boolean | undefined
-    */
-    has_tauri?: boolean;
-    /**
-     * @type array
-    */
-    ice_servers: LcxlRTCIceServer[];
-    /**
-     * @description Whether the server is running with administrative privileges
-     * @type boolean
-    */
-    is_admin: boolean;
-    /**
-     * @description Operation system enum
-     * @type string | undefined
-    */
-    operation_system?: OperationSystemEnum;
-    /**
-     * @description User name for signaling.
-     * @type string
-    */
-    user_name: string;
-    /**
-     * @description Video device list
-     * @type object
-    */
-    video_device_list: {
-        [key: string]: DisplayInfo[];
-    };
-    /**
-     * @description Concrete encoder input constraints. Empty means a legacy host.
-     * @type array | undefined
-    */
-    video_encoder_capabilities?: VideoEncoderCapability[];
-    /**
-     * @description Video encoder list
-     * @type array
-    */
-    video_encoder_list: string[];
-    /**
-     * @description Whether the daemon currently has the IDD virtual display attached\n(service-daemon mode + `virtual_display.enabled=true` + attach\nresolved). The browser uses this to gate the adaptive-resolution\nhook — there is no point firing ChangeDisplaySettings against a\nhost that does not own the IDD.
-     * @type boolean | undefined
-    */
-    virtual_display_active?: boolean;
-    /**
-     * @description Most-recently-applied IDD refresh rate the daemon has seen via the\nworker\'s VirtualDisplayMode echo. `0` means the daemon has no\nobservation yet (cold start) — the browser may use it for\ndisplay purposes only; the auto path always sends `refresh_hz=0`\nand lets the daemon do the authoritative fallback.
-     * @minLength 0
-     * @type integer | undefined, int32
-    */
-    virtual_display_current_refresh_hz?: number;
-    /**
-     * @description GDI device name (e.g. `\\\\.\\DISPLAY8`) of the IDD virtual display\nwhen the daemon currently has it attached. `None` when no virtual\ndisplay is attached (default mode / IDD detached / Disabled\nsupervisor). The browser uses this both to label the matching\nentry in the display picker AND to gate the adaptive-resolution\nhook — auto requests only fire when the captured display equals\nthis name, otherwise resizing the browser silently changes the\nIDD resolution while the worker is capturing a physical monitor.
-     * @type string,null
-    */
-    virtual_display_device_name?: string | null;
-};
-
-/**
  * @description Request body for `POST /api/service/install`.
 */
 export type InstallServiceRequest = {
@@ -1815,6 +1685,27 @@ export type KeyboardEventData = {
      * @type boolean
     */
     shift_key: boolean;
+};
+
+/**
+ * @description RTC IceServer
+*/
+export type LcxlRTCIceServer = {
+    /**
+     * @description Credential for the ICE server, if any.
+     * @type string
+    */
+    credential: string;
+    /**
+     * @description List of URLs associated with the ICE server, e.g. [\"stun:stun.l.google.com:19302\"]
+     * @type array
+    */
+    urls: string[];
+    /**
+     * @description Username for the ICE server, if any.
+     * @type string
+    */
+    username: string;
 };
 
 /**
@@ -2007,6 +1898,21 @@ export const mediaPipelinePhaseEnum = {
 export type MediaPipelinePhaseEnumKey = (typeof mediaPipelinePhaseEnum)[keyof typeof mediaPipelinePhaseEnum];
 
 export type MediaPipelinePhase = MediaPipelinePhaseEnumKey;
+
+export const videoEncoderIdEnum = {
+    X264: "X264",
+    OpenH264: "OpenH264",
+    VP8: "VP8",
+    VP9: "VP9",
+    AV1: "AV1"
+} as const;
+
+export type VideoEncoderIdEnumKey = (typeof videoEncoderIdEnum)[keyof typeof videoEncoderIdEnum];
+
+/**
+ * @description Concrete video encoder implementation.\n\nThis is intentionally distinct from the RTP codec: X264 and OpenH264\nboth produce H.264, but the worker must preserve which implementation\nthe controller selected.
+*/
+export type VideoEncoderId = VideoEncoderIdEnumKey;
 
 /**
  * @description Browser-visible state for one host-side media pipeline.\n\nA blocked pipeline is deliberately not represented as an empty video: the\ncontroller receives this typed state even when the SDP answer contains no\nactive video track or the worker exits before its first encoded frame.
@@ -2321,7 +2227,7 @@ export type RedeemCodeParams = {
 export type RedeemCodeResult = {
     access_ceiling?: (null | SecuritySettings);
     /**
-     * @description The reusable grant-session token the control end must attach to every\nRequestRemote for this target, including desktop and file-manager sessions.
+     * @description The reusable grant-session token the control end must attach to every\nRequestRemoteAccess for this target, including desktop and file-manager sessions.
      * @type string
     */
     grant_session_id: string;
@@ -2397,6 +2303,100 @@ export type RejectedTurnInterface = {
      * @type object
     */
     interface: TurnInterface;
+};
+
+export type VideoEncoderCapability = {
+    /**
+     * @description Concrete video encoder implementation.\n\nThis is intentionally distinct from the RTP codec: X264 and OpenH264\nboth produce H.264, but the worker must preserve which implementation\nthe controller selected.
+     * @type string
+    */
+    id: VideoEncoderId;
+    input_support: EncoderInputSupport;
+};
+
+/**
+ * @description RemoteAccessInitializedData is used to initialize signaling data.\ndesk server -> signaling server -> web browser\nSee <https://github.com/webrtc-rs/webrtc/blob/254bdd5d970933e847dc000de9545040ce16f19f/webrtc/src/peer_connection/configuration.rs>.
+*/
+export type RemoteAccessInitializedData = {
+    /**
+     * @description Browser-facing knobs that drive the adaptive-resolution hook. Server\nsources these from `Settings.virtual_display.adaptive_*` and ships\nthem through `RemoteAccessInitializedData` so each browser session uses the\nhost operator\'s preference without round-tripping a separate REST\nquery.\n\n`adaptive_throttle_ms` is intentionally NOT included — it is the\ndaemon\'s defensive rate limit and the browser does not need to know\nit.
+     * @type object | undefined
+    */
+    adaptive_resolution?: AdaptiveResolutionParams;
+    /**
+     * @description Audio device list
+     * @type object
+    */
+    audio_device_list: {
+        [key: string]: AudioDevice[];
+    };
+    /**
+     * @description Audio encoder list
+     * @type array
+    */
+    audio_encoder_list: string[];
+    /**
+     * @description Desk settings
+     * @type object
+    */
+    desk_settings: DeskSettings;
+    /**
+     * @description Whether the remote end has Tauri UI support (required for whiteboard overlay)
+     * @type boolean | undefined
+    */
+    has_tauri?: boolean;
+    /**
+     * @type array
+    */
+    ice_servers: LcxlRTCIceServer[];
+    /**
+     * @description Whether the server is running with administrative privileges
+     * @type boolean
+    */
+    is_admin: boolean;
+    /**
+     * @description Operation system enum
+     * @type string | undefined
+    */
+    operation_system?: OperationSystemEnum;
+    /**
+     * @description User name for signaling.
+     * @type string
+    */
+    user_name: string;
+    /**
+     * @description Video device list
+     * @type object
+    */
+    video_device_list: {
+        [key: string]: DisplayInfo[];
+    };
+    /**
+     * @description Concrete encoder input constraints. Empty means a legacy host.
+     * @type array | undefined
+    */
+    video_encoder_capabilities?: VideoEncoderCapability[];
+    /**
+     * @description Video encoder list
+     * @type array
+    */
+    video_encoder_list: string[];
+    /**
+     * @description Whether the daemon currently has the IDD virtual display attached\n(service-daemon mode + `virtual_display.enabled=true` + attach\nresolved). The browser uses this to gate the adaptive-resolution\nhook — there is no point firing ChangeDisplaySettings against a\nhost that does not own the IDD.
+     * @type boolean | undefined
+    */
+    virtual_display_active?: boolean;
+    /**
+     * @description Most-recently-applied IDD refresh rate the daemon has seen via the\nworker\'s VirtualDisplayMode echo. `0` means the daemon has no\nobservation yet (cold start) — the browser may use it for\ndisplay purposes only; the auto path always sends `refresh_hz=0`\nand lets the daemon do the authoritative fallback.
+     * @minLength 0
+     * @type integer | undefined, int32
+    */
+    virtual_display_current_refresh_hz?: number;
+    /**
+     * @description GDI device name (e.g. `\\\\.\\DISPLAY8`) of the IDD virtual display\nwhen the daemon currently has it attached. `None` when no virtual\ndisplay is attached (default mode / IDD detached / Disabled\nsupervisor). The browser uses this both to label the matching\nentry in the display picker AND to gate the adaptive-resolution\nhook — auto requests only fire when the captured display equals\nthis name, otherwise resizing the browser silently changes the\nIDD resolution while the worker is capturing a physical monitor.
+     * @type string,null
+    */
+    virtual_display_device_name?: string | null;
 };
 
 export const remoteSessionPurposeEnum = {
@@ -3131,7 +3131,7 @@ export type RestResponseRedeemCodeResult = {
     data?: {
         access_ceiling?: (null | SecuritySettings);
         /**
-         * @description The reusable grant-session token the control end must attach to every\nRequestRemote for this target, including desktop and file-manager sessions.
+         * @description The reusable grant-session token the control end must attach to every\nRequestRemoteAccess for this target, including desktop and file-manager sessions.
          * @type string
         */
         grant_session_id: string;
@@ -4015,7 +4015,7 @@ export type RestResponseVirtualDisplaySettings = {
     */
     data?: {
         /**
-         * @description Browser-side trailing-edge debounce window (ms) for the adaptive\nresolution hook. Resize events within this window reset the\ntimer; the send fires only after the wrapper has been stable for\nthis many ms. Sourced from `config.toml`; ferried to the browser\nvia `InitSignalingData::adaptive_resolution`.
+         * @description Browser-side trailing-edge debounce window (ms) for the adaptive\nresolution hook. Resize events within this window reset the\ntimer; the send fires only after the wrapper has been stable for\nthis many ms. Sourced from `config.toml`; ferried to the browser\nvia `RemoteAccessInitializedData::adaptive_resolution`.
          * @minLength 0
          * @default 5000
          * @type integer | undefined, int64
@@ -4179,12 +4179,6 @@ export type ServerInfo = {
  * @description Signal request control data
 */
 export type SignalRequestControlData = {
-    /**
-     * @description whether the control request is accepted
-     * @default false
-     * @type boolean | undefined
-    */
-    accept?: boolean;
     /**
      * @description whether to accept clipboard sync
      * @default false
@@ -4473,7 +4467,7 @@ export type TelemetryStatus = {
 };
 
 /**
- * @description SignalingType::SendDataToTerminal
+ * @description SignalingType::SendTerminalInput
 */
 export type TerminalInputData = {
     /**
@@ -4724,7 +4718,7 @@ export type VirtualDisplayDriverStatusResponse = {
 */
 export type VirtualDisplaySettings = {
     /**
-     * @description Browser-side trailing-edge debounce window (ms) for the adaptive\nresolution hook. Resize events within this window reset the\ntimer; the send fires only after the wrapper has been stable for\nthis many ms. Sourced from `config.toml`; ferried to the browser\nvia `InitSignalingData::adaptive_resolution`.
+     * @description Browser-side trailing-edge debounce window (ms) for the adaptive\nresolution hook. Resize events within this window reset the\ntimer; the send fires only after the wrapper has been stable for\nthis many ms. Sourced from `config.toml`; ferried to the browser\nvia `RemoteAccessInitializedData::adaptive_resolution`.
      * @minLength 0
      * @default 5000
      * @type integer | undefined, int64
@@ -5476,7 +5470,7 @@ export type OpenTerminalSessionQueryParams = {
     */
     device_id?: string | null;
     /**
-     * @description Browser-supplied (untrusted) grant-session selector, mirroring\n`RequestRemoteModel::grant_session_id`. A capability-scoped code-session\ncarries the grant it redeemed so the central can look up and stamp the\ncode\'s capability ceiling onto the `StartTerminal` frame (the terminal WS is\na distinct connection that never does a `RequestRemote`, so it cannot inherit\nthe control session\'s stamp). It is only a lookup key: the authorization fact\nis the server-side principal / target / generation check. `None` for an owner\nsession (stamped with no ceiling).
+     * @description Browser-supplied (untrusted) grant-session selector, mirroring\n`RequestRemoteModel::grant_session_id`. A capability-scoped code-session\ncarries the grant it redeemed so the central can look up and stamp the\ncode\'s capability ceiling onto the `StartTerminal` frame (the terminal WS is\na distinct connection that never does a `RequestRemoteAccess`, so it cannot inherit\nthe control session\'s stamp). It is only a lookup key: the authorization fact\nis the server-side principal / target / generation check. `None` for an owner\nsession (stamped with no ceiling).
      * @type string,null
     */
     grant_session_id?: string | null;

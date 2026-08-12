@@ -4,9 +4,9 @@ import { useTerminalCopilot } from './use-terminal-copilot';
 import type { TerminalCopilotEvent, TerminalContext } from './use-terminal-copilot';
 import type { SignalingMessage } from '../desk/use-desk-signaling';
 import {
-    SIGNALING_TYPE_CODE_TERMINAL_COPILOT_ASK,
-    SIGNALING_TYPE_CODE_TERMINAL_COPILOT_EVENT,
-    SIGNALING_TYPE_CODE_TERMINAL_COPILOT_CANCEL,
+    SIGNALING_TYPE_CODE_ASK_TERMINAL_COPILOT,
+    SIGNALING_TYPE_CODE_TERMINAL_COPILOT_UPDATED,
+    SIGNALING_TYPE_CODE_CANCEL_TERMINAL_COPILOT,
 } from '../desk/constants';
 
 // `sendMessage` returns the wire request_id the hook keys aggregation on.
@@ -19,7 +19,7 @@ beforeEach(() => {
 function eventFrame(event: TerminalCopilotEvent): SignalingMessage {
     return {
         request_id: event.request_id,
-        signaling_type: SIGNALING_TYPE_CODE_TERMINAL_COPILOT_EVENT,
+        signaling_type: SIGNALING_TYPE_CODE_TERMINAL_COPILOT_UPDATED,
         signaling_data: event,
     };
 }
@@ -58,7 +58,7 @@ describe('useTerminalCopilot', () => {
 
         expect(sendMessage).toHaveBeenCalledTimes(1);
         const [type, data, connectionId] = sendMessage.mock.calls[0];
-        expect(type).toBe(SIGNALING_TYPE_CODE_TERMINAL_COPILOT_ASK);
+        expect(type).toBe(SIGNALING_TYPE_CODE_ASK_TERMINAL_COPILOT);
         // The target rides the outer to_connection_id, not the payload.
         expect(connectionId).toBe('conn-1');
         expect((data as { mode: string }).mode).toBe('how_to');
@@ -114,7 +114,7 @@ describe('useTerminalCopilot', () => {
         // continue the thread; the in-flight turn is not part of the sent history.
         act(() => result.current.ask({ mode: 'how_to', question: 'now stop it', context: ctx }));
         const asks = sendMessage.mock.calls.filter(
-            (c) => c[0] === SIGNALING_TYPE_CODE_TERMINAL_COPILOT_ASK,
+            (c) => c[0] === SIGNALING_TYPE_CODE_ASK_TERMINAL_COPILOT,
         );
         const second = asks[1][1] as { history: { user: string; assistant: string }[] };
         expect(second.history).toEqual([
@@ -242,7 +242,7 @@ describe('useTerminalCopilot', () => {
         act(() => result.current.reset());
 
         const cancel = sendMessage.mock.calls.find(
-            (c) => c[0] === SIGNALING_TYPE_CODE_TERMINAL_COPILOT_CANCEL,
+            (c) => c[0] === SIGNALING_TYPE_CODE_CANCEL_TERMINAL_COPILOT,
         );
         expect(cancel).toBeTruthy();
         // The cancel correlates by the original request id and targets the host.
@@ -257,7 +257,7 @@ describe('useTerminalCopilot', () => {
         act(() => result.current.ask({ mode: 'how_to', question: 'b', context: ctx }));
 
         const asks = sendMessage.mock.calls.filter(
-            (c) => c[0] === SIGNALING_TYPE_CODE_TERMINAL_COPILOT_ASK,
+            (c) => c[0] === SIGNALING_TYPE_CODE_ASK_TERMINAL_COPILOT,
         );
         const first = (asks[0][1] as { conversation_id: string }).conversation_id;
         const second = (asks[1][1] as { conversation_id: string }).conversation_id;
@@ -266,7 +266,7 @@ describe('useTerminalCopilot', () => {
         act(() => result.current.reset());
         act(() => result.current.ask({ mode: 'how_to', question: 'c', context: ctx }));
         const asks2 = sendMessage.mock.calls.filter(
-            (c) => c[0] === SIGNALING_TYPE_CODE_TERMINAL_COPILOT_ASK,
+            (c) => c[0] === SIGNALING_TYPE_CODE_ASK_TERMINAL_COPILOT,
         );
         const third = (asks2[2][1] as { conversation_id: string }).conversation_id;
         expect(third).not.toBe(first);

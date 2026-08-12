@@ -9,7 +9,7 @@ use super::*;
 pub(super) fn is_central_plumbing_frame(t: SignalingType) -> bool {
     matches!(
         t,
-        SignalingType::CollectRequest | SignalingType::RemoteToolRequest
+        SignalingType::CollectEvidence | SignalingType::InvokeRemoteTool
     )
 }
 

@@ -77,5 +77,5 @@ mod exec_lifecycle;
 mod remote_display;
 mod routing;
 
-use agent::{agent_request_model, read_outcome};
+use agent::{invoke_agent_capability_model, read_outcome};
 use routing::{make_ctx_with_attached_supervisor, make_ctx_with_rx, read_response};

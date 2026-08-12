@@ -135,54 +135,76 @@ impl<O: PrivateScreenOps> PrivateScreenCore<O> {
         state_sender: &tokio::sync::mpsc::UnboundedSender<HostControlEventType>,
     ) -> LoopControl {
         match event {
-            PrivateScreenEvent::Remote(PrivateScreenCommand::Show(from_connection_id)) => {
-                if !self.is_authorized(&from_connection_id) {
+            PrivateScreenEvent::Remote(PrivateScreenCommand::Show {
+                connection_id,
+                request_id,
+            }) => {
+                if !self.is_authorized(&connection_id) {
                     log::warn!("Private screen is already controlled by another connection");
+                    let _ = state_sender.send(HostControlEventType::PrivateScreenUnknownError {
+                        connection_id: Some(connection_id),
+                        request_id: Some(request_id),
+                        message: "Private screen is controlled by another connection".into(),
+                    });
                     return LoopControl::Continue;
                 }
 
                 match enter_private_screen(&self.ops, on_local_escape.clone()) {
                     Ok(()) => {
                         let _ =
-                            state_sender.send(HostControlEventType::PrivateScreenVisibleChanged(
-                                from_connection_id.clone(),
-                                true,
-                            ));
-                        self.controlled_by_connection_id = Some(from_connection_id);
+                            state_sender.send(HostControlEventType::PrivateScreenVisibleChanged {
+                                connection_id: connection_id.clone(),
+                                request_id: Some(request_id),
+                                visible: true,
+                            });
+                        self.controlled_by_connection_id = Some(connection_id);
                     }
                     Err(error) => {
                         // The transaction already rolled itself back, so the
                         // machine is left unprotected but usable. Report the
                         // failure instead of claiming the screen is up.
                         log::error!("Failed to show private screen: {}", error);
-                        let _ = state_sender.send(HostControlEventType::PrivateScreenUnknownError(
-                            Some(from_connection_id),
-                            error,
-                        ));
+                        let _ =
+                            state_sender.send(HostControlEventType::PrivateScreenUnknownError {
+                                connection_id: Some(connection_id),
+                                request_id: Some(request_id),
+                                message: error,
+                            });
                     }
                 }
                 LoopControl::Continue
             }
-            PrivateScreenEvent::Remote(PrivateScreenCommand::Hide(from_connection_id)) => {
-                if !self.is_authorized(&from_connection_id) {
+            PrivateScreenEvent::Remote(PrivateScreenCommand::Hide {
+                connection_id,
+                request_id,
+            }) => {
+                if !self.is_authorized(&connection_id) {
                     log::warn!("Private screen is already controlled by another connection");
+                    let _ = state_sender.send(HostControlEventType::PrivateScreenUnknownError {
+                        connection_id: Some(connection_id),
+                        request_id: Some(request_id),
+                        message: "Private screen is controlled by another connection".into(),
+                    });
                     return LoopControl::Continue;
                 }
 
                 leave_private_screen(&self.ops);
                 self.controlled_by_connection_id = None;
-                let _ = state_sender.send(HostControlEventType::PrivateScreenVisibleChanged(
-                    from_connection_id,
-                    false,
-                ));
+                let _ = state_sender.send(HostControlEventType::PrivateScreenVisibleChanged {
+                    connection_id,
+                    request_id: Some(request_id),
+                    visible: false,
+                });
                 LoopControl::Continue
             }
             PrivateScreenEvent::Remote(PrivateScreenCommand::Quit) => {
                 leave_private_screen(&self.ops);
                 if let Some(owner) = self.controlled_by_connection_id.take() {
-                    let _ = state_sender.send(HostControlEventType::PrivateScreenVisibleChanged(
-                        owner, false,
-                    ));
+                    let _ = state_sender.send(HostControlEventType::PrivateScreenVisibleChanged {
+                        connection_id: owner,
+                        request_id: None,
+                        visible: false,
+                    });
                 }
                 log::info!("Private screen quit");
                 LoopControl::Stop
@@ -196,9 +218,11 @@ impl<O: PrivateScreenOps> PrivateScreenCore<O> {
                 };
 
                 leave_private_screen(&self.ops);
-                let _ = state_sender.send(HostControlEventType::PrivateScreenVisibleChanged(
-                    owner, false,
-                ));
+                let _ = state_sender.send(HostControlEventType::PrivateScreenVisibleChanged {
+                    connection_id: owner,
+                    request_id: None,
+                    visible: false,
+                });
                 LoopControl::Continue
             }
         }
@@ -595,6 +619,20 @@ mod tests {
         tokio::sync::mpsc::unbounded_channel()
     }
 
+    fn show(connection_id: &str) -> PrivateScreenCommand {
+        PrivateScreenCommand::Show {
+            connection_id: connection_id.to_string(),
+            request_id: format!("show-{connection_id}"),
+        }
+    }
+
+    fn hide(connection_id: &str) -> PrivateScreenCommand {
+        PrivateScreenCommand::Hide {
+            connection_id: connection_id.to_string(),
+            request_id: format!("hide-{connection_id}"),
+        }
+    }
+
     fn drain(
         receiver: &mut tokio::sync::mpsc::UnboundedReceiver<HostControlEventType>,
     ) -> Vec<HostControlEventType> {
@@ -609,9 +647,11 @@ mod tests {
         events
             .iter()
             .filter_map(|event| match event {
-                HostControlEventType::PrivateScreenVisibleChanged(id, visible) => {
-                    Some((id.clone(), *visible))
-                }
+                HostControlEventType::PrivateScreenVisibleChanged {
+                    connection_id,
+                    visible,
+                    ..
+                } => Some((connection_id.clone(), *visible)),
                 _ => None,
             })
             .collect()
@@ -724,7 +764,7 @@ mod tests {
         let mut core = PrivateScreenCore::new(RecordingOps::failing(Step::StartInterception));
 
         core.handle_event(
-            PrivateScreenEvent::Remote(PrivateScreenCommand::Show("conn-1".to_string())),
+            PrivateScreenEvent::Remote(show("conn-1")),
             &noop_escape(),
             &sender,
         );
@@ -737,7 +777,10 @@ mod tests {
         );
         assert!(matches!(
             events.as_slice(),
-            [HostControlEventType::PrivateScreenUnknownError(Some(id), _)] if id == "conn-1"
+            [HostControlEventType::PrivateScreenUnknownError {
+                connection_id: Some(id),
+                ..
+            }] if id == "conn-1"
         ));
     }
 
@@ -747,7 +790,7 @@ mod tests {
         let mut core = PrivateScreenCore::new(RecordingOps::default());
 
         core.handle_event(
-            PrivateScreenEvent::Remote(PrivateScreenCommand::Show("conn-1".to_string())),
+            PrivateScreenEvent::Remote(show("conn-1")),
             &noop_escape(),
             &sender,
         );
@@ -781,13 +824,13 @@ mod tests {
         let mut core = PrivateScreenCore::new(RecordingOps::default());
 
         core.handle_event(
-            PrivateScreenEvent::Remote(PrivateScreenCommand::Show("conn-1".to_string())),
+            PrivateScreenEvent::Remote(show("conn-1")),
             &noop_escape(),
             &sender,
         );
         core.handle_event(PrivateScreenEvent::LocalDismiss, &noop_escape(), &sender);
         core.handle_event(
-            PrivateScreenEvent::Remote(PrivateScreenCommand::Hide("conn-1".to_string())),
+            PrivateScreenEvent::Remote(hide("conn-1")),
             &noop_escape(),
             &sender,
         );
@@ -811,12 +854,12 @@ mod tests {
         let mut core = PrivateScreenCore::new(RecordingOps::default());
 
         core.handle_event(
-            PrivateScreenEvent::Remote(PrivateScreenCommand::Show("conn-1".to_string())),
+            PrivateScreenEvent::Remote(show("conn-1")),
             &noop_escape(),
             &sender,
         );
         core.handle_event(
-            PrivateScreenEvent::Remote(PrivateScreenCommand::Hide("conn-2".to_string())),
+            PrivateScreenEvent::Remote(hide("conn-2")),
             &noop_escape(),
             &sender,
         );
@@ -838,13 +881,13 @@ mod tests {
         let mut core = PrivateScreenCore::new(RecordingOps::default());
 
         core.handle_event(
-            PrivateScreenEvent::Remote(PrivateScreenCommand::Show("conn-1".to_string())),
+            PrivateScreenEvent::Remote(show("conn-1")),
             &noop_escape(),
             &sender,
         );
         let steps_after_owner = core.ops.steps().len();
         core.handle_event(
-            PrivateScreenEvent::Remote(PrivateScreenCommand::Show("conn-2".to_string())),
+            PrivateScreenEvent::Remote(show("conn-2")),
             &noop_escape(),
             &sender,
         );
@@ -859,7 +902,7 @@ mod tests {
         let mut core = PrivateScreenCore::new(RecordingOps::default());
 
         core.handle_event(
-            PrivateScreenEvent::Remote(PrivateScreenCommand::Show("conn-1".to_string())),
+            PrivateScreenEvent::Remote(show("conn-1")),
             &noop_escape(),
             &sender,
         );
@@ -885,12 +928,12 @@ mod tests {
         let mut core = PrivateScreenCore::new(RecordingOps::default());
 
         core.handle_event(
-            PrivateScreenEvent::Remote(PrivateScreenCommand::Show("conn-1".to_string())),
+            PrivateScreenEvent::Remote(show("conn-1")),
             &noop_escape(),
             &sender,
         );
         core.handle_event(
-            PrivateScreenEvent::Remote(PrivateScreenCommand::Hide("conn-1".to_string())),
+            PrivateScreenEvent::Remote(hide("conn-1")),
             &noop_escape(),
             &sender,
         );

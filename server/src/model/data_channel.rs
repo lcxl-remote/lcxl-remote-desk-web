@@ -42,8 +42,6 @@ pub struct CursorSyncData {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, ToSchema, Default)]
 #[serde(default)]
 pub struct SignalRequestControlData {
-    /// whether the control request is accepted
-    pub accept: bool,
     /// whether to accept file transfer
     pub accept_file_transfer: bool,
     /// whether to accept clipboard sync

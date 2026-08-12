@@ -26,7 +26,7 @@ pub(super) fn confirm_exec_model(request_id: &str, command: &str) -> SignalingMo
     };
     SignalingModel::new(
         request_id,
-        SignalingType::ConfirmExec,
+        SignalingType::PreviewExecution,
         Some("conn-1".to_string()),
         None,
         Some(serde_json::to_value(data).unwrap()),
@@ -45,7 +45,7 @@ pub(super) fn resolve_exec_model(
     };
     SignalingModel::new(
         request_id,
-        SignalingType::ResolveExec,
+        SignalingType::ResolveExecution,
         Some("conn-1".to_string()),
         None,
         Some(serde_json::to_value(data).unwrap()),
@@ -54,7 +54,7 @@ pub(super) fn resolve_exec_model(
 }
 
 /// A bare signaling model carrying only a `from_connection_id` (used for the
-/// `CloseControl` / `ConnectionRemoved` revocation paths, whose payload is
+/// `ReleaseControl` / `ConnectionRemoved` revocation paths, whose payload is
 /// intentionally empty).
 pub(super) fn connection_lifecycle_model(t: SignalingType, connection_id: &str) -> SignalingModel {
     SignalingModel::new("rc", t, Some(connection_id.to_string()), None, None, None)
@@ -143,7 +143,7 @@ pub(super) fn process_list_request() -> serde_json::Value {
 }
 
 /// With a manager authorization granting the requested capability, the
-/// AgentRequest passes authorization (it proceeds to the worker, which is
+/// InvokeAgentCapability passes authorization (it proceeds to the worker, which is
 /// absent in tests → `TargetOffline`, not `PermissionDenied`).
 #[tokio::test]
 pub(super) async fn injected_scope_authorizes_granted_capability() {
@@ -154,9 +154,12 @@ pub(super) async fn injected_scope_authorizes_granted_capability() {
         ExecutionMode::ReadOnly,
         desk_agent_protocol::RiskLevel::Low,
     ));
-    handle_agent_request_inbound(&ctx, &agent_request_model(process_list_request()))
-        .await
-        .unwrap();
+    handle_invoke_agent_capability_inbound(
+        &ctx,
+        &invoke_agent_capability_model(process_list_request()),
+    )
+    .await
+    .unwrap();
     match read_outcome(&mut rx) {
         AgentOutcome::Err(e) => assert_eq!(e.kind, AgentErrorKind::TargetOffline),
         other => panic!("unexpected outcome: {other:?}"),
@@ -174,9 +177,12 @@ pub(super) async fn injected_empty_scope_denies_capability() {
         ExecutionMode::ReadOnly,
         desk_agent_protocol::RiskLevel::Low,
     ));
-    handle_agent_request_inbound(&ctx, &agent_request_model(process_list_request()))
-        .await
-        .unwrap();
+    handle_invoke_agent_capability_inbound(
+        &ctx,
+        &invoke_agent_capability_model(process_list_request()),
+    )
+    .await
+    .unwrap();
     match read_outcome(&mut rx) {
         AgentOutcome::Err(e) => assert_eq!(e.kind, AgentErrorKind::PermissionDenied),
         other => panic!("unexpected outcome: {other:?}"),
@@ -217,7 +223,7 @@ pub(super) fn command_template_sync_model(
     };
     SignalingModel::new(
         "rs",
-        SignalingType::CommandTemplateSync,
+        SignalingType::SyncCommandTemplates,
         None,
         None,
         Some(serde_json::to_value(payload).unwrap()),
@@ -275,7 +281,7 @@ pub(super) fn command_blocklist_sync_model(
     };
     SignalingModel::new(
         "rb",
-        SignalingType::CommandBlocklistSync,
+        SignalingType::SyncCommandBlocklist,
         None,
         None,
         Some(serde_json::to_value(payload).unwrap()),

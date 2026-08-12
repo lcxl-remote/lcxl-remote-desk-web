@@ -48,16 +48,16 @@ use desk_agent_protocol::{
     ProtocolVersion, RequestId, TargetRef,
 };
 use desk_ipc_protocol::message::{
-    AgentRequestPayload, CloseTerminalPayload, EnablePrivateScreenPayload, ExecCancelPayload,
-    ExecPlanPayload, ListTerminalRequestPayload, ManagerFileDeleteRequestPayload,
-    ManagerFileListRequestPayload, ManagerRequestRefPayload, ResizeTerminalPayload,
-    SendDataToTerminalPayload, ServiceToWorker, SetVirtualDisplayModePayload,
-    StartTerminalRequestPayload, UpdateDeskSettingsPayload,
+    AgentRequestPayload, CloseTerminalPayload, DeleteFilePayload, ExecCancelPayload,
+    ExecPlanPayload, ListFilesPayload, ListTerminalCommandsPayload, ManagerRequestRefPayload,
+    ResizeTerminalPayload, SendTerminalInputPayload, ServiceToWorker,
+    SetPrivateScreenVisibilityPayload, SetVirtualDisplayModePayload, StartTerminalPayload,
+    UpdateDeskSettingsPayload,
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams};
 use desk_signal_facade::model::media_pipeline::{MediaPipelinePhase, MediaPipelineStateData};
-use desk_signal_facade::model::private_screen::EnablePrivateScreenData;
+use desk_signal_facade::model::private_screen::SetPrivateScreenVisibilityData;
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_signal_facade::model::signal::{
     OfferModel, RemoteSessionPurpose, RequestRemoteModel, SignalingModel, SignalingType,
@@ -66,6 +66,7 @@ use desk_signal_facade::model::terminal::{
     StartTerminalSession, TerminalInputData, TerminalResizeData,
 };
 use desk_signal_facade::model::virtual_display::ChangeDisplaySettingsPayload;
+use desk_signal_facade::service::response_type_for_request;
 use desk_utils::error::DeskErrorCode;
 use desk_virtual_display::{VirtualDisplayMode, validate_mode};
 use tokio::sync::broadcast;
@@ -77,9 +78,9 @@ use crate::daemon::virtual_display::{EnsureAttachedOutcome, VirtualDisplaySuperv
 use crate::daemon::worker_manager::WorkerManager;
 use crate::diagnose::DiagnoseOrchestrator;
 
-/// Bound on how long the `RequestRemote` branch waits for the IDD to
+/// Bound on how long the `RequestRemoteAccess` branch waits for the IDD to
 /// finish bring-up before falling through to a capabilities-without-IDD
-/// Init reply. `resolve_attach_with_backoff` schedules retries at
+/// RemoteAccessInitialized response. `resolve_attach_with_backoff` schedules retries at
 /// `[250, 500, 1000, 2000, 4000, 8000]` ms; with the driver already
 /// loaded the first one or two attempts usually succeed (< 1 s) and
 /// the post-attach `RefreshCapabilities` round-trip lands within
@@ -104,7 +105,7 @@ use agent_protocol::*;
 use desktop_settings::*;
 pub use desktop_settings::{compute_desired_with_active, update_exclusive_after_control_change};
 use edge_exec::*;
-pub(crate) use exec_lifecycle::send_edge_exec_result;
+pub(crate) use exec_lifecycle::send_edge_execution_completed;
 use exec_lifecycle::*;
 use external_requests::*;
 use manager_terminal::*;
@@ -115,30 +116,33 @@ use manager_terminal::*;
 pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
     match signaling_type {
         // ---- Daemon-owned: PC / SDP / ICE / SignalingState ----
-        SignalingType::RequestRemote
-        | SignalingType::Init
+        SignalingType::RequestRemoteAccess
+        | SignalingType::RemoteAccessInitialized
         | SignalingType::Offer
         | SignalingType::Answer
-        | SignalingType::Canid
-        | SignalingType::CloseControl
+        | SignalingType::IceCandidate
+        | SignalingType::ReleaseControl
+        | SignalingType::CloseRemoteSession
         | SignalingType::ConnectionRemoved => RouteOwnership::Daemon,
 
         // The daemon owns SignalingState, so the per-connection
-        // accept-control flow runs daemon-side (browser → daemon →
+        // control-approval flow runs daemon-side (browser → daemon →
         // host_control_hub → user → daemon updates SignalingState +
-        // emits AcceptControl/DenyControl back). Worker no longer
+        // emits ControlAccepted/ControlDenied back). Worker no longer
         // sees RequireControl in daemon-worker mode.
         SignalingType::RequireControl => RouteOwnership::Daemon,
 
         // Daemon-emitted reply variants for the RequireControl flow.
-        // The daemon emits AcceptControl / DenyControl outbound to the
+        // The daemon emits ControlAccepted / ControlDenied outbound to the
         // browser from `pc_manager::handle_require_control`; browsers
         // never echo them back. If a stray inbound copy arrives the
         // daemon swallows it (worker's `DeskSession::handle_message`
         // has no arm for these and would only return
         // `UNKNOWN_SIGNALING_TYPE` — bridging would just bounce
         // confusing errors back to the browser).
-        SignalingType::AcceptControl | SignalingType::DenyControl => RouteOwnership::Daemon,
+        SignalingType::ControlAccepted
+        | SignalingType::ControlDenied
+        | SignalingType::ControlReleased => RouteOwnership::Daemon,
 
         // Types that only flow *outbound* from the host
         // (worker → daemon → browser) or
@@ -151,70 +155,73 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // - `PrivateScreenStateChanged`: worker → browser only;
         //   emitted by `WorkerToService::PrivateScreenStateChanged`
         //   typed IPC.
-        // - `AudioPlaybackError`: emitted from the PC's `on_track`
+        // - `AudioPlaybackFailed`: emitted from the PC's `on_track`
         //   callback; in daemon-worker mode the daemon's
         //   pc_manager does not attach an `on_track` handler so the
         //   variant is dead until that work lands. Portable mode
         //   still produces it from `service::signaling`, but that
         //   path bypasses the router entirely.
-        // - `ManagerSystemStatue`: a dead-enum variant —
-        //   the worker's `handle_message` has no arm and the
-        //   front-end never emits it.
-        // - `ReplyFromTerminal` / `TerminalStarted` / `TerminalClosed`:
+        // - `TerminalOutputProduced` / `TerminalStarted` / `TerminalClosed`:
         //   worker → browser only. Worker emits them via
-        //   typed `WorkerToService::ReplyFromTerminal` /
+        //   typed `WorkerToService::TerminalOutputProduced` /
         //   `TerminalStarted` / `TerminalClosed`; the browser never
         //   echoes them back. A stray inbound copy is a protocol
         //   error from the browser — daemon swallows it rather than
         //   bridging to the worker (which has no `handle_message`
         //   arm for these and would only return
         //   `UNKNOWN_SIGNALING_TYPE`).
-        // - `AgentResponse`: worker → control end only. The worker
-        //   emits it via typed `WorkerToService::AgentResponse`; the
+        // - `AgentCapabilityCompleted`: worker → control end only. The worker
+        //   emits it via typed `WorkerToService::AgentCapabilityCompleted`; the
         //   control end never echoes it back. A stray inbound copy is a
         //   protocol error — daemon swallows it.
-        // - `DiagnoseEvent`: host → control end only (streamed). The
+        // - `DiagnosisUpdated`: host → control end only (streamed). The
         //   daemon orchestrator emits it; the control end never echoes
         //   it back. A stray inbound copy is a protocol error — swallow.
-        // - `ExecPreview` / `ExecResult`: host → control end only (the
+        // - `ExecutionPreviewGenerated` / `ExecutionCompleted`: host → control end only (the
         //   confirm-execution preview and result). Daemon-emitted; a stray
         //   inbound copy is a protocol error — swallow.
         SignalingType::PrivateScreenStateChanged
-        | SignalingType::AudioPlaybackError
+        | SignalingType::PrivateScreenVisibilitySet
+        | SignalingType::AudioPlaybackFailed
         | SignalingType::MediaPipelineStateChanged
-        | SignalingType::ManagerSystemStatue
-        | SignalingType::ReplyFromTerminal
+        | SignalingType::MediaPipelineRetryCompleted
+        | SignalingType::SystemInfoRetrieved
+        | SignalingType::DisplaySettingsChanged
+        | SignalingType::FilesListed
+        | SignalingType::FileDeleted
+        | SignalingType::TerminalCommandsListed
+        | SignalingType::TerminalOutputProduced
         | SignalingType::TerminalStarted
         | SignalingType::TerminalClosed
-        | SignalingType::AgentResponse
-        | SignalingType::DiagnoseEvent
-        | SignalingType::TerminalCopilotEvent
-        | SignalingType::TerminalCompleteResult
-        | SignalingType::ExecPreview
-        | SignalingType::ExecResult
-        | SignalingType::ExecLifecycle
-        | SignalingType::ExecStateReply => RouteOwnership::Daemon,
+        | SignalingType::AgentCapabilityCompleted
+        | SignalingType::DiagnosisUpdated
+        | SignalingType::TerminalCopilotUpdated
+        | SignalingType::TerminalCompletionsGenerated
+        | SignalingType::ExecutionPreviewGenerated
+        | SignalingType::ExecutionCompleted
+        | SignalingType::ExecutionProgressUpdated
+        | SignalingType::ExecutionStateReported => RouteOwnership::Daemon,
 
         // Browser → daemon media control. This is a local bounded restart of
         // the already-negotiated pipeline and never enters the worker's generic
         // signaling dispatcher.
         SignalingType::RetryMediaPipeline => RouteOwnership::Daemon,
 
-        // AI Diagnose request: control end → daemon. Unlike `AgentRequest`
+        // AI Diagnose request: control end → daemon. Unlike `InvokeAgentCapability`
         // (worker-bound raw capability call), the diagnose orchestrator runs
         // daemon-side (it owns the model call + redaction + streaming), so this
         // is handled inline against the daemon's orchestrator rather than
         // forwarded over IPC.
         // DiagnoseCancel stops a run the control end abandoned by starting over;
         // handle it inline against the daemon's orchestrator, like `Diagnose`.
-        SignalingType::Diagnose | SignalingType::DiagnoseCancel => RouteOwnership::Daemon,
+        SignalingType::DiagnoseDevice | SignalingType::CancelDiagnosis => RouteOwnership::Daemon,
 
         // In-terminal AI copilot: control end → daemon. Like `Diagnose`, the
         // copilot orchestrator runs daemon-side (model call + redaction +
         // streaming) in Default / DeskServer, so this is handled inline rather
         // than forwarded over IPC. `TerminalCopilotCancel` dismisses an in-flight
         // turn, handled inline like `DiagnoseCancel`.
-        SignalingType::TerminalCopilotAsk | SignalingType::TerminalCopilotCancel => {
+        SignalingType::AskTerminalCopilot | SignalingType::CancelTerminalCopilot => {
             RouteOwnership::Daemon
         }
 
@@ -222,19 +229,19 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // copilot, the completion turn runs daemon-side (a single tool-free model
         // call + redaction) in Default / DeskServer, so it is handled inline
         // rather than forwarded over IPC.
-        SignalingType::TerminalCompleteAsk => RouteOwnership::Daemon,
+        SignalingType::GenerateTerminalCompletions => RouteOwnership::Daemon,
 
         // AI confirmed-execution: control end → daemon. The approval state
         // machine (classify → preview → approve/reject → dispatch) lives
         // daemon-side, so these are handled inline rather than forwarded over
         // IPC, like `Diagnose`. The worker only ever receives the sealed
         // `ServiceToWorker::ExecPlan` (a later step), never these.
-        SignalingType::ConfirmExec | SignalingType::ResolveExec => RouteOwnership::Daemon,
+        SignalingType::PreviewExecution | SignalingType::ResolveExecution => RouteOwnership::Daemon,
 
         // Acting on a running execution needs the durable ledger and the worker
         // handle, both of which are the daemon's. The worker is told to stop a
         // command, but never asked what it knows — the ledger outlives it.
-        SignalingType::ExecControl => RouteOwnership::Daemon,
+        SignalingType::ControlExecution => RouteOwnership::Daemon,
 
         // Daemon-emitted notifications. Browsers don't send these
         // back at us, but if they did the daemon should swallow them
@@ -244,15 +251,15 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // AI audit event is emitted by this daemon toward the manager; it is
         // never received inbound here. Classify as daemon-owned so a stray
         // inbound frame is swallowed rather than forwarded to the worker.
-        SignalingType::AiAuditEvent => RouteOwnership::Daemon,
+        SignalingType::ReportAiAuditEvent => RouteOwnership::Daemon,
 
         // Command-template sync is applied to the daemon's own cache (the exec
         // classifier reads it); never forwarded to the worker.
-        SignalingType::CommandTemplateSync => RouteOwnership::Daemon,
+        SignalingType::SyncCommandTemplates => RouteOwnership::Daemon,
 
         // Command-blocklist sync is applied to the daemon's own cache (the exec
         // classifier's Step 0 reads it); never forwarded to the worker.
-        SignalingType::CommandBlocklistSync => RouteOwnership::Daemon,
+        SignalingType::SyncCommandBlocklist => RouteOwnership::Daemon,
 
         // Temporary-support code: manager → daemon, pushed over the host's regular
         // `Server` upstream after the manager issues a code for that connection.
@@ -264,10 +271,10 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         SignalingType::SupportCodeIssued
         | SignalingType::RequestSupportCode
         | SignalingType::RevokeSupportCode
-        | SignalingType::HostRemoteAccessLockRequest
-        | SignalingType::HostRemoteAccessLockAck
-        | SignalingType::TerminateRemotePeerRequest
-        | SignalingType::TerminateRemotePeerAck => RouteOwnership::Daemon,
+        | SignalingType::UpdateRemoteAccessLock
+        | SignalingType::RemoteAccessLockUpdated
+        | SignalingType::TerminateRemotePeer
+        | SignalingType::RemotePeerTerminationResolved => RouteOwnership::Daemon,
 
         // Grant-session revocation: manager → daemon, pushed after a dial-code
         // regeneration. The daemon direct-closes the affected grant connections
@@ -280,7 +287,7 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // against the daemon's collector, never forwarded to the worker.
         // CollectResponse is daemon-emitted toward the manager and never received
         // inbound here, so a stray inbound copy is swallowed daemon-side.
-        SignalingType::CollectRequest | SignalingType::CollectResponse => RouteOwnership::Daemon,
+        SignalingType::CollectEvidence | SignalingType::EvidenceCollectionUpdated => RouteOwnership::Daemon,
 
         // Fleet batch-execution: `EdgeExecRequest` is manager → daemon (the
         // daemon PEP re-validates the manager-sealed `ExecPlan` and dispatches it
@@ -288,24 +295,26 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // forwarded as-is. `EdgeExecResult` is daemon-emitted toward the manager
         // and never received inbound here, so a stray inbound copy is swallowed
         // daemon-side.
-        SignalingType::EdgeExecRequest | SignalingType::EdgeExecResult => RouteOwnership::Daemon,
+        SignalingType::ExecuteEdgePlan | SignalingType::EdgeExecutionCompleted => RouteOwnership::Daemon,
 
         // Remote read-tool RPC (§8.3): `RemoteToolRequest` is manager → daemon
         // (the daemon runs the one server-stamped read locally); handled inline,
         // never forwarded. `RemoteToolResponse` is daemon-emitted toward the
         // manager and never received inbound here, so a stray inbound copy is
         // swallowed daemon-side.
-        SignalingType::RemoteToolRequest | SignalingType::RemoteToolResponse => {
+        SignalingType::InvokeRemoteTool | SignalingType::RemoteToolOutputUpdated => {
             RouteOwnership::Daemon
         }
 
         // Connection-list bookkeeping is daemon state too — the
         // daemon knows about every active PC, the worker only knows
         // its own per-connection encoder set.
-        SignalingType::FetchConnections | SignalingType::ConnectionList => RouteOwnership::Daemon,
+        SignalingType::FetchConnections | SignalingType::ConnectionsFetched => RouteOwnership::Daemon,
 
         // Heartbeat is a WS keepalive — not for the worker.
-        SignalingType::Heartbeat => RouteOwnership::Daemon,
+        SignalingType::SendHeartbeat | SignalingType::HeartbeatAcknowledged => {
+            RouteOwnership::Daemon
+        }
 
         // ---- Worker-bound: user-session resources ----
         // Each of these rides a dedicated typed `ServiceToWorker::*`
@@ -319,21 +328,21 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // browser as `SignalingModel::error`, and only forwards a
         // typed `SetVirtualDisplayMode` IPC when the supervisor is
         // active in service mode.
-        SignalingType::EnablePrivateScreen
+        SignalingType::SetPrivateScreenVisibility
         | SignalingType::UpdateDeskSettings
-        | SignalingType::ManagerSystemInfo
-        | SignalingType::ManagerFileList
-        | SignalingType::ManagerFileDelete
+        | SignalingType::GetSystemInfo
+        | SignalingType::ListFiles
+        | SignalingType::DeleteFile
         | SignalingType::StartTerminal
-        | SignalingType::SendDataToTerminal
+        | SignalingType::SendTerminalInput
         | SignalingType::ResizeTerminal
         | SignalingType::CloseTerminal
-        | SignalingType::ListTerminal
+        | SignalingType::ListTerminalCommands
         | SignalingType::ChangeDisplaySettings
         // AI agent capability request: control end → daemon → worker.
         // The daemon two-phase-parses + stamps trusted fields, then
-        // ships a typed `ServiceToWorker::AgentRequest`.
-        | SignalingType::AgentRequest => RouteOwnership::Worker,
+        // ships a typed `ServiceToWorker::InvokeAgentCapability`.
+        | SignalingType::InvokeAgentCapability => RouteOwnership::Worker,
 
         // ---- Error / Unknown ----
         // These are daemon-owned. `Error` is something the daemon emits
@@ -401,7 +410,7 @@ pub struct RouterContext {
     pub policy: Arc<crate::model::policy_access::PolicyAccess>,
     pub host_control_hub: Arc<HostControlHub>,
     /// handle_request_remote reads `worker_capabilities` from
-    /// here to populate the Init reply, and handle_offer issues
+    /// here to populate the RemoteAccessInitialized response, and handle_offer issues
     /// `ServiceToWorker::StartMedia` through it once the SDP exchange
     /// completes (so the worker knows to spin up the per-connection
     /// encoder).
@@ -470,9 +479,9 @@ pub struct RouterContext {
     /// `route()` / handler call sites stay untouched.
     pub inbound_authz: Option<desk_agent_protocol::authz::AuthorizationBlock>,
     /// The validated capability-ceiling stamp for the current inbound
-    /// `RequestRemote`, set per call by the proxy after `gate_request_remote_frame`
+    /// `RequestRemoteAccess`, set per call by the proxy after `gate_request_remote_frame`
     /// accepts a wrapped frame on the trusted-central link. `None` for a bare
-    /// (non-central) request or a non-`RequestRemote` frame. A `Some` whose
+    /// (non-central) request or a non-`RequestRemoteAccess` frame. A `Some` whose
     /// `access_ceiling` is `Some(_)` marks a redeemed-grant session (restricted);
     /// an `access_ceiling` of `None` is a central-verified owner/full session.
     /// Threaded through the context (like `inbound_authz`) so the handler
@@ -486,13 +495,13 @@ pub struct RouterContext {
     /// `handle_start_terminal_inbound` consumes it to register the terminal
     /// connection's worker ceiling, record its admission, and index it under its
     /// grant — the terminal analogue of `inbound_request_remote_authz` (the terminal
-    /// WS is a distinct connection that never does a `RequestRemote`).
+    /// WS is a distinct connection that never does a `RequestRemoteAccess`).
     pub inbound_start_terminal_authz:
         Option<desk_signal_facade::model::request_remote_authz::RequestRemoteAuthz>,
     /// Per-attempt `request_id`s of fleet executions currently dispatched to the
-    /// worker. When the worker replies with `WorkerToService::ExecResult` whose
+    /// worker. When the worker replies with `WorkerToService::ExecutionCompleted` whose
     /// `request_id` is in this set, the proxy emits a `EdgeExecResult(614)`
-    /// toward the manager instead of an `ExecResult(609)` toward a browser.
+    /// toward the manager instead of an `ExecutionCompleted(609)` toward a browser.
     /// Always present (in-memory state); only populated on the fleet exec path.
     pub edge_exec_pending: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// On-demand temporary-support lifecycle. `handle_support_code_issued_inbound`
@@ -667,7 +676,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         return Ok(());
     }
     match model.signaling_type {
-        SignalingType::RequestRemote => {
+        SignalingType::RequestRemoteAccess => {
             let request_remote = model
                 .get_data::<RequestRemoteModel>()
                 .map_err(DeskError::from)?;
@@ -697,7 +706,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
 
             let s = ctx.settings.read().await.clone();
             // Block on virtual display attach BEFORE assembling the
-            // Init reply so the daemon's capabilities cache reflects
+            // RemoteAccessInitialized response so the daemon's capabilities cache reflects
             // the IDD and the dropdown shows it on the first dialog
             // open. Timeout falls through to a capabilities-without-IDD
             // reply; the next dialog open recovers via the existing
@@ -715,7 +724,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                     EnsureAttachedOutcome::TimedOut => {
                         log::warn!(
                             "[router] virtual display attach did not complete within \
-                             {VIRTUAL_DISPLAY_ATTACH_TIMEOUT:?}; Init reply will omit \
+                             {VIRTUAL_DISPLAY_ATTACH_TIMEOUT:?}; RemoteAccessInitialized response will omit \
                              IDD this round"
                         );
                     }
@@ -789,11 +798,11 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                 && ctx.pc_registry.pending_requests() == 0
             {
                 log::info!(
-                    "[router] post-RequestRemote cleanup: registry empty and no pending; \
+                    "[router] post-RequestRemoteAccess cleanup: registry empty and no pending; \
                      detaching virtual display"
                 );
                 if let Err(e) = supervisor.apply(false).await {
-                    log::warn!("[router] post-RequestRemote cleanup detach failed: {e}");
+                    log::warn!("[router] post-RequestRemoteAccess cleanup detach failed: {e}");
                 }
             }
 
@@ -854,15 +863,28 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                 Err(error) => Err(error.into()),
             }
         }
-        SignalingType::Canid => {
-            pc_manager::handle_canid(&ctx.pc_registry, model).await?;
+        SignalingType::IceCandidate => {
+            pc_manager::handle_ice_candidate(&ctx.pc_registry, model).await?;
             Ok(())
         }
-        SignalingType::CloseControl => {
-            // Releasing control revokes any session-scoped exec approvals the
+        SignalingType::ReleaseControl => {
+            let outcome = pc_manager::handle_release_control(
+                &ctx.pc_registry,
+                &ctx.outbound_tx,
+                model,
+            )
+            .await?;
+            ctx.host_control_hub
+                .host_activity()
+                .set_remote_control(&outcome.connection_id, false);
+            update_exclusive_after_control_change(ctx, &outcome).await;
+            Ok(())
+        }
+        SignalingType::CloseRemoteSession => {
+            // Closing the session revokes any session-scoped exec approvals the
             // connection accrued in SessionApproved mode.
             revoke_session_approvals(ctx, model);
-            pc_manager::handle_close_control(
+            pc_manager::handle_close_remote_session(
                 &ctx.pc_registry,
                 &ctx.worker_mgr,
                 ctx.virtual_display.as_ref(),
@@ -907,43 +929,51 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // used to be worker-bound for verbose logging, but since the
         // bridge is gone there is no point round-tripping them).
         SignalingType::Answer
-        | SignalingType::Init
-        | SignalingType::AcceptControl
-        | SignalingType::DenyControl
+        | SignalingType::RemoteAccessInitialized
+        | SignalingType::ControlAccepted
+        | SignalingType::ControlDenied
+        | SignalingType::ControlReleased
         | SignalingType::PrivateScreenStateChanged
-        | SignalingType::AudioPlaybackError
+        | SignalingType::PrivateScreenVisibilitySet
+        | SignalingType::AudioPlaybackFailed
         | SignalingType::MediaPipelineStateChanged
-        | SignalingType::ManagerSystemStatue
-        | SignalingType::ReplyFromTerminal
+        | SignalingType::MediaPipelineRetryCompleted
+        | SignalingType::SystemInfoRetrieved
+        | SignalingType::DisplaySettingsChanged
+        | SignalingType::FilesListed
+        | SignalingType::FileDeleted
+        | SignalingType::TerminalCommandsListed
+        | SignalingType::TerminalOutputProduced
         | SignalingType::TerminalStarted
         | SignalingType::TerminalClosed
         | SignalingType::DesktopSwitching
         | SignalingType::DesktopReady
         | SignalingType::FetchConnections
-        | SignalingType::ConnectionList
-        | SignalingType::Heartbeat
-        // AgentResponse only flows worker → control end; an inbound
+        | SignalingType::ConnectionsFetched
+        | SignalingType::SendHeartbeat
+        | SignalingType::HeartbeatAcknowledged
+        // AgentCapabilityCompleted only flows worker → control end; an inbound
         // copy is a protocol error — swallow it.
-        | SignalingType::AgentResponse
+        | SignalingType::AgentCapabilityCompleted
         // DiagnoseEvent only flows host → control end (streamed); an
         // inbound copy is a protocol error — swallow it.
-        | SignalingType::DiagnoseEvent
+        | SignalingType::DiagnosisUpdated
         // TerminalCopilotEvent only flows host → control end (streamed); an
         // inbound copy is a protocol error — swallow it.
-        | SignalingType::TerminalCopilotEvent
+        | SignalingType::TerminalCopilotUpdated
         // TerminalCompleteResult only flows host → control end; an inbound copy
         // is a protocol error — swallow it.
-        | SignalingType::TerminalCompleteResult
-        // ExecPreview / ExecResult and the lifecycle frames only flow host →
+        | SignalingType::TerminalCompletionsGenerated
+        // ExecPreview / ExecutionCompleted and the lifecycle frames only flow host →
         // control end; an inbound copy is a protocol error — swallow it.
-        | SignalingType::ExecPreview
-        | SignalingType::ExecResult
-        | SignalingType::ExecLifecycle
-        | SignalingType::ExecStateReply
-        | SignalingType::HostRemoteAccessLockRequest
-        | SignalingType::HostRemoteAccessLockAck
-        | SignalingType::TerminateRemotePeerRequest
-        | SignalingType::TerminateRemotePeerAck
+        | SignalingType::ExecutionPreviewGenerated
+        | SignalingType::ExecutionCompleted
+        | SignalingType::ExecutionProgressUpdated
+        | SignalingType::ExecutionStateReported
+        | SignalingType::UpdateRemoteAccessLock
+        | SignalingType::RemoteAccessLockUpdated
+        | SignalingType::TerminateRemotePeer
+        | SignalingType::RemotePeerTerminationResolved
         | SignalingType::Error
         | SignalingType::Unknown => {
             log::trace!(
@@ -952,20 +982,20 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             );
             Ok(())
         }
-        SignalingType::EnablePrivateScreen => {
-            handle_enable_private_screen_inbound(ctx, model).await
+        SignalingType::SetPrivateScreenVisibility => {
+            handle_set_private_screen_visibility_inbound(ctx, model).await
         }
         SignalingType::UpdateDeskSettings => handle_update_desk_settings_inbound(ctx, model).await,
         // Manager-plane typed-IPC dispatch.
-        SignalingType::ManagerSystemInfo => handle_manager_system_info_inbound(ctx, model).await,
-        SignalingType::ManagerFileList => handle_manager_file_list_inbound(ctx, model).await,
-        SignalingType::ManagerFileDelete => handle_manager_file_delete_inbound(ctx, model).await,
+        SignalingType::GetSystemInfo => handle_manager_system_info_inbound(ctx, model).await,
+        SignalingType::ListFiles => handle_manager_file_list_inbound(ctx, model).await,
+        SignalingType::DeleteFile => handle_manager_file_delete_inbound(ctx, model).await,
         // Terminal-plane typed-IPC dispatch.
         SignalingType::StartTerminal => handle_start_terminal_inbound(ctx, model).await,
-        SignalingType::SendDataToTerminal => handle_send_data_to_terminal_inbound(ctx, model).await,
+        SignalingType::SendTerminalInput => handle_send_data_to_terminal_inbound(ctx, model).await,
         SignalingType::ResizeTerminal => handle_resize_terminal_inbound(ctx, model).await,
         SignalingType::CloseTerminal => handle_close_terminal_inbound(ctx, model).await,
-        SignalingType::ListTerminal => handle_list_terminal_inbound(ctx, model).await,
+        SignalingType::ListTerminalCommands => handle_list_terminal_inbound(ctx, model).await,
         // Virtual display integration: browser → daemon ChangeDisplaySettings.
         // Daemon validates input, surfaces error responses for the
         // un-routable cases (FEATURE_UNAVAILABLE / INVALID_PARAMS /
@@ -975,48 +1005,48 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             handle_change_display_settings_inbound(ctx, model).await
         }
         // AI agent capability request: two-phase parse + trusted-field
-        // stamp, then ship a typed `ServiceToWorker::AgentRequest`.
-        SignalingType::AgentRequest => handle_agent_request_inbound(ctx, model).await,
+        // stamp, then ship a typed `ServiceToWorker::InvokeAgentCapability`.
+        SignalingType::InvokeAgentCapability => handle_invoke_agent_capability_inbound(ctx, model).await,
         // AI Diagnose: run the daemon-side orchestrator (Default / DeskServer)
         // or reply `FEATURE_UNAVAILABLE` (ServiceDaemon, where the orchestrator
         // is not injected). Streams `DiagnoseEvent` frames back to the browser.
-        SignalingType::Diagnose => handle_diagnose_inbound(ctx, model).await,
+        SignalingType::DiagnoseDevice => handle_diagnose_inbound(ctx, model).await,
         // AI Diagnose cancellation: stop the run abandoned by a UI start-over and
         // record an `ai.task.cancelled` audit; no `DiagnoseEvent` is streamed back.
-        SignalingType::DiagnoseCancel => handle_diagnose_cancel_inbound(ctx, model).await,
+        SignalingType::CancelDiagnosis => handle_diagnose_cancel_inbound(ctx, model).await,
         // In-terminal AI copilot: run the daemon-side orchestrator (Default /
         // DeskServer) or reply `FEATURE_UNAVAILABLE` (ServiceDaemon, where the
         // orchestrator is not injected). Streams `TerminalCopilotEvent` frames
         // back to the control end.
-        SignalingType::TerminalCopilotAsk => handle_terminal_copilot_inbound(ctx, model).await,
+        SignalingType::AskTerminalCopilot => handle_terminal_copilot_inbound(ctx, model).await,
         // Copilot dismissal: a UI-side action with no orchestrator state branch
         // yet; recorded as a no-op cancellation, like `DiagnoseCancel`.
-        SignalingType::TerminalCopilotCancel => Ok(()),
+        SignalingType::CancelTerminalCopilot => Ok(()),
         // In-terminal AI command completion: run the daemon-side single-shot
         // completion (Default / DeskServer) or reply with an error result
         // (ServiceDaemon, where the runtime is not injected). Answers with one
         // `TerminalCompleteResult` frame back to the control end.
-        SignalingType::TerminalCompleteAsk => handle_terminal_complete_inbound(ctx, model).await,
+        SignalingType::GenerateTerminalCompletions => handle_terminal_complete_inbound(ctx, model).await,
         // AI confirmed-execution: classify the command, store an immutable
         // pending approval, and stream an `ExecPreview` back (Default /
         // DeskServer) or reply `UnsupportedCapability` (ServiceDaemon).
-        SignalingType::ConfirmExec => handle_confirm_exec_inbound(ctx, model).await,
+        SignalingType::PreviewExecution => handle_confirm_exec_inbound(ctx, model).await,
         // AI confirmed-execution: consume a pending approval and (on approve)
         // dispatch the sealed plan. The execution itself + outbound
-        // `ExecResult` land with the worker executor in a later step.
-        SignalingType::ResolveExec => handle_resolve_exec_inbound(ctx, model).await,
-        SignalingType::ExecControl => handle_exec_control_inbound(ctx, model).await,
+        // `ExecutionCompleted` land with the worker executor in a later step.
+        SignalingType::ResolveExecution => handle_resolve_exec_inbound(ctx, model).await,
+        SignalingType::ControlExecution => handle_exec_control_inbound(ctx, model).await,
         // AI audit events are emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never persists audit itself).
-        SignalingType::AiAuditEvent => Ok(()),
+        SignalingType::ReportAiAuditEvent => Ok(()),
         // Command-template sync from the manager. The source gate
         // (`handle_inbound_signaling_text`) has already dropped any non-Manager
         // origin before reaching here; this only applies the validated set.
-        SignalingType::CommandTemplateSync => handle_command_template_sync_inbound(ctx, model),
+        SignalingType::SyncCommandTemplates => handle_command_template_sync_inbound(ctx, model),
         // Command-blocklist sync from the manager. The source gate
         // (`handle_inbound_signaling_text`) has already dropped any non-central
         // origin before reaching here; this only applies the validated set.
-        SignalingType::CommandBlocklistSync => handle_command_blocklist_sync_inbound(ctx, model),
+        SignalingType::SyncCommandBlocklist => handle_command_blocklist_sync_inbound(ctx, model),
         // Temporary-support code issued by the manager over this host's dedicated
         // Support upstream. The daemon surfaces it to the local user, who reads it
         // out to a supporter. The source gate (`handle_inbound_signaling_text`) has
@@ -1035,27 +1065,27 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // collectors and stream a chunked CollectResponse back. The source gate
         // (`handle_inbound_signaling_text`) has already dropped any non-Manager
         // origin before reaching here.
-        SignalingType::CollectRequest => handle_collect_request_inbound(ctx, model).await,
+        SignalingType::CollectEvidence => handle_collect_request_inbound(ctx, model).await,
         // CollectResponse is emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never consumes its own stream).
-        SignalingType::CollectResponse => Ok(()),
+        SignalingType::EvidenceCollectionUpdated => Ok(()),
         // Fleet batch-execution request from the manager: PEP re-validate the
         // manager-sealed `ExecPlan` and dispatch it to the worker, correlating
         // the worker's result back to the manager as a `EdgeExecResult`. The
         // source gate + dedicated authz gate (`signaling_proxy`) have already
         // dropped non-Manager origins and unwrapped/validated the authorization.
-        SignalingType::EdgeExecRequest => handle_edge_exec_request_inbound(ctx, model).await,
+        SignalingType::ExecuteEdgePlan => handle_edge_exec_request_inbound(ctx, model).await,
         // EdgeExecResult is emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never consumes its own replies).
-        SignalingType::EdgeExecResult => Ok(()),
+        SignalingType::EdgeExecutionCompleted => Ok(()),
         // Remote read-tool request from the manager (agentic loop running
         // centrally): run the one server-stamped read locally and stream a chunked
         // RemoteToolResponse back. The source gate has already dropped any
         // non-Manager origin before reaching here.
-        SignalingType::RemoteToolRequest => handle_remote_tool_request_inbound(ctx, model).await,
+        SignalingType::InvokeRemoteTool => handle_remote_tool_request_inbound(ctx, model).await,
         // RemoteToolResponse is emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never consumes its own stream).
-        SignalingType::RemoteToolResponse => Ok(()),
+        SignalingType::RemoteToolOutputUpdated => Ok(()),
     }
 }
 
@@ -1128,7 +1158,10 @@ async fn handle_retry_media_pipeline(
         )
         .await;
     match outcome {
-        RestartOutcome::Restarted => Ok(()),
+        RestartOutcome::Restarted => {
+            send_media_retry_success(ctx, model);
+            Ok(())
+        }
         RestartOutcome::NoCachedPayload { left_paused } => {
             let message =
                 format!("media retry requires a fresh offer; connection left_paused={left_paused}");
@@ -1213,7 +1246,7 @@ fn send_media_retry_error(
 ) {
     let response = SignalingModel::error(
         &model.request_id,
-        SignalingType::RetryMediaPipeline,
+        SignalingType::MediaPipelineRetryCompleted,
         None,
         model.from_connection_id.clone(),
         code,
@@ -1226,10 +1259,27 @@ fn send_media_retry_error(
     }
 }
 
+fn send_media_retry_success(ctx: &RouterContext, model: &SignalingModel) {
+    let response = SignalingModel::success_response::<()>(
+        &model.request_id,
+        SignalingType::MediaPipelineRetryCompleted,
+        None,
+        model.from_connection_id.clone(),
+        None,
+    );
+    if let Ok(response) = response
+        && let Ok(text) = serde_json::to_string(&response)
+    {
+        let _ = ctx.outbound_tx.send(text);
+    }
+}
+
 fn send_manager_admission_retry(ctx: &RouterContext, model: &SignalingModel) {
+    let response_type =
+        response_type_for_request(model.signaling_type).unwrap_or(SignalingType::Error);
     let response = SignalingModel::error(
         &model.request_id,
-        SignalingType::Error,
+        response_type,
         None,
         model.from_connection_id.clone(),
         DeskErrorCode::ACTION_NEED_RETRY,
@@ -1245,7 +1295,7 @@ fn send_manager_admission_retry(ctx: &RouterContext, model: &SignalingModel) {
 fn allowed_for_tombstoned_connection(signaling_type: SignalingType) -> bool {
     matches!(
         signaling_type,
-        SignalingType::CloseControl
+        SignalingType::CloseRemoteSession
             | SignalingType::ConnectionRemoved
             | SignalingType::CloseTerminal
     )
@@ -1254,15 +1304,16 @@ fn allowed_for_tombstoned_connection(signaling_type: SignalingType) -> bool {
 fn allowed_while_remote_access_locked(signaling_type: SignalingType) -> bool {
     matches!(
         signaling_type,
-        SignalingType::CloseControl
+        SignalingType::ReleaseControl
+            | SignalingType::CloseRemoteSession
             | SignalingType::ConnectionRemoved
             | SignalingType::CloseTerminal
-            | SignalingType::CommandTemplateSync
-            | SignalingType::CommandBlocklistSync
+            | SignalingType::SyncCommandTemplates
+            | SignalingType::SyncCommandBlocklist
             | SignalingType::SupportCodeIssued
             | SignalingType::RevokeAccessGrant
-            | SignalingType::HostRemoteAccessLockAck
-            | SignalingType::TerminateRemotePeerAck
+            | SignalingType::RemoteAccessLockUpdated
+            | SignalingType::RemotePeerTerminationResolved
     )
 }
 

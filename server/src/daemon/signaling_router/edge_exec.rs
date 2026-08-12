@@ -17,7 +17,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
     // is a routing fault. Reject (definitely not executed) rather than dispatch
     // an unauthorized plan.
     let Some(authz) = ctx.inbound_authz.clone() else {
-        send_edge_exec_result(
+        send_edge_execution_completed(
             &ctx.outbound_tx,
             &request_id,
             EdgeExecDisposition::RejectedBeforeDispatch {
@@ -34,7 +34,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
     let payload = match model.get_data::<EdgeExecRequestPayload>() {
         Ok(p) => p,
         Err(e) => {
-            send_edge_exec_result(
+            send_edge_execution_completed(
                 &ctx.outbound_tx,
                 &request_id,
                 EdgeExecDisposition::RejectedBeforeDispatch {
@@ -62,7 +62,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
     {
         let plan = payload.plan();
         if plan.execution_generation != request_id {
-            send_edge_exec_result(
+            send_edge_execution_completed(
                 &ctx.outbound_tx,
                 &request_id,
                 EdgeExecDisposition::RejectedBeforeDispatch {
@@ -72,7 +72,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
             return Ok(());
         }
         if plan.exec_request_id.0.is_empty() {
-            send_edge_exec_result(
+            send_edge_execution_completed(
                 &ctx.outbound_tx,
                 &request_id,
                 EdgeExecDisposition::RejectedBeforeDispatch {
@@ -82,7 +82,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
             return Ok(());
         }
         if plan.approval_id.0.is_empty() {
-            send_edge_exec_result(
+            send_edge_execution_completed(
                 &ctx.outbound_tx,
                 &request_id,
                 EdgeExecDisposition::RejectedBeforeDispatch {
@@ -97,7 +97,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
     // gate normally prevents dispatch to a daemon that cannot execute, but a PEP
     // must never assume the PDP got it right.
     if !ctx.exec_supported {
-        send_edge_exec_result(
+        send_edge_execution_completed(
             &ctx.outbound_tx,
             &request_id,
             EdgeExecDisposition::RejectedBeforeDispatch {
@@ -120,7 +120,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
             ExecutionMode::ConfirmEachAction | ExecutionMode::SessionApproved
         )
     {
-        send_edge_exec_result(
+        send_edge_execution_completed(
             &ctx.outbound_tx,
             &request_id,
             EdgeExecDisposition::RejectedBeforeDispatch {
@@ -159,7 +159,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
     };
     if let Some(reason) = rejection {
         log::warn!("[edge-exec] PEP rejected plan for request {request_id}: {reason}");
-        send_edge_exec_result(
+        send_edge_execution_completed(
             &ctx.outbound_tx,
             &request_id,
             EdgeExecDisposition::RejectedBeforeDispatch { reason },
@@ -174,8 +174,8 @@ pub(super) async fn handle_edge_exec_request_inbound(
 }
 
 /// Dispatch a PEP-validated fleet [`ExecPlan`] to the worker, correlated so the
-/// worker's `WorkerToService::ExecResult` is relayed back to the trusted central as a
-/// `EdgeExecResult(Executed{..})` (see the proxy's `ExecResult` handler). On a
+/// worker's `WorkerToService::ExecutionCompleted` is relayed back to the trusted central as a
+/// `EdgeExecResult(Executed{..})` (see the proxy's `ExecutionCompleted` handler). On a
 /// send failure the plan never reached the worker, so the change definitely did
 /// not run → `DispatchFailedBeforeWorker`.
 pub(super) async fn dispatch_fleet_exec_plan(
@@ -195,7 +195,7 @@ pub(super) async fn dispatch_fleet_exec_plan(
                     true,
                 ))
             });
-            send_edge_exec_result(
+            send_edge_execution_completed(
                 &ctx.outbound_tx,
                 request_id,
                 EdgeExecDisposition::Executed { outcome },
@@ -205,7 +205,7 @@ pub(super) async fn dispatch_fleet_exec_plan(
         ExecAdmission::AcceptedOutcomeUnknown(reason) => {
             // `ExecutionStateUnknown` rather than a pre-dispatch variant: only the
             // pre-dispatch ones assert the change did not run, and this one cannot.
-            send_edge_exec_result(
+            send_edge_execution_completed(
                 &ctx.outbound_tx,
                 request_id,
                 EdgeExecDisposition::ExecutionStateUnknown { reason },
@@ -213,7 +213,7 @@ pub(super) async fn dispatch_fleet_exec_plan(
             return;
         }
         ExecAdmission::Refused(reason) => {
-            send_edge_exec_result(
+            send_edge_execution_completed(
                 &ctx.outbound_tx,
                 request_id,
                 EdgeExecDisposition::RejectedBeforeDispatch { reason },
@@ -221,7 +221,7 @@ pub(super) async fn dispatch_fleet_exec_plan(
             return;
         }
         ExecAdmission::AtCapacity(reason) => {
-            send_edge_exec_result(
+            send_edge_execution_completed(
                 &ctx.outbound_tx,
                 request_id,
                 EdgeExecDisposition::HostAtCapacity { reason },
@@ -253,7 +253,7 @@ pub(super) async fn dispatch_fleet_exec_plan(
         }
         // Nothing was started, so the slot is free again immediately.
         ctx.exec_capacity.release(request_id);
-        send_edge_exec_result(
+        send_edge_execution_completed(
             &ctx.outbound_tx,
             request_id,
             EdgeExecDisposition::DispatchFailedBeforeWorker {
@@ -298,9 +298,9 @@ pub(super) fn build_agent_envelope(
     }
 }
 
-/// Route a control-end `AgentRequest`: two-phase parse → capability
+/// Route a control-end `InvokeAgentCapability`: two-phase parse → capability
 /// derivation → authorization → trusted-field stamp → typed worker IPC.
-pub(super) async fn handle_agent_request_inbound(
+pub(super) async fn handle_invoke_agent_capability_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
@@ -308,7 +308,7 @@ pub(super) async fn handle_agent_request_inbound(
     // may leave this host is gated locally by the fail-closed collection policy
     // (`allow_logs` / `allow_screen`) and centrally by the authorization scope
     // below. Provider credentials live on the central brain, so there is no local
-    // "gateway configured" gate here: an `AgentRequest` arrives already
+    // "gateway configured" gate here: an `InvokeAgentCapability` arrives already
     // authorized from the central link (or, off it, runs under the local read
     // scope).
     let Some(raw) = model.get_raw_data().as_ref() else {
@@ -317,7 +317,7 @@ pub(super) async fn handle_agent_request_inbound(
             model,
             agent_error(
                 AgentErrorKind::InvalidInput,
-                "missing AgentRequest body",
+                "missing InvokeAgentCapability body",
                 false,
                 true,
             ),
@@ -326,7 +326,7 @@ pub(super) async fn handle_agent_request_inbound(
     };
 
     // Reject unknown kinds gracefully before typed parsing.
-    if let Err(e) = validate_agent_request_kinds(raw) {
+    if let Err(e) = validate_invoke_agent_capability_kinds(raw) {
         emit_agent_error(ctx, model, e);
         return Ok(());
     }
@@ -340,7 +340,7 @@ pub(super) async fn handle_agent_request_inbound(
                 model,
                 agent_error(
                     AgentErrorKind::InvalidInput,
-                    &format!("bad AgentRequest payload: {e}"),
+                    &format!("bad InvokeAgentCapability payload: {e}"),
                     false,
                     true,
                 ),
@@ -349,7 +349,7 @@ pub(super) async fn handle_agent_request_inbound(
         }
     };
 
-    // The `AgentRequest(600)` plane is **read-only, permanently**. Exec must go
+    // The `InvokeAgentCapability(600)` plane is **read-only, permanently**. Exec must go
     // through the `ConfirmExec` → `ResolveExec` confirm flow (which classifies,
     // requires explicit approval, and ships a sealed `ExecPlan`); it can never
     // ride the raw capability path, even once execution is wired up. Reject it
@@ -420,7 +420,7 @@ pub(super) async fn handle_agent_request_inbound(
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::AgentRequest(payload))
+        .send_to_worker(ServiceToWorker::InvokeAgentCapability(payload))
         .await
     {
         emit_agent_error(

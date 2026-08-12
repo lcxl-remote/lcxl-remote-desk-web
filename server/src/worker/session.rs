@@ -25,14 +25,13 @@ use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
         AgentResponsePayload, DesktopChangedPayload, ExecCancelPayload, ExecHeartbeatPayload,
-        ExecResultIpcPayload, ExecSpawnReportPayload, FileTransferPayload, HeartbeatPayload,
-        ListTerminalResponsePayload, LocaleAppliedPayload, ManagerFileListResponsePayload,
-        ManagerResponseRefPayload, ManagerSystemInfoResponsePayload,
+        ExecResultIpcPayload, ExecSpawnReportPayload, FileTransferPayload, FilesListedPayload,
+        HeartbeatPayload, LocaleAppliedPayload, ManagerResponseRefPayload,
         PrivateScreenStateChangedPayload, RemoteAccessStateAppliedPayload,
-        ReplyFromTerminalPayload, SecurityPolicyAppliedPayload, ServiceToWorker,
-        SignalingErrorPayload, StopMediaPayload, TerminalClosedPayload, TerminalStartedPayload,
-        VirtualDisplayAttachOutcome, VirtualDisplayAttachResultPayload, WorkerInitPayload,
-        WorkerToService,
+        SecurityPolicyAppliedPayload, ServiceToWorker, SignalingErrorPayload, StopMediaPayload,
+        SystemInfoRetrievedPayload, TerminalClosedPayload, TerminalCommandsListedPayload,
+        TerminalOutputProducedPayload, TerminalStartedPayload, VirtualDisplayAttachOutcome,
+        VirtualDisplayAttachResultPayload, WorkerInitPayload, WorkerToService,
     },
     transport::{read_message, write_message},
 };
@@ -40,8 +39,9 @@ use desk_server_user::model::CurrentUser;
 use desk_signal_facade::model::files::FileListResponse;
 use desk_signal_facade::model::policy_snapshot::PolicySnapshot;
 use desk_signal_facade::model::private_screen::{
-    EnablePrivateScreenData, PrivateScreenStateChangedData,
+    PrivateScreenStateChangedData, SetPrivateScreenVisibilityData,
 };
+use desk_signal_facade::model::signal::PeerSignalingSender;
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use desk_signal_facade::model::system_info::SystemInfo;
 use desk_signal_facade::model::terminal::{TerminalList, TerminalOutputData};

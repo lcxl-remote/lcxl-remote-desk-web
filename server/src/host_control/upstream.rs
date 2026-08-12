@@ -282,6 +282,7 @@ mod tests {
         let mut rx = f.take_outbound_rx().unwrap();
         f.send(HostControlMessage::PrivateScreenHide {
             connection_id: "c1".into(),
+            request_id: "r-hide".into(),
         });
         let got = tokio::time::timeout(Duration::from_millis(50), rx.recv())
             .await
@@ -290,7 +291,8 @@ mod tests {
         assert_eq!(
             got,
             HostControlMessage::PrivateScreenHide {
-                connection_id: "c1".into()
+                connection_id: "c1".into(),
+                request_id: "r-hide".into(),
             }
         );
     }

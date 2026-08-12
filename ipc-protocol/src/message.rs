@@ -95,7 +95,7 @@ pub enum ServiceToWorker {
     // ---------- Typed control plane ----------
     /// Browser-issued private-screen toggle. Worker enables / disables
     /// the per-connection private screen via its `host_control_helper`.
-    EnablePrivateScreen(EnablePrivateScreenPayload),
+    SetPrivateScreenVisibility(SetPrivateScreenVisibilityPayload),
 
     /// Browser-issued desk-settings update. Carries the full
     /// `DeskSettings` so the worker can apply non-media fields
@@ -108,44 +108,44 @@ pub enum ServiceToWorker {
 
     // ---------- Manager plane (typed) ----------
     /// Browser → worker request for the host's [`SystemInfo`]. Worker
-    /// replies via [`WorkerToService::ManagerSystemInfoResponse`].
-    ManagerSystemInfoRequest(ManagerRequestRefPayload),
+    /// replies via [`WorkerToService::SystemInfoRetrieved`].
+    GetSystemInfo(ManagerRequestRefPayload),
 
     /// Browser → worker request to enumerate files. Worker replies
-    /// via [`WorkerToService::ManagerFileListResponse`].
-    ManagerFileListRequest(ManagerFileListRequestPayload),
+    /// via [`WorkerToService::FilesListed`].
+    ListFiles(ListFilesPayload),
 
     /// Browser → worker request to delete a file. Worker replies via
-    /// [`WorkerToService::ManagerFileDeleteResponse`] (empty body).
-    ManagerFileDeleteRequest(ManagerFileDeleteRequestPayload),
+    /// [`WorkerToService::FileDeleted`] (empty body).
+    DeleteFile(DeleteFilePayload),
 
     // ---------- Terminal plane (typed) ----------
     /// Browser → worker request to launch a new PTY-backed terminal
     /// session. Worker replies via
     /// [`WorkerToService::TerminalStarted`] (empty body) on success;
     /// failures take the typed [`WorkerToService::SignalingError`]
-    /// reverse path. The PTY reader thread emits `ReplyFromTerminal`
+    /// reverse path. The PTY reader thread emits `TerminalOutputProduced`
     /// chunks until the child exits, at which point the monitor task
     /// emits `TerminalClosed`.
-    StartTerminalRequest(StartTerminalRequestPayload),
+    StartTerminal(StartTerminalPayload),
 
     /// Browser → worker keystroke / paste write to a running terminal.
     /// One-way — no response variant.
-    SendDataToTerminalRequest(SendDataToTerminalPayload),
+    SendTerminalInput(SendTerminalInputPayload),
 
     /// Browser → worker terminal window resize. One-way.
-    ResizeTerminalRequest(ResizeTerminalPayload),
+    ResizeTerminal(ResizeTerminalPayload),
 
     /// Browser → worker terminal close (force-kills the child process
     /// tree by OS-session id). One-way; `TerminalClosed` is emitted by
     /// the monitor task when the child actually exits.
-    CloseTerminalRequest(CloseTerminalPayload),
+    CloseTerminal(CloseTerminalPayload),
 
     /// Browser → worker request for the list of available shells on
     /// this host. Worker replies via
-    /// [`WorkerToService::ListTerminalResponse`] (carries
+    /// [`WorkerToService::TerminalCommandsListed`] (carries
     /// [`TerminalList`]).
-    ListTerminalRequest(ListTerminalRequestPayload),
+    ListTerminalCommands(ListTerminalCommandsPayload),
 
     // ---------- File-transfer error feedback (event pipe) ----------
     /// Daemon → worker notification that a `dc.send` for a file-transfer
@@ -183,7 +183,7 @@ pub enum ServiceToWorker {
 
     /// Daemon → worker: re-publish the worker's [`MediaCapabilities`]
     /// so the daemon's cached snapshot (and any frontend that fetches
-    /// it via the next `InitSignalingData`) reflects the worker's
+    /// it via the next `RemoteAccessInitializedData`) reflects the worker's
     /// latest enumeration. Sent by the daemon's
     /// `VirtualDisplaySupervisor` when an IDD virtual monitor finishes
     /// attaching (or finishes detaching) — these transitions change
@@ -216,18 +216,18 @@ pub enum ServiceToWorker {
     /// Daemon → worker: an AI capability call. The worker runs the
     /// matching collector / executor inside the user session (where
     /// WinSta0 / the authoritative capture frame live) and replies via
-    /// [`WorkerToService::AgentResponse`]. `request_id` correlates the
+    /// [`WorkerToService::AgentCapabilityCompleted`]. `request_id` correlates the
     /// pair. The full [`desk_agent_protocol::AgentEnvelope`] is embedded
     /// verbatim — the daemon has already stamped its trusted fields
     /// (target / actor / scope / caller / request_id) before forwarding.
-    AgentRequest(AgentRequestPayload),
+    InvokeAgentCapability(AgentRequestPayload),
 
     /// Daemon → worker: a sealed, user-approved execution plan. The worker
     /// executes `plan.program` + `plan.argv` **verbatim** (no shell re-parse,
     /// no elevation, no stdin) inside the user session and replies via
-    /// [`WorkerToService::ExecResult`]. Unlike [`Self::AgentRequest`], exec never
+    /// [`WorkerToService::ExecutionCompleted`]. Unlike [`Self::InvokeAgentCapability`], exec never
     /// rides the capability envelope — only this dedicated variant carries an
-    /// executable plan, so a read-only `AgentRequest` can never become one.
+    /// executable plan, so a read-only `InvokeAgentCapability` can never become one.
     ExecPlan(ExecPlanPayload),
 
     /// Daemon → worker: stop the execution running under this generation and
@@ -235,7 +235,7 @@ pub enum ServiceToWorker {
     ///
     /// Fire-and-forget by design. The worker does not reply, because the only
     /// answer worth having is the execution's own terminal result, which already
-    /// travels on [`WorkerToService::ExecResult`]. A separate acknowledgement
+    /// travels on [`WorkerToService::ExecutionCompleted`]. A separate acknowledgement
     /// would say a stop was *requested*, which no upstream can act on — the
     /// daemon answers "what state is it in now?" from its durable ledger, and
     /// naming a generation the worker is not running is not an error there.
@@ -347,23 +347,23 @@ pub enum WorkerToService {
 
     // ---------- Manager plane (typed) ----------
     /// Worker → daemon response to
-    /// [`ServiceToWorker::ManagerSystemInfoRequest`]. Daemon
-    /// rebuilds the matching `SignalingType::ManagerSystemInfo`
+    /// [`ServiceToWorker::GetSystemInfo`]. Daemon
+    /// rebuilds the matching `SignalingType::GetSystemInfo`
     /// outbound model and writes it to the browser's signaling WS.
-    ManagerSystemInfoResponse(ManagerSystemInfoResponsePayload),
+    SystemInfoRetrieved(SystemInfoRetrievedPayload),
 
     /// Worker → daemon response to
-    /// [`ServiceToWorker::ManagerFileListRequest`].
-    ManagerFileListResponse(ManagerFileListResponsePayload),
+    /// [`ServiceToWorker::ListFiles`].
+    FilesListed(FilesListedPayload),
 
     /// Worker → daemon response to
-    /// [`ServiceToWorker::ManagerFileDeleteRequest`] (empty body —
+    /// [`ServiceToWorker::DeleteFile`] (empty body —
     /// `request_id` correlates with the original request).
-    ManagerFileDeleteResponse(ManagerResponseRefPayload),
+    FileDeleted(ManagerResponseRefPayload),
 
     // ---------- Terminal plane (typed) ----------
     /// Worker → daemon success reply for
-    /// [`ServiceToWorker::StartTerminalRequest`]. Empty body — the
+    /// [`ServiceToWorker::StartTerminal`]. Empty body — the
     /// `request_id` correlates with the original request. The daemon
     /// rebuilds the matching `SignalingType::TerminalStarted` outbound
     /// model and writes it to the browser's signaling WS.
@@ -371,7 +371,7 @@ pub enum WorkerToService {
 
     /// Worker → daemon notification that the PTY child process exited
     /// (either a clean exit observed by the monitor task or a forced
-    /// close via [`ServiceToWorker::CloseTerminalRequest`]). No
+    /// close via [`ServiceToWorker::CloseTerminal`]). No
     /// `request_id` because this is a server-initiated notification
     /// rather than a response to any specific request.
     TerminalClosed(TerminalClosedPayload),
@@ -380,13 +380,13 @@ pub enum WorkerToService {
     /// High-frequency keystroke-by-keystroke; chunks are 1 KB max.
     /// Travels on the event pipe (event traffic only — no media
     /// pressure on this path).
-    ReplyFromTerminal(ReplyFromTerminalPayload),
+    TerminalOutputProduced(TerminalOutputProducedPayload),
 
     /// Worker → daemon response to
-    /// [`ServiceToWorker::ListTerminalRequest`]. Carries the
+    /// [`ServiceToWorker::ListTerminalCommands`]. Carries the
     /// [`TerminalList`] (available shells + the configured default
     /// index).
-    ListTerminalResponse(ListTerminalResponsePayload),
+    TerminalCommandsListed(TerminalCommandsListedPayload),
 
     // ---------- Virtual display (event pipe) ----------
     /// Worker → daemon reply to
@@ -421,23 +421,23 @@ pub enum WorkerToService {
     ExclusiveResult(ExclusiveResultPayload),
 
     // ---------- AI agent plane (event pipe) ----------
-    /// Worker → daemon reply to [`ServiceToWorker::AgentRequest`]. The
-    /// daemon rebuilds the outbound `SignalingType::AgentResponse` model
+    /// Worker → daemon reply to [`ServiceToWorker::InvokeAgentCapability`]. The
+    /// daemon rebuilds the outbound `SignalingType::AgentCapabilityCompleted` model
     /// for the control end (the `outcome` is reused verbatim as the
     /// signaling_data) and emits the audit event from the envelope +
     /// outcome. Capability-level errors travel inside `outcome`
     /// ([`desk_agent_protocol::AgentOutcome::Err`]), not on the
     /// transport-level response state — so the control-end UI receives
     /// the full structured [`desk_agent_protocol::AgentError`].
-    AgentResponse(AgentResponsePayload),
+    AgentCapabilityCompleted(AgentResponsePayload),
 
     /// Worker → daemon reply to [`ServiceToWorker::ExecPlan`]. The daemon
-    /// rebuilds the outbound `SignalingType::ExecResult` model for the control
+    /// rebuilds the outbound `SignalingType::ExecutionCompleted` model for the control
     /// end (the embedded [`desk_agent_protocol::exec::ExecResultPayload`] is
     /// reused verbatim) and routes it back to `connection_id`. Execution
     /// failures (timeout, spawn error) travel inside the payload's
     /// `AgentOutcome::Err`, not the transport.
-    ExecResult(ExecResultIpcPayload),
+    ExecutionCompleted(ExecResultIpcPayload),
 
     /// Worker → daemon, sent the moment a [`ServiceToWorker::ExecPlan`] either
     /// starts running or fails to start.

@@ -24,7 +24,7 @@ pub enum AuthKind {
     /// signal: it presented a valid access-grant code and holds a server-minted
     /// `code_session_id` (in a private cookie), **not** the owner account. Its
     /// authority comes solely from the grant it redeemed, so it is never the
-    /// single-account owner and every RequestRemote it makes is stamped with the
+    /// single-account owner and every RequestRemoteAccess it makes is stamped with the
     /// code's capability ceiling — never full control.
     CodeSession,
 }
@@ -46,7 +46,7 @@ pub struct AuthContext {
     pub remote_desk_type: RemoteDeskTypeEnum,
     pub bound_device_id: Option<i32>,
     /// The server-minted `code_session_id` when `auth_kind == CodeSession`. It is
-    /// the grant principal source (`code:{id}`) the RequestRemote authorizer uses
+    /// the grant principal source (`code:{id}`) the RequestRemoteAccess authorizer uses
     /// to look up and authorize the redeemed grant. Resolved from a private
     /// (encrypted) cookie, never self-reported.
     pub code_session_id: Option<String>,

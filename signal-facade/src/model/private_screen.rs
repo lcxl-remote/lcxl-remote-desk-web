@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-/// Data model for EnablePrivateScreen signaling
+/// Requested private-screen visibility.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct EnablePrivateScreenData {
-    pub enable: bool,
+pub struct SetPrivateScreenVisibilityData {
+    pub visible: bool,
 }
 
 /// Data model for PrivateScreenStateChanged signaling

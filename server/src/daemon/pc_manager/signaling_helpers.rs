@@ -44,7 +44,7 @@ pub(super) fn send_response<T: serde::Serialize + ?Sized>(
 /// Forward locally-gathered ICE candidates back to the browser via the
 /// signaling channel. Each host / srflx / relay candidate emitted by
 /// libwebrtc is wrapped in a
-/// `SignalingType::Canid` message — without this the browser only ever
+/// `SignalingType::IceCandidate` message — without this the browser only ever
 /// learns about the daemon's transport addresses through peer-reflexive
 /// discovery, which only works for single-m-line PCs (DataChannel-only
 /// file transfer) and consistently times out for video+audio+DC PCs in
@@ -77,7 +77,7 @@ pub(super) fn register_local_ice_candidate_forwarder(
                 }
             };
             let model = match SignalingModel::new_request(
-                SignalingType::Canid,
+                SignalingType::IceCandidate,
                 Some(from_connection_id.clone()),
                 Some(&init),
             ) {
@@ -98,7 +98,7 @@ pub(super) fn register_local_ice_candidate_forwarder(
                     );
                     if let Err(e) = outbound.send(text) {
                         log::warn!(
-                            "[pc_manager] outbound send (Canid) failed for \
+                            "[pc_manager] outbound send (IceCandidate) failed for \
                              {from_connection_id}: {e}"
                         );
                     }

@@ -37,7 +37,7 @@ pub struct VirtualDisplaySettings {
     /// resolution hook. Resize events within this window reset the
     /// timer; the send fires only after the wrapper has been stable for
     /// this many ms. Sourced from `config.toml`; ferried to the browser
-    /// via `InitSignalingData::adaptive_resolution`.
+    /// via `RemoteAccessInitializedData::adaptive_resolution`.
     pub adaptive_debounce_ms: u64,
     /// Daemon-side minimum interval (ms) between accepted auto
     /// ChangeDisplaySettings requests. `0` is allowed and disables the

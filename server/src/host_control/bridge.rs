@@ -58,12 +58,20 @@ pub fn bridge_whiteboard_to_hub(hub: Arc<HostControlHub>) -> mpsc::Sender<Whiteb
 fn run_private_screen_bridge(hub: Arc<HostControlHub>, rx: mpsc::Receiver<PrivateScreenCommand>) {
     while let Ok(cmd) = rx.recv() {
         let msg = match cmd {
-            PrivateScreenCommand::Show(connection_id) => {
-                HostControlMessage::PrivateScreenShow { connection_id }
-            }
-            PrivateScreenCommand::Hide(connection_id) => {
-                HostControlMessage::PrivateScreenHide { connection_id }
-            }
+            PrivateScreenCommand::Show {
+                connection_id,
+                request_id,
+            } => HostControlMessage::PrivateScreenShow {
+                connection_id,
+                request_id,
+            },
+            PrivateScreenCommand::Hide {
+                connection_id,
+                request_id,
+            } => HostControlMessage::PrivateScreenHide {
+                connection_id,
+                request_id,
+            },
             PrivateScreenCommand::Quit => {
                 debug!("[hostctrl/bridge/privscr] received Quit; exiting");
                 break;
@@ -121,28 +129,39 @@ mod tests {
         let mut rx = hub.subscribe_outbound();
         let tx = bridge_private_screen_to_hub(Arc::clone(&hub));
 
-        tx.send(PrivateScreenCommand::Show("c1".to_string()))
-            .expect("send show");
+        tx.send(PrivateScreenCommand::Show {
+            connection_id: "c1".to_string(),
+            request_id: "r1".to_string(),
+        })
+        .expect("send show");
         let got = tokio::time::timeout(Duration::from_millis(200), rx.recv())
             .await
             .expect("must receive")
             .expect("not lagged");
         match got {
-            HostControlMessage::PrivateScreenShow { connection_id } => {
+            HostControlMessage::PrivateScreenShow {
+                connection_id,
+                request_id,
+            } => {
                 assert_eq!(connection_id, "c1");
+                assert_eq!(request_id, "r1");
             }
             other => panic!("unexpected: {other:?}"),
         }
 
-        tx.send(PrivateScreenCommand::Hide("c1".to_string()))
-            .expect("send hide");
+        tx.send(PrivateScreenCommand::Hide {
+            connection_id: "c1".to_string(),
+            request_id: "r2".to_string(),
+        })
+        .expect("send hide");
         let got = tokio::time::timeout(Duration::from_millis(200), rx.recv())
             .await
             .expect("must receive")
             .expect("not lagged");
         assert!(matches!(
             got,
-            HostControlMessage::PrivateScreenHide { connection_id } if connection_id == "c1"
+            HostControlMessage::PrivateScreenHide { connection_id, request_id }
+                if connection_id == "c1" && request_id == "r2"
         ));
     }
 

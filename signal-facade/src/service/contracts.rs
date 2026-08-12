@@ -3,6 +3,222 @@
 use super::*;
 use async_trait::async_trait;
 
+/// One wire role per signaling discriminant. Streaming responses remain
+/// responses even when their frames intentionally omit `response_state`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalingRole {
+    Request,
+    Response,
+    Command,
+    Notification,
+    WebRtc,
+    Meta,
+}
+
+/// Exhaustive role contract. Adding a variant without classifying it is a
+/// compile error, while the accompanying iteration tests protect discriminants
+/// and request/response separation.
+pub fn signaling_role(t: SignalingType) -> SignalingRole {
+    use SignalingRole::*;
+    match t {
+        SignalingType::SendHeartbeat
+        | SignalingType::FetchConnections
+        | SignalingType::RequestRemoteAccess
+        | SignalingType::RequireControl
+        | SignalingType::ReleaseControl
+        | SignalingType::ChangeDisplaySettings
+        | SignalingType::SetPrivateScreenVisibility
+        | SignalingType::RequestSupportCode
+        | SignalingType::UpdateRemoteAccessLock
+        | SignalingType::TerminateRemotePeer
+        | SignalingType::RetryMediaPipeline
+        | SignalingType::GetSystemInfo
+        | SignalingType::ListFiles
+        | SignalingType::DeleteFile
+        | SignalingType::StartTerminal
+        | SignalingType::ListTerminalCommands
+        | SignalingType::InvokeAgentCapability
+        | SignalingType::DiagnoseDevice
+        | SignalingType::PreviewExecution
+        | SignalingType::ResolveExecution
+        | SignalingType::CollectEvidence
+        | SignalingType::ExecuteEdgePlan
+        | SignalingType::InvokeRemoteTool
+        | SignalingType::AskTerminalCopilot
+        | SignalingType::GenerateTerminalCompletions
+        | SignalingType::ControlExecution => Request,
+
+        SignalingType::HeartbeatAcknowledged
+        | SignalingType::ConnectionsFetched
+        | SignalingType::RemoteAccessInitialized
+        | SignalingType::ControlAccepted
+        | SignalingType::ControlDenied
+        | SignalingType::ControlReleased
+        | SignalingType::DisplaySettingsChanged
+        | SignalingType::PrivateScreenVisibilitySet
+        | SignalingType::SupportCodeIssued
+        | SignalingType::RemoteAccessLockUpdated
+        | SignalingType::RemotePeerTerminationResolved
+        | SignalingType::MediaPipelineRetryCompleted
+        | SignalingType::SystemInfoRetrieved
+        | SignalingType::FilesListed
+        | SignalingType::FileDeleted
+        | SignalingType::TerminalStarted
+        | SignalingType::TerminalCommandsListed
+        | SignalingType::AgentCapabilityCompleted
+        | SignalingType::DiagnosisUpdated
+        | SignalingType::ExecutionPreviewGenerated
+        | SignalingType::ExecutionCompleted
+        | SignalingType::EvidenceCollectionUpdated
+        | SignalingType::EdgeExecutionCompleted
+        | SignalingType::RemoteToolOutputUpdated
+        | SignalingType::TerminalCopilotUpdated
+        | SignalingType::TerminalCompletionsGenerated
+        | SignalingType::ExecutionStateReported => Response,
+
+        SignalingType::RevokeSupportCode
+        | SignalingType::RevokeAccessGrant
+        | SignalingType::CloseRemoteSession
+        | SignalingType::UpdateDeskSettings
+        | SignalingType::SendTerminalInput
+        | SignalingType::ResizeTerminal
+        | SignalingType::CloseTerminal
+        | SignalingType::CancelDiagnosis
+        | SignalingType::ReportAiAuditEvent
+        | SignalingType::SyncCommandTemplates
+        | SignalingType::CancelTerminalCopilot
+        | SignalingType::SyncCommandBlocklist => Command,
+
+        SignalingType::ConnectionRemoved
+        | SignalingType::PrivateScreenStateChanged
+        | SignalingType::AudioPlaybackFailed
+        | SignalingType::MediaPipelineStateChanged
+        | SignalingType::TerminalOutputProduced
+        | SignalingType::TerminalClosed
+        | SignalingType::DesktopSwitching
+        | SignalingType::DesktopReady
+        | SignalingType::ExecutionProgressUpdated => Notification,
+
+        SignalingType::Offer | SignalingType::Answer | SignalingType::IceCandidate => WebRtc,
+        SignalingType::Error | SignalingType::Unknown => Meta,
+    }
+}
+
+/// Return the wire response type that completes a request. Requests with
+/// multiple normal outcomes use the failure-shaped outcome for generic business
+/// errors (`RequireControl` resolves to `ControlDenied`). One-way commands and
+/// WebRTC standard frames return `None`.
+pub fn response_type_for_request(t: SignalingType) -> Option<SignalingType> {
+    Some(match t {
+        SignalingType::SendHeartbeat => SignalingType::HeartbeatAcknowledged,
+        SignalingType::FetchConnections => SignalingType::ConnectionsFetched,
+        SignalingType::RequestRemoteAccess => SignalingType::RemoteAccessInitialized,
+        SignalingType::RequireControl => SignalingType::ControlDenied,
+        SignalingType::ReleaseControl => SignalingType::ControlReleased,
+        SignalingType::ChangeDisplaySettings => SignalingType::DisplaySettingsChanged,
+        SignalingType::SetPrivateScreenVisibility => SignalingType::PrivateScreenVisibilitySet,
+        SignalingType::RequestSupportCode => SignalingType::SupportCodeIssued,
+        SignalingType::UpdateRemoteAccessLock => SignalingType::RemoteAccessLockUpdated,
+        SignalingType::TerminateRemotePeer => SignalingType::RemotePeerTerminationResolved,
+        SignalingType::RetryMediaPipeline => SignalingType::MediaPipelineRetryCompleted,
+        SignalingType::GetSystemInfo => SignalingType::SystemInfoRetrieved,
+        SignalingType::ListFiles => SignalingType::FilesListed,
+        SignalingType::DeleteFile => SignalingType::FileDeleted,
+        SignalingType::StartTerminal => SignalingType::TerminalStarted,
+        SignalingType::ListTerminalCommands => SignalingType::TerminalCommandsListed,
+        SignalingType::InvokeAgentCapability => SignalingType::AgentCapabilityCompleted,
+        SignalingType::DiagnoseDevice => SignalingType::DiagnosisUpdated,
+        SignalingType::PreviewExecution => SignalingType::ExecutionPreviewGenerated,
+        SignalingType::ResolveExecution => SignalingType::ExecutionCompleted,
+        SignalingType::CollectEvidence => SignalingType::EvidenceCollectionUpdated,
+        SignalingType::ExecuteEdgePlan => SignalingType::EdgeExecutionCompleted,
+        SignalingType::InvokeRemoteTool => SignalingType::RemoteToolOutputUpdated,
+        SignalingType::AskTerminalCopilot => SignalingType::TerminalCopilotUpdated,
+        SignalingType::GenerateTerminalCompletions => SignalingType::TerminalCompletionsGenerated,
+        SignalingType::ControlExecution => SignalingType::ExecutionStateReported,
+        _ => return None,
+    })
+}
+
+/// All response types a request may produce. The first item is not used as a
+/// generic error choice; callers that synthesize business errors use
+/// [`response_type_for_request`].
+pub fn response_types_for_request(t: SignalingType) -> &'static [SignalingType] {
+    use SignalingType::*;
+    match t {
+        SendHeartbeat => &[HeartbeatAcknowledged],
+        FetchConnections => &[ConnectionsFetched],
+        RequestRemoteAccess => &[RemoteAccessInitialized],
+        RequireControl => &[ControlAccepted, ControlDenied],
+        ReleaseControl => &[ControlReleased],
+        ChangeDisplaySettings => &[DisplaySettingsChanged],
+        SetPrivateScreenVisibility => &[PrivateScreenVisibilitySet],
+        RequestSupportCode => &[SupportCodeIssued],
+        UpdateRemoteAccessLock => &[RemoteAccessLockUpdated],
+        TerminateRemotePeer => &[RemotePeerTerminationResolved],
+        RetryMediaPipeline => &[MediaPipelineRetryCompleted],
+        GetSystemInfo => &[SystemInfoRetrieved],
+        ListFiles => &[FilesListed],
+        DeleteFile => &[FileDeleted],
+        StartTerminal => &[TerminalStarted],
+        ListTerminalCommands => &[TerminalCommandsListed],
+        InvokeAgentCapability => &[AgentCapabilityCompleted],
+        DiagnoseDevice => &[DiagnosisUpdated],
+        PreviewExecution => &[ExecutionPreviewGenerated],
+        ResolveExecution => &[ExecutionCompleted],
+        CollectEvidence => &[EvidenceCollectionUpdated],
+        ExecuteEdgePlan => &[EdgeExecutionCompleted],
+        InvokeRemoteTool => &[RemoteToolOutputUpdated],
+        AskTerminalCopilot => &[TerminalCopilotUpdated],
+        GenerateTerminalCompletions => &[TerminalCompletionsGenerated],
+        ControlExecution => &[ExecutionStateReported],
+        _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod signaling_contract_tests {
+    use super::*;
+    use std::collections::HashSet;
+    use strum::IntoEnumIterator;
+
+    #[test]
+    fn every_discriminant_is_unique_and_has_one_role() {
+        let mut values = HashSet::new();
+        for signaling_type in SignalingType::iter() {
+            assert!(values.insert(signaling_type as i32));
+            let _ = signaling_role(signaling_type);
+        }
+    }
+
+    #[test]
+    fn requests_declare_distinct_responses_and_all_responses_are_reachable() {
+        let mut declared = HashSet::new();
+        for request in
+            SignalingType::iter().filter(|t| signaling_role(*t) == SignalingRole::Request)
+        {
+            let responses = response_types_for_request(request);
+            assert!(
+                !responses.is_empty(),
+                "{request:?} has no declared response"
+            );
+            for response in responses {
+                assert_ne!(request as i32, *response as i32);
+                assert_eq!(signaling_role(*response), SignalingRole::Response);
+                declared.insert(*response as i32);
+            }
+        }
+        for response in
+            SignalingType::iter().filter(|t| signaling_role(*t) == SignalingRole::Response)
+        {
+            assert!(
+                declared.contains(&(response as i32)),
+                "{response:?} is not declared by any request"
+            );
+        }
+    }
+}
+
 // ====== Credential heartbeat policy ======
 
 /// Stable reason classification for a manager credential that is no longer
@@ -113,9 +329,9 @@ pub trait ControlFrameAuthorizer: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ControlFrameOutcome> + Send + 'a>>;
 }
 
-// ====== AccessGrantAuthorizer (RequestRemote capability-ceiling stamp) ======
+// ====== AccessGrantAuthorizer (RequestRemoteAccess capability-ceiling stamp) ======
 
-/// Outcome of authorizing a `RequestRemote` before it is relayed to the host.
+/// Outcome of authorizing a `RequestRemoteAccess` before it is relayed to the host.
 pub enum RequestRemoteOutcome {
     /// Relay this model to the peer. The manager / signal server returns the frame
     /// wrapped in an `AuthorizedRequestRemote` (a trusted capability-ceiling
@@ -129,9 +345,9 @@ pub enum RequestRemoteOutcome {
     },
 }
 
-/// Stamps a trusted capability ceiling onto every `RequestRemote` before it is
+/// Stamps a trusted capability ceiling onto every `RequestRemoteAccess` before it is
 /// relayed to the host — the enforcement seam that lets the host drop any bare
-/// `RequestRemote` on its trusted-central upstream (defense against a grant
+/// `RequestRemoteAccess` on its trusted-central upstream (defense against a grant
 /// session stripping its stamp to masquerade as an owner). The manager and the
 /// signal server each implement it (rule 22, same shape): an owner / org
 /// authorization stamps `access_ceiling: None` (full), a valid redeemed grant
@@ -152,7 +368,7 @@ pub trait RequestRemoteAuthorizer: Send + Sync {
 /// Stamps a trusted capability ceiling onto a `StartTerminal` frame before it is
 /// relayed to the host — the terminal analogue of [`RequestRemoteAuthorizer`]. The
 /// remote terminal opens on a distinct WS connection that never does a
-/// `RequestRemote`, so without this stamp the host has no admission / ceiling for it
+/// `RequestRemoteAccess`, so without this stamp the host has no admission / ceiling for it
 /// (and its first door would either reject it or fall back to the host global). The
 /// manager and the signal server each implement it (rule 22, same shape): an owner
 /// session stamps `access_ceiling: None` (full control), a valid redeemed grant
@@ -187,7 +403,7 @@ pub enum OwnerPlaneOutcome {
 }
 
 /// Default-denies owner-plane device-management frames
-/// (`ManagerSystemInfo` / `ManagerSystemStatue` / `ChangeDisplaySettings`) for
+/// (`GetSystemInfo` / `SystemInfoRetrieved` / `ChangeDisplaySettings`) for
 /// any sender that is not the
 /// target device's owner (or an org-authorized operator). These frames carry no
 /// capability ceiling and are meaningful only to the owner, so a capped
@@ -324,27 +540,37 @@ pub trait SupportCodeMinter: Send + Sync {
 pub(crate) fn remote_access_frame_requires_unlocked(t: SignalingType) -> bool {
     !matches!(
         t,
-        SignalingType::Heartbeat
+        SignalingType::SendHeartbeat
+            | SignalingType::HeartbeatAcknowledged
             | SignalingType::FetchConnections
-            | SignalingType::ConnectionList
+            | SignalingType::ConnectionsFetched
             | SignalingType::ConnectionRemoved
-            | SignalingType::CloseControl
+            | SignalingType::ReleaseControl
+            | SignalingType::ControlReleased
+            | SignalingType::CloseRemoteSession
             | SignalingType::CloseTerminal
             | SignalingType::RequestSupportCode
             | SignalingType::SupportCodeIssued
             | SignalingType::RevokeSupportCode
             | SignalingType::RevokeAccessGrant
-            | SignalingType::HostRemoteAccessLockRequest
-            | SignalingType::HostRemoteAccessLockAck
-            | SignalingType::TerminateRemotePeerRequest
-            | SignalingType::TerminateRemotePeerAck
-            | SignalingType::AiAuditEvent
-            | SignalingType::CollectResponse
-            | SignalingType::EdgeExecResult
-            | SignalingType::ExecStateReply
-            | SignalingType::RemoteToolResponse
-            | SignalingType::CommandTemplateSync
-            | SignalingType::CommandBlocklistSync
+            | SignalingType::UpdateRemoteAccessLock
+            | SignalingType::RemoteAccessLockUpdated
+            | SignalingType::TerminateRemotePeer
+            | SignalingType::RemotePeerTerminationResolved
+            | SignalingType::SystemInfoRetrieved
+            | SignalingType::DisplaySettingsChanged
+            | SignalingType::PrivateScreenVisibilitySet
+            | SignalingType::MediaPipelineRetryCompleted
+            | SignalingType::FilesListed
+            | SignalingType::FileDeleted
+            | SignalingType::TerminalCommandsListed
+            | SignalingType::ReportAiAuditEvent
+            | SignalingType::EvidenceCollectionUpdated
+            | SignalingType::EdgeExecutionCompleted
+            | SignalingType::ExecutionStateReported
+            | SignalingType::RemoteToolOutputUpdated
+            | SignalingType::SyncCommandTemplates
+            | SignalingType::SyncCommandBlocklist
             | SignalingType::Error
             | SignalingType::Unknown
     )

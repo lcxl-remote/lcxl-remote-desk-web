@@ -7,6 +7,14 @@ struct OutstandingHeartbeat {
     deadline: tokio::time::Instant,
 }
 
+/// A manager credential probe is completed only by the dedicated heartbeat
+/// response type carrying the same correlation id.  Keeping this predicate
+/// separate prevents a request echo or an unrelated frame from renewing (or
+/// invalidating) the credential lease.
+pub(super) fn is_correlated_heartbeat_ack(model: &SignalingModel, request_id: &str) -> bool {
+    model.request_id == request_id && model.signaling_type == SignalingType::HeartbeatAcknowledged
+}
+
 pub(super) async fn teardown_manager_members(
     router_ctx: &RouterContext,
     members: &[String],
@@ -259,14 +267,14 @@ pub(super) async fn maintain_proxy_connection(
                                 if let Some(link) = manager_credential_link.as_ref()
                                     && let Ok(model) =
                                         serde_json::from_str::<SignalingModel>(&text_str)
-                                    && outstanding_heartbeat
-                                        .as_ref()
-                                        .is_some_and(|heartbeat| {
-                                            heartbeat.request_id == model.request_id
-                                        })
+                                    && outstanding_heartbeat.as_ref().is_some_and(|heartbeat| {
+                                        is_correlated_heartbeat_ack(
+                                            &model,
+                                            &heartbeat.request_id,
+                                        )
+                                    })
                                 {
-                                    if model.signaling_type == SignalingType::Heartbeat
-                                        && model
+                                    if model
                                             .response_state
                                             .as_ref()
                                             .is_some_and(SignalingResponseState::is_success)
@@ -302,8 +310,7 @@ pub(super) async fn maintain_proxy_connection(
                                         }
                                         continue;
                                     }
-                                    if model.signaling_type == SignalingType::Error
-                                        && let Some(response) = model.response_state.as_ref()
+                                    if let Some(response) = model.response_state.as_ref()
                                         && (response.error_code
                                             == DeskErrorCode::MANAGER_CREDENTIAL_REVOKED.code()
                                             || response.error_code
@@ -435,7 +442,7 @@ pub(super) async fn maintain_proxy_connection(
                 && outstanding_heartbeat.is_none()
                 && accelerated_remaining == 0 => {
                 let heartbeat = SignalingModel::new_request::<()>(
-                    SignalingType::Heartbeat,
+                    SignalingType::SendHeartbeat,
                     None,
                     None,
                 )
@@ -460,7 +467,7 @@ pub(super) async fn maintain_proxy_connection(
                 && outstanding_heartbeat.is_none()
                 && accelerated_remaining > 0 => {
                 let heartbeat = SignalingModel::new_request::<()>(
-                    SignalingType::Heartbeat,
+                    SignalingType::SendHeartbeat,
                     None,
                     None,
                 )

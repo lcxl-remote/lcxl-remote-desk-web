@@ -181,7 +181,7 @@ pub(super) fn pending_remote_access_frame(hub: &HostControlHub) -> Option<String
     let data = serde_json::to_value(&request).ok()?;
     serde_json::to_string(&SignalingModel::new(
         &request.request_id,
-        SignalingType::HostRemoteAccessLockRequest,
+        SignalingType::UpdateRemoteAccessLock,
         None,
         None,
         Some(data),
@@ -195,10 +195,10 @@ pub(super) async fn consume_remote_access_ack(text: &str, hub: &HostControlHub) 
         return false;
     };
     match model.signaling_type {
-        SignalingType::HostRemoteAccessLockAck => {
+        SignalingType::RemoteAccessLockUpdated => {
             let Ok(ack) = model
-                .get_data::<desk_signal_facade::model::remote_access::HostRemoteAccessLockAck>()
-            else {
+                .get_data::<desk_signal_facade::model::remote_access::RemoteAccessLockUpdatedData>(
+            ) else {
                 warn!("[remote-access] malformed central lock ack dropped");
                 return true;
             };
@@ -223,9 +223,9 @@ pub(super) async fn consume_remote_access_ack(text: &str, hub: &HostControlHub) 
             }
             true
         }
-        SignalingType::TerminateRemotePeerAck => {
+        SignalingType::RemotePeerTerminationResolved => {
             if let Ok(ack) =
-                model.get_data::<desk_signal_facade::model::remote_access::TerminateRemotePeerAck>()
+                model.get_data::<desk_signal_facade::model::remote_access::RemotePeerTerminationResolvedData>()
             {
                 info!(
                     "[remote-access] peer eviction {} for {}: {:?}",

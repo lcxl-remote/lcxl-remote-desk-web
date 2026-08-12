@@ -10,13 +10,13 @@ import type {
 } from './use-confirm-exec';
 import type { SignalingMessage } from '../desk/use-desk-signaling';
 import {
-    SIGNALING_TYPE_CODE_CONFIRM_EXEC,
-    SIGNALING_TYPE_CODE_EXEC_CONTROL,
-    SIGNALING_TYPE_CODE_EXEC_LIFECYCLE,
-    SIGNALING_TYPE_CODE_EXEC_PREVIEW,
-    SIGNALING_TYPE_CODE_EXEC_RESULT,
-    SIGNALING_TYPE_CODE_EXEC_STATE_REPLY,
-    SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+    SIGNALING_TYPE_CODE_PREVIEW_EXECUTION,
+    SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
+    SIGNALING_TYPE_CODE_EXECUTION_PROGRESS_UPDATED,
+    SIGNALING_TYPE_CODE_EXECUTION_PREVIEW_GENERATED,
+    SIGNALING_TYPE_CODE_EXECUTION_COMPLETED,
+    SIGNALING_TYPE_CODE_EXECUTION_STATE_REPORTED,
+    SIGNALING_TYPE_CODE_RESOLVE_EXECUTION,
 } from '../desk/constants';
 
 let nextId = 0;
@@ -37,7 +37,7 @@ const input: ExecRequestInput = {
 function previewFrame(requestId: string, preview: ExecPreview): SignalingMessage {
     return {
         request_id: requestId,
-        signaling_type: SIGNALING_TYPE_CODE_EXEC_PREVIEW,
+        signaling_type: SIGNALING_TYPE_CODE_EXECUTION_PREVIEW_GENERATED,
         signaling_data: preview,
     };
 }
@@ -45,7 +45,7 @@ function previewFrame(requestId: string, preview: ExecPreview): SignalingMessage
 function lifecycleFrame(payload: ExecLifecyclePayload): SignalingMessage {
     return {
         request_id: payload.execution_generation,
-        signaling_type: SIGNALING_TYPE_CODE_EXEC_LIFECYCLE,
+        signaling_type: SIGNALING_TYPE_CODE_EXECUTION_PROGRESS_UPDATED,
         signaling_data: payload,
     };
 }
@@ -53,7 +53,7 @@ function lifecycleFrame(payload: ExecLifecyclePayload): SignalingMessage {
 function stateReplyFrame(payload: ExecStateReplyPayload): SignalingMessage {
     return {
         request_id: payload.execution_generation,
-        signaling_type: SIGNALING_TYPE_CODE_EXEC_STATE_REPLY,
+        signaling_type: SIGNALING_TYPE_CODE_EXECUTION_STATE_REPORTED,
         signaling_data: payload,
     };
 }
@@ -61,7 +61,7 @@ function stateReplyFrame(payload: ExecStateReplyPayload): SignalingMessage {
 function resultFrame(payload: ExecResultPayload): SignalingMessage {
     return {
         request_id: 'r-res',
-        signaling_type: SIGNALING_TYPE_CODE_EXEC_RESULT,
+        signaling_type: SIGNALING_TYPE_CODE_EXECUTION_COMPLETED,
         signaling_data: payload,
     };
 }
@@ -104,7 +104,7 @@ describe('useConfirmExec', () => {
         const { hook, feed } = render();
         act(() => hook.result.current.requestPreview(0, input));
         expect(sendMessage).toHaveBeenCalledWith(
-            SIGNALING_TYPE_CODE_CONFIRM_EXEC,
+            SIGNALING_TYPE_CODE_PREVIEW_EXECUTION,
             expect.anything(),
             'desk-1',
         );
@@ -187,7 +187,7 @@ describe('useConfirmExec', () => {
 
         act(() => hook.result.current.approve(0));
         expect(sendMessage).toHaveBeenCalledWith(
-            SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+            SIGNALING_TYPE_CODE_RESOLVE_EXECUTION,
             { exec_request_id: 'exec-1', decision: 'approve' },
             'desk-1',
         );
@@ -228,7 +228,7 @@ describe('useConfirmExec', () => {
         act(() => feed(previewFrame('req-1', executablePreview())));
         act(() => hook.result.current.reject(0));
         expect(sendMessage).toHaveBeenCalledWith(
-            SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+            SIGNALING_TYPE_CODE_RESOLVE_EXECUTION,
             { exec_request_id: 'exec-1', decision: 'reject' },
             'desk-1',
         );
@@ -370,7 +370,7 @@ describe('useConfirmExec', () => {
 
         act(() => hook.result.current.cancel(0));
         expect(sendMessage).toHaveBeenCalledWith(
-            SIGNALING_TYPE_CODE_EXEC_CONTROL,
+            SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
             {
                 execution_generation: generation,
                 action: 'cancel',
@@ -407,7 +407,7 @@ describe('useConfirmExec', () => {
         const generation = approved(hook, feed);
         act(() => hook.result.current.queryState(0));
         expect(sendMessage).toHaveBeenCalledWith(
-            SIGNALING_TYPE_CODE_EXEC_CONTROL,
+            SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
             { execution_generation: generation, action: 'query_state' },
             'desk-1',
         );

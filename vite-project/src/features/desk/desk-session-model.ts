@@ -3,7 +3,7 @@ import type { RequestRemoteModel } from "@/services/types"
 /**
  * Whether the desk config dialog should be (re)opened automatically.
  *
- * It opens for the initial settings pick (INIT arrived, no connect attempt yet)
+ * It opens for the initial settings pick (REMOTE_ACCESS_INITIALIZED arrived, no connect attempt yet)
  * and after a terminal ICE failure so the user can retry. It must not reopen on
  * a transient `disconnected`, because ICE can recover without user action.
  */

@@ -31,7 +31,7 @@ impl CopilotFrameSink for SignalingCopilotFrames {
         };
         let frame = SignalingModel::new(
             &event.request_id,
-            SignalingType::TerminalCopilotEvent,
+            SignalingType::TerminalCopilotUpdated,
             None,
             self.to_connection_id.clone(),
             Some(data),
@@ -89,7 +89,7 @@ mod tests {
 
         let text = rx.try_recv().expect("a frame was broadcast");
         let model: SignalingModel = serde_json::from_str(&text).unwrap();
-        assert_eq!(model.signaling_type, SignalingType::TerminalCopilotEvent);
+        assert_eq!(model.signaling_type, SignalingType::TerminalCopilotUpdated);
         let event = model
             .get_data_with_type::<TerminalCopilotEvent>()
             .unwrap()

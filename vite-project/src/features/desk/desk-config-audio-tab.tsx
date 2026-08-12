@@ -17,12 +17,12 @@ import {
     SelectValue,
 } from "@/components/ui/select"
 import { TabsContent } from "@/components/ui/tabs"
-import type { InitSignalingData } from "@/services/types"
+import type { RemoteAccessInitializedData } from "@/services/types"
 import type { DeskConfigFormSettings } from "./desk-config-model"
 
 type DeskConfigAudioTabProps = {
     form: UseFormReturn<DeskConfigFormSettings>
-    initData: InitSignalingData | null
+    initData: RemoteAccessInitializedData | null
 }
 
 export function DeskConfigAudioTab({

@@ -158,7 +158,7 @@ pub async fn handle_manager_file_list(
     let from_connection_id = match signaling_model.from_connection_id.clone() {
         Some(connection_id) => connection_id,
         None => {
-            log::warn!("ManagerFileList without a controller connection was dropped");
+            log::warn!("ListFiles without a controller connection was dropped");
             return Ok(());
         }
     };
@@ -171,7 +171,7 @@ pub async fn handle_manager_file_list(
             .session
             .send_error(
                 &signaling_model.request_id,
-                SignalingType::ManagerFileList,
+                SignalingType::FilesListed,
                 Some(from_connection_id),
                 DeskErrorCode::PERMISSION_ERROR,
                 "File browse access denied",
@@ -187,7 +187,7 @@ pub async fn handle_manager_file_list(
                 .session
                 .send_response(
                     &signaling_model.request_id,
-                    SignalingType::ManagerFileList,
+                    SignalingType::FilesListed,
                     Some(from_connection_id),
                     &response,
                 )
@@ -198,7 +198,7 @@ pub async fn handle_manager_file_list(
                 .session
                 .send_error(
                     &signaling_model.request_id,
-                    SignalingType::ManagerFileList,
+                    SignalingType::FilesListed,
                     Some(from_connection_id),
                     e.to_error_code(),
                     &e.to_string(),
@@ -216,7 +216,7 @@ pub async fn handle_manager_file_delete(
     let from_connection_id = match signaling_model.from_connection_id.clone() {
         Some(connection_id) => connection_id,
         None => {
-            log::warn!("ManagerFileDelete without a controller connection was dropped");
+            log::warn!("DeleteFile without a controller connection was dropped");
             return Ok(());
         }
     };
@@ -230,7 +230,7 @@ pub async fn handle_manager_file_delete(
             .session
             .send_error(
                 &signaling_model.request_id,
-                SignalingType::ManagerFileDelete,
+                SignalingType::FileDeleted,
                 Some(from_connection_id),
                 DeskErrorCode::PERMISSION_ERROR,
                 "File browse access denied",
@@ -246,7 +246,7 @@ pub async fn handle_manager_file_delete(
             .session
             .send_error(
                 &signaling_model.request_id,
-                SignalingType::ManagerFileDelete,
+                SignalingType::FileDeleted,
                 Some(from_connection_id),
                 DeskErrorCode::PERMISSION_ERROR,
                 "File delete access denied",
@@ -262,7 +262,7 @@ pub async fn handle_manager_file_delete(
                 .session
                 .send_response(
                     &signaling_model.request_id,
-                    SignalingType::ManagerFileDelete,
+                    SignalingType::FileDeleted,
                     Some(from_connection_id),
                     &serde_json::json!({}),
                 )
@@ -273,7 +273,7 @@ pub async fn handle_manager_file_delete(
                 .session
                 .send_error(
                     &signaling_model.request_id,
-                    SignalingType::ManagerFileDelete,
+                    SignalingType::FileDeleted,
                     Some(from_connection_id),
                     e.to_error_code(),
                     &e.to_string(),

@@ -110,9 +110,9 @@ pub async fn open_terminal_session(
     .await?;
 
     // Build the StartTerminal frame, then stamp it with the caller's capability
-    // ceiling exactly like a RequestRemote (owner -> no ceiling, redeemed code ->
+    // ceiling exactly like a RequestRemoteAccess (owner -> no ceiling, redeemed code ->
     // its ceiling, else reject). The terminal WS is a distinct connection that never
-    // does a RequestRemote, so this stamp is how the host registers the ceiling,
+    // does a RequestRemoteAccess, so this stamp is how the host registers the ceiling,
     // records an admission, and indexes the connection under its grant.
     let start_terminal_command = SignalingModel::new_request(
         SignalingType::StartTerminal,

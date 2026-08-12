@@ -1,4 +1,4 @@
-//! RequestRemote peer-connection admission and initialization.
+//! RequestRemoteAccess peer-connection admission and initialization.
 
 use super::*;
 
@@ -36,7 +36,7 @@ fn resolve_wayland_control_mode_for_admission(
     Ok(Some(resolved))
 }
 
-/// Daemon side of `SignalingType::RequestRemote`. Creates the PC and
+/// Daemon side of `SignalingType::RequestRemoteAccess`. Creates the PC and
 /// emits the matching `Init` reply. Mirrors the worker's
 /// `init_ptc_peer_connection` minus the preapproved restoration (PC
 /// lives in the daemon and never has to be rehydrated across worker
@@ -44,7 +44,7 @@ fn resolve_wayland_control_mode_for_admission(
 /// the worker's `Capabilities` message).
 #[allow(
     clippy::too_many_arguments,
-    reason = "Daemon-side RequestRemote handler aggregates state from the \
+    reason = "Daemon-side RequestRemoteAccess handler aggregates state from the \
               entire RouterContext; bundling into a struct would force a \
               tighter Arc/RwLock surface than the call sites need."
 )]
@@ -98,7 +98,7 @@ pub async fn handle_request_remote(
     // `meet(ceiling, global)` gates enforce it from the first file-list / terminal
     // / media request (the never-drop event pipe keeps this FIFO-ordered before
     // them). Only grant-restricted connections carry a ceiling. Fail-closed: if the
-    // registration cannot be delivered we abort the whole `RequestRemote` — done
+    // registration cannot be delivered we abort the whole `RequestRemoteAccess` — done
     // *before* creating the PC so a rejected grant leaves no registered connection
     // — rather than let a capped grant session run with no worker-side cap (a
     // delivered media/terminal frame with no ceiling would fall back to global-only
@@ -136,7 +136,7 @@ pub async fn handle_request_remote(
 
     // Record the admission class for the router's first door, keyed by the
     // server-authoritative connection id. Kept for the whole signaling connection
-    // (survives a later `CloseControl` PC teardown) so a capped connection can
+    // (survives a later `CloseRemoteSession` PC teardown) so a capped connection can
     // never be reclassified as an unadmitted owner-plane sender.
     registry
         .record_admission(
@@ -149,7 +149,7 @@ pub async fn handle_request_remote(
         .await;
 
     // Stamp the capability ceiling and grant id onto the connection before the ICE
-    // / DataChannel handlers below and before the Init reply, so the worker-side
+    // / DataChannel handlers below and before the RemoteAccessInitialized response, so the worker-side
     // `meet(ceiling, global)` gates and grant-directed teardown observe them from
     // the connection's very first frame.
     {
@@ -213,7 +213,7 @@ pub async fn handle_request_remote(
         );
     }
 
-    // Populate the Init reply from the worker's
+    // Populate the RemoteAccessInitialized response from the worker's
     // `WorkerToService::Capabilities` snapshot when available; fall
     // back to capture-engine's static factory enumerations for the
     // codec lists when the worker hasn't reported yet (first-Init
@@ -298,7 +298,7 @@ pub async fn handle_request_remote(
         debounce_ms: settings.virtual_display.adaptive_debounce_ms,
         min_delta_px: settings.virtual_display.adaptive_min_delta_px,
     };
-    let init_data = InitSignalingData {
+    let init_data = RemoteAccessInitializedData {
         ice_servers: vec![],
         user_name: user_name.to_string(),
         audio_device_list,
@@ -318,7 +318,7 @@ pub async fn handle_request_remote(
         operation_system: desk_signal_facade::model::os::OperationSystemEnum::default(),
     };
     log::info!(
-        "[pc_manager] Sending Init reply for {from_connection_id} \
+        "[pc_manager] Sending RemoteAccessInitialized response for {from_connection_id} \
          (capabilities={})",
         if capabilities.is_some() {
             "from-worker"
@@ -329,7 +329,7 @@ pub async fn handle_request_remote(
     send_response(
         outbound,
         &model.request_id,
-        SignalingType::Init,
+        SignalingType::RemoteAccessInitialized,
         from_connection_id,
         Some(&init_data),
     )

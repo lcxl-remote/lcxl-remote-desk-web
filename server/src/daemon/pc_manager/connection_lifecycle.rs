@@ -9,7 +9,7 @@ use super::*;
 /// worker so its per-connection encoder + DXGI duplication / WASAPI capture
 /// release immediately. Used by:
 ///
-/// 1. [`handle_close_control`] — explicit browser CloseControl.
+/// 1. [`handle_close_remote_session`] — explicit browser session teardown.
 /// 2. The on_peer_connection_state_change hook installed in
 ///    [`register_peer_connection_state_cleanup`] — fires when ICE
 ///    detects the browser is gone (Failed/Closed/Disconnected).
@@ -73,7 +73,7 @@ pub async fn cleanup_pc(
     // revocation. Idempotent with the terminal's own `CloseTerminal` cleanup.
     if registry.is_terminal_connection(connection_id).await {
         if let Err(e) = worker_mgr
-            .send_to_worker(ServiceToWorker::CloseTerminalRequest(
+            .send_to_worker(ServiceToWorker::CloseTerminal(
                 desk_ipc_protocol::message::CloseTerminalPayload {
                     connection_id: connection_id.to_string(),
                 },
@@ -81,7 +81,7 @@ pub async fn cleanup_pc(
             .await
         {
             log::debug!(
-                "[pc_manager] CloseTerminalRequest for {connection_id} could not reach worker: {e}"
+                "[pc_manager] CloseTerminal for {connection_id} could not reach worker: {e}"
             );
         }
         if let Err(e) = worker_mgr
@@ -123,12 +123,12 @@ pub async fn cleanup_pc(
     //       a live PC out triggers detach. Stale `ConnectionRemoved`
     //       fan-outs that arrive after the PC was already cleaned up
     //       (or never existed) MUST NOT trigger a detach, since a
-    //       new `RequestRemote` may be mid-`ensure_attached` with no
+    //       new `RequestRemoteAccess` may be mid-`ensure_attached` with no
     //       PC registered yet.
     //   (2) `registry.len() == 0` — no other live browser session
     //       still using the IDD.
     //   (3) `registry.pending_requests() == 0` — no other browser
-    //       currently inside the `RequestRemote` handler holding a
+    //       currently inside the `RequestRemoteAccess` handler holding a
     //       `PendingRequestGuard`. Without this gate, a fast browser
     //       open/close racing with a slow new connection's
     //       `ensure_attached` would tear down the IDD while the
@@ -145,7 +145,7 @@ pub async fn cleanup_pc(
     }
 }
 
-/// Host-initiated teardown has stronger semantics than browser `CloseControl`:
+/// Host-initiated teardown has stronger semantics than browser `CloseRemoteSession`:
 /// it tombstones the signaling id and clears the whole admission footprint.
 pub async fn force_disconnect_connection(
     registry: &PcRegistry,
@@ -310,14 +310,14 @@ fn mark_connected_and_should_force_keyframe(has_connected_once: &AtomicBool) -> 
     has_connected_once.swap(true, Ordering::AcqRel)
 }
 
-/// Daemon side of `SignalingType::CloseControl`. Removes the
+/// Daemon side of `SignalingType::CloseRemoteSession`. Removes the
 /// per-connection context, closes the PC, and tells the worker to
 /// drop its per-`connection_id` encoder via
 /// `ServiceToWorker::StopMedia`. The StopMedia is best-effort — a
 /// dead worker will surface an error from `send_to_worker` which we
 /// log but don't propagate; the PC is already closed at that point
 /// so the daemon-side state is consistent regardless.
-pub async fn handle_close_control(
+pub async fn handle_close_remote_session(
     registry: &PcRegistry,
     worker_mgr: &WorkerManager,
     virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
@@ -329,7 +329,7 @@ pub async fn handle_close_control(
         worker_mgr,
         virtual_display,
         from_connection_id,
-        "close_control",
+        "close_remote_session",
     )
     .await;
     Ok(())
@@ -364,9 +364,9 @@ pub async fn handle_connection_removed(
         "peer_signaling_closed",
     )
     .await;
-    // The signaling connection is truly ending (not just a `CloseControl` PC
+    // The signaling connection is truly ending (not just a `CloseRemoteSession` PC
     // teardown), so drop its admission record. `cleanup_pc` above — shared with the
-    // `CloseControl` path — deliberately leaves the admission intact.
+    // `CloseRemoteSession` path — deliberately leaves the admission intact.
     registry.clear_admission(from_connection_id).await;
     Ok(())
 }

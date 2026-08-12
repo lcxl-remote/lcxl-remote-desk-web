@@ -276,7 +276,10 @@ async fn u8_state_broadcast_multi_subscriber() {
     let mut rx_b = hub.subscribe_state();
     hub.publish_state(HostControlEvent::PrivateScreenVisibilityChanged {
         connection_id: "c1".to_string(),
+        request_id: Some("r-state".to_string()),
         visible: true,
+        is_supported: true,
+        error_msg: None,
     });
     let a = tokio::time::timeout(Duration::from_millis(100), rx_a.recv())
         .await
@@ -291,6 +294,7 @@ async fn u8_state_broadcast_multi_subscriber() {
             HostControlEvent::PrivateScreenVisibilityChanged {
                 connection_id,
                 visible,
+                ..
             } => {
                 assert_eq!(connection_id, "c1");
                 assert!(visible);
@@ -306,6 +310,7 @@ fn u9_send_command_zero_subscribers_is_ok() {
     let n = hub
         .send_command(HostControlMessage::PrivateScreenShow {
             connection_id: "c1".to_string(),
+            request_id: "r-show".to_string(),
         })
         .expect("send_command should not error on no subscribers");
     assert_eq!(n, 0);
@@ -320,6 +325,7 @@ async fn u10_forwarder_send_command_forwards_to_upstream() {
 
     let cmd = HostControlMessage::PrivateScreenShow {
         connection_id: "c1".to_string(),
+        request_id: "r-show".to_string(),
     };
     let n = hub.send_command(cmd.clone()).unwrap();
     assert_eq!(n, 1);
@@ -339,6 +345,7 @@ async fn u11_forwarder_offline_send_command_silent() {
     let n = hub
         .send_command(HostControlMessage::PrivateScreenShow {
             connection_id: "c1".to_string(),
+            request_id: "r-show".to_string(),
         })
         .unwrap();
     assert_eq!(n, 0);

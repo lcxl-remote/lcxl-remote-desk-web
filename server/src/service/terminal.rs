@@ -159,7 +159,7 @@ pub async fn handle_manager_terminal_start(
             .session
             .send_error(
                 &signaling_model.request_id,
-                signaling_model.signaling_type,
+                SignalingType::TerminalStarted,
                 Some(from_connection_id.to_string()),
                 DeskErrorCode::PERMISSION_ERROR,
                 "Terminal access denied by security settings or user",
@@ -264,7 +264,7 @@ pub async fn handle_manager_terminal_start(
                     let content = String::from_utf8_lossy(&buf[..n]).to_string();
                     let data = TerminalOutputData { content };
                     let model = SignalingModel::new_request(
-                        SignalingType::ReplyFromTerminal,
+                        SignalingType::TerminalOutputProduced,
                         Some(terminal_connection_id.to_owned()),
                         Some(&data),
                     );
@@ -292,7 +292,7 @@ pub async fn handle_manager_terminal_start(
         };
 
         let model = SignalingModel::new_request(
-            SignalingType::ReplyFromTerminal,
+            SignalingType::TerminalOutputProduced,
             Some(terminal_connection_id.to_owned()),
             Some(&data),
         );
@@ -447,7 +447,7 @@ pub async fn handle_list_terminals(
             .session
             .send_error(
                 &signaling_model.request_id,
-                signaling_model.signaling_type,
+                SignalingType::TerminalCommandsListed,
                 from_connection_id,
                 DeskErrorCode::PERMISSION_ERROR,
                 "Terminal access denied by security settings or user",
@@ -461,7 +461,7 @@ pub async fn handle_list_terminals(
         .session
         .send_response(
             &signaling_model.request_id,
-            signaling_model.signaling_type,
+            SignalingType::TerminalCommandsListed,
             from_connection_id,
             &terminals,
         )

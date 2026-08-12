@@ -86,9 +86,13 @@ sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev \
 
 ## 添加新信令类型的步骤
 
-1. 在 `signal-facade/src/model/signal.rs` 的 `SignalingType` 中添加新的枚举变体（带唯一整数值）。
-2. 在 `signal/src/service.rs` 的 `handle_message` 函数中处理它 — 添加到转发分支或编写专用的匹配分支。**绝对不要添加 `_ =>` 兜底匹配**（由编译器强制检查穷尽性）。
-3. 更新前端：运行 `/update_openapi`，然后在 `vite-project/src/features/desk/hooks/useDeskRTC.ts` 中添加 `onMessage` 处理程序。
+1. 请求/命令用 `VerbObject`，响应/结果用 `SubjectPastParticiple`，主动状态通知用 `SubjectStateChanged`。禁止新信令使用 `*Request` / `*Response` / `*Reply` / `*Ack` / `*Result` / `*Event` 后缀；`Offer`、`Answer`、`IceCandidate` 是 WebRTC 标准术语例外。
+2. 在 `signal-facade/src/model/signal/signaling_type.rs` 添加带唯一整数值的 variant，并在 `signal-facade/src/service/contracts.rs` 声明其唯一角色。请求和响应必须是不同 variant/discriminant；成功与业务失败都回对应响应类型并沿用原 `request_id`，通知使用独立事件 id。
+3. 在 `signal/src/service.rs` 与 server daemon/worker 路径中处理它——添加到转发分支或编写专用匹配分支。**绝对不要添加 `_ =>` 兜底匹配**（由编译器强制检查穷尽性）。
+4. 同步 browser、manager、Android、iOS 的协议表与关联状态机；若 OpenAPI schema 受影响，运行仓库更新脚本重新生成客户端，禁止手改生成物。
+5. 补充 discriminant 唯一性、角色/请求映射穷尽性、成功/失败响应类型、`request_id` 匹配与 stale response 测试；验证开源 signal/manager 对等，以及 Default、DeskServer、ServiceDaemon 三条被控路径。
+
+控制生命周期固定为 `RequireControl` → `ControlAccepted` / `ControlDenied`、`ReleaseControl` → `ControlReleased`（PC 存活）、`CloseRemoteSession`（销毁 PC/媒体会话），不得再用 payload 布尔值或同一信令复用申请、释放、关闭三种动作。
 
 ## 信令鉴权 (CRITICAL)
 

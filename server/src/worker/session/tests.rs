@@ -181,7 +181,7 @@ fn outbound_dispatch_routes_error_responses_to_typed_signaling_error() {
     // SignalingModel::error builds the canonical wire shape.
     let model = SignalingModel::error(
         "req-bad",
-        SignalingType::StartTerminal,
+        SignalingType::TerminalStarted,
         None,
         Some("conn-term".to_string()),
         DeskErrorCode::PERMISSION_ERROR,
@@ -193,7 +193,7 @@ fn outbound_dispatch_routes_error_responses_to_typed_signaling_error() {
         WorkerToService::SignalingError(p) => {
             assert_eq!(p.request_id, "req-bad");
             assert_eq!(p.connection_id, "conn-term");
-            assert_eq!(p.signaling_type, SignalingType::StartTerminal);
+            assert_eq!(p.signaling_type, SignalingType::TerminalStarted);
             assert_eq!(p.error_code, DeskErrorCode::PERMISSION_ERROR.code());
             assert_eq!(p.error_message.as_deref(), Some("Permission denied"));
         }
@@ -231,14 +231,14 @@ fn outbound_dispatch_drops_unrecognised_signaling_types() {
     assert!(build_outbound_payload_from_desk_text(text).is_none());
 }
 
-/// A `ManagerSystemInfo` response (built by the worker's
+/// A `SystemInfoRetrieved` response (built by the worker's
 /// `send_response`) gets routed onto
-/// `WorkerToService::ManagerSystemInfoResponse` carrying the
+/// `WorkerToService::SystemInfoRetrieved` carrying the
 /// `request_id`, `connection_id`, and the `SystemInfo` body
 /// verbatim. This guards the typed-routing decision on the
 /// happy path.
 #[test]
-fn outbound_dispatch_routes_manager_system_info_response_to_typed_variant() {
+fn outbound_dispatch_routes_system_info_retrieved_to_typed_variant() {
     let info = SystemInfo {
         name: Some("alice-pc".to_string()),
         is_admin: Some(true),
@@ -246,7 +246,7 @@ fn outbound_dispatch_routes_manager_system_info_response_to_typed_variant() {
     };
     let model = SignalingModel::success_response(
         "req-info-1",
-        SignalingType::ManagerSystemInfo,
+        SignalingType::SystemInfoRetrieved,
         None,
         Some("conn-info".to_string()),
         Some(&info),
@@ -254,24 +254,24 @@ fn outbound_dispatch_routes_manager_system_info_response_to_typed_variant() {
     .expect("build response");
     let text = serde_json::to_string(&model).expect("serialise");
     match build_outbound_payload_from_desk_text(text).expect("typed route") {
-        WorkerToService::ManagerSystemInfoResponse(p) => {
+        WorkerToService::SystemInfoRetrieved(p) => {
             assert_eq!(p.request_id, "req-info-1");
             assert_eq!(p.connection_id.as_deref(), Some("conn-info"));
             assert_eq!(p.info.name.as_deref(), Some("alice-pc"));
             assert_eq!(p.info.is_admin, Some(true));
         }
-        other => panic!("expected ManagerSystemInfoResponse, got {other:?}"),
+        other => panic!("expected SystemInfoRetrieved, got {other:?}"),
     }
 }
 
-/// Empty-body responses (`ManagerFileDelete`) ride
+/// Empty-body responses (`FileDeleted`) ride
 /// `WorkerToService::ManagerResponseRefPayload` — only the
 /// `request_id` + `connection_id` matter.
 #[test]
 fn outbound_dispatch_routes_empty_body_manager_responses_to_typed_variants() {
     let model = SignalingModel::success_response(
         "req-empty",
-        SignalingType::ManagerFileDelete,
+        SignalingType::FileDeleted,
         None,
         Some("conn-empty".to_string()),
         Some(&()),
@@ -279,11 +279,11 @@ fn outbound_dispatch_routes_empty_body_manager_responses_to_typed_variants() {
     .expect("build response");
     let text = serde_json::to_string(&model).expect("serialise");
     match build_outbound_payload_from_desk_text(text).expect("typed route") {
-        WorkerToService::ManagerFileDeleteResponse(p) => {
+        WorkerToService::FileDeleted(p) => {
             assert_eq!(p.request_id, "req-empty");
             assert_eq!(p.connection_id.as_deref(), Some("conn-empty"));
         }
-        other => panic!("expected ManagerFileDeleteResponse, got {other:?}"),
+        other => panic!("expected FileDeleted, got {other:?}"),
     }
 }
 
@@ -334,33 +334,33 @@ fn outbound_dispatch_routes_terminal_closed_to_typed_variant() {
     }
 }
 
-/// `ReplyFromTerminal` is the high-frequency PTY-output
+/// `TerminalOutputProduced` is the high-frequency PTY-output
 /// path. The PTY reader thread builds it via `new_request` with a
 /// `TerminalOutputData` body; verify the body survives the typed
 /// route + the connection_id is read from `to_connection_id`
 /// (server-initiated request, target browser is the destination).
 #[test]
-fn outbound_dispatch_routes_reply_from_terminal_to_typed_variant() {
+fn outbound_dispatch_routes_terminal_output_produced_to_typed_variant() {
     let body = TerminalOutputData {
         content: "hello\r\nworld\r\n".to_string(),
     };
     let model = SignalingModel::new_request(
-        SignalingType::ReplyFromTerminal,
+        SignalingType::TerminalOutputProduced,
         Some("conn-term".to_string()),
         Some(&body),
     )
     .expect("build new_request");
     let text = serde_json::to_string(&model).expect("serialise");
     match build_outbound_payload_from_desk_text(text).expect("typed route") {
-        WorkerToService::ReplyFromTerminal(p) => {
+        WorkerToService::TerminalOutputProduced(p) => {
             assert_eq!(p.connection_id, "conn-term");
             assert_eq!(p.data.content, "hello\r\nworld\r\n");
         }
-        other => panic!("expected ReplyFromTerminal, got {other:?}"),
+        other => panic!("expected TerminalOutputProduced, got {other:?}"),
     }
 }
 
-/// `ListTerminal` response carries the `TerminalList` in
+/// `TerminalCommandsListed` response carries the `TerminalList` in
 /// the body. `handle_list_terminals` uses `send_response` which
 /// writes `to_connection_id` + the original request_id.
 #[test]
@@ -371,7 +371,7 @@ fn outbound_dispatch_routes_list_terminal_to_typed_variant() {
     };
     let model = SignalingModel::success_response(
         "req-list",
-        SignalingType::ListTerminal,
+        SignalingType::TerminalCommandsListed,
         None,
         Some("conn-list".to_string()),
         Some(&terminals),
@@ -379,17 +379,17 @@ fn outbound_dispatch_routes_list_terminal_to_typed_variant() {
     .expect("build response");
     let text = serde_json::to_string(&model).expect("serialise");
     match build_outbound_payload_from_desk_text(text).expect("typed route") {
-        WorkerToService::ListTerminalResponse(p) => {
+        WorkerToService::TerminalCommandsListed(p) => {
             assert_eq!(p.request_id, "req-list");
             assert_eq!(p.connection_id.as_deref(), Some("conn-list"));
             assert_eq!(p.terminals.commands.len(), 1);
             assert_eq!(p.terminals.current, 0);
         }
-        other => panic!("expected ListTerminalResponse, got {other:?}"),
+        other => panic!("expected TerminalCommandsListed, got {other:?}"),
     }
 }
 
-/// A `ManagerSystemInfo` response
+/// A `SystemInfoRetrieved` response
 /// produced by `handle_manager_system_info` for an internal HTTP request carries `to_connection_id == None` because
 /// the original request from `signal-facade::request_peer_with_callback`
 /// had no `from_connection_id`. The typed dispatcher must still
@@ -400,7 +400,7 @@ fn outbound_dispatch_manager_response_without_to_connection_routes_with_none() {
     let info = SystemInfo::default();
     let model = SignalingModel::success_response(
         "req-info-noid",
-        SignalingType::ManagerSystemInfo,
+        SignalingType::SystemInfoRetrieved,
         None,
         None, // HTTP-API trigger: no originating browser PC
         Some(&info),
@@ -408,11 +408,11 @@ fn outbound_dispatch_manager_response_without_to_connection_routes_with_none() {
     .expect("build response");
     let text = serde_json::to_string(&model).expect("serialise");
     match build_outbound_payload_from_desk_text(text).expect("typed route") {
-        WorkerToService::ManagerSystemInfoResponse(p) => {
+        WorkerToService::SystemInfoRetrieved(p) => {
             assert_eq!(p.request_id, "req-info-noid");
             assert!(p.connection_id.is_none());
         }
-        other => panic!("expected ManagerSystemInfoResponse, got {other:?}"),
+        other => panic!("expected SystemInfoRetrieved, got {other:?}"),
     }
 }
 

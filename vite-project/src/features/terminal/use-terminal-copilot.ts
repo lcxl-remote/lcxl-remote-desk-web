@@ -2,9 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { v4 } from 'uuid';
 import {
-    SIGNALING_TYPE_CODE_TERMINAL_COPILOT_ASK,
-    SIGNALING_TYPE_CODE_TERMINAL_COPILOT_EVENT,
-    SIGNALING_TYPE_CODE_TERMINAL_COPILOT_CANCEL,
+    SIGNALING_TYPE_CODE_ASK_TERMINAL_COPILOT,
+    SIGNALING_TYPE_CODE_TERMINAL_COPILOT_UPDATED,
+    SIGNALING_TYPE_CODE_CANCEL_TERMINAL_COPILOT,
 } from '../desk/constants';
 import type { AiProvenance } from '@/components/ai-generated-mark';
 import type { SignalingMessage, SignalingSubscriber } from '../desk/use-desk-signaling';
@@ -256,7 +256,7 @@ export function useTerminalCopilot({
                 org_id: input.orgId ?? undefined,
             };
             const requestId = sendMessage(
-                SIGNALING_TYPE_CODE_TERMINAL_COPILOT_ASK,
+                SIGNALING_TYPE_CODE_ASK_TERMINAL_COPILOT,
                 data,
                 connectionId,
             );
@@ -291,7 +291,7 @@ export function useTerminalCopilot({
         const requestId = activeRequestRef.current;
         if (connectionId && requestId) {
             sendMessage(
-                SIGNALING_TYPE_CODE_TERMINAL_COPILOT_CANCEL,
+                SIGNALING_TYPE_CODE_CANCEL_TERMINAL_COPILOT,
                 null,
                 connectionId,
                 requestId,
@@ -306,7 +306,7 @@ export function useTerminalCopilot({
 
     useEffect(() => {
         const handle = (message: SignalingMessage) => {
-            if (message.signaling_type !== SIGNALING_TYPE_CODE_TERMINAL_COPILOT_EVENT) return;
+            if (message.signaling_type !== SIGNALING_TYPE_CODE_TERMINAL_COPILOT_UPDATED) return;
             const event = message.signaling_data as TerminalCopilotEvent | null;
             if (!event || event.request_id !== activeRequestRef.current) return;
             // Ignore stale / replayed frames.

@@ -1,13 +1,13 @@
-//! Signal single-account capability-ceiling stamp for `RequestRemote` frames.
+//! Signal single-account capability-ceiling stamp for `RequestRemoteAccess` frames.
 //!
 //! The portable signal server is a `TrustedCentral` upstream to its edge, so the
-//! edge drops any bare `RequestRemote` arriving there (defense against a grant
+//! edge drops any bare `RequestRemoteAccess` arriving there (defense against a grant
 //! session stripping its stamp to masquerade as an owner). This authorizer stamps
-//! every relayed `RequestRemote` with an [`RequestRemoteAuthz`] so the edge
+//! every relayed `RequestRemoteAccess` with an [`RequestRemoteAuthz`] so the edge
 //! accepts it.
 //!
 //! OSS signal is single-account: the one authenticated operator is the owner of
-//! every device it reaches, so an authenticated `RequestRemote` is stamped with
+//! every device it reaches, so an authenticated `RequestRemoteAccess` is stamped with
 //! `access_ceiling: None` (full control, no ceiling). Redeemed device / support
 //! codes — which stamp `Some(ceiling)` — arrive with the unified redeem flow and
 //! its anonymous code-session identity; until that path exists, only the
@@ -108,7 +108,7 @@ pub(crate) fn signal_actor_summary(
 /// `grant_session_id` selector. The authorization fact is the server-side lookup:
 /// the grant's `principal` / `target` / live `generation` must all match. Returns
 /// `(ceiling, Some(grant_session_id), generation)` on success, or `None` to reject.
-/// Shared by the `RequestRemote` and `StartTerminal` stamps so a code-session
+/// Shared by the `RequestRemoteAccess` and `StartTerminal` stamps so a code-session
 /// authorizes identically on both connections.
 pub(crate) async fn resolve_grant_ceiling(
     grant_store: &Arc<dyn AccessGrantStore>,
@@ -148,7 +148,7 @@ pub(crate) fn resolve_target_audience(
     }
 }
 
-/// Build the `Forward` outcome wrapping a `RequestRemote` frame's data with a
+/// Build the `Forward` outcome wrapping a `RequestRemoteAccess` frame's data with a
 /// stamp. Pure over its inputs (expiry passed in) so it is unit-testable. Returns
 /// `Reject` only if the frame has no payload / cannot be encoded.
 fn build_stamped_outcome(
@@ -163,7 +163,7 @@ fn build_stamped_outcome(
     let Some(inner) = model.get_raw_data().clone() else {
         return RequestRemoteOutcome::Reject {
             code: DeskErrorCode::INVALID_PARAMS,
-            message: "RequestRemote had no payload".to_string(),
+            message: "RequestRemoteAccess had no payload".to_string(),
         };
     };
     let authz = RequestRemoteAuthz {
@@ -196,7 +196,7 @@ fn build_stamped_outcome(
     ))
 }
 
-/// Signal single-account `RequestRemote` capability-ceiling stamp.
+/// Signal single-account `RequestRemoteAccess` capability-ceiling stamp.
 ///
 /// The authenticated single account is the owner of every device it reaches, so
 /// its request is stamped with `access_ceiling: None` (full control). A
@@ -264,7 +264,7 @@ impl RequestRemoteAuthorizer for SignalRequestRemoteAuthorizer {
             let Some(to_id) = model.to_connection_id.clone() else {
                 return RequestRemoteOutcome::Reject {
                     code: DeskErrorCode::INVALID_PARAMS,
-                    message: "RequestRemote missing target connection".to_string(),
+                    message: "RequestRemoteAccess missing target connection".to_string(),
                 };
             };
             let audience = {
@@ -363,7 +363,7 @@ mod tests {
         .unwrap();
         SignalingModel::new(
             request_id,
-            SignalingType::RequestRemote,
+            SignalingType::RequestRemoteAccess,
             Some("browser-1".to_string()),
             to.map(str::to_string),
             Some(data),
@@ -371,7 +371,7 @@ mod tests {
         )
     }
 
-    /// A `RequestRemote` model carrying the browser-supplied (untrusted) grant
+    /// A `RequestRemoteAccess` model carrying the browser-supplied (untrusted) grant
     /// selector.
     fn request_remote_with_grant(grant_session_id: Option<&str>) -> SignalingModel {
         let inner = RequestRemoteModel {
@@ -381,7 +381,7 @@ mod tests {
         };
         SignalingModel::new(
             "req-1",
-            SignalingType::RequestRemote,
+            SignalingType::RequestRemoteAccess,
             Some("browser-1".to_string()),
             Some("edge-1".to_string()),
             Some(serde_json::to_value(inner).unwrap()),
@@ -629,7 +629,7 @@ mod tests {
     fn wrapper_fails_closed_without_payload() {
         let model = SignalingModel::new(
             "req-1",
-            SignalingType::RequestRemote,
+            SignalingType::RequestRemoteAccess,
             Some("browser-1".to_string()),
             Some("edge-1".to_string()),
             None,

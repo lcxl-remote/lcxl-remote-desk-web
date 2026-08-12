@@ -75,7 +75,11 @@ pub(super) fn send_collect_response(
     outbound_tx: &broadcast::Sender<String>,
     response: &CollectResponse,
 ) {
-    match SignalingModel::new_request(SignalingType::CollectResponse, None, Some(response)) {
+    match SignalingModel::new_request(
+        SignalingType::EvidenceCollectionUpdated,
+        None,
+        Some(response),
+    ) {
         Ok(model) => match serde_json::to_string(&model) {
             Ok(text) => {
                 let _ = outbound_tx.send(text);
@@ -174,7 +178,8 @@ pub(super) fn send_remote_tool_response(
     outbound_tx: &broadcast::Sender<String>,
     response: &desk_agent_protocol::remote_tool::RemoteToolResponse,
 ) {
-    match SignalingModel::new_request(SignalingType::RemoteToolResponse, None, Some(response)) {
+    match SignalingModel::new_request(SignalingType::RemoteToolOutputUpdated, None, Some(response))
+    {
         Ok(model) => match serde_json::to_string(&model) {
             Ok(text) => {
                 let _ = outbound_tx.send(text);
@@ -280,6 +285,23 @@ pub(super) fn handle_support_code_issued_inbound(
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
     use desk_signal_facade::model::support::SupportCodeIssuedData;
+    let state = ctx.support_link_state.clone();
+    let request_id = model.request_id.clone();
+    let Some(response_state) = model.response_state.as_ref() else {
+        log::warn!("[support] ignoring SupportCodeIssued without response state");
+        return Ok(());
+    };
+    if !response_state.is_success() {
+        actix_web::rt::spawn(async move {
+            if !state.settle_request(&request_id).await {
+                log::warn!("[support] ignoring stale SupportCodeIssued response");
+                return;
+            }
+            log::warn!("[support] manager refused support-code request");
+            state.finish().await;
+        });
+        return Ok(());
+    }
     let payload = match model.get_data::<SupportCodeIssuedData>() {
         Ok(p) => p,
         Err(e) => {
@@ -287,15 +309,15 @@ pub(super) fn handle_support_code_issued_inbound(
             return Ok(());
         }
     };
-    log::info!(
-        "[support] manager issued temporary support code (expires_at={})",
-        payload.expires_at
-    );
-    let state = ctx.support_link_state.clone();
     let expires_at = payload.expires_at;
     let code = payload.code;
     let armed_epoch = state.epoch();
     actix_web::rt::spawn(async move {
+        if !state.settle_request(&request_id).await {
+            log::warn!("[support] ignoring stale SupportCodeIssued response");
+            return;
+        }
+        log::info!("[support] manager issued temporary support code (expires_at={expires_at})");
         state.set_snapshot(code, expires_at).await;
         let now = chrono::Utc::now().timestamp();
         let remaining = expires_at.saturating_sub(now).max(0) as u64;
@@ -315,7 +337,7 @@ pub(super) fn handle_support_code_issued_inbound(
 /// host holds whose recorded generation is `≤ revoked_generation`, cutting an
 /// already-established peer connection immediately after a dial-code regeneration —
 /// the in-flight teardown that the `authorize` generation check alone can only
-/// enforce on the session's *next* `RequestRemote`.
+/// enforce on the session's *next* `RequestRemoteAccess`.
 pub(super) async fn handle_revoke_access_grant_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,

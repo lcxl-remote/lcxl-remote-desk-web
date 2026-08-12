@@ -5,7 +5,7 @@
 //! code-session, not the owner: redemption mints an access grant carrying the
 //! code's ceiling and stores a code-session identity (a server-minted principal)
 //! in an encrypted session cookie. The signaling plane stamps the code's ceiling
-//! on that session's RequestRemote frames, and the REST plane (via
+//! on that session's RequestRemoteAccess frames, and the REST plane (via
 //! `enforce_device_scope`) restricts it to its redeemed target's
 //! capability-carrier endpoints. Settings, system info, service management and
 //! every other owner-plane surface stay out of reach.
@@ -51,7 +51,7 @@ pub struct RedeemCodeResult {
     /// The resolved target device connection to control.
     pub target_connection_id: String,
     /// The reusable grant-session token the control end must attach to every
-    /// RequestRemote for this target, including desktop and file-manager sessions.
+    /// RequestRemoteAccess for this target, including desktop and file-manager sessions.
     pub grant_session_id: String,
     /// The redeemed code's capability ceiling, so the control end can hide the
     /// entries a dimension explicitly denies. This is a UX hint only — the host

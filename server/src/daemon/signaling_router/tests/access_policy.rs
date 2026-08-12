@@ -8,38 +8,41 @@ use super::*;
 #[test]
 pub(super) fn classify_daemon_owned_types() {
     for t in [
-        SignalingType::RequestRemote,
-        SignalingType::Init,
+        SignalingType::RequestRemoteAccess,
+        SignalingType::RemoteAccessInitialized,
         SignalingType::Offer,
         SignalingType::Answer,
-        SignalingType::Canid,
-        SignalingType::CloseControl,
+        SignalingType::IceCandidate,
+        SignalingType::ReleaseControl,
+        SignalingType::ControlReleased,
+        SignalingType::CloseRemoteSession,
         SignalingType::RequireControl,
-        SignalingType::AcceptControl,
-        SignalingType::DenyControl,
+        SignalingType::ControlAccepted,
+        SignalingType::ControlDenied,
         SignalingType::PrivateScreenStateChanged,
-        SignalingType::AudioPlaybackError,
+        SignalingType::AudioPlaybackFailed,
         SignalingType::MediaPipelineStateChanged,
         SignalingType::RetryMediaPipeline,
-        SignalingType::ManagerSystemStatue,
-        SignalingType::ReplyFromTerminal,
+        SignalingType::SystemInfoRetrieved,
+        SignalingType::TerminalOutputProduced,
         SignalingType::TerminalStarted,
         SignalingType::TerminalClosed,
         SignalingType::DesktopSwitching,
         SignalingType::DesktopReady,
         SignalingType::FetchConnections,
-        SignalingType::ConnectionList,
+        SignalingType::ConnectionsFetched,
         SignalingType::ConnectionRemoved,
-        SignalingType::Heartbeat,
+        SignalingType::SendHeartbeat,
+        SignalingType::HeartbeatAcknowledged,
         // Error / Unknown are daemon-owned.
         SignalingType::Error,
         SignalingType::Unknown,
-        // AgentResponse only flows worker → control end.
-        SignalingType::AgentResponse,
+        // AgentCapabilityCompleted only flows worker → control end.
+        SignalingType::AgentCapabilityCompleted,
         // Fleet exec: request handled inline (PEP + dispatch); result is
         // daemon-emitted toward the manager.
-        SignalingType::EdgeExecRequest,
-        SignalingType::EdgeExecResult,
+        SignalingType::ExecuteEdgePlan,
+        SignalingType::EdgeExecutionCompleted,
         // Temporary-support code: manager → daemon, consumed locally.
         SignalingType::SupportCodeIssued,
     ] {
@@ -53,24 +56,24 @@ pub(super) fn classify_daemon_owned_types() {
 
 /// Worker-bound: user-session resources (files, terminal request
 /// types, overlays, approval, manager queries). The 3
-/// terminal *reverse* notification types (`ReplyFromTerminal`,
+/// terminal *reverse* notification types (`TerminalOutputProduced`,
 /// `TerminalStarted`, `TerminalClosed`) are classified as
 /// daemon-owned because they only flow worker → browser; an
 /// inbound copy is a protocol error to swallow.
 #[test]
 pub(super) fn classify_worker_owned_types() {
     for t in [
-        SignalingType::EnablePrivateScreen,
+        SignalingType::SetPrivateScreenVisibility,
         SignalingType::UpdateDeskSettings,
-        SignalingType::ManagerSystemInfo,
-        SignalingType::ManagerFileList,
+        SignalingType::GetSystemInfo,
+        SignalingType::ListFiles,
         SignalingType::StartTerminal,
-        SignalingType::SendDataToTerminal,
+        SignalingType::SendTerminalInput,
         SignalingType::ResizeTerminal,
         SignalingType::CloseTerminal,
-        SignalingType::ListTerminal,
+        SignalingType::ListTerminalCommands,
         SignalingType::ChangeDisplaySettings,
-        SignalingType::AgentRequest,
+        SignalingType::InvokeAgentCapability,
     ] {
         assert_eq!(
             classify(t),
@@ -112,17 +115,18 @@ pub(super) fn capped_session_permits_matrix_over_all_signaling_types() {
 
     let terminal_family = [
         StartTerminal,
-        SendDataToTerminal,
+        SendTerminalInput,
         ResizeTerminal,
         CloseTerminal,
-        ListTerminal,
+        ListTerminalCommands,
     ];
-    let file_family = [ManagerFileList, ManagerFileDelete];
+    let file_family = [ListFiles, DeleteFile];
 
     for t in SignalingType::iter() {
         let baseline = is_baseline_signaling_type(t);
-        let is_family =
-            terminal_family.contains(&t) || file_family.contains(&t) || t == EnablePrivateScreen;
+        let is_family = terminal_family.contains(&t)
+            || file_family.contains(&t)
+            || t == SetPrivateScreenVisibility;
 
         // A baseline type must never also be a capability family (no overlap).
         assert!(
@@ -149,16 +153,16 @@ pub(super) fn capped_session_permits_matrix_over_all_signaling_types() {
     // protects them, so door1 must deny them for a capped session even under a
     // permissive ceiling.
     for t in [
-        ManagerSystemInfo,
+        GetSystemInfo,
         ChangeDisplaySettings,
-        AgentRequest,
-        ConfirmExec,
-        ResolveExec,
-        TerminalCopilotAsk,
-        CollectRequest,
-        EdgeExecRequest,
-        RemoteToolRequest,
-        Diagnose,
+        InvokeAgentCapability,
+        PreviewExecution,
+        ResolveExecution,
+        AskTerminalCopilot,
+        CollectEvidence,
+        ExecuteEdgePlan,
+        InvokeRemoteTool,
+        DiagnoseDevice,
     ] {
         assert!(
             !capped_session_permits(t, &allow_families),
@@ -180,8 +184,8 @@ pub(super) fn capped_session_permits_early_rejects_only_explicit_deny() {
         ..Default::default()
     };
     assert!(capped_session_permits(StartTerminal, &ceiling));
-    assert!(!capped_session_permits(ManagerFileList, &ceiling));
-    assert!(capped_session_permits(EnablePrivateScreen, &ceiling));
+    assert!(!capped_session_permits(ListFiles, &ceiling));
+    assert!(capped_session_permits(SetPrivateScreenVisibility, &ceiling));
 }
 
 #[test]
@@ -193,32 +197,29 @@ pub(super) fn capped_session_requires_browse_and_delete_for_file_delete() {
         allow_file_delete: Some(false),
         ..Default::default()
     };
-    assert!(capped_session_permits(ManagerFileList, &browse_only));
-    assert!(!capped_session_permits(ManagerFileDelete, &browse_only));
+    assert!(capped_session_permits(ListFiles, &browse_only));
+    assert!(!capped_session_permits(DeleteFile, &browse_only));
 
     let delete_only = SecuritySettings {
         allow_file_browse: Some(false),
         allow_file_delete: Some(true),
         ..Default::default()
     };
-    assert!(!capped_session_permits(ManagerFileList, &delete_only));
-    assert!(!capped_session_permits(ManagerFileDelete, &delete_only));
+    assert!(!capped_session_permits(ListFiles, &delete_only));
+    assert!(!capped_session_permits(DeleteFile, &delete_only));
 
     let browse_and_delete = SecuritySettings {
         allow_file_browse: Some(true),
         allow_file_delete: Some(true),
         ..Default::default()
     };
-    assert!(capped_session_permits(
-        ManagerFileDelete,
-        &browse_and_delete
-    ));
+    assert!(capped_session_permits(DeleteFile, &browse_and_delete));
 }
 
 /// The admission-based door1 gate: a session admitted as owner passes
 /// everything; a capped session (a redeemed grant, including a temporary-support
 /// session) runs the capability matrix; an un-admitted connection is fail-closed
-/// for connection-scoped capability frames (the pre-`RequestRemote` window
+/// for connection-scoped capability frames (the pre-`RequestRemoteAccess` window
 /// where the worker has no ceiling — pre-admission), while owner-plane frames pass here
 /// and are authorized at the central.
 #[test]
@@ -232,12 +233,12 @@ pub(super) fn door1_permits_gates_capped_sessions_and_fails_closed_unadmitted_ca
     // Admitted owner: everything passes.
     assert!(door1_permits(
         &ConnectionGate::KnownOwnerFull,
-        ManagerSystemInfo
+        GetSystemInfo
     ));
     // Admitted capped: owner-plane denied, permitted family allowed.
     assert!(!door1_permits(
         &ConnectionGate::KnownCapped(capped.clone()),
-        ManagerSystemInfo
+        GetSystemInfo
     ));
     assert!(door1_permits(
         &ConnectionGate::KnownCapped(capped),
@@ -246,18 +247,18 @@ pub(super) fn door1_permits_gates_capped_sessions_and_fails_closed_unadmitted_ca
     // Un-admitted WS connection: a connection-scoped capability frame is
     // denied — it would otherwise reach the worker before any ceiling was
     // provisioned and be evaluated against the host global
-    // pre-RequestRemote window). `StartTerminal` is deliberately NOT in this
-    // list: like `RequestRemote` it is the admission-establishing frame for the
+    // pre-RequestRemoteAccess window). `StartTerminal` is deliberately NOT in this
+    // list: like `RequestRemoteAccess` it is the admission-establishing frame for the
     // terminal WS, gated by its own source-gate + handler, so it must reach the
     // handler on an un-admitted connection (asserted permitted below).
     for t in [
-        SendDataToTerminal,
+        SendTerminalInput,
         ResizeTerminal,
         CloseTerminal,
-        ListTerminal,
-        ManagerFileList,
-        ManagerFileDelete,
-        EnablePrivateScreen,
+        ListTerminalCommands,
+        ListFiles,
+        DeleteFile,
+        SetPrivateScreenVisibility,
     ] {
         assert!(
             !door1_permits(&ConnectionGate::UnadmittedConnection, t),
@@ -266,15 +267,15 @@ pub(super) fn door1_permits_gates_capped_sessions_and_fails_closed_unadmitted_ca
     }
     // Un-admitted owner-plane / baseline / admission-establishing frames still
     // pass here (owner-plane is authorized at the central; a code-session cannot
-    // originate them; `RequestRemote` / `StartTerminal` are gated by their own
+    // originate them; `RequestRemoteAccess` / `StartTerminal` are gated by their own
     // source-gate + handler).
     assert!(door1_permits(
         &ConnectionGate::UnadmittedConnection,
-        ManagerSystemInfo
+        GetSystemInfo
     ));
     assert!(door1_permits(
         &ConnectionGate::UnadmittedConnection,
-        RequestRemote
+        RequestRemoteAccess
     ));
     assert!(
         door1_permits(&ConnectionGate::UnadmittedConnection, StartTerminal),
@@ -283,15 +284,12 @@ pub(super) fn door1_permits_gates_capped_sessions_and_fails_closed_unadmitted_ca
     // Server-internal frames may still serve explicitly authorized internal
     // terminal operations, but file-manager frames require a controller
     // connection now that their REST entry points no longer exist.
-    assert!(!door1_permits(
+    assert!(!door1_permits(&ConnectionGate::ServerInternal, ListFiles));
+    assert!(!door1_permits(&ConnectionGate::ServerInternal, DeleteFile));
+    assert!(door1_permits(
         &ConnectionGate::ServerInternal,
-        ManagerFileList
+        ListTerminalCommands
     ));
-    assert!(!door1_permits(
-        &ConnectionGate::ServerInternal,
-        ManagerFileDelete
-    ));
-    assert!(door1_permits(&ConnectionGate::ServerInternal, ListTerminal));
 }
 
 /// `classify_connection` reads the registry admission map — an id with no

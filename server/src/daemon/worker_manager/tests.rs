@@ -226,7 +226,7 @@ async fn handle_crash_recovery_is_noop_when_inprocess() {
 /// Capabilities round-trip: `set_worker_capabilities` stores the
 /// snapshot and `worker_capabilities()` returns it. The daemon's
 /// signaling_proxy relies on this to bridge `WorkerToService::
-/// Capabilities` into the `RequestRemote` Init reply path.
+/// Capabilities` into the `RequestRemoteAccess` RemoteAccessInitialized response path.
 #[tokio::test]
 async fn worker_capabilities_round_trip() {
     let (mgr, _rx) = test_manager();

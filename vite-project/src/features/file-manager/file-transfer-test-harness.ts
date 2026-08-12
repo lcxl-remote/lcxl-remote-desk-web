@@ -110,7 +110,7 @@ export async function openChannel(): Promise<StubDataChannel> {
     act(() =>
         ws.onmessage?.({
             data: JSON.stringify({
-                signaling_type: 101, // INIT
+                signaling_type: 101, // REMOTE_ACCESS_INITIALIZED
                 signaling_data: { ice_servers: [], desk_settings: {} },
             }),
         }),

@@ -1,7 +1,7 @@
 //! In-process context collector backing the diagnose orchestrator.
 //!
 //! Wraps the worker's [`LocalDeviceAgent`] (the same read collectors a raw
-//! `AgentRequest` drives) and gathers the policy-selected evidence into an
+//! `InvokeAgentCapability` drives) and gathers the policy-selected evidence into an
 //! [`EvidenceSnapshot`]. This is the `ContextCollector` used in Default /
 //! DeskServer mode, where the worker runs in the daemon process; the
 //! service-daemon cross-process path is a later additive implementation of the

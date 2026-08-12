@@ -195,7 +195,7 @@ pub async fn run_signaling_proxy(
         inbound_request_remote_authz: None,
         inbound_start_terminal_authz: None,
         // Fleet exec correlation set, shared with the worker-message loop below so
-        // a worker `ExecResult` for an in-flight fleet attempt is relayed to the
+        // a worker `ExecutionCompleted` for an in-flight fleet attempt is relayed to the
         // manager as a `EdgeExecResult`.
         edge_exec_pending: Default::default(),
         // On-demand temporary-support lifecycle, shared with the support loop.
@@ -482,14 +482,19 @@ pub async fn run_signaling_proxy(
                         None,
                         None::<&()>,
                     ) {
-                        Ok(model) => match serde_json::to_string(&model) {
-                            Ok(text) => {
-                                let _ = outbound_tx.send(text);
+                        Ok(model) => {
+                            support_link_state
+                                .begin_request(model.request_id.clone())
+                                .await;
+                            match serde_json::to_string(&model) {
+                                Ok(text) => {
+                                    let _ = outbound_tx.send(text);
+                                }
+                                Err(e) => {
+                                    warn!("[support] failed to serialise RequestSupportCode: {e}")
+                                }
                             }
-                            Err(e) => {
-                                warn!("[support] failed to serialise RequestSupportCode: {e}")
-                            }
-                        },
+                        }
                         Err(e) => warn!("[support] failed to build RequestSupportCode: {e}"),
                     }
                 } else {
@@ -756,11 +761,21 @@ pub async fn run_signaling_proxy(
             // channel the SignalingMessage path used. Build failures
             // are non-fatal — log + drop, no panic on the bus.
             WorkerToService::PrivateScreenStateChanged(payload) => {
-                match SignalingModel::new_request(
-                    SignalingType::PrivateScreenStateChanged,
-                    Some(payload.connection_id.clone()),
-                    Some(&payload.data),
-                ) {
+                let model = match payload.request_id.as_deref() {
+                    Some(request_id) => SignalingModel::success_response(
+                        request_id,
+                        SignalingType::PrivateScreenVisibilitySet,
+                        None,
+                        Some(payload.connection_id.clone()),
+                        Some(&payload.data),
+                    ),
+                    None => SignalingModel::new_request(
+                        SignalingType::PrivateScreenStateChanged,
+                        Some(payload.connection_id.clone()),
+                        Some(&payload.data),
+                    ),
+                };
+                match model {
                     Ok(model) => match serde_json::to_string(&model) {
                         Ok(text) => {
                             let _ = outbound_tx.send(text);
@@ -841,33 +856,33 @@ pub async fn run_signaling_proxy(
                     payload.outcome
                 );
             }
-            WorkerToService::ManagerSystemInfoResponse(payload) => {
+            WorkerToService::SystemInfoRetrieved(payload) => {
                 send_manager_response(
                     &outbound_tx,
-                    "ManagerSystemInfo",
+                    "SystemInfoRetrieved",
                     &payload.request_id,
                     &payload.connection_id,
-                    SignalingType::ManagerSystemInfo,
+                    SignalingType::SystemInfoRetrieved,
                     Some(&payload.info),
                 );
             }
-            WorkerToService::ManagerFileListResponse(payload) => {
+            WorkerToService::FilesListed(payload) => {
                 send_manager_response(
                     &outbound_tx,
-                    "ManagerFileList",
+                    "FilesListed",
                     &payload.request_id,
                     &payload.connection_id,
-                    SignalingType::ManagerFileList,
+                    SignalingType::FilesListed,
                     Some(&payload.response),
                 );
             }
-            WorkerToService::ManagerFileDeleteResponse(payload) => {
+            WorkerToService::FileDeleted(payload) => {
                 send_manager_response(
                     &outbound_tx,
-                    "ManagerFileDelete",
+                    "FileDeleted",
                     &payload.request_id,
                     &payload.connection_id,
-                    SignalingType::ManagerFileDelete,
+                    SignalingType::FileDeleted,
                     Option::<&()>::None,
                 );
             }
@@ -912,10 +927,10 @@ pub async fn run_signaling_proxy(
             // outbound channel for the WS sinks to ship to the
             // browser. `TerminalStarted` is a `success_response`
             // (StartTerminal correlation); `TerminalClosed` and
-            // `ReplyFromTerminal` are server-initiated `new_request`
+            // `TerminalOutputProduced` is a server-initiated `new_request`
             // notifications (no `request_id` correlation);
-            // `ListTerminalResponse` is a `success_response` for
-            // `ListTerminal`.
+            // `TerminalCommandsListed` is a `success_response` for
+            // `ListTerminalCommands`.
             WorkerToService::TerminalStarted(payload) => {
                 host_activity.terminal_started(&payload.connection_id);
                 // Terminal session traffic always carries a
@@ -943,22 +958,22 @@ pub async fn run_signaling_proxy(
                     Option::<&()>::None,
                 );
             }
-            WorkerToService::ReplyFromTerminal(payload) => {
+            WorkerToService::TerminalOutputProduced(payload) => {
                 send_terminal_notification(
                     &outbound_tx,
-                    "ReplyFromTerminal",
+                    "TerminalOutputProduced",
                     &payload.connection_id,
-                    SignalingType::ReplyFromTerminal,
+                    SignalingType::TerminalOutputProduced,
                     Some(&payload.data),
                 );
             }
-            WorkerToService::ListTerminalResponse(payload) => {
+            WorkerToService::TerminalCommandsListed(payload) => {
                 send_manager_response(
                     &outbound_tx,
-                    "ListTerminal",
+                    "TerminalCommandsListed",
                     &payload.request_id,
                     &payload.connection_id,
-                    SignalingType::ListTerminal,
+                    SignalingType::TerminalCommandsListed,
                     Some(&payload.terminals),
                 );
             }
@@ -1014,24 +1029,24 @@ pub async fn run_signaling_proxy(
                 }
             }
             // AI agent reply: rebuild the outbound
-            // `SignalingType::AgentResponse` model carrying the
+            // `SignalingType::AgentCapabilityCompleted` model carrying the
             // `AgentOutcome` verbatim as signaling_data and write it onto
             // the control end's signaling WS. Capability-level errors live
             // inside the `AgentOutcome::Err` (the response state stays a
             // transport-level success), so the control-end UI receives the
             // full structured `AgentError`. Mirrors the
             // manager-plane response rebuild.
-            WorkerToService::AgentResponse(payload) => {
+            WorkerToService::AgentCapabilityCompleted(payload) => {
                 send_manager_response(
                     &outbound_tx,
-                    "AgentResponse",
+                    "AgentCapabilityCompleted",
                     &payload.request_id,
                     &payload.connection_id,
-                    SignalingType::AgentResponse,
+                    SignalingType::AgentCapabilityCompleted,
                     Some(&payload.outcome),
                 );
             }
-            // AI exec result: rebuild the outbound `SignalingType::ExecResult`
+            // AI exec result: rebuild the outbound `SignalingType::ExecutionCompleted`
             // as a notification-style frame (`response_state = None`) carrying
             // the `ExecResultPayload` verbatim, correlated to the suggested
             // command by `exec_request_id`. Execution failures live inside the
@@ -1102,7 +1117,7 @@ pub async fn run_signaling_proxy(
                 );
                 continue;
             }
-            WorkerToService::ExecResult(payload) => {
+            WorkerToService::ExecutionCompleted(payload) => {
                 // Close out the ledger entry first, so the host's own record is
                 // settled before the answer leaves the machine. The generation is
                 // the frame id the plan was dispatched under.
@@ -1161,11 +1176,11 @@ pub async fn run_signaling_proxy(
                 }
                 // Fleet exec correlation: if this result is for an in-flight
                 // fleet attempt, relay it to the manager as a `EdgeExecResult`
-                // (`Executed`) instead of an `ExecResult(609)` toward a browser.
+                // (`Executed`) instead of an `ExecutionCompleted(609)` toward a browser.
                 let is_fleet =
                     take_edge_exec_correlation(&router_ctx.edge_exec_pending, &payload.request_id);
                 if is_fleet {
-                    signaling_router::send_edge_exec_result(
+                    signaling_router::send_edge_execution_completed(
                         &outbound_tx,
                         &payload.request_id,
                         desk_agent_protocol::edge_exec::EdgeExecDisposition::Executed {
@@ -1178,7 +1193,7 @@ pub async fn run_signaling_proxy(
                     Ok(value) => {
                         let frame = SignalingModel::new(
                             &payload.request_id,
-                            SignalingType::ExecResult,
+                            SignalingType::ExecutionCompleted,
                             None,
                             payload.connection_id.clone(),
                             Some(value),
@@ -1189,7 +1204,7 @@ pub async fn run_signaling_proxy(
                                 let _ = outbound_tx.send(text);
                             }
                             Err(e) => warn!(
-                                "[SignalingProxy] Failed to serialise ExecResult frame for \
+                                "[SignalingProxy] Failed to serialise ExecutionCompleted frame for \
                                  {:?}: {e} (request_id={})",
                                 payload.connection_id, payload.request_id,
                             ),

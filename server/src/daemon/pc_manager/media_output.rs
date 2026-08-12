@@ -12,7 +12,7 @@ use super::*;
 ///
 /// All errors are intentionally swallowed:
 ///
-/// - **Unknown `connection_id`** — a race against `CloseControl` /
+/// - **Unknown `connection_id`** — a race against `CloseRemoteSession` /
 ///   browser drop. Logged at trace level so high-rate noise during
 ///   normal teardown does not flood the operator.
 /// - **No `video_track` yet (Audio frame, or video before the first
@@ -38,7 +38,7 @@ pub async fn write_video_frame(registry: &PcRegistry, frame: MediaFrame) {
 
     // Hold the read guard only as long as we need the track Arc + the
     // pause flag; clone them out before awaiting on `write_sample` so
-    // the daemon's offer / canid handlers (which take the write lock)
+    // the daemon's offer / ice_candidate handlers (which take the write lock)
     // are not blocked while the codec write completes.
     let (track_opt, paused) = {
         let g = ctx.read().await;

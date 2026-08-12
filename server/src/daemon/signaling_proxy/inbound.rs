@@ -14,11 +14,11 @@ use super::*;
 pub(super) fn is_trusted_central_only(t: SignalingType) -> bool {
     matches!(
         t,
-        SignalingType::CommandTemplateSync
-            | SignalingType::CommandBlocklistSync
-            | SignalingType::CollectRequest
-            | SignalingType::EdgeExecRequest
-            | SignalingType::RemoteToolRequest
+        SignalingType::SyncCommandTemplates
+            | SignalingType::SyncCommandBlocklist
+            | SignalingType::CollectEvidence
+            | SignalingType::ExecuteEdgePlan
+            | SignalingType::InvokeRemoteTool
             | SignalingType::SupportCodeIssued
             | SignalingType::RevokeAccessGrant
     )
@@ -81,7 +81,7 @@ pub(super) async fn handle_inbound_signaling_text(
     // `EdgeExecRequest` uses a dedicated authorization gate: a trusted-but-
     // invalid request is answered with a synthesized denied result (so the
     // central pending entry resolves) rather than silently dropped.
-    if parsed.signaling_type == SignalingType::EdgeExecRequest {
+    if parsed.signaling_type == SignalingType::ExecuteEdgePlan {
         match gate_fleet_exec_frame(parsed, &expected_audience, &now) {
             FleetExecGateOutcome::Pass(unwrapped, block) => {
                 let effective_ctx = RouterContext {
@@ -94,7 +94,7 @@ pub(super) async fn handle_inbound_signaling_text(
             }
             FleetExecGateOutcome::Denied { request_id, reason } => {
                 warn!("[Proxy] EdgeExecRequest denied ({reason}); replying denied result");
-                signaling_router::send_edge_exec_result(
+                signaling_router::send_edge_execution_completed(
                     &router_ctx.outbound_tx,
                     &request_id,
                     desk_agent_protocol::edge_exec::EdgeExecDisposition::RejectedBeforeDispatch {
@@ -142,13 +142,13 @@ pub(super) async fn handle_inbound_signaling_text(
         return InboundOutcome::Continue;
     }
 
-    // `RequestRemote` carries the capability-ceiling stamp: required and validated
+    // `RequestRemoteAccess` carries the capability-ceiling stamp: required and validated
     // on the trusted-central link (a bare one there is dropped as a downgrade
     // attempt), rejected if stamped from a non-central source, passed through bare
     // on the owner-only relay path. The validated stamp rides into the router via
     // the context so the freshly-created session inherits its restriction /
     // ceiling.
-    if parsed.signaling_type == SignalingType::RequestRemote {
+    if parsed.signaling_type == SignalingType::RequestRemoteAccess {
         match gate_request_remote_frame(parsed, source, &expected_audience, &now) {
             RequestRemoteGateOutcome::Pass(unwrapped, authz) => {
                 let effective_ctx;
@@ -162,17 +162,17 @@ pub(super) async fn handle_inbound_signaling_text(
                     router_ctx
                 };
                 if let Err(e) = signaling_router::route(&unwrapped, ctx_ref).await {
-                    warn!("[Proxy] router handler failed for RequestRemote: {e}");
+                    warn!("[Proxy] router handler failed for RequestRemoteAccess: {e}");
                 }
             }
             RequestRemoteGateOutcome::Drop(reason) => {
-                warn!("[Proxy] Dropping RequestRemote: {reason}");
+                warn!("[Proxy] Dropping RequestRemoteAccess: {reason}");
             }
         }
         return InboundOutcome::Continue;
     }
 
-    // `StartTerminal` carries the same capability-ceiling stamp as `RequestRemote`
+    // `StartTerminal` carries the same capability-ceiling stamp as `RequestRemoteAccess`
     // (it is the admission-establishing frame for the distinct terminal WS): required
     // and validated on the trusted-central link, rejected if stamped from a
     // non-central source, passed through bare on the owner-only relay path. The
@@ -259,7 +259,7 @@ pub(super) fn send_exec_lifecycle(
     };
     let frame = SignalingModel::new(
         execution_generation,
-        SignalingType::ExecLifecycle,
+        SignalingType::ExecutionProgressUpdated,
         None,
         to_connection_id,
         Some(data),

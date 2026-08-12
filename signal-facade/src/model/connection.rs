@@ -59,7 +59,7 @@ pub struct FetchConnectionsScope {
 
 /// Connection list information
 #[derive(Serialize, Clone, Debug, ToSchema)]
-pub struct ConnectionList {
+pub struct ConnectionsFetchedData {
     /// Current connection ID
     pub current_connection_id: String,
     /// Connection map
@@ -75,6 +75,51 @@ use std::{
 };
 use tokio::sync::{RwLock, oneshot};
 
+/// One pending signaling request and the response types allowed to complete it.
+/// A frame with the same request id but a different wire role stays pending.
+pub struct PendingRequestCallback {
+    expected_response_types: &'static [SignalingType],
+    sender: oneshot::Sender<SignalingModel>,
+}
+
+impl PendingRequestCallback {
+    pub fn new(
+        expected_response_types: &'static [SignalingType],
+        sender: oneshot::Sender<SignalingModel>,
+    ) -> Self {
+        Self {
+            expected_response_types,
+            sender,
+        }
+    }
+
+    pub fn accepts(&self, signaling_type: SignalingType) -> bool {
+        self.expected_response_types.contains(&signaling_type)
+    }
+
+    pub fn send(self, model: SignalingModel) -> bool {
+        self.sender.send(model).is_ok()
+    }
+}
+
+/// Remove a pending callback only when both its request id and declared
+/// response type match. A same-id frame with another wire role must leave the
+/// real request pending for its eventual response.
+pub(crate) fn take_matching_request_callback(
+    callbacks: &mut HashMap<String, PendingRequestCallback>,
+    request_id: &str,
+    signaling_type: SignalingType,
+) -> Option<PendingRequestCallback> {
+    if callbacks
+        .get(request_id)
+        .is_some_and(|pending| pending.accepts(signaling_type))
+    {
+        callbacks.remove(request_id)
+    } else {
+        None
+    }
+}
+
 /// Connection state for a single WebSocket connection.
 /// Used by both signal server and manager.
 #[derive(Clone)]
@@ -87,9 +132,9 @@ pub struct ConnectionState {
     /// When a browser connection is closed, signal server should notify
     /// the desk server to close related terminal processes.
     pub terminal_connection_ids: Arc<RwLock<HashSet<String>>>,
-    /// `request_id -> oneshot::Sender<SignalingModel>`
-    /// For request-response pattern over signaling
-    pub request_callback_map: Arc<RwLock<HashMap<String, oneshot::Sender<SignalingModel>>>>,
+    /// `request_id -> (expected response types, callback)` for the signaling
+    /// request-response pattern. A mismatched type never consumes the callback.
+    pub request_callback_map: Arc<RwLock<HashMap<String, PendingRequestCallback>>>,
     /// Device code assigned to this connection (if it's a Server type connection)
     pub device_code: Option<String>,
     /// Server-resolved authentication identity for this connection. Filled from
@@ -180,21 +225,31 @@ impl ForwardSignalingSender for ConnectionState {
     where
         T: ?Sized + Serialize + Sync,
     {
+        let expected_response_types = crate::service::response_types_for_request(signaling_type);
+        if expected_response_types.is_empty() {
+            return DeskSignalFacadeError::custom_error(
+                DeskErrorCode::INVALID_PARAMS,
+                &format!("Signaling type {signaling_type} has no declared callback response"),
+            );
+        }
         let signaling_model = SignalingModel::new_request(
             signaling_type,
             Some(self.model.connection_id.clone()),
             data,
         )?;
+        let signaling_text = serde_json::to_string(&signaling_model)?;
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.session
-            .write()
-            .await
-            .text(serde_json::to_string(&signaling_model)?)
-            .await?;
-        self.request_callback_map
-            .write()
-            .await
-            .insert(signaling_model.request_id.clone(), tx);
+        self.request_callback_map.write().await.insert(
+            signaling_model.request_id.clone(),
+            PendingRequestCallback::new(expected_response_types, tx),
+        );
+        if let Err(error) = self.session.write().await.text(signaling_text).await {
+            self.request_callback_map
+                .write()
+                .await
+                .remove(&signaling_model.request_id);
+            return Err(error.into());
+        }
 
         // TODO: timeout should be configured in the config file
         let timeout = timeout.unwrap_or(Duration::from_secs(30));
@@ -312,5 +367,50 @@ mod tests {
             serde_json::from_str(r#"{"scope":"org","org_id":"org-7"}"#).unwrap();
         assert_eq!(parsed.scope, ConnectionScope::Org);
         assert_eq!(parsed.org_id.as_deref(), Some("org-7"));
+    }
+
+    #[test]
+    fn pending_callback_accepts_only_its_declared_response_type() {
+        let mut callbacks = HashMap::new();
+        let (sender, receiver) = oneshot::channel();
+        callbacks.insert(
+            "request-1".to_string(),
+            PendingRequestCallback::new(
+                crate::service::response_types_for_request(SignalingType::ListTerminalCommands),
+                sender,
+            ),
+        );
+
+        assert!(
+            take_matching_request_callback(
+                &mut callbacks,
+                "request-1",
+                SignalingType::TerminalStarted,
+            )
+            .is_none()
+        );
+        assert!(callbacks.contains_key("request-1"));
+
+        let pending = take_matching_request_callback(
+            &mut callbacks,
+            "request-1",
+            SignalingType::TerminalCommandsListed,
+        )
+        .expect("declared terminal-list response should complete the request");
+        assert!(!callbacks.contains_key("request-1"));
+
+        let response = SignalingModel::success_response::<()>(
+            "request-1",
+            SignalingType::TerminalCommandsListed,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(pending.send(response));
+        assert_eq!(
+            receiver.blocking_recv().unwrap().signaling_type,
+            SignalingType::TerminalCommandsListed
+        );
     }
 }

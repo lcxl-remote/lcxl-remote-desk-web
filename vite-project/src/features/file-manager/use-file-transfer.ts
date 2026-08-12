@@ -1,15 +1,18 @@
 import { useRef, useState, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import {
-    SIGNALING_TYPE_CODE_REQUEST_REMOTE,
-    SIGNALING_TYPE_CODE_INIT,
+    SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS,
+    SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
     SIGNALING_TYPE_CODE_OFFER,
     SIGNALING_TYPE_CODE_ANSWER,
-    SIGNALING_TYPE_CODE_CANID,
-    SIGNALING_TYPE_CODE_MANAGER_SYSTEM_INFO,
-    SIGNALING_TYPE_CODE_MANAGER_FILE_LIST,
-    SIGNALING_TYPE_CODE_MANAGER_FILE_DELETE,
-    SIGNALING_TYPE_CODE_CLOSE_CONTROL,
+    SIGNALING_TYPE_CODE_ICE_CANDIDATE,
+    SIGNALING_TYPE_CODE_GET_SYSTEM_INFO,
+    SIGNALING_TYPE_CODE_SYSTEM_INFO_RETRIEVED,
+    SIGNALING_TYPE_CODE_LIST_FILES,
+    SIGNALING_TYPE_CODE_FILES_LISTED,
+    SIGNALING_TYPE_CODE_DELETE_FILE,
+    SIGNALING_TYPE_CODE_FILE_DELETED,
+    SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION,
 } from '../desk/constants';
 import { createAcceptGate } from './upload-accept-gate';
 import { readSessionGrant } from '@/features/desk/session-grant';
@@ -131,6 +134,7 @@ export function useFileTransfer(deskId: string | undefined) {
         resolve: (value: any) => void;
         reject: (error: Error) => void;
         timeout: ReturnType<typeof setTimeout>;
+        expectedResponseType: number;
     }>());
 
     // Update a transfer in the list (simple merge, no computation)
@@ -452,7 +456,7 @@ export function useFileTransfer(deskId: string | undefined) {
                 }
                 const msg = {
                     request_id: uuidv4(),
-                    signaling_type: SIGNALING_TYPE_CODE_REQUEST_REMOTE,
+                    signaling_type: SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS,
                     signaling_data,
                     to_connection_id: deskId,
                 };
@@ -495,11 +499,7 @@ export function useFileTransfer(deskId: string | undefined) {
                     const signaling = JSON.parse(event.data);
                     const { signaling_type, signaling_data } = signaling;
                     const pending = pendingRequests.current.get(signaling.request_id);
-                    if (pending && (
-                        signaling_type === SIGNALING_TYPE_CODE_MANAGER_FILE_LIST
-                        || signaling_type === SIGNALING_TYPE_CODE_MANAGER_FILE_DELETE
-                        || signaling_type === SIGNALING_TYPE_CODE_MANAGER_SYSTEM_INFO
-                    )) {
+                    if (pending && signaling_type === pending.expectedResponseType) {
                         clearTimeout(pending.timeout);
                         pendingRequests.current.delete(signaling.request_id);
                         if (signaling.response_state?.error_code) {
@@ -512,8 +512,19 @@ export function useFileTransfer(deskId: string | undefined) {
                         }
                         return;
                     }
+                    if (pending && (
+                        signaling_type === SIGNALING_TYPE_CODE_FILES_LISTED
+                        || signaling_type === SIGNALING_TYPE_CODE_FILE_DELETED
+                        || signaling_type === SIGNALING_TYPE_CODE_SYSTEM_INFO_RETRIEVED
+                    )) {
+                        console.error(
+                            "Protocol error: signaling response type did not match pending request",
+                            { requestId: signaling.request_id, signaling_type, expected: pending.expectedResponseType },
+                        );
+                        return;
+                    }
 
-                    if (signaling_type === SIGNALING_TYPE_CODE_INIT) {
+                    if (signaling_type === SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED) {
                         initDataRef.current = signaling_data;
                         // 2. Create RTCPeerConnection
                         const pc = new RTCPeerConnection({
@@ -568,7 +579,7 @@ export function useFileTransfer(deskId: string | undefined) {
                         if (pc) {
                             await pc.setRemoteDescription(new RTCSessionDescription(signaling_data));
                         }
-                    } else if (signaling_type === SIGNALING_TYPE_CODE_CANID) {
+                    } else if (signaling_type === SIGNALING_TYPE_CODE_ICE_CANDIDATE) {
                         const pc = pcRef.current;
                         if (pc) {
                             await pc.addIceCandidate(new RTCIceCandidate(signaling_data));
@@ -589,6 +600,7 @@ export function useFileTransfer(deskId: string | undefined) {
 
     const sendFileRequest = useCallback(async <T,>(
         signalingType: number,
+        expectedResponseType: number,
         signalingData: unknown,
     ): Promise<T> => {
         await ensureConnection();
@@ -606,6 +618,7 @@ export function useFileTransfer(deskId: string | undefined) {
                 resolve: value => resolve(value as T),
                 reject,
                 timeout,
+                expectedResponseType,
             });
             try {
                 ws.send(JSON.stringify({
@@ -623,11 +636,11 @@ export function useFileTransfer(deskId: string | undefined) {
     }, [deskId, ensureConnection]);
 
     const listFiles = useCallback((params: unknown) => (
-        sendFileRequest<any>(SIGNALING_TYPE_CODE_MANAGER_FILE_LIST, params)
+        sendFileRequest<any>(SIGNALING_TYPE_CODE_LIST_FILES, SIGNALING_TYPE_CODE_FILES_LISTED, params)
     ), [sendFileRequest]);
 
     const deleteFile = useCallback((request: unknown) => (
-        sendFileRequest<void>(SIGNALING_TYPE_CODE_MANAGER_FILE_DELETE, request)
+        sendFileRequest<void>(SIGNALING_TYPE_CODE_DELETE_FILE, SIGNALING_TYPE_CODE_FILE_DELETED, request)
     ), [sendFileRequest]);
 
     // The host's own system information. The server this browser is connected to
@@ -639,7 +652,11 @@ export function useFileTransfer(deskId: string | undefined) {
     // `Partial`: the response is the shared signaling document, whose fields a
     // host fills as far as it can, so a reader must handle any of them missing.
     const querySystemInfo = useCallback(() => (
-        sendFileRequest<Partial<SystemInfo>>(SIGNALING_TYPE_CODE_MANAGER_SYSTEM_INFO, null)
+        sendFileRequest<Partial<SystemInfo>>(
+            SIGNALING_TYPE_CODE_GET_SYSTEM_INFO,
+            SIGNALING_TYPE_CODE_SYSTEM_INFO_RETRIEVED,
+            null,
+        )
     ), [sendFileRequest]);
 
     // Close WebRTC and WebSocket connections
@@ -677,7 +694,7 @@ export function useFileTransfer(deskId: string | undefined) {
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && deskId) {
                 const msg = {
                     request_id: uuidv4(),
-                    signaling_type: SIGNALING_TYPE_CODE_CLOSE_CONTROL,
+                    signaling_type: SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION,
                     signaling_data: null,
                     to_connection_id: deskId,
                 };

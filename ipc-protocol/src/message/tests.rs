@@ -611,22 +611,20 @@ fn media_frame_round_trips_wincode_200kb() {
 
 // === Typed control plane — round-trip tests ===
 
-/// `EnablePrivateScreen` carries the same bool the legacy
-/// `EnablePrivateScreenData` JSON used. Round-tripping it under
-/// wincode pins the wire shape — a reorder of `connection_id`
-/// vs `enable` would silently flip enable-vs-disable on
-/// matched-version daemon/worker pairs.
+/// Private-screen setting carries the request id through daemon/worker IPC.
 #[test]
-fn enable_private_screen_round_trips_wincode() {
-    for enable in [true, false] {
-        let msg = ServiceToWorker::EnablePrivateScreen(EnablePrivateScreenPayload {
+fn set_private_screen_visibility_round_trips_wincode() {
+    for visible in [true, false] {
+        let msg = ServiceToWorker::SetPrivateScreenVisibility(SetPrivateScreenVisibilityPayload {
+            request_id: "req-priv".to_string(),
             connection_id: "conn-priv".to_string(),
-            enable,
+            visible,
         });
         match wincode_round_trip(&msg) {
-            ServiceToWorker::EnablePrivateScreen(p) => {
+            ServiceToWorker::SetPrivateScreenVisibility(p) => {
+                assert_eq!(p.request_id, "req-priv");
                 assert_eq!(p.connection_id, "conn-priv");
-                assert_eq!(p.enable, enable);
+                assert_eq!(p.visible, visible);
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -669,6 +667,7 @@ fn update_desk_settings_round_trips_wincode() {
 #[test]
 fn private_screen_state_changed_round_trips_wincode() {
     let msg = WorkerToService::PrivateScreenStateChanged(PrivateScreenStateChangedPayload {
+        request_id: Some("req-pss".to_string()),
         connection_id: "conn-pss".to_string(),
         data: PrivateScreenStateChangedData {
             visible: false,
@@ -694,12 +693,12 @@ fn private_screen_state_changed_round_trips_wincode() {
 /// reorder would silently swap them on matched-version pairs).
 #[test]
 fn manager_request_ref_round_trips_wincode() {
-    let msg = ServiceToWorker::ManagerSystemInfoRequest(ManagerRequestRefPayload {
+    let msg = ServiceToWorker::GetSystemInfo(ManagerRequestRefPayload {
         request_id: "req-info-1".to_string(),
         connection_id: Some("conn-mgr".to_string()),
     });
     match wincode_round_trip(&msg) {
-        ServiceToWorker::ManagerSystemInfoRequest(p) => {
+        ServiceToWorker::GetSystemInfo(p) => {
             assert_eq!(p.request_id, "req-info-1");
             assert_eq!(p.connection_id.as_deref(), Some("conn-mgr"));
         }
@@ -710,24 +709,24 @@ fn manager_request_ref_round_trips_wincode() {
     // `signal-facade::controller::sysinfo`) have no originating
     // browser PC; verify a `None` connection_id round-trips so
     // the daemon's manager handlers don't drop the request.
-    let none_msg = ServiceToWorker::ManagerSystemInfoRequest(ManagerRequestRefPayload {
+    let none_msg = ServiceToWorker::GetSystemInfo(ManagerRequestRefPayload {
         request_id: "req-info-no-conn".to_string(),
         connection_id: None,
     });
     match wincode_round_trip(&none_msg) {
-        ServiceToWorker::ManagerSystemInfoRequest(p) => {
+        ServiceToWorker::GetSystemInfo(p) => {
             assert!(p.connection_id.is_none());
         }
         other => panic!("unexpected: {other:?}"),
     }
 }
 
-/// `ManagerFileListRequest` ferries `FileListParams` (carries 4
+/// `ListFiles` ferries `FileListParams` (carries 4
 /// `Option<DateTime<Local>>` fields via the wincode chrono adapter).
 /// Use a non-default page_count (and filename
 /// filter) so a stripped field shows up as a test failure.
 #[test]
-fn manager_file_list_request_round_trips_wincode() {
+fn list_files_round_trips_wincode() {
     let params = FileListParams {
         path: "C:\\Users".to_string(),
         page_no: 2,
@@ -735,13 +734,13 @@ fn manager_file_list_request_round_trips_wincode() {
         file_name: Some("readme".to_string()),
         ..Default::default()
     };
-    let msg = ServiceToWorker::ManagerFileListRequest(ManagerFileListRequestPayload {
+    let msg = ServiceToWorker::ListFiles(ListFilesPayload {
         request_id: "req-fl".to_string(),
         connection_id: "conn-fl".to_string(),
         params,
     });
     match wincode_round_trip(&msg) {
-        ServiceToWorker::ManagerFileListRequest(p) => {
+        ServiceToWorker::ListFiles(p) => {
             assert_eq!(p.request_id, "req-fl");
             assert_eq!(p.connection_id, "conn-fl");
             assert_eq!(p.params.path, "C:\\Users");
@@ -757,12 +756,12 @@ fn manager_file_list_request_round_trips_wincode() {
 /// envelopes at the type level; round-trip pins the variant tag.
 #[test]
 fn manager_response_ref_round_trips_wincode() {
-    let msg = WorkerToService::ManagerFileDeleteResponse(ManagerResponseRefPayload {
+    let msg = WorkerToService::FileDeleted(ManagerResponseRefPayload {
         request_id: "req-del".to_string(),
         connection_id: Some("conn-del".to_string()),
     });
     match wincode_round_trip(&msg) {
-        WorkerToService::ManagerFileDeleteResponse(p) => {
+        WorkerToService::FileDeleted(p) => {
             assert_eq!(p.request_id, "req-del");
             assert_eq!(p.connection_id.as_deref(), Some("conn-del"));
         }
@@ -770,24 +769,24 @@ fn manager_response_ref_round_trips_wincode() {
     }
 }
 
-/// `ManagerSystemInfoResponse` carries the full `SystemInfo`
+/// `SystemInfoRetrieved` carries the full `SystemInfo`
 /// blob; verify `startup_mode` + `is_admin` survive (the legacy
 /// handler set both at runtime so they are the most likely
 /// round-trip regression points).
 #[test]
-fn manager_system_info_response_round_trips_wincode() {
+fn system_info_retrieved_round_trips_wincode() {
     let info = SystemInfo {
         name: Some("alice-pc".to_string()),
         is_admin: Some(true),
         ..SystemInfo::default()
     };
-    let msg = WorkerToService::ManagerSystemInfoResponse(ManagerSystemInfoResponsePayload {
+    let msg = WorkerToService::SystemInfoRetrieved(SystemInfoRetrievedPayload {
         request_id: "req-info".to_string(),
         connection_id: Some("conn-info".to_string()),
         info,
     });
     match wincode_round_trip(&msg) {
-        WorkerToService::ManagerSystemInfoResponse(p) => {
+        WorkerToService::SystemInfoRetrieved(p) => {
             assert_eq!(p.request_id, "req-info");
             assert_eq!(p.info.name.as_deref(), Some("alice-pc"));
             assert_eq!(p.info.is_admin, Some(true));
@@ -798,14 +797,14 @@ fn manager_system_info_response_round_trips_wincode() {
 
 // === Terminal plane — round-trip tests ===
 
-/// `StartTerminalRequest` ferries `StartTerminalSession` over the
+/// `StartTerminal` ferries `StartTerminalSession` over the
 /// wincode derive. A non-trivial `command` (with
 /// comma-separated args) survives the round-trip — a stripped or
 /// reordered field would break terminal launch on matched-version
 /// daemon/worker pairs.
 #[test]
-fn start_terminal_request_round_trips_wincode() {
-    let msg = ServiceToWorker::StartTerminalRequest(StartTerminalRequestPayload {
+fn start_terminal_round_trips_wincode() {
+    let msg = ServiceToWorker::StartTerminal(StartTerminalPayload {
         request_id: "req-start".to_string(),
         connection_id: "conn-term".to_string(),
         session: StartTerminalSession {
@@ -815,7 +814,7 @@ fn start_terminal_request_round_trips_wincode() {
         },
     });
     match wincode_round_trip(&msg) {
-        ServiceToWorker::StartTerminalRequest(p) => {
+        ServiceToWorker::StartTerminal(p) => {
             assert_eq!(p.request_id, "req-start");
             assert_eq!(p.connection_id, "conn-term");
             assert_eq!(
@@ -827,19 +826,19 @@ fn start_terminal_request_round_trips_wincode() {
     }
 }
 
-/// `SendDataToTerminalRequest` is the keystroke / paste path —
+/// `SendTerminalInput` is the keystroke / paste path —
 /// arbitrary UTF-8 (including newlines + escape codes) must
 /// round-trip verbatim.
 #[test]
-fn send_data_to_terminal_request_round_trips_wincode() {
-    let msg = ServiceToWorker::SendDataToTerminalRequest(SendDataToTerminalPayload {
+fn send_terminal_input_round_trips_wincode() {
+    let msg = ServiceToWorker::SendTerminalInput(SendTerminalInputPayload {
         connection_id: "conn-term".to_string(),
         data: TerminalInputData {
             content: "ls -la\n\x1b[1;31mred\x1b[0m\n".to_string(),
         },
     });
     match wincode_round_trip(&msg) {
-        ServiceToWorker::SendDataToTerminalRequest(p) => {
+        ServiceToWorker::SendTerminalInput(p) => {
             assert_eq!(p.connection_id, "conn-term");
             assert_eq!(p.data.content, "ls -la\n\x1b[1;31mred\x1b[0m\n");
         }
@@ -847,12 +846,12 @@ fn send_data_to_terminal_request_round_trips_wincode() {
     }
 }
 
-/// `ResizeTerminalRequest` carries a u16 rows × cols pair; pin
+/// `ResizeTerminal` carries a u16 rows × cols pair; pin
 /// the round-trip so a future field reorder does not silently
 /// swap rows and cols at the wire.
 #[test]
-fn resize_terminal_request_round_trips_wincode() {
-    let msg = ServiceToWorker::ResizeTerminalRequest(ResizeTerminalPayload {
+fn resize_terminal_round_trips_wincode() {
+    let msg = ServiceToWorker::ResizeTerminal(ResizeTerminalPayload {
         connection_id: "conn-term".to_string(),
         data: TerminalResizeData {
             rows: 50,
@@ -860,7 +859,7 @@ fn resize_terminal_request_round_trips_wincode() {
         },
     });
     match wincode_round_trip(&msg) {
-        ServiceToWorker::ResizeTerminalRequest(p) => {
+        ServiceToWorker::ResizeTerminal(p) => {
             assert_eq!(p.connection_id, "conn-term");
             assert_eq!(p.data.rows, 50);
             assert_eq!(p.data.cols, 200);
@@ -869,26 +868,26 @@ fn resize_terminal_request_round_trips_wincode() {
     }
 }
 
-/// `CloseTerminalRequest` and `ListTerminalRequest` are body-less;
+/// `CloseTerminal` and `ListTerminalCommands` are body-less;
 /// verify the variant tag survives wincode (a reorder of the
 /// terminal-plane variants would silently misroute one onto the
 /// other on matched-version pairs).
 #[test]
-fn close_and_list_terminal_requests_round_trip_wincode() {
-    let close = ServiceToWorker::CloseTerminalRequest(CloseTerminalPayload {
+fn close_and_list_terminal_commands_round_trip_wincode() {
+    let close = ServiceToWorker::CloseTerminal(CloseTerminalPayload {
         connection_id: "conn-term".to_string(),
     });
     assert!(matches!(
         wincode_round_trip(&close),
-        ServiceToWorker::CloseTerminalRequest(_)
+        ServiceToWorker::CloseTerminal(_)
     ));
 
-    let list = ServiceToWorker::ListTerminalRequest(ListTerminalRequestPayload {
+    let list = ServiceToWorker::ListTerminalCommands(ListTerminalCommandsPayload {
         request_id: "req-list".to_string(),
         connection_id: Some("conn-list".to_string()),
     });
     match wincode_round_trip(&list) {
-        ServiceToWorker::ListTerminalRequest(p) => {
+        ServiceToWorker::ListTerminalCommands(p) => {
             assert_eq!(p.request_id, "req-list");
             assert_eq!(p.connection_id.as_deref(), Some("conn-list"));
         }
@@ -899,12 +898,12 @@ fn close_and_list_terminal_requests_round_trip_wincode() {
     // dispatches with no `from_connection_id`; verify `None`
     // round-trips so the daemon's terminal handler doesn't drop
     // it.
-    let list_no_conn = ServiceToWorker::ListTerminalRequest(ListTerminalRequestPayload {
+    let list_no_conn = ServiceToWorker::ListTerminalCommands(ListTerminalCommandsPayload {
         request_id: "req-list-no-conn".to_string(),
         connection_id: None,
     });
     match wincode_round_trip(&list_no_conn) {
-        ServiceToWorker::ListTerminalRequest(p) => {
+        ServiceToWorker::ListTerminalCommands(p) => {
             assert!(p.connection_id.is_none());
         }
         other => panic!("unexpected: {other:?}"),
@@ -913,7 +912,7 @@ fn close_and_list_terminal_requests_round_trip_wincode() {
 
 /// `TerminalStarted` is the success response for `StartTerminal`.
 /// Empty body — `request_id` correlates back to the original
-/// `StartTerminalRequest`. Verify the variant survives wincode
+/// `StartTerminal`. Verify the variant survives wincode
 /// alongside `TerminalClosed` (notification, no `request_id`)
 /// so the daemon's reverse-direction code can keep them
 /// straight.
@@ -942,21 +941,21 @@ fn terminal_started_and_closed_round_trip_wincode() {
     }
 }
 
-/// `ReplyFromTerminal` is the high-frequency PTY-output path.
+/// `TerminalOutputProduced` is the high-frequency PTY-output path.
 /// Verify a reasonably large chunk (4 KB — well above the
 /// worker's 1 KB read buffer to leave headroom) survives wincode
 /// without truncation.
 #[test]
-fn reply_from_terminal_round_trips_wincode_with_large_chunk() {
+fn terminal_output_produced_round_trips_wincode_with_large_chunk() {
     let body = "abcdefgh".repeat(512); // 4 KB
-    let msg = WorkerToService::ReplyFromTerminal(ReplyFromTerminalPayload {
+    let msg = WorkerToService::TerminalOutputProduced(TerminalOutputProducedPayload {
         connection_id: "conn-term".to_string(),
         data: TerminalOutputData {
             content: body.clone(),
         },
     });
     match wincode_round_trip(&msg) {
-        WorkerToService::ReplyFromTerminal(p) => {
+        WorkerToService::TerminalOutputProduced(p) => {
             assert_eq!(p.connection_id, "conn-term");
             assert_eq!(p.data.content.len(), body.len());
             assert_eq!(p.data.content, body);
@@ -979,7 +978,7 @@ fn signaling_error_round_trips_wincode() {
     let msg = WorkerToService::SignalingError(SignalingErrorPayload {
         request_id: "req-err-1".to_string(),
         connection_id: "conn-err".to_string(),
-        signaling_type: SignalingType::StartTerminal,
+        signaling_type: SignalingType::TerminalStarted,
         error_code: 401,
         error_message: Some("Permission denied".to_string()),
     });
@@ -987,7 +986,7 @@ fn signaling_error_round_trips_wincode() {
         WorkerToService::SignalingError(p) => {
             assert_eq!(p.request_id, "req-err-1");
             assert_eq!(p.connection_id, "conn-err");
-            assert_eq!(p.signaling_type, SignalingType::StartTerminal);
+            assert_eq!(p.signaling_type, SignalingType::TerminalStarted);
             assert_eq!(p.error_code, 401);
             assert_eq!(p.error_message.as_deref(), Some("Permission denied"));
         }
@@ -999,7 +998,7 @@ fn signaling_error_round_trips_wincode() {
     let msg = WorkerToService::SignalingError(SignalingErrorPayload {
         request_id: "req-err-2".to_string(),
         connection_id: "conn-err".to_string(),
-        signaling_type: SignalingType::ManagerFileList,
+        signaling_type: SignalingType::FilesListed,
         error_code: -1,
         error_message: None,
     });
@@ -1012,12 +1011,12 @@ fn signaling_error_round_trips_wincode() {
     }
 }
 
-/// `ListTerminalResponse` ferries `TerminalList` over the wincode
+/// `TerminalCommandsListed` ferries `TerminalList` over the wincode
 /// derive. Round-trip a non-empty list so a
 /// stripped field shows up as a test failure rather than a silent
 /// wire-format drift.
 #[test]
-fn list_terminal_response_round_trips_wincode() {
+fn terminal_commands_listed_round_trips_wincode() {
     let terminals = TerminalList {
         commands: vec![
             vec!["C:\\Windows\\System32\\cmd.exe".to_string()],
@@ -1025,13 +1024,13 @@ fn list_terminal_response_round_trips_wincode() {
         ],
         current: 1,
     };
-    let msg = WorkerToService::ListTerminalResponse(ListTerminalResponsePayload {
+    let msg = WorkerToService::TerminalCommandsListed(TerminalCommandsListedPayload {
         request_id: "req-list".to_string(),
         connection_id: Some("conn-list".to_string()),
         terminals,
     });
     match wincode_round_trip(&msg) {
-        WorkerToService::ListTerminalResponse(p) => {
+        WorkerToService::TerminalCommandsListed(p) => {
             assert_eq!(p.request_id, "req-list");
             assert_eq!(p.connection_id.as_deref(), Some("conn-list"));
             assert_eq!(p.terminals.commands.len(), 2);
@@ -1164,24 +1163,25 @@ fn service_to_worker_all_variants_round_trip() {
             connection_id: "c".to_string(),
             data: vec![0xBB, 0xCC],
         }),
-        ServiceToWorker::EnablePrivateScreen(EnablePrivateScreenPayload {
+        ServiceToWorker::SetPrivateScreenVisibility(SetPrivateScreenVisibilityPayload {
+            request_id: "r-ps".to_string(),
             connection_id: "c".to_string(),
-            enable: true,
+            visible: true,
         }),
         ServiceToWorker::UpdateDeskSettings(UpdateDeskSettingsPayload {
             connection_id: "c".to_string(),
             settings: DeskSettings::default(),
         }),
-        ServiceToWorker::ManagerSystemInfoRequest(ManagerRequestRefPayload {
+        ServiceToWorker::GetSystemInfo(ManagerRequestRefPayload {
             request_id: "r1".to_string(),
             connection_id: Some("c".to_string()),
         }),
-        ServiceToWorker::ManagerFileListRequest(ManagerFileListRequestPayload {
+        ServiceToWorker::ListFiles(ListFilesPayload {
             request_id: "r2".to_string(),
             connection_id: "c".to_string(),
             params: FileListParams::default(),
         }),
-        ServiceToWorker::ManagerFileDeleteRequest(ManagerFileDeleteRequestPayload {
+        ServiceToWorker::DeleteFile(DeleteFilePayload {
             request_id: "r3".to_string(),
             connection_id: "c".to_string(),
             request: DeleteFileRequest::default(),
@@ -1190,7 +1190,7 @@ fn service_to_worker_all_variants_round_trip() {
             operation_id: "op-locale".to_string(),
             locale: "en-US".to_string(),
         }),
-        ServiceToWorker::StartTerminalRequest(StartTerminalRequestPayload {
+        ServiceToWorker::StartTerminal(StartTerminalPayload {
             request_id: "r6".to_string(),
             connection_id: "c".to_string(),
             session: StartTerminalSession {
@@ -1199,20 +1199,20 @@ fn service_to_worker_all_variants_round_trip() {
                 grant_session_id: None,
             },
         }),
-        ServiceToWorker::SendDataToTerminalRequest(SendDataToTerminalPayload {
+        ServiceToWorker::SendTerminalInput(SendTerminalInputPayload {
             connection_id: "c".to_string(),
             data: TerminalInputData {
                 content: "ls\n".to_string(),
             },
         }),
-        ServiceToWorker::ResizeTerminalRequest(ResizeTerminalPayload {
+        ServiceToWorker::ResizeTerminal(ResizeTerminalPayload {
             connection_id: "c".to_string(),
             data: TerminalResizeData { rows: 24, cols: 80 },
         }),
-        ServiceToWorker::CloseTerminalRequest(CloseTerminalPayload {
+        ServiceToWorker::CloseTerminal(CloseTerminalPayload {
             connection_id: "c".to_string(),
         }),
-        ServiceToWorker::ListTerminalRequest(ListTerminalRequestPayload {
+        ServiceToWorker::ListTerminalCommands(ListTerminalCommandsPayload {
             request_id: "r7".to_string(),
             connection_id: Some("c".to_string()),
         }),
@@ -1235,7 +1235,7 @@ fn service_to_worker_all_variants_round_trip() {
         }),
         ServiceToWorker::DetachVirtualDisplay,
         ServiceToWorker::RefreshCapabilities,
-        ServiceToWorker::AgentRequest(AgentRequestPayload {
+        ServiceToWorker::InvokeAgentCapability(AgentRequestPayload {
             request_id: "r-ai".to_string(),
             connection_id: Some("c".to_string()),
             envelope: sample_agent_envelope(),
@@ -1476,6 +1476,7 @@ fn worker_to_service_all_variants_round_trip() {
             outcome: FileTransferOutcome::Completed,
         }),
         WorkerToService::PrivateScreenStateChanged(PrivateScreenStateChangedPayload {
+            request_id: None,
             connection_id: "c".to_string(),
             data: PrivateScreenStateChangedData {
                 visible: true,
@@ -1494,12 +1495,12 @@ fn worker_to_service_all_variants_round_trip() {
                 message: Some("unsupported dimensions".to_string()),
             },
         }),
-        WorkerToService::ManagerSystemInfoResponse(ManagerSystemInfoResponsePayload {
+        WorkerToService::SystemInfoRetrieved(SystemInfoRetrievedPayload {
             request_id: "r".to_string(),
             connection_id: Some("c".to_string()),
             info: SystemInfo::default(),
         }),
-        WorkerToService::ManagerFileListResponse(ManagerFileListResponsePayload {
+        WorkerToService::FilesListed(FilesListedPayload {
             request_id: "r".to_string(),
             connection_id: Some("c".to_string()),
             response: FileListResponse {
@@ -1507,7 +1508,7 @@ fn worker_to_service_all_variants_round_trip() {
                 total_count: 0,
             },
         }),
-        WorkerToService::ManagerFileDeleteResponse(ManagerResponseRefPayload {
+        WorkerToService::FileDeleted(ManagerResponseRefPayload {
             request_id: "r".to_string(),
             connection_id: Some("c".to_string()),
         }),
@@ -1534,13 +1535,13 @@ fn worker_to_service_all_variants_round_trip() {
         WorkerToService::TerminalClosed(TerminalClosedPayload {
             connection_id: "c".to_string(),
         }),
-        WorkerToService::ReplyFromTerminal(ReplyFromTerminalPayload {
+        WorkerToService::TerminalOutputProduced(TerminalOutputProducedPayload {
             connection_id: "c".to_string(),
             data: TerminalOutputData {
                 content: "hi".to_string(),
             },
         }),
-        WorkerToService::ListTerminalResponse(ListTerminalResponsePayload {
+        WorkerToService::TerminalCommandsListed(TerminalCommandsListedPayload {
             request_id: "r".to_string(),
             connection_id: Some("c".to_string()),
             terminals: TerminalList {
@@ -1561,7 +1562,7 @@ fn worker_to_service_all_variants_round_trip() {
             instance_id: "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay".to_string(),
             outcome: VirtualDisplayAttachOutcome::Attached("\\\\.\\DISPLAY4".to_string()),
         }),
-        WorkerToService::AgentResponse(AgentResponsePayload {
+        WorkerToService::AgentCapabilityCompleted(AgentResponsePayload {
             request_id: "r-ai".to_string(),
             connection_id: Some("c".to_string()),
             outcome: desk_agent_protocol::AgentOutcome::Err(desk_agent_protocol::AgentError {
@@ -1572,7 +1573,7 @@ fn worker_to_service_all_variants_round_trip() {
                 error_code: None,
             }),
         }),
-        WorkerToService::ExecResult(ExecResultIpcPayload {
+        WorkerToService::ExecutionCompleted(ExecResultIpcPayload {
             request_id: "r-exec".to_string(),
             connection_id: Some("c".to_string()),
             result: desk_agent_protocol::exec::ExecResultPayload {
@@ -1615,36 +1616,45 @@ fn worker_to_service_all_variants_round_trip() {
 #[test]
 fn signaling_error_round_trips_wincode_for_every_signaling_type() {
     let all_types = [
-        SignalingType::Heartbeat,
+        SignalingType::SendHeartbeat,
+        SignalingType::HeartbeatAcknowledged,
         SignalingType::FetchConnections,
-        SignalingType::ConnectionList,
+        SignalingType::ConnectionsFetched,
         SignalingType::ConnectionRemoved,
-        SignalingType::RequestRemote,
-        SignalingType::Init,
+        SignalingType::RequestRemoteAccess,
+        SignalingType::RemoteAccessInitialized,
         SignalingType::Offer,
         SignalingType::Answer,
-        SignalingType::Canid,
+        SignalingType::IceCandidate,
         SignalingType::RequireControl,
-        SignalingType::AcceptControl,
-        SignalingType::DenyControl,
-        SignalingType::CloseControl,
+        SignalingType::ControlAccepted,
+        SignalingType::ControlDenied,
+        SignalingType::ReleaseControl,
+        SignalingType::ControlReleased,
+        SignalingType::CloseRemoteSession,
         SignalingType::ChangeDisplaySettings,
-        SignalingType::EnablePrivateScreen,
+        SignalingType::SetPrivateScreenVisibility,
         SignalingType::PrivateScreenStateChanged,
-        SignalingType::AudioPlaybackError,
+        SignalingType::AudioPlaybackFailed,
         SignalingType::MediaPipelineStateChanged,
         SignalingType::RetryMediaPipeline,
+        SignalingType::PrivateScreenVisibilitySet,
+        SignalingType::DisplaySettingsChanged,
+        SignalingType::MediaPipelineRetryCompleted,
         SignalingType::UpdateDeskSettings,
-        SignalingType::ManagerSystemInfo,
-        SignalingType::ManagerSystemStatue,
-        SignalingType::ManagerFileList,
-        SignalingType::ManagerFileDelete,
+        SignalingType::GetSystemInfo,
+        SignalingType::SystemInfoRetrieved,
+        SignalingType::ListFiles,
+        SignalingType::FilesListed,
+        SignalingType::DeleteFile,
+        SignalingType::FileDeleted,
         SignalingType::StartTerminal,
-        SignalingType::SendDataToTerminal,
+        SignalingType::SendTerminalInput,
         SignalingType::ResizeTerminal,
         SignalingType::CloseTerminal,
-        SignalingType::ReplyFromTerminal,
-        SignalingType::ListTerminal,
+        SignalingType::TerminalOutputProduced,
+        SignalingType::ListTerminalCommands,
+        SignalingType::TerminalCommandsListed,
         SignalingType::TerminalStarted,
         SignalingType::TerminalClosed,
         SignalingType::DesktopSwitching,
@@ -1654,7 +1664,7 @@ fn signaling_error_round_trips_wincode_for_every_signaling_type() {
     ];
     assert_eq!(
         all_types.len(),
-        36,
+        45,
         "SignalingType variant count drift — add new variant + tag here"
     );
     for ty in all_types {
@@ -2104,7 +2114,7 @@ fn sample_exec_plan() -> desk_agent_protocol::exec::ExecPlan {
 }
 
 /// `ServiceToWorker::ExecPlan` carries the full sealed plan across the
-/// daemon → worker wire, and `WorkerToService::ExecResult` carries the
+/// daemon → worker wire, and `WorkerToService::ExecutionCompleted` carries the
 /// `exec_request_id`-tagged result back.
 #[test]
 fn exec_plan_and_result_round_trip_wincode() {
@@ -2123,7 +2133,7 @@ fn exec_plan_and_result_round_trip_wincode() {
         other => panic!("unexpected: {other:?}"),
     }
 
-    let result_msg = WorkerToService::ExecResult(ExecResultIpcPayload {
+    let result_msg = WorkerToService::ExecutionCompleted(ExecResultIpcPayload {
         request_id: "r-exec".to_string(),
         connection_id: Some("conn-1".to_string()),
         result: desk_agent_protocol::exec::ExecResultPayload {
@@ -2143,7 +2153,7 @@ fn exec_plan_and_result_round_trip_wincode() {
         audit_source_request_id: Some("frame-req-9".to_string()),
     });
     match wincode_round_trip(&result_msg) {
-        WorkerToService::ExecResult(p) => {
+        WorkerToService::ExecutionCompleted(p) => {
             assert_eq!(p.request_id, "r-exec");
             assert_eq!(p.result.exec_request_id.0, "exec-1");
             assert_eq!(p.audit_source_request_id.as_deref(), Some("frame-req-9"));
@@ -2156,17 +2166,17 @@ fn exec_plan_and_result_round_trip_wincode() {
     }
 }
 
-/// `ServiceToWorker::AgentRequest` carries the full embedded
+/// `ServiceToWorker::InvokeAgentCapability` carries the full embedded
 /// `AgentEnvelope` across the daemon → worker wire byte-for-byte.
 #[test]
-fn agent_request_round_trips_wincode() {
-    let msg = ServiceToWorker::AgentRequest(AgentRequestPayload {
+fn invoke_agent_capability_round_trips_wincode() {
+    let msg = ServiceToWorker::InvokeAgentCapability(AgentRequestPayload {
         request_id: "req-ai-1".to_string(),
         connection_id: Some("conn-1".to_string()),
         envelope: sample_agent_envelope(),
     });
     match wincode_round_trip(&msg) {
-        ServiceToWorker::AgentRequest(p) => {
+        ServiceToWorker::InvokeAgentCapability(p) => {
             assert_eq!(p.request_id, "req-ai-1");
             assert_eq!(p.connection_id.as_deref(), Some("conn-1"));
             assert_eq!(p.envelope, sample_agent_envelope());
@@ -2175,13 +2185,13 @@ fn agent_request_round_trips_wincode() {
     }
 }
 
-/// `WorkerToService::AgentResponse` reuses `AgentOutcome` verbatim;
+/// `WorkerToService::AgentCapabilityCompleted` reuses `AgentOutcome` verbatim;
 /// both the `Ok` (output) and `Err` (capability-level error) arms
 /// survive the worker → daemon wire.
 #[test]
-fn agent_response_round_trips_wincode_both_arms() {
+fn agent_capability_completed_round_trips_wincode_both_arms() {
     use desk_agent_protocol::*;
-    let ok = WorkerToService::AgentResponse(AgentResponsePayload {
+    let ok = WorkerToService::AgentCapabilityCompleted(AgentResponsePayload {
         request_id: "req-ai-1".to_string(),
         connection_id: Some("conn-1".to_string()),
         outcome: AgentOutcome::Ok(OperationOutput::ReadContext(
@@ -2192,14 +2202,14 @@ fn agent_response_round_trips_wincode_both_arms() {
         )),
     });
     match wincode_round_trip(&ok) {
-        WorkerToService::AgentResponse(p) => {
+        WorkerToService::AgentCapabilityCompleted(p) => {
             assert_eq!(p.request_id, "req-ai-1");
             assert!(matches!(p.outcome, AgentOutcome::Ok(_)));
         }
         other => panic!("unexpected: {other:?}"),
     }
 
-    let err = WorkerToService::AgentResponse(AgentResponsePayload {
+    let err = WorkerToService::AgentCapabilityCompleted(AgentResponsePayload {
         request_id: "req-ai-2".to_string(),
         connection_id: None,
         outcome: AgentOutcome::Err(AgentError {
@@ -2211,7 +2221,7 @@ fn agent_response_round_trips_wincode_both_arms() {
         }),
     });
     match wincode_round_trip(&err) {
-        WorkerToService::AgentResponse(p) => {
+        WorkerToService::AgentCapabilityCompleted(p) => {
             assert_eq!(p.connection_id, None);
             match p.outcome {
                 AgentOutcome::Err(e) => {

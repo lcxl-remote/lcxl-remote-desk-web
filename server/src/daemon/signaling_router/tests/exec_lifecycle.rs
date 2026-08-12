@@ -48,7 +48,7 @@ pub(super) async fn audited_ctx(
 pub(super) fn exec_control_model(request_id: &str, action: ExecControlAction) -> SignalingModel {
     SignalingModel::new(
         request_id,
-        SignalingType::ExecControl,
+        SignalingType::ControlExecution,
         Some("conn-1".to_string()),
         None,
         Some(
@@ -67,7 +67,7 @@ pub(super) fn expect_state_reply(rx: &mut broadcast::Receiver<String>) -> ExecSt
     loop {
         let text = rx.try_recv().expect("no frame was sent");
         let frame: SignalingModel = serde_json::from_str(&text).unwrap();
-        if frame.signaling_type == SignalingType::ExecStateReply {
+        if frame.signaling_type == SignalingType::ExecutionStateReported {
             return frame.get_data::<ExecStateReplyPayload>().unwrap();
         }
     }
@@ -134,7 +134,7 @@ pub(super) async fn a_cancel_reaches_the_worker_and_still_answers_from_the_ledge
         &ctx,
         &SignalingModel::new(
             "req-1",
-            SignalingType::ExecControl,
+            SignalingType::ControlExecution,
             Some("conn-1".to_string()),
             None,
             Some(serde_json::json!({
@@ -247,7 +247,7 @@ pub(super) async fn a_query_neither_stops_anything_nor_is_audited() {
 pub(super) fn malformed_confirm_exec_model(request_id: &str) -> SignalingModel {
     SignalingModel::new(
         request_id,
-        SignalingType::ConfirmExec,
+        SignalingType::PreviewExecution,
         Some("conn-1".to_string()),
         None,
         Some(serde_json::json!({ "operation": "not-an-object" })),
@@ -259,7 +259,7 @@ pub(super) fn malformed_confirm_exec_model(request_id: &str) -> SignalingModel {
 pub(super) fn read_operation_confirm_exec_model(request_id: &str) -> SignalingModel {
     SignalingModel::new(
         request_id,
-        SignalingType::ConfirmExec,
+        SignalingType::PreviewExecution,
         Some("conn-1".to_string()),
         None,
         Some(process_list_request()),
@@ -517,7 +517,7 @@ pub(super) async fn resolve_exec_from_other_connection_is_denied_and_keeps_pendi
     // A ResolveExec from a *different* connection must not consume or run it.
     let foreign = SignalingModel::new(
         "r2",
-        SignalingType::ResolveExec,
+        SignalingType::ResolveExecution,
         Some("conn-attacker".to_string()),
         None,
         Some(
@@ -539,7 +539,7 @@ pub(super) async fn resolve_exec_from_other_connection_is_denied_and_keeps_pendi
     );
     let res = read_response(&mut rx)
         .get_data::<ExecResultPayload>()
-        .expect("ExecResult");
+        .expect("ExecutionCompleted");
     assert!(matches!(res.outcome, AgentOutcome::Err(_)));
 
     // The owning connection can still approve.
@@ -601,7 +601,7 @@ pub(super) async fn approve_rejects_when_blocklist_changes_after_preview() {
     .unwrap();
     let result = read_response(&mut rx)
         .get_data::<ExecResultPayload>()
-        .expect("policy-change ExecResult");
+        .expect("policy-change ExecutionCompleted");
     match result.outcome {
         AgentOutcome::Err(error) => {
             assert_eq!(error.kind, AgentErrorKind::PermissionDenied);
@@ -630,7 +630,7 @@ pub(super) async fn approve_rejects_when_local_mode_tightens_after_preview() {
     .unwrap();
     let result = read_response(&mut rx)
         .get_data::<ExecResultPayload>()
-        .expect("mode-change ExecResult");
+        .expect("mode-change ExecutionCompleted");
     assert!(matches!(
         result.outcome,
         AgentOutcome::Err(ref error) if error.kind == AgentErrorKind::PermissionDenied
@@ -639,8 +639,8 @@ pub(super) async fn approve_rejects_when_local_mode_tightens_after_preview() {
 }
 
 #[tokio::test]
-pub(super) async fn agent_request_plane_permanently_rejects_exec() {
-    let (ctx, mut rx) = make_ctx_with_rx().await; // Even with execution fully enabled, the raw AgentRequest plane refuses
+pub(super) async fn invoke_agent_capability_plane_permanently_rejects_exec() {
+    let (ctx, mut rx) = make_ctx_with_rx().await; // Even with execution fully enabled, the raw InvokeAgentCapability plane refuses
     // exec — it must go through the confirm flow.
     let input = desk_agent_protocol::ExecInput {
         target: desk_agent_protocol::ExecTarget::Shell {
@@ -662,17 +662,19 @@ pub(super) async fn agent_request_plane_permanently_rejects_exec() {
     };
     let model = SignalingModel::new(
         "r1",
-        SignalingType::AgentRequest,
+        SignalingType::InvokeAgentCapability,
         Some("conn-1".to_string()),
         None,
         Some(serde_json::to_value(req).unwrap()),
         None,
     );
-    handle_agent_request_inbound(&ctx, &model).await.unwrap();
+    handle_invoke_agent_capability_inbound(&ctx, &model)
+        .await
+        .unwrap();
 
     let outcome = read_response(&mut rx)
         .get_data::<AgentOutcome>()
-        .expect("AgentResponse");
+        .expect("AgentCapabilityCompleted");
     match outcome {
         AgentOutcome::Err(e) => assert_eq!(e.kind, AgentErrorKind::UnsupportedCapability),
         AgentOutcome::Ok(_) => panic!("exec must be rejected on the agent-request plane"),
@@ -738,7 +740,7 @@ pub(super) async fn confirm_exec_local_mode_caps_manager_authorization() {
     };
     let model = SignalingModel::new(
         "r-exec",
-        SignalingType::ConfirmExec,
+        SignalingType::PreviewExecution,
         Some("conn-1".to_string()),
         None,
         Some(serde_json::to_value(data).unwrap()),

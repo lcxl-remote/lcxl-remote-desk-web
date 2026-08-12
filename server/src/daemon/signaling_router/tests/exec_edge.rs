@@ -41,7 +41,7 @@ pub(super) fn fleet_exec_model(request_id: &str, plan: &ExecPlan) -> SignalingMo
     let payload = EdgeExecRequestPayload::Fleet { plan: plan.clone() };
     SignalingModel::new(
         request_id,
-        SignalingType::EdgeExecRequest,
+        SignalingType::ExecuteEdgePlan,
         None,
         None,
         Some(serde_json::to_value(&payload).unwrap()),
@@ -62,7 +62,7 @@ pub(super) fn agentic_exec_model(
     };
     SignalingModel::new(
         request_id,
-        SignalingType::EdgeExecRequest,
+        SignalingType::ExecuteEdgePlan,
         None,
         None,
         Some(serde_json::to_value(&payload).unwrap()),
@@ -435,7 +435,7 @@ pub(super) async fn fleet_exec_valid_plan_dispatches_to_worker_and_marks_in_flig
 
     // The worker received the sealed plan, correlated by the per-attempt id,
     // and the daemon marked the attempt in-flight so the eventual worker
-    // ExecResult relays back as a EdgeExecResult.
+    // ExecutionCompleted relays back as a EdgeExecResult.
     match ipc_rx.try_recv().expect("ExecPlan IPC") {
         ServiceToWorker::ExecPlan(payload) => {
             assert_eq!(payload.request_id, "a1");
@@ -828,7 +828,7 @@ pub(super) async fn edge_exec_untagged_plan_is_rejected() {
     // Send the bare plan, not an EdgeExecRequestPayload.
     let bare = SignalingModel::new(
         "a1",
-        SignalingType::EdgeExecRequest,
+        SignalingType::ExecuteEdgePlan,
         None,
         None,
         Some(serde_json::to_value(&plan).unwrap()),
@@ -1251,7 +1251,7 @@ pub(super) async fn session_approved_first_confirm_prompts_then_auto_executes() 
     .await
     .unwrap();
     assert_eq!(ctx.session_approvals.granted_count("conn-1"), 1);
-    let _ = read_response(&mut rx); // ExecResult (worker unavailable in test)
+    let _ = read_response(&mut rx); // ExecutionCompleted (worker unavailable in test)
 
     // Repeat: auto-executes — no prompt, nothing parked.
     handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r3", "Get-Service -Name Spooler"))
@@ -1301,10 +1301,10 @@ pub(super) async fn session_approval_is_per_template() {
     assert_eq!(ctx.exec_approvals.len(), 1);
 }
 
-/// Releasing control (`CloseControl`) revokes the connection's session
+/// Closing the remote session revokes the connection's session
 /// grants; a subsequent confirm prompts again.
 #[tokio::test]
-pub(super) async fn session_approval_revoked_on_close_control() {
+pub(super) async fn session_approval_revoked_on_close_remote_session() {
     let (ctx, mut rx) = exec_enabled_ctx(ExecutionMode::SessionApproved).await;
     handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "Get-Service -Name Spooler"))
         .await
@@ -1320,7 +1320,7 @@ pub(super) async fn session_approval_revoked_on_close_control() {
     assert_eq!(ctx.session_approvals.granted_count("conn-1"), 1);
 
     route(
-        &connection_lifecycle_model(SignalingType::CloseControl, "conn-1"),
+        &connection_lifecycle_model(SignalingType::CloseRemoteSession, "conn-1"),
         &ctx,
     )
     .await
@@ -1403,10 +1403,10 @@ pub(super) async fn session_approved_auto_exec_emits_allowed_and_executed_audit(
 #[test]
 pub(super) fn classify_routes_exec_signaling_types_to_daemon() {
     for t in [
-        SignalingType::ConfirmExec,
-        SignalingType::ExecPreview,
-        SignalingType::ResolveExec,
-        SignalingType::ExecResult,
+        SignalingType::PreviewExecution,
+        SignalingType::ExecutionPreviewGenerated,
+        SignalingType::ResolveExecution,
+        SignalingType::ExecutionCompleted,
     ] {
         assert_eq!(classify(t), RouteOwnership::Daemon, "{t:?}");
     }
@@ -1506,7 +1506,7 @@ pub(super) async fn resolve_exec_approve_consumes_pending_once() {
     let exec_request_id = read_preview(&mut rx).exec_request_id.unwrap();
     assert_eq!(ctx.exec_approvals.len(), 1);
 
-    // First approve consumes the pending and emits an ExecResult.
+    // First approve consumes the pending and emits an ExecutionCompleted.
     handle_resolve_exec_inbound(
         &ctx,
         &resolve_exec_model("r2", exec_request_id.clone(), ApprovalDecision::Approve),
@@ -1516,7 +1516,7 @@ pub(super) async fn resolve_exec_approve_consumes_pending_once() {
     assert_eq!(ctx.exec_approvals.len(), 0);
     let first = read_response(&mut rx)
         .get_data::<ExecResultPayload>()
-        .expect("ExecResult");
+        .expect("ExecutionCompleted");
     assert_eq!(first.exec_request_id, exec_request_id);
 
     // Second approve (replay / concurrent double-confirm) finds nothing and
@@ -1529,7 +1529,7 @@ pub(super) async fn resolve_exec_approve_consumes_pending_once() {
     .unwrap();
     let second = read_response(&mut rx)
         .get_data::<ExecResultPayload>()
-        .expect("ExecResult");
+        .expect("ExecutionCompleted");
     match second.outcome {
         AgentOutcome::Err(e) => assert_eq!(e.kind, AgentErrorKind::InvalidInput),
         AgentOutcome::Ok(_) => panic!("replayed approve must not succeed"),

@@ -1,9 +1,9 @@
-//! Trusted capability-ceiling stamp for `RequestRemote` frames.
+//! Trusted capability-ceiling stamp for `RequestRemoteAccess` frames.
 //!
-//! A `RequestRemote` reaching a host through a trusted central signaling server
+//! A `RequestRemoteAccess` reaching a host through a trusted central signaling server
 //! is wrapped in an [`AuthorizedRequestRemote`]: the original frame data plus an
 //! [`RequestRemoteAuthz`] block the central server stamps. The host only trusts a
-//! stamp from its `TrustedCentral` upstream and drops any bare `RequestRemote`
+//! stamp from its `TrustedCentral` upstream and drops any bare `RequestRemoteAccess`
 //! arriving there (defense against a grant session stripping its stamp to
 //! masquerade as an owner). The `access_ceiling` says what the session may do:
 //! `None` is a central-verified owner/full session, `Some(ceiling)` is the
@@ -78,7 +78,7 @@ impl std::fmt::Display for RequestRemoteAuthzError {
 
 impl std::error::Error for RequestRemoteAuthzError {}
 
-/// The trusted stamp a central signaling server puts on a `RequestRemote`.
+/// The trusted stamp a central signaling server puts on a `RequestRemoteAccess`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestRemoteAuthz {
     /// Wire version. Checked first by [`Self::validate`].
@@ -145,7 +145,7 @@ impl RequestRemoteAuthz {
     }
 }
 
-/// A `RequestRemote` frame's data wrapped with its trusted stamp. The `inner`
+/// A `RequestRemoteAccess` frame's data wrapped with its trusted stamp. The `inner`
 /// value is the original frame data (a serialized [`super::signal::RequestRemoteModel`],
 /// with any TURN ICE already injected) kept byte-for-byte so the host unwraps it
 /// back unchanged after validating `authz`.
@@ -157,9 +157,9 @@ pub struct AuthorizedRequestRemote {
 
 /// A `StartTerminal` frame's data wrapped with its trusted stamp, the terminal
 /// analogue of [`AuthorizedRequestRemote`]. The remote terminal opens on a
-/// **distinct** WS connection that never does a `RequestRemote`, so it carries no
+/// **distinct** WS connection that never does a `RequestRemoteAccess`, so it carries no
 /// admission / ceiling on the host; the central stamps this "admission-establishing"
-/// frame exactly like a `RequestRemote` (owner → `access_ceiling: None`, redeemed
+/// frame exactly like a `RequestRemoteAccess` (owner → `access_ceiling: None`, redeemed
 /// code → `Some(ceiling)`) so the host can register the ceiling, record an
 /// admission, and index the connection under its grant. Reuses [`RequestRemoteAuthz`]
 /// verbatim (same request_id / audience / expiry / grant discipline); the wire types

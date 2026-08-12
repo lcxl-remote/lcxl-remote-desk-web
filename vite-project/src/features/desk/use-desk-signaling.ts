@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { v4 } from 'uuid';
-import { SIGNALING_TYPE_CODE_HEARTBEAT } from './constants';
+import {
+    SIGNALING_TYPE_CODE_HEARTBEAT_ACKNOWLEDGED,
+    SIGNALING_TYPE_CODE_SEND_HEARTBEAT,
+} from './constants';
 
 export type SignalingMessage = {
     request_id?: string;
@@ -101,6 +104,7 @@ export function useDeskSignaling() {
     const heartbeatTimerRef = useRef<number | null>(null);
     const heartbeatCheckTimerRef = useRef<number | null>(null);
     const lastHeartbeatResponseRef = useRef<number>(Date.now());
+    const pendingHeartbeatIdsRef = useRef<Set<string>>(new Set());
 
     // Reconnect state
     const reconnectTimerRef = useRef<number | null>(null);
@@ -116,6 +120,7 @@ export function useDeskSignaling() {
             window.clearInterval(heartbeatCheckTimerRef.current);
             heartbeatCheckTimerRef.current = null;
         }
+        pendingHeartbeatIdsRef.current.clear();
     }, []);
 
     const clearReconnectTimer = useCallback(() => {
@@ -146,9 +151,11 @@ export function useDeskSignaling() {
             // Setup heartbeat
             heartbeatTimerRef.current = window.setInterval(() => {
                 if (ws.readyState === WebSocket.OPEN) {
+                    const requestId = v4();
+                    pendingHeartbeatIdsRef.current.add(requestId);
                     ws.send(JSON.stringify({
-                        request_id: v4(),
-                        signaling_type: SIGNALING_TYPE_CODE_HEARTBEAT,
+                        request_id: requestId,
+                        signaling_type: SIGNALING_TYPE_CODE_SEND_HEARTBEAT,
                         signaling_data: null,
                     }));
                 }
@@ -206,8 +213,11 @@ export function useDeskSignaling() {
                 const message = JSON.parse(event.data) as SignalingMessage;
 
                 // Track heartbeat responses
-                if (message.signaling_type === SIGNALING_TYPE_CODE_HEARTBEAT) {
-                    lastHeartbeatResponseRef.current = Date.now();
+                if (message.signaling_type === SIGNALING_TYPE_CODE_HEARTBEAT_ACKNOWLEDGED) {
+                    const requestId = message.request_id;
+                    if (requestId && pendingHeartbeatIdsRef.current.delete(requestId)) {
+                        lastHeartbeatResponseRef.current = Date.now();
+                    }
                     return; // Don't propagate heartbeat to consumers
                 }
 

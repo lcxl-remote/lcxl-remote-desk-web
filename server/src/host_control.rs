@@ -106,7 +106,10 @@ pub enum HostControlEvent {
     /// Private-screen overlay visibility flipped.
     PrivateScreenVisibilityChanged {
         connection_id: String,
+        request_id: Option<String>,
         visible: bool,
+        is_supported: bool,
+        error_msg: Option<String>,
     },
 }
 
@@ -1314,13 +1317,19 @@ impl HostControlHub {
             }
             HostControlMessage::PrivateScreenStateChangedToWorker {
                 connection_id,
+                request_id,
                 visible,
+                is_supported,
+                error_msg,
             } => {
                 let _ = inner
                     .state_tx
                     .send(HostControlEvent::PrivateScreenVisibilityChanged {
                         connection_id,
+                        request_id,
                         visible,
+                        is_supported,
+                        error_msg,
                     });
             }
             other => {

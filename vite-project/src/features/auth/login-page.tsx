@@ -132,7 +132,7 @@ export default function LoginPage() {
     // Redeem an access-grant code into a capability-scoped session, then open the
     // resolved target. This replaces the legacy "device-code login": the redeemer is
     // no longer the owner but a restricted session, so the grant token is stored for
-    // this target and carried on every RequestRemote.
+    // this target and carried on every RequestRemoteAccess.
     async function onRedeemCode(values: FormValues) {
         const resp = await redeem({ data: { code: (values.deviceCode || "").trim() } })
         // The kubb client rejects a `success:false` envelope, so reaching here means

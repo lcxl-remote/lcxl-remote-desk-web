@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { v4 } from 'uuid';
 import {
-    SIGNALING_TYPE_CODE_DIAGNOSE,
-    SIGNALING_TYPE_CODE_DIAGNOSE_EVENT,
-    SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL,
-    SIGNALING_TYPE_CODE_EXEC_CONTROL,
-    SIGNALING_TYPE_CODE_EXEC_PREVIEW,
-    SIGNALING_TYPE_CODE_EXEC_STATE_REPLY,
-    SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+    SIGNALING_TYPE_CODE_DIAGNOSE_DEVICE,
+    SIGNALING_TYPE_CODE_DIAGNOSIS_UPDATED,
+    SIGNALING_TYPE_CODE_CANCEL_DIAGNOSIS,
+    SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
+    SIGNALING_TYPE_CODE_EXECUTION_PREVIEW_GENERATED,
+    SIGNALING_TYPE_CODE_EXECUTION_STATE_REPORTED,
+    SIGNALING_TYPE_CODE_RESOLVE_EXECUTION,
 } from './constants';
 import type { ExecPreview } from '../exec/use-confirm-exec';
 import { deskErrorCodeEnum } from '@/services/types';
@@ -241,7 +241,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                 // non-authoritative hint the manager validates, ignored open-source.
                 org_id: options?.orgId ?? undefined,
             };
-            const requestId = sendMessage(SIGNALING_TYPE_CODE_DIAGNOSE, data, deskId);
+            const requestId = sendMessage(SIGNALING_TYPE_CODE_DIAGNOSE_DEVICE, data, deskId);
             activeRequestRef.current = requestId;
             lastSeqRef.current = -1;
             setState((prev) => ({
@@ -264,7 +264,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
     const reset = useCallback(() => {
         const requestId = activeRequestRef.current;
         if (deskId && requestId) {
-            sendMessage(SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL, null, deskId, requestId);
+            sendMessage(SIGNALING_TYPE_CODE_CANCEL_DIAGNOSIS, null, deskId, requestId);
         }
         activeRequestRef.current = null;
         conversationIdRef.current = null;
@@ -342,7 +342,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         const reqId = state.pendingExec?.exec_request_id;
         if (!deskId || !reqId) return;
         sendMessage(
-            SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+            SIGNALING_TYPE_CODE_RESOLVE_EXECUTION,
             { exec_request_id: reqId, decision: 'approve' },
             deskId,
         );
@@ -383,7 +383,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         const reqId = state.pendingExec?.exec_request_id;
         if (deskId && reqId) {
             sendMessage(
-                SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+                SIGNALING_TYPE_CODE_RESOLVE_EXECUTION,
                 { exec_request_id: reqId, decision: 'reject' },
                 deskId,
             );
@@ -400,7 +400,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
             action: 'cancel',
             requested_by: 'diagnose-operator',
         };
-        sendMessage(SIGNALING_TYPE_CODE_EXEC_CONTROL, payload, deskId);
+        sendMessage(SIGNALING_TYPE_CODE_CONTROL_EXECUTION, payload, deskId);
         setState((prev) => ({
             ...prev,
             backgroundExecution: prev.backgroundExecution
@@ -418,7 +418,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                 execution_generation: background.executionGeneration,
                 action: 'query_state',
             };
-            sendMessage(SIGNALING_TYPE_CODE_EXEC_CONTROL, payload, deskId);
+            sendMessage(SIGNALING_TYPE_CODE_CONTROL_EXECUTION, payload, deskId);
         };
         const interval = window.setInterval(queryState, CANCEL_STATE_POLL_MS);
         return () => window.clearInterval(interval);
@@ -435,7 +435,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         // `seq`; the previous single-value delivery could coalesce a burst
         // and drop intermediate frames, so streaming relies on this path.
         const handle = (message: SignalingMessage) => {
-            if (message.signaling_type === SIGNALING_TYPE_CODE_EXEC_STATE_REPLY) {
+            if (message.signaling_type === SIGNALING_TYPE_CODE_EXECUTION_STATE_REPORTED) {
                 const payload = message.signaling_data as ExecStateReplyPayload | null;
                 if (!payload) return;
                 setState((prev) => {
@@ -456,7 +456,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
             // (`use-desk-exec`) owns previews it requested and correlates them by its
             // own ConfirmExec request_id; it drops anything it did not request, so
             // claiming the agentic one here causes no double handling.
-            if (message.signaling_type === SIGNALING_TYPE_CODE_EXEC_PREVIEW) {
+            if (message.signaling_type === SIGNALING_TYPE_CODE_EXECUTION_PREVIEW_GENERATED) {
                 if (activeRequestRef.current === null) return;
                 const preview = message.signaling_data as ExecPreview | null;
                 if (!preview || !preview.exec_request_id) return;
@@ -466,7 +466,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                 return;
             }
 
-            if (message.signaling_type !== SIGNALING_TYPE_CODE_DIAGNOSE_EVENT) return;
+            if (message.signaling_type !== SIGNALING_TYPE_CODE_DIAGNOSIS_UPDATED) return;
             const event = message.signaling_data as DiagnoseEvent | null;
             if (!event || event.request_id !== activeRequestRef.current) return;
             // Ignore stale / replayed frames.

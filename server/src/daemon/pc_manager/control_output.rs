@@ -9,7 +9,7 @@ use super::*;
 ///
 /// All "channel-not-open" / "connection-unknown" paths are silent:
 ///
-/// - Unknown `connection_id` — race against `CloseControl`; trace-log.
+/// - Unknown `connection_id` — race against `CloseRemoteSession`; trace-log.
 /// - No cursor DataChannel registered yet — browser hasn't opened the
 ///   `cursor_sync_event` channel for this connection (e.g. control
 ///   not granted, browser still negotiating). Debug-log + drop.
@@ -90,7 +90,7 @@ pub async fn write_cursor_data(registry: &PcRegistry, payload: CursorDataPayload
 ///
 /// Silent-drop branches:
 ///
-/// - Unknown `connection_id` — race against `CloseControl`; trace-log.
+/// - Unknown `connection_id` — race against `CloseRemoteSession`; trace-log.
 /// - Permission not granted — `accept_clipboard_sync` is false; debug-log.
 /// - No clipboard DataChannel registered yet — browser hasn't opened
 ///   the `clipboard_event` channel; debug-log.

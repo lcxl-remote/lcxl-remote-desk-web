@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-    SIGNALING_TYPE_CODE_TERMINAL_COMPLETE_ASK,
-    SIGNALING_TYPE_CODE_TERMINAL_COMPLETE_RESULT,
+    SIGNALING_TYPE_CODE_GENERATE_TERMINAL_COMPLETIONS,
+    SIGNALING_TYPE_CODE_TERMINAL_COMPLETIONS_GENERATED,
 } from '../desk/constants';
 import type { SignalingMessage, SignalingSubscriber } from '../desk/use-desk-signaling';
 import type { ExecDecision, RiskLevel, AgentError } from './use-terminal-copilot';
@@ -181,7 +181,7 @@ export function useTerminalComplete({
             }
             timerRef.current = window.setTimeout(() => {
                 const requestId = sendMessage(
-                    SIGNALING_TYPE_CODE_TERMINAL_COMPLETE_ASK,
+                    SIGNALING_TYPE_CODE_GENERATE_TERMINAL_COMPLETIONS,
                     {
                         prefix,
                         context,
@@ -203,7 +203,7 @@ export function useTerminalComplete({
 
     useEffect(() => {
         const handle = (message: SignalingMessage) => {
-            if (message.signaling_type !== SIGNALING_TYPE_CODE_TERMINAL_COMPLETE_RESULT) return;
+            if (message.signaling_type !== SIGNALING_TYPE_CODE_TERMINAL_COMPLETIONS_GENERATED) return;
             const result = message.signaling_data as TerminalCompleteResult | null;
             if (!result || result.request_id !== activeRequestRef.current) return;
             activeRequestRef.current = null;

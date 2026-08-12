@@ -478,13 +478,19 @@ async fn handle_client_message(
         }
         HostControlMessage::PrivateScreenStateChanged {
             connection_id,
+            request_id,
             visible,
+            is_supported,
+            error_msg,
         } => {
             state
                 .hub
                 .publish_state(HostControlEvent::PrivateScreenVisibilityChanged {
                     connection_id,
+                    request_id,
                     visible,
+                    is_supported,
+                    error_msg,
                 });
         }
         HostControlMessage::SecurityApprovalResolved { req_id } => {
@@ -639,7 +645,8 @@ mod tests {
 
         assert!(is_outbound_for_role(
             &HostControlMessage::PrivateScreenShow {
-                connection_id: "c1".into()
+                connection_id: "c1".into(),
+                request_id: "r-show".into(),
             },
             role
         ));
@@ -697,7 +704,8 @@ mod tests {
         ));
         assert!(!is_outbound_for_role(
             &HostControlMessage::PrivateScreenShow {
-                connection_id: "c1".into()
+                connection_id: "c1".into(),
+                request_id: "r-show".into(),
             },
             role
         ));
@@ -844,7 +852,8 @@ mod tests {
         let role: Option<ClientRole> = None;
         assert!(!is_outbound_for_role(
             &HostControlMessage::PrivateScreenShow {
-                connection_id: "c1".into()
+                connection_id: "c1".into(),
+                request_id: "r-show".into(),
             },
             role
         ));

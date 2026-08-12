@@ -211,11 +211,11 @@ describe('shouldOpenConfigDialog', () => {
     rtcFailed: false,
   };
 
-  it('opens for the initial settings pick (INIT arrived, no attempt yet)', () => {
+  it('opens for the initial settings pick (REMOTE_ACCESS_INITIALIZED arrived, no attempt yet)', () => {
     expect(shouldOpenConfigDialog(base)).toBe(true);
   });
 
-  it('stays closed before INIT data arrives', () => {
+  it('stays closed before REMOTE_ACCESS_INITIALIZED data arrives', () => {
     expect(shouldOpenConfigDialog({ ...base, hasInitData: false })).toBe(false);
   });
 

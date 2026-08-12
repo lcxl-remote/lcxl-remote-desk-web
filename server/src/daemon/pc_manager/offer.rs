@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Inverse of the worker-side codec mapping. Used by the Init reply
+/// Inverse of the worker-side codec mapping. Used by the RemoteAccessInitialized response
 /// path so the daemon's `audio_encoder_list` / `video_encoder_list`
 /// payloads carry the same string identifiers the legacy worker did.
 pub(super) fn media_codec_to_str(c: &MediaCodec) -> Option<String> {
@@ -226,7 +226,7 @@ pub async fn handle_offer(
     let ctx = registry.get(from_connection_id).await.ok_or_else(|| {
         DeskError::CustomError(CustomDeskError::new(
             DeskErrorCode::SYSTEM_ERROR,
-            &format!("No PC for {from_connection_id} (offer arrived before RequestRemote?)"),
+            &format!("No PC for {from_connection_id} (offer arrived before RequestRemoteAccess?)"),
         ))
     })?;
 
@@ -358,7 +358,7 @@ pub async fn handle_offer(
         // Spawn the RTCP reader. PLI / FIR from the browser become
         // ForceKeyframe IPC; REMB estimates feed the per-connection
         // adaptive bitrate-cap controller. Reader exits when the
-        // rtp_sender is closed (PC drop / CloseControl), see
+        // rtp_sender is closed (PC drop / CloseRemoteSession), see
         // `spawn_rtcp_feedback_task`.
         spawn_rtcp_feedback_task(
             rtp_sender,
@@ -617,14 +617,17 @@ async fn publish_offer_media_state(
     }
 }
 
-/// Daemon side of `SignalingType::Canid` (ICE candidate). Mirrors the
+/// Daemon side of `SignalingType::IceCandidate` (ICE candidate). Mirrors the
 /// worker's mDNS rewrite path for `*.local` hosts.
-pub async fn handle_canid(registry: &PcRegistry, model: &SignalingModel) -> Result<(), DeskError> {
+pub async fn handle_ice_candidate(
+    registry: &PcRegistry,
+    model: &SignalingModel,
+) -> Result<(), DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
     let ctx = registry.get(from_connection_id).await.ok_or_else(|| {
         DeskError::CustomError(CustomDeskError::new(
             DeskErrorCode::SYSTEM_ERROR,
-            &format!("No PC for {from_connection_id} (Canid before RequestRemote?)"),
+            &format!("No PC for {from_connection_id} (IceCandidate before RequestRemoteAccess?)"),
         ))
     })?;
     let mut candidate_init = match model.get_data_with_type::<RTCIceCandidateInit>()? {

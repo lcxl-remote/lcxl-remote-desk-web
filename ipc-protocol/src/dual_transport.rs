@@ -26,7 +26,7 @@
 //!    → per-connection bounded queue → file lane → worker download
 //!    loop → `file.read` blocks). Putting file-transfer on the event
 //!    lane would mean a slow GB-scale download head-of-line blocks
-//!    `ManagerFileListResponse` / `Heartbeat` / desktop switches —
+//!    `FilesListed` / `Heartbeat` / desktop switches —
 //!    fix-2026-05-05 (`pc_manager.rs` regression test
 //!    `event_lane_unaffected_by_file_lane_backlog`) explicitly forbids
 //!    that. The trade-off: a stalled connection will hold up *other*

@@ -3,9 +3,9 @@
 //! Runs inside the user session (WinSta0) where the read collectors and
 //! the authoritative capture frame live. The daemon two-phase-parses and
 //! authorizes the request, then ships a typed
-//! `ServiceToWorker::AgentRequest` carrying a fully server-stamped
+//! `ServiceToWorker::InvokeAgentCapability` carrying a fully server-stamped
 //! [`AgentEnvelope`]; the worker dispatches it here and replies via
-//! `WorkerToService::AgentResponse`.
+//! `WorkerToService::AgentCapabilityCompleted`.
 //!
 //! Each supported read kind dispatches to a collector in [`collectors`]. A collector
 //! that cannot run on the host (no Docker, no session context, unsupported

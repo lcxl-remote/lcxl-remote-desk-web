@@ -66,7 +66,7 @@ impl WorkerSession {
         // Optional media pipe. Connect failure is non-fatal —
         // the worker continues to serve event-pipe traffic (mouse / clipboard
         // / file transfer / ...) and reports `Capabilities` so the daemon can
-        // populate `RequestRemote` Init replies even if no frames flow.
+        // populate `RequestRemoteAccess` Init replies even if no frames flow.
         let media_sender = match init_payload.media_pipe_name.as_deref() {
             Some(name) => {
                 info!("Worker connecting to media pipe: {name}");

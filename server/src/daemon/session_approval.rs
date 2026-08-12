@@ -11,7 +11,7 @@
 //! - **intersected with the command whitelist**: only a command that matched a
 //!   template (i.e. is classified executable) is ever granted, so an approval can
 //!   never widen what the classifier already permits;
-//! - **in-memory and short-lived**: releasing control (`CloseControl`), the
+//! - **in-memory and short-lived**: releasing control (`CloseRemoteSession`), the
 //!   connection ending (`ConnectionRemoved`), or a daemon restart revokes them.
 //!
 //! [`ExecutionMode::SessionApproved`]: desk_agent_protocol::ExecutionMode::SessionApproved

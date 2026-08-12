@@ -1,11 +1,11 @@
 //! Signal single-account capability-ceiling stamp for `StartTerminal` frames.
 //!
 //! The remote terminal opens on a **distinct** WS connection that never does a
-//! `RequestRemote`, so on the host it carries no admission and no capability
+//! `RequestRemoteAccess`, so on the host it carries no admission and no capability
 //! ceiling. Without a stamp the host's first door would reject it (a capability
 //! frame from an un-admitted connection) or, worse, fall back to the host global
 //! ceiling. This authorizer stamps every `StartTerminal` exactly like
-//! [`crate::request_remote_authorizer`] stamps a `RequestRemote`, so the host can
+//! [`crate::request_remote_authorizer`] stamps a `RequestRemoteAccess`, so the host can
 //! register the ceiling, record an admission, and index the connection under its
 //! grant — making the terminal connection a first-class capability-scoped session.
 //!

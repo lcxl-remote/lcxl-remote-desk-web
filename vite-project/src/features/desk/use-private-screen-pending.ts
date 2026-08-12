@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 
-type Pending = { target: boolean; timer: number }
+type Pending = { target: boolean; requestId: string; timer: number }
 
 export function usePrivateScreenPending({
     onError,
@@ -21,7 +21,7 @@ export function usePrivateScreenPending({
         setTarget(null)
     }, [])
 
-    const start = useCallback((nextTarget: boolean) => {
+    const start = useCallback((nextTarget: boolean, requestId: string) => {
         if (pendingRef.current) return false
         const timer = window.setTimeout(() => {
             if (pendingRef.current?.target !== nextTarget) return
@@ -29,17 +29,17 @@ export function usePrivateScreenPending({
             setTarget(null)
             onErrorRef.current("timeout")
         }, timeoutMs)
-        pendingRef.current = { target: nextTarget, timer }
+        pendingRef.current = { target: nextTarget, requestId, timer }
         setTarget(nextTarget)
         return true
     }, [timeoutMs])
 
-    const confirm = useCallback((visible: boolean) => {
-        if (pendingRef.current?.target === visible) clear()
+    const confirm = useCallback((requestId: string, visible: boolean) => {
+        if (pendingRef.current?.requestId === requestId && pendingRef.current.target === visible) clear()
     }, [clear])
 
-    const fail = useCallback((message?: string) => {
-        if (!pendingRef.current) return
+    const fail = useCallback((requestId: string, message?: string) => {
+        if (pendingRef.current?.requestId !== requestId) return
         clear()
         onErrorRef.current("remote", message)
     }, [clear])

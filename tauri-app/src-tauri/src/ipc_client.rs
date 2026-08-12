@@ -192,11 +192,23 @@ fn handle_server_msg(
                 let _ = tx.send(NativeBridgeEvent::LocaleChanged { locale });
             }
         }
-        HostControlMessage::PrivateScreenShow { connection_id } => {
-            let _ = ps_cmd_tx.send(PrivateScreenCommand::Show(connection_id));
+        HostControlMessage::PrivateScreenShow {
+            connection_id,
+            request_id,
+        } => {
+            let _ = ps_cmd_tx.send(PrivateScreenCommand::Show {
+                connection_id,
+                request_id,
+            });
         }
-        HostControlMessage::PrivateScreenHide { connection_id } => {
-            let _ = ps_cmd_tx.send(PrivateScreenCommand::Hide(connection_id));
+        HostControlMessage::PrivateScreenHide {
+            connection_id,
+            request_id,
+        } => {
+            let _ = ps_cmd_tx.send(PrivateScreenCommand::Hide {
+                connection_id,
+                request_id,
+            });
         }
         HostControlMessage::WhiteboardShow { connection_id } => {
             let _ = wb_cmd_tx.send(WhiteboardCommand::Show(connection_id));
@@ -257,12 +269,28 @@ fn handle_server_msg(
 
 fn map_state_event(event: HostControlEventType) -> Option<HostControlMessage> {
     match event {
-        HostControlEventType::PrivateScreenVisibleChanged(connection_id, visible) => {
-            Some(HostControlMessage::PrivateScreenStateChanged {
-                connection_id,
-                visible,
-            })
-        }
+        HostControlEventType::PrivateScreenVisibleChanged {
+            connection_id,
+            request_id,
+            visible,
+        } => Some(HostControlMessage::PrivateScreenStateChanged {
+            connection_id,
+            request_id,
+            visible,
+            is_supported: true,
+            error_msg: None,
+        }),
+        HostControlEventType::PrivateScreenUnknownError {
+            connection_id: Some(connection_id),
+            request_id,
+            message,
+        } => Some(HostControlMessage::PrivateScreenStateChanged {
+            connection_id,
+            request_id,
+            visible: false,
+            is_supported: true,
+            error_msg: Some(message),
+        }),
         _ => None,
     }
 }
@@ -285,6 +313,7 @@ mod tests {
         handle_server_msg(
             HostControlMessage::PrivateScreenShow {
                 connection_id: "c1".to_string(),
+                request_id: "r1".to_string(),
             },
             &ps_tx,
             &wb_tx,
@@ -298,7 +327,13 @@ mod tests {
             .recv_timeout(std::time::Duration::from_millis(50))
             .unwrap()
         {
-            PrivateScreenCommand::Show(id) => assert_eq!(id, "c1"),
+            PrivateScreenCommand::Show {
+                connection_id,
+                request_id,
+            } => {
+                assert_eq!(connection_id, "c1");
+                assert_eq!(request_id, "r1");
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -444,17 +479,21 @@ mod tests {
 
     #[test]
     fn map_state_event_translates_visibility_change() {
-        let msg = map_state_event(HostControlEventType::PrivateScreenVisibleChanged(
-            "c1".to_string(),
-            true,
-        ))
+        let msg = map_state_event(HostControlEventType::PrivateScreenVisibleChanged {
+            connection_id: "c1".to_string(),
+            request_id: Some("r1".to_string()),
+            visible: true,
+        })
         .expect("should produce");
         match msg {
             HostControlMessage::PrivateScreenStateChanged {
                 connection_id,
+                request_id,
                 visible,
+                ..
             } => {
                 assert_eq!(connection_id, "c1");
+                assert_eq!(request_id.as_deref(), Some("r1"));
                 assert!(visible);
             }
             other => panic!("unexpected: {other:?}"),

@@ -25,7 +25,7 @@ pub const CODE_SESSION_KEY: &str = "code_session";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeSessionCookie {
     /// Server-minted, high-entropy principal id. It is the grant principal source
-    /// (`code:{id}`) the RequestRemote authorizer authorizes against, and it
+    /// (`code:{id}`) the RequestRemoteAccess authorizer authorizes against, and it
     /// cannot be a `user_id`, so it never aliases the single-account owner.
     pub code_session_id: String,
     /// The grant session minted for this redemption. The REST guard looks it up in
@@ -36,7 +36,7 @@ pub struct CodeSessionCookie {
     /// ceiling.
     pub grant_session_id: String,
     /// The device connection this code authorized access to. Every request from
-    /// this session — signaling RequestRemote and scoped REST alike — may only
+    /// this session — signaling RequestRemoteAccess and scoped REST alike — may only
     /// address this target.
     pub target_connection_id: String,
 }

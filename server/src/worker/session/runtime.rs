@@ -823,14 +823,15 @@ impl WorkerSession {
                                 // rebuild a lightweight `SignalingModel`
                                 // from the typed payload so the existing
                                 // arms keep working without duplicating the handlers.
-                                ServiceToWorker::EnablePrivateScreen(payload) => {
-                                    dispatch_typed_signaling(
+                                ServiceToWorker::SetPrivateScreenVisibility(payload) => {
+                                    dispatch_typed_signaling_with_request_id(
                                         &mut desk_session,
-                                        SignalingType::EnablePrivateScreen,
+                                        SignalingType::SetPrivateScreenVisibility,
+                                        payload.request_id,
                                         Some(payload.connection_id),
-                                        &EnablePrivateScreenData {
-                                            enable: payload.enable,
-                                        },
+                                        Some(&SetPrivateScreenVisibilityData {
+                                            visible: payload.visible,
+                                        }),
                                     )
                                     .await;
                                 }
@@ -850,30 +851,30 @@ impl WorkerSession {
                                 // request_id, which the desk_rx outbound
                                 // classifier turns into the matching
                                 // typed `WorkerToService::Manager*Response`.
-                                ServiceToWorker::ManagerSystemInfoRequest(payload) => {
+                                ServiceToWorker::GetSystemInfo(payload) => {
                                     dispatch_typed_signaling_with_request_id(
                                         &mut desk_session,
-                                        SignalingType::ManagerSystemInfo,
+                                        SignalingType::GetSystemInfo,
                                         payload.request_id,
                                         payload.connection_id,
                                         Option::<&()>::None,
                                     )
                                     .await;
                                 }
-                                ServiceToWorker::ManagerFileListRequest(payload) => {
+                                ServiceToWorker::ListFiles(payload) => {
                                     dispatch_typed_signaling_with_request_id(
                                         &mut desk_session,
-                                        SignalingType::ManagerFileList,
+                                        SignalingType::ListFiles,
                                         payload.request_id,
                                         Some(payload.connection_id),
                                         Some(&payload.params),
                                     )
                                     .await;
                                 }
-                                ServiceToWorker::ManagerFileDeleteRequest(payload) => {
+                                ServiceToWorker::DeleteFile(payload) => {
                                     dispatch_typed_signaling_with_request_id(
                                         &mut desk_session,
-                                        SignalingType::ManagerFileDelete,
+                                        SignalingType::DeleteFile,
                                         payload.request_id,
                                         Some(payload.connection_id),
                                         Some(&payload.request),
@@ -924,12 +925,12 @@ impl WorkerSession {
                                 // which the desk_rx outbound classifier
                                 // turns into the matching typed
                                 // `WorkerToService::TerminalStarted` /
-                                // `ListTerminalResponse`. The body-less
-                                // request types (`SendDataToTerminal`,
+                                // `TerminalCommandsListed`. The body-less
+                                // request types (`SendTerminalInput`,
                                 // `ResizeTerminal`, `CloseTerminal`)
                                 // ride `dispatch_typed_signaling`
                                 // because the worker emits no response.
-                                ServiceToWorker::StartTerminalRequest(payload) => {
+                                ServiceToWorker::StartTerminal(payload) => {
                                     dispatch_typed_signaling_with_request_id(
                                         &mut desk_session,
                                         SignalingType::StartTerminal,
@@ -939,16 +940,16 @@ impl WorkerSession {
                                     )
                                     .await;
                                 }
-                                ServiceToWorker::SendDataToTerminalRequest(payload) => {
+                                ServiceToWorker::SendTerminalInput(payload) => {
                                     dispatch_typed_signaling(
                                         &mut desk_session,
-                                        SignalingType::SendDataToTerminal,
+                                        SignalingType::SendTerminalInput,
                                         Some(payload.connection_id),
                                         &payload.data,
                                     )
                                     .await;
                                 }
-                                ServiceToWorker::ResizeTerminalRequest(payload) => {
+                                ServiceToWorker::ResizeTerminal(payload) => {
                                     dispatch_typed_signaling(
                                         &mut desk_session,
                                         SignalingType::ResizeTerminal,
@@ -957,7 +958,7 @@ impl WorkerSession {
                                     )
                                     .await;
                                 }
-                                ServiceToWorker::CloseTerminalRequest(payload) => {
+                                ServiceToWorker::CloseTerminal(payload) => {
                                     dispatch_typed_signaling_with_request_id(
                                         &mut desk_session,
                                         SignalingType::CloseTerminal,
@@ -974,10 +975,10 @@ impl WorkerSession {
                                     )
                                     .await;
                                 }
-                                ServiceToWorker::ListTerminalRequest(payload) => {
+                                ServiceToWorker::ListTerminalCommands(payload) => {
                                     dispatch_typed_signaling_with_request_id(
                                         &mut desk_session,
-                                        SignalingType::ListTerminal,
+                                        SignalingType::ListTerminalCommands,
                                         payload.request_id,
                                         payload.connection_id,
                                         Option::<&()>::None,
@@ -1326,9 +1327,9 @@ impl WorkerSession {
                                         writer_tx.clone(),
                                     );
                                 }
-                                ServiceToWorker::AgentRequest(payload) => {
+                                ServiceToWorker::InvokeAgentCapability(payload) => {
                                     info!(
-                                        "Worker received AgentRequest req={} conn={:?}",
+                                        "Worker received InvokeAgentCapability req={} conn={:?}",
                                         payload.request_id, payload.connection_id,
                                     );
                                     // Run the collector off the IPC loop so a
@@ -1352,7 +1353,7 @@ impl WorkerSession {
                                             Err(error) => AgentOutcome::Err(error),
                                         };
                                         if writer_tx
-                                            .send(WorkerToService::AgentResponse(
+                                            .send(WorkerToService::AgentCapabilityCompleted(
                                                 AgentResponsePayload {
                                                     request_id: payload.request_id,
                                                     connection_id: payload.connection_id,
@@ -1362,7 +1363,7 @@ impl WorkerSession {
                                             .is_err()
                                         {
                                             warn!(
-                                                "writer task closed; dropping AgentResponse"
+                                                "writer task closed; dropping AgentCapabilityCompleted"
                                             );
                                         }
                                     });
@@ -1461,7 +1462,7 @@ impl WorkerSession {
                                             outcome,
                                         };
                                         if writer_tx
-                                            .send(WorkerToService::ExecResult(
+                                            .send(WorkerToService::ExecutionCompleted(
                                                 ExecResultIpcPayload {
                                                     request_id: payload.request_id,
                                                     connection_id: payload.connection_id,
@@ -1475,7 +1476,7 @@ impl WorkerSession {
                                             ))
                                             .is_err()
                                         {
-                                            warn!("writer task closed; dropping ExecResult");
+                                            warn!("writer task closed; dropping ExecutionCompleted");
                                         }
                                     });
                                 }

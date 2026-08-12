@@ -4,9 +4,9 @@ import { useDeskRTC } from './use-desk-rtc';
 import useDeskRtcSource from './use-desk-rtc.ts?raw';
 import type { SignalingMessage } from './use-desk-signaling';
 import {
-    SIGNALING_TYPE_CODE_INIT,
+    SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
     SIGNALING_TYPE_CODE_ANSWER,
-    SIGNALING_TYPE_CODE_CANID,
+    SIGNALING_TYPE_CODE_ICE_CANDIDATE,
 } from './constants';
 
 // Global ordering log shared by the mocked PeerConnection so a test can
@@ -179,10 +179,10 @@ describe('useDeskRTC inbound signaling drain', () => {
             }),
         );
 
-        // INIT primes initData so connect() can build the PeerConnection.
+        // REMOTE_ACCESS_INITIALIZED primes initData so connect() can build the PeerConnection.
         await act(async () => {
             emit({
-                signaling_type: SIGNALING_TYPE_CODE_INIT,
+                signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
                 signaling_data: { ice_servers: [] },
             });
         });
@@ -208,7 +208,7 @@ describe('useDeskRTC inbound signaling drain', () => {
         await act(async () => {
             for (let n = 0; n < 5; n += 1) {
                 emit({
-                    signaling_type: SIGNALING_TYPE_CODE_CANID,
+                    signaling_type: SIGNALING_TYPE_CODE_ICE_CANDIDATE,
                     signaling_data: { candidate: `c${n}` },
                 });
             }
@@ -252,7 +252,7 @@ describe('useDeskRTC inbound signaling drain', () => {
 
         await act(async () => {
             emit({
-                signaling_type: SIGNALING_TYPE_CODE_INIT,
+                signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
                 signaling_data: { ice_servers: [] },
             });
         });
@@ -284,7 +284,7 @@ describe('useDeskRTC inbound signaling drain', () => {
 
         await act(async () => {
             emit({
-                signaling_type: SIGNALING_TYPE_CODE_INIT,
+                signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
                 signaling_data: { ice_servers: [] },
             });
         });
@@ -321,7 +321,7 @@ describe('useDeskRTC inbound signaling drain', () => {
 
         await act(async () => {
             emit({
-                signaling_type: SIGNALING_TYPE_CODE_INIT,
+                signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
                 signaling_data: { ice_servers: [] },
             });
         });
@@ -358,7 +358,7 @@ describe('useDeskRTC inbound signaling drain', () => {
 
         await act(async () => {
             emit({
-                signaling_type: SIGNALING_TYPE_CODE_INIT,
+                signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
                 signaling_data: { ice_servers: [] },
             });
         });
@@ -392,7 +392,7 @@ describe('useDeskRTC inbound signaling drain', () => {
 
         await act(async () => {
             emit({
-                signaling_type: SIGNALING_TYPE_CODE_INIT,
+                signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
                 signaling_data: { ice_servers: [] },
             });
         });
@@ -424,7 +424,7 @@ describe('useDeskRTC inbound signaling drain', () => {
 
         await act(async () => {
             emit({
-                signaling_type: SIGNALING_TYPE_CODE_INIT,
+                signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
                 signaling_data: { ice_servers: [] },
             });
         });
@@ -455,7 +455,7 @@ describe('useDeskRTC inbound signaling drain', () => {
 
         await act(async () => {
             emit({
-                signaling_type: SIGNALING_TYPE_CODE_INIT,
+                signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
                 signaling_data: { ice_servers: [] },
             });
         });

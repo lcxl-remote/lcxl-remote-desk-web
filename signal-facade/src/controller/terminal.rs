@@ -19,7 +19,7 @@ pub async fn list_terminal_core(
     let response = request_on_local_connection::<()>(
         connection_map,
         connection_id,
-        SignalingType::ListTerminal,
+        SignalingType::ListTerminalCommands,
         None,
         &not_found,
     )

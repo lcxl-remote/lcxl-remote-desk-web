@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct HostRemoteAccessLockRequest {
+pub struct UpdateRemoteAccessLockData {
     pub request_id: String,
     pub lock_id: Option<String>,
     pub state_version: u64,
@@ -10,7 +10,7 @@ pub struct HostRemoteAccessLockRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct HostRemoteAccessLockAck {
+pub struct RemoteAccessLockUpdatedData {
     pub request_id: String,
     pub lock_id: Option<String>,
     pub state_version: u64,
@@ -19,7 +19,7 @@ pub struct HostRemoteAccessLockAck {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct TerminateRemotePeerRequest {
+pub struct TerminateRemotePeerData {
     pub operation_id: String,
     pub target_connection_id: String,
 }
@@ -33,7 +33,7 @@ pub enum PeerEvictionOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct TerminateRemotePeerAck {
+pub struct RemotePeerTerminationResolvedData {
     pub operation_id: String,
     pub target_connection_id: String,
     pub outcome: PeerEvictionOutcome,
@@ -44,8 +44,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lock_request_and_ack_round_trip() {
-        let request = HostRemoteAccessLockRequest {
+    fn lock_update_and_updated_response_round_trip() {
+        let request = UpdateRemoteAccessLockData {
             request_id: "req-1".into(),
             lock_id: Some("lock-1".into()),
             state_version: 7,
@@ -53,21 +53,21 @@ mod tests {
         };
         let encoded = serde_json::to_string(&request).unwrap();
         assert_eq!(
-            serde_json::from_str::<HostRemoteAccessLockRequest>(&encoded).unwrap(),
+            serde_json::from_str::<UpdateRemoteAccessLockData>(&encoded).unwrap(),
             request
         );
 
-        let ack = HostRemoteAccessLockAck {
+        let updated = RemoteAccessLockUpdatedData {
             request_id: "req-1".into(),
             lock_id: Some("lock-1".into()),
             state_version: 7,
             locked: true,
             generation: 3,
         };
-        let encoded = serde_json::to_string(&ack).unwrap();
+        let encoded = serde_json::to_string(&updated).unwrap();
         assert_eq!(
-            serde_json::from_str::<HostRemoteAccessLockAck>(&encoded).unwrap(),
-            ack
+            serde_json::from_str::<RemoteAccessLockUpdatedData>(&encoded).unwrap(),
+            updated
         );
     }
 }

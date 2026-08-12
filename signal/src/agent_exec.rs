@@ -385,7 +385,7 @@ impl SignalAgentTools {
                 .as_ref()
                 .map(|id| id.0.as_str())
                 .unwrap_or_default(),
-            SignalingType::ExecPreview,
+            SignalingType::ExecutionPreviewGenerated,
             None,
             Some(browser_connection_id.to_string()),
             serde_json::to_value(preview).ok(),
@@ -411,7 +411,7 @@ impl SignalAgentTools {
         };
         let frame = SignalingModel::new(
             execution_generation,
-            SignalingType::ExecControl,
+            SignalingType::ControlExecution,
             None,
             Some(self.target_connection_id.clone()),
             serde_json::to_value(payload).ok(),
@@ -514,7 +514,7 @@ impl SignalAgentTools {
         let wrapper = AuthorizedControlPayload { inner, authz };
         let frame = SignalingModel::new(
             &request_id,
-            SignalingType::EdgeExecRequest,
+            SignalingType::ExecuteEdgePlan,
             None,
             Some(self.target_connection_id.clone()),
             serde_json::to_value(wrapper).ok(),

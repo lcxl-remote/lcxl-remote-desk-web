@@ -1,7 +1,7 @@
 // Per-target access-grant store for the control end.
 //
 // When a code is redeemed the server returns a `grant_session_id` and the code's
-// capability ceiling (`access_ceiling`). Every RequestRemote for that target — the
+// capability ceiling (`access_ceiling`). Every RequestRemoteAccess for that target — the
 // main session and the separate file-transfer connection — must carry the
 // grant_session_id so the trusted central can look the grant up and stamp the
 // ceiling. This module holds that grant, keyed by the target connection id (the
@@ -20,7 +20,7 @@ import type { SecuritySettings } from '@/services/types';
 export type GrantSource = 'device-code' | 'support';
 
 export interface SessionGrant {
-    /// The reusable grant token attached to every RequestRemote for this target.
+    /// The reusable grant token attached to every RequestRemoteAccess for this target.
     grantSessionId: string;
     /// The code's capability ceiling, used only to hide entries a dimension explicitly
     /// denies. `null` is treated as "no explicit ceiling" (show everything as tryable).

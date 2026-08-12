@@ -7,7 +7,7 @@ use wincode::{SchemaRead, SchemaWrite};
 use super::{ServiceToWorker, WorkerToService};
 // ================= AI agent IPC payloads =================
 
-/// Payload for [`ServiceToWorker::AgentRequest`]. Embeds the full
+/// Payload for [`ServiceToWorker::InvokeAgentCapability`]. Embeds the full
 /// [`desk_agent_protocol::AgentEnvelope`] (already server-stamped) so the
 /// IPC layer does not re-spell any of its fields — `desk-agent-protocol`
 /// derives the same `wincode` schema this transport uses. `connection_id`
@@ -21,9 +21,9 @@ pub struct AgentRequestPayload {
     pub envelope: desk_agent_protocol::AgentEnvelope,
 }
 
-/// Payload for [`WorkerToService::AgentResponse`]. Reuses
+/// Payload for [`WorkerToService::AgentCapabilityCompleted`]. Reuses
 /// [`desk_agent_protocol::AgentOutcome`] verbatim — the same shape the
-/// daemon then ships to the control end as `AgentResponse`
+/// daemon then ships to the control end as `AgentCapabilityCompleted`
 /// signaling_data, so there is no daemon-side re-mapping. Mirrors the
 /// `VirtualDisplayModeOutcome` Applied/Failed precedent.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
@@ -37,7 +37,7 @@ pub struct AgentResponsePayload {
 /// [`desk_agent_protocol::exec::ExecPlan`] plus the signaling correlation
 /// (`request_id`) and originating control-end `connection_id`, which the worker
 /// echoes back in [`ExecResultIpcPayload`] so the daemon can route the outbound
-/// `ExecResult` without keeping its own in-flight map.
+/// `ExecutionCompleted` without keeping its own in-flight map.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ExecPlanPayload {
     pub request_id: String,
@@ -58,7 +58,7 @@ pub struct ExecCancelPayload {
     pub execution_generation: String,
 }
 
-/// Payload for [`WorkerToService::ExecResult`]. Embeds the
+/// Payload for [`WorkerToService::ExecutionCompleted`]. Embeds the
 /// [`desk_agent_protocol::exec::ExecResultPayload`] (tagged with
 /// `exec_request_id`) the daemon ships to the control end verbatim, plus the
 /// echoed `request_id` / `connection_id` for routing.

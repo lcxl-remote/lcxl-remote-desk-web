@@ -10,13 +10,13 @@ import {
 import type { DiagnoseEvent, SnapshotMessage } from './use-desk-diagnose';
 import type { SignalingMessage } from './use-desk-signaling';
 import {
-    SIGNALING_TYPE_CODE_DIAGNOSE,
-    SIGNALING_TYPE_CODE_DIAGNOSE_EVENT,
-    SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL,
-    SIGNALING_TYPE_CODE_EXEC_CONTROL,
-    SIGNALING_TYPE_CODE_EXEC_PREVIEW,
-    SIGNALING_TYPE_CODE_EXEC_STATE_REPLY,
-    SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+    SIGNALING_TYPE_CODE_DIAGNOSE_DEVICE,
+    SIGNALING_TYPE_CODE_DIAGNOSIS_UPDATED,
+    SIGNALING_TYPE_CODE_CANCEL_DIAGNOSIS,
+    SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
+    SIGNALING_TYPE_CODE_EXECUTION_PREVIEW_GENERATED,
+    SIGNALING_TYPE_CODE_EXECUTION_STATE_REPORTED,
+    SIGNALING_TYPE_CODE_RESOLVE_EXECUTION,
 } from './constants';
 import type { ExecPreview, ExecStateReplyPayload } from '../exec/use-confirm-exec';
 
@@ -37,7 +37,7 @@ afterEach(() => {
 function frame(event: DiagnoseEvent): SignalingMessage {
     return {
         request_id: event.request_id,
-        signaling_type: SIGNALING_TYPE_CODE_DIAGNOSE_EVENT,
+        signaling_type: SIGNALING_TYPE_CODE_DIAGNOSIS_UPDATED,
         signaling_data: event,
     };
 }
@@ -59,7 +59,7 @@ function execPreviewFrame(overrides: Partial<ExecPreview> = {}): SignalingMessag
     };
     return {
         request_id: preview.exec_request_id ?? 'exec-1',
-        signaling_type: SIGNALING_TYPE_CODE_EXEC_PREVIEW,
+        signaling_type: SIGNALING_TYPE_CODE_EXECUTION_PREVIEW_GENERATED,
         signaling_data: preview,
     };
 }
@@ -147,7 +147,7 @@ function renderDiagnose(deskId: string | null = 'desk-1') {
  */
 function conversationIdOfCall(n: number): string {
     const diagnoses = sendMessage.mock.calls.filter(
-        (c) => c[0] === SIGNALING_TYPE_CODE_DIAGNOSE,
+        (c) => c[0] === SIGNALING_TYPE_CODE_DIAGNOSE_DEVICE,
     );
     const body = diagnoses[n][1] as { conversation_id?: string };
     return body.conversation_id as string;
@@ -160,7 +160,7 @@ describe('useDeskDiagnose', () => {
         act(() => result.current.start('why slow?', { includeScreen: true }));
 
         expect(sendMessage).toHaveBeenCalledWith(
-            SIGNALING_TYPE_CODE_DIAGNOSE,
+            SIGNALING_TYPE_CODE_DIAGNOSE_DEVICE,
             expect.objectContaining({
                 question: 'why slow?',
                 include_screen: true,
@@ -330,7 +330,7 @@ describe('useDeskDiagnose', () => {
         act(() => result.current.reset());
         // The in-flight request is cancelled (audited) before we drop tracking.
         expect(sendMessage).toHaveBeenCalledWith(
-            SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL,
+            SIGNALING_TYPE_CODE_CANCEL_DIAGNOSIS,
             null,
             'desk-1',
             'req-1',
@@ -576,7 +576,7 @@ describe('useDeskDiagnose', () => {
         sendMessage.mockClear();
         act(() => result.current.approveExec());
         expect(sendMessage).toHaveBeenCalledWith(
-            SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+            SIGNALING_TYPE_CODE_RESOLVE_EXECUTION,
             { exec_request_id: 'exec-1', decision: 'approve' },
             'desk-1',
         );
@@ -661,7 +661,7 @@ describe('useDeskDiagnose', () => {
         sendMessage.mockClear();
         act(() => result.current.cancelBackgroundExec());
         expect(sendMessage).toHaveBeenCalledWith(
-            SIGNALING_TYPE_CODE_EXEC_CONTROL,
+            SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
             {
                 execution_generation: 'generation-bg-1',
                 action: 'cancel',
@@ -674,7 +674,7 @@ describe('useDeskDiagnose', () => {
         sendMessage.mockClear();
         act(() => vi.advanceTimersByTime(500));
         expect(sendMessage).toHaveBeenCalledWith(
-            SIGNALING_TYPE_CODE_EXEC_CONTROL,
+            SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
             {
                 execution_generation: 'generation-bg-1',
                 action: 'query_state',
@@ -691,7 +691,7 @@ describe('useDeskDiagnose', () => {
         };
         feed({
             request_id: 'state-running',
-            signaling_type: SIGNALING_TYPE_CODE_EXEC_STATE_REPLY,
+            signaling_type: SIGNALING_TYPE_CODE_EXECUTION_STATE_REPORTED,
             signaling_data: running,
         });
         expect(result.current.state.backgroundExecution?.cancelRequested).toBe(true);
@@ -703,7 +703,7 @@ describe('useDeskDiagnose', () => {
         };
         feed({
             request_id: 'state-terminal',
-            signaling_type: SIGNALING_TYPE_CODE_EXEC_STATE_REPLY,
+            signaling_type: SIGNALING_TYPE_CODE_EXECUTION_STATE_REPORTED,
             signaling_data: terminal,
         });
         expect(result.current.state.backgroundExecution).toBeNull();
@@ -757,7 +757,7 @@ describe('useDeskDiagnose', () => {
         sendMessage.mockClear();
         act(() => result.current.rejectExec());
         expect(sendMessage).toHaveBeenCalledWith(
-            SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+            SIGNALING_TYPE_CODE_RESOLVE_EXECUTION,
             { exec_request_id: 'exec-1', decision: 'reject' },
             'desk-1',
         );

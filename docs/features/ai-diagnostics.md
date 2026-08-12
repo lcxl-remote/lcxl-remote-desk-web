@@ -13,10 +13,10 @@ AI is orchestrated by the **central signaling server** (the "central brain"); th
 ```mermaid
 graph LR
     user[User question] --> central[Central Signaling Brain]
-    central -->|CollectRequest| edge[Thin Edge Device]
+    central -->|CollectEvidence| edge[Thin Edge Device]
     edge -->|read-only collect| evidence[Device Evidence]
     evidence -->|Strict Redaction<br/>on the edge| redacted[Redacted Evidence]
-    redacted -->|CollectResponse| central
+    redacted -->|EvidenceCollectionUpdated| central
     central -->|call model| model[AI Model]
     model -->|tool calls + stream| diag[Multi-turn diagnosis]
     diag -->|exec_command| approve[Full command preview<br/>explicit owner approval]

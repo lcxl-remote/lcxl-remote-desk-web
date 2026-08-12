@@ -1,77 +1,59 @@
-
-export const SIGNALING_TYPE_CODE_HEARTBEAT = 1;
+export const SIGNALING_TYPE_CODE_SEND_HEARTBEAT = 1;
+export const SIGNALING_TYPE_CODE_HEARTBEAT_ACKNOWLEDGED = 2;
 
 export const SIGNALING_TYPE_CODE_FETCH_CONNECTIONS = 21;
-export const SIGNALING_TYPE_CODE_CONNECTION_LIST = 22;
+export const SIGNALING_TYPE_CODE_CONNECTIONS_FETCHED = 22;
 
-export const SIGNALING_TYPE_CODE_REQUEST_REMOTE = 100;
-export const SIGNALING_TYPE_CODE_INIT = 101;
+export const SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS = 100;
+export const SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED = 101;
 export const SIGNALING_TYPE_CODE_OFFER = 102;
 export const SIGNALING_TYPE_CODE_ANSWER = 103;
-export const SIGNALING_TYPE_CODE_CANID = 104;
-// The target host's own system information. Distinct from `/api/desk/sysinfo`,
-// which describes the server the browser is connected to — a manager or a
-// signaling server, whose properties say nothing about the machine on display.
-export const SIGNALING_TYPE_CODE_MANAGER_SYSTEM_INFO = 10003;
-export const SIGNALING_TYPE_CODE_MANAGER_FILE_LIST = 10005;
-export const SIGNALING_TYPE_CODE_MANAGER_FILE_DELETE = 10006;
+export const SIGNALING_TYPE_CODE_ICE_CANDIDATE = 104;
 
 export const SIGNALING_TYPE_CODE_REQUIRE_CONTROL = 201;
-export const SIGNALING_TYPE_CODE_ACCEPT_CONTROL = 202;
-export const SIGNALING_TYPE_CODE_DENY_CONTROL = 203;
-export const SIGNALING_TYPE_CODE_CLOSE_CONTROL = 204;
+export const SIGNALING_TYPE_CODE_CONTROL_ACCEPTED = 202;
+export const SIGNALING_TYPE_CODE_CONTROL_DENIED = 203;
+export const SIGNALING_TYPE_CODE_RELEASE_CONTROL = 204;
 export const SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS = 205;
-
-export const SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS = 301;
-
-export const SIGNALING_TYPE_CODE_ENABLE_PRIVATE_SCREEN = 206;
+export const SIGNALING_TYPE_CODE_SET_PRIVATE_SCREEN_VISIBILITY = 206;
 export const SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED = 207;
-export const SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_ERROR = 208;
+export const SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_FAILED = 208;
 export const SIGNALING_TYPE_CODE_MEDIA_PIPELINE_STATE_CHANGED = 217;
 export const SIGNALING_TYPE_CODE_RETRY_MEDIA_PIPELINE = 218;
+export const SIGNALING_TYPE_CODE_CONTROL_RELEASED = 219;
+export const SIGNALING_TYPE_CODE_DISPLAY_SETTINGS_CHANGED = 220;
+export const SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION = 221;
+export const SIGNALING_TYPE_CODE_PRIVATE_SCREEN_VISIBILITY_SET = 222;
+export const SIGNALING_TYPE_CODE_MEDIA_PIPELINE_RETRY_COMPLETED = 223;
 
+export const SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS = 301;
 export const SIGNALING_TYPE_CODE_DESKTOP_SWITCHING = 500;
 export const SIGNALING_TYPE_CODE_DESKTOP_READY = 501;
 
-// AI Diagnose: request (control end -> host) and streamed event frames
-// (host -> control end). The event stream is notification-style — frames
-// carry `request_id` + `seq` + `kind`, never a one-shot response.
-export const SIGNALING_TYPE_CODE_DIAGNOSE = 602;
-export const SIGNALING_TYPE_CODE_DIAGNOSE_EVENT = 603;
-// Cancel an in-flight diagnosis when the operator starts over. The host stops
-// pending work and records an `ai.task.cancelled` audit. Carries no payload;
-// the message request_id correlates the cancelled diagnosis.
-export const SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL = 604;
+export const SIGNALING_TYPE_CODE_INVOKE_AGENT_CAPABILITY = 600;
+export const SIGNALING_TYPE_CODE_AGENT_CAPABILITY_COMPLETED = 601;
+export const SIGNALING_TYPE_CODE_DIAGNOSE_DEVICE = 602;
+export const SIGNALING_TYPE_CODE_DIAGNOSIS_UPDATED = 603;
+export const SIGNALING_TYPE_CODE_CANCEL_DIAGNOSIS = 604;
+export const SIGNALING_TYPE_CODE_PREVIEW_EXECUTION = 605;
+export const SIGNALING_TYPE_CODE_EXECUTION_PREVIEW_GENERATED = 606;
+export const SIGNALING_TYPE_CODE_RESOLVE_EXECUTION = 607;
+export const SIGNALING_TYPE_CODE_EXECUTION_COMPLETED = 609;
+export const SIGNALING_TYPE_CODE_ASK_TERMINAL_COPILOT = 617;
+export const SIGNALING_TYPE_CODE_TERMINAL_COPILOT_UPDATED = 618;
+export const SIGNALING_TYPE_CODE_CANCEL_TERMINAL_COPILOT = 619;
+export const SIGNALING_TYPE_CODE_GENERATE_TERMINAL_COMPLETIONS = 620;
+export const SIGNALING_TYPE_CODE_TERMINAL_COMPLETIONS_GENERATED = 621;
+export const SIGNALING_TYPE_CODE_CONTROL_EXECUTION = 623;
+export const SIGNALING_TYPE_CODE_EXECUTION_STATE_REPORTED = 624;
+export const SIGNALING_TYPE_CODE_EXECUTION_PROGRESS_UPDATED = 625;
 
-// AI confirmed execution: ConfirmExec / ResolveExec (control end -> host) and
-// ExecPreview / ExecResult (host -> control end, notification-style). The host
-// classifies the command, requires explicit approval, and runs only server-admitted
-// plans.
-export const SIGNALING_TYPE_CODE_CONFIRM_EXEC = 605;
-export const SIGNALING_TYPE_CODE_EXEC_PREVIEW = 606;
-export const SIGNALING_TYPE_CODE_RESOLVE_EXEC = 607;
-export const SIGNALING_TYPE_CODE_EXEC_RESULT = 609;
-
-// Execution lifecycle: ExecControl (control end → host: cancel or state query),
-// and the host's answers — ExecStateReply (to both) and ExecLifecycle (accepted /
-// still running). Mirror `SignalingType::Exec{Control,StateReply,Lifecycle}`.
-// These let the control end show what a command is actually doing instead of
-// assuming it started, and stop one that is running.
-export const SIGNALING_TYPE_CODE_EXEC_CONTROL = 623;
-export const SIGNALING_TYPE_CODE_EXEC_STATE_REPLY = 624;
-export const SIGNALING_TYPE_CODE_EXEC_LIFECYCLE = 625;
-
-// Terminal AI copilot: the ask (control end → server), the notification-style
-// event stream (server → control end), and a cancel. Mirror
-// `SignalingType::TerminalCopilot{Ask,Event,Cancel}` (617/618/619).
-export const SIGNALING_TYPE_CODE_TERMINAL_COPILOT_ASK = 617;
-export const SIGNALING_TYPE_CODE_TERMINAL_COPILOT_EVENT = 618;
-export const SIGNALING_TYPE_CODE_TERMINAL_COPILOT_CANCEL = 619;
-
-// AI command completion: a non-streaming ask + single result. Mirror
-// `SignalingType::TerminalComplete{Ask,Result}` (620/621).
-export const SIGNALING_TYPE_CODE_TERMINAL_COMPLETE_ASK = 620;
-export const SIGNALING_TYPE_CODE_TERMINAL_COMPLETE_RESULT = 621;
+export const SIGNALING_TYPE_CODE_GET_SYSTEM_INFO = 10003;
+export const SIGNALING_TYPE_CODE_SYSTEM_INFO_RETRIEVED = 10004;
+export const SIGNALING_TYPE_CODE_LIST_FILES = 10005;
+export const SIGNALING_TYPE_CODE_DELETE_FILE = 10006;
+export const SIGNALING_TYPE_CODE_FILES_LISTED = 10015;
+export const SIGNALING_TYPE_CODE_FILE_DELETED = 10016;
 
 export const SIGNALING_TYPE_CODE_ERROR = -1;
-export const SIGNALING_TYPE_CODE_UNKNOWN_TYPE = -100;
+export const SIGNALING_TYPE_CODE_UNKNOWN = -100;

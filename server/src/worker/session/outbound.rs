@@ -54,11 +54,11 @@ pub(super) async fn dispatch_typed_signaling<T>(
 /// `Manager*Response`).
 ///
 /// Also accepts an `Option<&T>` body so empty-body requests
-/// (`ManagerSystemInfoRequest`) can
+/// (`GetSystemInfo`) can
 /// share this helper without serialising a synthetic placeholder.
 ///
 /// `connection_id` is `Option<String>` because retained non-file manager
-/// requests and `ListTerminal` can originate from an HTTP controller without
+/// requests and `ListTerminalCommands` can originate from an HTTP controller without
 /// a browser PC. Interactive file list and delete requests always provide a
 /// trusted controller connection and fail closed before reaching this helper.
 pub(super) async fn dispatch_typed_signaling_with_request_id<T>(
@@ -96,6 +96,29 @@ pub(super) async fn dispatch_typed_signaling_with_request_id<T>(
             "DeskSession handle_message error for typed {signaling_type:?}: {e}, \
              connection_id={connection_id:?}, request_id={request_id}",
         );
+        let response_type = match signaling_type {
+            SignalingType::SetPrivateScreenVisibility => {
+                Some(SignalingType::PrivateScreenVisibilitySet)
+            }
+            SignalingType::GetSystemInfo => Some(SignalingType::SystemInfoRetrieved),
+            SignalingType::ListFiles => Some(SignalingType::FilesListed),
+            SignalingType::DeleteFile => Some(SignalingType::FileDeleted),
+            SignalingType::StartTerminal => Some(SignalingType::TerminalStarted),
+            SignalingType::ListTerminalCommands => Some(SignalingType::TerminalCommandsListed),
+            _ => None,
+        };
+        if let Some(response_type) = response_type {
+            let _ = desk_session
+                .session
+                .send_error(
+                    &request_id,
+                    response_type,
+                    connection_id,
+                    e.to_error_code(),
+                    &e.to_string(),
+                )
+                .await;
+        }
     }
 }
 
@@ -170,7 +193,7 @@ pub(super) fn build_outbound_payload_from_desk_text(text: String) -> Option<Work
 /// the surrounding function getting unwieldy.
 pub(super) fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerToService> {
     match model.signaling_type {
-        SignalingType::PrivateScreenStateChanged => {
+        SignalingType::PrivateScreenStateChanged | SignalingType::PrivateScreenVisibilitySet => {
             let connection_id = model.to_connection_id.clone()?;
             let data = model
                 .get_data_with_type::<PrivateScreenStateChangedData>()
@@ -178,6 +201,12 @@ pub(super) fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerT
                 .flatten()?;
             Some(WorkerToService::PrivateScreenStateChanged(
                 PrivateScreenStateChangedPayload {
+                    request_id: if model.signaling_type == SignalingType::PrivateScreenVisibilitySet
+                    {
+                        Some(model.request_id.clone())
+                    } else {
+                        None
+                    },
                     connection_id,
                     data,
                 },
@@ -189,44 +218,42 @@ pub(super) fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerT
         // triggered manager requests carry `None`, so the typed
         // payload also carries `Option<String>` and the daemon
         // correlates the response by `request_id` alone.
-        SignalingType::ManagerSystemInfo => {
+        SignalingType::SystemInfoRetrieved => {
             let info = model.get_data_with_type::<SystemInfo>().ok().flatten()?;
-            Some(WorkerToService::ManagerSystemInfoResponse(
-                ManagerSystemInfoResponsePayload {
+            Some(WorkerToService::SystemInfoRetrieved(
+                SystemInfoRetrievedPayload {
                     request_id: model.request_id.clone(),
                     connection_id: model.to_connection_id.clone(),
                     info,
                 },
             ))
         }
-        SignalingType::ManagerFileList => {
+        SignalingType::FilesListed => {
             let response = model
                 .get_data_with_type::<FileListResponse>()
                 .ok()
                 .flatten()?;
-            Some(WorkerToService::ManagerFileListResponse(
-                ManagerFileListResponsePayload {
-                    request_id: model.request_id.clone(),
-                    connection_id: model.to_connection_id.clone(),
-                    response,
-                },
-            ))
+            Some(WorkerToService::FilesListed(FilesListedPayload {
+                request_id: model.request_id.clone(),
+                connection_id: model.to_connection_id.clone(),
+                response,
+            }))
         }
-        // The ManagerFileDelete response carries an empty body (`&()`), so a
+        // The DeleteFile response carries an empty body (`&()`), so a
         // successful round-trip omits signaling_data; `request_id` alone is
         // enough to correlate back to either an originating internal request or
         // the browser PC named by `to_connection_id`.
-        SignalingType::ManagerFileDelete => Some(WorkerToService::ManagerFileDeleteResponse(
-            ManagerResponseRefPayload {
+        SignalingType::FileDeleted => {
+            Some(WorkerToService::FileDeleted(ManagerResponseRefPayload {
                 request_id: model.request_id.clone(),
                 connection_id: model.to_connection_id.clone(),
-            },
-        )),
+            }))
+        }
         // Terminal-plane responses and notifications. The
         // worker's terminal handlers always set the target browser in
         // `to_connection_id` (either via `success_response` for
-        // `TerminalStarted` / `ListTerminal`, or via `new_request` for
-        // server-initiated `ReplyFromTerminal` / `TerminalClosed`).
+        // `TerminalStarted` / `ListTerminalCommands`, or via `new_request` for
+        // server-initiated `TerminalOutputProduced` / `TerminalClosed`).
         SignalingType::TerminalStarted => {
             let connection_id = model.to_connection_id.clone()?;
             Some(WorkerToService::TerminalStarted(TerminalStartedPayload {
@@ -240,23 +267,23 @@ pub(super) fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerT
                 connection_id,
             }))
         }
-        SignalingType::ReplyFromTerminal => {
+        SignalingType::TerminalOutputProduced => {
             let connection_id = model.to_connection_id.clone()?;
             let data = model
                 .get_data_with_type::<TerminalOutputData>()
                 .ok()
                 .flatten()?;
-            Some(WorkerToService::ReplyFromTerminal(
-                ReplyFromTerminalPayload {
+            Some(WorkerToService::TerminalOutputProduced(
+                TerminalOutputProducedPayload {
                     connection_id,
                     data,
                 },
             ))
         }
-        SignalingType::ListTerminal => {
+        SignalingType::TerminalCommandsListed => {
             let terminals = model.get_data_with_type::<TerminalList>().ok().flatten()?;
-            Some(WorkerToService::ListTerminalResponse(
-                ListTerminalResponsePayload {
+            Some(WorkerToService::TerminalCommandsListed(
+                TerminalCommandsListedPayload {
                     request_id: model.request_id.clone(),
                     connection_id: model.to_connection_id.clone(),
                     terminals,

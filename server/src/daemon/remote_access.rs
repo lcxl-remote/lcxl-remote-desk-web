@@ -471,7 +471,7 @@ impl RemoteAccessCoordinator {
 
     pub fn pending_central_request(
         &self,
-    ) -> Option<desk_signal_facade::model::remote_access::HostRemoteAccessLockRequest> {
+    ) -> Option<desk_signal_facade::model::remote_access::UpdateRemoteAccessLockData> {
         let state = self.gate.snapshot();
         if !state.central_sync_pending
             || (!state.durable && state.mode != RemoteAccessMode::RecoveryLocked)
@@ -486,7 +486,7 @@ impl RemoteAccessCoordinator {
             return None;
         }
         Some(
-            desk_signal_facade::model::remote_access::HostRemoteAccessLockRequest {
+            desk_signal_facade::model::remote_access::UpdateRemoteAccessLockData {
                 request_id: central_request_id(&state, lock_id.as_deref()),
                 lock_id,
                 state_version: state.state_version,
@@ -497,7 +497,7 @@ impl RemoteAccessCoordinator {
 
     pub async fn acknowledge_central(
         &self,
-        ack: &desk_signal_facade::model::remote_access::HostRemoteAccessLockAck,
+        ack: &desk_signal_facade::model::remote_access::RemoteAccessLockUpdatedData,
     ) -> Result<bool> {
         let _transition = self.transition.lock().await;
         let current = self.gate.snapshot();
@@ -683,13 +683,13 @@ impl RemoteAccessCoordinator {
 
     fn enqueue_peer_eviction(&self, target_connection_id: &str) {
         let operation_id = uuid::Uuid::new_v4().to_string();
-        let payload = desk_signal_facade::model::remote_access::TerminateRemotePeerRequest {
+        let payload = desk_signal_facade::model::remote_access::TerminateRemotePeerData {
             operation_id: operation_id.clone(),
             target_connection_id: target_connection_id.to_string(),
         };
         let frame = desk_signal_facade::model::signal::SignalingModel::new(
             &operation_id,
-            desk_signal_facade::model::signal::SignalingType::TerminateRemotePeerRequest,
+            desk_signal_facade::model::signal::SignalingType::TerminateRemotePeer,
             None,
             None,
             serde_json::to_value(payload).ok(),
@@ -960,7 +960,7 @@ mod tests {
         assert_eq!(store.load_or_initialize(), unlocked);
 
         let request = coordinator.pending_central_request().unwrap();
-        let unlock_ack = desk_signal_facade::model::remote_access::HostRemoteAccessLockAck {
+        let unlock_ack = desk_signal_facade::model::remote_access::RemoteAccessLockUpdatedData {
             request_id: request.request_id.clone(),
             lock_id: request.lock_id.clone(),
             state_version: request.state_version,
@@ -1030,7 +1030,7 @@ mod tests {
         let request = coordinator.pending_central_request().unwrap();
         assert!(!request.locked);
         assert!(request.lock_id.is_none());
-        let ack = desk_signal_facade::model::remote_access::HostRemoteAccessLockAck {
+        let ack = desk_signal_facade::model::remote_access::RemoteAccessLockUpdatedData {
             request_id: request.request_id,
             lock_id: None,
             state_version: 9,
@@ -1055,7 +1055,7 @@ mod tests {
         let coordinator = coordinator(store.clone(), gate.clone());
         coordinator.unlock(0).await.unwrap();
         let first_request = coordinator.pending_central_request().unwrap();
-        let ack = desk_signal_facade::model::remote_access::HostRemoteAccessLockAck {
+        let ack = desk_signal_facade::model::remote_access::RemoteAccessLockUpdatedData {
             request_id: first_request.request_id,
             lock_id: Some("central-lock".into()),
             state_version: 12,
@@ -1074,7 +1074,7 @@ mod tests {
         let second_request = coordinator.pending_central_request().unwrap();
         assert!(!second_request.locked);
         assert_eq!(second_request.lock_id.as_deref(), Some("central-lock"));
-        let synced_ack = desk_signal_facade::model::remote_access::HostRemoteAccessLockAck {
+        let synced_ack = desk_signal_facade::model::remote_access::RemoteAccessLockUpdatedData {
             request_id: second_request.request_id,
             lock_id: Some("central-lock".into()),
             state_version: second_request.state_version,

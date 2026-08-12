@@ -90,28 +90,28 @@ pub(super) fn make_change_display_settings_model(
 ///
 /// The router swallows `ChangeDisplaySettings` (dead enum),
 /// `PrivateScreenStateChanged` (worker → browser only), and
-/// `AudioPlaybackError` (dead in daemon-worker mode) as
+/// `AudioPlaybackFailed` (dead in daemon-worker mode) as
 /// daemon-emitted / dead variants that must never reach the worker.
 #[tokio::test]
 pub(super) async fn route_swallows_daemon_emitted_variants() {
     let ctx = make_ctx().await;
     for t in [
         SignalingType::Answer,
-        SignalingType::Init,
-        SignalingType::AcceptControl,
-        SignalingType::DenyControl,
+        SignalingType::RemoteAccessInitialized,
+        SignalingType::ControlAccepted,
+        SignalingType::ControlDenied,
         SignalingType::PrivateScreenStateChanged,
-        SignalingType::AudioPlaybackError,
+        SignalingType::AudioPlaybackFailed,
         SignalingType::MediaPipelineStateChanged,
-        SignalingType::ManagerSystemStatue,
-        SignalingType::ReplyFromTerminal,
+        SignalingType::SystemInfoRetrieved,
+        SignalingType::TerminalOutputProduced,
         SignalingType::TerminalStarted,
         SignalingType::TerminalClosed,
         SignalingType::DesktopSwitching,
         SignalingType::DesktopReady,
         SignalingType::FetchConnections,
-        SignalingType::ConnectionList,
-        SignalingType::Heartbeat,
+        SignalingType::ConnectionsFetched,
+        SignalingType::SendHeartbeat,
         SignalingType::Error,
         SignalingType::Unknown,
     ] {
@@ -120,18 +120,18 @@ pub(super) async fn route_swallows_daemon_emitted_variants() {
     }
 }
 
-/// Pin behaviour: a stray inbound `AcceptControl` (which would
+/// Pin behaviour: a stray inbound `ControlAccepted` (which would
 /// be a protocol error from the browser, since the daemon emits
-/// AcceptControl outbound) is swallowed — `route` returns Ok
+/// `ControlAccepted` outbound) is swallowed — `route` returns Ok
 /// so the message never reaches the worker. The SignalingMessage
-/// bridge is gone, so the only way for an inbound `AcceptControl`
+/// bridge is gone, so the only way for an inbound `ControlAccepted`
 /// to leak through would be a new regression in `route()`'s match.
 #[tokio::test]
 pub(super) async fn route_inbound_accept_control_is_swallowed_not_bridged() {
     let ctx = make_ctx().await;
     let model = SignalingModel::new(
         "stray-accept",
-        SignalingType::AcceptControl,
+        SignalingType::ControlAccepted,
         Some("conn-z".to_string()),
         None,
         None,
@@ -139,7 +139,7 @@ pub(super) async fn route_inbound_accept_control_is_swallowed_not_bridged() {
     );
     route(&model, &ctx)
         .await
-        .expect("AcceptControl inbound must be swallowed, not surfaced as error");
+        .expect("ControlAccepted inbound must be swallowed, not surfaced as error");
 }
 
 #[tokio::test]
@@ -155,7 +155,10 @@ pub(super) async fn retry_media_pipeline_is_daemon_owned_and_reports_unknown_con
     );
     route(&model, &ctx).await.expect("retry route must respond");
     let response = read_response(&mut rx);
-    assert_eq!(response.signaling_type, SignalingType::RetryMediaPipeline);
+    assert_eq!(
+        response.signaling_type,
+        SignalingType::MediaPipelineRetryCompleted
+    );
     assert_eq!(
         response.response_state.expect("error state").error_code,
         DeskErrorCode::CLIENT_ID_NOT_FOUND.code(),
@@ -171,7 +174,7 @@ pub(super) async fn route_terminal_requests_handled_inline_not_bridged() {
     let ctx = make_ctx().await;
     // Terminal frames are connection-scoped capability frames: door1 only
     // admits them once the connection has an admission (here an owner one),
-    // matching production where they follow the session's `RequestRemote`.
+    // matching production where they follow the session's `RequestRemoteAccess`.
     ctx.pc_registry
         .record_admission("conn-term", pc_manager::Admission::OwnerFull)
         .await;
@@ -186,7 +189,7 @@ pub(super) async fn route_terminal_requests_handled_inline_not_bridged() {
             .unwrap(),
         ),
         (
-            SignalingType::SendDataToTerminal,
+            SignalingType::SendTerminalInput,
             serde_json::to_value(desk_signal_facade::model::terminal::TerminalInputData {
                 content: "echo hi\n".to_string(),
             })
@@ -201,7 +204,7 @@ pub(super) async fn route_terminal_requests_handled_inline_not_bridged() {
             .unwrap(),
         ),
         (SignalingType::CloseTerminal, serde_json::Value::Null),
-        (SignalingType::ListTerminal, serde_json::Value::Null),
+        (SignalingType::ListTerminalCommands, serde_json::Value::Null),
     ];
     for (t, body) in cases {
         let signaling_data = if body.is_null() { None } else { Some(body) };
@@ -264,7 +267,7 @@ pub(super) async fn route_start_terminal_owner_stamp_records_admission_and_marks
     assert!(ctx.pc_registry.is_terminal_connection("term-x").await);
     assert!(matches!(
         worker_rx.try_recv(),
-        Ok(ServiceToWorker::StartTerminalRequest(_))
+        Ok(ServiceToWorker::StartTerminal(_))
     ));
     // A bare frame (owner-only relay, no stamp) admits as owner the same way.
     let mut ctx2 = make_ctx().await;
@@ -278,7 +281,7 @@ pub(super) async fn route_start_terminal_owner_stamp_records_admission_and_marks
     ));
     assert!(matches!(
         worker_rx2.try_recv(),
-        Ok(ServiceToWorker::StartTerminalRequest(_))
+        Ok(ServiceToWorker::StartTerminal(_))
     ));
 }
 
@@ -364,10 +367,10 @@ pub(super) async fn route_terminal_request_without_connection_id_is_noop() {
     let ctx = make_ctx().await;
     for t in [
         SignalingType::StartTerminal,
-        SignalingType::SendDataToTerminal,
+        SignalingType::SendTerminalInput,
         SignalingType::ResizeTerminal,
         SignalingType::CloseTerminal,
-        SignalingType::ListTerminal,
+        SignalingType::ListTerminalCommands,
     ] {
         let model = SignalingModel::new("req-noid", t, None, None, None, None);
         assert!(route(&model, &ctx).await.is_ok(), "{t:?}");
@@ -376,7 +379,7 @@ pub(super) async fn route_terminal_request_without_connection_id_is_noop() {
 
 /// Malformed `StartTerminal` body (not a `StartTerminalSession`
 /// JSON object) must not crash the router — it should log + drop.
-/// The `SendDataToTerminal` / `ResizeTerminal` analogues take the
+/// The `SendTerminalInput` / `ResizeTerminal` analogues take the
 /// `get_data_with_type` path which already returns `Ok(None)` on
 /// missing data; this case verifies a parse-failure surface.
 #[tokio::test]
@@ -406,9 +409,9 @@ pub(super) async fn route_start_terminal_with_invalid_payload_is_dropped() {
 pub(super) async fn route_manager_requests_handled_inline_not_bridged() {
     let ctx = make_ctx().await;
     let cases = [
-        (SignalingType::ManagerSystemInfo, serde_json::Value::Null),
+        (SignalingType::GetSystemInfo, serde_json::Value::Null),
         (
-            SignalingType::ManagerFileList,
+            SignalingType::ListFiles,
             serde_json::to_value(desk_signal_facade::model::files::FileListParams {
                 path: "C:\\".to_string(),
                 page_no: 1,
@@ -418,7 +421,7 @@ pub(super) async fn route_manager_requests_handled_inline_not_bridged() {
             .unwrap(),
         ),
         (
-            SignalingType::ManagerFileDelete,
+            SignalingType::DeleteFile,
             serde_json::to_value(desk_signal_facade::model::files::DeleteFileRequest {
                 file_path: "C:\\old.txt".to_string(),
                 delete_permanently: Some(false),
@@ -447,7 +450,7 @@ pub(super) async fn route_manager_requests_handled_inline_not_bridged() {
 #[tokio::test]
 pub(super) async fn route_non_file_manager_request_without_connection_id_forwards() {
     let ctx = make_ctx().await;
-    let t = SignalingType::ManagerSystemInfo;
+    let t = SignalingType::GetSystemInfo;
     let model = SignalingModel::new("req-no-conn", t, None, None, None, None);
     assert!(
         route(&model, &ctx).await.is_ok(),
@@ -467,7 +470,7 @@ pub(super) async fn route_manager_file_list_without_connection_id_is_dropped() {
     };
     let model = SignalingModel::new(
         "req-fl-no-conn",
-        SignalingType::ManagerFileList,
+        SignalingType::ListFiles,
         None,
         None,
         Some(serde_json::to_value(&params).unwrap()),
@@ -476,7 +479,7 @@ pub(super) async fn route_manager_file_list_without_connection_id_is_dropped() {
     assert!(route(&model, &ctx).await.is_ok());
 }
 
-/// `ListTerminal` is dispatched by
+/// `ListTerminalCommands` is dispatched by
 /// `signal-facade::controller::terminal::list_terminal` (REST GET)
 /// without a `from_connection_id`. The router must forward it.
 #[tokio::test]
@@ -484,7 +487,7 @@ pub(super) async fn route_list_terminal_without_connection_id_forwards() {
     let ctx = make_ctx().await;
     let model = SignalingModel::new(
         "req-list-no-conn",
-        SignalingType::ListTerminal,
+        SignalingType::ListTerminalCommands,
         None,
         None,
         None,
@@ -493,7 +496,7 @@ pub(super) async fn route_list_terminal_without_connection_id_forwards() {
     assert!(route(&model, &ctx).await.is_ok());
 }
 
-/// Malformed manager request bodies (e.g. `ManagerFileList` with
+/// Malformed manager request bodies (e.g. `ListFiles` with
 /// non-`FileListParams` JSON) must not crash the router — they
 /// should log + drop.
 #[tokio::test]
@@ -506,7 +509,7 @@ pub(super) async fn route_manager_file_list_with_invalid_payload_is_dropped() {
         .await;
     let model = SignalingModel::new(
         "req-fl-bad",
-        SignalingType::ManagerFileList,
+        SignalingType::ListFiles,
         Some("conn-fl".to_string()),
         None,
         Some(serde_json::json!("not file list params")),
@@ -515,22 +518,23 @@ pub(super) async fn route_manager_file_list_with_invalid_payload_is_dropped() {
     assert!(route(&model, &ctx).await.is_ok());
 }
 
-/// `EnablePrivateScreen` is handled inline by the router
-/// (typed [`ServiceToWorker::EnablePrivateScreen`] IPC). With no
+/// `SetPrivateScreenVisibility` is handled inline by the router
+/// (typed [`ServiceToWorker::SetPrivateScreenVisibility`] IPC). With no
 /// active worker the typed send is logged but the route call
 /// itself still succeeds.
 #[tokio::test]
 pub(super) async fn route_enable_private_screen_handled_inline_not_bridged() {
     let ctx = make_ctx().await;
-    // EnablePrivateScreen is a connection-scoped capability frame — admit the
+    // SetPrivateScreenVisibility is a connection-scoped capability frame — admit the
     // connection so door1 passes it to the inline handler.
     ctx.pc_registry
         .record_admission("conn-priv", pc_manager::Admission::OwnerFull)
         .await;
-    let data = desk_signal_facade::model::private_screen::EnablePrivateScreenData { enable: true };
+    let data =
+        desk_signal_facade::model::private_screen::SetPrivateScreenVisibilityData { visible: true };
     let model = SignalingModel::new(
         "r-eps",
-        SignalingType::EnablePrivateScreen,
+        SignalingType::SetPrivateScreenVisibility,
         Some("conn-priv".to_string()),
         None,
         Some(serde_json::to_value(&data).unwrap()),
@@ -539,16 +543,18 @@ pub(super) async fn route_enable_private_screen_handled_inline_not_bridged() {
     assert!(route(&model, &ctx).await.is_ok());
 }
 
-/// `EnablePrivateScreen` arriving without a `from_connection_id`
+/// `SetPrivateScreenVisibility` arriving without a `from_connection_id`
 /// is a malformed message — daemon logs and drops, no panic, no
 /// IPC send.
 #[tokio::test]
 pub(super) async fn route_enable_private_screen_without_connection_id_is_noop() {
     let ctx = make_ctx().await;
-    let data = desk_signal_facade::model::private_screen::EnablePrivateScreenData { enable: false };
+    let data = desk_signal_facade::model::private_screen::SetPrivateScreenVisibilityData {
+        visible: false,
+    };
     let model = SignalingModel::new(
         "r-eps-noid",
-        SignalingType::EnablePrivateScreen,
+        SignalingType::SetPrivateScreenVisibility,
         None,
         None,
         Some(serde_json::to_value(&data).unwrap()),
@@ -742,16 +748,16 @@ pub(super) async fn route_update_desk_settings_with_invalid_payload_is_dropped()
     assert!(route(&model, &ctx).await.is_ok());
 }
 
-/// `CloseControl` against an empty registry doesn't error — the
+/// `CloseRemoteSession` against an empty registry doesn't error — the
 /// daemon logs a warning and treats it as a no-op so a stale
-/// CloseControl after a previous PC dispose does not surface as
+/// close after a previous PC dispose does not surface as
 /// a handler error to the caller.
 #[tokio::test]
-pub(super) async fn route_close_control_empty_registry_is_ok() {
+pub(super) async fn route_close_remote_session_empty_registry_is_ok() {
     let ctx = make_ctx().await;
     let model = SignalingModel::new(
         "r",
-        SignalingType::CloseControl,
+        SignalingType::CloseRemoteSession,
         Some("conn-x".to_string()),
         None,
         None,
@@ -797,7 +803,7 @@ pub(super) async fn route_returns_error_when_supervisor_is_none() {
     );
     assert_eq!(
         resp.signaling_type as i32,
-        SignalingType::ChangeDisplaySettings as i32,
+        SignalingType::DisplaySettingsChanged as i32,
     );
     assert_eq!(resp.request_id, "req-1");
 }

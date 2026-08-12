@@ -20,7 +20,7 @@ use desk_ipc_protocol::message::{FileManagerOpenedPayload, WorkerToService};
 use desk_server_user::model::CurrentUser;
 use desk_signal_facade::error::DeskSignalFacadeError;
 use desk_signal_facade::model::private_screen::{
-    EnablePrivateScreenData, PrivateScreenStateChangedData,
+    PrivateScreenStateChangedData, SetPrivateScreenVisibilityData,
 };
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_signal_facade::model::signal::{PeerSignalingSender, SignalingModel, SignalingType};
@@ -216,7 +216,7 @@ pub(crate) async fn resolve_mdns_host(host: &str) -> Option<IpAddr> {
 /// Used by the worker IPC loop ([`crate::worker::session::WorkerSession`])
 /// to dispatch typed-IPC requests forwarded by the daemon for
 /// worker-owned `SignalingType`s. The PeerConnection, SDP/ICE handling,
-/// `RequireControl` / `CloseControl` and all media capture live in
+/// `RequireControl` / `CloseRemoteSession` and all media capture live in
 /// `daemon::pc_manager` instead — see that module for the daemon-side
 /// counterpart.
 pub struct DeskSession {
@@ -294,18 +294,32 @@ impl DeskSession {
                     match state_rx.recv().await {
                         Ok(HostControlEvent::PrivateScreenVisibilityChanged {
                             connection_id,
+                            request_id,
                             visible,
+                            is_supported,
+                            error_msg,
                         }) => {
                             let data = PrivateScreenStateChangedData {
                                 visible,
-                                is_supported: true,
-                                error_msg: None,
+                                is_supported,
+                                error_msg,
                             };
-                            if let Ok(model) = SignalingModel::new_request(
-                                SignalingType::PrivateScreenStateChanged,
-                                Some(connection_id),
-                                Some(&data),
-                            ) && let Ok(text) = serde_json::to_string(&model)
+                            let model = match request_id {
+                                Some(request_id) => SignalingModel::success_response(
+                                    &request_id,
+                                    SignalingType::PrivateScreenVisibilitySet,
+                                    None,
+                                    Some(connection_id),
+                                    Some(&data),
+                                ),
+                                None => SignalingModel::new_request(
+                                    SignalingType::PrivateScreenStateChanged,
+                                    Some(connection_id),
+                                    Some(&data),
+                                ),
+                            };
+                            if let Ok(model) = model
+                                && let Ok(text) = serde_json::to_string(&model)
                             {
                                 let _ = session_clone.sender.send(DeskSessionMessage::Text(
                                     bytestring::ByteString::from(text),
@@ -506,9 +520,9 @@ impl DeskSession {
     }
 
     /// Dispatch a worker-owned signaling message produced by the daemon's
-    /// typed-IPC fan-out. Daemon-owned types (`RequestRemote`, `Offer`,
-    /// `Answer`, `Canid`, `RequireControl`, `CloseControl`,
-    /// `AcceptControl`, `DenyControl`, `AudioPlaybackError`) never reach
+    /// typed-IPC fan-out. Daemon-owned types (`RequestRemoteAccess`, `Offer`,
+    /// `Answer`, `IceCandidate`, `RequireControl`, `CloseRemoteSession`,
+    /// `ControlAccepted`, `ControlDenied`, `AudioPlaybackFailed`) never reach
     /// this dispatcher — `daemon::signaling_router` handles
     /// them inline against the daemon-held PC and never forwards them
     /// through the worker IPC loop.
@@ -527,12 +541,12 @@ impl DeskSession {
                 // ready hook.
                 let _ = signaling_model;
             }
-            SignalingType::EnablePrivateScreen => {
+            SignalingType::SetPrivateScreenVisibility => {
                 let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
                 if let Some(data) =
-                    signaling_model.get_data_with_type::<EnablePrivateScreenData>()?
+                    signaling_model.get_data_with_type::<SetPrivateScreenVisibilityData>()?
                 {
-                    if data.enable {
+                    if data.visible {
                         let private_screen = self
                             .policy
                             .capability(SecurityPermissionType::PrivateScreen);
@@ -569,7 +583,7 @@ impl DeskSession {
                             self.session
                                 .send_error(
                                     &signaling_model.request_id,
-                                    signaling_model.signaling_type,
+                                    SignalingType::PrivateScreenVisibilitySet,
                                     Some(from_connection_id.to_string()),
                                     DeskErrorCode::PERMISSION_ERROR,
                                     "Private screen access denied",
@@ -579,21 +593,23 @@ impl DeskSession {
                         }
                     }
 
-                    let _ = self
-                        .host_control_helper
-                        .enable_private_screen(from_connection_id, data.enable);
+                    let _ = self.host_control_helper.enable_private_screen(
+                        from_connection_id,
+                        &signaling_model.request_id,
+                        data.visible,
+                    );
                 }
             }
-            SignalingType::ManagerFileList => {
+            SignalingType::ListFiles => {
                 handle_manager_file_list(self, signaling_model).await?;
             }
-            SignalingType::ManagerFileDelete => {
+            SignalingType::DeleteFile => {
                 handle_manager_file_delete(self, signaling_model).await?;
             }
             SignalingType::StartTerminal => {
                 handle_manager_terminal_start(self, signaling_model).await?;
             }
-            SignalingType::SendDataToTerminal => {
+            SignalingType::SendTerminalInput => {
                 handle_manager_terminal_data(self, signaling_model).await?;
             }
             SignalingType::ResizeTerminal => {
@@ -602,10 +618,10 @@ impl DeskSession {
             SignalingType::CloseTerminal => {
                 handle_manager_terminal_close(self, signaling_model).await?;
             }
-            SignalingType::ListTerminal => {
+            SignalingType::ListTerminalCommands => {
                 handle_list_terminals(self, signaling_model).await?;
             }
-            SignalingType::ManagerSystemInfo => {
+            SignalingType::GetSystemInfo => {
                 let mut sys = sysinfo::System::new_all();
                 sys.refresh_all();
                 let mut system_info = crate::model::info::SystemInfo::from(&sys);
@@ -621,7 +637,7 @@ impl DeskSession {
                 self.session
                     .send_response(
                         &signaling_model.request_id,
-                        SignalingType::ManagerSystemInfo,
+                        SignalingType::SystemInfoRetrieved,
                         signaling_model.from_connection_id.clone(),
                         &facade_info,
                     )
@@ -649,7 +665,7 @@ impl DeskSession {
 /// (`asked == true`) AND control is already approved on the worker side.
 ///
 /// Critically returns `false` for the release path (`asked == false`) so
-/// `CloseControl` keeps clearing state: short-circuiting on release would
+/// `CloseRemoteSession` keeps clearing state: short-circuiting on release would
 /// silently turn a "release control" request into a no-op.
 pub fn should_short_circuit_control(asked: bool, currently_accepted: bool) -> bool {
     asked && currently_accepted
@@ -682,7 +698,7 @@ mod sender_tests {
         sender
             .send_response(
                 "req-42",
-                SignalingType::ManagerSystemInfo,
+                SignalingType::GetSystemInfo,
                 Some("conn-7".to_string()),
                 &serde_json::json!({"hello": "world"}),
             )
@@ -694,10 +710,7 @@ mod sender_tests {
         };
         let model: SignalingModel = serde_json::from_str(&text).expect("parse");
         assert_eq!(model.request_id, "req-42");
-        assert!(matches!(
-            model.signaling_type,
-            SignalingType::ManagerSystemInfo
-        ));
+        assert!(matches!(model.signaling_type, SignalingType::GetSystemInfo));
         assert_eq!(model.to_connection_id.as_deref(), Some("conn-7"));
         let state = model.response_state.expect("response_state");
         assert!(state.is_success());
@@ -713,7 +726,7 @@ mod sender_tests {
         sender
             .send_error(
                 "req-9",
-                SignalingType::EnablePrivateScreen,
+                SignalingType::SetPrivateScreenVisibility,
                 Some("conn-2".to_string()),
                 DeskErrorCode::PERMISSION_ERROR,
                 "denied",
@@ -727,7 +740,7 @@ mod sender_tests {
         let model: SignalingModel = serde_json::from_str(&text).expect("parse");
         assert!(matches!(
             model.signaling_type,
-            SignalingType::EnablePrivateScreen
+            SignalingType::SetPrivateScreenVisibility
         ));
         let state = model.response_state.expect("response_state");
         assert!(!state.is_success());
@@ -754,7 +767,7 @@ mod handle_request_control_tests {
     }
 
     /// Release path ⇒ MUST NOT short-circuit even when currently accepted.
-    /// Short-circuiting here would turn a CloseControl into a no-op and
+    /// Short-circuiting here would turn a CloseRemoteSession into a no-op and
     /// the worker would stay in `accept_control = true`.
     #[test]
     fn control_no_short_circuit_on_release_even_if_accepted() {

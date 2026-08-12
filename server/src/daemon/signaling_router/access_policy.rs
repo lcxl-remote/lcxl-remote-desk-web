@@ -7,21 +7,22 @@ pub(super) fn new_audit_event_id() -> String {
 
 /// Baseline session-establishment / control-plane frames that every session —
 /// even a fully capped grant / support session — may use. Deliberately minimal:
-/// session establishment (`RequestRemote` / `Offer` / `Answer` / `Canid`), the
-/// control plane (`RequireControl` / `CloseControl`), teardown
-/// (`ConnectionRemoved`), `Heartbeat`, and the manager's `SupportCodeIssued`
+/// session establishment (`RequestRemoteAccess` / `Offer` / `Answer` / `IceCandidate`), the
+/// control plane (`RequireControl` / `ReleaseControl`), teardown
+/// (`CloseRemoteSession` / `ConnectionRemoved`), `SendHeartbeat`, and the manager's `SupportCodeIssued`
 /// host-inbound notification (display + arm TTL; triggers no privileged action).
 pub(super) fn is_baseline_signaling_type(t: SignalingType) -> bool {
     matches!(
         t,
-        SignalingType::RequestRemote
+        SignalingType::RequestRemoteAccess
             | SignalingType::Offer
             | SignalingType::Answer
-            | SignalingType::Canid
+            | SignalingType::IceCandidate
             | SignalingType::RequireControl
-            | SignalingType::CloseControl
+            | SignalingType::ReleaseControl
+            | SignalingType::CloseRemoteSession
             | SignalingType::ConnectionRemoved
-            | SignalingType::Heartbeat
+            | SignalingType::SendHeartbeat
             | SignalingType::SupportCodeIssued
             | SignalingType::RetryMediaPipeline
     )
@@ -36,25 +37,25 @@ pub(super) fn is_baseline_signaling_type(t: SignalingType) -> bool {
 /// would fall back to the host global (fail-open). door1 therefore denies these for
 /// an un-admitted connection.
 ///
-/// `StartTerminal` is deliberately **excluded**: like `RequestRemote`, it is the
+/// `StartTerminal` is deliberately **excluded**: like `RequestRemoteAccess`, it is the
 /// admission-*establishing* frame for the terminal WS (a distinct connection that
-/// never does a `RequestRemote`). Its own source-gate (`gate_start_terminal_frame`)
+/// never does a `RequestRemoteAccess`). Its own source-gate (`gate_start_terminal_frame`)
 /// requires and validates a capability stamp on the trusted-central link, and
 /// `handle_start_terminal_inbound` records the admission + ceiling from that stamp —
 /// so it must be allowed to reach the handler on an un-admitted connection, exactly
-/// as `RequestRemote` is. The remaining terminal I/O frames stay gated here and pass
+/// as `RequestRemoteAccess` is. The remaining terminal I/O frames stay gated here and pass
 /// once `StartTerminal` has established the admission.
 pub(super) fn is_connection_scoped_capability_frame(t: SignalingType) -> bool {
     use SignalingType::*;
     matches!(
         t,
-        SendDataToTerminal
+        SendTerminalInput
             | ResizeTerminal
             | CloseTerminal
-            | ListTerminal
-            | ManagerFileList
-            | ManagerFileDelete
-            | EnablePrivateScreen
+            | ListTerminalCommands
+            | ListFiles
+            | DeleteFile
+            | SetPrivateScreenVisibility
     )
 }
 
@@ -75,14 +76,13 @@ pub(super) fn capped_session_permits(t: SignalingType, ceiling: &SecuritySetting
     }
     match t {
         // Terminal family — the whole terminal UI including enumeration.
-        StartTerminal | SendDataToTerminal | ResizeTerminal | CloseTerminal | ListTerminal => {
-            ceiling.allow_terminal != Some(false)
-        }
-        ManagerFileList => ceiling.allow_file_browse != Some(false),
-        ManagerFileDelete => {
+        StartTerminal | SendTerminalInput | ResizeTerminal | CloseTerminal
+        | ListTerminalCommands => ceiling.allow_terminal != Some(false),
+        ListFiles => ceiling.allow_file_browse != Some(false),
+        DeleteFile => {
             ceiling.allow_file_browse != Some(false) && ceiling.allow_file_delete != Some(false)
         }
-        EnablePrivateScreen => ceiling.allow_private_screen != Some(false),
+        SetPrivateScreenVisibility => ceiling.allow_private_screen != Some(false),
         _ => false,
     }
 }
@@ -90,7 +90,7 @@ pub(super) fn capped_session_permits(t: SignalingType, ceiling: &SecuritySetting
 /// Classification of a `from_connection_id` for the door1 gate, derived from its
 /// **admission record** (kept for the whole signaling connection, independent of
 /// the PC lifecycle) rather than the PC's live state — so a capped connection
-/// that dropped its PC via `CloseControl` is still classified as capped.
+/// that dropped its PC via `CloseRemoteSession` is still classified as capped.
 pub(super) enum ConnectionGate {
     /// Admitted as a full owner session — no capability ceiling.
     KnownOwnerFull,
@@ -104,8 +104,8 @@ pub(super) enum ConnectionGate {
     /// manufacture this classification.
     ServerInternal,
     /// A WS connection carrying a real stamped id but no admission record: it
-    /// never did an authorized `RequestRemote` on this instance (a management-only
-    /// connection, or a session before its `RequestRemote`), or the id is spoofed.
+    /// never did an authorized `RequestRemoteAccess` on this instance (a management-only
+    /// connection, or a session before its `RequestRemoteAccess`), or the id is spoofed.
     /// door1 is fail-closed for connection-scoped capability frames here (see
     /// [`door1_permits`]) — a capped session that has not yet been admitted must
     /// not slip a capability frame through the pre-admission window where the
@@ -133,7 +133,7 @@ pub(super) async fn classify_connection(
 /// The door1 decision for an inbound frame. A session admitted as owner passes
 /// everything (route() drops non-inbound types anyway); a capped session (a
 /// redeemed grant carrying an `access_ceiling`, including a temporary-support
-/// session) runs the capability matrix (still capped after a `CloseControl` PC
+/// session) runs the capability matrix (still capped after a `CloseRemoteSession` PC
 /// teardown, since the admission outlives the PC).
 ///
 /// A server-internal frame passes because its producing service already ran
@@ -149,10 +149,9 @@ pub(super) fn door1_permits(gate: &ConnectionGate, t: SignalingType) -> bool {
     match gate {
         ConnectionGate::KnownOwnerFull => true,
         ConnectionGate::KnownCapped(ceiling) => capped_session_permits(t, ceiling),
-        ConnectionGate::ServerInternal => !matches!(
-            t,
-            SignalingType::ManagerFileList | SignalingType::ManagerFileDelete
-        ),
+        ConnectionGate::ServerInternal => {
+            !matches!(t, SignalingType::ListFiles | SignalingType::DeleteFile)
+        }
         ConnectionGate::UnadmittedConnection => !is_connection_scoped_capability_frame(t),
     }
 }
@@ -163,7 +162,7 @@ pub(super) fn audit_now() -> String {
 }
 
 /// Revoke every session-scoped exec approval held by the connection that sent
-/// `model`. Called when the connection releases control (`CloseControl`) or ends
+/// `model`. Called when the connection releases control (`ReleaseControl`) or ends
 /// (`ConnectionRemoved`); a no-op when the connection had no grants.
 pub(super) fn revoke_session_approvals(ctx: &RouterContext, model: &SignalingModel) {
     if let Some(conn) = model.from_connection_id.as_deref() {
@@ -190,10 +189,11 @@ pub(super) fn risk_str(risk: desk_agent_protocol::RiskLevel) -> &'static str {
 ///
 /// Each `SignalingType` is exhaustively dispatched: PC / SDP / ICE /
 /// SignalingState types run inline against `ctx.pc_registry`;
-/// worker-bound types (terminal, manager queries, EnablePrivateScreen,
+/// worker-bound types (terminal, manager queries, SetPrivateScreenVisibility,
 /// UpdateDeskSettings) are shipped to the worker via dedicated
 /// `ServiceToWorker::*` typed IPC variants; daemon-emitted notifications
-/// and dead-enum variants (`Answer`, `Init`, `Heartbeat`, `Error`,
+/// and outbound/metadata variants (`Answer`, `RemoteAccessInitialized`,
+/// `HeartbeatAcknowledged`, `Error`,
 /// `Unknown`, ...) are trace-logged + dropped. There is no fallback
 /// path because the typed IPC path has no `SignalingMessage` bridge.
 pub(super) async fn promote_desktop_resources(

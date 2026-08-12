@@ -7,27 +7,24 @@ use super::*;
 #[test]
 fn owner_plane_frames_are_classified_for_code_session_denial() {
     use SignalingType::*;
-    for t in [
-        ManagerSystemInfo,
-        ManagerSystemStatue,
-        ChangeDisplaySettings,
-    ] {
+    for t in [GetSystemInfo, ChangeDisplaySettings] {
         assert!(
             is_owner_plane_management_frame(t),
             "{t:?} must be owner-plane (denied for a code-session)"
         );
     }
     for t in [
-        RequestRemote,
+        RequestRemoteAccess,
         Offer,
         Answer,
         RequireControl,
-        CloseControl,
+        ReleaseControl,
+        CloseRemoteSession,
         StartTerminal,
-        ListTerminal,
-        ManagerFileList,
-        ManagerFileDelete,
-        EnablePrivateScreen,
+        ListTerminalCommands,
+        ListFiles,
+        DeleteFile,
+        SetPrivateScreenVisibility,
         UpdateDeskSettings,
         RetryMediaPipeline,
     ] {
@@ -83,14 +80,17 @@ fn signaling_type_connection_removed_wire_format_is_stable() {
 /// host → control relay branch, exactly like the copilot ask/event pair.
 #[test]
 fn terminal_complete_signaling_discriminants_are_stable() {
-    assert_eq!(SignalingType::TerminalCompleteAsk as i32, 620);
-    assert_eq!(SignalingType::TerminalCompleteResult as i32, 621);
+    assert_eq!(SignalingType::GenerateTerminalCompletions as i32, 620);
+    assert_eq!(SignalingType::TerminalCompletionsGenerated as i32, 621);
     assert_eq!(
-        serde_json::to_string(&SignalingType::TerminalCompleteAsk).unwrap(),
+        serde_json::to_string(&SignalingType::GenerateTerminalCompletions).unwrap(),
         "620"
     );
     let parsed: SignalingType = serde_json::from_str("621").unwrap();
-    assert!(matches!(parsed, SignalingType::TerminalCompleteResult));
+    assert!(matches!(
+        parsed,
+        SignalingType::TerminalCompletionsGenerated
+    ));
 }
 
 /// Empty map (no `Server`-type peers around) must skip the
@@ -227,7 +227,7 @@ async fn relay_or_not_found_not_found_falls_through() {
 fn frame(to: Option<&str>, is_response: bool) -> SignalingModel {
     SignalingModel::new(
         "req-1",
-        SignalingType::ListTerminal,
+        SignalingType::ListTerminalCommands,
         None,
         to.map(str::to_string),
         None,
@@ -235,7 +235,7 @@ fn frame(to: Option<&str>, is_response: bool) -> SignalingModel {
     )
 }
 
-/// A body-less response with no `to_connection_id` (e.g. a `ListTerminal`
+/// A body-less response with no `to_connection_id` (e.g. a `ListTerminalCommands`
 /// response the daemon broadcast to a non-owning upstream) is dropped, not
 /// surfaced as "To connection id can't be none".
 #[test]

@@ -58,9 +58,11 @@ pub(super) fn emit_error_response(
     code: DeskErrorCode,
     message: &str,
 ) {
+    let response_type =
+        response_type_for_request(model.signaling_type).unwrap_or(SignalingType::Error);
     match SignalingModel::error(
         &model.request_id,
-        model.signaling_type,
+        response_type,
         None,
         model.from_connection_id.clone(),
         code,
@@ -99,6 +101,7 @@ pub(super) fn emit_applied_response(
     height: u32,
     refresh_hz: u32,
 ) {
+    let response_type = SignalingType::DisplaySettingsChanged;
     let payload = ChangeDisplaySettingsPayload {
         width,
         height,
@@ -107,7 +110,7 @@ pub(super) fn emit_applied_response(
     };
     match SignalingModel::success_response(
         &model.request_id,
-        model.signaling_type,
+        response_type,
         None,
         model.from_connection_id.clone(),
         Some(&payload),
@@ -342,13 +345,13 @@ pub(super) async fn handle_change_display_settings_inbound(
     Ok(())
 }
 
-/// Parse the inbound `EnablePrivateScreen` payload and ship
-/// it to the worker as typed [`ServiceToWorker::EnablePrivateScreen`].
+/// Parse the inbound `SetPrivateScreenVisibility` payload and ship
+/// it to the worker as typed [`ServiceToWorker::SetPrivateScreenVisibility`].
 /// Replaces the legacy `SignalingMessage` opaque envelope.
 ///
 /// Parse / send failures are non-fatal for the WS connection — they
 /// only prevent the toggle from reaching the worker, which is logged.
-pub(super) async fn handle_enable_private_screen_inbound(
+pub(super) async fn handle_set_private_screen_visibility_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
@@ -356,34 +359,54 @@ pub(super) async fn handle_enable_private_screen_inbound(
         Some(id) => id.to_string(),
         None => {
             log::warn!(
-                "[router] EnablePrivateScreen missing from_connection_id; ignoring \
+                "[router] SetPrivateScreenVisibility missing from_connection_id \
                  (request_id={})",
                 model.request_id,
             );
-            return Ok(());
-        }
-    };
-    let data = match model.get_data::<EnablePrivateScreenData>() {
-        Ok(d) => d,
-        Err(e) => {
-            log::warn!(
-                "[router] EnablePrivateScreen payload parse failed for {from_connection_id}: \
-                 {e}; ignoring"
+            emit_error_response(
+                ctx,
+                model,
+                DeskErrorCode::INVALID_PARAMS,
+                "private screen request requires a source connection",
             );
             return Ok(());
         }
     };
-    let payload = EnablePrivateScreenPayload {
+    let data = match model.get_data::<SetPrivateScreenVisibilityData>() {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!(
+                "[router] SetPrivateScreenVisibility payload parse failed for \
+                 {from_connection_id}: {e}"
+            );
+            emit_error_response(
+                ctx,
+                model,
+                DeskErrorCode::INVALID_PARAMS,
+                &format!("bad SetPrivateScreenVisibility payload: {e}"),
+            );
+            return Ok(());
+        }
+    };
+    let payload = SetPrivateScreenVisibilityPayload {
+        request_id: model.request_id.clone(),
         connection_id: from_connection_id.clone(),
-        enable: data.enable,
+        visible: data.visible,
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::EnablePrivateScreen(payload))
+        .send_to_worker(ServiceToWorker::SetPrivateScreenVisibility(payload))
         .await
     {
         log::warn!(
-            "[router] failed to send typed EnablePrivateScreen for {from_connection_id}: {e}",
+            "[router] failed to send typed SetPrivateScreenVisibility for \
+             {from_connection_id}: {e}",
+        );
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::REMOTE_DESK_OFFLINE,
+            &format!("worker unavailable: {e}"),
         );
     }
     Ok(())

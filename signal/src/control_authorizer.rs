@@ -267,7 +267,7 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
             // the pending collection (if any) and never relay — the edge has no
             // diagnose task. Needs only the request id, so it is handled before
             // the relay pre-flight.
-            if model.signaling_type == SignalingType::DiagnoseCancel {
+            if model.signaling_type == SignalingType::CancelDiagnosis {
                 self.collect_pending.cancel(&model.request_id);
                 let cancelled = crate::agent_exec::global_agent_exec_pending()
                     .cancel_approvals_for_diagnosis(&actor.model.connection_id, &model.request_id);
@@ -281,14 +281,14 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
             }
             // A copilot cancel is consumed centrally (the copilot runs on signal,
             // not the edge); best-effort no-op, never relayed.
-            if model.signaling_type == SignalingType::TerminalCopilotCancel {
+            if model.signaling_type == SignalingType::CancelTerminalCopilot {
                 return ControlFrameOutcome::Handled;
             }
             // A signal-owned agentic exec parks its approval here. Consume only
             // when the request id and browser connection both match; otherwise
             // this is the ordinary browser-initiated ConfirmExec flow and still
             // relays to the host unchanged.
-            if model.signaling_type == SignalingType::ResolveExec {
+            if model.signaling_type == SignalingType::ResolveExecution {
                 if let Ok(data) = model.get_data::<ResolveExecData>()
                     && crate::agent_exec::global_agent_exec_pending()
                         .resolve(&actor.model.connection_id, &data)
@@ -364,10 +364,10 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                 // Acting on an already-authorized execution does not mint a new
                 // plan. The authenticated single-account owner may forward a
                 // cancel/query directly; the host answers from its durable ledger.
-                SignalingType::ExecControl => ControlFrameOutcome::Forward(model.clone()),
+                SignalingType::ControlExecution => ControlFrameOutcome::Forward(model.clone()),
                 // Single round-trip device frames: wrap with the decision and
                 // relay to the edge, which re-checks and enforces.
-                SignalingType::AgentRequest | SignalingType::ConfirmExec => {
+                SignalingType::InvokeAgentCapability | SignalingType::PreviewExecution => {
                     let expires_at = (chrono::Utc::now()
                         + chrono::Duration::seconds(AUTHZ_TTL_SECS))
                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -388,7 +388,7 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                 // question to the edge. The orchestration uses signal's own
                 // provider credentials, so the relay wrapper / audience are not
                 // used on this path.
-                SignalingType::Diagnose => {
+                SignalingType::DiagnoseDevice => {
                     let request = match model.get_data::<DiagnoseRequestData>() {
                         Ok(r) => r,
                         Err(e) => {
@@ -428,7 +428,7 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                 // dial is `!Send` and latency-sensitive, so it is spawned and the
                 // frame reported `Handled`. The relay wrapper / audience are not
                 // used on this path (the question is never relayed to the edge).
-                SignalingType::TerminalCompleteAsk => {
+                SignalingType::GenerateTerminalCompletions => {
                     let ask = match model
                         .get_data::<desk_agent_protocol::terminal_complete::TerminalCompleteAsk>()
                     {
@@ -449,7 +449,7 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                     ));
                     ControlFrameOutcome::Handled
                 }
-                SignalingType::TerminalCopilotAsk => {
+                SignalingType::AskTerminalCopilot => {
                     let ask = match model
                         .get_data::<desk_agent_protocol::terminal_copilot::TerminalCopilotAsk>()
                     {
@@ -493,7 +493,7 @@ mod tests {
         .unwrap();
         SignalingModel::new(
             request_id,
-            SignalingType::Diagnose,
+            SignalingType::DiagnoseDevice,
             Some("browser-1".to_string()),
             to.map(str::to_string),
             Some(data),
@@ -524,7 +524,7 @@ mod tests {
         .unwrap();
         SignalingModel::new(
             request_id,
-            SignalingType::ConfirmExec,
+            SignalingType::PreviewExecution,
             Some("browser-1".to_string()),
             to.map(str::to_string),
             Some(data),
@@ -683,7 +683,7 @@ mod tests {
             ControlFrameOutcome::Forward(frame) => frame,
             _ => panic!("expected a wrapped Forward outcome"),
         };
-        assert_eq!(frame.signaling_type, SignalingType::ConfirmExec);
+        assert_eq!(frame.signaling_type, SignalingType::PreviewExecution);
         assert_eq!(frame.request_id, "req-9");
         assert_eq!(frame.to_connection_id.as_deref(), Some("edge-1"));
         let wrapper: AuthorizedControlPayload<ConfirmExecData> =
@@ -714,7 +714,7 @@ mod tests {
         // A frame with no payload cannot be wrapped (nothing to authorize).
         let model = SignalingModel::new(
             "req-1",
-            SignalingType::AgentRequest,
+            SignalingType::InvokeAgentCapability,
             Some("browser-1".to_string()),
             Some("edge-1".to_string()),
             None,

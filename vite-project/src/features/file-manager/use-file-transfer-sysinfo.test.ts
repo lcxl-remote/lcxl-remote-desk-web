@@ -16,11 +16,12 @@ import { deskErrorCodeEnum } from '@/services/types';
 // from its own server: between them may sit a manager or a signaling server
 // whose startup mode describes neither the host nor anything the file manager
 // shows. The wire contract is what matters here — the request goes out as
-// `ManagerSystemInfo` (10003) and its answer is matched back by request id —
+// `GetSystemInfo` (10003) and its `SystemInfoRetrieved` response are matched by request id —
 // so that is what this asserts. One comprehensive `renderHook` test per file:
 // see the note in `file-transfer-test-harness.ts`.
 
-const MANAGER_SYSTEM_INFO = 10003;
+const GET_SYSTEM_INFO = 10003;
+const SYSTEM_INFO_RETRIEVED = 10004;
 
 describe('useFileTransfer host system info', () => {
     let saved: SignalingGlobals;
@@ -50,7 +51,7 @@ describe('useFileTransfer host system info', () => {
         const ws = StubWebSocket.instances[StubWebSocket.instances.length - 1];
         await flush();
 
-        const asked = ws.sent.map(parseSent).find(m => m.signaling_type === MANAGER_SYSTEM_INFO);
+        const asked = ws.sent.map(parseSent).find(m => m.signaling_type === GET_SYSTEM_INFO);
         expect(asked).toBeDefined();
         expect(asked.to_connection_id).toBe('desk-A');
         expect(asked.request_id).toBeTruthy();
@@ -59,7 +60,7 @@ describe('useFileTransfer host system info', () => {
         act(() => ws.onmessage?.({
             data: JSON.stringify({
                 request_id: asked.request_id,
-                signaling_type: MANAGER_SYSTEM_INFO,
+                signaling_type: SYSTEM_INFO_RETRIEVED,
                 signaling_data: { startup_mode: 'service-daemon', host_name: 'alice-pc' },
             }),
         }));
@@ -80,13 +81,13 @@ describe('useFileTransfer host system info', () => {
 
         const refused = ws.sent
             .map(parseSent)
-            .filter(m => m.signaling_type === MANAGER_SYSTEM_INFO)
+            .filter(m => m.signaling_type === GET_SYSTEM_INFO)
             .at(-1);
         expect(refused.request_id).not.toBe(asked.request_id);
         act(() => ws.onmessage?.({
             data: JSON.stringify({
                 request_id: refused.request_id,
-                signaling_type: MANAGER_SYSTEM_INFO,
+                signaling_type: SYSTEM_INFO_RETRIEVED,
                 response_state: {
                     error_code: deskErrorCodeEnum.PERMISSION_ERROR,
                     message: 'the target is not reachable',

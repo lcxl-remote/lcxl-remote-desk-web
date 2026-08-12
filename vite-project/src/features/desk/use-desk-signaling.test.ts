@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useDeskSignaling } from "./use-desk-signaling";
 import {
     SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
-    SIGNALING_TYPE_CODE_HEARTBEAT,
+    SIGNALING_TYPE_CODE_HEARTBEAT_ACKNOWLEDGED,
 } from "./constants";
 
 /**
@@ -353,7 +353,8 @@ describe("useDeskSignaling.subscribe (lossless delivery)", () => {
         act(() => {
             ws.onmessage?.({
                 data: JSON.stringify({
-                    signaling_type: SIGNALING_TYPE_CODE_HEARTBEAT,
+                    signaling_type: SIGNALING_TYPE_CODE_HEARTBEAT_ACKNOWLEDGED,
+                    request_id: "heartbeat-request-id",
                     signaling_data: null,
                 }),
             } as any);

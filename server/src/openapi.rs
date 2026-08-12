@@ -2,10 +2,10 @@ use desk_signal::controller::device_code::{
     DeviceCodeBatchDeleteParams, DeviceCodeItem, DeviceCodeListResult,
 };
 use desk_signal_facade::model::{
-    connection::ConnectionList,
+    connection::ConnectionsFetchedData,
     desk_settings::DeskSettings,
     media_pipeline::MediaPipelineStateData,
-    signal::{InitSignalingData, RequestRemoteModel, SignalingModel},
+    signal::{RemoteAccessInitializedData, RequestRemoteModel, SignalingModel},
     terminal::{TerminalInputData, TerminalOutputData, TerminalResizeData},
 };
 use desk_turn::model::{TurnInterface, TurnSettings};
@@ -27,12 +27,12 @@ use desk_input_injection::model::data_channel::{KeyboardEventData, MouseEventDat
 #[openapi(components(schemas(
     SignalingModel,
     RequestRemoteModel,
-    InitSignalingData,
+    RemoteAccessInitializedData,
     DeskSettings,
     KeyboardEventData,
     MouseEventData,
     SignalRequestControlData,
-    ConnectionList,
+    ConnectionsFetchedData,
     TerminalInputData,
     TerminalOutputData,
     TerminalResizeData,

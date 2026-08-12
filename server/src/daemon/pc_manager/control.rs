@@ -4,16 +4,14 @@ use super::*;
 
 /// Daemon side of `SignalingType::RequireControl`. Mirrors the
 /// worker-side `DeskSession::handle_request_control` but runs against
-/// the daemon-held PC. The browser sends this to either
-/// (a) request control + clipboard grants (`accept = true`) or (b)
-/// release them (`accept = false`); the daemon dispatches to the
+/// the daemon-held PC. The browser sends this only to request control
+/// and optional clipboard grants; the daemon dispatches to the
 /// host-control hub for user approval (subject to settings allow /
 /// remember bits), updates the per-connection [`SignalingState`], and
 /// emits the matching reply back through the outbound sink:
 ///
-/// - `accept = true` && approved → `AcceptControl`
-/// - `accept = true` && denied → `DenyControl` (state stays false)
-/// - `accept = false` (release) → `CloseControl` (state goes false)
+/// - approved → `ControlAccepted`
+/// - denied → `ControlDenied` (state stays false)
 ///
 /// The daemon `on_data_channel` router gates each forwarded
 /// browser-input event on the resulting `accept_control` /
@@ -31,7 +29,7 @@ pub async fn handle_require_control(
         DeskError::CustomError(CustomDeskError::new(
             DeskErrorCode::SYSTEM_ERROR,
             &format!(
-                "No PC for {from_connection_id} (RequireControl arrived before RequestRemote?)"
+                "No PC for {from_connection_id} (RequireControl arrived before RequestRemoteAccess?)"
             ),
         ))
     })?;
@@ -52,36 +50,7 @@ pub async fn handle_require_control(
         (s.accept_control, s.accept_clipboard_sync)
     };
 
-    // Releasing control (accept = false) is never a privileged action and must
-    // never prompt the host. The browser sends RequireControl{accept=false} when
-    // the user clicks "cancel control"; routing that through the approval path
-    // would pop a spurious authorization dialog on the host just as the
-    // controller is walking away (and, with allow_remote_control = None, block on
-    // the UI-readiness probe). Short-circuit straight to the release reply.
-    if !control_data.accept {
-        {
-            let ctx = ctx.read().await;
-            let mut s = ctx.signaling_state.write().await;
-            s.accept_control = false;
-            s.accept_clipboard_sync = false;
-        }
-        log::info!("[pc_manager] {from_connection_id}: release (CloseControl)");
-        send_response::<()>(
-            outbound,
-            &model.request_id,
-            SignalingType::CloseControl,
-            from_connection_id,
-            None,
-        )?;
-        return Ok(ControlOutcome {
-            connection_id: from_connection_id.to_string(),
-            accept_control: false,
-            changed: currently_has_control,
-        });
-    }
-
-    // From here on the browser is requesting a grant (accept = true). The
-    // effective permission is the connection's capability ceiling met with the
+    // The effective permission is the connection's capability ceiling met with the
     // host global, so a redeemed-grant session can only be tightened relative to
     // the owner's global; an owner session carries no ceiling and uses the global
     // verbatim.
@@ -103,26 +72,25 @@ pub async fn handle_require_control(
         c.allow_remote_control
     });
 
-    let control_approved =
-        if should_short_circuit_control(control_data.accept, currently_has_control) {
-            log::info!(
-                "[pc_manager] {from_connection_id}: short-circuit RemoteControl (already accepted)"
-            );
-            true
-        } else {
-            check_security_permission(
-                policy,
-                host_control_hub,
-                allow_control,
-                control.generation,
-                SecurityPermissionType::RemoteControl,
-                Some(from_connection_id.to_string()),
-                // Capped grant / code-session: honor the prompt but never widen the
-                // owner's global allow_* from a borrowed session's "remember".
-                access_ceiling.is_some(),
-            )
-            .await
-        };
+    let control_approved = if should_short_circuit_control(true, currently_has_control) {
+        log::info!(
+            "[pc_manager] {from_connection_id}: short-circuit RemoteControl (already accepted)"
+        );
+        true
+    } else {
+        check_security_permission(
+            policy,
+            host_control_hub,
+            allow_control,
+            control.generation,
+            SecurityPermissionType::RemoteControl,
+            Some(from_connection_id.to_string()),
+            // Capped grant / code-session: honor the prompt but never widen the
+            // owner's global allow_* from a borrowed session's "remember".
+            access_ceiling.is_some(),
+        )
+        .await
+    };
 
     if !control_approved {
         log::warn!("[pc_manager] {from_connection_id}: RemoteControl denied");
@@ -135,7 +103,7 @@ pub async fn handle_require_control(
         send_response::<()>(
             outbound,
             &model.request_id,
-            SignalingType::DenyControl,
+            SignalingType::ControlDenied,
             from_connection_id,
             None,
         )?;
@@ -184,7 +152,7 @@ pub async fn handle_require_control(
         s.accept_control = true;
         s.accept_clipboard_sync = clipboard_approved;
         log::info!(
-            "[pc_manager] {from_connection_id}: AcceptControl \
+            "[pc_manager] {from_connection_id}: ControlAccepted \
              (accept_control=true, accept_clipboard_sync={clipboard_approved})"
         );
     }
@@ -192,7 +160,7 @@ pub async fn handle_require_control(
     send_response::<()>(
         outbound,
         &model.request_id,
-        SignalingType::AcceptControl,
+        SignalingType::ControlAccepted,
         from_connection_id,
         None,
     )?;
@@ -200,6 +168,46 @@ pub async fn handle_require_control(
         connection_id: from_connection_id.to_string(),
         accept_control: true,
         changed: !currently_has_control,
+    })
+}
+
+/// Release control and clipboard grants without tearing down the peer connection
+/// or media pipeline.
+pub async fn handle_release_control(
+    registry: &PcRegistry,
+    outbound: &OutboundSink,
+    model: &SignalingModel,
+) -> Result<ControlOutcome, DeskError> {
+    let from_connection_id = model.check_and_get_from_connection_id()?;
+    let ctx = registry.get(from_connection_id).await.ok_or_else(|| {
+        DeskError::CustomError(CustomDeskError::new(
+            DeskErrorCode::SYSTEM_ERROR,
+            &format!(
+                "No PC for {from_connection_id} (ReleaseControl arrived before RequestRemoteAccess?)"
+            ),
+        ))
+    })?;
+
+    let currently_has_control = {
+        let ctx = ctx.read().await;
+        let mut state = ctx.signaling_state.write().await;
+        let had_control = state.accept_control;
+        state.accept_control = false;
+        state.accept_clipboard_sync = false;
+        had_control
+    };
+
+    send_response::<()>(
+        outbound,
+        &model.request_id,
+        SignalingType::ControlReleased,
+        from_connection_id,
+        None,
+    )?;
+    Ok(ControlOutcome {
+        connection_id: from_connection_id.to_string(),
+        accept_control: false,
+        changed: currently_has_control,
     })
 }
 

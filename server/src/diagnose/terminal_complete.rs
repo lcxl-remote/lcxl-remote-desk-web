@@ -27,7 +27,7 @@ pub fn send_completion_result(
     };
     let frame = SignalingModel::new(
         &result.request_id,
-        SignalingType::TerminalCompleteResult,
+        SignalingType::TerminalCompletionsGenerated,
         None,
         to_connection_id,
         Some(data),
@@ -56,7 +56,10 @@ mod tests {
 
         let text = rx.try_recv().expect("a frame was broadcast");
         let model: SignalingModel = serde_json::from_str(&text).unwrap();
-        assert_eq!(model.signaling_type, SignalingType::TerminalCompleteResult);
+        assert_eq!(
+            model.signaling_type,
+            SignalingType::TerminalCompletionsGenerated
+        );
         let got = model
             .get_data_with_type::<TerminalCompleteResult>()
             .unwrap()

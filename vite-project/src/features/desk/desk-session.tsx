@@ -48,20 +48,25 @@ import { DeskControlBar } from "./desk-control-bar"
 import { getMacKeyboardMappingController } from "./keyboard-mapping"
 import { useDraggableControlBar } from "./use-draggable-control-bar"
 import {
-    SIGNALING_TYPE_CODE_REQUEST_REMOTE,
+    SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS,
     SIGNALING_TYPE_CODE_REQUIRE_CONTROL,
-    SIGNALING_TYPE_CODE_CLOSE_CONTROL,
-    SIGNALING_TYPE_CODE_ACCEPT_CONTROL,
-    SIGNALING_TYPE_CODE_DENY_CONTROL,
+    SIGNALING_TYPE_CODE_RELEASE_CONTROL,
+    SIGNALING_TYPE_CODE_CONTROL_RELEASED,
+    SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION,
+    SIGNALING_TYPE_CODE_CONTROL_ACCEPTED,
+    SIGNALING_TYPE_CODE_CONTROL_DENIED,
     SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS,
-    SIGNALING_TYPE_CODE_ENABLE_PRIVATE_SCREEN,
+    SIGNALING_TYPE_CODE_SET_PRIVATE_SCREEN_VISIBILITY,
+    SIGNALING_TYPE_CODE_PRIVATE_SCREEN_VISIBILITY_SET,
     SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED,
-    SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_ERROR,
+    SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_FAILED,
     SIGNALING_TYPE_CODE_MEDIA_PIPELINE_STATE_CHANGED,
     SIGNALING_TYPE_CODE_RETRY_MEDIA_PIPELINE,
+    SIGNALING_TYPE_CODE_MEDIA_PIPELINE_RETRY_COMPLETED,
     SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
+    SIGNALING_TYPE_CODE_DISPLAY_SETTINGS_CHANGED,
     SIGNALING_TYPE_CODE_ERROR,
-    SIGNALING_TYPE_CODE_INIT,
+    SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
     SIGNALING_TYPE_CODE_OFFER,
 } from "./constants"
 import { AdmissionRetrySchedule } from "./admission-retry"
@@ -91,6 +96,10 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     // Control state
     const [hasControl, setHasControl] = useState(false);
     const [isWaitingApproval, setIsWaitingApproval] = useState(false);
+    const controlRequestRef = useRef<{
+        requestId: string;
+        kind: "require" | "release";
+    } | null>(null);
     const hasRequestedRef = useRef(false);
     const admissionRetryRef = useRef({
         generation: 0,
@@ -131,7 +140,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
             admittedWaylandModeRef.current,
         )
         const requestId = sendMessage(
-            SIGNALING_TYPE_CODE_REQUEST_REMOTE,
+            SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS,
             requestData,
             deskId,
         );
@@ -163,6 +172,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     const [isVideoReady, setIsVideoReady] = useState(false);
     const [mediaPipelineState, setMediaPipelineState] = useState<MediaPipelineStateData | null>(null);
     const [mediaRetryPending, setMediaRetryPending] = useState(false);
+    const mediaRetryRequestIdRef = useRef<string | null>(null);
     const [isMuted, setIsMuted] = useState(() => {
         // Safari/iOS requires muted for autoPlay
         return /Mobile|Android|iP(ad|hone)/.test(navigator.userAgent) ? true : false;
@@ -315,7 +325,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         useResolutionToast({
             subscribe,
             isRTCConnected,
-            changeDisplaySettingsType: SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
+            changeDisplaySettingsType: SIGNALING_TYPE_CODE_DISPLAY_SETTINGS_CHANGED,
             translate: (key) => t(key),
         });
 
@@ -388,7 +398,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         const handle = (message: SignalingMessage) => {
             const { signaling_type } = message;
 
-            if (signaling_type === SIGNALING_TYPE_CODE_INIT
+            if (signaling_type === SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED
                 && message.request_id
                 && admissionRetryRef.current.requestIds.has(message.request_id)
             ) {
@@ -442,33 +452,57 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                     message: message.response_state.message,
                     compatible_encoders: [],
                 });
-            } else if (signaling_type === SIGNALING_TYPE_CODE_ACCEPT_CONTROL) {
+            } else if ((signaling_type === SIGNALING_TYPE_CODE_CONTROL_ACCEPTED
+                || signaling_type === SIGNALING_TYPE_CODE_CONTROL_DENIED)
+                && message.request_id === controlRequestRef.current?.requestId
+                && controlRequestRef.current?.kind === "require"
+            ) {
+                controlRequestRef.current = null;
+                if (signaling_type === SIGNALING_TYPE_CODE_CONTROL_DENIED) {
+                    console.log("Remote control request DENIED by peer.");
+                    setHasControl(false);
+                    setIsWaitingApproval(false);
+                    return;
+                }
                 console.log("Remote control request ACCEPTED by peer.");
                 setHasControl(true);
                 setIsWaitingApproval(false);
                 videoRef.current?.focus();
-            } else if (signaling_type === SIGNALING_TYPE_CODE_DENY_CONTROL) {
-                console.log("Remote control request DENIED by peer.");
+            } else if (signaling_type === SIGNALING_TYPE_CODE_CONTROL_RELEASED
+                && message.request_id === controlRequestRef.current?.requestId
+                && controlRequestRef.current?.kind === "release"
+            ) {
+                controlRequestRef.current = null;
+                console.log("Remote control RELEASED.");
                 setHasControl(false);
                 setIsWaitingApproval(false);
-            } else if (signaling_type === SIGNALING_TYPE_CODE_CLOSE_CONTROL) {
-                console.log("Remote control CLOSED by peer.");
-                setHasControl(false);
-                setIsWaitingApproval(false);
-            } else if (signaling_type === SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED) {
+            } else if (signaling_type === SIGNALING_TYPE_CODE_PRIVATE_SCREEN_VISIBILITY_SET) {
                 const data = message.signaling_data;
-                if (data) {
-                    console.log("Private screen state changed:", data);
+                const requestId = message.request_id;
+                if (!requestId) return;
+                if (message.response_state?.error_code) {
+                    const error = message.response_state.message ?? data?.error_msg;
+                    console.error("Private screen error:", error);
+                    failPrivateScreenPending(requestId, error);
+                } else if (data) {
+                    console.log("Private screen visibility set:", data);
                     setIsPrivateScreen(data.visible ?? false);
                     setIsPrivateScreenSupported(data.is_supported ?? true);
                     if (data.error_msg) {
-                        console.error("Private screen error:", data.error_msg);
-                        failPrivateScreenPending(data.error_msg);
+                        const error = data.error_msg;
+                        console.error("Private screen error:", error);
+                        failPrivateScreenPending(requestId, error);
                     } else if (typeof data.visible === "boolean") {
-                        confirmPrivateScreenPending(data.visible);
+                        confirmPrivateScreenPending(requestId, data.visible);
                     }
                 }
-            } else if (signaling_type === SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_ERROR) {
+            } else if (signaling_type === SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED) {
+                const data = message.signaling_data;
+                if (data) {
+                    setIsPrivateScreen(data.visible ?? false);
+                    setIsPrivateScreenSupported(data.is_supported ?? true);
+                }
+            } else if (signaling_type === SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_FAILED) {
                 const data = message.signaling_data;
                 if (data && data.error) {
                     console.error("Remote audio playback error:", data.error);
@@ -476,16 +510,21 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                 }
             } else if (signaling_type === SIGNALING_TYPE_CODE_MEDIA_PIPELINE_STATE_CHANGED) {
                 const state = message.signaling_data as MediaPipelineStateData | null;
-                setMediaRetryPending(false);
                 if (state?.phase === "streaming") {
                     setMediaPipelineState(null);
                 } else if (state) {
                     setMediaPipelineState(state);
                 }
-            } else if (signaling_type === SIGNALING_TYPE_CODE_RETRY_MEDIA_PIPELINE
+            } else if (signaling_type === SIGNALING_TYPE_CODE_MEDIA_PIPELINE_RETRY_COMPLETED
                 && message.response_state
+                && message.request_id === mediaRetryRequestIdRef.current
             ) {
+                mediaRetryRequestIdRef.current = null;
                 setMediaRetryPending(false);
+                if (!message.response_state.error_code) {
+                    setMediaPipelineState(null);
+                    return;
+                }
                 const needsRenegotiation = message.response_state.error_code
                     === deskErrorCodeEnum.VIDEO_PIPELINE_RENEGOTIATION_REQUIRED;
                 if (needsRenegotiation) setIsConfigOpen(true);
@@ -502,7 +541,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                     ),
                     variant: "destructive",
                 });
-            } else if (signaling_type === SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS) {
+            } else if (signaling_type === SIGNALING_TYPE_CODE_DISPLAY_SETTINGS_CHANGED) {
                 // Adaptive-resolution echo: the right-bottom status toast
                 // is driven by `useResolutionToast`, which subscribes to
                 // the signaling stream directly and gates transitions by the
@@ -532,12 +571,12 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
 
     useEffect(() => clearAdmissionRetry, [clearAdmissionRetry]);
 
-    // Wait for INIT data, then show the config dialog so the user can pick
+    // Wait for REMOTE_ACCESS_INITIALIZED data, then show the config dialog so the user can pick
     // capture settings. Reopen it only for the initial pick or after a terminal
     // ICE failure (retry) — never on a transient `disconnected`, which heals on
     // its own (see `shouldOpenConfigDialog`). The auto-reconnect path that fired
     // after `DesktopReady` is gone — the daemon-held PC survives worker swaps so
-    // INIT only ever arrives once per session.
+    // REMOTE_ACCESS_INITIALIZED only ever arrives once per session.
     useEffect(() => {
         if (
             shouldOpenConfigDialog({
@@ -766,7 +805,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         const settingsWithPrefs: DeskSettings = {
             ...settings,
             adaptive_bitrate: adaptiveBitrateEnabled,
-            // RequestRemote froze this mode before the PeerConnection existed.
+            // RequestRemoteAccess froze this mode before the PeerConnection existed.
             // A changed choice is persisted for the next logical connection.
             wayland_control_mode: admittedWaylandModeRef.current,
         };
@@ -822,13 +861,22 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     };
 
     const handleRequestControl = () => {
+        if (hasControl) {
+            const requestId = sendMessage(
+                SIGNALING_TYPE_CODE_RELEASE_CONTROL,
+                null,
+                deskId,
+            );
+            controlRequestRef.current = { requestId, kind: "release" };
+            setIsWaitingApproval(true);
+            return;
+        }
         // In a restricted session, only auto-request the capabilities the code's
         // ceiling does not deny; an owner session leaves every dimension visible so
         // this keeps the previous unconditional behaviour.
         const wantClipboard = !hasControl && restricted.capabilityVisible('allow_clipboard_sync');
         const wantFileTransfer = !hasControl && restricted.capabilityVisible('allow_file_transfer');
         const requestControlData = {
-            accept: !hasControl,
             accept_clipboard_sync: wantClipboard, // Auto-request clipboard when the ceiling allows it
             accept_file_transfer: wantFileTransfer,
         };
@@ -838,7 +886,12 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         }
 
         console.log(`Sending REQUIRE_CONTROL signaling, requestControlData:`, requestControlData);
-        sendMessage(SIGNALING_TYPE_CODE_REQUIRE_CONTROL, requestControlData, deskId);
+        const requestId = sendMessage(
+            SIGNALING_TYPE_CODE_REQUIRE_CONTROL,
+            requestControlData,
+            deskId,
+        );
+        controlRequestRef.current = { requestId, kind: "require" };
         setIsWaitingApproval(true);
     };
 
@@ -847,9 +900,9 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         if (deskId) {
             if (isPrivateScreen) {
                 console.log(`Disabling private screen before disconnect`);
-                sendMessage(SIGNALING_TYPE_CODE_ENABLE_PRIVATE_SCREEN, { enable: false }, deskId);
+                sendMessage(SIGNALING_TYPE_CODE_SET_PRIVATE_SCREEN_VISIBILITY, { visible: false }, deskId);
             }
-            sendMessage(SIGNALING_TYPE_CODE_CLOSE_CONTROL, null, deskId);
+            sendMessage(SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION, null, deskId);
         }
         closeRTC();
         navigate(`/desk/${deskId}`);
@@ -858,15 +911,24 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     const handleMediaPipelineRetry = () => {
         if (!deskId || mediaRetryPending) return;
         setMediaRetryPending(true);
-        sendMessage(SIGNALING_TYPE_CODE_RETRY_MEDIA_PIPELINE, null, deskId);
+        mediaRetryRequestIdRef.current = sendMessage(
+            SIGNALING_TYPE_CODE_RETRY_MEDIA_PIPELINE,
+            null,
+            deskId,
+        );
     };
 
     const handleTogglePrivateScreen = () => {
         if (!deskId) return;
         const newState = !isPrivateScreen;
-        if (!startPrivateScreenPending(newState)) return;
+        if (isPrivateScreenPending) return;
         console.log(`Toggling private screen: ${newState}`);
-        sendMessage(SIGNALING_TYPE_CODE_ENABLE_PRIVATE_SCREEN, { enable: newState }, deskId);
+        const requestId = sendMessage(
+            SIGNALING_TYPE_CODE_SET_PRIVATE_SCREEN_VISIBILITY,
+            { visible: newState },
+            deskId,
+        );
+        startPrivateScreenPending(newState, requestId);
     };
 
     const handleFullscreen = async () => {

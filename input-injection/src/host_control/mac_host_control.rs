@@ -35,9 +35,15 @@ impl HostControlHelper for MacHostControlHelper {
     fn enable_private_screen(
         &self,
         from_connection_id: &str,
+        request_id: &str,
         enable: bool,
     ) -> Result<(), InputError> {
-        send_private_screen_command(self.cmd_sender.as_ref(), from_connection_id, enable);
+        send_private_screen_command(
+            self.cmd_sender.as_ref(),
+            from_connection_id,
+            request_id,
+            enable,
+        );
         Ok(())
     }
 

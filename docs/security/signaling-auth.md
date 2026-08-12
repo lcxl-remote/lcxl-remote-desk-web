@@ -59,7 +59,7 @@ This outbound guard is separate from the model-provider SSRF guard (`ProviderSsr
 
 ## Manager credential proof and local lease
 
-A host connected on the explicit Manager lane sends an application-level Heartbeat every 30 seconds. The Manager returns a correlated proof only while the token and owner snapshot remains fresh and valid. The host uses a monotonic 120-second credential lease; a normal OSS/local/remote-signaling Heartbeat never renews it.
+A host connected on the explicit Manager lane sends `SendHeartbeat` every 30 seconds. The Manager returns a correlated `HeartbeatAcknowledged` (with the same `request_id`) and a proof only while the token and owner snapshot remain fresh and valid. The host uses a monotonic 120-second credential lease; a normal OSS/local/remote-signaling acknowledgement never renews it.
 
 - Terminal revocation closes sessions and parks same-token reconnect.
 - Recoverable suspension closes sessions but retries the same token with bounded delay (at most about 330 seconds after restoration).

@@ -39,6 +39,7 @@ pub trait HostControlHelper {
     fn enable_private_screen(
         &self,
         from_connection_id: &str,
+        request_id: &str,
         enable: bool,
     ) -> Result<(), InputError>;
 
@@ -67,20 +68,31 @@ pub struct PrivateScreenState {
 #[derive(Debug, Clone)]
 pub enum HostControlEventType {
     PrivateScreenInited(PrivateScreenState),
-    PrivateScreenVisibleChanged(String /*from connection id*/, bool),
+    PrivateScreenVisibleChanged {
+        connection_id: String,
+        request_id: Option<String>,
+        visible: bool,
+    },
 
     PrivateScreenHotkeyRegisterError,
-    PrivateScreenUnknownError(
-        Option<String>, /*from connection id*/
-        String,         /*error message*/
-    ),
+    PrivateScreenUnknownError {
+        connection_id: Option<String>,
+        request_id: Option<String>,
+        message: String,
+    },
     PrivateScreenClosed,
 }
 
 #[derive(Debug, Clone)]
 pub enum PrivateScreenCommand {
-    Show(String /*from connection id*/),
-    Hide(String /*from connection id*/),
+    Show {
+        connection_id: String,
+        request_id: String,
+    },
+    Hide {
+        connection_id: String,
+        request_id: String,
+    },
     Quit,
 }
 

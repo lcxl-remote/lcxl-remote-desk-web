@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-    SIGNALING_TYPE_CODE_CONFIRM_EXEC,
-    SIGNALING_TYPE_CODE_EXEC_CONTROL,
-    SIGNALING_TYPE_CODE_EXEC_LIFECYCLE,
-    SIGNALING_TYPE_CODE_EXEC_PREVIEW,
-    SIGNALING_TYPE_CODE_EXEC_RESULT,
-    SIGNALING_TYPE_CODE_EXEC_STATE_REPLY,
-    SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+    SIGNALING_TYPE_CODE_PREVIEW_EXECUTION,
+    SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
+    SIGNALING_TYPE_CODE_EXECUTION_PROGRESS_UPDATED,
+    SIGNALING_TYPE_CODE_EXECUTION_PREVIEW_GENERATED,
+    SIGNALING_TYPE_CODE_EXECUTION_COMPLETED,
+    SIGNALING_TYPE_CODE_EXECUTION_STATE_REPORTED,
+    SIGNALING_TYPE_CODE_RESOLVE_EXECUTION,
 } from '../desk/constants';
 import type { SignalingMessage, SignalingSubscriber } from '../desk/use-desk-signaling';
 
@@ -225,7 +225,7 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                 // personal view behave identically.
                 org_id: orgId ?? undefined,
             };
-            const requestId = sendMessage(SIGNALING_TYPE_CODE_CONFIRM_EXEC, data, deskId);
+            const requestId = sendMessage(SIGNALING_TYPE_CODE_PREVIEW_EXECUTION, data, deskId);
             previewReqToRow.current[requestId] = rowIndex;
             setEntries((prev) => ({
                 ...prev,
@@ -251,7 +251,7 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
             // The frame that approves is the one that triggers the dispatch, so
             // its id is the execution generation the host will report against.
             const generation = sendMessage(
-                SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+                SIGNALING_TYPE_CODE_RESOLVE_EXECUTION,
                 { exec_request_id: entry.execRequestId, decision: 'approve' },
                 deskId,
             );
@@ -275,7 +275,7 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
             const entry = entries[rowIndex];
             if (deskId && entry?.execRequestId) {
                 sendMessage(
-                    SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+                    SIGNALING_TYPE_CODE_RESOLVE_EXECUTION,
                     { exec_request_id: entry.execRequestId, decision: 'reject' },
                     deskId,
                 );
@@ -299,7 +299,7 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                 action: 'cancel',
                 requested_by: 'control-end',
             };
-            sendMessage(SIGNALING_TYPE_CODE_EXEC_CONTROL, payload, deskId);
+            sendMessage(SIGNALING_TYPE_CODE_CONTROL_EXECUTION, payload, deskId);
             // The row is not moved to a finished phase: a stop that was asked for
             // is not a stop that happened, and only the host's own result says
             // whether — and how far — the command ran.
@@ -320,7 +320,7 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                 execution_generation: entry.executionGeneration,
                 action: 'query_state',
             };
-            sendMessage(SIGNALING_TYPE_CODE_EXEC_CONTROL, payload, deskId);
+            sendMessage(SIGNALING_TYPE_CODE_CONTROL_EXECUTION, payload, deskId);
         },
         [deskId, entries, sendMessage],
     );
@@ -338,7 +338,7 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
         // ExecResult is delivered in order, so two frames arriving in one
         // tick can no longer coalesce away.
         const handle = (message: SignalingMessage) => {
-            if (message.signaling_type === SIGNALING_TYPE_CODE_EXEC_PREVIEW) {
+            if (message.signaling_type === SIGNALING_TYPE_CODE_EXECUTION_PREVIEW_GENERATED) {
                 const preview = message.signaling_data as ExecPreview | null;
                 const reqId = message.request_id;
                 if (!preview || !reqId) return;
@@ -367,7 +367,7 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                 return;
             }
 
-            if (message.signaling_type === SIGNALING_TYPE_CODE_EXEC_LIFECYCLE) {
+            if (message.signaling_type === SIGNALING_TYPE_CODE_EXECUTION_PROGRESS_UPDATED) {
                 const payload = message.signaling_data as ExecLifecyclePayload | null;
                 if (!payload) return;
                 const rowIndex = generationToRow.current[payload.execution_generation];
@@ -394,7 +394,7 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                 return;
             }
 
-            if (message.signaling_type === SIGNALING_TYPE_CODE_EXEC_STATE_REPLY) {
+            if (message.signaling_type === SIGNALING_TYPE_CODE_EXECUTION_STATE_REPORTED) {
                 const payload = message.signaling_data as ExecStateReplyPayload | null;
                 if (!payload) return;
                 const rowIndex = generationToRow.current[payload.execution_generation];
@@ -430,7 +430,7 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                 return;
             }
 
-            if (message.signaling_type === SIGNALING_TYPE_CODE_EXEC_RESULT) {
+            if (message.signaling_type === SIGNALING_TYPE_CODE_EXECUTION_COMPLETED) {
                 const payload = message.signaling_data as ExecResultPayload | null;
                 if (!payload) return;
                 const rowIndex = execIdToRow.current[payload.exec_request_id];

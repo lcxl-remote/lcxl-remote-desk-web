@@ -219,7 +219,7 @@ enum SupervisorState {
         /// `VirtualDisplayAttachOutcome::Attached`. Used by
         /// [`VirtualDisplaySupervisor::ensure_attached`] to verify the
         /// post-attach capabilities cache actually surfaces this
-        /// monitor before letting `RequestRemote` proceed.
+        /// monitor before letting `RequestRemoteAccess` proceed.
         display_name: String,
         // `handle` keeps the OS resource alive — dropped only on
         // `apply(false)` / `shutdown`. The struct is held for its
@@ -234,8 +234,8 @@ enum SupervisorState {
 pub enum EnsureAttachedOutcome {
     /// State is `Attached`, the post-promotion capabilities-version
     /// target has been reached, and the cached `MediaCapabilities`
-    /// contains the attached display name. `RequestRemote` can safely
-    /// assemble the Init reply expecting the IDD to appear in the
+    /// contains the attached display name. `RequestRemoteAccess` can safely
+    /// assemble the RemoteAccessInitialized response expecting the IDD to appear in the
     /// dropdown.
     Attached,
     /// Bring-up did not complete within the timeout. The supervisor is
@@ -284,7 +284,7 @@ pub struct VirtualDisplaySupervisor {
     /// Most-recently observed IDD refresh rate (Hz) from the worker's
     /// `VirtualDisplayMode::Applied` echo. `0` ⇒ no observation yet.
     /// Used by:
-    ///   * `InitSignalingData::virtual_display_current_refresh_hz`
+    ///   * `RemoteAccessInitializedData::virtual_display_current_refresh_hz`
     ///     (display only, not authoritative)
     ///   * The router's auto `ChangeDisplaySettings` path to fill in a
     ///     refresh value when the browser sends `refresh_hz=0`.
@@ -403,7 +403,7 @@ impl VirtualDisplaySupervisor {
     /// GDI device name (e.g. `\\.\DISPLAY8`) the IDD is currently pinned
     /// to when the supervisor is in `Attached`. `None` for every other
     /// state. Used by `pc_manager` to populate
-    /// `InitSignalingData::virtual_display_device_name`, which the
+    /// `RemoteAccessInitializedData::virtual_display_device_name`, which the
     /// browser then uses both to label the matching entry in the display
     /// picker and to gate the adaptive-resolution hook.
     pub async fn attached_display_name(&self) -> Option<String> {
@@ -801,7 +801,7 @@ impl VirtualDisplaySupervisor {
                     // The IDD HMONITOR is now visible to
                     // `monitors::enum_display_infos`; ask the worker to
                     // re-publish Capabilities so the daemon's cache (and
-                    // the next browser's `InitSignalingData`) reflects
+                    // the next browser's `RemoteAccessInitializedData`) reflects
                     // it. Re-emitting Capabilities will also trigger
                     // `on_worker_capabilities`, which re-sends a fresh
                     // AttachVirtualDisplay; the resulting second attach
@@ -892,18 +892,18 @@ impl VirtualDisplaySupervisor {
         *state = SupervisorState::Disabled;
     }
 
-    /// Lazy bring-up entry point used by the router's `RequestRemote`
+    /// Lazy bring-up entry point used by the router's `RequestRemoteAccess`
     /// branch. Returns when the supervisor is `Attached` **and** the
     /// daemon's `worker_capabilities` cache has been refreshed
     /// post-attach (cap version reached the promotion target **and**
     /// the cache lists the attached `display_name`) — so the caller
-    /// can safely assemble an `InitSignalingData` whose
+    /// can safely assemble an `RemoteAccessInitializedData` whose
     /// `video_device_list` is known to include the IDD.
     ///
     /// On timeout the supervisor is left in its current state (typically
     /// `Attaching`); the next call resumes from there. The caller is
-    /// expected to fall through to a capabilities-without-IDD Init reply
-    /// rather than fail the `RequestRemote`. A background
+    /// expected to fall through to a capabilities-without-IDD RemoteAccessInitialized response
+    /// rather than fail the `RequestRemoteAccess`. A background
     /// `RefreshCapabilities` may still complete after we return
     /// `TimedOut`, and the next dialog open will see the IDD.
     pub async fn ensure_attached(&self, timeout: Duration) -> EnsureAttachedOutcome {

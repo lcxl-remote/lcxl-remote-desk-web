@@ -200,7 +200,7 @@ pub(super) async fn handle_confirm_exec_inbound(
     // Fleet PDP capability gate (manager link): the command's required exec
     // capability — the `shell.exec.readonly` vs `shell.exec.confirmed` split
     // decided by the server-side classification — must be in the policy-granted
-    // scope. This mirrors the AgentRequest read path: a policy that grants only
+    // scope. This mirrors the InvokeAgentCapability read path: a policy that grants only
     // `shell.exec.readonly` must not run a mutating command even when the mode
     // and `max_risk` would otherwise allow it. Without a manager authorization
     // (single-machine / remote-signaling) the local mode / template gating is
@@ -350,7 +350,7 @@ pub(super) async fn handle_confirm_exec_inbound(
                 )
                 .await;
             // Informational preview (no confirmation) so the control end can
-            // show what ran; the result follows as an `ExecResult`.
+            // show what ran; the result follows as an `ExecutionCompleted`.
             let preview = ExecPreview {
                 exec_request_id: Some(exec_request_id),
                 shell,
@@ -441,7 +441,7 @@ pub(super) async fn handle_confirm_exec_inbound(
 /// Route a control-end `ResolveExec`: consume the pending approval (once) and,
 /// on approve, seal the stored draft into an `ExecPlan` and dispatch it. Reject
 /// just consumes the pending and ends. A missing / expired / already-consumed id
-/// on approve returns an error `ExecResult`.
+/// on approve returns an error `ExecutionCompleted`.
 /// Handle an `ExecControl(623)`: stop an execution, or report on one.
 ///
 /// Both actions answer with the same `ExecStateReply(624)` built from the durable
@@ -504,7 +504,7 @@ pub(super) async fn handle_exec_control_inbound(
     send_notification(
         &ctx.outbound_tx,
         &request_id,
-        SignalingType::ExecStateReply,
+        SignalingType::ExecutionStateReported,
         to,
         &reply,
         "ExecStateReply",
@@ -578,7 +578,7 @@ pub(super) async fn handle_resolve_exec_inbound(
                             data.exec_request_id.0
                         );
                     }
-                    send_exec_result(
+                    send_execution_completed(
                         &ctx.outbound_tx,
                         &request_id,
                         to,
@@ -648,7 +648,7 @@ pub(super) async fn handle_resolve_exec_inbound(
                         .with_task_id(audit_source),
                     )
                     .await;
-                send_exec_result(
+                send_execution_completed(
                     &ctx.outbound_tx,
                     &request_id,
                     to,
@@ -735,8 +735,8 @@ pub(super) async fn handle_resolve_exec_inbound(
 }
 
 /// Dispatch a sealed [`ExecPlan`] to the worker for execution. The worker runs
-/// the argv verbatim and replies with `WorkerToService::ExecResult`, which the
-/// signaling proxy turns into the outbound `ExecResult(609)` frame. The
+/// the argv verbatim and replies with `WorkerToService::ExecutionCompleted`, which the
+/// signaling proxy turns into the outbound `ExecutionCompleted(609)` frame. The
 /// `request_id` / `connection_id` are echoed through so the proxy can route that
 /// frame back. If the worker is unreachable, synthesize an error result here so
 /// the control end still gets a definite answer.
@@ -763,7 +763,7 @@ pub(super) async fn dispatch_exec_plan(
                     true,
                 ))
             });
-            send_exec_result(
+            send_execution_completed(
                 &ctx.outbound_tx,
                 request_id,
                 to_connection_id,
@@ -777,7 +777,7 @@ pub(super) async fn dispatch_exec_plan(
         ExecAdmission::AcceptedOutcomeUnknown(reason) => {
             // Deliberately not an error that reads as "did not run": the change may
             // already have happened, and saying otherwise would invite a retry of it.
-            send_exec_result(
+            send_execution_completed(
                 &ctx.outbound_tx,
                 request_id,
                 to_connection_id,
@@ -794,7 +794,7 @@ pub(super) async fn dispatch_exec_plan(
             return;
         }
         ExecAdmission::Refused(reason) => {
-            send_exec_result(
+            send_execution_completed(
                 &ctx.outbound_tx,
                 request_id,
                 to_connection_id,
@@ -811,7 +811,7 @@ pub(super) async fn dispatch_exec_plan(
             return;
         }
         ExecAdmission::AtCapacity(reason) => {
-            send_exec_result(
+            send_execution_completed(
                 &ctx.outbound_tx,
                 request_id,
                 to_connection_id,
@@ -843,7 +843,7 @@ pub(super) async fn dispatch_exec_plan(
     {
         // Nothing was started, so the slot is free again immediately.
         ctx.exec_capacity.release(&plan_generation);
-        send_exec_result(
+        send_execution_completed(
             &ctx.outbound_tx,
             request_id,
             to_connection_id,
@@ -864,7 +864,7 @@ pub(super) async fn dispatch_exec_plan(
 /// frame, correlated by the per-attempt `request_id`. Used both for the early
 /// PEP rejections (synthesized here) and for the worker's completed result
 /// (relayed by the signaling proxy).
-pub(crate) fn send_edge_exec_result(
+pub(crate) fn send_edge_execution_completed(
     outbound_tx: &broadcast::Sender<String>,
     request_id: &str,
     disposition: EdgeExecDisposition,
@@ -876,7 +876,7 @@ pub(crate) fn send_edge_exec_result(
     send_notification(
         outbound_tx,
         request_id,
-        SignalingType::EdgeExecResult,
+        SignalingType::EdgeExecutionCompleted,
         None,
         &payload,
         "EdgeExecResult",

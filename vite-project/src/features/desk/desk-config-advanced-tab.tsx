@@ -22,7 +22,7 @@ import { Slider } from "@/components/ui/slider"
 import { TabsContent } from "@/components/ui/tabs"
 import type {
     EncoderInputLimits,
-    InitSignalingData,
+    RemoteAccessInitializedData,
     OperationSystemEnum,
     Resolution,
     VideoEncoderId,
@@ -33,7 +33,7 @@ type DeskConfigAdvancedTabProps = {
     adaptiveBitrateEnabled: boolean
     adaptiveQualityEnabled: boolean
     form: UseFormReturn<DeskConfigFormSettings>
-    initData: InitSignalingData | null
+    initData: RemoteAccessInitializedData | null
     onAdaptiveBitrateChange: (enabled: boolean) => void
     onAdaptiveQualityChange: (enabled: boolean) => void
 }

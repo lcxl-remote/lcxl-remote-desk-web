@@ -34,7 +34,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Slider } from "@/components/ui/slider"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { AlertTriangle } from "lucide-react"
-import type { InitSignalingData, DeskSettings } from "@/services/types"
+import type { RemoteAccessInitializedData, DeskSettings } from "@/services/types"
 import { DeskConfigAdvancedTab } from "./desk-config-advanced-tab"
 import { DeskConfigAudioTab } from "./desk-config-audio-tab"
 import {
@@ -55,7 +55,7 @@ import type { DeskConfigFormSettings } from "./desk-config-model"
 interface DeskConfigDialogProps {
     open: boolean
     onOpenChange: (open: boolean) => void
-    initData: InitSignalingData | null
+    initData: RemoteAccessInitializedData | null
     onSubmit: (settings: DeskSettings) => void
     onCancel: () => void
     /**

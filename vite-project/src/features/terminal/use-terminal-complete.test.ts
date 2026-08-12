@@ -9,8 +9,8 @@ import {
 } from './use-terminal-complete';
 import type { SignalingMessage } from '../desk/use-desk-signaling';
 import {
-    SIGNALING_TYPE_CODE_TERMINAL_COMPLETE_ASK,
-    SIGNALING_TYPE_CODE_TERMINAL_COMPLETE_RESULT,
+    SIGNALING_TYPE_CODE_GENERATE_TERMINAL_COMPLETIONS,
+    SIGNALING_TYPE_CODE_TERMINAL_COMPLETIONS_GENERATED,
 } from '../desk/constants';
 
 // `sendMessage` returns the wire request_id the hook keys its result on.
@@ -33,7 +33,7 @@ const ctx: TerminalCompletionContext = {
 function resultFrame(result: TerminalCompleteResult): SignalingMessage {
     return {
         request_id: result.request_id,
-        signaling_type: SIGNALING_TYPE_CODE_TERMINAL_COMPLETE_RESULT,
+        signaling_type: SIGNALING_TYPE_CODE_TERMINAL_COMPLETIONS_GENERATED,
         signaling_data: result,
     };
 }
@@ -92,7 +92,7 @@ describe('useTerminalComplete', () => {
         act(() => vi.advanceTimersByTime(100));
         expect(sendMessage).toHaveBeenCalledTimes(1);
         const [type, data, connectionId] = sendMessage.mock.calls[0];
-        expect(type).toBe(SIGNALING_TYPE_CODE_TERMINAL_COMPLETE_ASK);
+        expect(type).toBe(SIGNALING_TYPE_CODE_GENERATE_TERMINAL_COMPLETIONS);
         expect(connectionId).toBe('conn-1');
         expect((data as { prefix: string }).prefix).toBe('systemctl ');
     });

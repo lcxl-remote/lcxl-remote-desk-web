@@ -944,7 +944,7 @@ fn supervisor_records_full_mode_on_applied() {
 /// `attached_display_name()` returns the GDI device name only while
 /// the supervisor is `Attached`. Every other state (`Disabled`,
 /// `Attaching`, `Detaching`) returns `None`. `pc_manager` reads this
-/// to populate `InitSignalingData::virtual_display_device_name`.
+/// to populate `RemoteAccessInitializedData::virtual_display_device_name`.
 #[tokio::test]
 async fn supervisor_attached_display_name_only_when_attached() {
     let (worker_mgr, _rx) = make_worker_mgr();

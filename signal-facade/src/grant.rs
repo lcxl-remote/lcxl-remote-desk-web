@@ -3,7 +3,7 @@
 //! distinguished only by TTL).
 //!
 //! A redeemed code produces a **grant session**: a principal-bound, reusable
-//! logical-session token (`grant_session_id`) written here. Every RequestRemote
+//! logical-session token (`grant_session_id`) written here. Every RequestRemoteAccess
 //! that carries the token (the main control connection, the file-transfer second
 //! connection, and any reconnect) does a **lookup-and-stamp** — a pure read of
 //! the grant plus a principal / target / generation check — after which the
@@ -88,7 +88,7 @@ pub struct GrantSessionRecord {
     /// The device (external `device_id` / target connection identity) this grant
     /// authorizes a session against.
     pub target_device: String,
-    /// The per-code capability ceiling to stamp on a matching RequestRemote.
+    /// The per-code capability ceiling to stamp on a matching RequestRemoteAccess.
     /// `None` is reserved for owner/org full-control sessions, which do **not**
     /// go through a grant at all; a redeemed code always carries `Some(ceiling)`
     /// (a code with no explicit config is an all-`None` ceiling, i.e. every

@@ -681,7 +681,7 @@ mod tests {
         fn block_input(&self, _: bool) -> Result<(), InputError> {
             unimplemented!()
         }
-        fn enable_private_screen(&self, _: &str, _: bool) -> Result<(), InputError> {
+        fn enable_private_screen(&self, _: &str, _: &str, _: bool) -> Result<(), InputError> {
             unimplemented!()
         }
         fn control_monitor_power(&self, _: bool) -> Result<(), InputError> {

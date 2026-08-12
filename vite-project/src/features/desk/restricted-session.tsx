@@ -37,7 +37,7 @@ export type CapabilityKey =
 export interface RestrictedSession {
     // True when the current session was opened by redeeming a code.
     isRestricted: boolean;
-    // The grant token to attach to RequestRemote, or null for an owner session.
+    // The grant token to attach to RequestRemoteAccess, or null for an owner session.
     grantSessionId: string | null;
     // The code's ceiling, or null when unrestricted / unconfigured.
     ceiling: SecuritySettings | null;
@@ -55,7 +55,7 @@ export interface RestrictedSession {
 // grant lives only in this tab's sessionStorage: a non-owner who deep-links the
 // target in a fresh tab has no grant and is rendered as owner, showing owner-plane
 // affordances. That is a UX artifact only — the host independently fail-closes, and
-// the manager's RequestRemote authorizer rejects a non-owner with no valid grant, so
+// the manager's RequestRemoteAccess authorizer rejects a non-owner with no valid grant, so
 // no owner-plane action succeeds. A fully robust indicator would require a
 // server-authoritative "my relationship to this device" signal rather than the tab's
 // volatile grant; that is a deliberate follow-up, not a safety gap.

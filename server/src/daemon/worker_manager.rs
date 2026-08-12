@@ -172,7 +172,7 @@ pub struct WorkerManager {
     /// so async callers can wait until the cache reflects a known-newer
     /// snapshot (e.g. `VirtualDisplaySupervisor::ensure_attached` waits
     /// for the post-attach `RefreshCapabilities` round-trip to update
-    /// the cache before letting `RequestRemote` assemble the Init reply).
+    /// the cache before letting `RequestRemoteAccess` assemble the RemoteAccessInitialized response).
     capabilities_version: Arc<AtomicU64>,
     /// The security policy sequence the worker last confirmed holding. Compared
     /// against what the daemon published to tell a converged worker from one
@@ -574,7 +574,7 @@ impl WorkerManager {
 
         // Mirror start_worker: a fresh worker re-reports capabilities on its
         // own; clearing the cached snapshot avoids handing stale device data
-        // to a `RequestRemote` that lands between Init and the worker's
+        // to a `RequestRemoteAccess` that lands between Init and the worker's
         // first `Capabilities` emission.
         *self.worker_capabilities.lock().unwrap() = None;
         *self.wayland_portal_snapshot.lock().unwrap() = None;
@@ -753,8 +753,8 @@ impl WorkerManager {
 
     /// Stash the worker's last reported [`MediaCapabilities`]. Called
     /// from `signaling_proxy` whenever the worker emits
-    /// `WorkerToService::Capabilities`. Subsequent `RequestRemote`
-    /// handling uses the snapshot to populate the Init reply.
+    /// `WorkerToService::Capabilities`. Subsequent `RequestRemoteAccess`
+    /// handling uses the snapshot to populate the RemoteAccessInitialized response.
     ///
     /// Bumps [`Self::capabilities_version`] and notifies the watch
     /// channel so awaiters (e.g. `VirtualDisplaySupervisor::ensure_attached`)

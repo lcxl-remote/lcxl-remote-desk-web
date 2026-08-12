@@ -9,11 +9,49 @@ use desk_signal_facade::model::signal::{RequestRemoteModel, SignalingModel, Sign
 const RR_AUDIENCE: &str = "host-client-abc";
 const RR_NOW: &str = "2026-01-01T00:00:00Z";
 
+#[test]
+fn manager_heartbeat_probe_only_accepts_the_dedicated_correlated_response() {
+    let acknowledged = SignalingModel::success_response::<()>(
+        "heartbeat-1",
+        SignalingType::HeartbeatAcknowledged,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(is_correlated_heartbeat_ack(&acknowledged, "heartbeat-1"));
+
+    let typed_error = SignalingModel::error(
+        "heartbeat-1",
+        SignalingType::HeartbeatAcknowledged,
+        None,
+        None,
+        DeskErrorCode::MANAGER_CREDENTIAL_REVOKED,
+        "revoked",
+    )
+    .unwrap();
+    assert!(is_correlated_heartbeat_ack(&typed_error, "heartbeat-1"));
+
+    let request_echo = SignalingModel::success_response::<()>(
+        "heartbeat-1",
+        SignalingType::SendHeartbeat,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(!is_correlated_heartbeat_ack(&request_echo, "heartbeat-1"));
+    assert!(!is_correlated_heartbeat_ack(&acknowledged, "heartbeat-2"));
+}
+
 /// Read the one lifecycle frame that was emitted.
 fn expect_lifecycle(rx: &mut tokio::sync::broadcast::Receiver<String>) -> ExecLifecyclePayload {
     let text = rx.try_recv().expect("no lifecycle frame was sent");
     let frame: SignalingModel = serde_json::from_str(&text).unwrap();
-    assert_eq!(frame.signaling_type, SignalingType::ExecLifecycle);
+    assert_eq!(
+        frame.signaling_type,
+        SignalingType::ExecutionProgressUpdated
+    );
     frame.get_data::<ExecLifecyclePayload>().unwrap()
 }
 
@@ -169,7 +207,7 @@ fn bare_request_remote() -> SignalingModel {
     let data = serde_json::to_value(RequestRemoteModel::default()).unwrap();
     SignalingModel::new(
         "req-1",
-        SignalingType::RequestRemote,
+        SignalingType::RequestRemoteAccess,
         Some("browser-1".to_string()),
         Some("host-1".to_string()),
         Some(data),
@@ -184,7 +222,7 @@ fn stamped_request_remote(authz: RequestRemoteAuthz) -> SignalingModel {
     };
     SignalingModel::new(
         "req-1",
-        SignalingType::RequestRemote,
+        SignalingType::RequestRemoteAccess,
         Some("browser-1".to_string()),
         Some("host-1".to_string()),
         Some(serde_json::to_value(&wrapper).unwrap()),
@@ -215,13 +253,13 @@ fn support_code_issued_is_trusted_central_only() {
     // confining it stops a bare relay forging a teardown of a live session.
     assert!(is_trusted_central_only(SignalingType::RevokeAccessGrant));
     // Alongside the other central→daemon plumbing.
-    assert!(is_trusted_central_only(SignalingType::CommandBlocklistSync));
-    assert!(is_trusted_central_only(SignalingType::CollectRequest));
+    assert!(is_trusted_central_only(SignalingType::SyncCommandBlocklist));
+    assert!(is_trusted_central_only(SignalingType::CollectEvidence));
     // The host→manager support frames are NOT gated here (they egress, never
     // arrive inbound), nor are ordinary session frames.
     assert!(!is_trusted_central_only(SignalingType::RequestSupportCode));
     assert!(!is_trusted_central_only(SignalingType::RevokeSupportCode));
-    assert!(!is_trusted_central_only(SignalingType::RequestRemote));
+    assert!(!is_trusted_central_only(SignalingType::RequestRemoteAccess));
     assert!(!is_trusted_central_only(SignalingType::Offer));
 }
 
@@ -236,7 +274,7 @@ fn request_remote_bare_from_trusted_central_is_dropped() {
         RR_NOW,
     ) {
         RequestRemoteGateOutcome::Drop(_) => {}
-        RequestRemoteGateOutcome::Pass(..) => panic!("bare central RequestRemote must drop"),
+        RequestRemoteGateOutcome::Pass(..) => panic!("bare central RequestRemoteAccess must drop"),
     }
 }
 
@@ -271,7 +309,7 @@ fn request_remote_stamp_failing_validation_is_dropped() {
 
 #[test]
 fn request_remote_valid_owner_stamp_passes_and_unwraps() {
-    // A valid owner stamp (no ceiling) unwraps to a bare RequestRemote and
+    // A valid owner stamp (no ceiling) unwraps to a bare RequestRemoteAccess and
     // carries the validated stamp; the inner payload is restored.
     match gate_request_remote_frame(
         stamped_request_remote(authz(None)),
@@ -319,7 +357,7 @@ fn request_remote_bare_from_relay_passes_unchanged() {
         RR_NOW,
     ) {
         RequestRemoteGateOutcome::Pass(_, None) => {}
-        _ => panic!("bare relay RequestRemote must pass unstamped"),
+        _ => panic!("bare relay RequestRemoteAccess must pass unstamped"),
     }
 }
 
@@ -359,7 +397,7 @@ fn stamped_start_terminal(authz: RequestRemoteAuthz) -> SignalingModel {
 
 #[test]
 fn start_terminal_bare_from_trusted_central_is_dropped() {
-    // Terminal mirrors RequestRemote: the central always stamps, so a bare
+    // Terminal mirrors RequestRemoteAccess: the central always stamps, so a bare
     // StartTerminal on that link is forged / a stripped stamp and must drop.
     match gate_start_terminal_frame(
         bare_start_terminal(),
@@ -575,11 +613,11 @@ async fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
 }
 
 #[test]
-fn ordinary_exec_result_is_not_consumed_as_edge_exec() {
+fn ordinary_execution_completed_is_not_consumed_as_edge_exec() {
     let pending = std::sync::Mutex::new(std::collections::HashSet::new());
     assert!(
         !super::take_edge_exec_correlation(&pending, "browser-exec"),
-        "an ordinary ExecResult must continue to the browser forwarding branch"
+        "an ordinary ExecutionCompleted must continue to the browser forwarding branch"
     );
     pending.lock().unwrap().insert("central-exec".into());
     assert!(super::take_edge_exec_correlation(&pending, "central-exec"));
@@ -597,7 +635,7 @@ async fn drops_worker_bound_message_without_from_connection_id() {
 
     let model = SignalingModel::new(
         "req-1",
-        SignalingType::EnablePrivateScreen,
+        SignalingType::SetPrivateScreenVisibility,
         None,
         None,
         None,
@@ -666,7 +704,14 @@ fn fatal_registration_reject_matches_only_quota_codes() {
     assert_eq!(fatal_registration_reject(&other), None);
 
     // A non-Error frame is never fatal.
-    let normal = SignalingModel::new("r", SignalingType::RequestRemote, None, None, None, None);
+    let normal = SignalingModel::new(
+        "r",
+        SignalingType::RequestRemoteAccess,
+        None,
+        None,
+        None,
+        None,
+    );
     assert_eq!(fatal_registration_reject(&normal), None);
 }
 
@@ -825,7 +870,7 @@ async fn quota_error_is_fatal_only_on_manager_link() {
     assert_eq!(disabled, InboundOutcome::Continue);
 }
 
-/// Daemon-owned RequestRemote without `from_connection_id` does
+/// Daemon-owned RequestRemoteAccess without `from_connection_id` does
 /// not crash the dispatcher — the router's `handle_request_remote`
 /// returns the per-handler error which we log and return.
 #[tokio::test]
@@ -834,7 +879,7 @@ async fn handles_router_error_without_panic() {
 
     let model = SignalingModel::new(
         "req-2",
-        SignalingType::RequestRemote,
+        SignalingType::RequestRemoteAccess,
         None, // missing from_connection_id triggers handler error
         None,
         None,
@@ -855,7 +900,7 @@ async fn worker_owned_with_from_connection_id_does_not_panic() {
 
     let model = SignalingModel::new(
         "req-3",
-        SignalingType::EnablePrivateScreen,
+        SignalingType::SetPrivateScreenVisibility,
         Some("conn-x".to_string()),
         None,
         None,
@@ -884,7 +929,7 @@ fn command_template_sync_text() -> String {
     };
     let model = SignalingModel::new(
         "rs",
-        SignalingType::CommandTemplateSync,
+        SignalingType::SyncCommandTemplates,
         None,
         None,
         Some(serde_json::to_value(payload).unwrap()),
@@ -958,7 +1003,7 @@ async fn command_template_sync_applies_current_epoch_and_ignores_unknown_version
         };
         let model = SignalingModel::new(
             "rs",
-            SignalingType::CommandTemplateSync,
+            SignalingType::SyncCommandTemplates,
             None,
             None,
             Some(serde_json::to_value(payload).unwrap()),
@@ -1046,7 +1091,7 @@ fn wrapped_diagnose_model(request_id: &str, audience: &str) -> SignalingModel {
     };
     SignalingModel::new(
         request_id,
-        SignalingType::Diagnose,
+        SignalingType::DiagnoseDevice,
         Some("browser-conn".to_string()),
         Some("server-conn".to_string()),
         Some(serde_json::to_value(&wrapper).unwrap()),
@@ -1061,7 +1106,7 @@ fn bare_diagnose_model(request_id: &str) -> SignalingModel {
     };
     SignalingModel::new(
         request_id,
-        SignalingType::Diagnose,
+        SignalingType::DiagnoseDevice,
         Some("browser-conn".to_string()),
         Some("server-conn".to_string()),
         Some(serde_json::to_value(&inner).unwrap()),
@@ -1166,7 +1211,7 @@ fn wrapped_confirm_exec_model(request_id: &str, audience: &str) -> SignalingMode
     };
     SignalingModel::new(
         request_id,
-        SignalingType::ConfirmExec,
+        SignalingType::PreviewExecution,
         Some("browser-conn".to_string()),
         Some("server-conn".to_string()),
         Some(serde_json::to_value(&wrapper).unwrap()),
@@ -1183,7 +1228,7 @@ fn wrapped_confirm_exec_from_trusted_central_is_unwrapped_to_router() {
     let model = wrapped_confirm_exec_model("ce-1", "dev-1");
     match gate_authz_frame(model, InboundSignalingSource::TrustedCentral, "dev-1", NOW) {
         AuthzGateOutcome::Pass(unwrapped, Some(authz)) => {
-            assert_eq!(unwrapped.signaling_type, SignalingType::ConfirmExec);
+            assert_eq!(unwrapped.signaling_type, SignalingType::PreviewExecution);
             // Unwrapped: the inner ConfirmExecData is now the frame data.
             let inner = unwrapped
                 .get_data::<desk_agent_protocol::exec::ConfirmExecData>()
@@ -1256,7 +1301,7 @@ fn wrapped_fleet_exec_model(request_id: &str, audience: &str) -> SignalingModel 
     };
     SignalingModel::new(
         request_id,
-        SignalingType::EdgeExecRequest,
+        SignalingType::ExecuteEdgePlan,
         None,
         None,
         Some(serde_json::to_value(&wrapper).unwrap()),
@@ -1300,7 +1345,7 @@ fn fleet_gate_denies_a_malformed_wrapper() {
     // still correlatable (it has a request_id) → denied, not dropped.
     let model = SignalingModel::new(
         "a1",
-        SignalingType::EdgeExecRequest,
+        SignalingType::ExecuteEdgePlan,
         None,
         None,
         Some(serde_json::json!({ "not": "a wrapper" })),
@@ -1365,7 +1410,7 @@ fn central_wrapper_expired_is_dropped() {
     wrapper.authz.expires_at = Some("2020-01-01T00:00:00Z".to_string());
     let model = SignalingModel::new(
         "r1",
-        SignalingType::Diagnose,
+        SignalingType::DiagnoseDevice,
         Some("browser-conn".to_string()),
         Some("server-conn".to_string()),
         Some(serde_json::to_value(&wrapper).unwrap()),
@@ -1389,7 +1434,7 @@ fn central_wrapper_request_id_mismatch_is_dropped() {
     };
     let model = SignalingModel::new(
         "frame-req",
-        SignalingType::Diagnose,
+        SignalingType::DiagnoseDevice,
         Some("browser-conn".to_string()),
         Some("server-conn".to_string()),
         Some(serde_json::to_value(&wrapper).unwrap()),
@@ -1413,7 +1458,7 @@ fn collect_request_value(request_id: &str) -> serde_json::Value {
 fn bare_collect_model(request_id: &str) -> SignalingModel {
     SignalingModel::new(
         request_id,
-        SignalingType::CollectRequest,
+        SignalingType::CollectEvidence,
         None,
         None,
         Some(collect_request_value(request_id)),
@@ -1432,7 +1477,7 @@ fn wrapped_collect_model(
     });
     SignalingModel::new(
         frame_request_id,
-        SignalingType::CollectRequest,
+        SignalingType::CollectEvidence,
         None,
         None,
         Some(wrapper),
@@ -1680,14 +1725,14 @@ async fn dispatch_attach_result_drops_message_when_supervisor_disabled() {
 
 // ====== AI agent response routing ======
 
-/// The daemon rebuilds an outbound `SignalingType::AgentResponse`
+/// The daemon rebuilds an outbound `SignalingType::AgentCapabilityCompleted`
 /// model carrying the `AgentOutcome` verbatim for both the `Ok`
 /// (output) and `Err` (capability-level error) arms. The
 /// transport-level `response_state` is always success — the business
 /// error lives inside the `AgentOutcome::Err` so the control end gets
 /// the full structured `AgentError`.
 #[test]
-fn agent_response_outbound_rebuild_both_arms() {
+fn agent_capability_completed_outbound_rebuild_both_arms() {
     use desk_agent_protocol::{
         AgentError, AgentErrorKind, AgentOutcome, ContainerListOutput, OperationOutput,
         ReadContextOutput,
@@ -1719,18 +1764,20 @@ fn agent_response_outbound_rebuild_both_arms() {
         let (tx, mut rx) = broadcast::channel::<String>(4);
         send_manager_response(
             &tx,
-            "AgentResponse",
+            "AgentCapabilityCompleted",
             request_id,
             &conn,
-            SignalingType::AgentResponse,
+            SignalingType::AgentCapabilityCompleted,
             Some(&outcome),
         );
-        let text = rx.try_recv().expect("outbound AgentResponse broadcast");
+        let text = rx
+            .try_recv()
+            .expect("outbound AgentCapabilityCompleted broadcast");
         let model: SignalingModel = serde_json::from_str(&text).unwrap();
         assert_eq!(model.request_id, request_id);
         assert_eq!(
             model.signaling_type as i32,
-            SignalingType::AgentResponse as i32
+            SignalingType::AgentCapabilityCompleted as i32
         );
         assert_eq!(model.to_connection_id, conn);
         // Transport state is success regardless of the business result.

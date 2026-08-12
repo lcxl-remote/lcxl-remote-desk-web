@@ -10,10 +10,10 @@ pub(super) async fn handle_manager_system_info_inbound(
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::ManagerSystemInfoRequest(payload))
+        .send_to_worker(ServiceToWorker::GetSystemInfo(payload))
         .await
     {
-        log::warn!("[router] failed to send typed ManagerSystemInfoRequest: {e}");
+        log::warn!("[router] failed to send typed GetSystemInfo: {e}");
     }
     Ok(())
 }
@@ -22,31 +22,37 @@ pub(super) async fn handle_manager_file_list_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    let Some(connection_id) = require_from_connection_id(model, "ManagerFileList") else {
+    let Some(connection_id) = require_from_connection_id(model, "ListFiles") else {
         return Ok(());
     };
     let params = match model.get_data::<FileListParams>() {
         Ok(p) => p,
         Err(e) => {
             log::warn!(
-                "[router] ManagerFileList payload parse failed for {connection_id:?}: {e}; \
-                 dropping (request_id={})",
+                "[router] ListFiles payload parse failed for {connection_id:?}: {e}; \
+                 rejecting (request_id={})",
                 model.request_id,
+            );
+            emit_error_response(
+                ctx,
+                model,
+                DeskErrorCode::INVALID_PARAMS,
+                "invalid file list payload",
             );
             return Ok(());
         }
     };
-    let payload = ManagerFileListRequestPayload {
+    let payload = ListFilesPayload {
         request_id: model.request_id.clone(),
         connection_id: connection_id.to_string(),
         params,
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::ManagerFileListRequest(payload))
+        .send_to_worker(ServiceToWorker::ListFiles(payload))
         .await
     {
-        log::warn!("[router] failed to send typed ManagerFileListRequest: {e}");
+        log::warn!("[router] failed to send typed ListFiles: {e}");
     }
     Ok(())
 }
@@ -55,31 +61,31 @@ pub(super) async fn handle_manager_file_delete_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    let Some(connection_id) = require_from_connection_id(model, "ManagerFileDelete") else {
+    let Some(connection_id) = require_from_connection_id(model, "DeleteFile") else {
         return Ok(());
     };
     let request = match model.get_data::<DeleteFileRequest>() {
         Ok(r) => r,
         Err(e) => {
             log::warn!(
-                "[router] ManagerFileDelete payload parse failed for {connection_id:?}: {e}; \
+                "[router] DeleteFile payload parse failed for {connection_id:?}: {e}; \
                  dropping (request_id={})",
                 model.request_id,
             );
             return Ok(());
         }
     };
-    let payload = ManagerFileDeleteRequestPayload {
+    let payload = DeleteFilePayload {
         request_id: model.request_id.clone(),
         connection_id: connection_id.to_string(),
         request,
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::ManagerFileDeleteRequest(payload))
+        .send_to_worker(ServiceToWorker::DeleteFile(payload))
         .await
     {
-        log::warn!("[router] failed to send typed ManagerFileDeleteRequest: {e}");
+        log::warn!("[router] failed to send typed DeleteFile: {e}");
     }
     Ok(())
 }
@@ -126,13 +132,19 @@ pub(super) async fn handle_start_terminal_inbound(
             return Ok(());
         }
     };
-    // The terminal WS is a distinct connection that never does a `RequestRemote`, so
+    // The terminal WS is a distinct connection that never does a `RequestRemoteAccess`, so
     // this is its admission-establishing frame: register the connection's capability
     // ceiling + admission (+ grant index) from the validated stamp before shipping
     // the request to the worker, so the worker-side `meet(ceiling, global)` gate
     // enforces it from the very first terminal request. Fail-closed: a capped ceiling
     // that cannot reach the worker refuses the terminal (never starts it ceiling-less).
     if !register_terminal_admission(ctx, connection_id).await {
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::INVALID_STATE,
+            "terminal admission could not be established",
+        );
         return Ok(());
     }
     ctx.host_control_hub.host_activity().ensure_session(
@@ -143,17 +155,23 @@ pub(super) async fn handle_start_terminal_inbound(
             .unwrap_or_else(desk_signal_facade::model::request_remote_authz::ActorSummary::unknown),
     );
 
-    let payload = StartTerminalRequestPayload {
+    let payload = StartTerminalPayload {
         request_id: model.request_id.clone(),
         connection_id: connection_id.to_string(),
         session,
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::StartTerminalRequest(payload))
+        .send_to_worker(ServiceToWorker::StartTerminal(payload))
         .await
     {
-        log::warn!("[router] failed to send typed StartTerminalRequest: {e}");
+        log::warn!("[router] failed to send typed StartTerminal: {e}");
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::REMOTE_DESK_OFFLINE,
+            "terminal worker is unavailable",
+        );
         pc_manager::force_disconnect_connection(
             &ctx.pc_registry,
             &ctx.worker_mgr,
@@ -251,7 +269,7 @@ pub(super) async fn handle_send_data_to_terminal_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    let Some(connection_id) = require_from_connection_id(model, "SendDataToTerminal") else {
+    let Some(connection_id) = require_from_connection_id(model, "SendTerminalInput") else {
         return Ok(());
     };
     let data = match model.get_data_with_type::<TerminalInputData>() {
@@ -262,23 +280,23 @@ pub(super) async fn handle_send_data_to_terminal_inbound(
         }
         Err(e) => {
             log::warn!(
-                "[router] SendDataToTerminal payload parse failed for {connection_id}: {e}; \
+                "[router] SendTerminalInput payload parse failed for {connection_id}: {e}; \
                  dropping (request_id={})",
                 model.request_id,
             );
             return Ok(());
         }
     };
-    let payload = SendDataToTerminalPayload {
+    let payload = SendTerminalInputPayload {
         connection_id: connection_id.to_string(),
         data,
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::SendDataToTerminalRequest(payload))
+        .send_to_worker(ServiceToWorker::SendTerminalInput(payload))
         .await
     {
-        log::warn!("[router] failed to send typed SendDataToTerminalRequest: {e}");
+        log::warn!("[router] failed to send typed SendTerminalInput: {e}");
     }
     Ok(())
 }
@@ -308,10 +326,10 @@ pub(super) async fn handle_resize_terminal_inbound(
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::ResizeTerminalRequest(payload))
+        .send_to_worker(ServiceToWorker::ResizeTerminal(payload))
         .await
     {
-        log::warn!("[router] failed to send typed ResizeTerminalRequest: {e}");
+        log::warn!("[router] failed to send typed ResizeTerminal: {e}");
     }
     Ok(())
 }
@@ -328,10 +346,10 @@ pub(super) async fn handle_close_terminal_inbound(
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::CloseTerminalRequest(payload))
+        .send_to_worker(ServiceToWorker::CloseTerminal(payload))
         .await
     {
-        log::warn!("[router] failed to send typed CloseTerminalRequest: {e}");
+        log::warn!("[router] failed to send typed CloseTerminal: {e}");
     }
 
     // Clear the terminal connection's whole capability footprint so nothing survives
@@ -369,31 +387,31 @@ pub(super) async fn handle_list_terminal_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    let payload = ListTerminalRequestPayload {
+    let payload = ListTerminalCommandsPayload {
         request_id: model.request_id.clone(),
         connection_id: optional_from_connection_id(model),
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::ListTerminalRequest(payload))
+        .send_to_worker(ServiceToWorker::ListTerminalCommands(payload))
         .await
     {
-        log::warn!("[router] failed to send typed ListTerminalRequest: {e}");
+        log::warn!("[router] failed to send typed ListTerminalCommands: {e}");
     }
     Ok(())
 }
 
 // ---- AI agent plane typed-IPC dispatch ----
 //
-// Inbound `AgentRequest` from a control end carries the
+// Inbound `InvokeAgentCapability` from a control end carries the
 // non-authoritative `desk_agent_protocol::AgentRequestData` (operation +
 // reason). The daemon two-phase-parses the operation against its
 // supported-kind set (so an unknown *newer* kind degrades to
 // `UnsupportedCapability` instead of failing serde), derives the
 // capability from the input, authorizes it against a server-computed
 // scope, stamps every trusted field, and ships a typed
-// `ServiceToWorker::AgentRequest` to the worker. Any rejection short-
-// circuits with an outbound `AgentResponse(AgentOutcome::Err)`; the
+// `ServiceToWorker::InvokeAgentCapability` to the worker. Any rejection short-
+// circuits with an outbound `AgentCapabilityCompleted(AgentOutcome::Err)`; the
 // route itself always returns `Ok(())` (the control-end-visible failure
 // is the outcome we already emitted).
 

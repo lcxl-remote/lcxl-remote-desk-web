@@ -16,12 +16,13 @@ use crate::{
     error::DeskSignalFacadeError,
     model::{
         connection::{
-            ConnectionList, ConnectionModel, ConnectionState, FetchConnectionsScope,
+            ConnectionModel, ConnectionState, ConnectionsFetchedData, FetchConnectionsScope,
             SharedConnectionMap,
         },
         signal::{
-            ForwardSignalingSender, InitSignalingData, LcxlRTCIceServer, RemoteDeskTypeEnum,
-            RequestRemoteModel, SignalingModel, SignalingType, SignalingUser, TurnProvider,
+            ForwardSignalingSender, LcxlRTCIceServer, RemoteAccessInitializedData,
+            RemoteDeskTypeEnum, RequestRemoteModel, SignalingModel, SignalingType, SignalingUser,
+            TurnProvider,
         },
         version::VersionInfo,
     },
@@ -46,7 +47,7 @@ async fn build_request_remote_ice(
     turn?.get_rest_ice_servers(to_connection_id, ttl_secs).await
 }
 
-/// Rebuild a `RequestRemote` after optionally injecting recipient TURN data.
+/// Rebuild a `RequestRemoteAccess` after optionally injecting recipient TURN data.
 /// Keeping this seam separate makes every browser-supplied admission field part
 /// of the regression surface instead of relying on an authorizer to preserve it.
 fn rebuild_request_remote_with_ice(
@@ -55,6 +56,37 @@ fn rebuild_request_remote_with_ice(
 ) -> Result<SignalingModel, DeskSignalFacadeError> {
     let mut data = model.get_data_with_default::<RequestRemoteModel>()?;
     if let Some(ice_server) = ice_server {
+        data.ice_servers.push(ice_server);
+    }
+    Ok(SignalingModel::new(
+        model.request_id.as_str(),
+        model.signaling_type,
+        model.from_connection_id.clone(),
+        model.to_connection_id.clone(),
+        Some(serde_json::to_value(data)?),
+        model.response_state.clone(),
+    ))
+}
+
+/// Add recipient TURN credentials to a successful remote-access initialization.
+/// Business failures deliberately carry no success payload and must pass through
+/// unchanged so the controller can act on their typed `response_state`.
+fn rebuild_remote_access_initialized_with_ice(
+    model: &SignalingModel,
+    ice_server: Option<LcxlRTCIceServer>,
+) -> Result<SignalingModel, DeskSignalFacadeError> {
+    if model
+        .response_state
+        .as_ref()
+        .is_some_and(|state| !state.is_success())
+    {
+        return Ok(model.clone());
+    }
+
+    let mut data = model.get_data::<RemoteAccessInitializedData>()?;
+    if let Some(ice_server) = ice_server
+        && !ice_server.urls.is_empty()
+    {
         data.ice_servers.push(ice_server);
     }
     Ok(SignalingModel::new(
@@ -80,9 +112,7 @@ mod request_remote_ice_tests;
 pub(crate) fn is_owner_plane_management_frame(t: SignalingType) -> bool {
     matches!(
         t,
-        SignalingType::ManagerSystemInfo
-            | SignalingType::ManagerSystemStatue
-            | SignalingType::ChangeDisplaySettings
+        SignalingType::GetSystemInfo | SignalingType::ChangeDisplaySettings
     )
 }
 
@@ -111,7 +141,7 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// the manager (which wraps the frames with an authorization decision);
     /// `None` in the signal server, where the frames relay unwrapped.
     pub control_authorizer: Option<Arc<dyn ControlFrameAuthorizer>>,
-    /// Capability-ceiling stamp seam for `RequestRemote` frames. `Some` in both
+    /// Capability-ceiling stamp seam for `RequestRemoteAccess` frames. `Some` in both
     /// the manager and the signal server (each stamps owner sessions with no
     /// ceiling and redeemed grants with their per-code ceiling, default-denying
     /// otherwise); `None` only where the host applies no central trust, in which
@@ -346,8 +376,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
         self
     }
 
-    /// Attach the `RequestRemote` capability-ceiling stamp seam. The manager and
-    /// the signal server both call this so every relayed `RequestRemote` carries a
+    /// Attach the `RequestRemoteAccess` capability-ceiling stamp seam. The manager and
+    /// the signal server both call this so every relayed `RequestRemoteAccess` carries a
     /// trusted stamp; a handler left without one relays requests unstamped.
     pub fn with_request_remote_authorizer(
         mut self,
@@ -478,7 +508,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // and display-mode changes
             // have **no** worker-side `meet` gate, so the central is their sole
             // authorization point. door1 denies them for an *admitted* capped
-            // session; blocking here also closes the pre-`RequestRemote` window,
+            // session; blocking here also closes the pre-`RequestRemoteAccess` window,
             // where the host has no admission record yet and would otherwise pass
             // them. Session media tuning (`UpdateDeskSettings`) is
             // session-scoped, not host config, so it is intentionally not listed.
@@ -493,19 +523,30 @@ impl<U: SignalingUser> SignalingHandler<U> {
             }
         }
 
-        if let Some(tx) = self
-            .connection_state
-            .request_callback_map
-            .write()
-            .await
-            .remove(&signaling_model.request_id)
-        {
-            tx.send(signaling_model.clone()).map_err(|_| {
-                DeskSignalFacadeError::new_custom_error(
+        let pending_callback = {
+            let mut callbacks = self.connection_state.request_callback_map.write().await;
+            let has_same_request_id = callbacks.contains_key(&signaling_model.request_id);
+            let pending = crate::model::connection::take_matching_request_callback(
+                &mut callbacks,
+                &signaling_model.request_id,
+                signaling_model.signaling_type,
+            );
+            if pending.is_none() && has_same_request_id {
+                log::warn!(
+                    "Ignoring mismatched {} for pending request {}; callback remains active",
+                    signaling_model.signaling_type,
+                    signaling_model.request_id
+                );
+            }
+            pending
+        };
+        if let Some(pending) = pending_callback {
+            if !pending.send(signaling_model.clone()) {
+                return Err(DeskSignalFacadeError::new_custom_error(
                     DeskErrorCode::SYSTEM_ERROR,
                     "Failed to send response to peer",
-                )
-            })?;
+                ));
+            }
             return Ok(());
         }
         // No pending request-callback matched here. The daemon fans every
@@ -566,6 +607,16 @@ impl<U: SignalingUser> SignalingHandler<U> {
     ) -> Result<MessageControl, DeskSignalFacadeError> {
         log::debug!("Received text message: {}", text);
         let signaling_model = serde_json::from_str::<SignalingModel>(&text)?;
+        if self.connection_state.auth_context.auth_kind
+            == crate::model::auth_context::AuthKind::CookieAuth
+            && contracts::signaling_role(signaling_model.signaling_type)
+                == contracts::SignalingRole::Response
+        {
+            return DeskSignalFacadeError::custom_error(
+                DeskErrorCode::PERMISSION_ERROR,
+                "browser connections cannot originate response-only signaling types",
+            );
+        }
         if signaling_model.is_request()
             && remote_access_frame_requires_unlocked(signaling_model.signaling_type)
             && let Some(authorizer) = self.remote_access_admission_authorizer.clone()
@@ -586,12 +637,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
         }
         let mut control = MessageControl::Continue;
         match signaling_model.signaling_type {
-            SignalingType::Heartbeat => {
+            SignalingType::SendHeartbeat => {
                 let (response, should_close) = match &self.credential_policy {
                     CredentialPolicy::Plain => (
                         SignalingModel::success_response::<()>(
                             &signaling_model.request_id,
-                            SignalingType::Heartbeat,
+                            SignalingType::HeartbeatAcknowledged,
                             None,
                             Some(self.connection_state.model.connection_id.clone()),
                             None,
@@ -606,7 +657,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                             CredentialHeartbeatOutcome::Proof(proof) => (
                                 SignalingModel::success_response(
                                     &signaling_model.request_id,
-                                    SignalingType::Heartbeat,
+                                    SignalingType::HeartbeatAcknowledged,
                                     None,
                                     Some(self.connection_state.model.connection_id.clone()),
                                     Some(&proof),
@@ -622,7 +673,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                                 (
                                     SignalingModel::error(
                                         &signaling_model.request_id,
-                                        SignalingType::Error,
+                                        SignalingType::HeartbeatAcknowledged,
                                         None,
                                         Some(
                                             self.connection_state.model.connection_id.clone(),
@@ -641,7 +692,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                                 (
                                     SignalingModel::error(
                                         &signaling_model.request_id,
-                                        SignalingType::Error,
+                                        SignalingType::HeartbeatAcknowledged,
                                         None,
                                         Some(
                                             self.connection_state.model.connection_id.clone(),
@@ -656,7 +707,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                             | CredentialHeartbeatOutcome::BackendUnavailable => (
                                 SignalingModel::success_response::<()>(
                                     &signaling_model.request_id,
-                                    SignalingType::Heartbeat,
+                                    SignalingType::HeartbeatAcknowledged,
                                     None,
                                     Some(
                                         self.connection_state.model.connection_id.clone(),
@@ -678,6 +729,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     control = MessageControl::Close;
                 }
             }
+            SignalingType::HeartbeatAcknowledged => {
+                log::warn!(
+                    "Received server-originated heartbeat response from client {}; dropping",
+                    self.connection_state.model.connection_id
+                );
+            }
             SignalingType::FetchConnections => {
                 let connection_map = if let Some(resolver) = &self.fetch_connections_resolver {
                     // Manager: cluster-wide, presence-backed, scope-authorized
@@ -697,7 +754,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                         .map(|item| (item.0.clone(), item.1.model.clone()))
                         .collect()
                 };
-                let connection_list = ConnectionList {
+                let connection_list = ConnectionsFetchedData {
                     current_connection_id: self.connection_state.model.connection_id.clone(),
                     connection_map,
                 };
@@ -705,14 +762,14 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 log::info!("Sending connection list to client: {:?}", connection_list);
                 let response = SignalingModel::success_response(
                     &signaling_model.request_id,
-                    SignalingType::ConnectionList,
+                    SignalingType::ConnectionsFetched,
                     None,
                     None,
                     Some(&connection_list),
                 )?;
                 self.connection_state.send_response(None, &response).await?;
             }
-            SignalingType::ConnectionList => {
+            SignalingType::ConnectionsFetched => {
                 log::warn!(
                     "Received connection list signaling type: {}, it should not be received",
                     signaling_model.signaling_type
@@ -730,7 +787,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     self.connection_state.model.connection_id
                 );
             }
-            SignalingType::SendDataToTerminal => {
+            SignalingType::SendTerminalInput => {
                 let from_connection_id = &self.connection_state.model.connection_id;
                 if signaling_model.is_request()
                     && !self
@@ -771,11 +828,11 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 self.forward_to_peer(&signaling_model, false).await?;
             }
 
-            SignalingType::ReplyFromTerminal | SignalingType::TerminalClosed => {
+            SignalingType::TerminalOutputProduced | SignalingType::TerminalClosed => {
                 self.forward_to_peer(&signaling_model, true).await?;
             }
 
-            SignalingType::Canid => {
+            SignalingType::IceCandidate => {
                 let fallback_ip = self
                     .connection_state
                     .model
@@ -796,7 +853,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 self.forward_to_peer(&signaling_model, false).await?;
             }
 
-            SignalingType::RequestRemote => {
+            SignalingType::RequestRemoteAccess => {
                 // Inject a TURN REST ICE server for the RECIPIENT (the desk
                 // server / host this REQUEST_REMOTE is forwarded to) so it can
                 // gather srflx/relay candidates for NAT traversal. Keyed on
@@ -830,23 +887,36 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 self.forward_to_peer(&to_forward, false).await?;
             }
 
-            SignalingType::Init => {
-                let mut data = signaling_model.get_data::<InitSignalingData>()?;
+            SignalingType::RemoteAccessInitialized => {
+                // A typed business failure has no initialization payload. Forward
+                // it before attempting success-only parsing/TURN injection so the
+                // controller receives errors such as ACTION_NEED_RETRY instead of
+                // a locally synthesized BLANK_SIGNALING_DATA failure.
+                if signaling_model
+                    .response_state
+                    .as_ref()
+                    .is_some_and(|state| !state.is_success())
+                {
+                    self.forward_to_peer(&signaling_model, false).await?;
+                    return Ok(MessageControl::Continue);
+                }
+
                 // TODO need to support static auth secret
                 // ice servers
                 // username is connection_id
                 // password is client id
+                let mut ice_server = None;
                 let client_id_opt = self.connection_state.model.version_info.client_id.clone();
                 if let Some(client_id) = client_id_opt {
                     if let Some(turn) = &self.turn {
-                        let ice_server = turn
+                        let candidate = turn
                             .get_ice_servers(
                                 &self.connection_state.model.connection_id,
                                 &client_id,
                             )
                             .await;
-                        if !ice_server.urls.is_empty() {
-                            data.ice_servers.push(ice_server);
+                        if !candidate.urls.is_empty() {
+                            ice_server = Some(candidate);
                         } else {
                             log::warn!(
                                 "Skipping empty TURN ICE servers for connection {}",
@@ -860,15 +930,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
                         );
                     }
                 }
-                let data = Some(serde_json::to_value(data)?);
-                let new_signaling_model = SignalingModel::new(
-                    signaling_model.request_id.as_str(),
-                    signaling_model.signaling_type,
-                    signaling_model.from_connection_id,
-                    signaling_model.to_connection_id,
-                    data,
-                    signaling_model.response_state,
-                );
+                let new_signaling_model =
+                    rebuild_remote_access_initialized_with_ice(&signaling_model, ice_server)?;
                 self.forward_to_peer(&new_signaling_model, false).await?;
             }
             // Owner-plane device-management frames. These carry no capability
@@ -881,9 +944,30 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // denial in `forward_to_peer` (`is_owner_plane_management_frame`)
             // still applies, so its behaviour is unchanged. Kept in lock-step with
             // `is_owner_plane_management_frame`.
-            SignalingType::ManagerSystemInfo
-            | SignalingType::ManagerSystemStatue
-            | SignalingType::ChangeDisplaySettings => {
+            SignalingType::GetSystemInfo | SignalingType::ChangeDisplaySettings => {
+                if let Some(authorizer) = self.owner_plane_authorizer.clone() {
+                    match authorizer
+                        .authorize(
+                            &self.connection_state,
+                            &self.connection_map,
+                            &signaling_model,
+                        )
+                        .await
+                    {
+                        OwnerPlaneOutcome::Allow => {}
+                        OwnerPlaneOutcome::Reject { code, message } => {
+                            return DeskSignalFacadeError::custom_error(code, &message);
+                        }
+                    }
+                }
+                self.forward_to_peer(&signaling_model, false).await?;
+            }
+
+            // Owner-plane responses are outbound-only and must pass the same
+            // manager fence as their requests. The manager verifies the bound
+            // host, expected response type, request id, and original browser;
+            // the OSS signal keeps its existing direct relay behavior.
+            SignalingType::SystemInfoRetrieved | SignalingType::DisplaySettingsChanged => {
                 if let Some(authorizer) = self.owner_plane_authorizer.clone() {
                     match authorizer
                         .authorize(
@@ -906,29 +990,36 @@ impl<U: SignalingUser> SignalingHandler<U> {
             SignalingType::Offer
             | SignalingType::Answer
             | SignalingType::RequireControl
-            | SignalingType::AcceptControl
-            | SignalingType::DenyControl
-            | SignalingType::CloseControl
+            | SignalingType::ControlAccepted
+            | SignalingType::ControlDenied
+            | SignalingType::ReleaseControl
+            | SignalingType::ControlReleased
+            | SignalingType::CloseRemoteSession
             | SignalingType::UpdateDeskSettings
-            | SignalingType::ManagerFileList
-            | SignalingType::ManagerFileDelete
-            | SignalingType::ListTerminal
-            | SignalingType::EnablePrivateScreen
+            | SignalingType::ListFiles
+            | SignalingType::FilesListed
+            | SignalingType::DeleteFile
+            | SignalingType::FileDeleted
+            | SignalingType::ListTerminalCommands
+            | SignalingType::TerminalCommandsListed
+            | SignalingType::SetPrivateScreenVisibility
+            | SignalingType::PrivateScreenVisibilitySet
             | SignalingType::PrivateScreenStateChanged
             | SignalingType::TerminalStarted
-            | SignalingType::AudioPlaybackError
+            | SignalingType::AudioPlaybackFailed
             | SignalingType::MediaPipelineStateChanged
             | SignalingType::RetryMediaPipeline
+            | SignalingType::MediaPipelineRetryCompleted
             | SignalingType::DesktopSwitching
             | SignalingType::DesktopReady
             // AI host → control-end responses are plain relayed types (no
             // authorization injection on the reply path).
-            | SignalingType::AgentResponse
-            | SignalingType::DiagnoseEvent
-            | SignalingType::TerminalCopilotEvent
-            | SignalingType::TerminalCompleteResult
-            | SignalingType::ExecPreview
-            | SignalingType::ExecResult
+            | SignalingType::AgentCapabilityCompleted
+            | SignalingType::DiagnosisUpdated
+            | SignalingType::TerminalCopilotUpdated
+            | SignalingType::TerminalCompletionsGenerated
+            | SignalingType::ExecutionPreviewGenerated
+            | SignalingType::ExecutionCompleted
             => {
                 // Generic forwarding
                 self.forward_to_peer(&signaling_model, false).await?;
@@ -938,7 +1029,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // Centrally-owned edge executions intentionally carry no peer target:
             // their authoritative result is consumed by the central observer, so
             // lifecycle progress is advisory and must not be forwarded to `None`.
-            SignalingType::ExecLifecycle => {
+            SignalingType::ExecutionProgressUpdated => {
                 if signaling_model.to_connection_id.is_some() {
                     self.forward_to_peer(&signaling_model, false).await?;
                 } else {
@@ -955,7 +1046,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // has no peer target, and its answer is consumed here instead of being
             // forwarded to no one. The signal server has no reconcile consumer, so
             // an unrouted reply is simply dropped.
-            SignalingType::ExecStateReply => {
+            SignalingType::ExecutionStateReported => {
                 if signaling_model.to_connection_id.is_some() {
                     self.forward_to_peer(&signaling_model, false).await?;
                 } else if let Some(observer) = self.exec_state_reply_observer.clone() {
@@ -969,7 +1060,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // audit observer for persistence; never relayed to a peer (it must
             // not re-enter the control-end broadcast lane). Ignored where no
             // observer is attached (the signal server).
-            SignalingType::AiAuditEvent => {
+            SignalingType::ReportAiAuditEvent => {
                 if let Some(observer) = self.audit_observer.clone() {
                     observer
                         .on_audit_event(&self.connection_state, &signaling_model)
@@ -992,18 +1083,18 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // approval centrally (it owns the durable work item). A host exec's
             // ResolveExec is relayed unwrapped by the authorizer (`Forward`); with no
             // authorizer (signal server) it relays plainly, exactly like before.
-            SignalingType::AgentRequest
-            | SignalingType::Diagnose
-            | SignalingType::DiagnoseCancel
-            | SignalingType::TerminalCopilotAsk
-            | SignalingType::TerminalCopilotCancel
-            | SignalingType::TerminalCompleteAsk
-            | SignalingType::ConfirmExec
+            SignalingType::InvokeAgentCapability
+            | SignalingType::DiagnoseDevice
+            | SignalingType::CancelDiagnosis
+            | SignalingType::AskTerminalCopilot
+            | SignalingType::CancelTerminalCopilot
+            | SignalingType::GenerateTerminalCompletions
+            | SignalingType::PreviewExecution
             // `ExecControl` acts on a command that is already running, so it goes
             // through the authorizer rather than relaying: stopping someone else's
             // execution is a decision, and one that has to be recorded.
-            | SignalingType::ExecControl
-            | SignalingType::ResolveExec => {
+            | SignalingType::ControlExecution
+            | SignalingType::ResolveExecution => {
                 let to_forward = if let Some(authorizer) = self.control_authorizer.clone() {
                     match authorizer
                         .authorize(&self.connection_state, &self.connection_map, &signaling_model)
@@ -1023,7 +1114,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 self.forward_to_peer(&to_forward, false).await?;
             }
 
-            SignalingType::CommandTemplateSync => {
+            SignalingType::SyncCommandTemplates => {
                 // Manager → daemon only, originated server-side and written
                 // directly to the desk-server's session. A client sending it
                 // inbound to the signaling server is a protocol error; swallow
@@ -1033,7 +1124,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     self.connection_state.model.connection_id
                 );
             }
-            SignalingType::CommandBlocklistSync => {
+            SignalingType::SyncCommandBlocklist => {
                 // Manager → daemon only, originated server-side and written
                 // directly to the desk-server's session. A client sending it
                 // inbound to the signaling server is a protocol error; swallow
@@ -1043,7 +1134,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     self.connection_state.model.connection_id
                 );
             }
-            SignalingType::CollectRequest => {
+            SignalingType::CollectEvidence => {
                 // Manager → daemon only, originated server-side and written
                 // directly to the desk-server's session. A client sending it
                 // inbound to the signaling server is a protocol error; swallow it
@@ -1053,7 +1144,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     self.connection_state.model.connection_id
                 );
             }
-            SignalingType::CollectResponse => {
+            SignalingType::EvidenceCollectionUpdated => {
                 // Desk-server daemon → manager only. Consumed by the manager
                 // orchestrator's pending store; never relayed to a peer (it must
                 // not re-enter the control-end broadcast lane). Ignored where no
@@ -1064,7 +1155,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                         .await;
                 }
             }
-            SignalingType::EdgeExecRequest => {
+            SignalingType::ExecuteEdgePlan => {
                 // Manager → daemon only, originated server-side and written
                 // directly to the desk-server's session (the manager is the PDP).
                 // A client sending it inbound to the signaling server is a
@@ -1075,7 +1166,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     self.connection_state.model.connection_id
                 );
             }
-            SignalingType::RemoteToolRequest => {
+            SignalingType::InvokeRemoteTool => {
                 // Manager owner instance → daemon only, written directly to the
                 // desk-server's session. A client sending it inbound to the
                 // signaling server is a protocol error; swallow it so a control end
@@ -1085,7 +1176,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     self.connection_state.model.connection_id
                 );
             }
-            SignalingType::RemoteToolResponse => {
+            SignalingType::RemoteToolOutputUpdated => {
                 // Desk-server daemon → manager only. Consumed by the manager
                 // remote-tool pending store; never relayed to a peer. Ignored where
                 // no remote-tool consumer is attached (the signal server).
@@ -1095,7 +1186,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                         .await;
                 }
             }
-            SignalingType::EdgeExecResult => {
+            SignalingType::EdgeExecutionCompleted => {
                 // Desk-server daemon → manager only. Consumed by the manager
                 // execution pending store; never relayed to a peer (it must not
                 // re-enter the control-end broadcast lane). Ignored where no
@@ -1140,22 +1231,22 @@ impl<U: SignalingUser> SignalingHandler<U> {
                         .await;
                 }
             }
-            SignalingType::HostRemoteAccessLockRequest => {
+            SignalingType::UpdateRemoteAccessLock => {
                 if let Some(controller) = self.host_remote_access_controller.clone() {
                     controller
                         .on_lock_request(&self.connection_state, &signaling_model)
                         .await;
                 }
             }
-            SignalingType::TerminateRemotePeerRequest => {
+            SignalingType::TerminateRemotePeer => {
                 if let Some(controller) = self.host_remote_access_controller.clone() {
                     controller
                         .on_terminate_peer_request(&self.connection_state, &signaling_model)
                         .await;
                 }
             }
-            SignalingType::HostRemoteAccessLockAck
-            | SignalingType::TerminateRemotePeerAck => {
+            SignalingType::RemoteAccessLockUpdated
+            | SignalingType::RemotePeerTerminationResolved => {
                 log::warn!(
                     "Received server-originated remote-access ack from client {}; dropping",
                     self.connection_state.model.connection_id

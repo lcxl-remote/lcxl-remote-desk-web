@@ -2,10 +2,10 @@ use super::*;
 
 // ---- AI agent plane: two-phase parse + authz + routing ----
 
-pub(super) fn agent_request_model(raw: serde_json::Value) -> SignalingModel {
+pub(super) fn invoke_agent_capability_model(raw: serde_json::Value) -> SignalingModel {
     SignalingModel::new(
         "req-ai-1",
-        SignalingType::AgentRequest,
+        SignalingType::InvokeAgentCapability,
         Some("conn-1".to_string()),
         None,
         Some(raw),
@@ -16,7 +16,7 @@ pub(super) fn agent_request_model(raw: serde_json::Value) -> SignalingModel {
 pub(super) fn read_outcome(rx: &mut broadcast::Receiver<String>) -> AgentOutcome {
     read_response(rx)
         .get_data::<AgentOutcome>()
-        .expect("AgentResponse must carry an AgentOutcome")
+        .expect("AgentCapabilityCompleted must carry an AgentOutcome")
 }
 
 /// A fully-known read request is accepted.
@@ -32,7 +32,7 @@ fn two_phase_parse_accepts_known_read_kind() {
         },
         "reason": null
     });
-    assert!(validate_agent_request_kinds(&raw).is_ok());
+    assert!(validate_invoke_agent_capability_kinds(&raw).is_ok());
 }
 
 /// An unknown *outer* kind (newer control end) degrades to
@@ -42,7 +42,7 @@ fn two_phase_parse_rejects_unknown_outer_kind() {
     let raw = serde_json::json!({
         "operation": { "input": { "kind": "telepathy", "params": {} } }
     });
-    let err = validate_agent_request_kinds(&raw).expect_err("unknown outer kind");
+    let err = validate_invoke_agent_capability_kinds(&raw).expect_err("unknown outer kind");
     assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
 }
 
@@ -60,7 +60,7 @@ fn two_phase_parse_rejects_unknown_inner_read_kind() {
             }
         }
     });
-    let err = validate_agent_request_kinds(&raw).expect_err("unknown inner kind");
+    let err = validate_invoke_agent_capability_kinds(&raw).expect_err("unknown inner kind");
     assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
 }
 
@@ -81,10 +81,10 @@ fn authorize_respects_granted_set() {
 }
 
 /// Unknown read kind routed through the full handler emits an
-/// outbound `AgentResponse(AgentOutcome::Err(UnsupportedCapability))`
+/// outbound `AgentCapabilityCompleted(AgentOutcome::Err(UnsupportedCapability))`
 /// and never forwards anything to the worker.
 #[tokio::test]
-async fn agent_request_unknown_kind_emits_unsupported_outcome() {
+async fn invoke_agent_capability_unknown_kind_emits_unsupported_outcome() {
     let (ctx, mut rx) = make_ctx_with_rx().await;
     let raw = serde_json::json!({
         "operation": {
@@ -95,7 +95,7 @@ async fn agent_request_unknown_kind_emits_unsupported_outcome() {
         },
         "reason": null
     });
-    handle_agent_request_inbound(&ctx, &agent_request_model(raw))
+    handle_invoke_agent_capability_inbound(&ctx, &invoke_agent_capability_model(raw))
         .await
         .unwrap();
     match read_outcome(&mut rx) {
@@ -107,7 +107,7 @@ async fn agent_request_unknown_kind_emits_unsupported_outcome() {
 /// `exec` parses cleanly but derives no capability, so the
 /// handler rejects it as `UnsupportedCapability` without forwarding.
 #[tokio::test]
-async fn agent_request_exec_is_unsupported_until_m2() {
+async fn invoke_agent_capability_exec_is_unsupported_until_m2() {
     let (ctx, mut rx) = make_ctx_with_rx().await;
     let raw = serde_json::json!({
         "operation": {
@@ -125,7 +125,7 @@ async fn agent_request_exec_is_unsupported_until_m2() {
         },
         "reason": null
     });
-    handle_agent_request_inbound(&ctx, &agent_request_model(raw))
+    handle_invoke_agent_capability_inbound(&ctx, &invoke_agent_capability_model(raw))
         .await
         .unwrap();
     match read_outcome(&mut rx) {
@@ -134,12 +134,12 @@ async fn agent_request_exec_is_unsupported_until_m2() {
     }
 }
 
-/// A valid read forwards a typed `ServiceToWorker::AgentRequest` with
+/// A valid read forwards a typed `ServiceToWorker::InvokeAgentCapability` with
 /// every trusted field stamped server-side: `request_id` from the
 /// signaling model, the actor injected (never self-reported by the
 /// control end), and the connection correlated.
 #[tokio::test]
-async fn agent_request_valid_forwards_with_server_injected_fields() {
+async fn invoke_agent_capability_valid_forwards_with_server_injected_fields() {
     use desk_agent_protocol::{
         AgentOperation, ContextKind, OperationInput, ProcessListParams, ReadContextInput,
     };
@@ -158,15 +158,15 @@ async fn agent_request_valid_forwards_with_server_injected_fields() {
         org_id: None,
     };
     let raw = serde_json::to_value(&req).unwrap();
-    handle_agent_request_inbound(&ctx, &agent_request_model(raw))
+    handle_invoke_agent_capability_inbound(&ctx, &invoke_agent_capability_model(raw))
         .await
         .unwrap();
 
     match ipc_rx
         .try_recv()
-        .expect("worker should receive AgentRequest")
+        .expect("worker should receive InvokeAgentCapability")
     {
-        ServiceToWorker::AgentRequest(p) => {
+        ServiceToWorker::InvokeAgentCapability(p) => {
             assert_eq!(p.request_id, "req-ai-1");
             assert_eq!(p.connection_id.as_deref(), Some("conn-1"));
             // request_id is re-stamped from the signaling model, not
@@ -186,7 +186,7 @@ async fn agent_request_valid_forwards_with_server_injected_fields() {
 /// host with no worker proceeds past authorization (default local read scope)
 /// and reports `TargetOffline` — not the removed "not configured" rejection.
 #[tokio::test]
-async fn agent_request_without_local_gateway_proceeds_to_authorization() {
+async fn invoke_agent_capability_without_local_gateway_proceeds_to_authorization() {
     use desk_agent_protocol::{
         AgentOperation, ContextKind, OperationInput, ProcessListParams, ReadContextInput,
     };
@@ -203,7 +203,7 @@ async fn agent_request_without_local_gateway_proceeds_to_authorization() {
         org_id: None,
     };
     let raw = serde_json::to_value(&req).unwrap();
-    handle_agent_request_inbound(&ctx, &agent_request_model(raw))
+    handle_invoke_agent_capability_inbound(&ctx, &invoke_agent_capability_model(raw))
         .await
         .unwrap();
     match read_outcome(&mut rx) {

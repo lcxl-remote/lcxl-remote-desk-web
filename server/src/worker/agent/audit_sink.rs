@@ -59,7 +59,7 @@ impl AuditSink for RemoteAuditSink {
             return;
         }
         let payload = AiAuditEventPayload { event };
-        match SignalingModel::new_request(SignalingType::AiAuditEvent, None, Some(&payload)) {
+        match SignalingModel::new_request(SignalingType::ReportAiAuditEvent, None, Some(&payload)) {
             Ok(model) => match serde_json::to_string(&model) {
                 Ok(text) => {
                     let _ = self.outbound_tx.send(text);

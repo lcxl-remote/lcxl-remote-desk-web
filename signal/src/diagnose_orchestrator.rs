@@ -169,7 +169,7 @@ async fn push_collect_request(
         request_id: request_id.to_string(),
         request: request.clone(),
     };
-    let frame = SignalingModel::new_request(SignalingType::CollectRequest, None, Some(&payload))
+    let frame = SignalingModel::new_request(SignalingType::CollectEvidence, None, Some(&payload))
         .map_err(|e| format!("build CollectRequest: {e}"))?;
     send_frame(target, &frame).await
 }
@@ -192,7 +192,7 @@ pub async fn stream_event(
     };
     let frame = SignalingModel::new(
         &event.request_id,
-        SignalingType::DiagnoseEvent,
+        SignalingType::DiagnosisUpdated,
         None,
         Some(browser_connection_id.to_string()),
         serde_json::to_value(event).ok(),

@@ -693,7 +693,7 @@ impl MediaProducer {
 
     /// Build a one-shot capability snapshot for the daemon. Called
     /// from `worker::session::ipc_loop` immediately after Init so the
-    /// daemon can populate the next `RequestRemote` Init reply with
+    /// daemon can populate the next `RequestRemoteAccess` RemoteAccessInitialized response with
     /// real codec / device data.
     pub fn build_capabilities(desktop_name: Option<&str>, has_tauri: bool) -> MediaCapabilities {
         // Verbatim encoder identifiers from capture-engine. We carry both
@@ -720,7 +720,7 @@ impl MediaProducer {
             }
         }
         // Daemon's `pc_manager` echoes these maps verbatim into
-        // `InitSignalingData::{video,audio}_device_list`, so the
+        // `RemoteAccessInitializedData::{video,audio}_device_list`, so the
         // browser's capture-source picker keeps the per-driver
         // grouping it had in the legacy worker-owned-PC path.
         let video_device_list = list_image_capture();

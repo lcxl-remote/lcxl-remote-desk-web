@@ -1,5 +1,30 @@
 use super::*;
 
+#[test]
+fn remote_access_initialized_business_error_is_forwarded_without_success_payload() {
+    let response = SignalingModel::error(
+        "request-1",
+        SignalingType::RemoteAccessInitialized,
+        Some("host-1".to_string()),
+        Some("browser-1".to_string()),
+        DeskErrorCode::ACTION_NEED_RETRY,
+        "credential proof pending",
+    )
+    .unwrap();
+
+    let rebuilt = rebuild_remote_access_initialized_with_ice(&response, None).unwrap();
+    assert_eq!(
+        rebuilt.signaling_type,
+        SignalingType::RemoteAccessInitialized
+    );
+    assert_eq!(rebuilt.request_id, "request-1");
+    assert!(rebuilt.get_raw_data().is_none());
+    assert_eq!(
+        rebuilt.response_state.unwrap().error_code,
+        DeskErrorCode::ACTION_NEED_RETRY.code()
+    );
+}
+
 /// Fake provider that records nothing — `get_ice_servers` must never be hit
 /// (REQUEST_REMOTE must use the REST path), and `get_rest_ice_servers`
 /// echoes the requested name into the username so the test can assert the
@@ -24,7 +49,7 @@ impl TurnProvider for FakeTurn {
 fn model(to: Option<&str>) -> SignalingModel {
     SignalingModel::new(
         "req-1",
-        SignalingType::RequestRemote,
+        SignalingType::RequestRemoteAccess,
         Some("browser-conn".to_string()),
         to.map(str::to_string),
         None,
@@ -85,7 +110,7 @@ fn turn_rebuild_preserves_requested_wayland_control_mode() {
     };
     let original = SignalingModel::new(
         "req-wayland",
-        SignalingType::RequestRemote,
+        SignalingType::RequestRemoteAccess,
         Some("browser-conn".to_string()),
         Some("host-1".to_string()),
         Some(serde_json::to_value(payload).unwrap()),

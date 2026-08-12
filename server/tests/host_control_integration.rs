@@ -109,6 +109,7 @@ async fn integration_forwarder_offline_fails_fast() {
     let n = hub
         .send_command(HostControlMessage::PrivateScreenShow {
             connection_id: "c1".to_string(),
+            request_id: "r-show".to_string(),
         })
         .expect("send_command should not error");
     assert_eq!(n, 0);

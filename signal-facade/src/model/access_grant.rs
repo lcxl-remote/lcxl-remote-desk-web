@@ -2,7 +2,7 @@
 //!
 //! The central brain (manager) sends the target host a [`RevokeAccessGrantData`]
 //! to direct-close an already-established grant session it holds, cutting the peer
-//! connection immediately rather than waiting for its next `RequestRemote` (which
+//! connection immediately rather than waiting for its next `RequestRemoteAccess` (which
 //! the `authorize` generation check would reject anyway). Two granularities share
 //! the frame:
 //!

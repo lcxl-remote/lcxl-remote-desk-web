@@ -204,7 +204,7 @@ pub struct ResolveExecData {
 }
 
 /// Server → control end (`ExecResult`) **and** worker → daemon
-/// (`WorkerToService::ExecResult`): the execution result, tagged with its
+/// (`WorkerToService::ExecutionCompleted`): the execution result, tagged with its
 /// [`ExecRequestId`] so the UI backfills the right suggested-command row.
 ///
 /// Carries [`AgentOutcome`] (`Ok(OperationOutput::Exec(..))` | `Err`) rather

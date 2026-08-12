@@ -40,6 +40,7 @@ pub struct SupportLinkState {
     /// cannot tear down a newer one.
     epoch: AtomicU64,
     snapshot: RwLock<Option<SupportCodeSnapshot>>,
+    pending_request_id: RwLock<Option<String>>,
 }
 
 impl Default for SupportLinkState {
@@ -55,6 +56,7 @@ impl SupportLinkState {
             active_tx,
             epoch: AtomicU64::new(0),
             snapshot: RwLock::new(None),
+            pending_request_id: RwLock::new(None),
         }
     }
 
@@ -108,6 +110,22 @@ impl SupportLinkState {
         *self.snapshot.write().await = Some(SupportCodeSnapshot { code, expires_at });
     }
 
+    /// Mark the one support-code request currently awaiting a manager response.
+    pub async fn begin_request(&self, request_id: String) {
+        *self.pending_request_id.write().await = Some(request_id);
+    }
+
+    /// Settle only the response belonging to the current request. Late responses
+    /// from a prior start are ignored and cannot populate a newer session.
+    pub async fn settle_request(&self, request_id: &str) -> bool {
+        let mut pending = self.pending_request_id.write().await;
+        if pending.as_deref() != Some(request_id) {
+            return false;
+        }
+        *pending = None;
+        true
+    }
+
     /// The current code snapshot, if a session is live and the code has arrived.
     pub async fn snapshot(&self) -> Option<SupportCodeSnapshot> {
         self.snapshot.read().await.clone()
@@ -140,6 +158,7 @@ impl SupportLinkState {
     pub async fn finish(&self) {
         self.request_stop();
         *self.snapshot.write().await = None;
+        *self.pending_request_id.write().await = None;
     }
 }
 
@@ -192,5 +211,14 @@ mod tests {
         st.finish().await;
         assert!(!st.is_active());
         assert!(st.snapshot().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn only_matching_support_response_settles_pending_request() {
+        let st = SupportLinkState::new();
+        st.begin_request("new".into()).await;
+        assert!(!st.settle_request("old").await);
+        assert!(st.settle_request("new").await);
+        assert!(!st.settle_request("new").await);
     }
 }

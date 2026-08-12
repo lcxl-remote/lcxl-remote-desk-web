@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::remote_access::{
-    HostRemoteAccessLockAck, HostRemoteAccessLockRequest, PeerEvictionOutcome,
-    TerminateRemotePeerAck, TerminateRemotePeerRequest,
+    PeerEvictionOutcome, RemoteAccessLockUpdatedData, RemotePeerTerminationResolvedData,
+    TerminateRemotePeerData, UpdateRemoteAccessLockData,
 };
 use desk_signal_facade::model::signal::{RemoteDeskTypeEnum, SignalingModel, SignalingType};
 use desk_signal_facade::service::{
@@ -45,8 +45,8 @@ impl SignalRemoteAccessControl {
     async fn apply_lock_request(
         &self,
         client_id: &str,
-        request: &HostRemoteAccessLockRequest,
-    ) -> Result<HostRemoteAccessLockAck, sea_orm::DbErr> {
+        request: &UpdateRemoteAccessLockData,
+    ) -> Result<RemoteAccessLockUpdatedData, sea_orm::DbErr> {
         let txn = self.db.begin().await?;
         let code = device_code::Entity::find()
             .filter(device_code::Column::ClientId.eq(client_id))
@@ -142,7 +142,7 @@ impl SignalRemoteAccessControl {
                 "authorization generation advanced: client_id={client_id}, reason=remote_access_lock"
             );
         }
-        Ok(HostRemoteAccessLockAck {
+        Ok(RemoteAccessLockUpdatedData {
             request_id: request.request_id.clone(),
             lock_id: state.lock_id,
             state_version: u64::try_from(state.state_version).unwrap_or(0),
@@ -201,7 +201,7 @@ impl RemoteAccessAdmissionAuthorizer for SignalRemoteAccessControl {
             };
             match self.is_client_locked(client_id).await {
                 Ok(false) => {
-                    if model.signaling_type == SignalingType::RequestRemote {
+                    if model.signaling_type == SignalingType::RequestRemoteAccess {
                         self.browser_hosts
                             .write()
                             .await
@@ -233,13 +233,13 @@ impl HostRemoteAccessController for SignalRemoteAccessControl {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             if source.model.version_info.remote_desk_type != RemoteDeskTypeEnum::Server {
-                log::warn!("non-host attempted HostRemoteAccessLockRequest");
+                log::warn!("non-host attempted UpdateRemoteAccessLockData");
                 return;
             }
             let Some(client_id) = source.model.version_info.client_id.as_deref() else {
                 return;
             };
-            let Ok(request) = model.get_data::<HostRemoteAccessLockRequest>() else {
+            let Ok(request) = model.get_data::<UpdateRemoteAccessLockData>() else {
                 return;
             };
             if request.request_id != model.request_id {
@@ -251,7 +251,7 @@ impl HostRemoteAccessController for SignalRemoteAccessControl {
                     Self::push(
                         source,
                         &model.request_id,
-                        SignalingType::HostRemoteAccessLockAck,
+                        SignalingType::RemoteAccessLockUpdated,
                         &ack,
                     )
                     .await;
@@ -270,7 +270,7 @@ impl HostRemoteAccessController for SignalRemoteAccessControl {
             if source.model.version_info.remote_desk_type != RemoteDeskTypeEnum::Server {
                 return;
             }
-            let Ok(request) = model.get_data::<TerminateRemotePeerRequest>() else {
+            let Ok(request) = model.get_data::<TerminateRemotePeerData>() else {
                 return;
             };
             let owns_peer = self
@@ -301,7 +301,7 @@ impl HostRemoteAccessController for SignalRemoteAccessControl {
             } else {
                 PeerEvictionOutcome::Unavailable
             };
-            let ack = TerminateRemotePeerAck {
+            let ack = RemotePeerTerminationResolvedData {
                 operation_id: request.operation_id,
                 target_connection_id: request.target_connection_id,
                 outcome,
@@ -309,7 +309,7 @@ impl HostRemoteAccessController for SignalRemoteAccessControl {
             Self::push(
                 source,
                 &model.request_id,
-                SignalingType::TerminateRemotePeerAck,
+                SignalingType::RemotePeerTerminationResolved,
                 &ack,
             )
             .await;
@@ -348,8 +348,8 @@ mod tests {
         (db, control)
     }
 
-    fn request(version: u64, lock_id: Option<&str>, locked: bool) -> HostRemoteAccessLockRequest {
-        HostRemoteAccessLockRequest {
+    fn request(version: u64, lock_id: Option<&str>, locked: bool) -> UpdateRemoteAccessLockData {
+        UpdateRemoteAccessLockData {
             request_id: format!("request-{version}"),
             lock_id: lock_id.map(str::to_string),
             state_version: version,

@@ -1,4 +1,4 @@
-//! Source-aware authorization for AI, RequestRemote, and terminal frames.
+//! Source-aware authorization for AI, RequestRemoteAccess, and terminal frames.
 
 use super::*;
 
@@ -32,7 +32,9 @@ pub(super) enum AuthzGateOutcome {
 pub(super) fn is_ai_control_frame(t: SignalingType) -> bool {
     matches!(
         t,
-        SignalingType::AgentRequest | SignalingType::Diagnose | SignalingType::ConfirmExec
+        SignalingType::InvokeAgentCapability
+            | SignalingType::DiagnoseDevice
+            | SignalingType::PreviewExecution
     )
 }
 
@@ -118,7 +120,7 @@ pub(super) fn gate_authz_frame(
     AuthzGateOutcome::Pass(unwrapped, Some(wrapper.authz))
 }
 
-/// Outcome of the source-gated capability-ceiling check for a `RequestRemote`.
+/// Outcome of the source-gated capability-ceiling check for a `RequestRemoteAccess`.
 pub(super) enum RequestRemoteGateOutcome {
     /// Forward this (possibly unwrapped) model to the router, carrying the
     /// validated capability-ceiling stamp when the request arrived wrapped from
@@ -128,16 +130,16 @@ pub(super) enum RequestRemoteGateOutcome {
     Drop(String),
 }
 
-/// Source-gate an inbound `RequestRemote` against the capability-ceiling stamp
+/// Source-gate an inbound `RequestRemoteAccess` against the capability-ceiling stamp
 /// rules. This is the anti-downgrade anchor (mirrors [`gate_authz_frame`]): the
-/// trusted-central link always stamps every `RequestRemote` (owner → no ceiling,
+/// trusted-central link always stamps every `RequestRemoteAccess` (owner → no ceiling,
 /// redeemed grant → its ceiling), so on that link a bare request is illegitimate
 /// and dropped, and a stamp from any other source is an illegitimate injection
 /// and dropped.
 ///
 /// - A **wrapper** (`AuthorizedRequestRemote`) is only legitimate from
 ///   `TrustedCentral`; on any other source it is dropped.
-/// - On `TrustedCentral` a **bare** `RequestRemote` is dropped — a forged frame,
+/// - On `TrustedCentral` a **bare** `RequestRemoteAccess` is dropped — a forged frame,
 ///   a relay fault, or a grant session stripping its stamp to masquerade as an
 ///   owner. Dropping it here is the only defense (there is no physical restricted
 ///   upstream to fall back on).
@@ -145,7 +147,7 @@ pub(super) enum RequestRemoteGateOutcome {
 ///   this daemon's audience, and expiry; on success the inner frame is unwrapped
 ///   and forwarded with the validated stamp (the ceiling the router / worker
 ///   enforce).
-/// - On a non-central source (loopback / relay / support) a bare `RequestRemote`
+/// - On a non-central source (loopback / relay / support) a bare `RequestRemoteAccess`
 ///   passes through unchanged: the owner-only relay path, where there is no
 ///   central to stamp and redeemed codes are hard-rejected at redeem time.
 pub(super) fn gate_request_remote_frame(
@@ -164,7 +166,7 @@ pub(super) fn gate_request_remote_frame(
     if !has_wrapper {
         if source == InboundSignalingSource::TrustedCentral {
             return RequestRemoteGateOutcome::Drop(
-                "bare RequestRemote from trusted-central source (capability-ceiling stamp required)"
+                "bare RequestRemoteAccess from trusted-central source (capability-ceiling stamp required)"
                     .to_string(),
             );
         }
@@ -173,7 +175,7 @@ pub(super) fn gate_request_remote_frame(
 
     if source != InboundSignalingSource::TrustedCentral {
         return RequestRemoteGateOutcome::Drop(format!(
-            "RequestRemote carried a capability-ceiling stamp from non-central source {source:?}"
+            "RequestRemoteAccess carried a capability-ceiling stamp from non-central source {source:?}"
         ));
     }
 
@@ -185,7 +187,7 @@ pub(super) fn gate_request_remote_frame(
         Ok(w) => w,
         Err(e) => {
             return RequestRemoteGateOutcome::Drop(format!(
-                "malformed RequestRemote stamp wrapper: {e}"
+                "malformed RequestRemoteAccess stamp wrapper: {e}"
             ));
         }
     };
@@ -194,10 +196,12 @@ pub(super) fn gate_request_remote_frame(
         .authz
         .validate(&model.request_id, expected_audience, now_rfc3339)
     {
-        return RequestRemoteGateOutcome::Drop(format!("RequestRemote stamp rejected: {e:?}"));
+        return RequestRemoteGateOutcome::Drop(format!(
+            "RequestRemoteAccess stamp rejected: {e:?}"
+        ));
     }
 
-    // Validated: forward the inner frame as a bare RequestRemote plus the
+    // Validated: forward the inner frame as a bare RequestRemoteAccess plus the
     // validated stamp, which the router threads into the session's restriction /
     // capability-ceiling enforcement.
     let unwrapped = SignalingModel::new(
@@ -213,7 +217,7 @@ pub(super) fn gate_request_remote_frame(
 
 /// Source-gate an inbound `StartTerminal` against the capability-ceiling stamp
 /// rules, the terminal analogue of [`gate_request_remote_frame`]. The remote
-/// terminal opens on a distinct WS connection that never does a `RequestRemote`, so
+/// terminal opens on a distinct WS connection that never does a `RequestRemoteAccess`, so
 /// `StartTerminal` is *its* admission-establishing frame and must carry the same
 /// stamp discipline:
 ///
@@ -231,7 +235,7 @@ pub(super) fn gate_request_remote_frame(
 /// - On a non-central source (loopback / relay) a bare `StartTerminal` passes
 ///   through unchanged: the owner-only relay path, where there is no central to
 ///   stamp and redeemed codes are hard-rejected at redeem time — identical to the
-///   `RequestRemote` owner relay.
+///   `RequestRemoteAccess` owner relay.
 pub(super) fn gate_start_terminal_frame(
     model: SignalingModel,
     source: InboundSignalingSource,

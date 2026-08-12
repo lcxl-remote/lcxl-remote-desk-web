@@ -7,7 +7,7 @@ use desk_agent_protocol::diagnose::{DiagnoseEventKind, DiagnoseRequestData};
 fn diagnose_model(raw: serde_json::Value) -> SignalingModel {
     SignalingModel::new(
         "req-diag-1",
-        SignalingType::Diagnose,
+        SignalingType::DiagnoseDevice,
         Some("conn-1".to_string()),
         None,
         Some(raw),
@@ -17,18 +17,21 @@ fn diagnose_model(raw: serde_json::Value) -> SignalingModel {
 
 /// classify: both halves of the diagnose pair are daemon-owned. `Diagnose`
 /// is handled inline by the orchestrator (not worker-bound like
-/// `AgentRequest`); `DiagnoseEvent` is host → control-end only, so a stray
+/// `InvokeAgentCapability`); `DiagnoseEvent` is host → control-end only, so a stray
 /// inbound copy is swallowed.
 #[test]
 fn classify_diagnose_pair_is_daemon_owned() {
-    assert_eq!(classify(SignalingType::Diagnose), RouteOwnership::Daemon);
     assert_eq!(
-        classify(SignalingType::DiagnoseEvent),
+        classify(SignalingType::DiagnoseDevice),
+        RouteOwnership::Daemon
+    );
+    assert_eq!(
+        classify(SignalingType::DiagnosisUpdated),
         RouteOwnership::Daemon
     );
     // The start-over cancellation is handled inline by the daemon too.
     assert_eq!(
-        classify(SignalingType::DiagnoseCancel),
+        classify(SignalingType::CancelDiagnosis),
         RouteOwnership::Daemon
     );
 }
@@ -40,15 +43,15 @@ fn classify_diagnose_pair_is_daemon_owned() {
 #[test]
 fn classify_terminal_copilot_frames_are_daemon_owned() {
     assert_eq!(
-        classify(SignalingType::TerminalCopilotAsk),
+        classify(SignalingType::AskTerminalCopilot),
         RouteOwnership::Daemon
     );
     assert_eq!(
-        classify(SignalingType::TerminalCopilotEvent),
+        classify(SignalingType::TerminalCopilotUpdated),
         RouteOwnership::Daemon
     );
     assert_eq!(
-        classify(SignalingType::TerminalCopilotCancel),
+        classify(SignalingType::CancelTerminalCopilot),
         RouteOwnership::Daemon
     );
 }
@@ -59,11 +62,11 @@ fn classify_terminal_copilot_frames_are_daemon_owned() {
 #[test]
 fn classify_terminal_complete_frames_are_daemon_owned() {
     assert_eq!(
-        classify(SignalingType::TerminalCompleteAsk),
+        classify(SignalingType::GenerateTerminalCompletions),
         RouteOwnership::Daemon
     );
     assert_eq!(
-        classify(SignalingType::TerminalCompleteResult),
+        classify(SignalingType::TerminalCompletionsGenerated),
         RouteOwnership::Daemon
     );
 }
@@ -74,11 +77,11 @@ fn classify_terminal_complete_frames_are_daemon_owned() {
 #[test]
 fn classify_collect_pair_is_daemon_owned() {
     assert_eq!(
-        classify(SignalingType::CollectRequest),
+        classify(SignalingType::CollectEvidence),
         RouteOwnership::Daemon
     );
     assert_eq!(
-        classify(SignalingType::CollectResponse),
+        classify(SignalingType::EvidenceCollectionUpdated),
         RouteOwnership::Daemon
     );
 }
@@ -87,7 +90,7 @@ fn collect_request_model(request: CollectRequest) -> SignalingModel {
     let raw = serde_json::to_value(&request).unwrap();
     SignalingModel::new(
         "sig-collect-1",
-        SignalingType::CollectRequest,
+        SignalingType::CollectEvidence,
         Some("manager".to_string()),
         None,
         Some(raw),
@@ -117,7 +120,7 @@ fn drain_collect_responses(rx: &mut broadcast::Receiver<String>) -> Vec<CollectR
         let model: SignalingModel = serde_json::from_str(&text).expect("valid signaling json");
         assert!(matches!(
             model.signaling_type,
-            SignalingType::CollectResponse
+            SignalingType::EvidenceCollectionUpdated
         ));
         out.push(
             model
@@ -212,7 +215,7 @@ async fn diagnose_at_edge_replies_centralized_unavailable() {
         .await
         .unwrap();
     let frame = read_response(&mut rx);
-    assert_eq!(frame.signaling_type, SignalingType::DiagnoseEvent);
+    assert_eq!(frame.signaling_type, SignalingType::DiagnosisUpdated);
     // Notification, not a one-shot response.
     assert!(frame.response_state.is_none());
     let event = frame.get_data::<DiagnoseEvent>().expect("DiagnoseEvent");
@@ -231,7 +234,7 @@ async fn terminal_copilot_at_edge_replies_centralized_unavailable() {
     let (ctx, mut rx) = make_ctx_with_rx().await;
     let ask = SignalingModel::new(
         "req-cop-1",
-        SignalingType::TerminalCopilotAsk,
+        SignalingType::AskTerminalCopilot,
         Some("conn-1".to_string()),
         None,
         None,
@@ -239,7 +242,7 @@ async fn terminal_copilot_at_edge_replies_centralized_unavailable() {
     );
     handle_terminal_copilot_inbound(&ctx, &ask).await.unwrap();
     let frame = read_response(&mut rx);
-    assert_eq!(frame.signaling_type, SignalingType::TerminalCopilotEvent);
+    assert_eq!(frame.signaling_type, SignalingType::TerminalCopilotUpdated);
     let event = frame
         .get_data::<TerminalCopilotEvent>()
         .expect("TerminalCopilotEvent");
@@ -257,7 +260,7 @@ async fn terminal_complete_at_edge_replies_centralized_unavailable() {
     let (ctx, mut rx) = make_ctx_with_rx().await;
     let ask = SignalingModel::new(
         "req-comp-1",
-        SignalingType::TerminalCompleteAsk,
+        SignalingType::GenerateTerminalCompletions,
         Some("conn-1".to_string()),
         None,
         None,
@@ -265,7 +268,10 @@ async fn terminal_complete_at_edge_replies_centralized_unavailable() {
     );
     handle_terminal_complete_inbound(&ctx, &ask).await.unwrap();
     let frame = read_response(&mut rx);
-    assert_eq!(frame.signaling_type, SignalingType::TerminalCompleteResult);
+    assert_eq!(
+        frame.signaling_type,
+        SignalingType::TerminalCompletionsGenerated
+    );
     let result = frame
         .get_data::<TerminalCompleteResult>()
         .expect("TerminalCompleteResult");
@@ -282,7 +288,7 @@ async fn terminal_complete_at_edge_replies_centralized_unavailable() {
 fn diagnose_cancel_model() -> SignalingModel {
     SignalingModel::new(
         "req-diag-1",
-        SignalingType::DiagnoseCancel,
+        SignalingType::CancelDiagnosis,
         Some("conn-1".to_string()),
         None,
         None,

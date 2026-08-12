@@ -244,7 +244,7 @@ pub async fn run_service_daemon_inner(
     // supervisor and hand it to the router (via signaling_proxy). v5
     // lazy lifecycle: attach is NOT performed at daemon startup any
     // more. The router calls `ensure_attached` on the first
-    // `RequestRemote` whose desk settings enable the virtual display,
+    // `RequestRemoteAccess` whose desk settings enable the virtual display,
     // and `cleanup_pc` calls `apply(false)` when the last PC drops.
     // This keeps the IDD invisible to the local user while there is
     // no remote session — so a window dragged onto an extended

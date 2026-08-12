@@ -13,10 +13,10 @@ AI 由**中心信令服务器**（“中心大脑”）编排；设备只是一�
 ```mermaid
 graph LR
     user[用户问题] --> central[中心信令大脑]
-    central -->|CollectRequest| edge[瘦被控端设备]
+    central -->|CollectEvidence| edge[瘦被控端设备]
     edge -->|只读采集| evidence[设备证据]
     evidence -->|被控端本地<br/>严格脱敏| redacted[脱敏后证据]
-    redacted -->|CollectResponse| central
+    redacted -->|EvidenceCollectionUpdated| central
     central -->|调用模型| model[AI 模型]
     model -->|工具调用 + 流式| diag[多轮诊断]
     diag -->|exec_command| approve[完整命令预览<br/>所有者明确批准]

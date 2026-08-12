@@ -172,14 +172,14 @@ pub enum MediaCodec {
 
 /// Worker advertises which codecs / capture sources it can drive on the
 /// current desktop. Daemon decides which codec the SDP m-line offers and
-/// echoes the device lists into the `InitSignalingData` reply so the
+/// echoes the device lists into the `RemoteAccessInitializedData` reply so the
 /// browser can render its capture-source picker.
 ///
 /// `*_codecs` are ordered: index 0 is the worker's preferred choice.
 /// `*_device_list` mirrors the structured maps that
 /// `desk_capture_engine::list_image_capture` /
 /// `list_audio_capture` produce so the daemon can pass them through to
-/// `InitSignalingData::{video,audio}_device_list` without losing any
+/// `RemoteAccessInitializedData::{video,audio}_device_list` without losing any
 /// per-driver grouping or device metadata.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct MediaCapabilities {
@@ -192,7 +192,7 @@ pub struct MediaCapabilities {
     /// `MediaCodec::H264` for SDP m-line negotiation, while this list
     /// preserves the per-implementation distinction the UI needs (so
     /// the user can pick libx264 vs OpenH264). The daemon copies this
-    /// straight into `InitSignalingData::video_encoder_list`.
+    /// straight into `RemoteAccessInitializedData::video_encoder_list`.
     #[serde(default)]
     pub video_encoders: Vec<String>,
     /// Strongly typed input constraints for each concrete encoder.
@@ -510,14 +510,15 @@ pub struct ErrorPayload {
 
 // ---------- Typed control plane ----------
 
-/// Payload for [`ServiceToWorker::EnablePrivateScreen`]. Mirrors the
+/// Payload for [`ServiceToWorker::SetPrivateScreenVisibility`]. Mirrors the
 /// JSON shape of `desk_signal_facade::model::private_screen::
-/// EnablePrivateScreenData` plus the `connection_id` the daemon
+/// SetPrivateScreenVisibilityData` plus the `connection_id` the daemon
 /// already had at the WS-router boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
-pub struct EnablePrivateScreenPayload {
+pub struct SetPrivateScreenVisibilityPayload {
+    pub request_id: String,
     pub connection_id: String,
-    pub enable: bool,
+    pub visible: bool,
 }
 
 /// Payload for [`ServiceToWorker::UpdateDeskSettings`]. Carries the
@@ -537,6 +538,7 @@ pub struct UpdateDeskSettingsPayload {
 /// daemon needs to pick the right outbound signaling websocket.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct PrivateScreenStateChangedPayload {
+    pub request_id: Option<String>,
     pub connection_id: String,
     pub data: PrivateScreenStateChangedData,
 }
@@ -583,7 +585,7 @@ pub struct FileTransferFinishedPayload {
 // ---------- Manager plane (typed) ----------
 
 /// Shared envelope for body-less manager *requests*
-/// (`ManagerSystemInfoRequest`).
+/// (`GetSystemInfo`).
 /// Carries the `request_id` so the worker can echo it back on the
 /// matching response payload, and the `connection_id` so the daemon
 /// can pick the right outbound signaling websocket when it ferries
@@ -600,7 +602,7 @@ pub struct ManagerRequestRefPayload {
 }
 
 /// Shared envelope for body-less manager *responses*
-/// (`ManagerFileDeleteResponse`).
+/// (`FileDeleted`).
 /// Same shape as [`ManagerRequestRefPayload`] but kept distinct so
 /// the daemon's response-direction code is symmetric with the
 /// request-direction code at the type-system level. `connection_id`
@@ -611,18 +613,18 @@ pub struct ManagerResponseRefPayload {
     pub connection_id: Option<String>,
 }
 
-/// Payload for [`ServiceToWorker::ManagerFileListRequest`]. Carries the
+/// Payload for [`ServiceToWorker::ListFiles`]. Carries the
 /// trusted controller connection and the browser-issued list parameters.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
-pub struct ManagerFileListRequestPayload {
+pub struct ListFilesPayload {
     pub request_id: String,
     pub connection_id: String,
     pub params: FileListParams,
 }
 
-/// Payload for [`ServiceToWorker::ManagerFileDeleteRequest`].
+/// Payload for [`ServiceToWorker::DeleteFile`].
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
-pub struct ManagerFileDeleteRequestPayload {
+pub struct DeleteFilePayload {
     pub request_id: String,
     pub connection_id: String,
     pub request: DeleteFileRequest,
@@ -691,22 +693,22 @@ pub struct LocaleAppliedPayload {
     pub locale: String,
 }
 
-/// Payload for [`WorkerToService::ManagerSystemInfoResponse`].
+/// Payload for [`WorkerToService::SystemInfoRetrieved`].
 /// `SystemInfo` is the wire shape the worker computed from
 /// `sysinfo::System` and the legacy handler used to send via
 /// `send_response`. `connection_id` is `Option` because the matching
 /// request can be HTTP-API-triggered with no `from_connection_id` —
 /// see [`ManagerRequestRefPayload`].
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
-pub struct ManagerSystemInfoResponsePayload {
+pub struct SystemInfoRetrievedPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
     pub info: SystemInfo,
 }
 
-/// Payload for [`WorkerToService::ManagerFileListResponse`].
+/// Payload for [`WorkerToService::FilesListed`].
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
-pub struct ManagerFileListResponsePayload {
+pub struct FilesListedPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
     pub response: FileListResponse,
@@ -714,34 +716,34 @@ pub struct ManagerFileListResponsePayload {
 
 // ---------- Terminal plane (typed) ----------
 
-/// Payload for [`ServiceToWorker::StartTerminalRequest`]. Carries the
+/// Payload for [`ServiceToWorker::StartTerminal`]. Carries the
 /// browser-supplied [`StartTerminalSession`] (the comma-separated
 /// command + args string the worker splits in
 /// `handle_manager_terminal_start`). `request_id` is echoed back on
 /// the [`WorkerToService::TerminalStarted`] reply.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
-pub struct StartTerminalRequestPayload {
+pub struct StartTerminalPayload {
     pub request_id: String,
     pub connection_id: String,
     pub session: StartTerminalSession,
 }
 
-/// Payload for [`ServiceToWorker::SendDataToTerminalRequest`]. One-way —
+/// Payload for [`ServiceToWorker::SendTerminalInput`]. One-way —
 /// no `request_id` because the worker does not reply.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
-pub struct SendDataToTerminalPayload {
+pub struct SendTerminalInputPayload {
     pub connection_id: String,
     pub data: TerminalInputData,
 }
 
-/// Payload for [`ServiceToWorker::ResizeTerminalRequest`]. One-way.
+/// Payload for [`ServiceToWorker::ResizeTerminal`]. One-way.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ResizeTerminalPayload {
     pub connection_id: String,
     pub data: TerminalResizeData,
 }
 
-/// Payload for [`ServiceToWorker::CloseTerminalRequest`]. Body-less
+/// Payload for [`ServiceToWorker::CloseTerminal`]. Body-less
 /// (the only thing the worker needs is the connection id). Distinct
 /// from [`ConnectionRefPayload`] / [`TerminalClosedPayload`] so the
 /// terminal-plane direction is symmetric at the type level.
@@ -750,22 +752,22 @@ pub struct CloseTerminalPayload {
     pub connection_id: String,
 }
 
-/// Payload for [`ServiceToWorker::ListTerminalRequest`]. Body-less;
+/// Payload for [`ServiceToWorker::ListTerminalCommands`]. Body-less;
 /// `request_id` is echoed back on the
-/// [`WorkerToService::ListTerminalResponse`]. `connection_id` is
+/// [`WorkerToService::TerminalCommandsListed`]. `connection_id` is
 /// `Option` because `signal-facade::controller::terminal::list_terminal`
 /// dispatches via `connection.request_peer_with_callback` with no
 /// originating browser PC — the response is correlated by
 /// `request_id`.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
-pub struct ListTerminalRequestPayload {
+pub struct ListTerminalCommandsPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
 }
 
 /// Payload for [`WorkerToService::TerminalStarted`]. Empty body —
 /// `request_id` correlates with the originating
-/// [`ServiceToWorker::StartTerminalRequest`].
+/// [`ServiceToWorker::StartTerminal`].
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct TerminalStartedPayload {
     pub request_id: String,
@@ -780,21 +782,21 @@ pub struct TerminalClosedPayload {
     pub connection_id: String,
 }
 
-/// Payload for [`WorkerToService::ReplyFromTerminal`]. Each chunk is
+/// Payload for [`WorkerToService::TerminalOutputProduced`]. Each chunk is
 /// at most ~1 KB (the worker's PTY reader buffer size), so the event
 /// pipe handles the rate fine without competing with media frames.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
-pub struct ReplyFromTerminalPayload {
+pub struct TerminalOutputProducedPayload {
     pub connection_id: String,
     pub data: TerminalOutputData,
 }
 
-/// Payload for [`WorkerToService::ListTerminalResponse`]. Carries the
+/// Payload for [`WorkerToService::TerminalCommandsListed`]. Carries the
 /// fully resolved [`TerminalList`] the worker built from
 /// `which::which`/`which_re` lookups. `connection_id` is `Option` for
-/// the same reason as [`ListTerminalRequestPayload`].
+/// the same reason as [`ListTerminalCommandsPayload`].
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
-pub struct ListTerminalResponsePayload {
+pub struct TerminalCommandsListedPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
     pub terminals: TerminalList,

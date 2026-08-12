@@ -214,7 +214,7 @@ pub async fn handle_signaling(
     // Signal is the OSS single-account central brain: it resolves the connection's
     // identity so its control-frame authorizer can stamp a trusted actor/target.
     // A capability-scoped code-session resolves to its own principal (never the
-    // single-account owner) so the RequestRemote authorizer stamps the redeemed
+    // single-account owner) so the RequestRemoteAccess authorizer stamps the redeemed
     // code's ceiling rather than full control.
     let auth_context =
         browser_auth_context(code_session.as_ref(), client_version_info.remote_desk_type);

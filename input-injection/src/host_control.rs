@@ -15,6 +15,7 @@ use crate::model::host_control::PrivateScreenCommand;
 fn send_private_screen_command(
     sender: Option<&std::sync::mpsc::Sender<PrivateScreenCommand>>,
     from_connection_id: &str,
+    request_id: &str,
     enable: bool,
 ) {
     let Some(sender) = sender else {
@@ -25,9 +26,15 @@ fn send_private_screen_command(
     };
 
     let command = if enable {
-        PrivateScreenCommand::Show(from_connection_id.to_string())
+        PrivateScreenCommand::Show {
+            connection_id: from_connection_id.to_string(),
+            request_id: request_id.to_string(),
+        }
     } else {
-        PrivateScreenCommand::Hide(from_connection_id.to_string())
+        PrivateScreenCommand::Hide {
+            connection_id: from_connection_id.to_string(),
+            request_id: request_id.to_string(),
+        }
     };
     if let Err(error) = sender.send(command) {
         log::error!("Failed to send private screen command: {error}");
@@ -42,21 +49,23 @@ mod tests {
     fn private_screen_command_maps_enable_to_show_and_disable_to_hide() {
         let (sender, receiver) = std::sync::mpsc::channel();
 
-        send_private_screen_command(Some(&sender), "connection", true);
+        send_private_screen_command(Some(&sender), "connection", "request-1", true);
         assert!(matches!(
             receiver.recv().unwrap(),
-            PrivateScreenCommand::Show(id) if id == "connection"
+            PrivateScreenCommand::Show { connection_id, request_id }
+                if connection_id == "connection" && request_id == "request-1"
         ));
 
-        send_private_screen_command(Some(&sender), "connection", false);
+        send_private_screen_command(Some(&sender), "connection", "request-2", false);
         assert!(matches!(
             receiver.recv().unwrap(),
-            PrivateScreenCommand::Hide(id) if id == "connection"
+            PrivateScreenCommand::Hide { connection_id, request_id }
+                if connection_id == "connection" && request_id == "request-2"
         ));
     }
 
     #[test]
     fn missing_private_screen_sender_is_a_noop() {
-        send_private_screen_command(None, "connection", true);
+        send_private_screen_command(None, "connection", "request", true);
     }
 }
