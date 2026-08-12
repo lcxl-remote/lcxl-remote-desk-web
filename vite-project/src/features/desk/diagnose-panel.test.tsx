@@ -843,7 +843,7 @@ describe("DiagnosePanel", () => {
         fireEvent.scroll(scrollArea);
 
         fireEvent.click(screen.getByRole("button", { name: "Scroll to latest" }));
-        expect(scrollArea.scrollTop).toBe(900);
+        expect(scrollArea.scrollTop).toBe(600);
         expect(
             screen.queryByRole("button", { name: "Scroll to latest" }),
         ).not.toBeInTheDocument();

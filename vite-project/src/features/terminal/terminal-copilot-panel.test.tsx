@@ -293,7 +293,7 @@ describe("TerminalCopilotPanel exec promotion", () => {
         fireEvent.scroll(scrollArea);
 
         fireEvent.click(screen.getByRole("button", { name: "Scroll to latest" }));
-        expect(scrollArea.scrollTop).toBe(800);
+        expect(scrollArea.scrollTop).toBe(560);
         expect(
             screen.queryByRole("button", { name: "Scroll to latest" }),
         ).not.toBeInTheDocument();

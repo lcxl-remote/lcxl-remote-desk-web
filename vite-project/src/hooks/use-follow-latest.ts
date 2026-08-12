@@ -17,6 +17,7 @@ export function useFollowLatest(enabled = true) {
     const scrollRef = useRef<HTMLDivElement>(null)
     const followingRef = useRef(true)
     const previousEnabledRef = useRef(enabled)
+    const previousScrollHeightRef = useRef(0)
     const [showJumpToLatest, setShowJumpToLatest] = useState(false)
 
     const isAtBottom = useCallback((element: HTMLDivElement) => {
@@ -26,17 +27,25 @@ export function useFollowLatest(enabled = true) {
         )
     }, [])
 
+    const scrollToLatest = useCallback((element: HTMLDivElement) => {
+        const target = Math.max(0, element.scrollHeight - element.clientHeight)
+        // Avoid redundant writes. A focused textarea may make the browser adjust
+        // its ancestor just enough to keep the caret visible; continuously
+        // assigning scrollTop on unrelated renders fights that native behavior
+        // and makes the content visibly oscillate.
+        if (Math.abs(element.scrollTop - target) > 1) {
+            element.scrollTop = target
+        }
+    }, [])
+
     const jumpToLatest = useCallback(() => {
         const element = scrollRef.current
         if (!element) return
 
-        // Assigning scrollTop is deliberately immediate. Besides making the
-        // action feel responsive, it avoids intermediate smooth-scroll events
-        // being mistaken for the user scrolling away from the bottom.
-        element.scrollTop = element.scrollHeight
+        scrollToLatest(element)
         followingRef.current = true
         setShowJumpToLatest(false)
-    }, [])
+    }, [scrollToLatest])
 
     const onScroll = useCallback<UIEventHandler<HTMLDivElement>>(
         (event) => {
@@ -54,6 +63,9 @@ export function useFollowLatest(enabled = true) {
     useLayoutEffect(() => {
         const element = scrollRef.current
         if (!element) return
+        const contentHeightChanged =
+            element.scrollHeight !== previousScrollHeightRef.current
+        previousScrollHeightRef.current = element.scrollHeight
 
         if (!enabled) {
             previousEnabledRef.current = false
@@ -62,11 +74,12 @@ export function useFollowLatest(enabled = true) {
             return
         }
 
-        if (!previousEnabledRef.current) followingRef.current = true
+        const becameEnabled = !previousEnabledRef.current
+        if (becameEnabled) followingRef.current = true
         previousEnabledRef.current = true
 
         if (followingRef.current) {
-            element.scrollTop = element.scrollHeight
+            if (contentHeightChanged || becameEnabled) scrollToLatest(element)
             setShowJumpToLatest(false)
         } else {
             const atBottom = isAtBottom(element)
@@ -86,7 +99,7 @@ export function useFollowLatest(enabled = true) {
 
         const observer = new ResizeObserver(() => {
             if (followingRef.current) {
-                element.scrollTop = element.scrollHeight
+                scrollToLatest(element)
                 setShowJumpToLatest(false)
             } else {
                 const atBottom = isAtBottom(element)
@@ -96,7 +109,7 @@ export function useFollowLatest(enabled = true) {
         })
         observer.observe(element)
         return () => observer.disconnect()
-    }, [enabled, isAtBottom])
+    }, [enabled, isAtBottom, scrollToLatest])
 
     return {
         scrollRef,
