@@ -71,6 +71,25 @@ function renderPanel(
 }
 
 describe("TerminalCopilotPanel exec promotion", () => {
+    it("clears the question after submitting it", () => {
+        const onAsk = vi.fn();
+        render(
+            <TerminalCopilotPanel
+                state={baseState}
+                onAsk={onAsk}
+                onReset={vi.fn()}
+                onClose={vi.fn()}
+                onFill={vi.fn()}
+            />,
+        );
+        const input = screen.getByPlaceholderText("Describe what you want to do…");
+        fireEvent.change(input, { target: { value: "show disk usage" } });
+        fireEvent.click(screen.getByText("Ask"));
+
+        expect(onAsk).toHaveBeenCalledWith("how_to", "show disk usage", null);
+        expect(input).toHaveValue("");
+    });
+
     it("shows Run for a confirm_required suggestion and relays the exact command", () => {
         const exec = stubExec();
         renderPanel([suggestion({ cwd: "/srv" })], exec);

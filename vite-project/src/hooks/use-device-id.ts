@@ -1,5 +1,12 @@
 import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
 
+/** Resolve the live connection metadata for a remote desk. */
+export function useDeviceConnection(connectionId: string | undefined) {
+    const { data: connections } = useListConnections()
+    if (!connectionId) return undefined
+    return connections?.find((c) => c.connection_id === connectionId)
+}
+
 /**
  * Resolves the device primary key for a connection from the live connection
  * list. Control ends address an enterprise manager device by this id so the
@@ -9,7 +16,5 @@ import { useListConnections } from "@/services/hooks/connectionController/useLis
  * routing by `connection_id` (dual-target wire model).
  */
 export function useDeviceId(connectionId: string | undefined): string | undefined {
-    const { data: connections } = useListConnections()
-    if (!connectionId) return undefined
-    return connections?.find((c) => c.connection_id === connectionId)?.device_id ?? undefined
+    return useDeviceConnection(connectionId)?.device_id ?? undefined
 }

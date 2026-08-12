@@ -9,9 +9,19 @@ vi.mock("@/services/hooks/connectionController/useListConnections", () => ({
     useListConnections: () => ({ data: h.connections }),
 }))
 
-import { useDeviceId } from "./use-device-id"
+import { useDeviceConnection, useDeviceId } from "./use-device-id"
 
 describe("useDeviceId", () => {
+    it("exposes the host-reported platform with the connection metadata", () => {
+        h.connections = [{
+            connection_id: "conn-1",
+            device_id: "42",
+            version_info: { operation_system: "Mac" },
+        }]
+        const { result } = renderHook(() => useDeviceConnection("conn-1"))
+        expect(result.current?.version_info.operation_system).toBe("Mac")
+    })
+
     it("resolves the manager device id for a connection", () => {
         h.connections = [
             { connection_id: "conn-1", device_id: "42" },

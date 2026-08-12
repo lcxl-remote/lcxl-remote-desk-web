@@ -12,7 +12,7 @@ import {
     CardTitle,
 } from "@/components/ui/card"
 import { Label } from "@/components/ui/label"
-import { useDeviceId } from "@/hooks/use-device-id"
+import { useDeviceConnection } from "@/hooks/use-device-id"
 import { useListTerminal } from "@/services/hooks/terminalController/useListTerminal"
 
 const TerminalView = lazy(() =>
@@ -39,7 +39,9 @@ export default function TerminalSessionLauncher({
     const { id: connectionId } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const { t } = useTranslation()
-    const deviceId = useDeviceId(connectionId)
+    const connection = useDeviceConnection(connectionId)
+    const deviceId = connection?.device_id ?? undefined
+    const operationSystem = connection?.version_info?.operation_system
     const { data: terminalList, isLoading } = useListTerminal(
         connectionId || '',
         deviceId ? { device_id: deviceId } : undefined,
@@ -61,6 +63,7 @@ export default function TerminalSessionLauncher({
                     connectionId={connectionId}
                     deviceId={deviceId}
                     command={selectedCommand}
+                    operationSystem={operationSystem}
                     onClose={handleTerminalClose}
                     orgId={orgId}
                 />

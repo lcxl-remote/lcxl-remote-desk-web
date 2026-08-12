@@ -9,7 +9,10 @@ vi.mock('react-i18next', () => ({
 }));
 
 vi.mock('@/hooks/use-device-id', () => ({
-    useDeviceId: () => 'device-1',
+    useDeviceConnection: () => ({
+        device_id: 'device-1',
+        version_info: { operation_system: 'Mac' },
+    }),
 }));
 
 vi.mock('@/services/hooks/terminalController/useListTerminal', () => ({
@@ -22,8 +25,8 @@ vi.mock('@/services/hooks/terminalController/useListTerminal', () => ({
 }));
 
 vi.mock('./terminal-session', () => ({
-    TerminalView: ({ command }: { command: string }) => (
-        <div data-testid="terminal-runtime">{command}</div>
+    TerminalView: ({ command, operationSystem }: { command: string; operationSystem?: string }) => (
+        <div data-testid="terminal-runtime">{command}:{operationSystem}</div>
     ),
 }));
 
@@ -49,7 +52,7 @@ describe('TerminalSessionLauncher', () => {
         });
 
         expect(await screen.findByTestId('terminal-runtime')).toHaveTextContent(
-            'pwsh,-NoLogo',
+            'pwsh,-NoLogo:Mac',
         );
     });
 });

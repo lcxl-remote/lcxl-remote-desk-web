@@ -268,6 +268,7 @@ export function TerminalCopilotPanel({
         if (running) return;
         if (mode === 'how_to' && !question.trim()) return;
         onAsk(mode, question.trim(), modelId);
+        setQuestion('');
     };
 
     return (

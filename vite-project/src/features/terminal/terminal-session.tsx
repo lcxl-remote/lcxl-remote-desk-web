@@ -26,6 +26,8 @@ import {
 } from "./use-terminal-complete"
 import { terminalWelcomeBanner } from "./terminal-welcome"
 import { useTerminalSessionGuard } from "./use-terminal-session-guard"
+import type { OperationSystemEnum } from "@/services/types"
+import { terminalOs, terminalShell } from "./terminal-environment"
 
 // Max bytes of recent terminal scrollback kept as a non-authoritative copilot
 // prompt hint (the server re-redacts and re-caps it). Bounded so the ring buffer
@@ -42,7 +44,7 @@ const SIGNALING_TYPE_CODE_SEND_HEARTBEAT = 1
 const SIGNALING_TYPE_CODE_ERROR = -1
 const TERMINAL_HEARTBEAT_INTERVAL_MS = 30_000
 
-export function TerminalView({ connectionId, deviceId, command, onClose, orgId }: { connectionId: string; deviceId?: string; command: string; onClose: () => void; orgId?: number }) {
+export function TerminalView({ connectionId, deviceId, command, operationSystem, onClose, orgId }: { connectionId: string; deviceId?: string; command: string; operationSystem?: OperationSystemEnum; onClose: () => void; orgId?: number }) {
     const { t } = useTranslation()
     const terminalRef = useRef<HTMLDivElement>(null)
     const [isConnected, setIsConnected] = useState(false)
@@ -107,13 +109,14 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
         xtermRef.current?.focus()
     }, [connectionId])
 
-    // Derive the (non-authoritative) shell/os hint from the selected command.
+    // The shell comes from the selected command, while the OS comes from the
+    // remote host's connection handshake. Shell names are cross-platform (macOS
+    // ships bash, and pwsh runs on Unix), so they cannot identify the OS.
     const buildContext = useCallback((mode: TerminalCopilotMode): TerminalContext => {
-        const shell = (command.split(",")[0] || "").split(/[\\/]/).pop() || command
-        const isWindows = /cmd|powershell|pwsh/i.test(shell)
+        const shell = terminalShell(command)
         const recent = recentOutputRef.current.slice(-COPILOT_RECENT_OUTPUT_LIMIT)
         return {
-            os: isWindows ? "windows" : "linux",
+            os: terminalOs(operationSystem),
             shell,
             recent_output: recent,
             last_command: lastCommandRef.current || undefined,
@@ -121,7 +124,7 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
             // operator is asking about; the server caps it again.
             error_text: mode === "explain_error" ? recent : undefined,
         }
-    }, [command])
+    }, [command, operationSystem])
 
     const askCopilot = useCallback((mode: TerminalCopilotMode, question: string, modelId: number | null) => {
         copilot.ask({ mode, question: question || undefined, context: buildContext(mode), modelId, orgId })
@@ -129,14 +132,13 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
 
     // The (non-authoritative) environment hint for a completion ask.
     const completeContext = useCallback((): TerminalCompletionContext => {
-        const shell = (command.split(",")[0] || "").split(/[\\/]/).pop() || command
-        const isWindows = /cmd|powershell|pwsh/i.test(shell)
+        const shell = terminalShell(command)
         return {
-            os: isWindows ? "windows" : "linux",
+            os: terminalOs(operationSystem),
             shell,
             recent_output: recentOutputRef.current.slice(-COPILOT_RECENT_OUTPUT_LIMIT),
         }
-    }, [command])
+    }, [command, operationSystem])
 
     // Called whenever the live input line changes. Drives the layered completion:
     // an instant L1 suggestion from recent-command history, plus a debounced L2 AI
@@ -155,7 +157,7 @@ export function TerminalView({ connectionId, deviceId, command, onClose, orgId }
             return
         }
         // L1: instant, zero-latency history match, then the known-command corpus.
-        const shell = (command.split(",")[0] || "").split(/[\\/]/).pop() || command
+        const shell = terminalShell(command)
         const local = pickLocalGhost(line, historyRef.current, commonCommandsFor(shell))
         setGhost(local ? { suffix: local, note: '', source: 'history' } : null)
         // L2: debounced AI ask (its result upgrades the ghost when it lands).
