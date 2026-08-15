@@ -142,7 +142,7 @@ npm run dev
 
 - `video_fps`: Video frame rate (default 60). Lowering this value reduces CPU and bandwidth usage.
 - `video_quality`: Video encoding quality (0-63, lower is better, default 22).
-- `video_encoder` / `audio_encoder`: Optional; auto-selected when omitted. Video may be `X264` / `VP8` / `VP9` / `H264` / `AV1`; audio is `OPUS`.
+- `video_encoder` / `audio_encoder`: Optional; auto-selected when omitted. Video may be `X264` / `VP8` / `VP9` / `H264` / `AV1`; audio is `Opus`.
 - `video_device_name`: GDI device name of the monitor to capture (`\\.\DISPLAYn`); empty string means "ask the browser to pick on first connection".
 - `show_mouse`: Whether to capture and display the mouse cursor.
 - `enable_dirty_rect`: Whether to enable dirty-rectangle incremental encoding.

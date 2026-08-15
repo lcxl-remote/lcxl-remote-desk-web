@@ -218,6 +218,7 @@ fn show_tray_notification(app_handle: &AppHandle, permission_type: &SecurityPerm
     let permission_key = match permission_type {
         SecurityPermissionType::RemoteControl => "permission.remote_control",
         SecurityPermissionType::ClipboardSync => "permission.clipboard_sync",
+        SecurityPermissionType::SystemAudioCapture => "permission.system_audio_capture",
         SecurityPermissionType::PrivateScreen => "permission.private_screen",
         SecurityPermissionType::Whiteboard => "permission.whiteboard",
         SecurityPermissionType::Terminal => "permission.terminal",

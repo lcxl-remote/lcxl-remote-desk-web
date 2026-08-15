@@ -116,6 +116,8 @@ pub(super) fn h264_walk_nals(nal_bytes: &[u8]) -> Vec<(u8, usize)> {
 
 pub(super) fn build_media_frame(
     connection_id: &str,
+    connection_epoch: &str,
+    generation: u32,
     seq: u64,
     duration_ns: u64,
     kind: MediaFrameKind,
@@ -129,6 +131,8 @@ pub(super) fn build_media_frame(
         .min(u64::MAX as u128) as u64;
     MediaFrame {
         connection_id: connection_id.to_string(),
+        connection_epoch: connection_epoch.to_string(),
+        generation,
         seq,
         ts_ns,
         duration_ns,

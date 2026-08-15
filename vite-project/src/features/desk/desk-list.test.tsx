@@ -20,6 +20,12 @@ vi.mock("@/services/hooks/connectionController/useListConnections", () => ({
         refetch: h.refetch,
     }),
 }));
+// Desk-list platform tests do not exercise host-readiness queries. Keep that
+// independently tested child out of this unit fixture so it does not require a
+// QueryClientProvider unrelated to the assertions below.
+vi.mock("@/features/desk/host-readiness-banners", () => ({
+    HostReadinessBanners: () => null,
+}));
 
 import DeskList from "./desk-list";
 

@@ -61,6 +61,7 @@ pub(super) fn build_virtual_display_response(
                 supervisor.record_applied_mode(data.width, data.height, data.refresh_hz);
             }
             let response = ChangeDisplaySettingsPayload {
+                connection_epoch: payload.connection_epoch,
                 width: data.width,
                 height: data.height,
                 refresh_hz: data.refresh_hz,

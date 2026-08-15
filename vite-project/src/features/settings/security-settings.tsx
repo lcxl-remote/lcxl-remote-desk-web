@@ -20,6 +20,7 @@ import { mapTimeoutFromSelectValue, mapTimeoutToSelectValue } from "./security-t
 const securitySettingsSchema = z.object({
     allow_remote_control: z.boolean().nullable(),
     allow_clipboard_sync: z.boolean().nullable(),
+    allow_system_audio_capture: z.boolean().nullable(),
     allow_private_screen: z.boolean().nullable(),
     allow_whiteboard: z.boolean().nullable(),
     allow_terminal: z.boolean().nullable(),
@@ -57,6 +58,7 @@ export function SecuritySettings() {
         defaultValues: {
             allow_remote_control: null,
             allow_clipboard_sync: null,
+            allow_system_audio_capture: null,
             allow_private_screen: null,
             allow_whiteboard: null,
             allow_terminal: null,
@@ -74,6 +76,7 @@ export function SecuritySettings() {
             form.reset({
                 allow_remote_control: data.allow_remote_control ?? null,
                 allow_clipboard_sync: data.allow_clipboard_sync ?? null,
+                allow_system_audio_capture: data.allow_system_audio_capture ?? null,
                 allow_private_screen: data.allow_private_screen ?? null,
                 allow_whiteboard: data.allow_whiteboard ?? null,
                 allow_terminal: data.allow_terminal ?? null,
@@ -114,6 +117,7 @@ export function SecuritySettings() {
     const permissionItems = [
         { name: "allow_remote_control", label: t("security.permission.remoteControl"), desc: t("pages.system.security.remoteControlDesc") },
         { name: "allow_clipboard_sync", label: t("security.permission.clipboardSync"), desc: t("pages.system.security.clipboardSyncDesc") },
+        { name: "allow_system_audio_capture", label: t("security.permission.systemAudioCapture"), desc: t("pages.system.security.systemAudioCaptureDesc") },
         { name: "allow_private_screen", label: t("security.permission.privateScreen"), desc: t("pages.system.security.privateScreenDesc") },
         { name: "allow_whiteboard", label: t("security.permission.whiteboard"), desc: t("pages.system.security.whiteboardDesc") },
         { name: "allow_terminal", label: t("security.permission.terminal"), desc: t("pages.system.security.terminalDesc") },

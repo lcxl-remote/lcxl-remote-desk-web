@@ -193,6 +193,11 @@ pub struct WorkerManager {
     /// this flag and skip the swap, leaving the existing in-process
     /// worker in place.
     is_inprocess: Arc<AtomicBool>,
+    /// Permanent fail-safe latch for this host process. If an in-process worker
+    /// does not exit after a cooperative Shutdown within the hard deadline, its
+    /// native capture threads may still be alive; no replacement worker may be
+    /// started beside it until the application/service process is restarted.
+    media_worker_restart_required: Arc<AtomicBool>,
     remote_access_gate: Arc<StdRwLock<crate::daemon::remote_access::RemoteAccessGate>>,
     remote_access_acks: Arc<
         StdMutex<
@@ -373,6 +378,7 @@ impl WorkerManager {
             policy_applied_seq: Arc::new(AtomicU64::new(0)),
             capabilities_version_tx: Arc::new(cap_version_tx),
             is_inprocess: Arc::new(AtomicBool::new(false)),
+            media_worker_restart_required: Arc::new(AtomicBool::new(false)),
             remote_access_gate: Arc::new(StdRwLock::new(
                 crate::daemon::remote_access::RemoteAccessGate::startup_locked(),
             )),
@@ -388,6 +394,10 @@ impl WorkerManager {
     /// only meaningful in the daemon-spawned (named-pipe) topology.
     pub fn is_inprocess(&self) -> bool {
         self.is_inprocess.load(Ordering::Relaxed)
+    }
+
+    pub fn media_worker_restart_required(&self) -> bool {
+        self.media_worker_restart_required.load(Ordering::Acquire)
     }
 
     /// Name the worker that is about to start, and hand back the sink its
@@ -442,7 +452,7 @@ impl WorkerManager {
         // own Init handshake; until then the daemon ships an empty
         // device list rather than an old (potentially wrong-desktop)
         // snapshot.
-        *self.worker_capabilities.lock().unwrap() = None;
+        self.clear_worker_capabilities();
         *self.wayland_portal_snapshot.lock().unwrap() = None;
         #[cfg(target_os = "linux")]
         {
@@ -565,6 +575,11 @@ impl WorkerManager {
         desktop_name: Option<String>,
         host_control_hub: Arc<HostControlHub>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if self.media_worker_restart_required() {
+            return Err(
+                "media worker could not be stopped safely; host process restart required".into(),
+            );
+        }
         // Latch the in-process flag so `signaling_proxy::DesktopChanged`
         // and `handle_crash_recovery` skip their swap-to-fresh-worker
         // branches. Once set this manager remains in in-process mode
@@ -576,7 +591,7 @@ impl WorkerManager {
         // own; clearing the cached snapshot avoids handing stale device data
         // to a `RequestRemoteAccess` that lands between Init and the worker's
         // first `Capabilities` emission.
-        *self.worker_capabilities.lock().unwrap() = None;
+        self.clear_worker_capabilities();
         *self.wayland_portal_snapshot.lock().unwrap() = None;
         #[cfg(target_os = "linux")]
         {
@@ -767,11 +782,40 @@ impl WorkerManager {
         let _ = self.capabilities_version_tx.send_replace(new_version);
     }
 
+    fn clear_worker_capabilities(&self) {
+        *self.worker_capabilities.lock().unwrap() = None;
+        let new_version = self.capabilities_version.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = self.capabilities_version_tx.send_replace(new_version);
+    }
+
+    /// Subscribe before reading so a capability publication between those two
+    /// operations cannot be missed. A clear notification wakes the loop but is
+    /// never returned as a usable snapshot.
+    pub async fn wait_current_worker_capabilities(
+        &self,
+        timeout: Duration,
+    ) -> Option<MediaCapabilities> {
+        let mut versions = self.subscribe_capabilities_version();
+        tokio::time::timeout(timeout, async {
+            loop {
+                if let Some(capabilities) = self.worker_capabilities() {
+                    return Some(capabilities);
+                }
+                if versions.changed().await.is_err() {
+                    return None;
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     /// Take a snapshot of the latest reported worker capabilities.
-    /// Returns `None` until the worker has sent Capabilities at least
-    /// once after Init; in that window the daemon ships an empty
-    /// device list, the same behaviour as the legacy single-process
-    /// path on first connection.
+    /// Returns `None` until the current worker incarnation has sent
+    /// `Capabilities`; remote-desktop admission must use
+    /// [`Self::wait_current_worker_capabilities`] instead of treating that
+    /// state as an empty capability set.
     pub fn worker_capabilities(&self) -> Option<MediaCapabilities> {
         self.worker_capabilities.lock().unwrap().clone()
     }
@@ -842,7 +886,7 @@ impl WorkerManager {
         ipc_tx: mpsc::UnboundedSender<ServiceToWorker>,
     ) -> WorkerIncarnation {
         let incarnation = self.mint_worker().incarnation();
-        *self.worker_capabilities.lock().unwrap() = None;
+        self.clear_worker_capabilities();
         *self.wayland_portal_snapshot.lock().unwrap() = None;
         #[cfg(target_os = "linux")]
         {
@@ -923,20 +967,42 @@ impl WorkerManager {
     }
 
     pub async fn recycle_for_remote_access_timeout(&self) -> Result<(), String> {
-        let (session_id, desktop_name, inprocess_restart, mut process) = {
+        let (session_id, desktop_name, inprocess_restart, mut inprocess_task, mut process) = {
             let mut inner = self.inner.lock().await;
             let Some(mut worker) = inner.active_worker.take() else {
                 return Ok(());
             };
             let _ = worker.ipc_tx.send(ServiceToWorker::Shutdown);
-            self.retire_worker(&mut worker);
+            self.current_incarnation.store(0, Ordering::Release);
+            for task in worker.lane_tasks.drain(..) {
+                task.abort();
+            }
             (
                 worker.session_id,
                 worker.desktop_name.clone(),
                 worker.inprocess_restart.take(),
+                worker.inprocess_task.take(),
                 worker.process_handle.take(),
             )
         };
+        if let Some(task) = inprocess_task.as_mut()
+            && tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .is_err()
+        {
+            // Dropping the JoinHandle only detaches the task; it is deliberately
+            // not treated as a hard kill because capture backends may own native
+            // threads outside the cancelled future. Permanently latch the host
+            // and fail every live media session closed.
+            self.media_worker_restart_required
+                .store(true, Ordering::Release);
+            self.clear_worker_capabilities();
+            self.pc_registry.fail_media_worker_restart_required().await;
+            return Err(
+                "in-process media worker did not exit within 5 seconds; host restart required"
+                    .to_string(),
+            );
+        }
         if let Some(process) = process.as_mut() {
             let _ = process.kill().await;
             process.wait().await;

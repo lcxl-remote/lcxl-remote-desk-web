@@ -5,6 +5,32 @@ use desk_signal_facade::model::media_capability::{VideoEncoderCapability, VideoE
 use desk_signal_facade::model::signal::{LcxlRTCIceServer, RemoteSessionPurpose};
 use desk_turn::model::TurnSettings;
 
+#[test]
+fn system_audio_revocation_only_runs_for_a_stricter_effective_permission() {
+    assert!(security_permission_is_tighter(Some(true), None));
+    assert!(security_permission_is_tighter(Some(true), Some(false)));
+    assert!(security_permission_is_tighter(None, Some(false)));
+    assert!(!security_permission_is_tighter(None, None));
+    assert!(!security_permission_is_tighter(None, Some(true)));
+    assert!(!security_permission_is_tighter(Some(false), None));
+}
+
+#[test]
+fn rtcp_bitrate_targets_the_current_stable_video_generation() {
+    let mut coordinator = PerConnectionMediaCoordinator::default();
+    coordinator.video.generation = 7;
+    assert_eq!(stable_video_generation(&coordinator), Some(7));
+
+    coordinator.video.lifecycle = MediaSlotLifecycle::Transitioning;
+    coordinator.video.generation = 8;
+    coordinator.video.pending_generation = Some(8);
+    assert_eq!(stable_video_generation(&coordinator), None);
+
+    coordinator.video.lifecycle = MediaSlotLifecycle::Stable;
+    coordinator.video.pending_generation = None;
+    assert_eq!(stable_video_generation(&coordinator), Some(8));
+}
+
 fn encoder_for_negotiated_codec(
     preferred: VideoEncoderType,
     codec: MediaCodec,
@@ -800,28 +826,27 @@ fn start_media_payload_for(connection_id: &str) -> StartMediaPayload {
     StartMediaPayload {
         resolved_wayland_control_mode: None,
         connection_id: connection_id.to_string(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
+        audio_generation: 1,
         video_codec: MediaCodec::H264,
-        video_encoder: None,
-        audio_codec: MediaCodec::Opus,
+        video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
         video_device: None,
-        audio_device: None,
         fps: 30,
         bitrate_kbps: 0,
         quality: 0,
         start_video: true,
-        start_audio: true,
-        image_capture: None,
-        enable_dirty_rect: None,
+        audio: None,
+        image_capture: "default".to_string(),
+        enable_dirty_rect: false,
+        show_mouse: false,
     }
 }
 
-/// `record_start_media_was_first` reports `true` only for the first
-/// offer and overwrites the cached payload on every call. This is the
-/// gate `handle_offer` uses to issue worker `StartMedia` exactly once
-/// (first negotiation) while a renegotiation re-offer skips it but
-/// still refreshes the cache for a later worker-swap resume.
+/// The first offer installs the accepted/recovery snapshot exactly once;
+/// a re-offer must not overwrite it with browser-cached state.
 #[tokio::test]
-async fn record_start_media_marks_only_first_offer() {
+async fn install_initial_media_marks_only_first_offer() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
         requested_wayland_control_mode: Some("auto".to_string()),
@@ -838,14 +863,14 @@ async fn record_start_media_marks_only_first_offer() {
     let first = ctx
         .read()
         .await
-        .record_start_media_was_first(start_media_payload_for("conn-a"))
+        .install_initial_media(start_media_payload_for("conn-a"), None)
         .await;
     assert!(first, "the first offer must report is_first_offer = true");
 
     let second = ctx
         .read()
         .await
-        .record_start_media_was_first(start_media_payload_for("conn-a"))
+        .install_initial_media(start_media_payload_for("conn-a"), None)
         .await;
     assert!(!second, "a renegotiation re-offer must report false");
 
@@ -857,9 +882,7 @@ async fn record_start_media_marks_only_first_offer() {
 /// Two offers racing on the same connection (an in-flight initial
 /// offer vs a frontend ICE-restart re-offer) must yield exactly one
 /// `true`, so the worker receives a single `StartMedia`. The
-/// serialization comes from each caller holding the
-/// `PeerConnectionContext` write lock across the check-and-set,
-/// mirroring `handle_offer`.
+/// serialization comes from the recovery-slot lock.
 #[tokio::test]
 async fn concurrent_offers_mark_first_once() {
     let registry = PcRegistry::new();
@@ -878,13 +901,15 @@ async fn concurrent_offers_mark_first_once() {
     let c1 = Arc::clone(&ctx);
     let c2 = Arc::clone(&ctx);
     let t1 = tokio::spawn(async move {
-        let g = c1.write().await;
-        g.record_start_media_was_first(start_media_payload_for("conn-race"))
+        c1.read()
+            .await
+            .install_initial_media(start_media_payload_for("conn-race"), None)
             .await
     });
     let t2 = tokio::spawn(async move {
-        let g = c2.write().await;
-        g.record_start_media_was_first(start_media_payload_for("conn-race"))
+        c2.read()
+            .await
+            .install_initial_media(start_media_payload_for("conn-race"), None)
             .await
     });
     let r1 = t1.await.expect("task 1");
@@ -929,6 +954,8 @@ async fn write_video_frame_unknown_connection_is_silent_noop() {
     let registry = PcRegistry::new();
     let frame = MediaFrame {
         connection_id: "ghost".into(),
+        connection_epoch: "test-epoch".to_string(),
+        generation: 1,
         seq: 0,
         ts_ns: 0,
         duration_ns: 16_666_666,
@@ -964,6 +991,8 @@ async fn write_video_frame_no_track_yet_is_silent_noop() {
     // `handle_offer`).
     let frame = MediaFrame {
         connection_id: "conn-no-track".into(),
+        connection_epoch: "test-epoch".to_string(),
+        generation: 1,
         seq: 0,
         ts_ns: 0,
         duration_ns: 16_666_666,
@@ -1034,6 +1063,8 @@ async fn write_video_frame_paused_p_frame_keeps_flag_set() {
 
     let frame = MediaFrame {
         connection_id: "conn-pause-p".into(),
+        connection_epoch: "test-epoch".to_string(),
+        generation: 1,
         seq: 0,
         ts_ns: 0,
         duration_ns: 16_666_666,
@@ -1065,14 +1096,23 @@ async fn write_video_frame_paused_i_frame_clears_flag() {
         grant_session_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
-    registry
+    let pc = registry
         .create_for_request_remote("conn-pause-i", &request_remote, &s)
         .await
         .expect("create");
+    let epoch = pc.read().await.connection_epoch.clone();
+    {
+        let guard = pc.read().await;
+        let mut fence = guard.media_output_fence.write().await;
+        fence.video_epoch = epoch.clone();
+        fence.video_generation = 1;
+    }
     registry.pause_all_media().await;
 
     let frame = MediaFrame {
         connection_id: "conn-pause-i".into(),
+        connection_epoch: epoch,
+        generation: 1,
         seq: 0,
         ts_ns: 0,
         duration_ns: 16_666_666,
@@ -1118,95 +1158,6 @@ async fn reset_media_for_unknown_connection_is_noop() {
     let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
 
     registry.reset_media_for("nope", &worker_mgr).await;
-}
-
-/// `broadcast_media_settings_update` with all-`None` payload
-/// short-circuits without iterating the registry — pinning so a
-/// future change doesn't accidentally fan out a no-op IPC to every
-/// worker on every `UpdateDeskSettings` that touches only
-/// non-media fields (wayland_control_mode, private_screen, etc.).
-#[tokio::test]
-async fn broadcast_media_settings_update_all_none_is_noop() {
-    let registry = PcRegistry::new();
-    let request_remote = RequestRemoteModel {
-        requested_wayland_control_mode: Some("auto".to_string()),
-        purpose: RemoteSessionPurpose::RemoteDesktop,
-        ice_servers: vec![],
-        grant_session_id: None,
-    };
-    let s = settings_with_startup(StartupMode::ServiceDaemon);
-    registry
-        .create_for_request_remote("conn-x", &request_remote, &s)
-        .await
-        .expect("create");
-
-    let shared = SharedSettings::from(s);
-    let settings = actix_web::web::Data::new(shared);
-    let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
-
-    // No worker active and all-None payload — must complete cleanly.
-    registry
-        .broadcast_media_settings_update(&worker_mgr, None, None, None, None)
-        .await;
-}
-
-/// Regression for the dirty-rect kill-switch: a fan-out that
-/// carries *only* `enable_dirty_rect` (fps / bitrate / quality all
-/// `None`) must NOT short-circuit. The browser toggling the
-/// Advanced-tab switch without changing anything else is the
-/// expected path, and pre-fix `broadcast_media_settings_update`
-/// would have early-returned on `fps.is_none() && bitrate.is_none()
-/// && quality.is_none()`, silently dropping the toggle on the
-/// floor.
-#[tokio::test]
-async fn broadcast_media_settings_update_dirty_rect_only_not_short_circuited() {
-    let registry = PcRegistry::new();
-    let s = settings_with_startup(StartupMode::ServiceDaemon);
-    let shared = SharedSettings::from(s);
-    let settings = actix_web::web::Data::new(shared);
-    let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
-
-    // Empty registry + dirty-rect-only payload: must complete
-    // cleanly rather than early-return (the all-None guard must
-    // include enable_dirty_rect).
-    registry
-        .broadcast_media_settings_update(&worker_mgr, None, None, None, Some(false))
-        .await;
-}
-
-/// `broadcast_media_settings_update` only fans out to PCs that
-/// already have a cached `StartMediaPayload`. A registry with PCs
-/// that haven't received the first Offer yet (no cache) must
-/// neither panic nor accidentally synthesize a default StartMedia
-/// — handle_offer owns first-time fan-out.
-#[tokio::test]
-async fn broadcast_media_settings_update_skips_pcs_without_cached_offer() {
-    let registry = PcRegistry::new();
-    let request_remote = RequestRemoteModel {
-        requested_wayland_control_mode: Some("auto".to_string()),
-        purpose: RemoteSessionPurpose::RemoteDesktop,
-        ice_servers: vec![],
-        grant_session_id: None,
-    };
-    let s = settings_with_startup(StartupMode::ServiceDaemon);
-    registry
-        .create_for_request_remote("conn-no-offer", &request_remote, &s)
-        .await
-        .expect("create");
-
-    let shared = SharedSettings::from(s);
-    let settings = actix_web::web::Data::new(shared);
-    let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
-
-    // No cached_start_media → loop body skipped; no worker active
-    // either, but the function must still not panic.
-    registry
-        .broadcast_media_settings_update(&worker_mgr, Some(60), None, Some(40), Some(false))
-        .await;
-
-    // The registered PC stays uncached.
-    let ctx = registry.get("conn-no-offer").await.unwrap();
-    assert!(ctx.read().await.cached_start_media.read().await.is_none());
 }
 
 /// `reset_media_for` on a registered connection without a cached
@@ -1283,6 +1234,55 @@ async fn resume_active_media_skips_pc_without_cached_offer() {
     // Cached slot stays None.
     let ctx = registry.get("conn-no-offer").await.unwrap();
     assert!(ctx.read().await.cached_start_media.read().await.is_none());
+}
+
+#[tokio::test]
+async fn resume_active_media_allocates_fresh_generations_and_advances_fence() {
+    use desk_ipc_protocol::message::ServiceToWorker;
+
+    let registry = PcRegistry::new();
+    let request_remote = RequestRemoteModel {
+        requested_wayland_control_mode: Some("auto".to_string()),
+        purpose: RemoteSessionPurpose::RemoteDesktop,
+        ice_servers: vec![],
+        grant_session_id: None,
+    };
+    let s = settings_with_startup(StartupMode::ServiceDaemon);
+    let ctx = registry
+        .create_for_request_remote("conn-fresh", &request_remote, &s)
+        .await
+        .expect("create");
+    assert!(
+        ctx.read()
+            .await
+            .install_initial_media(start_media_payload_for("conn-fresh"), None)
+            .await
+    );
+
+    let settings = actix_web::web::Data::new(SharedSettings::from(s));
+    let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+    let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+    worker_mgr.install_active_for_test(ipc_tx).await;
+
+    registry.resume_active_media(&worker_mgr, None).await;
+
+    let resumed = loop {
+        match ipc_rx.try_recv().expect("resume IPC") {
+            ServiceToWorker::StartMedia(payload) => break payload,
+            _ => continue,
+        }
+    };
+    assert_eq!(resumed.video_generation, 2);
+    assert_eq!(resumed.audio_generation, 2);
+    let guard = ctx.read().await;
+    let coordinator = guard.media_coordinator.lock().await;
+    assert_eq!(coordinator.video.generation, 2);
+    assert_eq!(coordinator.audio.generation, 2);
+    drop(coordinator);
+    let fence = guard.media_output_fence.read().await;
+    assert_eq!(fence.video_generation, 2);
+    assert_eq!(fence.audio_generation, 2);
+    assert!(!fence.audio_open);
 }
 
 /// After a worker swap the freshly spawned worker has an empty
@@ -1401,6 +1401,8 @@ async fn write_video_frame_audio_kind_uses_audio_track_slot() {
         .expect("create");
     let frame = MediaFrame {
         connection_id: "conn-audio".into(),
+        connection_epoch: "test-epoch".to_string(),
+        generation: 1,
         seq: 0,
         ts_ns: 0,
         duration_ns: 20_000_000,
@@ -1426,7 +1428,7 @@ async fn handle_request_remote_uses_worker_capabilities_when_present() {
         audio_codecs: vec![MediaCodec::Opus],
         video_encoders: vec!["VP9".to_string(), "AV1".to_string()],
         video_encoder_capabilities: vec![],
-        audio_encoders: vec!["OPUS".to_string()],
+        audio_encoders: vec!["Opus".to_string()],
         video_device_list: std::collections::BTreeMap::new(),
         audio_device_list: std::collections::BTreeMap::new(),
         has_tauri: false,
@@ -1478,7 +1480,7 @@ async fn handle_request_remote_uses_worker_capabilities_when_present() {
         .expect("Init payload present");
     // Worker said Vp9, Av1 → daemon should ship those strings.
     assert_eq!(init.video_encoder_list, vec!["VP9", "AV1"]);
-    assert_eq!(init.audio_encoder_list, vec!["OPUS"]);
+    assert_eq!(init.audio_encoder_list, vec!["Opus"]);
     assert!(init.is_admin, "init must mirror caps.is_admin");
 }
 
@@ -1488,7 +1490,7 @@ async fn handle_request_remote_uses_worker_capabilities_when_present() {
 /// behaviour during the small race window between worker spawn
 /// and first Capabilities IPC.
 #[tokio::test]
-async fn handle_request_remote_falls_back_when_no_capabilities() {
+async fn handle_request_remote_fails_closed_when_no_capabilities() {
     let registry = PcRegistry::new();
     let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
     let s = settings_with_startup(StartupMode::ServiceDaemon);
@@ -1510,7 +1512,7 @@ async fn handle_request_remote_falls_back_when_no_capabilities() {
         None,
     );
 
-    handle_request_remote(
+    let error = handle_request_remote(
         &registry,
         &outbound_tx,
         &s,
@@ -1525,19 +1527,9 @@ async fn handle_request_remote_falls_back_when_no_capabilities() {
         0,
     )
     .await
-    .expect("handle ok");
-
-    let text = outbound_rx.recv().await.expect("init reply");
-    let reply: SignalingModel = serde_json::from_str(&text).unwrap();
-    let init: RemoteAccessInitializedData = reply
-        .get_data::<RemoteAccessInitializedData>()
-        .expect("Init payload");
-    // Static fallback comes from `list_video_encoder()` /
-    // `list_audio_encoder()` — both must be populated regardless
-    // of test platform; we only check non-emptiness rather than
-    // an exact platform-dependent list.
-    assert!(!init.video_encoder_list.is_empty());
-    assert!(!init.audio_encoder_list.is_empty());
+    .expect_err("desktop admission must wait for authoritative capabilities");
+    assert!(format!("{error}").contains("99"));
+    assert!(outbound_rx.try_recv().is_err());
 }
 
 /// A redeemed-grant `RequestRemoteAccess` carries a validated capability ceiling and
@@ -1562,6 +1554,7 @@ async fn handle_request_remote_stamps_ceiling_and_grant_onto_signaling_state() {
     let (worker_mgr, _rx) = WorkerManager::new(settings_data, registry.clone());
     let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
     worker_mgr.install_active_for_test(ipc_tx).await;
+    let capabilities = MediaCapabilities::default();
     #[cfg(target_os = "linux")]
     mark_portal_ready(&worker_mgr);
 
@@ -1593,7 +1586,7 @@ async fn handle_request_remote_stamps_ceiling_and_grant_onto_signaling_state() {
         &s,
         "user-x",
         false,
-        None,
+        Some(&capabilities),
         Some(&worker_mgr),
         None,
         &model,
@@ -1725,7 +1718,7 @@ async fn handle_request_remote_preserves_x264_h264_distinction_in_encoder_list()
         // UI layer: both implementations remain distinct.
         video_encoders: vec!["X264".to_string(), "VP9".to_string(), "H264".to_string()],
         video_encoder_capabilities: vec![],
-        audio_encoders: vec!["OPUS".to_string()],
+        audio_encoders: vec!["Opus".to_string()],
         video_device_list: std::collections::BTreeMap::new(),
         audio_device_list: std::collections::BTreeMap::new(),
         has_tauri: false,
@@ -1777,7 +1770,7 @@ async fn handle_request_remote_preserves_x264_h264_distinction_in_encoder_list()
         "X264 and H264 must remain separate encoder choices for the UI \
              rather than collapsing to two indistinguishable 'H264' entries"
     );
-    assert_eq!(init.audio_encoder_list, vec!["OPUS"]);
+    assert_eq!(init.audio_encoder_list, vec!["Opus"]);
 }
 
 /// Regression: the daemon-side PC must publish locally-gathered
@@ -1804,6 +1797,7 @@ async fn local_ice_candidate_forwarder_publishes_ice_candidate_to_outbound() {
         Arc::clone(&pc),
         outbound_tx,
         "conn-trickle".to_string(),
+        "epoch-trickle".to_string(),
     );
 
     // Trigger ICE gathering: any local SDP with at least one
@@ -1833,11 +1827,12 @@ async fn local_ice_candidate_forwarder_publishes_ice_candidate_to_outbound() {
                     Some("conn-trickle"),
                     "IceCandidate must target the originating browser connection"
                 );
-                let init: RTCIceCandidateInit = m
-                    .get_data::<RTCIceCandidateInit>()
-                    .expect("IceCandidate payload must be RTCIceCandidateInit");
+                let wrapped: desk_signal_facade::model::remote_session::IceCandidatePayload = m
+                    .get_data()
+                    .expect("IceCandidate payload must carry its connection epoch");
+                assert_eq!(wrapped.connection_epoch, "epoch-trickle");
                 assert!(
-                    !init.candidate.is_empty(),
+                    !wrapped.candidate.candidate.is_empty(),
                     "forwarded candidate string must be non-empty"
                 );
                 ice_candidate_count += 1;
@@ -1870,6 +1865,7 @@ async fn handle_request_remote_registers_ice_candidate_forwarder() {
     let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(32);
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     let worker_mgr = request_test_worker_mgr(&s, &registry);
+    let capabilities = MediaCapabilities::default();
     let model = SignalingModel::new(
         "req-init-ice",
         SignalingType::RequestRemoteAccess,
@@ -1893,7 +1889,7 @@ async fn handle_request_remote_registers_ice_candidate_forwarder() {
         &s,
         "user-x",
         false,
-        None,
+        Some(&capabilities),
         Some(&worker_mgr),
         None,
         &model,
@@ -2171,6 +2167,129 @@ async fn cleanup_pc_detaches_supervisor_when_last_pc_removed_and_no_pending() {
         "Disabled",
         "N->0 cleanup must detach the supervisor",
     );
+}
+
+#[tokio::test]
+async fn cleanup_pc_keeps_virtual_display_for_an_admitted_replacement_session() {
+    use crate::daemon::virtual_display::VirtualDisplaySupervisor;
+    let registry = PcRegistry::new();
+    let request_remote = RequestRemoteModel {
+        requested_wayland_control_mode: Some("auto".to_string()),
+        purpose: RemoteSessionPurpose::RemoteDesktop,
+        ice_servers: vec![],
+        grant_session_id: None,
+    };
+    let s = settings_with_startup(StartupMode::ServiceDaemon);
+    registry
+        .create_for_request_remote("conn-replace", &request_remote, &s)
+        .await
+        .expect("create");
+    registry
+        .record_admission("conn-replace", Admission::OwnerFull)
+        .await;
+
+    let settings = actix_web::web::Data::new(SharedSettings::from(s));
+    let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+    let supervisor = Arc::new(VirtualDisplaySupervisor::new_attached_for_test(
+        worker_mgr.clone(),
+        "SWD\\TEST\\TEST",
+    ));
+
+    cleanup_pc(
+        &registry,
+        &worker_mgr,
+        Some(&supervisor),
+        "conn-replace",
+        "codec-replacement",
+    )
+    .await;
+
+    assert_eq!(registry.len().await, 0);
+    assert_eq!(
+        supervisor.state_label().await,
+        "Attached",
+        "the signaling admission owns the IDD across PC replacement",
+    );
+}
+
+#[tokio::test]
+async fn pc_cleanup_preserves_logical_activity_until_signaling_connection_ends() {
+    use desk_ipc_protocol::message::ServiceToWorker;
+    use desk_signal_facade::model::request_remote_authz::ActorSummary;
+
+    let registry = PcRegistry::new();
+    let hub = Arc::new(HostControlHub::new_local());
+    registry.set_host_control_hub(&hub);
+    let request_remote = RequestRemoteModel {
+        requested_wayland_control_mode: Some("auto".to_string()),
+        purpose: RemoteSessionPurpose::RemoteDesktop,
+        ice_servers: vec![],
+        grant_session_id: None,
+    };
+    let s = settings_with_startup(StartupMode::ServiceDaemon);
+    registry
+        .create_for_request_remote("conn-handoff", &request_remote, &s)
+        .await
+        .expect("create");
+    registry
+        .record_admission("conn-handoff", Admission::OwnerFull)
+        .await;
+    let activity = hub.host_activity();
+    registry.set_host_activity(activity.clone());
+    activity.ensure_session("conn-handoff", ActorSummary::unknown());
+    activity.mark_video_negotiated("conn-handoff");
+    activity.set_pc_connected("conn-handoff", true);
+    activity.set_remote_control("conn-handoff", true);
+    activity.set_system_audio_capture("conn-handoff", true);
+
+    let settings = actix_web::web::Data::new(SharedSettings::from(s));
+    let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+    let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+    worker_mgr.install_active_for_test(ipc_tx).await;
+
+    cleanup_pc(
+        &registry,
+        &worker_mgr,
+        None,
+        "conn-handoff",
+        "codec-replacement",
+    )
+    .await;
+
+    let during_handoff = activity.snapshot();
+    assert_eq!(during_handoff.total_session_count, 1);
+    assert!(during_handoff.sessions[0].desktop_view);
+    assert!(!during_handoff.sessions[0].remote_control);
+    assert!(!during_handoff.sessions[0].system_audio_capture);
+    assert!(registry.admission("conn-handoff").await.is_some());
+    assert!(matches!(
+        ipc_rx.try_recv(),
+        Ok(ServiceToWorker::StopMedia(_))
+    ));
+    assert!(
+        ipc_rx.try_recv().is_err(),
+        "PC cleanup must not hide private screen"
+    );
+
+    let removed = SignalingModel::new(
+        "removed",
+        SignalingType::ConnectionRemoved,
+        Some("conn-handoff".to_string()),
+        None,
+        None,
+        None,
+    );
+    handle_connection_removed(&registry, &worker_mgr, None, &removed)
+        .await
+        .expect("logical teardown");
+
+    assert_eq!(activity.snapshot().total_session_count, 0);
+    assert!(registry.admission("conn-handoff").await.is_none());
+    assert!(matches!(
+        ipc_rx.try_recv(),
+        Ok(ServiceToWorker::SetPrivateScreenVisibility(payload))
+            if payload.connection_id == "conn-handoff" && !payload.visible
+    ));
 }
 
 /// As long as other PCs are still live, the supervisor must stay
@@ -2964,11 +3083,11 @@ async fn close_grants_up_to_generation_closes_only_superseded_grants() {
     assert_eq!(registry.connections_for_grant("GS-new").await, ["conn-new"]);
 }
 
-/// `cleanup_pc` prunes the grant reverse-index on teardown so a later directed
-/// revocation can never reach a stale connection id, and drops the grant key
-/// once its last connection departs.
+/// PeerConnection cleanup preserves the grant reverse-index so revocation still
+/// reaches the controller during a codec-replacement gap. The index is removed
+/// only when the signaling connection itself ends.
 #[tokio::test]
-async fn cleanup_pc_unindexes_grant_connection() {
+async fn cleanup_pc_preserves_grant_index_until_logical_connection_ends() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
         requested_wayland_control_mode: Some("auto".to_string()),
@@ -2982,6 +3101,9 @@ async fn cleanup_pc_unindexes_grant_connection() {
         .await
         .expect("pc");
     registry.index_grant_connection("GS-9", 5, "conn-g").await;
+    registry
+        .record_admission("conn-g", Admission::Capped(SecuritySettings::default()))
+        .await;
     assert_eq!(registry.connections_for_grant("GS-9").await, ["conn-g"]);
 
     let shared = SharedSettings::from(s);
@@ -2989,6 +3111,19 @@ async fn cleanup_pc_unindexes_grant_connection() {
     let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
     cleanup_pc(&registry, &worker_mgr, None, "conn-g", "test").await;
 
+    assert_eq!(registry.connections_for_grant("GS-9").await, ["conn-g"]);
+
+    let removed = SignalingModel::new(
+        "removed",
+        SignalingType::ConnectionRemoved,
+        Some("conn-g".to_string()),
+        None,
+        None,
+        None,
+    );
+    handle_connection_removed(&registry, &worker_mgr, None, &removed)
+        .await
+        .expect("logical teardown");
     assert!(registry.connections_for_grant("GS-9").await.is_empty());
 }
 
@@ -3078,17 +3213,30 @@ async fn force_disconnect_tombstones_and_clears_admission_only_connection() {
     assert!(registry.admission("conn-admitted").await.is_none());
     assert!(registry.is_tombstoned("conn-admitted").await);
     assert!(registry.all_connection_ids().await.is_empty());
-    let mut saw_ceiling_clear = false;
+    let mut messages = Vec::new();
     while let Ok(message) = ipc_rx.try_recv() {
-        if matches!(
+        messages.push(message);
+    }
+    let privacy_hide = messages.iter().position(|message| {
+        matches!(
+            message,
+            ServiceToWorker::SetPrivateScreenVisibility(payload)
+                if payload.connection_id == "conn-admitted" && !payload.visible
+        )
+    });
+    let ceiling_clear = messages.iter().position(|message| {
+        matches!(
             message,
             ServiceToWorker::SetConnectionCeiling(payload)
                 if payload.connection_id == "conn-admitted" && payload.ceiling.is_none()
-        ) {
-            saw_ceiling_clear = true;
-        }
-    }
-    assert!(saw_ceiling_clear);
+        )
+    });
+    assert!(privacy_hide.is_some());
+    assert!(ceiling_clear.is_some());
+    assert!(
+        privacy_hide < ceiling_clear,
+        "privacy must hide before ceiling teardown"
+    );
 }
 
 #[tokio::test]
@@ -3768,7 +3916,15 @@ async fn disable_with_active_cap_emits_clear_ipc() {
         let directive = state
             .decide_on_remb(std::time::Instant::now(), 8_000_000.0)
             .expect("constrained REMB must produce a directive");
-        send_cap_directive(&worker_mgr, "conn-cap", directive, &mut state).await;
+        send_cap_directive(
+            &worker_mgr,
+            "conn-cap",
+            "test-epoch",
+            1,
+            directive,
+            &mut state,
+        )
+        .await;
         assert_eq!(state.current_cap_kbps(), Some(6_800));
     }
     assert_eq!(expect_cap_ipc(&mut ipc_rx, "conn-cap"), 6_800);
@@ -3779,7 +3935,15 @@ async fn disable_with_active_cap_emits_clear_ipc() {
         let directive = state
             .set_enabled_and_decide_clear(false)
             .expect("disable with active cap must emit Clear");
-        send_cap_directive(&worker_mgr, "conn-cap", directive, &mut state).await;
+        send_cap_directive(
+            &worker_mgr,
+            "conn-cap",
+            "test-epoch",
+            1,
+            directive,
+            &mut state,
+        )
+        .await;
         assert_eq!(state.current_cap_kbps(), None);
         assert_eq!(
             state.decide_on_remb(std::time::Instant::now(), 2_000_000.0),
@@ -3820,7 +3984,15 @@ async fn send_failure_does_not_commit_and_retry_succeeds() {
         let directive = state
             .decide_on_remb(now, 8_000_000.0)
             .expect("must decide a cap");
-        send_cap_directive(&worker_mgr, "conn-f", directive, &mut state).await;
+        send_cap_directive(
+            &worker_mgr,
+            "conn-f",
+            "test-epoch",
+            1,
+            directive,
+            &mut state,
+        )
+        .await;
         assert_eq!(
             state.current_cap_kbps(),
             None,
@@ -3837,7 +4009,15 @@ async fn send_failure_does_not_commit_and_retry_succeeds() {
         let directive = state
             .decide_on_remb(now, 8_000_000.0)
             .expect("retry must re-decide after an uncommitted failure");
-        send_cap_directive(&worker_mgr, "conn-f", directive, &mut state).await;
+        send_cap_directive(
+            &worker_mgr,
+            "conn-f",
+            "test-epoch",
+            1,
+            directive,
+            &mut state,
+        )
+        .await;
         assert_eq!(state.current_cap_kbps(), Some(6_800));
     }
     assert_eq!(expect_cap_ipc(&mut ipc_rx2, "conn-f"), 6_800);
@@ -3871,7 +4051,7 @@ async fn no_setcap_after_clear_under_concurrency() {
             let remb = if i % 2 == 0 { 8_000_000.0 } else { 2_000_000.0 };
             let mut state = shared.state.lock().await;
             if let Some(d) = state.decide_on_remb(std::time::Instant::now(), remb) {
-                send_cap_directive(&worker_mgr, "conn-race", d, &mut state).await;
+                send_cap_directive(&worker_mgr, "conn-race", "test-epoch", 1, d, &mut state).await;
             }
         }));
     }
@@ -3883,7 +4063,7 @@ async fn no_setcap_after_clear_under_concurrency() {
             tokio::task::yield_now().await;
             let mut state = shared.state.lock().await;
             if let Some(d) = state.set_enabled_and_decide_clear(false) {
-                send_cap_directive(&worker_mgr, "conn-race", d, &mut state).await;
+                send_cap_directive(&worker_mgr, "conn-race", "test-epoch", 1, d, &mut state).await;
             }
         }));
     }

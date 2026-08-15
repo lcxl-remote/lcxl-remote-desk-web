@@ -24,8 +24,14 @@ pub async fn cleanup_pc(
     reason: &str,
 ) {
     let removed = registry.remove(connection_id).await;
-    if let Some(activity) = registry.host_activity() {
-        activity.remove_connection(connection_id);
+    if removed.is_some()
+        && let Some(activity) = registry.host_activity()
+    {
+        // A PC is an implementation detail inside the browser's longer-lived
+        // signaling session. Preserve the desktop-view entry so a negotiated
+        // codec replacement does not destroy/recreate the host indicator, while
+        // clearing activity flags whose media/control path really stopped.
+        activity.begin_pc_handoff(connection_id);
     }
     // Deny anything this connection was still waiting on an answer for. Without
     // this the dialog outlives the controller that raised it, and a user who
@@ -41,12 +47,23 @@ pub async fn cleanup_pc(
             );
         }
     }
-    // Prune the grant reverse-index on every teardown path (idempotent for
-    // connections that carry no grant) so a directed teardown can never reach a
-    // stale connection id.
-    registry.unindex_grant_connection(connection_id).await;
+    // Grant reverse-index ownership follows the signaling session, not this PC.
+    // Keeping it through a replacement closes the revocation race where a grant
+    // is revoked after the old PC closes but before the new PC is registered.
     if let Some(ctx) = &removed {
         let ctx = ctx.read().await;
+        ctx.media_paused.store(true, Ordering::Relaxed);
+        ctx.media_output_fence.write().await.audio_open = false;
+        let mut coordinator = ctx.media_coordinator.lock().await;
+        coordinator.closed = true;
+        coordinator.current_apply_request_id = None;
+        coordinator.pending_audio_approval_id = None;
+        coordinator.pending_audio_candidate = None;
+        coordinator.video_terminal_waiter = None;
+        coordinator.audio_terminal_waiter = None;
+        coordinator.audio_expected_terminal = None;
+        coordinator.audio_desired_active = false;
+        drop(coordinator);
         if let Err(e) = ctx.pc.close().await {
             log::warn!("[pc_manager] PC close failed for {connection_id}: {e}");
         }
@@ -55,15 +72,19 @@ pub async fn cleanup_pc(
         log::debug!("[pc_manager] cleanup_pc({connection_id}, {reason}): registry already empty");
     }
 
-    if let Err(e) = worker_mgr
-        .send_to_worker(ServiceToWorker::StopMedia(
-            desk_ipc_protocol::message::StopMediaPayload {
-                connection_id: connection_id.to_string(),
-            },
-        ))
-        .await
-    {
-        log::debug!("[pc_manager] StopMedia for {connection_id} could not reach worker: {e}");
+    if let Some(ctx) = &removed {
+        let connection_epoch = ctx.read().await.connection_epoch.clone();
+        if let Err(e) = worker_mgr
+            .send_to_worker(ServiceToWorker::StopMedia(
+                desk_ipc_protocol::message::StopMediaPayload {
+                    connection_id: connection_id.to_string(),
+                    connection_epoch,
+                },
+            ))
+            .await
+        {
+            log::debug!("[pc_manager] StopMedia for {connection_id} could not reach worker: {e}");
+        }
     }
 
     // Terminal WS connections hold no PC and no media, so the steps above are a
@@ -118,7 +139,7 @@ pub async fn cleanup_pc(
         supervisor.recompute_desired().await;
     }
 
-    // N -> 0 virtual display detach. Three gates, all required:
+    // N -> 0 virtual display detach. Four gates, all required:
     //   (1) `removed.is_some()` — only the call that actually pulled
     //       a live PC out triggers detach. Stale `ConnectionRemoved`
     //       fan-outs that arrive after the PC was already cleaned up
@@ -133,16 +154,75 @@ pub async fn cleanup_pc(
     //       open/close racing with a slow new connection's
     //       `ensure_attached` would tear down the IDD while the
     //       new connection is still bringing it up.
+    //   (4) no admission remains for this signaling connection. An admission
+    //       outlives its PC and therefore represents a logical browser session
+    //       that may be replacing the PC after a wire-codec change.
     if let Some(supervisor) = virtual_display
         && removed.is_some()
         && registry.len().await == 0
         && registry.pending_requests() == 0
+        && registry.admission(connection_id).await.is_none()
     {
         log::info!("[pc_manager] last PC removed, no pending requests; detaching virtual display");
         if let Err(e) = supervisor.apply(false).await {
             log::warn!("[pc_manager] N->0 virtual display detach failed: {e}");
         }
     }
+}
+
+pub async fn hide_private_screen_best_effort(
+    worker_mgr: &WorkerManager,
+    connection_id: &str,
+    reason: &str,
+) {
+    if let Err(error) = worker_mgr
+        .send_to_worker(ServiceToWorker::SetPrivateScreenVisibility(
+            desk_ipc_protocol::message::SetPrivateScreenVisibilityPayload {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                connection_id: connection_id.to_string(),
+                visible: false,
+            },
+        ))
+        .await
+    {
+        log::debug!(
+            "[pc_manager] private-screen lifecycle hide for {connection_id} \
+             ({reason}) could not reach worker: {error}"
+        );
+    }
+}
+
+async fn detach_virtual_display_if_unused(
+    registry: &PcRegistry,
+    virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
+    reason: &str,
+) {
+    if let Some(supervisor) = virtual_display
+        && registry.len().await == 0
+        && registry.pending_requests() == 0
+    {
+        log::info!("[pc_manager] logical connection ended ({reason}); detaching virtual display");
+        if let Err(error) = supervisor.apply(false).await {
+            log::warn!("[pc_manager] logical teardown virtual display detach failed: {error}");
+        }
+    }
+}
+
+async fn finalize_logical_connection(
+    registry: &PcRegistry,
+    worker_mgr: &WorkerManager,
+    virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
+    connection_id: &str,
+    reason: &str,
+) {
+    hide_private_screen_best_effort(worker_mgr, connection_id, reason).await;
+    if let Some(activity) = registry.host_activity() {
+        activity.remove_connection(connection_id);
+    }
+    registry.clear_admission(connection_id).await;
+    registry.unindex_grant_connection(connection_id).await;
+    registry.unmark_terminal_connection(connection_id).await;
+    detach_virtual_display_if_unused(registry, virtual_display, reason).await;
 }
 
 /// Host-initiated teardown has stronger semantics than browser `CloseRemoteSession`:
@@ -161,6 +241,13 @@ pub async fn force_disconnect_connection(
         .any(|candidate| candidate == connection_id);
     registry.tombstone_connection(connection_id).await;
     cleanup_pc(registry, worker_mgr, virtual_display, connection_id, reason).await;
+    if existed {
+        // Hide the privacy screen while the worker still has the connection
+        // ceiling. Clearing the ceiling first would make teardown ordering
+        // depend on the worker's fallback policy instead of the lifecycle.
+        finalize_logical_connection(registry, worker_mgr, virtual_display, connection_id, reason)
+            .await;
+    }
     if let Err(error) = worker_mgr
         .send_to_worker(ServiceToWorker::SetConnectionCeiling(
             desk_ipc_protocol::message::SetConnectionCeilingPayload {
@@ -174,9 +261,6 @@ pub async fn force_disconnect_connection(
             "[pc_manager] force-disconnect ceiling clear for {connection_id} could not reach worker: {error}"
         );
     }
-    registry.clear_admission(connection_id).await;
-    registry.unindex_grant_connection(connection_id).await;
-    registry.unmark_terminal_connection(connection_id).await;
     existed
 }
 
@@ -197,6 +281,7 @@ pub async fn close_grant_session(
     let ids = registry.connections_for_grant(grant_session_id).await;
     for id in ids {
         cleanup_pc(registry, worker_mgr, virtual_display, &id, reason).await;
+        finalize_logical_connection(registry, worker_mgr, virtual_display, &id, reason).await;
     }
 }
 
@@ -324,14 +409,31 @@ pub async fn handle_close_remote_session(
     model: &SignalingModel,
 ) -> Result<(), DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
-    cleanup_pc(
-        registry,
-        worker_mgr,
-        virtual_display,
-        from_connection_id,
-        "close_remote_session",
-    )
-    .await;
+    let payload =
+        model.get_data::<desk_signal_facade::model::remote_session::CloseRemoteSessionPayload>()?;
+    if let Some(context) = registry.get(from_connection_id).await {
+        if context.read().await.connection_epoch != payload.connection_epoch {
+            return Ok(());
+        }
+        cleanup_pc(
+            registry,
+            worker_mgr,
+            virtual_display,
+            from_connection_id,
+            "close_remote_session",
+        )
+        .await;
+    }
+    if payload.finalize_logical_connection {
+        finalize_logical_connection(
+            registry,
+            worker_mgr,
+            virtual_display,
+            from_connection_id,
+            "close_remote_session_finalized",
+        )
+        .await;
+    }
     Ok(())
 }
 
@@ -356,6 +458,11 @@ pub async fn handle_connection_removed(
     model: &SignalingModel,
 ) -> Result<(), DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
+    let known_logical_connection = registry
+        .all_connection_ids()
+        .await
+        .iter()
+        .any(|connection_id| connection_id == from_connection_id);
     cleanup_pc(
         registry,
         worker_mgr,
@@ -364,10 +471,18 @@ pub async fn handle_connection_removed(
         "peer_signaling_closed",
     )
     .await;
-    // The signaling connection is truly ending (not just a `CloseRemoteSession` PC
-    // teardown), so drop its admission record. `cleanup_pc` above — shared with the
-    // `CloseRemoteSession` path — deliberately leaves the admission intact.
-    registry.clear_admission(from_connection_id).await;
+    // The signaling connection is truly ending (not just a `CloseRemoteSession`
+    // PC teardown), so release every logical-session-owned resource.
+    if known_logical_connection {
+        finalize_logical_connection(
+            registry,
+            worker_mgr,
+            virtual_display,
+            from_connection_id,
+            "peer_signaling_closed",
+        )
+        .await;
+    }
     Ok(())
 }
 

@@ -308,7 +308,7 @@ impl WorkerSession {
                             connection_ids.extend(producer.stop_all_media());
                         }
                         for connection_id in connection_ids {
-                            input_dispatcher.stop_connection(&StopMediaPayload { connection_id });
+                            input_dispatcher.stop_connection_by_id(&connection_id);
                         }
                         warn!(
                             "Wayland Portal session lost; stopped all active media and input pipelines"
@@ -571,6 +571,11 @@ impl WorkerSession {
                                         "Security policy update reached the main loop; \
                                          the policy mirror was not updated"
                                     );
+                                }
+                                ServiceToWorker::ApplyMediaSettings(payload) => {
+                                    if let Some(producer) = media_producer.as_ref() {
+                                        producer.apply_media_settings(payload);
+                                    }
                                 }
                                 ServiceToWorker::AuthorizeWaylandPortal(payload) => {
                                     #[cfg(target_os = "linux")]
@@ -835,15 +840,6 @@ impl WorkerSession {
                                     )
                                     .await;
                                 }
-                                ServiceToWorker::UpdateDeskSettings(payload) => {
-                                    dispatch_typed_signaling(
-                                        &mut desk_session,
-                                        SignalingType::UpdateDeskSettings,
-                                        Some(payload.connection_id),
-                                        &payload.settings,
-                                    )
-                                    .await;
-                                }
                                 // Manager-plane typed requests rebuild a
                                 // SignalingModel with the original
                                 // request_id so DeskSession::handle_message
@@ -1094,6 +1090,7 @@ impl WorkerSession {
                                         for step in restart_steps {
                                             producer.stop_media(&StopMediaPayload {
                                                 connection_id: step.connection_id.clone(),
+                                                connection_epoch: step.active.connection_epoch.clone(),
                                             });
                                             let connection_id = step.connection_id.clone();
                                             producer.start_media_with(step.active, |generation| {
@@ -1149,6 +1146,7 @@ impl WorkerSession {
                                             if let Some(producer) = media_producer.as_ref() {
                                                 producer.stop_media(&StopMediaPayload {
                                                     connection_id: step.connection_id.clone(),
+                                                    connection_epoch: step.active.connection_epoch.clone(),
                                                 });
                                                 let connection_id = step.connection_id.clone();
                                                 producer.start_media_with(
@@ -1245,6 +1243,7 @@ impl WorkerSession {
                                         if let Some(producer) = media_producer.as_ref() {
                                             producer.stop_media(&StopMediaPayload {
                                                 connection_id: step.connection_id.clone(),
+                                                connection_epoch: step.active.connection_epoch.clone(),
                                             });
                                             let connection_id = step.connection_id.clone();
                                             producer.start_media_with(
@@ -1644,6 +1643,7 @@ impl WorkerSession {
                             for step in restart_steps {
                                 producer.stop_media(&StopMediaPayload {
                                     connection_id: step.connection_id.clone(),
+                                    connection_epoch: step.active.connection_epoch.clone(),
                                 });
                                 let connection_id = step.connection_id.clone();
                                 producer.start_media_with(step.active, |generation| {

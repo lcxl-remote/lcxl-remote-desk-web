@@ -33,6 +33,8 @@ export type SendTrackedOptions = {
     toConnectionId?: string;
     requestId?: string;
     replaceKey?: string;
+    /** Logical PeerConnection scope used to purge stale queued callbacks. */
+    scope?: string;
     onSent?: (requestId: string) => void;
 };
 
@@ -50,6 +52,7 @@ export type SendTrackedResult = {
 type QueuedMessage = {
     msg: SignalingMessage;
     replaceKey?: string;
+    scope?: string;
     onSent?: (requestId: string) => void;
 };
 
@@ -303,12 +306,12 @@ export function useDeskSignaling() {
                 return { requestId: id, disposition: 'sent' };
             } catch (e) {
                 console.warn('sendTracked: ws.send failed, queuing message', opts.type, e);
-                enqueue({ msg, replaceKey: opts.replaceKey, onSent: opts.onSent });
+                enqueue({ msg, replaceKey: opts.replaceKey, scope: opts.scope, onSent: opts.onSent });
                 return { requestId: id, disposition: 'queued' };
             }
         }
 
-        enqueue({ msg, replaceKey: opts.replaceKey, onSent: opts.onSent });
+        enqueue({ msg, replaceKey: opts.replaceKey, scope: opts.scope, onSent: opts.onSent });
         if (!socketRef.current || socketRef.current.readyState === WebSocket.CLOSED) {
             connect();
         }
@@ -324,6 +327,12 @@ export function useDeskSignaling() {
     const cancelQueued = useCallback((replaceKey: string) => {
         messageQueue.current = messageQueue.current.filter(
             (q) => q.replaceKey !== replaceKey,
+        );
+    }, []);
+
+    const cancelQueuedScope = useCallback((scope: string) => {
+        messageQueue.current = messageQueue.current.filter(
+            (q) => q.scope !== scope,
         );
     }, []);
 
@@ -350,5 +359,6 @@ export function useDeskSignaling() {
         sendMessage,
         sendTracked,
         cancelQueued,
+        cancelQueuedScope,
     };
 }

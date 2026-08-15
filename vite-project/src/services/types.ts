@@ -143,6 +143,57 @@ export type AudioDevice = {
     id: string;
 };
 
+export const audioEncoderIdEnum = {
+    Opus: "Opus"
+} as const;
+
+export type AudioEncoderIdEnumKey = (typeof audioEncoderIdEnum)[keyof typeof audioEncoderIdEnum];
+
+export type AudioEncoderId = AudioEncoderIdEnumKey;
+
+/**
+ * @description Selected Audio Device Model
+*/
+export type SelectedAudioDevice = {
+    /**
+     * @description Audio Data Flow Enum
+     * @type string
+    */
+    audio_data_flow: AudioDataFlow;
+    /**
+     * @description Audio device id, None for default audio device
+     * @type string,null
+    */
+    audio_device_id?: string | null;
+};
+
+export type AudioPipelineSettings = {
+    /**
+     * @type string
+    */
+    audio_capture: string;
+    /**
+     * @description Selected Audio Device Model
+     * @type object
+    */
+    audio_device: SelectedAudioDevice;
+    /**
+     * @type string
+    */
+    audio_encoder: AudioEncoderId;
+};
+
+export const audioSettingsEffectEnum = {
+    unchanged: "unchanged",
+    started: "started",
+    stopped: "stopped",
+    restarted: "restarted"
+} as const;
+
+export type AudioSettingsEffectEnumKey = (typeof audioSettingsEffectEnum)[keyof typeof audioSettingsEffectEnum];
+
+export type AudioSettingsEffect = AudioSettingsEffectEnumKey;
+
 export const waylandAuthorizationTargetEnum = {
     screen_only: "screen_only",
     screen_and_input: "screen_and_input"
@@ -470,6 +521,15 @@ export type ConnectionModel = {
     version_info: VersionInfo;
 };
 
+export const connectionSettingsEffectEnum = {
+    unchanged: "unchanged",
+    needs_reconnect: "needs_reconnect"
+} as const;
+
+export type ConnectionSettingsEffectEnumKey = (typeof connectionSettingsEffectEnum)[keyof typeof connectionSettingsEffectEnum];
+
+export type ConnectionSettingsEffect = ConnectionSettingsEffectEnumKey;
+
 export type ConnectionVerifyParams = {
     /**
      * @description Deployment bootstrap token used only while the standalone server is not\ninitialized and was started with `LRD_BOOTSTRAP_TOKEN`.
@@ -727,6 +787,9 @@ export const deskErrorCodeEnum = {
     WAYLAND_PORTAL_AUTHORIZATION_CANCELLED: 95,
     WAYLAND_PORTAL_SESSION_CLOSED: 96,
     WAYLAND_PORTAL_BACKEND_FAILED: 97,
+    ADAPTIVE_RESOLUTION_REQUIRES_SINGLE_CLIENT: 98,
+    REMOTE_DESKTOP_CAPABILITIES_NOT_READY: 99,
+    MEDIA_WORKER_RESTART_REQUIRED: 100,
     CONNECTION_UNREACHABLE: 64,
     CONNECTION_NOT_SIGNALING: 65,
     CONNECTION_AUTH_FAILED: 66,
@@ -753,22 +816,6 @@ export type DeskErrorCodeEnumKey = (typeof deskErrorCodeEnum)[keyof typeof deskE
  * @description Business error code carried in `RestResponse.code`, in signaling error frames and on the agent-error wire. It is never an HTTP status: transport-level failures are expressed by the status line, business outcomes by this value.
 */
 export type DeskErrorCode = DeskErrorCodeEnumKey;
-
-/**
- * @description Selected Audio Device Model
-*/
-export type SelectedAudioDevice = {
-    /**
-     * @description Audio Data Flow Enum
-     * @type string
-    */
-    audio_data_flow: AudioDataFlow;
-    /**
-     * @description Audio device id, None for default audio device
-     * @type string,null
-    */
-    audio_device_id?: string | null;
-};
 
 /**
  * @description H264 encoder settings
@@ -907,7 +954,7 @@ export type X264EncoderSettings = {
 */
 export type DeskSettings = {
     /**
-     * @description Whether the daemon\'s REMB-driven adaptive bitrate cap is active\nfor this connection. Defaults to `true`. Session-scoped state:\nit takes effect per connection (initialised from the offer\'s\ndesk settings, live-toggled via `UpdateDeskSettings` for the\noriginating connection only) and is not persisted server-side —\nthe browser keeps the user\'s preference. Distinct from the\nbrowser-side adaptive *quality* loop: the cap only trims\nbitrate spikes, quality stays untouched.
+     * @description Whether the daemon\'s REMB-driven adaptive bitrate cap is active\nfor this connection. Defaults to `true`. Session-scoped state:\nit takes effect per connection (initialised from the offer\'s\nsession settings, live-toggled via `ApplyRemoteSessionSettings` for the\noriginating connection only) and is not persisted server-side —\nthe browser keeps the user\'s preference. Distinct from the\nbrowser-side adaptive *quality* loop: the cap only trims\nbitrate spikes, quality stays untouched.
      * @default true
      * @type boolean | undefined
     */
@@ -1002,13 +1049,6 @@ export type DeskSettings = {
     */
     video_quality?: number;
     /**
-     * @description Video zoom ratio (e.g., 50 for 50% zoom)
-     * @minLength 0
-     * @default 100
-     * @type integer | undefined, int32
-    */
-    video_zoom_ratio?: number;
-    /**
      * @default null
     */
     vp8_encoder?: (null | VpxEncoderSettings);
@@ -1068,6 +1108,11 @@ export type SecuritySettings = {
      * @type boolean,null
     */
     allow_remote_control?: boolean | null;
+    /**
+     * @description Allow capture and transmission of the host\'s system audio
+     * @type boolean,null
+    */
+    allow_system_audio_capture?: boolean | null;
     /**
      * @description Allow remote terminal access
      * @type boolean,null
@@ -2305,6 +2350,112 @@ export type RejectedTurnInterface = {
     interface: TurnInterface;
 };
 
+export const sessionSettingApplyModeEnum = {
+    unsupported: "unsupported",
+    offer_only: "offer_only",
+    apply: "apply",
+    reconnect: "reconnect"
+} as const;
+
+export type SessionSettingApplyModeEnumKey = (typeof sessionSettingApplyModeEnum)[keyof typeof sessionSettingApplyModeEnum];
+
+export type SessionSettingApplyMode = SessionSettingApplyModeEnumKey;
+
+export type SessionSettingsCapabilities = {
+    /**
+     * @type string
+    */
+    adaptive_bitrate: SessionSettingApplyMode;
+    /**
+     * @type string
+    */
+    audio_capture: SessionSettingApplyMode;
+    /**
+     * @type string
+    */
+    audio_device: SessionSettingApplyMode;
+    /**
+     * @type string
+    */
+    audio_encoder: SessionSettingApplyMode;
+    /**
+     * @type string
+    */
+    capture_audio: SessionSettingApplyMode;
+    /**
+     * @type string
+    */
+    enable_dirty_rect: SessionSettingApplyMode;
+    /**
+     * @type string
+    */
+    image_capture: SessionSettingApplyMode;
+    /**
+     * @type string
+    */
+    show_mouse: SessionSettingApplyMode;
+    /**
+     * @type string
+    */
+    video_device_name: SessionSettingApplyMode;
+    /**
+     * @type string
+    */
+    video_encoder: SessionSettingApplyMode;
+    /**
+     * @type string
+    */
+    video_fps: SessionSettingApplyMode;
+    /**
+     * @type string
+    */
+    video_quality: SessionSettingApplyMode;
+};
+
+export type SuggestedSessionSettings = {
+    /**
+     * @type boolean
+    */
+    adaptive_bitrate: boolean;
+    /**
+     * @type string,null
+    */
+    audio_capture?: string | null;
+    audio_device?: (null | SelectedAudioDevice);
+    audio_encoder?: (null | AudioEncoderId);
+    /**
+     * @type boolean
+    */
+    capture_audio: boolean;
+    /**
+     * @type boolean
+    */
+    enable_dirty_rect: boolean;
+    /**
+     * @type string,null
+    */
+    image_capture?: string | null;
+    /**
+     * @type boolean
+    */
+    show_mouse: boolean;
+    /**
+     * @type string,null
+    */
+    video_device_name?: string | null;
+    video_encoder?: (null | VideoEncoderId);
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    video_fps: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    video_quality: number;
+};
+
 export type VideoEncoderCapability = {
     /**
      * @description Concrete video encoder implementation.\n\nThis is intentionally distinct from the RTP codec: X264 and OpenH264\nboth produce H.264, but the worker must preserve which implementation\nthe controller selected.
@@ -2336,10 +2487,10 @@ export type RemoteAccessInitializedData = {
     */
     audio_encoder_list: string[];
     /**
-     * @description Desk settings
-     * @type object
+     * @description Opaque host-owned logical PeerConnection generation.
+     * @type string
     */
-    desk_settings: DeskSettings;
+    connection_epoch: string;
     /**
      * @description Whether the remote end has Tauri UI support (required for whiteboard overlay)
      * @type boolean | undefined
@@ -2359,6 +2510,15 @@ export type RemoteAccessInitializedData = {
      * @type string | undefined
     */
     operation_system?: OperationSystemEnum;
+    /**
+     * @type object
+    */
+    session_settings_capabilities: SessionSettingsCapabilities;
+    /**
+     * @description Host recommendation only. The controller resolves this with capabilities\nand its browser-scoped intent before constructing an executable offer.
+     * @type object
+    */
+    suggested_session_settings: SuggestedSessionSettings;
     /**
      * @description User name for signaling.
      * @type string
@@ -2407,6 +2567,113 @@ export const remoteSessionPurposeEnum = {
 export type RemoteSessionPurposeEnumKey = (typeof remoteSessionPurposeEnum)[keyof typeof remoteSessionPurposeEnum];
 
 export type RemoteSessionPurpose = RemoteSessionPurposeEnumKey;
+
+export type RemoteSessionSettings = {
+    /**
+     * @type boolean
+    */
+    adaptive_bitrate: boolean;
+    audio: (null | AudioPipelineSettings);
+    /**
+     * @type boolean
+    */
+    enable_dirty_rect: boolean;
+    /**
+     * @type string
+    */
+    image_capture: string;
+    /**
+     * @type boolean
+    */
+    show_mouse: boolean;
+    /**
+     * @type string
+    */
+    video_device_name: string;
+    /**
+     * @description Concrete video encoder implementation.\n\nThis is intentionally distinct from the RTP codec: X264 and OpenH264\nboth produce H.264, but the worker must preserve which implementation\nthe controller selected.
+     * @type string
+    */
+    video_encoder: VideoEncoderId;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    video_fps: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    video_quality: number;
+};
+
+export const videoSettingsEffectEnum = {
+    unchanged: "unchanged",
+    applied_live: "applied_live",
+    restarted: "restarted"
+} as const;
+
+export type VideoSettingsEffectEnumKey = (typeof videoSettingsEffectEnum)[keyof typeof videoSettingsEffectEnum];
+
+export type VideoSettingsEffect = VideoSettingsEffectEnumKey;
+
+export type RemoteSessionSettingsEffects = {
+    /**
+     * @type string
+    */
+    audio: AudioSettingsEffect;
+    /**
+     * @type string
+    */
+    connection: ConnectionSettingsEffect;
+    /**
+     * @type string
+    */
+    video: VideoSettingsEffect;
+};
+
+export type RemoteSessionSettingsFieldError = {
+    /**
+     * @description Business error code carried in `RestResponse.code`, in signaling error frames and on the agent-error wire. It is never an HTTP status: transport-level failures are expressed by the status line, business outcomes by this value.
+     * @type integer, int32
+    */
+    code: DeskErrorCode;
+    /**
+     * @type string
+    */
+    field: string;
+};
+
+export type RemoteSessionSettingsRuntimeOverrides = {
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    adaptive_video_quality?: number | null;
+};
+
+export type RemoteSessionSettingsApplied = {
+    /**
+     * @type object
+    */
+    baseline_settings: RemoteSessionSettings;
+    /**
+     * @type string
+    */
+    connection_epoch: string;
+    /**
+     * @type object
+    */
+    effects: RemoteSessionSettingsEffects;
+    /**
+     * @type array
+    */
+    errors: RemoteSessionSettingsFieldError[];
+    /**
+     * @type object
+    */
+    runtime_overrides: RemoteSessionSettingsRuntimeOverrides;
+};
 
 /**
  * @description RequestRemoteModel is used to request remote access.\nweb browser -> signaling server -> desk server
@@ -3191,6 +3458,11 @@ export type RestResponseSecuritySettings = {
          * @type boolean,null
         */
         allow_remote_control?: boolean | null;
+        /**
+         * @description Allow capture and transmission of the host\'s system audio
+         * @type boolean,null
+        */
+        allow_system_audio_capture?: boolean | null;
         /**
          * @description Allow remote terminal access
          * @type boolean,null
@@ -4255,6 +4527,36 @@ export type SupportSessionStatus = {
      * @type integer,null, int64
     */
     expires_at?: number | null;
+};
+
+export const systemAudioCaptureStateEnum = {
+    off: "off",
+    starting: "starting",
+    active: "active",
+    restarting: "restarting",
+    denied: "denied",
+    failed: "failed"
+} as const;
+
+export type SystemAudioCaptureStateEnumKey = (typeof systemAudioCaptureStateEnum)[keyof typeof systemAudioCaptureStateEnum];
+
+export type SystemAudioCaptureState = SystemAudioCaptureStateEnumKey;
+
+export type SystemAudioCaptureStateData = {
+    accepted_audio: (null | AudioPipelineSettings);
+    /**
+     * @type string
+    */
+    connection_epoch: string;
+    error_code?: (null | DeskErrorCode);
+    /**
+     * @type string,null
+    */
+    resolved_audio_device_id?: string | null;
+    /**
+     * @type string
+    */
+    state: SystemAudioCaptureState;
 };
 
 /**

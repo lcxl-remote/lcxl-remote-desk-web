@@ -28,6 +28,8 @@ pub struct SecuritySettings {
     pub allow_remote_control: Option<bool>,
     /// Allow clipboard synchronization
     pub allow_clipboard_sync: Option<bool>,
+    /// Allow capture and transmission of the host's system audio
+    pub allow_system_audio_capture: Option<bool>,
     /// Allow enabling private screen mode
     pub allow_private_screen: Option<bool>,
     /// Allow whiteboard overlay
@@ -58,6 +60,7 @@ impl Default for SecuritySettings {
         Self {
             allow_remote_control: None,
             allow_clipboard_sync: None,
+            allow_system_audio_capture: None,
             allow_private_screen: None,
             allow_whiteboard: None,
             allow_terminal: None,
@@ -81,6 +84,7 @@ impl SecuritySettings {
         Self {
             allow_remote_control: None,
             allow_clipboard_sync: None,
+            allow_system_audio_capture: None,
             allow_private_screen: None,
             allow_whiteboard: None,
             allow_terminal: None,
@@ -168,6 +172,7 @@ macro_rules! security_capabilities {
 security_capabilities! {
     RemoteControl => allow_remote_control, "security.permission.remoteControl";
     ClipboardSync => allow_clipboard_sync, "security.permission.clipboardSync";
+    SystemAudioCapture => allow_system_audio_capture, "security.permission.systemAudioCapture";
     PrivateScreen => allow_private_screen, "security.permission.privateScreen";
     Whiteboard => allow_whiteboard, "security.permission.whiteboard";
     Terminal => allow_terminal, "security.permission.terminal";
@@ -195,6 +200,7 @@ mod tests {
         let SecuritySettings {
             allow_remote_control,
             allow_clipboard_sync,
+            allow_system_audio_capture,
             allow_private_screen,
             allow_whiteboard,
             allow_terminal,
@@ -206,6 +212,7 @@ mod tests {
         for (name, value) in [
             ("allow_remote_control", allow_remote_control),
             ("allow_clipboard_sync", allow_clipboard_sync),
+            ("allow_system_audio_capture", allow_system_audio_capture),
             ("allow_private_screen", allow_private_screen),
             ("allow_whiteboard", allow_whiteboard),
             ("allow_terminal", allow_terminal),
@@ -248,6 +255,7 @@ mod tests {
         let c = SecuritySettings::all_prompt();
         assert_eq!(c.allow_remote_control, None);
         assert_eq!(c.allow_clipboard_sync, None);
+        assert_eq!(c.allow_system_audio_capture, None);
         assert_eq!(c.allow_private_screen, None);
         assert_eq!(c.allow_whiteboard, None);
         assert_eq!(c.allow_terminal, None);

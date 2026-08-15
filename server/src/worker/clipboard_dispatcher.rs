@@ -731,18 +731,20 @@ mod tests {
         StartMediaPayload {
             resolved_wayland_control_mode: None,
             connection_id: connection_id.to_string(),
+            connection_epoch: "test-epoch".to_string(),
+            video_generation: 1,
+            audio_generation: 1,
             video_codec: desk_ipc_protocol::message::MediaCodec::H264,
-            video_encoder: None,
-            audio_codec: desk_ipc_protocol::message::MediaCodec::Opus,
+            video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
             video_device: None,
-            audio_device: None,
             fps: 30,
             bitrate_kbps: 0,
             quality: 0,
             start_video: true,
-            start_audio: true,
-            image_capture: None,
-            enable_dirty_rect: None,
+            audio: None,
+            image_capture: "default".to_string(),
+            enable_dirty_rect: false,
+            show_mouse: false,
         }
     }
 
@@ -875,6 +877,7 @@ mod tests {
         }
         d.stop_connection(&StopMediaPayload {
             connection_id: "c1".into(),
+            connection_epoch: "test-epoch".to_string(),
         })
         .await;
         let g = d.inner.lock().await;

@@ -45,6 +45,7 @@ pub struct CapabilityState {
 pub struct PolicyGenerations {
     pub allow_remote_control: u64,
     pub allow_clipboard_sync: u64,
+    pub allow_system_audio_capture: u64,
     pub allow_private_screen: u64,
     pub allow_whiteboard: u64,
     pub allow_terminal: u64,
@@ -58,6 +59,7 @@ impl PolicyGenerations {
         match capability {
             SecurityPermissionType::RemoteControl => &mut self.allow_remote_control,
             SecurityPermissionType::ClipboardSync => &mut self.allow_clipboard_sync,
+            SecurityPermissionType::SystemAudioCapture => &mut self.allow_system_audio_capture,
             SecurityPermissionType::PrivateScreen => &mut self.allow_private_screen,
             SecurityPermissionType::Whiteboard => &mut self.allow_whiteboard,
             SecurityPermissionType::Terminal => &mut self.allow_terminal,
@@ -72,6 +74,7 @@ impl PolicyGenerations {
         match capability {
             SecurityPermissionType::RemoteControl => self.allow_remote_control,
             SecurityPermissionType::ClipboardSync => self.allow_clipboard_sync,
+            SecurityPermissionType::SystemAudioCapture => self.allow_system_audio_capture,
             SecurityPermissionType::PrivateScreen => self.allow_private_screen,
             SecurityPermissionType::Whiteboard => self.allow_whiteboard,
             SecurityPermissionType::Terminal => self.allow_terminal,

@@ -449,6 +449,17 @@ desk_error_codes! {
     /// The Portal backend failed to create or validate a usable session. Raw
     /// backend details are diagnostic-only; UIs localize this code.
     WAYLAND_PORTAL_BACKEND_FAILED = 97,
+    /// Automatic IDD resolution changes require exactly one active remote
+    /// desktop peer. The preference remains stored, but this request cannot be
+    /// applied while another desktop peer is present.
+    ADAPTIVE_RESOLUTION_REQUIRES_SINGLE_CLIENT = 98,
+    /// The current worker has not published the media capability snapshot needed
+    /// to construct an executable remote-desktop session.
+    REMOTE_DESKTOP_CAPABILITIES_NOT_READY = 99,
+    /// An in-process worker could not stop its media threads within the bounded
+    /// fail-safe window. The host process must be restarted before new media
+    /// sessions can be admitted.
+    MEDIA_WORKER_RESTART_REQUIRED = 100,
 
     /// A connection-verify probe could not reach the target at all (DNS failure,
     /// connection refused, TLS handshake failure). Carried inside the

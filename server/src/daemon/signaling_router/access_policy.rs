@@ -56,6 +56,8 @@ pub(super) fn is_connection_scoped_capability_frame(t: SignalingType) -> bool {
             | ListFiles
             | DeleteFile
             | SetPrivateScreenVisibility
+            | ApplyRemoteSessionSettings
+            | UpdateAdaptiveVideoQuality
     )
 }
 
@@ -83,6 +85,7 @@ pub(super) fn capped_session_permits(t: SignalingType, ceiling: &SecuritySetting
             ceiling.allow_file_browse != Some(false) && ceiling.allow_file_delete != Some(false)
         }
         SetPrivateScreenVisibility => ceiling.allow_private_screen != Some(false),
+        ApplyRemoteSessionSettings | UpdateAdaptiveVideoQuality => true,
         _ => false,
     }
 }
@@ -149,9 +152,13 @@ pub(super) fn door1_permits(gate: &ConnectionGate, t: SignalingType) -> bool {
     match gate {
         ConnectionGate::KnownOwnerFull => true,
         ConnectionGate::KnownCapped(ceiling) => capped_session_permits(t, ceiling),
-        ConnectionGate::ServerInternal => {
-            !matches!(t, SignalingType::ListFiles | SignalingType::DeleteFile)
-        }
+        ConnectionGate::ServerInternal => !matches!(
+            t,
+            SignalingType::ListFiles
+                | SignalingType::DeleteFile
+                | SignalingType::ApplyRemoteSessionSettings
+                | SignalingType::UpdateAdaptiveVideoQuality
+        ),
         ConnectionGate::UnadmittedConnection => !is_connection_scoped_capability_frame(t),
     }
 }
@@ -190,7 +197,7 @@ pub(super) fn risk_str(risk: desk_agent_protocol::RiskLevel) -> &'static str {
 /// Each `SignalingType` is exhaustively dispatched: PC / SDP / ICE /
 /// SignalingState types run inline against `ctx.pc_registry`;
 /// worker-bound types (terminal, manager queries, SetPrivateScreenVisibility,
-/// UpdateDeskSettings) are shipped to the worker via dedicated
+/// ApplyRemoteSessionSettings) are shipped to the worker via dedicated
 /// `ServiceToWorker::*` typed IPC variants; daemon-emitted notifications
 /// and outbound/metadata variants (`Answer`, `RemoteAccessInitialized`,
 /// `HeartbeatAcknowledged`, `Error`,

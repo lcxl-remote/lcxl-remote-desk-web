@@ -12,6 +12,7 @@ import {
     ShieldOff,
     TerminalSquare,
     Upload,
+    Volume2,
 } from 'lucide-react';
 import { emit } from '@tauri-apps/api/event';
 
@@ -37,6 +38,7 @@ export type HostAccessSession = {
     };
     started_at: string;
     desktop_view: boolean;
+    system_audio_capture: boolean;
     remote_control: boolean;
     terminal_count: number;
     file_manager: boolean;
@@ -71,9 +73,12 @@ type ControlResult = {
 const CONTROL_EVENT = 'lcxl-host-access-control';
 const CONTROL_RESULT_EVENT = 'lcxl-host-access-control-result';
 
-export function activeKinds(session: HostAccessSession): string[] {
-    const kinds: string[] = [];
+export type HostActivityKind = 'desktop' | 'audio' | 'control' | 'terminal' | 'files' | 'transfer';
+
+export function activeKinds(session: HostAccessSession): HostActivityKind[] {
+    const kinds: HostActivityKind[] = [];
     if (session.desktop_view) kinds.push('desktop');
+    if (session.system_audio_capture) kinds.push('audio');
     if (session.remote_control) kinds.push('control');
     if (session.terminal_count > 0) kinds.push('terminal');
     if (session.file_manager) kinds.push('files');
@@ -182,9 +187,16 @@ export default function HostAccessStatusPage() {
     };
 
     const counts = useMemo(() => {
-        const result = { desktop: 0, control: 0, terminal: 0, files: 0, transfer: 0 };
+        const result: Record<HostActivityKind, number> = {
+            desktop: 0,
+            audio: 0,
+            control: 0,
+            terminal: 0,
+            files: 0,
+            transfer: 0,
+        };
         for (const session of snapshot?.sessions ?? []) {
-            for (const kind of activeKinds(session)) result[kind as keyof typeof result] += 1;
+            for (const kind of activeKinds(session)) result[kind] += 1;
         }
         return result;
     }, [snapshot]);
@@ -305,6 +317,7 @@ export default function HostAccessStatusPage() {
                         </CollapsibleTrigger>
                         <div className="mt-3 flex flex-wrap gap-1.5">
                             {counts.desktop > 0 && <ActivityBadge icon={Eye} label={t('hostAccess.desktop')} />}
+                            {counts.audio > 0 && <ActivityBadge icon={Volume2} label={t('hostAccess.systemAudio')} />}
                             {counts.control > 0 && <ActivityBadge icon={Keyboard} label={t('hostAccess.control')} />}
                             {counts.terminal > 0 && <ActivityBadge icon={TerminalSquare} label={t('hostAccess.terminal')} />}
                             {counts.files > 0 && <ActivityBadge icon={Files} label={t('hostAccess.files')} />}
@@ -389,6 +402,9 @@ function SessionDetails({
             </div>
             <div className="mt-2 flex flex-wrap gap-1.5">
                 {session.desktop_view && <ActivityBadge icon={Eye} label={t('hostAccess.desktop')} />}
+                {session.system_audio_capture && (
+                    <ActivityBadge icon={Volume2} label={t('hostAccess.systemAudio')} />
+                )}
                 {session.remote_control && <ActivityBadge icon={Keyboard} label={t('hostAccess.control')} />}
                 {session.terminal_count > 0 && (
                     <ActivityBadge icon={TerminalSquare} label={t('hostAccess.terminal')} />

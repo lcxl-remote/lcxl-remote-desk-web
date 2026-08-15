@@ -91,12 +91,10 @@ mod remote_access_initialized_data_tests {
         DEFAULT_ADAPTIVE_DEBOUNCE_MS, DEFAULT_ADAPTIVE_MIN_DELTA_PX,
     };
 
-    /// Pre-adaptive-resolution peers ship `RemoteAccessInitializedData` JSON without
-    /// the three new fields. `#[serde(default)]` must populate them with
-    /// sensible defaults so the daemon stays compatible with anyone still
-    /// running the previous release of the signaling facade.
+    /// Optional display metadata keeps sensible defaults. Terminal session
+    /// settings and the connection epoch remain required below.
     #[test]
-    fn remote_access_initialized_data_legacy_json_defaults_new_fields() {
+    fn remote_access_initialized_data_defaults_optional_display_fields() {
         let raw = r#"{
             "ice_servers": [],
             "user_name": "tester",
@@ -104,7 +102,35 @@ mod remote_access_initialized_data_tests {
             "audio_encoder_list": [],
             "video_device_list": {},
             "video_encoder_list": [],
-            "desk_settings": {},
+            "suggested_session_settings": {
+                "capture_audio": false,
+                "image_capture": null,
+                "video_device_name": null,
+                "show_mouse": true,
+                "video_encoder": null,
+                "video_quality": 22,
+                "video_fps": 60,
+                "enable_dirty_rect": true,
+                "adaptive_bitrate": true,
+                "audio_capture": null,
+                "audio_device": null,
+                "audio_encoder": null
+            },
+            "session_settings_capabilities": {
+                "capture_audio": "unsupported",
+                "image_capture": "apply",
+                "video_device_name": "apply",
+                "show_mouse": "apply",
+                "video_encoder": "apply",
+                "video_quality": "apply",
+                "video_fps": "apply",
+                "enable_dirty_rect": "apply",
+                "adaptive_bitrate": "apply",
+                "audio_capture": "unsupported",
+                "audio_device": "unsupported",
+                "audio_encoder": "unsupported"
+            },
+            "connection_epoch": "epoch-test",
             "is_admin": false
         }"#;
         let data: RemoteAccessInitializedData = serde_json::from_str(raw).expect("decode");
@@ -112,7 +138,7 @@ mod remote_access_initialized_data_tests {
         assert_eq!(data.virtual_display_current_refresh_hz, 0);
         assert!(
             data.virtual_display_device_name.is_none(),
-            "legacy peers without virtual_display_device_name must decode to None",
+            "missing virtual_display_device_name must decode to None",
         );
         assert_eq!(
             data.adaptive_resolution.debounce_ms,
@@ -122,13 +148,13 @@ mod remote_access_initialized_data_tests {
             data.adaptive_resolution.min_delta_px,
             DEFAULT_ADAPTIVE_MIN_DELTA_PX
         );
-        // Legacy peers predate the host-OS field; it must default to Other so
+        // Missing host OS defaults to Other so
         // the browser falls back to a generic (Windows) shortcut menu rather
         // than mislabelling the host.
         assert_eq!(data.operation_system, OperationSystemEnum::Other);
         assert!(
             data.video_encoder_capabilities.is_empty(),
-            "legacy Init payloads must decode missing encoder capabilities as unknown"
+            "an omitted optional encoder capability list remains empty"
         );
     }
 
@@ -143,7 +169,35 @@ mod remote_access_initialized_data_tests {
             "audio_encoder_list": [],
             "video_device_list": {},
             "video_encoder_list": [],
-            "desk_settings": {},
+            "suggested_session_settings": {
+                "capture_audio": false,
+                "image_capture": null,
+                "video_device_name": null,
+                "show_mouse": true,
+                "video_encoder": null,
+                "video_quality": 22,
+                "video_fps": 60,
+                "enable_dirty_rect": true,
+                "adaptive_bitrate": true,
+                "audio_capture": null,
+                "audio_device": null,
+                "audio_encoder": null
+            },
+            "session_settings_capabilities": {
+                "capture_audio": "unsupported",
+                "image_capture": "apply",
+                "video_device_name": "apply",
+                "show_mouse": "apply",
+                "video_encoder": "apply",
+                "video_quality": "apply",
+                "video_fps": "apply",
+                "enable_dirty_rect": "apply",
+                "adaptive_bitrate": "apply",
+                "audio_capture": "unsupported",
+                "audio_device": "unsupported",
+                "audio_encoder": "unsupported"
+            },
+            "connection_epoch": "epoch-test",
             "is_admin": false,
             "operation_system": "Mac"
         }"#;

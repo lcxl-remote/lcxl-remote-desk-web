@@ -165,7 +165,6 @@ describe('useDeskRTC inbound signaling drain', () => {
             opts.onSent?.(opts.requestId);
             return { requestId: opts.requestId, disposition: 'sent' as const };
         });
-        const sendMessage = vi.fn(() => 'msg-id');
         const cancelQueued = vi.fn();
         const { subscribe, emit } = makeSignalingHarness();
 
@@ -173,9 +172,9 @@ describe('useDeskRTC inbound signaling drain', () => {
             useDeskRTC({
                 deskId: 'desk-1',
                 subscribe,
-                sendMessage,
                 sendTracked,
                 cancelQueued,
+                cancelQueuedScope: vi.fn(),
             }),
         );
 
@@ -183,7 +182,7 @@ describe('useDeskRTC inbound signaling drain', () => {
         await act(async () => {
             emit({
                 signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
-                signaling_data: { ice_servers: [] },
+                signaling_data: { ice_servers: [], connection_epoch: 'epoch-1' },
             });
         });
 
@@ -209,7 +208,10 @@ describe('useDeskRTC inbound signaling drain', () => {
             for (let n = 0; n < 5; n += 1) {
                 emit({
                     signaling_type: SIGNALING_TYPE_CODE_ICE_CANDIDATE,
-                    signaling_data: { candidate: `c${n}` },
+                    signaling_data: {
+                        connection_epoch: 'epoch-1',
+                        candidate: { candidate: `c${n}` },
+                    },
                 });
             }
         });
@@ -244,16 +246,16 @@ describe('useDeskRTC inbound signaling drain', () => {
             useDeskRTC({
                 deskId: 'desk-1',
                 subscribe,
-                sendMessage: vi.fn(() => 'msg-id'),
                 sendTracked,
                 cancelQueued: vi.fn(),
+                cancelQueuedScope: vi.fn(),
             }),
         );
 
         await act(async () => {
             emit({
                 signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
-                signaling_data: { ice_servers: [] },
+                signaling_data: { ice_servers: [], connection_epoch: 'epoch-1' },
             });
         });
         await act(async () => {
@@ -276,16 +278,16 @@ describe('useDeskRTC inbound signaling drain', () => {
             useDeskRTC({
                 deskId: 'desk-1',
                 subscribe,
-                sendMessage: vi.fn(() => 'msg-id'),
                 sendTracked,
                 cancelQueued: vi.fn(),
+                cancelQueuedScope: vi.fn(),
             }),
         );
 
         await act(async () => {
             emit({
                 signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
-                signaling_data: { ice_servers: [] },
+                signaling_data: { ice_servers: [], connection_epoch: 'epoch-1' },
             });
         });
         await act(async () => {
@@ -313,16 +315,16 @@ describe('useDeskRTC inbound signaling drain', () => {
             useDeskRTC({
                 deskId: 'desk-1',
                 subscribe,
-                sendMessage: vi.fn(() => 'msg-id'),
                 sendTracked,
                 cancelQueued: vi.fn(),
+                cancelQueuedScope: vi.fn(),
             }),
         );
 
         await act(async () => {
             emit({
                 signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
-                signaling_data: { ice_servers: [] },
+                signaling_data: { ice_servers: [], connection_epoch: 'epoch-1' },
             });
         });
         await act(async () => {
@@ -350,16 +352,16 @@ describe('useDeskRTC inbound signaling drain', () => {
             useDeskRTC({
                 deskId: 'desk-1',
                 subscribe,
-                sendMessage: vi.fn(() => 'msg-id'),
                 sendTracked,
                 cancelQueued: vi.fn(),
+                cancelQueuedScope: vi.fn(),
             }),
         );
 
         await act(async () => {
             emit({
                 signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
-                signaling_data: { ice_servers: [] },
+                signaling_data: { ice_servers: [], connection_epoch: 'epoch-1' },
             });
         });
         await act(async () => {
@@ -384,16 +386,16 @@ describe('useDeskRTC inbound signaling drain', () => {
             useDeskRTC({
                 deskId: 'desk-1',
                 subscribe,
-                sendMessage: vi.fn(() => 'msg-id'),
                 sendTracked: vi.fn(() => ({ requestId: 'id', disposition: 'sent' as const })),
                 cancelQueued: vi.fn(),
+                cancelQueuedScope: vi.fn(),
             }),
         );
 
         await act(async () => {
             emit({
                 signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
-                signaling_data: { ice_servers: [] },
+                signaling_data: { ice_servers: [], connection_epoch: 'epoch-1' },
             });
         });
 
@@ -416,16 +418,16 @@ describe('useDeskRTC inbound signaling drain', () => {
             useDeskRTC({
                 deskId: 'desk-1',
                 subscribe,
-                sendMessage: vi.fn(() => 'msg-id'),
                 sendTracked,
                 cancelQueued: vi.fn(),
+                cancelQueuedScope: vi.fn(),
             }),
         );
 
         await act(async () => {
             emit({
                 signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
-                signaling_data: { ice_servers: [] },
+                signaling_data: { ice_servers: [], connection_epoch: 'epoch-1' },
             });
         });
         await act(async () => {
@@ -447,16 +449,16 @@ describe('useDeskRTC inbound signaling drain', () => {
             useDeskRTC({
                 deskId: 'desk-1',
                 subscribe,
-                sendMessage: vi.fn(() => 'msg-id'),
                 sendTracked,
                 cancelQueued: vi.fn(),
+                cancelQueuedScope: vi.fn(),
             }),
         );
 
         await act(async () => {
             emit({
                 signaling_type: SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
-                signaling_data: { ice_servers: [] },
+                signaling_data: { ice_servers: [], connection_epoch: 'epoch-1' },
             });
         });
         await act(async () => {

@@ -42,7 +42,7 @@ Once connected, video, Opus audio, and data channels (for input, clipboard, and 
 | Channel | Carries |
 |---|---|
 | Video track | Encoded screen frames (AV1 / H.264 / VP8 / VP9) |
-| Audio track | Opus-encoded system audio |
+| Audio track | Host-authorized, live Opus system audio |
 | Data channel (input) | Mouse / keyboard injection |
 | Data channel (clipboard) | Bidirectional text clipboard |
 | Data channel (file) | Uploads, downloads, deletions |

@@ -77,12 +77,26 @@ export function useDeskClipboard({ clipboardChannel, hasControl, isActive }: Use
         });
     }, []);
 
+    const enableClipboard = useCallback(() => {
+        if (window.isSecureContext === false) {
+            showErr('Clipboard sync requires HTTPS secure context.');
+            return false;
+        }
+        setClipboardEnabled(true);
+        return true;
+    }, []);
+
     // Set the flag back to false if control is lost
     useEffect(() => {
         console.log(`[DeskClipboard] Auth state changed: hasControl=${hasControl}, isActive=${isActive}`);
         if (!hasControl || !isActive) {
             console.log(`[DeskClipboard] disabling...`);
             setClipboardEnabled(false);
+            chunksBuffer.current = [];
+            incomingImageState.current = { totalChunks: 0, totalBytes: 0 };
+            setTransferProgress(null);
+            setTransferStatus('idle');
+            setFallbackToast({ show: false });
         }
     }, [hasControl, isActive]);
 
@@ -362,6 +376,7 @@ export function useDeskClipboard({ clipboardChannel, hasControl, isActive }: Use
         transferStatus,
         errorMessage,
         toggleClipboard,
+        enableClipboard,
         fallbackToast,
         execFallbackToastAction,
         closeFallbackToast,

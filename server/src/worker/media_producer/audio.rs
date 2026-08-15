@@ -1,6 +1,6 @@
 use super::*;
 
-/// Inner async loop for audio. Mirrors the legacy `capture_audio_task`:
+/// Inner async loop for a connection-scoped audio runner:
 /// 5 ms ticker drives an inner buffer-drain loop
 /// that pulls 20 ms Opus packets out of the encoder and ships each one
 /// as a `MediaFrame { Audio }` to the daemon. The daemon's
@@ -9,9 +9,7 @@ use super::*;
 /// frames themselves to reach the browser.
 ///
 /// **Audio codec is locked to Opus** for now — the only audio encoder
-/// the capture-engine factory ships. The IPC `audio_codec` field on
-/// `StartMediaPayload` is kept for forward compatibility but the
-/// worker simply asserts and proceeds with Opus.
+/// the capture-engine factory ships.
 ///
 /// Failures during capture init / start / encode propagate up as
 /// `Err(String)` and the spawning thread logs them at warn level — a
@@ -25,20 +23,48 @@ pub(super) async fn audio_pipeline_loop(
     stop_flag: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let connection_id = payload.connection_id.clone();
-    if !matches!(payload.audio_codec, MediaCodec::Opus) {
+    let audio = payload
+        .audio
+        .as_ref()
+        .ok_or_else(|| "audio pipeline started without audio settings".to_string())?;
+    if !matches!(audio.codec, MediaCodec::Opus) {
         warn!(
             "[MediaProducer:{connection_id}] Requested audio codec {:?} is not Opus; \
-             worker only ships Opus today — proceeding with Opus and ignoring the request",
-            payload.audio_codec,
+             worker only ships Opus today",
+            audio.codec,
         );
+        return Err("unsupported audio codec".to_string());
     }
+
+    let mut effective_settings = base_settings;
+    effective_settings.audio_capture = Some(audio.pipeline.audio_capture.clone());
+    effective_settings.audio_device = Some(audio.pipeline.audio_device.clone());
+    effective_settings.audio_encoder = Some(audio.pipeline.audio_encoder.setting_name().into());
 
     info!("[MediaProducer:{connection_id}] Starting audio pipeline (Opus)");
 
-    let mut capture = create_audio_capture(&base_settings).map_err(|e| format!("{e}"))?;
+    let mut capture = create_audio_capture(&effective_settings).map_err(|e| format!("{e}"))?;
     let wave_format = capture.start().map_err(|e| format!("{e}"))?;
     let mut encoder =
-        create_audio_encoder(&base_settings, wave_format).map_err(|e| format!("{e}"))?;
+        create_audio_encoder(&effective_settings, wave_format).map_err(|e| format!("{e}"))?;
+
+    // A Stop can arrive while capture/encoder construction is blocking. Do
+    // not publish `Active` after the slot has already selected `Off` as its
+    // terminal; the thread wrapper will publish the matching Off event.
+    if stop_flag.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
+    let _ = error_tx.send(WorkerToService::AudioPipelineStateChanged(
+        AudioPipelineStateChangedPayload {
+            connection_id: connection_id.clone(),
+            connection_epoch: payload.connection_epoch.clone(),
+            audio_generation: payload.audio_generation,
+            phase: AudioPipelinePhase::Active,
+            resolved_audio_device_id: None,
+            error_code: None,
+        },
+    ));
 
     // 5 ms outer tick + inner drain loop sets the pacing —
     // capture buffers fill at the OS audio cadence (typically 10 ms),
@@ -75,7 +101,7 @@ pub(super) async fn audio_pipeline_loop(
                         "[MediaProducer:{connection_id}] audio capture needs retry — \
                          recreating capture"
                     );
-                    capture = match create_audio_capture(&base_settings) {
+                    capture = match create_audio_capture(&effective_settings) {
                         Ok(c) => c,
                         Err(e) => {
                             warn!(
@@ -120,6 +146,8 @@ pub(super) async fn audio_pipeline_loop(
             }
             let frame = build_media_frame(
                 &connection_id,
+                &payload.connection_epoch,
+                payload.audio_generation,
                 seq,
                 audio_duration_ns,
                 MediaFrameKind::Audio,

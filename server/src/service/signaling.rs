@@ -531,14 +531,11 @@ impl DeskSession {
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
         match signaling_model.signaling_type {
-            SignalingType::UpdateDeskSettings => {
-                // Encoder fps / quality live-apply runs on the
-                // daemon side via `UpdateMediaSettings`; the worker
-                // `DeskSession` no longer owns capture / encode state
-                // and has nothing to do with the rest of the
-                // `DeskSettings` payload. Keeping the typed dispatch
-                // path so future stateful worker-side handling has a
-                // ready hook.
+            SignalingType::ApplyRemoteSessionSettings
+            | SignalingType::UpdateAdaptiveVideoQuality
+            | SignalingType::RemoteSessionSettingsApplied
+            | SignalingType::SystemAudioCaptureStateChanged => {
+                // Per-connection media settings are daemon/coordinator-owned.
                 let _ = signaling_model;
             }
             SignalingType::SetPrivateScreenVisibility => {

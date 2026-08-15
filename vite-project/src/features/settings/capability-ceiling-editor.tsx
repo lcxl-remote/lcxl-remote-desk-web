@@ -26,6 +26,7 @@ import type { SecuritySettings } from '@/services/types';
 const DIMENSIONS: { key: CapabilityDimension; label: string; desc: string }[] = [
     { key: 'allow_remote_control', label: 'security.permission.remoteControl', desc: 'pages.system.security.remoteControlDesc' },
     { key: 'allow_clipboard_sync', label: 'security.permission.clipboardSync', desc: 'pages.system.security.clipboardSyncDesc' },
+    { key: 'allow_system_audio_capture', label: 'security.permission.systemAudioCapture', desc: 'pages.system.security.systemAudioCaptureDesc' },
     { key: 'allow_private_screen', label: 'security.permission.privateScreen', desc: 'pages.system.security.privateScreenDesc' },
     { key: 'allow_whiteboard', label: 'security.permission.whiteboard', desc: 'pages.system.security.whiteboardDesc' },
     { key: 'allow_terminal', label: 'security.permission.terminal', desc: 'pages.system.security.terminalDesc' },
@@ -37,6 +38,7 @@ const DIMENSIONS: { key: CapabilityDimension; label: string; desc: string }[] = 
 type CapabilityDimension =
     | 'allow_remote_control'
     | 'allow_clipboard_sync'
+    | 'allow_system_audio_capture'
     | 'allow_private_screen'
     | 'allow_whiteboard'
     | 'allow_terminal'
@@ -57,6 +59,7 @@ export const CAPABILITY_PRESETS: Record<'viewOnly' | 'assist' | 'full', Security
     viewOnly: {
         allow_remote_control: false,
         allow_clipboard_sync: false,
+        allow_system_audio_capture: false,
         allow_private_screen: false,
         allow_whiteboard: false,
         allow_terminal: false,
@@ -67,6 +70,7 @@ export const CAPABILITY_PRESETS: Record<'viewOnly' | 'assist' | 'full', Security
     assist: {
         allow_remote_control: true,
         allow_clipboard_sync: true,
+        allow_system_audio_capture: true,
         allow_private_screen: null,
         allow_whiteboard: true,
         allow_terminal: false,
@@ -77,6 +81,7 @@ export const CAPABILITY_PRESETS: Record<'viewOnly' | 'assist' | 'full', Security
     full: {
         allow_remote_control: true,
         allow_clipboard_sync: true,
+        allow_system_audio_capture: true,
         allow_private_screen: true,
         allow_whiteboard: true,
         allow_terminal: true,

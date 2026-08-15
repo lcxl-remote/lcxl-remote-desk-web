@@ -23,15 +23,19 @@ import type { DeskConfigFormSettings } from "./desk-config-model"
 type DeskConfigAudioTabProps = {
     form: UseFormReturn<DeskConfigFormSettings>
     initData: RemoteAccessInitializedData | null
+    systemAudioAllowed: boolean
 }
 
 export function DeskConfigAudioTab({
     form,
     initData,
+    systemAudioAllowed,
 }: DeskConfigAudioTabProps) {
     const { t } = useTranslation()
     const enableAudio = form.watch("enable_audio")
     const audioCaptureList = Object.keys(initData?.audio_device_list ?? {})
+    const audioCapabilityAvailable = systemAudioAllowed && audioCaptureList.length > 0
+        && (initData?.audio_encoder_list?.length ?? 0) > 0
     const selectedAudioCapture = form.watch("audio_capture")
     const audioDeviceList = selectedAudioCapture
         ? initData?.audio_device_list?.[selectedAudioCapture] ?? []
@@ -47,6 +51,7 @@ export function DeskConfigAudioTab({
                         <FormControl>
                             <Checkbox
                                 checked={!!field.value}
+                                disabled={!audioCapabilityAvailable}
                                 onCheckedChange={field.onChange}
                             />
                         </FormControl>
@@ -165,7 +170,7 @@ export function DeskConfigAudioTab({
                                         defaultValue={currentValue}
                                         key={`audio-encoder-${currentValue}`}
                                         onValueChange={(value) => {
-                                            field.onChange(value === "auto" ? null : value)
+                                            field.onChange(value === "auto" ? null : "Opus")
                                         }}
                                     >
                                         <FormControl>

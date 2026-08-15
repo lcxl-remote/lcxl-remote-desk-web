@@ -1,4 +1,54 @@
-import type { RequestRemoteModel } from "@/services/types"
+import type {
+    RemoteSessionSettings,
+    RequestRemoteModel,
+    SessionSettingApplyMode,
+} from "@/services/types"
+
+export const SETTINGS_APPLY_TIMEOUT_MS = 50_000
+
+/** Resolve a browser preference against the host's advertised capability. */
+export function resolveAdaptiveBitrateForHost(
+    capability: SessionSettingApplyMode,
+    suggested: boolean,
+    preferred: boolean,
+): boolean {
+    return capability === "unsupported" ? suggested : preferred
+}
+
+export interface SettingsApplyTimerOwner {
+    requestId: string
+    timer: number | null
+}
+
+/**
+ * Arms (or replaces) the deadline owned by one correlated settings request.
+ * The same helper is used first while a command is queued offline and again
+ * after `onSent`, so a queued command cannot block the settings UI forever.
+ */
+export function armSettingsApplyTimeout(
+    pending: SettingsApplyTimerOwner,
+    requestId: string,
+    onTimeout: () => void,
+    timeoutMs = SETTINGS_APPLY_TIMEOUT_MS,
+): boolean {
+    if (pending.requestId !== requestId) return false
+    if (pending.timer !== null) window.clearTimeout(pending.timer)
+    pending.timer = window.setTimeout(onTimeout, timeoutMs)
+    return true
+}
+
+const SYSTEM_AUDIO_STATE_KEYS: Record<string, string> = {
+    off: "pages.desk.systemAudioStateValue.off",
+    starting: "pages.desk.systemAudioStateValue.starting",
+    active: "pages.desk.systemAudioStateValue.active",
+    restarting: "pages.desk.systemAudioStateValue.restarting",
+    denied: "pages.desk.systemAudioStateValue.denied",
+    failed: "pages.desk.systemAudioStateValue.failed",
+}
+
+export function systemAudioStateTranslationKey(state: string): string {
+    return SYSTEM_AUDIO_STATE_KEYS[state] ?? "pages.desk.systemAudioStateValue.unknown"
+}
 
 /**
  * Whether the desk config dialog should be (re)opened automatically.
@@ -30,6 +80,119 @@ export function shouldShowMediaPipelineOverlay(
     return hasPipelineState && !isConfigOpen
 }
 
+/** A successful signaling response still carries response_state with code 0. */
+export function isRemoteSettingsFailure(
+    isProtocolError: boolean,
+    errorCode: number | null | undefined,
+): boolean {
+    return isProtocolError || !!errorCode
+}
+
+export interface ControlReconnectIntent {
+    previousEpoch: string
+}
+
+/**
+ * Remember control intent across a settings-driven PeerConnection rebuild.
+ * The old authorization is deliberately not carried into the new epoch; the
+ * browser must issue a fresh RequireControl after the replacement PC connects.
+ */
+export function armControlReconnect(
+    hadControl: boolean,
+    previousEpoch: string,
+): ControlReconnectIntent | null {
+    return hadControl ? { previousEpoch } : null
+}
+
+/**
+ * Consume a pending control intent only after both the session epoch changed
+ * and the replacement PeerConnection reached Connected. This prevents the
+ * still-connected old PC from receiving the restoration request.
+ */
+export function claimControlReconnect(
+    intent: ControlReconnectIntent | null,
+    currentEpoch: string | undefined,
+    isRTCConnected: boolean,
+): { intent: ControlReconnectIntent | null; shouldRequest: boolean } {
+    if (
+        !intent
+        || !currentEpoch
+        || currentEpoch === intent.previousEpoch
+        || !isRTCConnected
+    ) {
+        return { intent, shouldRequest: false }
+    }
+    return { intent: null, shouldRequest: true }
+}
+
+/**
+ * These are the video fields for which the host replaces the capture/encoder
+ * pipeline (or renegotiates the RTP codec). Other video knobs are applied to
+ * the current generation and should not cover a healthy picture with a
+ * loading surface.
+ */
+export function videoSettingsMayInterrupt(
+    previous: RemoteSessionSettings | null,
+    requested: RemoteSessionSettings,
+): boolean {
+    if (!previous) return false
+    return previous.image_capture !== requested.image_capture
+        || previous.video_device_name !== requested.video_device_name
+        || previous.video_encoder !== requested.video_encoder
+}
+
+/**
+ * Wait for evidence that the video element presented another frame. WebRTC
+ * implementations do not consistently emit `timeupdate` when a sender swaps
+ * encoders on the same track, so combine the dedicated frame callback with a
+ * playback-quality counter. There is deliberately no time-based success
+ * fallback: hiding the loading surface without a presented frame would mask a
+ * genuinely frozen WebRTC stream as a successful encoder switch.
+ */
+export function waitForVideoPresentation(
+    video: HTMLVideoElement,
+    onPresented: () => void,
+): () => void {
+    let settled = false
+    let frameCallbackId: number | null = null
+    let pollId: number | null = null
+    const initialFrameCount = typeof video.getVideoPlaybackQuality === "function"
+        ? video.getVideoPlaybackQuality().totalVideoFrames
+        : null
+
+    const cleanup = () => {
+        if (frameCallbackId !== null && typeof video.cancelVideoFrameCallback === "function") {
+            video.cancelVideoFrameCallback(frameCallbackId)
+        }
+        if (pollId !== null) window.clearInterval(pollId)
+        video.removeEventListener("timeupdate", finish)
+        frameCallbackId = null
+        pollId = null
+    }
+    const finish = () => {
+        if (settled) return
+        settled = true
+        cleanup()
+        onPresented()
+    }
+
+    if (typeof video.requestVideoFrameCallback === "function") {
+        frameCallbackId = video.requestVideoFrameCallback(finish)
+    }
+    if (initialFrameCount !== null) {
+        pollId = window.setInterval(() => {
+            if (video.getVideoPlaybackQuality().totalVideoFrames > initialFrameCount) finish()
+        }, 100)
+    }
+    video.addEventListener("timeupdate", finish, { once: true })
+
+    return () => {
+        if (settled) return
+        settled = true
+        cleanup()
+    }
+}
+
 type DesktopRequestRemotePayload = Pick<
     RequestRemoteModel,
     "purpose" | "grant_session_id" | "requested_wayland_control_mode"
@@ -47,26 +210,5 @@ export function buildDesktopRequestRemotePayload(
         purpose: "remote_desktop",
         requested_wayland_control_mode: requestedWaylandControlMode,
         ...(grantSessionId ? { grant_session_id: grantSessionId } : {}),
-    }
-}
-
-const WAYLAND_MODE_STORAGE_PREFIX = "lcxl-desk-wayland-control-mode:"
-const WAYLAND_MODES = new Set(["auto", "none", "uinput", "portal"])
-
-export function loadRequestedWaylandControlMode(connectionId: string): string {
-    try {
-        const value = localStorage.getItem(`${WAYLAND_MODE_STORAGE_PREFIX}${connectionId}`)
-        return value && WAYLAND_MODES.has(value) ? value : "auto"
-    } catch {
-        return "auto"
-    }
-}
-
-export function saveRequestedWaylandControlMode(connectionId: string, mode: string): void {
-    if (!WAYLAND_MODES.has(mode)) return
-    try {
-        localStorage.setItem(`${WAYLAND_MODE_STORAGE_PREFIX}${connectionId}`, mode)
-    } catch {
-        // The current connection remains valid; only the next-session preference is lost.
     }
 }

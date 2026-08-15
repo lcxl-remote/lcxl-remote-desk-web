@@ -18,7 +18,7 @@ use desk_ipc_protocol::message::{ServiceToWorker, SetLocalePayload};
 use desk_signal_facade::model::policy_snapshot::{CapabilityState, PolicySnapshot};
 use desk_signal_facade::model::security_settings::{SecurityPermissionType, SecuritySettings};
 use desk_utils::error::DeskErrorCode;
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{Mutex as TokioMutex, watch};
 
 use crate::daemon::worker_manager::WorkerManager;
 use crate::error::DeskError;
@@ -87,6 +87,7 @@ pub struct SettingsCoordinator {
     /// A synchronous lock, so a permission gate can read the policy without
     /// awaiting anything — gates run on the hot path of every remote command.
     policy: StdRwLock<PolicySnapshot>,
+    policy_events: watch::Sender<PolicySnapshot>,
     /// Where a committed policy is published. Bound once the worker manager
     /// exists; before that (and in a host that never runs one) a commit is
     /// durable and live but has nobody to notify.
@@ -106,9 +107,12 @@ impl std::fmt::Debug for SettingsCoordinator {
 
 impl SettingsCoordinator {
     pub fn new(settings: std::sync::Arc<SharedSettings>, initial: SecuritySettings) -> Self {
+        let initial_policy = PolicySnapshot::new(initial);
+        let (policy_events, _) = watch::channel(initial_policy.clone());
         Self {
             settings,
-            policy: StdRwLock::new(PolicySnapshot::new(initial)),
+            policy: StdRwLock::new(initial_policy),
+            policy_events,
             worker_manager: OnceLock::new(),
             commit_lock: TokioMutex::new(()),
         }
@@ -134,6 +138,10 @@ impl SettingsCoordinator {
 
     pub fn snapshot(&self) -> PolicySnapshot {
         self.policy.read().expect("settings coordinator").clone()
+    }
+
+    pub fn subscribe_policy(&self) -> watch::Receiver<PolicySnapshot> {
+        self.policy_events.subscribe()
     }
 
     pub fn seq(&self) -> u64 {
@@ -320,6 +328,7 @@ impl SettingsCoordinator {
         };
 
         if let Some(snapshot) = published {
+            self.policy_events.send_replace(snapshot.clone());
             self.publish(snapshot).await;
         }
         if let Some(locale) = outcome.locale_changed_to.as_deref() {

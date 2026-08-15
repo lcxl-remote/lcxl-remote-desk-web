@@ -173,8 +173,21 @@ pub enum SignalingType {
     #[wincode(tag = 223)]
     MediaPipelineRetryCompleted = 223,
 
+    /// Controller → host request to apply settings to one admitted remote
+    /// desktop connection.
     #[wincode(tag = 301)]
-    UpdateDeskSettings = 301,
+    ApplyRemoteSessionSettings = 301,
+    /// Terminal response to [`Self::ApplyRemoteSessionSettings`].
+    #[wincode(tag = 302)]
+    RemoteSessionSettingsApplied = 302,
+    /// Controller → host narrow runtime override. This never mutates the
+    /// accepted user baseline.
+    #[wincode(tag = 303)]
+    UpdateAdaptiveVideoQuality = 303,
+    /// Host → controller notification of the actual system-audio capture
+    /// state for one connection.
+    #[wincode(tag = 304)]
+    SystemAudioCaptureStateChanged = 304,
 
     #[wincode(tag = 10003)]
     GetSystemInfo = 10003,

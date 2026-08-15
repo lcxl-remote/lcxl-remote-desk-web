@@ -549,10 +549,12 @@ export function useFileTransfer(deskId: string | undefined) {
 
                         pc.onicecandidate = (event) => {
                             if (event.candidate === null && pc.localDescription) {
-                                // Send OFFER with minimal desk settings
+                                // DataChannel-only Offer carries an explicit null
+                                // session-settings field by protocol.
                                 const offerModel = {
                                     offer: pc.localDescription,
-                                    desk_settings: signaling_data.desk_settings,
+                                    connection_epoch: signaling_data.connection_epoch,
+                                    session_settings: null,
                                 };
                                 const msg = {
                                     request_id: uuidv4(),
@@ -581,8 +583,12 @@ export function useFileTransfer(deskId: string | undefined) {
                         }
                     } else if (signaling_type === SIGNALING_TYPE_CODE_ICE_CANDIDATE) {
                         const pc = pcRef.current;
-                        if (pc) {
-                            await pc.addIceCandidate(new RTCIceCandidate(signaling_data));
+                        if (
+                            pc
+                            && signaling_data.connection_epoch
+                                === initDataRef.current?.connection_epoch
+                        ) {
+                            await pc.addIceCandidate(new RTCIceCandidate(signaling_data.candidate));
                         }
                     }
                 } catch (e) {
@@ -695,7 +701,10 @@ export function useFileTransfer(deskId: string | undefined) {
                 const msg = {
                     request_id: uuidv4(),
                     signaling_type: SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION,
-                    signaling_data: null,
+                    signaling_data: {
+                        connection_epoch: initDataRef.current?.connection_epoch,
+                        finalize_logical_connection: true,
+                    },
                     to_connection_id: deskId,
                 };
                 wsRef.current.send(JSON.stringify(msg));

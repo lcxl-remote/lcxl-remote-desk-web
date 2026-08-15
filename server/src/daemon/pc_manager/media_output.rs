@@ -40,14 +40,39 @@ pub async fn write_video_frame(registry: &PcRegistry, frame: MediaFrame) {
     // pause flag; clone them out before awaiting on `write_sample` so
     // the daemon's offer / ice_candidate handlers (which take the write lock)
     // are not blocked while the codec write completes.
-    let (track_opt, paused) = {
+    let (track_opt, paused, fence) = {
         let g = ctx.read().await;
         let t = match frame.kind {
             MediaFrameKind::VideoI | MediaFrameKind::VideoP => g.video_track.clone(),
             MediaFrameKind::Audio => g.audio_track.clone(),
         };
-        (t, g.media_paused.clone())
+        (t, g.media_paused.clone(), Arc::clone(&g.media_output_fence))
     };
+
+    // Keep the read guard through `write_sample`: revocation takes the write
+    // side, so once it returns no older audio write can still be in flight.
+    let fence_guard = fence.read().await;
+    let generation_matches = match frame.kind {
+        MediaFrameKind::VideoI | MediaFrameKind::VideoP => {
+            fence_guard.video_epoch == frame.connection_epoch
+                && fence_guard.video_generation == frame.generation
+        }
+        MediaFrameKind::Audio => {
+            fence_guard.audio_open
+                && fence_guard.audio_epoch == frame.connection_epoch
+                && fence_guard.audio_generation == frame.generation
+        }
+    };
+    if !generation_matches {
+        log::trace!(
+            "[pc_manager] dropping stale/closed {:?} frame for {} epoch={} generation={}",
+            frame.kind,
+            frame.connection_id,
+            frame.connection_epoch,
+            frame.generation
+        );
+        return;
+    }
 
     // While a worker swap is in progress every frame except the
     // first IDR is dropped. Writing P frames or audio against the
@@ -98,7 +123,14 @@ pub async fn write_video_frame(registry: &PcRegistry, frame: MediaFrame) {
         duration: Duration::from_nanos(frame.duration_ns),
         ..Default::default()
     };
-    if let Err(e) = track.write_sample(&sample).await {
+    // Both media kinds share the output fence. An unbounded video write would
+    // therefore also prevent a security-driven audio revocation from taking
+    // the write side of that fence. Bound every WebRTC write uniformly.
+    let write_result = tokio::time::timeout(Duration::from_secs(1), track.write_sample(&sample))
+        .await
+        .map_err(|_| format!("{:?} write timed out", frame.kind))
+        .and_then(|result| result.map_err(|e| e.to_string()));
+    if let Err(e) = write_result {
         log::warn!(
             "[pc_manager] write_sample failed for {} ({:?}): {e}",
             frame.connection_id,

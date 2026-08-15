@@ -1,5 +1,33 @@
 use super::*;
 
+const TEST_CONNECTION_EPOCH: &str = "test-connection-epoch";
+
+/// Keep virtual-display test cases focused on their mode inputs while
+/// serializing the terminal wire shape (which always carries an epoch).
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ChangeDisplaySettingsPayload {
+    width: u32,
+    height: u32,
+    refresh_hz: u32,
+    auto: bool,
+}
+
+impl serde::Serialize for ChangeDisplaySettingsPayload {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        desk_signal_facade::model::virtual_display::ChangeDisplaySettingsPayload {
+            connection_epoch: TEST_CONNECTION_EPOCH.to_string(),
+            width: self.width,
+            height: self.height,
+            refresh_hz: self.refresh_hz,
+            auto: self.auto,
+        }
+        .serialize(serializer)
+    }
+}
+
 async fn make_ctx() -> RouterContext {
     let (outbound_tx, _) = broadcast::channel::<String>(16);
     let shared =
@@ -66,6 +94,25 @@ async fn make_ctx() -> RouterContext {
         edge_exec_pending: Default::default(),
         support_link_state: Arc::new(crate::daemon::support_link_state::SupportLinkState::new()),
     }
+}
+
+async fn seed_test_desktop_pc(ctx: &RouterContext, connection_id: &str) {
+    let request = desk_signal_facade::model::signal::RequestRemoteModel {
+        requested_wayland_control_mode: Some("auto".to_string()),
+        purpose: RemoteSessionPurpose::RemoteDesktop,
+        ice_servers: vec![],
+        grant_session_id: None,
+    };
+    let pc = ctx
+        .pc_registry
+        .create_for_request_remote(
+            connection_id,
+            &request,
+            &crate::model::settings::Settings::default(),
+        )
+        .await
+        .expect("seed test desktop PC");
+    pc.write().await.connection_epoch = TEST_CONNECTION_EPOCH.to_string();
 }
 
 mod access_policy;

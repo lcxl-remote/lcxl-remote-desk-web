@@ -227,7 +227,7 @@ npm run build
 
 - `video_fps`: 视频帧率 (默认 60)。降低此值可减少 CPU 和带宽占用。
 - `video_quality`: 视频编码质量 (0-63，越低越好，默认 22)。
-- `video_encoder` / `audio_encoder`: 可选项，省略时自动选择。视频可选 `X264` / `VP8` / `VP9` / `H264` / `AV1`，音频为 `OPUS`。
+- `video_encoder` / `audio_encoder`: 可选项，省略时自动选择。视频可选 `X264` / `VP8` / `VP9` / `H264` / `AV1`，音频为 `Opus`。
 - `video_device_name`: 指定要捕获的显示器的 GDI 设备名（`\\.\DISPLAYn`）；为空串时由浏览器在首次连接时弹框选择。
 - `show_mouse`: 是否在远程画面中捕捉并显示移动的鼠标指针。
 - `enable_dirty_rect`: 是否启用脏矩形增量编码。

@@ -59,7 +59,10 @@ import {
 } from "@/components/ui/tooltip"
 import type { RestrictedSession } from "./restricted-session"
 import type { useDeskInput } from "./use-desk-input"
-import type { useDeskMicrophone } from "./use-desk-microphone"
+import {
+    microphoneErrorTranslationKeys,
+    type useDeskMicrophone,
+} from "./use-desk-microphone"
 import type { useDeskWhiteboard } from "./use-desk-whiteboard"
 import { getKeyboardShortcuts } from "./keyboard-shortcuts"
 import type { DesktopControllerPlatform } from "./keyboard-mapping"
@@ -442,7 +445,7 @@ export function DeskControlBar({
                         <TooltipContent>
                             <p>
                                 {microphone.micError
-                                    ? microphone.micError
+                                    ? t(microphoneErrorTranslationKeys[microphone.micError])
                                     : microphone.isMicActive
                                         ? t("pages.desk.stopMic")
                                         : t("pages.desk.startMic")}

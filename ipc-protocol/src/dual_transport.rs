@@ -495,8 +495,13 @@ pub mod framed {
                 let bytes = match wincode::config::serialize(&msg, IPC_CONFIG) {
                     Ok(v) => v,
                     Err(e) => {
-                        log::error!("event writer encode failed: {e}");
-                        continue;
+                        // The event lane is never-drop: continuing would create
+                        // a selective hole while later lifecycle events still
+                        // reach the peer. Closing the sender makes the transport
+                        // failure visible and lets incarnation recovery rebuild
+                        // state from an accepted snapshot.
+                        log::error!("event writer encode failed: {e}; closing transport");
+                        break;
                     }
                 };
                 if let Err(e) = sink.send(Bytes::from(bytes)).await {
@@ -592,6 +597,8 @@ mod tests {
     fn make_video_p(seq: u64, payload_bytes: usize) -> MediaFrame {
         MediaFrame {
             connection_id: "c1".to_string(),
+            connection_epoch: "epoch-1".to_string(),
+            generation: 1,
             seq,
             ts_ns: 0,
             duration_ns: 16_666_666,
@@ -863,6 +870,8 @@ mod tests {
         let payload = vec![0xEFu8; 2 * 1024 * 1024]; // 2 MB IDR
         let frame = MediaFrame {
             connection_id: "conn-idr".to_string(),
+            connection_epoch: "epoch-idr".to_string(),
+            generation: 7,
             seq: 1,
             ts_ns: 1_700_000_000_000_000_000,
             duration_ns: 16_666_666,

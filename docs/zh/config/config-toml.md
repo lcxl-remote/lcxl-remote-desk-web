@@ -105,7 +105,7 @@ external = "[2001:db8::1]:3478"
 
 - `video_fps`——视频帧率（默认 `60`）。降低可减少 CPU 与带宽占用。
 - `video_quality`——视频编码质量（`0`–`63`，越低越好，默认 `22`）。
-- `video_encoder` / `audio_encoder`——可选；省略时自动选择。视频可为 `X264` / `VP8` / `VP9` / `H264` / `AV1`；音频为 `OPUS`。
+- `video_encoder` / `audio_encoder`——可选；省略时自动选择。视频可为 `X264` / `VP8` / `VP9` / `H264` / `AV1`；音频为 `Opus`。
 - `video_device_name`——要采集的显示器 GDI 设备名（`\\.\DISPLAYn`）；留空表示“首次连接时让浏览器选择”。
 - `show_mouse`——是否采集并显示鼠标光标。
 - `enable_dirty_rect`——是否启用脏矩形增量编码。
@@ -124,6 +124,7 @@ external = "[2001:db8::1]:3478"
 
 - `allow_remote_control`——鼠标 / 键盘输入。
 - `allow_clipboard_sync`——剪贴板同步。
+- `allow_system_audio_capture`——采集并传输被控端的系统音频。
 - `allow_private_screen`——防窥（隐私）屏模式。
 - `allow_whiteboard`——白板叠加。
 - `allow_terminal`——远程终端访问。

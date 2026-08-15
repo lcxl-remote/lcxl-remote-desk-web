@@ -143,7 +143,7 @@ are not part of the API; only `/api/turn/session/statistics` remains.
 
 - `video_fps` — video frame rate (default `60`). Lowering reduces CPU and bandwidth usage.
 - `video_quality` — video encoding quality (`0`–`63`, lower is better, default `22`).
-- `video_encoder` / `audio_encoder` — optional; auto-selected when omitted. Video may be `X264` / `VP8` / `VP9` / `H264` / `AV1`; audio is `OPUS`.
+- `video_encoder` / `audio_encoder` — optional; auto-selected when omitted. Video may be `X264` / `VP8` / `VP9` / `H264` / `AV1`; audio is `Opus`.
 - `video_device_name` — GDI device name of the monitor to capture (`\\.\DISPLAYn`); empty means "ask the browser to pick on first connection".
 - `show_mouse` — whether to capture and display the mouse cursor.
 - `enable_dirty_rect` — whether to enable dirty-rectangle incremental encoding.
@@ -168,6 +168,7 @@ with that code's capability ceiling and live approval.
 
 - `allow_remote_control` — mouse / keyboard input.
 - `allow_clipboard_sync` — clipboard synchronization.
+- `allow_system_audio_capture` — capture and transmit the host's system audio.
 - `allow_private_screen` — private (privacy) screen mode.
 - `allow_whiteboard` — whiteboard overlay.
 - `allow_terminal` — remote terminal access.

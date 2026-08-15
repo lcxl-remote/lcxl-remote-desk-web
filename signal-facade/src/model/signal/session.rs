@@ -18,6 +18,10 @@ use crate::model::{
     image_capture::DisplayInfo,
     media_capability::VideoEncoderCapability,
     os::OperationSystemEnum,
+    remote_session::{
+        RemoteSessionSettings, SessionSettingsCapabilities, SuggestedSessionSettings,
+        deserialize_required_nullable,
+    },
     security_settings::SecuritySettings,
     virtual_display::{DEFAULT_ADAPTIVE_DEBOUNCE_MS, DEFAULT_ADAPTIVE_MIN_DELTA_PX},
 };
@@ -158,8 +162,12 @@ pub struct RemoteAccessInitializedData {
     /// Concrete encoder input constraints. Empty means a legacy host.
     #[serde(default)]
     pub video_encoder_capabilities: Vec<VideoEncoderCapability>,
-    /// Current desk settings
-    pub desk_settings: DeskSettings,
+    /// Host recommendation only. The controller resolves this with capabilities
+    /// and its browser-scoped intent before constructing an executable offer.
+    pub suggested_session_settings: SuggestedSessionSettings,
+    pub session_settings_capabilities: SessionSettingsCapabilities,
+    /// Opaque host-owned logical PeerConnection generation.
+    pub connection_epoch: String,
     /// Whether the remote end has Tauri UI support (required for whiteboard overlay)
     #[serde(default)]
     pub has_tauri: bool,
@@ -287,8 +295,12 @@ pub struct SignalingState {
 pub struct OfferModel {
     /// offer session description
     pub offer: RTCSessionDescription,
-    /// desk settings
-    pub desk_settings: DeskSettings,
+    /// Host-issued logical connection generation.
+    pub connection_epoch: String,
+    /// Remote desktop sends a complete object; DataChannel-only sends an
+    /// explicitly present JSON null.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub session_settings: Option<RemoteSessionSettings>,
 }
 
 /// Remote Desk Type Enum

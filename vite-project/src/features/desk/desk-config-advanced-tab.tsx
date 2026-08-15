@@ -48,6 +48,7 @@ export function DeskConfigAdvancedTab({
 }: DeskConfigAdvancedTabProps) {
     const { t } = useTranslation()
     const captureMode = form.watch("image_capture")
+    const capabilities = initData?.session_settings_capabilities
     const deviceName = form.watch("video_device_name")
     const display = captureMode
         ? initData?.video_device_list?.[captureMode]?.find(
@@ -62,6 +63,9 @@ export function DeskConfigAdvancedTab({
                 height: display.desktop_coordinates.bottom - display.desktop_coordinates.top,
             }
             : undefined
+    )
+    const videoEncoderOptions = canonicalVideoEncoderOptions(
+        initData?.video_encoder_list ?? [],
     )
 
     const encoderCompatible = (settingName: string) => {
@@ -83,6 +87,7 @@ export function DeskConfigAdvancedTab({
                         <FormItem>
                             <FormLabel>{t("pages.desk.videoEncoder")}</FormLabel>
                             <Select
+                                disabled={capabilities?.video_encoder === "unsupported"}
                                 defaultValue={currentValue}
                                 key={`video-encoder-${currentValue}`}
                                 onValueChange={(value) => {
@@ -98,14 +103,14 @@ export function DeskConfigAdvancedTab({
                                     <SelectItem value="auto">
                                         {t("pages.desk.autoBackendControl")}
                                     </SelectItem>
-                                    {initData?.video_encoder_list?.map((encoder) => (
+                                    {videoEncoderOptions.map(({ id, settingName }) => (
                                         <SelectItem
-                                            disabled={!encoderCompatible(encoder)}
-                                            key={encoder}
-                                            value={encoder}
+                                            disabled={!encoderCompatible(settingName)}
+                                            key={id}
+                                            value={id}
                                         >
-                                            {encoder}
-                                            {!encoderCompatible(encoder)
+                                            {id}
+                                            {!encoderCompatible(settingName)
                                                 ? ` — ${t("pages.desk.mediaPipeline.unsupportedAtResolution")}`
                                                 : ""}
                                         </SelectItem>
@@ -165,6 +170,7 @@ export function DeskConfigAdvancedTab({
                         <FormControl>
                             <Slider
                                 className="py-2"
+                                disabled={capabilities?.video_quality === "unsupported"}
                                 max={63}
                                 min={0}
                                 onValueChange={(values) => field.onChange(values[0])}
@@ -180,6 +186,7 @@ export function DeskConfigAdvancedTab({
             <div className="flex flex-row items-start space-x-3 rounded-md border p-2">
                 <Checkbox
                     checked={adaptiveQualityEnabled}
+                    disabled={capabilities?.video_quality === "unsupported"}
                     id="adaptive-quality-toggle"
                     onCheckedChange={(checked) => {
                         onAdaptiveQualityChange(checked === true)
@@ -198,6 +205,7 @@ export function DeskConfigAdvancedTab({
             <div className="flex flex-row items-start space-x-3 rounded-md border p-2">
                 <Checkbox
                     checked={adaptiveBitrateEnabled}
+                    disabled={capabilities?.adaptive_bitrate === "unsupported"}
                     id="adaptive-bitrate-toggle"
                     onCheckedChange={(checked) => {
                         onAdaptiveBitrateChange(checked === true)
@@ -222,6 +230,7 @@ export function DeskConfigAdvancedTab({
                         <FormControl>
                             <Input
                                 {...field}
+                                disabled={capabilities?.video_fps === "unsupported"}
                                 min={1}
                                 onChange={(event) => {
                                     const value = event.target.value
@@ -250,6 +259,7 @@ export function DeskConfigAdvancedTab({
                         <FormControl>
                             <Checkbox
                                 checked={field.value ?? true}
+                                disabled={capabilities?.enable_dirty_rect === "unsupported"}
                                 onCheckedChange={field.onChange}
                             />
                         </FormControl>
@@ -282,6 +292,20 @@ export function encoderIdForSetting(settingName: string): VideoEncoderId | undef
         case "AV1": return "AV1"
         default: return undefined
     }
+}
+
+export function canonicalVideoEncoderOptions(
+    settingNames: ReadonlyArray<string>,
+): Array<{ id: VideoEncoderId; settingName: string }> {
+    const seen = new Set<VideoEncoderId>()
+    const options: Array<{ id: VideoEncoderId; settingName: string }> = []
+    for (const settingName of settingNames) {
+        const id = encoderIdForSetting(settingName)
+        if (!id || seen.has(id)) continue
+        seen.add(id)
+        options.push({ id, settingName })
+    }
+    return options
 }
 
 export function limitsAcceptResolution(limits: EncoderInputLimits, source: Resolution): boolean {

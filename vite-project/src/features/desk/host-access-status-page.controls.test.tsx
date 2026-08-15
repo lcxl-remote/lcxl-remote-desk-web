@@ -20,6 +20,7 @@ const snapshot: HostAccessSnapshot = {
         actor: { display_name: 'Alice', access_source: 'authenticated_account' },
         started_at: '2026-07-22T00:00:00Z',
         desktop_view: true,
+        system_audio_capture: true,
         remote_control: true,
         terminal_count: 0,
         file_manager: false,
@@ -47,6 +48,12 @@ describe('host access status controls', () => {
     });
 
     afterEach(() => vi.restoreAllMocks());
+
+    it('shows active system audio capture in the collapsed summary', () => {
+        render(<HostAccessStatusPage />);
+
+        expect(screen.getByText('hostAccess.systemAudio')).toBeInTheDocument();
+    });
 
     it('waits for the daemon result instead of optimistically changing lock state', async () => {
         render(<HostAccessStatusPage />);

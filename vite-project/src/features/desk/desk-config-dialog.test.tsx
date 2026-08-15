@@ -8,11 +8,17 @@ import {
     normalizeCaptureTarget,
     orderCaptureModes,
     pickDefaultDeviceName,
+    preferSavedDeskValue,
+    resolveAudioEncoder,
+    resolveExecutableDeskConfig,
+    resolveVideoEncoder,
     shouldShowAdminPrivilegeWarning,
     shouldShowNoDisplayWarning,
-    toDeskSettings,
+    toDeskDevicePreferences,
+    toRemoteSessionSettings,
 } from "./desk-config-model"
-import type { DisplayInfo } from "@/services/types"
+import type { DisplayInfo, RemoteAccessInitializedData } from "@/services/types"
+import { DEFAULT_DESK_DEVICE_PREFERENCES } from "./desk-preferences"
 
 function makeDisplayInfo(
     overrides: Partial<DisplayInfo> & {
@@ -172,6 +178,89 @@ describe("shouldShowAdminPrivilegeWarning", () => {
 })
 
 describe("desk config normalization", () => {
+    it("uses host suggestions until this browser has saved a preference", () => {
+        expect(preferSavedDeskValue(null, 60, 30)).toBe(30)
+        expect(preferSavedDeskValue(
+            DEFAULT_DESK_DEVICE_PREFERENCES,
+            60,
+            30,
+        )).toBe(60)
+    })
+
+    it("defaults system audio capture to enabled", () => {
+        expect(DESK_CONFIG_DEFAULTS.enable_audio).toBe(true)
+    })
+
+    it("resolves nullable automatic encoders from host capabilities", () => {
+        expect(resolveVideoEncoder(null, null, ["VP8", "X264"])).toBe("VP8")
+        expect(resolveVideoEncoder("H264", null, ["OpenH264"])).toBe("OpenH264")
+        expect(resolveAudioEncoder(null, null, ["Opus"])).toBe("Opus")
+    })
+
+    it("pins unsupported Android host fields to its suggestions", () => {
+        const initData = {
+            audio_device_list: {},
+            audio_encoder_list: [],
+            video_device_list: {
+                default: [makeDisplayInfo({
+                    device_name: "android-screen",
+                    desktop_coordinates: { left: 0, top: 0, right: 1080, bottom: 2400 },
+                })],
+            },
+            video_encoder_list: ["OpenH264", "VP8"],
+            suggested_session_settings: {
+                capture_audio: false,
+                image_capture: "default",
+                video_device_name: "android-screen",
+                show_mouse: false,
+                video_encoder: null,
+                video_quality: 22,
+                video_fps: 30,
+                enable_dirty_rect: false,
+                adaptive_bitrate: false,
+                audio_capture: null,
+                audio_device: null,
+                audio_encoder: null,
+            },
+            session_settings_capabilities: {
+                capture_audio: "unsupported",
+                image_capture: "unsupported",
+                video_device_name: "unsupported",
+                show_mouse: "unsupported",
+                video_encoder: "reconnect",
+                video_quality: "unsupported",
+                video_fps: "unsupported",
+                enable_dirty_rect: "unsupported",
+                adaptive_bitrate: "unsupported",
+                audio_capture: "unsupported",
+                audio_device: "unsupported",
+                audio_encoder: "unsupported",
+            },
+        } as RemoteAccessInitializedData
+        const resolved = resolveExecutableDeskConfig({
+            ...DESK_CONFIG_DEFAULTS,
+            enable_audio: true,
+            image_capture: "WGC",
+            video_device_name: "desktop-screen",
+            show_mouse: true,
+            video_encoder: null,
+            video_quality: 40,
+            video_fps: 60,
+            enable_dirty_rect: true,
+        }, initData)
+
+        expect(resolved).toMatchObject({
+            enable_audio: false,
+            image_capture: "default",
+            video_device_name: "android-screen",
+            show_mouse: false,
+            video_encoder: "OpenH264",
+            video_quality: 22,
+            video_fps: 30,
+            enable_dirty_rect: false,
+        })
+    })
+
     it("orders preferred capture modes before other backends", () => {
         expect(orderCaptureModes(["GDI", "Custom", "WGC", "DXGI"])).toEqual([
             "WGC",
@@ -206,19 +295,37 @@ describe("desk config normalization", () => {
     })
 
     it("removes form-only fields and normalizes disabled audio", () => {
-        const settings = toDeskSettings({
+        const settings = toRemoteSessionSettings({
             ...DESK_CONFIG_DEFAULTS,
+            image_capture: "WGC",
+            video_device_name: "primary",
+            video_encoder: "X264",
             audio_device: {
                 audio_data_flow: "Render",
                 audio_device_id: "speaker",
             },
             enable_audio: false,
             video_fps: 0,
+        }, true)
+
+        expect(settings.audio).toBeNull()
+        expect(settings.video_fps).toBe(60)
+        expect(settings).not.toHaveProperty("enable_audio")
+    })
+
+    it("normalizes the wire default device selector to one preference auto value", () => {
+        const preferences = toDeskDevicePreferences({
+            ...DESK_CONFIG_DEFAULTS,
+            audio_capture: "WASAPI",
+            audio_device: {
+                audio_data_flow: "Render",
+                audio_device_id: null,
+            },
         })
 
-        expect(settings.audio_device).toBeNull()
-        expect(settings.video_fps).toBeUndefined()
-        expect(settings).not.toHaveProperty("enable_audio")
+        expect(preferences.captureAudio).toBe(true)
+        expect(preferences.audioCapture).toBe("WASAPI")
+        expect(preferences.audioDevice).toBeNull()
     })
 })
 

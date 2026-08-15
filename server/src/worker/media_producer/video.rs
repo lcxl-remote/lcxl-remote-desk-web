@@ -129,17 +129,14 @@ pub(super) async fn video_pipeline_loop(
                 display_info.desktop_coordinates.height().max(0) as u32,
             )
         });
-    let encoder_id = payload.video_encoder.or_else(|| {
-        merged_settings
-            .video_encoder
-            .as_deref()
-            .and_then(VideoEncoderId::from_setting_name)
-    });
+    let encoder_id = Some(payload.video_encoder);
     if let Err(reason) = preflight_encoder_dimensions(encoder_id, encoder_init_size) {
         video_state.store(VIDEO_STATE_BLOCKED, Ordering::Release);
         report_dimension_blocked(
             &error_tx,
             &connection_id,
+            &payload.connection_epoch,
+            payload.video_generation,
             encoder_id,
             encoder_init_size,
             reason,
@@ -156,6 +153,8 @@ pub(super) async fn video_pipeline_loop(
                 &video_state,
                 &error_tx,
                 &connection_id,
+                &payload.connection_epoch,
+                payload.video_generation,
                 encoder_id,
                 encoder_init_size,
                 format!("{e}"),
@@ -164,7 +163,14 @@ pub(super) async fn video_pipeline_loop(
         }
     };
     video_state.store(VIDEO_STATE_STREAMING, Ordering::Release);
-    report_streaming(&error_tx, &connection_id, encoder_id, encoder_init_size);
+    report_streaming(
+        &error_tx,
+        &connection_id,
+        &payload.connection_epoch,
+        payload.video_generation,
+        encoder_id,
+        encoder_init_size,
+    );
     let mut next_pass_is_idr = true; // first frame is always I (encoder emits SPS/PPS+IDR)
     let mut seq: u64 = 0;
     let mut frame_interval = merged_settings.get_duration_by_video_fps();
@@ -298,6 +304,8 @@ pub(super) async fn video_pipeline_loop(
                         &video_state,
                         &error_tx,
                         &connection_id,
+                        &payload.connection_epoch,
+                        payload.video_generation,
                         encoder_id,
                         encoder_init_size,
                         format!("{error}"),
@@ -313,6 +321,22 @@ pub(super) async fn video_pipeline_loop(
             last_emit_for_throttle = std::time::Instant::now()
                 .checked_sub(frame_interval)
                 .unwrap_or_else(std::time::Instant::now);
+        }
+        if drain_outcome.live_settings_applied {
+            // A correlated live-settings request is complete once the
+            // worker has consumed its directives. Some directives
+            // rebuild the encoder; cursor and dirty-rect updates do not,
+            // but both paths must emit the same terminal confirmation so
+            // the daemon does not time out and roll back a successful
+            // update.
+            report_streaming(
+                &error_tx,
+                &connection_id,
+                &payload.connection_epoch,
+                payload.video_generation,
+                encoder_id,
+                encoder_init_size,
+            );
         }
         // Bitrate-cap directives apply *after* a potential rebuild so
         // a batch carrying both a quality change and a cap lands on
@@ -350,6 +374,8 @@ pub(super) async fn video_pipeline_loop(
                         &video_state,
                         &error_tx,
                         &connection_id,
+                        &payload.connection_epoch,
+                        payload.video_generation,
                         encoder_id,
                         encoder_init_size,
                         format!("{error}"),
@@ -416,6 +442,8 @@ pub(super) async fn video_pipeline_loop(
                             &video_state,
                             &error_tx,
                             &connection_id,
+                            &payload.connection_epoch,
+                            payload.video_generation,
                             encoder_id,
                             encoder_init_size,
                             format!("encode_cached failed three consecutive times: {e}"),
@@ -466,6 +494,8 @@ pub(super) async fn video_pipeline_loop(
                 }
                 let frame = build_media_frame(
                     &connection_id,
+                    &payload.connection_epoch,
+                    payload.video_generation,
                     seq,
                     if i == 0 { actual_duration_ns } else { 0 },
                     kind_for_pass,
@@ -513,6 +543,8 @@ pub(super) async fn video_pipeline_loop(
                 report_dimension_blocked(
                     &error_tx,
                     &connection_id,
+                    &payload.connection_epoch,
+                    payload.video_generation,
                     encoder_id,
                     encoder_init_size,
                     reason,
@@ -529,6 +561,8 @@ pub(super) async fn video_pipeline_loop(
                         &video_state,
                         &error_tx,
                         &connection_id,
+                        &payload.connection_epoch,
+                        payload.video_generation,
                         encoder_id,
                         encoder_init_size,
                         format!("{error}"),
@@ -538,7 +572,14 @@ pub(super) async fn video_pipeline_loop(
             };
             video_state.store(VIDEO_STATE_STREAMING, Ordering::Release);
             replay_bitrate_cap(&mut encoder, current_cap_kbps, &connection_id);
-            report_streaming(&error_tx, &connection_id, encoder_id, encoder_init_size);
+            report_streaming(
+                &error_tx,
+                &connection_id,
+                &payload.connection_epoch,
+                payload.video_generation,
+                encoder_id,
+                encoder_init_size,
+            );
             next_pass_is_idr = true;
             rebuild_pending = true;
             last_emit_for_throttle = std::time::Instant::now()
@@ -568,6 +609,8 @@ pub(super) async fn video_pipeline_loop(
                         &video_state,
                         &error_tx,
                         &connection_id,
+                        &payload.connection_epoch,
+                        payload.video_generation,
                         encoder_id,
                         encoder_init_size,
                         format!("encode failed three consecutive times: {e}"),
@@ -610,6 +653,8 @@ pub(super) async fn video_pipeline_loop(
             }
             let frame = build_media_frame(
                 &connection_id,
+                &payload.connection_epoch,
+                payload.video_generation,
                 seq,
                 if i == 0 { actual_duration_ns } else { 0 },
                 kind_for_pass,
@@ -657,6 +702,8 @@ pub(super) fn record_encode_failure(consecutive_failures: &mut u8) -> bool {
 pub(super) fn report_dimension_blocked(
     error_tx: &mpsc::UnboundedSender<WorkerToService>,
     connection_id: &str,
+    connection_epoch: &str,
+    video_generation: u32,
     encoder_id: Option<VideoEncoderId>,
     size: (u32, u32),
     reason: EncoderCompatibilityError,
@@ -671,6 +718,8 @@ pub(super) fn report_dimension_blocked(
     let _ = error_tx.send(WorkerToService::MediaPipelineState(
         MediaPipelineStatePayload {
             connection_id: connection_id.to_string(),
+            connection_epoch: connection_epoch.to_string(),
+            video_generation,
             data: MediaPipelineStateData::blocked_dimensions(
                 encoder_id,
                 source_resolution,
@@ -685,6 +734,8 @@ pub(super) fn report_prepare_failed(
     video_state: &AtomicU8,
     error_tx: &mpsc::UnboundedSender<WorkerToService>,
     connection_id: &str,
+    connection_epoch: &str,
+    video_generation: u32,
     encoder_id: Option<VideoEncoderId>,
     size: (u32, u32),
     message: String,
@@ -698,6 +749,8 @@ pub(super) fn report_prepare_failed(
     let _ = error_tx.send(WorkerToService::MediaPipelineState(
         MediaPipelineStatePayload {
             connection_id: connection_id.to_string(),
+            connection_epoch: connection_epoch.to_string(),
+            video_generation,
             data: MediaPipelineStateData {
                 phase: MediaPipelinePhase::Failed,
                 encoder: encoder_id,
@@ -714,6 +767,8 @@ pub(super) fn report_runtime_failed(
     video_state: &AtomicU8,
     error_tx: &mpsc::UnboundedSender<WorkerToService>,
     connection_id: &str,
+    connection_epoch: &str,
+    video_generation: u32,
     encoder_id: Option<VideoEncoderId>,
     size: (u32, u32),
     message: String,
@@ -723,6 +778,8 @@ pub(super) fn report_runtime_failed(
     let _ = error_tx.send(WorkerToService::MediaPipelineState(
         MediaPipelineStatePayload {
             connection_id: connection_id.to_string(),
+            connection_epoch: connection_epoch.to_string(),
+            video_generation,
             data: MediaPipelineStateData {
                 phase: MediaPipelinePhase::Failed,
                 encoder: encoder_id,
@@ -738,12 +795,16 @@ pub(super) fn report_runtime_failed(
 fn report_streaming(
     error_tx: &mpsc::UnboundedSender<WorkerToService>,
     connection_id: &str,
+    connection_epoch: &str,
+    video_generation: u32,
     encoder_id: Option<VideoEncoderId>,
     size: (u32, u32),
 ) {
     let _ = error_tx.send(WorkerToService::MediaPipelineState(
         MediaPipelineStatePayload {
             connection_id: connection_id.to_string(),
+            connection_epoch: connection_epoch.to_string(),
+            video_generation,
             data: MediaPipelineStateData {
                 phase: MediaPipelinePhase::Streaming,
                 encoder: encoder_id,

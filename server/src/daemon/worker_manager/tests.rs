@@ -242,7 +242,7 @@ async fn worker_capabilities_round_trip() {
         audio_codecs: vec![desk_ipc_protocol::message::MediaCodec::Opus],
         video_encoders: vec!["X264".to_string(), "H264".to_string(), "VP9".to_string()],
         video_encoder_capabilities: vec![],
-        audio_encoders: vec!["OPUS".to_string()],
+        audio_encoders: vec!["Opus".to_string()],
         video_device_list: std::collections::BTreeMap::new(),
         audio_device_list: std::collections::BTreeMap::new(),
         has_tauri: true,

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
+import { v4 } from "uuid"
 import { AlertTriangle, Loader2 } from "lucide-react"
 import { TooltipProvider } from "@/components/ui/tooltip"
 
@@ -28,15 +29,27 @@ import { useResolutionToast } from "./use-resolution-toast"
 import { isWebRtcAvailable } from "./webrtc-support"
 import { useToast } from "@/hooks/use-toast"
 import { deskErrorMessage, type ErrorCodeKeyMap } from "@/lib/desk-error-i18n"
-import type { DeskSettings, MediaPipelineStateData } from "@/services/types"
+import type {
+    MediaPipelineStateData,
+    RemoteSessionSettings,
+    RemoteSessionSettingsApplied,
+    SystemAudioCaptureStateData,
+} from "@/services/types"
 import { deskErrorCodeEnum } from "@/services/types"
 import { useRestrictedSession } from "@/features/desk/restricted-session"
 import {
+    armControlReconnect,
+    armSettingsApplyTimeout,
     buildDesktopRequestRemotePayload,
-    loadRequestedWaylandControlMode,
-    saveRequestedWaylandControlMode,
+    claimControlReconnect,
+    isRemoteSettingsFailure,
+    resolveAdaptiveBitrateForHost,
     shouldOpenConfigDialog,
     shouldShowMediaPipelineOverlay,
+    systemAudioStateTranslationKey,
+    type ControlReconnectIntent,
+    videoSettingsMayInterrupt,
+    waitForVideoPresentation,
 } from "./desk-session-model"
 import {
     ClipboardFallbackToast,
@@ -55,7 +68,10 @@ import {
     SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION,
     SIGNALING_TYPE_CODE_CONTROL_ACCEPTED,
     SIGNALING_TYPE_CODE_CONTROL_DENIED,
-    SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS,
+    SIGNALING_TYPE_CODE_APPLY_REMOTE_SESSION_SETTINGS,
+    SIGNALING_TYPE_CODE_REMOTE_SESSION_SETTINGS_APPLIED,
+    SIGNALING_TYPE_CODE_UPDATE_ADAPTIVE_VIDEO_QUALITY,
+    SIGNALING_TYPE_CODE_SYSTEM_AUDIO_CAPTURE_STATE_CHANGED,
     SIGNALING_TYPE_CODE_SET_PRIVATE_SCREEN_VISIBILITY,
     SIGNALING_TYPE_CODE_PRIVATE_SCREEN_VISIBILITY_SET,
     SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED,
@@ -71,6 +87,23 @@ import {
 } from "./constants"
 import { AdmissionRetrySchedule } from "./admission-retry"
 import { usePrivateScreenPending } from "./use-private-screen-pending"
+import { useDeviceConnectionResolution } from "@/hooks/use-device-id"
+import {
+    DEFAULT_DESK_USER_PREFERENCES,
+    DeskPreferenceStore,
+    type DeskDevicePreferencesV1,
+    type WaylandControlMode,
+} from "./desk-preferences"
+import type { DeskConfigSubmission } from "./desk-config-model"
+
+function executableSessionSettings(settings: DeskConfigSubmission): RemoteSessionSettings {
+    const {
+        adaptive_web_page_resolution: _adaptiveResolution,
+        wayland_control_mode: _waylandControlMode,
+        ...remote
+    } = settings;
+    return remote;
+}
 
 const MEDIA_PIPELINE_ERROR_KEYS: ErrorCodeKeyMap = {
     [deskErrorCodeEnum.VIDEO_ENCODER_DIMENSIONS_UNSUPPORTED]: "pages.desk.mediaPipeline.blockedDescription",
@@ -80,14 +113,40 @@ const MEDIA_PIPELINE_ERROR_KEYS: ErrorCodeKeyMap = {
     [deskErrorCodeEnum.VIDEO_PIPELINE_RUNTIME_FAILED]: "pages.desk.mediaPipeline.runtimeFailedDescription",
 }
 
+const SETTINGS_ERROR_KEYS: ErrorCodeKeyMap = {
+    [deskErrorCodeEnum.PERMISSION_ERROR]: "pages.desk.systemAudioPermissionDenied",
+    [deskErrorCodeEnum.FEATURE_UNAVAILABLE]: "pages.desk.settingFeatureUnavailable",
+    [deskErrorCodeEnum.ACTION_NEED_RETRY]: "pages.desk.settingNeedsRetry",
+    [deskErrorCodeEnum.ADAPTIVE_RESOLUTION_REQUIRES_SINGLE_CLIENT]: "pages.desk.adaptiveResolutionMultipleClients",
+    [deskErrorCodeEnum.REMOTE_DESKTOP_CAPABILITIES_NOT_READY]: "pages.desk.capabilitiesNotReady",
+    [deskErrorCodeEnum.MEDIA_WORKER_RESTART_REQUIRED]: "pages.desk.mediaWorkerRestartRequired",
+}
+
+const SETTINGS_EFFECT_KEYS: Record<string, string> = {
+    unchanged: "pages.desk.settingsEffect.unchanged",
+    applied_live: "pages.desk.settingsEffect.appliedLive",
+    restarted: "pages.desk.settingsEffect.restarted",
+    started: "pages.desk.settingsEffect.started",
+    stopped: "pages.desk.settingsEffect.stopped",
+    needs_reconnect: "pages.desk.settingsEffect.needsReconnect",
+}
+
 /** Container props. `orgId` is injected only by the manager console's org view
  *  (via a static wrapper); the open-source standalone app renders `<DeskSession/>`
  *  with no props, keeping the AI model selection personal-scoped. */
 type DeskSessionProps = {
     orgId?: number
+    /** Manager injects `u:<user_id>`; standalone omits it for its fixed owner. */
+    preferenceOwnerKey?: string | null
+    /** Manager identity query is still pending; admission must wait. */
+    preferenceOwnerLoading?: boolean
 }
 
-export default function DeskSession({ orgId }: DeskSessionProps = {}) {
+export default function DeskSession({
+    orgId,
+    preferenceOwnerKey,
+    preferenceOwnerLoading = false,
+}: DeskSessionProps = {}) {
     const { id: deskId } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const { t } = useTranslation()
@@ -99,7 +158,12 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     const controlRequestRef = useRef<{
         requestId: string;
         kind: "require" | "release";
+        wantsClipboard?: boolean;
     } | null>(null);
+    const controlReconnectRef = useRef<ControlReconnectIntent | null>(null);
+    const clipboardEnabledRef = useRef(false);
+    const clipboardReconnectIntentRef = useRef<boolean | null>(null);
+    const deactivateWhiteboardRef = useRef<() => void>(() => {});
     const hasRequestedRef = useRef(false);
     const admissionRetryRef = useRef({
         generation: 0,
@@ -108,14 +172,37 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         timer: null as number | null,
     });
 
-    const { isConnected, subscribe, sendMessage, sendTracked, cancelQueued } = useDeskSignaling()
+    const { isConnected, subscribe, sendMessage, sendTracked, cancelQueued, cancelQueuedScope } = useDeskSignaling()
 
     // Restriction state derived from the redeemed grant (if any) for this target.
     const restricted = useRestrictedSession(deskId);
     const grantSessionId = restricted.grantSessionId;
-    const admittedWaylandModeRef = useRef(
-        loadRequestedWaylandControlMode(deskId ?? "unknown"),
-    );
+    // Grant classification happens before resolving any persistent device key.
+    // Restricted sessions are always memory-only even if the target itself has
+    // a stable manager device id.
+    const deviceConnectionResolution = useDeviceConnectionResolution(deskId);
+    const controllerUserKey = preferenceOwnerKey === undefined
+        ? "standalone-owner"
+        : preferenceOwnerKey;
+    const deviceKey = deviceConnectionResolution.status === "persistent"
+        ? deviceConnectionResolution.deviceKey
+        : null;
+    const preferenceScope = useMemo(() => ({
+        controllerUserKey,
+        deviceKey,
+        restricted: restricted.isRestricted,
+    }), [controllerUserKey, deviceKey, restricted.isRestricted]);
+    const preferenceStoreRef = useRef<DeskPreferenceStore | null>(null);
+    if (preferenceStoreRef.current === null) {
+        let storage: Storage | null = null;
+        try {
+            storage = typeof window === "undefined" ? null : window.localStorage;
+        } catch {
+            storage = null;
+        }
+        preferenceStoreRef.current = new DeskPreferenceStore(storage);
+    }
+    const admittedWaylandModeRef = useRef<WaylandControlMode>("auto");
 
     const clearAdmissionRetry = useCallback(() => {
         const state = admissionRetryRef.current;
@@ -129,10 +216,20 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     }, []);
 
     const sendRemoteAdmission = useCallback((newLogicalAttempt: boolean) => {
-        if (!deskId) return;
+        if (
+            !deskId
+            || preferenceOwnerLoading
+            || deviceConnectionResolution.status === "loading"
+        ) return;
         const state = admissionRetryRef.current;
         if (newLogicalAttempt) {
             clearAdmissionRetry();
+            // Admission consumes the already-hydrated stable scope. The old
+            // connection-id-keyed Wayland localStorage path is intentionally
+            // gone; a missing stable identity remains page-memory-only.
+            admittedWaylandModeRef.current = preferenceStoreRef.current!
+                .loadDevice(preferenceScope)
+                .waylandControlMode;
         }
         const requestData = buildDesktopRequestRemotePayload(
             deskId,
@@ -146,7 +243,15 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         );
         state.requestIds.add(requestId);
         hasRequestedRef.current = true;
-    }, [clearAdmissionRetry, deskId, grantSessionId, sendMessage]);
+    }, [
+        clearAdmissionRetry,
+        deskId,
+        deviceConnectionResolution.status,
+        grantSessionId,
+        preferenceOwnerLoading,
+        preferenceScope,
+        sendMessage,
+    ]);
 
     const handleConnect = useCallback(() => {
         if (deskId && !hasRequestedRef.current) {
@@ -165,11 +270,61 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     const controlBarRef = useRef<HTMLDivElement>(null)
 
     const [isConfigOpen, setIsConfigOpen] = useState(false);
+    const [devicePreferences, setDevicePreferences] =
+        useState<DeskDevicePreferencesV1 | null>(null);
+    // Deliberately reload on every dialog open. This gives another tab's last
+    // completed save a chance to become visible without live storage events.
+    useEffect(() => {
+        if (
+            !isConfigOpen
+            || preferenceOwnerLoading
+            || deviceConnectionResolution.status === "loading"
+        ) return;
+        setDevicePreferences(
+            preferenceStoreRef.current!.loadDeviceIfPresent(preferenceScope),
+        );
+    }, [
+        deviceConnectionResolution.status,
+        isConfigOpen,
+        preferenceOwnerLoading,
+        preferenceScope,
+    ]);
     // True once the user has kicked off a WebRTC connect from the dialog. Gates
     // the auto-reopen so a transient ICE `disconnected` during/after negotiation
     // does not pop the dialog back up over a connection that is still healing.
     const hasAttemptedConnectRef = useRef(false);
     const [isVideoReady, setIsVideoReady] = useState(false);
+    const [isVideoTransitioning, setIsVideoTransitioning] = useState(false);
+    const videoTransitionGenerationRef = useRef(0);
+    const pendingVideoFrameCancelRef = useRef<(() => void) | null>(null);
+    const clearPendingVideoFrameWait = useCallback(() => {
+        pendingVideoFrameCancelRef.current?.();
+        pendingVideoFrameCancelRef.current = null;
+    }, []);
+    const beginVideoTransition = useCallback(() => {
+        clearPendingVideoFrameWait();
+        videoTransitionGenerationRef.current += 1;
+        setIsVideoTransitioning(true);
+    }, [clearPendingVideoFrameWait]);
+    const finishVideoTransition = useCallback((generation?: number) => {
+        if (generation !== undefined && generation !== videoTransitionGenerationRef.current) return;
+        clearPendingVideoFrameWait();
+        setIsVideoTransitioning(false);
+    }, [clearPendingVideoFrameWait]);
+    const finishVideoTransitionOnNextFrame = useCallback(() => {
+        clearPendingVideoFrameWait();
+        const video = videoRef.current;
+        if (!video) return;
+        const generation = videoTransitionGenerationRef.current;
+        pendingVideoFrameCancelRef.current = waitForVideoPresentation(video, () => {
+            pendingVideoFrameCancelRef.current = null;
+            finishVideoTransition(generation);
+        });
+    }, [clearPendingVideoFrameWait, finishVideoTransition]);
+    useEffect(() => () => {
+        videoTransitionGenerationRef.current += 1;
+        clearPendingVideoFrameWait();
+    }, [clearPendingVideoFrameWait]);
     const [mediaPipelineState, setMediaPipelineState] = useState<MediaPipelineStateData | null>(null);
     const [mediaRetryPending, setMediaRetryPending] = useState(false);
     const mediaRetryRequestIdRef = useRef<string | null>(null);
@@ -194,52 +349,43 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     const [showStats, setShowStats] = useState(false);
     const [showDiagnose, setShowDiagnose] = useState(false);
 
-    // Adaptive-quality opt-in (client-only, persisted in localStorage so
-    // the user's preference survives reloads). When `false` the
-    // packet-loss / RTT driven encoder-rebuild loop below short-circuits
-    // and `video_quality` stays at whatever the config dialog last sent.
-    // Default `true` preserves the historical behaviour.
-    const [adaptiveQualityEnabled, setAdaptiveQualityEnabled] = useState<boolean>(() => {
-        try {
-            const raw = localStorage.getItem("lcxl-desk-adaptive-quality-enabled");
-            return raw === null ? true : raw === "true";
-        } catch {
-            return true;
-        }
-    });
+    const [adaptiveQualityEnabled, setAdaptiveQualityEnabled] =
+        useState(DEFAULT_DESK_USER_PREFERENCES.adaptiveQualityEnabled);
+    const [adaptiveBitrateEnabled, setAdaptiveBitrateEnabled] =
+        useState(DEFAULT_DESK_USER_PREFERENCES.adaptiveBitrateEnabled);
+    const persistedUserPreferenceKey = restricted.isRestricted
+        ? null
+        : controllerUserKey;
+    const userPreferenceScope = persistedUserPreferenceKey ?? "memory-only";
+    const [hydratedUserPreferenceScope, setHydratedUserPreferenceScope] =
+        useState<string | null>(null);
     useEffect(() => {
-        try {
-            localStorage.setItem("lcxl-desk-adaptive-quality-enabled", String(adaptiveQualityEnabled));
-        } catch {
-            // Ignore quota / private-mode errors — runtime state is still
-            // correct, only persistence is lost.
-        }
-    }, [adaptiveQualityEnabled]);
-
-    // Server-side adaptive bitrate-cap opt-in (REMB-driven inner loop
-    // on the daemon). Browser-owned preference, persisted like the
-    // adaptive-quality toggle above; injected into
-    // `DeskSettings.adaptive_bitrate` on connect / UpdateDeskSettings
-    // (the server treats it as session state and never persists it).
-    const [adaptiveBitrateEnabled, setAdaptiveBitrateEnabled] = useState<boolean>(() => {
-        try {
-            const raw = localStorage.getItem("lcxl-desk-adaptive-bitrate-enabled");
-            return raw === null ? true : raw === "true";
-        } catch {
-            return true;
-        }
-    });
+        const preferences = preferenceStoreRef.current!.loadUser(
+            persistedUserPreferenceKey,
+        );
+        setAdaptiveQualityEnabled(preferences.adaptiveQualityEnabled);
+        setAdaptiveBitrateEnabled(preferences.adaptiveBitrateEnabled);
+        setHydratedUserPreferenceScope(userPreferenceScope);
+    }, [persistedUserPreferenceKey, userPreferenceScope]);
     useEffect(() => {
-        try {
-            localStorage.setItem("lcxl-desk-adaptive-bitrate-enabled", String(adaptiveBitrateEnabled));
-        } catch {
-            // Ignore quota / private-mode errors (see above).
-        }
-    }, [adaptiveBitrateEnabled]);
+        if (hydratedUserPreferenceScope !== userPreferenceScope) return;
+        preferenceStoreRef.current!.saveUser(persistedUserPreferenceKey, {
+            version: 1,
+            adaptiveQualityEnabled,
+            adaptiveBitrateEnabled,
+        });
+    }, [
+        adaptiveBitrateEnabled,
+        adaptiveQualityEnabled,
+        hydratedUserPreferenceScope,
+        persistedUserPreferenceKey,
+        userPreferenceScope,
+    ]);
 
     // Privacy screen state
     const [isPrivateScreen, setIsPrivateScreen] = useState(false);
     const [isPrivateScreenSupported, setIsPrivateScreenSupported] = useState(true);
+    const releaseInputsRef = useRef<() => void>(() => {});
     const {
         pending: isPrivateScreenPending,
         start: startPrivateScreenPending,
@@ -258,13 +404,257 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         },
     });
 
-    const { peerConnection, remoteStream, initData, connect, renegotiate, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, whiteboardChannel, cursorSyncChannel, isRTCConnected, rtcFailed, closeRTC, rtcStats } = useDeskRTC({
+    const settingsReconnectRef = useRef<{
+        previousEpoch: string;
+        settings: RemoteSessionSettings;
+    } | null>(null);
+    const { peerConnection, remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, whiteboardChannel, cursorSyncChannel, isRTCConnected, rtcFailed, closeRTC, rtcStats } = useDeskRTC({
         deskId: deskId || null,
         subscribe,
-        sendMessage,
         sendTracked,
-        cancelQueued
+        cancelQueued,
+        cancelQueuedScope,
     });
+
+    const clearSettingsApply = useCallback(() => {
+        const pending = settingsApplyRef.current;
+        if (pending?.timer !== null && pending?.timer !== undefined) {
+            window.clearTimeout(pending.timer);
+        }
+        settingsApplyRef.current = null;
+    }, []);
+
+    const rebuildRemoteSession = useCallback((settings: RemoteSessionSettings) => {
+        if (!deskId || !initData) return;
+        beginVideoTransition();
+        const previousEpoch = initData.connection_epoch;
+        releaseInputsRef.current();
+        controlReconnectRef.current = armControlReconnect(hasControl, previousEpoch);
+        clipboardReconnectIntentRef.current = hasControl ? clipboardEnabledRef.current : null;
+        controlRequestRef.current = null;
+        setHasControl(false);
+        setIsWaitingApproval(false);
+        if (isConnected) {
+            // The socket is open, so this Close goes on the wire immediately;
+            // RequestRemoteAccess below follows it in WebSocket FIFO order.
+            sendMessage(
+                SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION,
+                {
+                    connection_epoch: previousEpoch,
+                    finalize_logical_connection: false,
+                },
+                deskId,
+            );
+        }
+        clearSettingsApply();
+        closeRTC();
+        setSystemAudioState(null);
+        settingsReconnectRef.current = { previousEpoch, settings };
+        hasRequestedRef.current = false;
+        sendRemoteAdmission(true);
+    }, [
+        beginVideoTransition,
+        clearSettingsApply,
+        closeRTC,
+        deskId,
+        hasControl,
+        initData,
+        isConnected,
+        sendMessage,
+        sendRemoteAdmission,
+    ]);
+
+    useEffect(() => {
+        const pending = settingsReconnectRef.current;
+        if (!pending || !initData || initData.connection_epoch === pending.previousEpoch) return;
+        settingsReconnectRef.current = null;
+        hasAttemptedConnectRef.current = true;
+        setMediaRetryPending(false);
+        void connect(pending.settings);
+    }, [connect, initData]);
+
+    const applyRemoteSettings = useCallback((
+        settings: DeskConfigSubmission,
+        mayInterruptVideo = false,
+    ) => {
+        if (!deskId || !initData) return;
+        if (settingsApplyRef.current) {
+            toast({ title: t("pages.desk.settingsApplyInProgress") });
+            return;
+        }
+        if (mayInterruptVideo) beginVideoTransition();
+        const connectionEpoch = initData.connection_epoch;
+        const requested = executableSessionSettings(settings);
+        const requestId = v4();
+        const replaceKey = `session-settings:${connectionEpoch}`;
+        settingsApplyRef.current = {
+            requestId,
+            connectionEpoch,
+            requested: settings,
+            timer: null,
+        };
+        const result = sendTracked({
+            type: SIGNALING_TYPE_CODE_APPLY_REMOTE_SESSION_SETTINGS,
+            data: {
+                connection_epoch: connectionEpoch,
+                settings: requested,
+            },
+            toConnectionId: deskId,
+            requestId,
+            replaceKey,
+            scope: `session:${connectionEpoch}`,
+            onSent: (requestId) => {
+                const pending = settingsApplyRef.current;
+                if (!pending || pending.requestId !== requestId) return;
+                armSettingsApplyTimeout(pending, requestId, () => {
+                    if (settingsApplyRef.current?.requestId !== requestId) return;
+                    settingsApplyRef.current = null;
+                    finishVideoTransition();
+                    toast({
+                        variant: "destructive",
+                        title: t("pages.desk.settingsApplyTimeout"),
+                    });
+                });
+            },
+        });
+        if (result.requestId !== requestId) {
+            clearSettingsApply();
+            finishVideoTransition();
+        } else if (result.disposition === "queued") {
+            const pending = settingsApplyRef.current;
+            if (pending) {
+                armSettingsApplyTimeout(pending, requestId, () => {
+                    if (settingsApplyRef.current?.requestId !== requestId) return;
+                    cancelQueued(replaceKey);
+                    settingsApplyRef.current = null;
+                    finishVideoTransition();
+                    toast({
+                        variant: "destructive",
+                        title: t("pages.desk.settingsApplyTimeout"),
+                    });
+                });
+            }
+        }
+    }, [
+        beginVideoTransition,
+        cancelQueued,
+        clearSettingsApply,
+        deskId,
+        finishVideoTransition,
+        initData,
+        sendTracked,
+        t,
+        toast,
+    ]);
+
+    useEffect(() => subscribe((message) => {
+        if (message.signaling_type === SIGNALING_TYPE_CODE_SYSTEM_AUDIO_CAPTURE_STATE_CHANGED) {
+            const state = message.signaling_data as SystemAudioCaptureStateData;
+            if (state.connection_epoch === initData?.connection_epoch) {
+                setSystemAudioState(state);
+                const current = lastSettingsRef.current;
+                if (current) {
+                    const accepted = {
+                        ...current,
+                        audio: state.accepted_audio,
+                    };
+                    lastSettingsRef.current = accepted;
+                    setActiveSettings(accepted);
+                }
+                if (state.error_code === deskErrorCodeEnum.MEDIA_WORKER_RESTART_REQUIRED) {
+                    toast({
+                        variant: "destructive",
+                        title: t("pages.desk.mediaWorkerRestartRequired"),
+                    });
+                }
+            }
+            return;
+        }
+        if (message.signaling_type !== SIGNALING_TYPE_CODE_REMOTE_SESSION_SETTINGS_APPLIED
+            && message.signaling_type !== SIGNALING_TYPE_CODE_ERROR) return;
+        const pending = settingsApplyRef.current;
+        if (!pending || message.request_id !== pending.requestId) return;
+        if (isRemoteSettingsFailure(
+            message.signaling_type === SIGNALING_TYPE_CODE_ERROR,
+            message.response_state?.error_code,
+        )) {
+            clearSettingsApply();
+            finishVideoTransition();
+            toast({
+                variant: "destructive",
+                title: t("pages.desk.settingsApplyFailed"),
+                description: deskErrorMessage(
+                    t,
+                    SETTINGS_ERROR_KEYS,
+                    message.response_state?.error_code,
+                    message.response_state?.message ?? undefined,
+                    t("pages.desk.settingsApplyFailed"),
+                ),
+            });
+            return;
+        }
+        if (message.signaling_type !== SIGNALING_TYPE_CODE_REMOTE_SESSION_SETTINGS_APPLIED) return;
+        const applied = message.signaling_data as RemoteSessionSettingsApplied;
+        if (applied.connection_epoch !== pending.connectionEpoch) return;
+        clearSettingsApply();
+        if (applied.effects.connection === "needs_reconnect") {
+            toast({
+                title: t("pages.desk.settingsReconnectRequired"),
+                description: t("pages.desk.settingsReconnectStarting"),
+            });
+            hasAttemptedConnectRef.current = true;
+            lastSettingsRef.current = pending.requested;
+            setActiveSettings(pending.requested);
+            adaptiveQualityOverrideRef.current = null;
+            rebuildRemoteSession(executableSessionSettings(pending.requested));
+            return;
+        }
+        if (applied.effects.video === "restarted") {
+            finishVideoTransitionOnNextFrame();
+        } else {
+            finishVideoTransition();
+        }
+        const localSettings = pending.requested;
+        const accepted: DeskConfigSubmission = {
+            ...applied.baseline_settings,
+            adaptive_web_page_resolution:
+                localSettings?.adaptive_web_page_resolution ?? true,
+            wayland_control_mode:
+                localSettings?.wayland_control_mode ?? admittedWaylandModeRef.current,
+        };
+        lastSettingsRef.current = accepted;
+        setActiveSettings(accepted);
+        adaptiveQualityOverrideRef.current =
+            applied.runtime_overrides.adaptive_video_quality ?? null;
+        const effectDescription = t("pages.desk.settingsAppliedEffects", {
+            video: t(SETTINGS_EFFECT_KEYS[applied.effects.video] ?? applied.effects.video),
+            audio: t(SETTINGS_EFFECT_KEYS[applied.effects.audio] ?? applied.effects.audio),
+            connection: t(SETTINGS_EFFECT_KEYS[applied.effects.connection]
+                ?? applied.effects.connection),
+        });
+        const fieldErrors = applied.errors.map((error) => `${error.field}: ${deskErrorMessage(
+            t,
+            SETTINGS_ERROR_KEYS,
+            error.code,
+            undefined,
+            t("pages.desk.settingsApplyFailed"),
+        )}`).join("; ");
+        toast({
+            title: t("pages.desk.settingsApplied"),
+            description: fieldErrors
+                ? `${effectDescription}. ${fieldErrors}`
+                : effectDescription,
+        });
+    }), [
+        clearSettingsApply,
+        finishVideoTransition,
+        finishVideoTransitionOnNextFrame,
+        initData?.connection_epoch,
+        rebuildRemoteSession,
+        subscribe,
+        t,
+        toast,
+    ]);
 
     // Guard against accidentally closing/reloading an active session.
     useBeforeUnloadConfirm(isRTCConnected);
@@ -291,10 +681,11 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     // (`reconnectTimedOut`, `autoReconnectRef`, `switchTimeoutRef`) is
     // gone — the browser sees worker swaps as a brief frame freeze that
     // resolves on the next IDR, with no React-level state to manage.
-    // `lastSettingsRef` survives because the non-reconnect parts of the
-    // adaptive-quality loop still consult it.
-    const lastSettingsRef = useRef<DeskSettings | null>(null);
-    // State mirror of the user-submitted settings used solely for
+    // `lastSettingsRef` is the host-accepted baseline for the active epoch.
+    // A fresh Offer/rebuild seeds it with that Offer's complete settings;
+    // live 301 changes replace it only after the correlated 302 response.
+    const lastSettingsRef = useRef<DeskConfigSubmission | null>(null);
+    // State mirror of the accepted settings used solely for
     // hooks/effects whose React-tracked deps must re-evaluate on a
     // settings change. Refs are intentionally invisible to React's
     // render cycle, so reading `lastSettingsRef.current` inside a hook's
@@ -303,7 +694,15 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     // re-render the component. Mirror only fields the gating cares
     // about — the adaptive-quality auto-adjust path keeps writing only
     // to the ref so its per-stats-tick updates do not force a re-render.
-    const [activeSettings, setActiveSettings] = useState<DeskSettings | null>(null);
+    const [activeSettings, setActiveSettings] = useState<DeskConfigSubmission | null>(null);
+    const [systemAudioState, setSystemAudioState] = useState<SystemAudioCaptureStateData | null>(null);
+    const settingsApplyRef = useRef<{
+        requestId: string;
+        connectionEpoch: string;
+        requested: DeskConfigSubmission;
+        timer: number | null;
+    } | null>(null);
+    const adaptiveQualityOverrideRef = useRef<number | null>(null);
 
     // Adaptive resolution: request ids the hook has emitted but not yet
     // seen an echo for. The control-signaling subscription uses this set as
@@ -341,7 +740,11 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     // is fresh without an extra setState round-trip.
     const qualityAdjustmentCountRef = useRef<number>(0);
 
-    const { cursorStyle } = useCursorSync(cursorSyncChannel, videoRef, isRTCConnected && hasControl);
+    const { cursorStyle } = useCursorSync(
+        cursorSyncChannel,
+        videoRef,
+        isRTCConnected && hasControl && (activeSettings?.show_mouse ?? true),
+    );
 
     const {
         clipboardEnabled,
@@ -349,6 +752,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         transferStatus,
         errorMessage,
         toggleClipboard,
+        enableClipboard,
         fallbackToast,
         execFallbackToastAction,
         closeFallbackToast
@@ -357,6 +761,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         hasControl: isRTCConnected && hasControl,
         isActive: true
     });
+    clipboardEnabledRef.current = clipboardEnabled;
 
     const whiteboard = useDeskWhiteboard({
         videoRef,
@@ -364,12 +769,13 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         isConnected: isRTCConnected && hasControl,
         hasTauri: initData?.has_tauri ?? false,
     });
+    deactivateWhiteboardRef.current = whiteboard.deactivateWhiteboard;
 
     const macKeyboardMappingController = getMacKeyboardMappingController(
         initData?.operation_system,
     );
 
-    const { sendKeyboardEvents } = useDeskInput({
+    const { sendKeyboardEvents, releaseAllInputs } = useDeskInput({
         videoRef,
         mouseChannel,
         keyboardChannel,
@@ -378,6 +784,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         ignoreInputEvents: !!whiteboard.textInput,
         remapCtrlToCommand: macKeyboardMappingController !== undefined,
     });
+    releaseInputsRef.current = releaseAllInputs;
 
     const microphone = useDeskMicrophone({
         peerConnection,
@@ -399,19 +806,43 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
             const { signaling_type } = message;
 
             if (signaling_type === SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED
+                && !message.response_state
                 && message.request_id
                 && admissionRetryRef.current.requestIds.has(message.request_id)
             ) {
                 clearAdmissionRetry();
-            } else if (signaling_type === SIGNALING_TYPE_CODE_ERROR
+            } else if ((signaling_type === SIGNALING_TYPE_CODE_ERROR
+                || (signaling_type === SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED
+                    && !!message.response_state))
                 && message.request_id
                 && admissionRetryRef.current.requestIds.delete(message.request_id)
             ) {
-                if (message.response_state?.error_code === deskErrorCodeEnum.ACTION_NEED_RETRY) {
+                if (
+                    message.response_state?.error_code === deskErrorCodeEnum.ACTION_NEED_RETRY
+                    || message.response_state?.error_code
+                        === deskErrorCodeEnum.REMOTE_DESKTOP_CAPABILITIES_NOT_READY
+                ) {
                     const state = admissionRetryRef.current;
                     const delay = state.schedule.nextDelay();
                     if (delay === null) {
                         clearAdmissionRetry();
+                        const abandoned = settingsReconnectRef.current;
+                        if (abandoned && deskId && isConnected) {
+                            sendMessage(
+                                SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION,
+                                {
+                                    connection_epoch: abandoned.previousEpoch,
+                                    finalize_logical_connection: true,
+                                },
+                                deskId,
+                            );
+                            settingsReconnectRef.current = null;
+                            controlReconnectRef.current = null;
+                            clipboardReconnectIntentRef.current = null;
+                            clearPrivateScreenPending();
+                            setIsPrivateScreen(false);
+                            finishVideoTransition();
+                        }
                         toast({
                             title: t('pages.desk.admissionRetry.title'),
                             description: t('pages.desk.admissionRetry.exhausted'),
@@ -457,15 +888,18 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                 && message.request_id === controlRequestRef.current?.requestId
                 && controlRequestRef.current?.kind === "require"
             ) {
+                const request = controlRequestRef.current;
                 controlRequestRef.current = null;
                 if (signaling_type === SIGNALING_TYPE_CODE_CONTROL_DENIED) {
                     console.log("Remote control request DENIED by peer.");
+                    deactivateWhiteboardRef.current();
                     setHasControl(false);
                     setIsWaitingApproval(false);
                     return;
                 }
                 console.log("Remote control request ACCEPTED by peer.");
                 setHasControl(true);
+                if (request?.wantsClipboard) enableClipboard();
                 setIsWaitingApproval(false);
                 videoRef.current?.focus();
             } else if (signaling_type === SIGNALING_TYPE_CODE_CONTROL_RELEASED
@@ -474,6 +908,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
             ) {
                 controlRequestRef.current = null;
                 console.log("Remote control RELEASED.");
+                deactivateWhiteboardRef.current();
                 setHasControl(false);
                 setIsWaitingApproval(false);
             } else if (signaling_type === SIGNALING_TYPE_CODE_PRIVATE_SCREEN_VISIBILITY_SET) {
@@ -523,8 +958,10 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                 setMediaRetryPending(false);
                 if (!message.response_state.error_code) {
                     setMediaPipelineState(null);
+                    finishVideoTransitionOnNextFrame();
                     return;
                 }
+                finishVideoTransition();
                 const needsRenegotiation = message.response_state.error_code
                     === deskErrorCodeEnum.VIDEO_PIPELINE_RENEGOTIATION_REQUIRED;
                 if (needsRenegotiation) setIsConfigOpen(true);
@@ -556,7 +993,22 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
             }
         };
         return subscribe(handle);
-    }, [clearAdmissionRetry, confirmPrivateScreenPending, failPrivateScreenPending, sendRemoteAdmission, subscribe, t, toast]);
+    }, [
+        clearAdmissionRetry,
+        clearPrivateScreenPending,
+        confirmPrivateScreenPending,
+        deskId,
+        enableClipboard,
+        failPrivateScreenPending,
+        finishVideoTransition,
+        finishVideoTransitionOnNextFrame,
+        isConnected,
+        sendMessage,
+        sendRemoteAdmission,
+        subscribe,
+        t,
+        toast,
+    ]);
 
     // Reset requested state if connection drops
     useEffect(() => {
@@ -633,7 +1085,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     // Adaptive quality: adjust video_quality based on packet loss and RTT
     useEffect(() => {
         if (!isRTCConnected || !deskId || !lastSettingsRef.current) return;
-        // User-toggleable: when disabled, no UpdateDeskSettings is sent
+        // User-toggleable: when disabled, no narrow 303 override is sent
         // from this loop and the encoder is never rebuilt for ABR
         // reasons.
         if (!adaptiveQualityEnabled) {
@@ -656,7 +1108,9 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         const avgRtt = win.reduce((s, x) => s + x.rtt, 0) / win.length;
         const now = Date.now();
         const elapsed = now - lastQualityAdjustRef.current;
-        const currentQuality = lastSettingsRef.current.video_quality ?? 22;
+        const currentQuality = adaptiveQualityOverrideRef.current
+            ?? lastSettingsRef.current.video_quality
+            ?? 22;
 
         let newQuality: number | null = null;
         if ((avgPacketLoss > 3 || avgRtt > 200) && elapsed >= 3000) {
@@ -666,14 +1120,22 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         }
 
         if (newQuality !== null && newQuality !== currentQuality) {
-            const newSettings = { ...lastSettingsRef.current, video_quality: newQuality };
-            lastSettingsRef.current = newSettings;
-            sendMessage(SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, newSettings, deskId);
+            sendTracked({
+                type: SIGNALING_TYPE_CODE_UPDATE_ADAPTIVE_VIDEO_QUALITY,
+                data: {
+                    connection_epoch: initData?.connection_epoch,
+                    video_quality: newQuality,
+                },
+                toConnectionId: deskId,
+                replaceKey: `adaptive-quality:${initData?.connection_epoch ?? ""}`,
+                scope: `session:${initData?.connection_epoch ?? ""}`,
+            });
+            adaptiveQualityOverrideRef.current = newQuality;
             lastQualityAdjustRef.current = now;
             statsWindowRef.current = [];
             qualityAdjustmentCountRef.current += 1;
         }
-    }, [rtcStats, adaptiveQualityEnabled, sendMessage, deskId]);
+    }, [rtcStats, adaptiveQualityEnabled, sendTracked, deskId, initData?.connection_epoch]);
 
     // Adaptive resolution dispatcher: wraps sendMessage so the hook
     // gets the real wire request_id back (sendMessage returns it).
@@ -692,20 +1154,25 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
             refresh_hz: number;
             auto: true;
         }) => {
+            if (!initData?.connection_epoch) return "";
+            const wirePayload = {
+                ...payload,
+                connection_epoch: initData.connection_epoch,
+            };
             const reqId = sendMessage(
                 SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
-                payload,
+                wirePayload,
                 deskId ?? undefined,
             );
             console.info("[adaptive-resolution dispatch] 205 sent", {
                 reqId,
-                payload,
+                payload: wirePayload,
                 deskId,
             });
             registerResolutionSent(reqId, payload.width, payload.height);
             return reqId;
         },
-        [sendMessage, deskId, registerResolutionSent],
+        [sendMessage, deskId, initData?.connection_epoch, registerResolutionSent],
     );
 
     // The hook's `enabled` aggregates every condition that must be
@@ -726,9 +1193,8 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     //     scenario, but defence-in-depth here keeps us safe if a
     //     stale `adaptive_web_page_resolution=true` slips through.
     //   - user toggled "Adaptive Resolution" on in the config dialog
-    // `lastSettingsRef.current` is populated from `handleConfigSubmit`
-    // before we ever call `connect`, so reading it here after RTC is
-    // up is always safe.
+    // A new Offer seeds `lastSettingsRef.current` before `connect`; live
+    // changes update it only after the host confirms the accepted baseline.
     const adaptiveGateInputs = {
         deskId,
         isRTCConnected,
@@ -776,7 +1242,15 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
         minDeltaPx: initData?.adaptive_resolution?.min_delta_px ?? undefined,
     });
 
-    const handleConfigSubmit = (settings: DeskSettings) => {
+    const handleConfigSubmit = (
+        settings: DeskConfigSubmission,
+        preferences: DeskDevicePreferencesV1,
+    ) => {
+        if (!initData) return;
+        if (settingsApplyRef.current) {
+            toast({ title: t("pages.desk.settingsApplyInProgress") });
+            return;
+        }
         // Some webviews (notably Linux WebKitGTK with WebRTC disabled) lack
         // RTCPeerConnection. Surface a clear message instead of letting the
         // connection attempt throw an unhandled rejection that the user never
@@ -791,51 +1265,61 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
             });
             return;
         }
-        // Inject the parent-owned adaptive-bitrate preference so it
-        // rides the offer (new connection init) and UpdateDeskSettings
-        // (live toggle for this connection on the daemon side).
         const requestedMode = settings.wayland_control_mode ?? "auto";
         if (deskId && requestedMode !== admittedWaylandModeRef.current) {
-            saveRequestedWaylandControlMode(deskId, requestedMode);
             toast({
-                title: t("pages.desk.waylandModeNextConnectionTitle"),
-                description: t("pages.desk.waylandModeNextConnectionDescription"),
+                title: t(isRTCConnected
+                    ? "pages.desk.waylandModeReconnectTitle"
+                    : "pages.desk.waylandModeNextConnectionTitle"),
+                description: t(isRTCConnected
+                    ? "pages.desk.waylandModeReconnectDescription"
+                    : "pages.desk.waylandModeNextConnectionDescription"),
             });
         }
-        const settingsWithPrefs: DeskSettings = {
+        const settingsWithPrefs: DeskConfigSubmission = {
             ...settings,
-            adaptive_bitrate: adaptiveBitrateEnabled,
-            // RequestRemoteAccess froze this mode before the PeerConnection existed.
-            // A changed choice is persisted for the next logical connection.
-            wayland_control_mode: admittedWaylandModeRef.current,
+            adaptive_bitrate: resolveAdaptiveBitrateForHost(
+                initData.session_settings_capabilities.adaptive_bitrate,
+                initData.suggested_session_settings.adaptive_bitrate,
+                adaptiveBitrateEnabled,
+            ),
         };
-        lastSettingsRef.current = settingsWithPrefs;
-        // Mirror to state so `useAdaptiveResolution` re-evaluates its
-        // `enabled` gate on this submit even when no other tracked
-        // state happens to change in the same tick (e.g. the user is
-        // already connected and only flips display + adaptive toggle).
-        setActiveSettings(settingsWithPrefs);
-        if (mediaPipelineState) {
+        const previousSettings = lastSettingsRef.current;
+        preferenceStoreRef.current!.saveDevice(preferenceScope, preferences);
+        setDevicePreferences(preferences);
+        if (isRTCConnected && requestedMode !== admittedWaylandModeRef.current) {
+            lastSettingsRef.current = settingsWithPrefs;
+            adaptiveQualityOverrideRef.current = null;
+            setActiveSettings(settingsWithPrefs);
+            hasAttemptedConnectRef.current = true;
+            rebuildRemoteSession(executableSessionSettings(settingsWithPrefs));
+        } else if (mediaPipelineState) {
             // A terminal video pipeline has already released its encoder and
-            // capture subscription. Live UpdateDeskSettings cannot revive it
-            // (and does not carry a concrete encoder id), so renegotiate the
-            // Offer. The daemon restarts the cached worker pipeline when the
-            // wire codec is unchanged and returns a structured reconnect error
-            // when it is not.
+            // capture subscription. Re-admit the logical session so all old
+            // callbacks/queued controls are cancelled and the host allocates a
+            // fresh connection epoch before applying the requested baseline.
+            lastSettingsRef.current = settingsWithPrefs;
+            adaptiveQualityOverrideRef.current = null;
+            setActiveSettings(settingsWithPrefs);
             hasAttemptedConnectRef.current = true;
             setMediaRetryPending(true);
+            beginVideoTransition();
             void (isRTCConnected
-                ? renegotiate(settingsWithPrefs)
-                : connect(settingsWithPrefs));
+                ? rebuildRemoteSession(executableSessionSettings(settingsWithPrefs))
+                : connect(executableSessionSettings(settingsWithPrefs)));
         } else if (isRTCConnected && deskId) {
-            console.log("Updating desk settings dynamically...", settingsWithPrefs);
-            sendMessage(SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, settingsWithPrefs, deskId);
-            toast({ title: t("pages.desk.settingsSent") });
+            applyRemoteSettings(
+                settingsWithPrefs,
+                videoSettingsMayInterrupt(previousSettings, settingsWithPrefs),
+            );
         } else {
             // Mark that a connect is in flight so a transient ICE drop during
             // negotiation does not auto-reopen this dialog.
+            lastSettingsRef.current = settingsWithPrefs;
+            adaptiveQualityOverrideRef.current = null;
+            setActiveSettings(settingsWithPrefs);
             hasAttemptedConnectRef.current = true;
-            connect(settingsWithPrefs);
+            connect(executableSessionSettings(settingsWithPrefs));
         }
         setIsConfigOpen(false);
     };
@@ -846,22 +1330,55 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
     // daemon scopes the change to this connection.
     useEffect(() => {
         if (!isRTCConnected || !deskId || !lastSettingsRef.current) return;
-        if (lastSettingsRef.current.adaptive_bitrate === adaptiveBitrateEnabled) return;
-        const updated: DeskSettings = {
+        if (settingsApplyRef.current) return;
+        const resolvedAdaptiveBitrate = initData
+            ? resolveAdaptiveBitrateForHost(
+                initData.session_settings_capabilities.adaptive_bitrate,
+                initData.suggested_session_settings.adaptive_bitrate,
+                adaptiveBitrateEnabled,
+            )
+            : adaptiveBitrateEnabled;
+        if (lastSettingsRef.current.adaptive_bitrate === resolvedAdaptiveBitrate) return;
+        const updated: DeskConfigSubmission = {
             ...lastSettingsRef.current,
-            adaptive_bitrate: adaptiveBitrateEnabled,
+            adaptive_bitrate: resolvedAdaptiveBitrate,
         };
-        lastSettingsRef.current = updated;
-        sendMessage(SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, updated, deskId);
-    }, [adaptiveBitrateEnabled, isRTCConnected, deskId, sendMessage]);
+        applyRemoteSettings(updated);
+    }, [adaptiveBitrateEnabled, isRTCConnected, deskId, initData, applyRemoteSettings]);
 
     const handleConfigCancel = () => {
         setIsConfigOpen(false);
         navigate(`/desk/${deskId}`);
     };
 
+    const requestRemoteControl = useCallback((clipboardIntent?: boolean) => {
+        if (!deskId) return;
+        // In a restricted session, only auto-request the capabilities the code's
+        // ceiling does not deny; an owner session leaves every dimension visible so
+        // this keeps the previous unconditional behaviour.
+        const wantClipboard = restricted.capabilityVisible('allow_clipboard_sync')
+            && (clipboardIntent ?? true);
+        const wantFileTransfer = restricted.capabilityVisible('allow_file_transfer');
+        const requestControlData = {
+            accept_clipboard_sync: wantClipboard, // Auto-request clipboard when the ceiling allows it
+            accept_file_transfer: wantFileTransfer,
+        };
+        console.log(`Sending REQUIRE_CONTROL signaling, requestControlData:`, requestControlData);
+        const requestId = sendMessage(
+            SIGNALING_TYPE_CODE_REQUIRE_CONTROL,
+            requestControlData,
+            deskId,
+        );
+        controlRequestRef.current = { requestId, kind: "require", wantsClipboard: wantClipboard };
+        setIsWaitingApproval(true);
+    }, [deskId, restricted, sendMessage]);
+
     const handleRequestControl = () => {
         if (hasControl) {
+            releaseInputsRef.current();
+            // Clear the host overlay while this connection still owns control;
+            // the data-channel route is denied immediately after ReleaseControl.
+            deactivateWhiteboardRef.current();
             const requestId = sendMessage(
                 SIGNALING_TYPE_CODE_RELEASE_CONTROL,
                 null,
@@ -871,38 +1388,47 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
             setIsWaitingApproval(true);
             return;
         }
-        // In a restricted session, only auto-request the capabilities the code's
-        // ceiling does not deny; an owner session leaves every dimension visible so
-        // this keeps the previous unconditional behaviour.
-        const wantClipboard = !hasControl && restricted.capabilityVisible('allow_clipboard_sync');
-        const wantFileTransfer = !hasControl && restricted.capabilityVisible('allow_file_transfer');
-        const requestControlData = {
-            accept_clipboard_sync: wantClipboard, // Auto-request clipboard when the ceiling allows it
-            accept_file_transfer: wantFileTransfer,
-        };
-        // Auto-enable UI state if asking for control
-        if (wantClipboard && window.isSecureContext !== false) {
-            if (!clipboardEnabled) toggleClipboard();
-        }
-
-        console.log(`Sending REQUIRE_CONTROL signaling, requestControlData:`, requestControlData);
-        const requestId = sendMessage(
-            SIGNALING_TYPE_CODE_REQUIRE_CONTROL,
-            requestControlData,
-            deskId,
-        );
-        controlRequestRef.current = { requestId, kind: "require" };
-        setIsWaitingApproval(true);
+        requestRemoteControl();
     };
 
+    useEffect(() => {
+        const claimed = claimControlReconnect(
+            controlReconnectRef.current,
+            initData?.connection_epoch,
+            isRTCConnected,
+        );
+        controlReconnectRef.current = claimed.intent;
+        if (claimed.shouldRequest) {
+            const clipboardIntent = clipboardReconnectIntentRef.current;
+            clipboardReconnectIntentRef.current = null;
+            requestRemoteControl(clipboardIntent ?? undefined);
+        }
+    }, [initData?.connection_epoch, isRTCConnected, requestRemoteControl]);
+
     const handleDisconnect = () => {
+        const finalEpoch = initData?.connection_epoch
+            ?? settingsReconnectRef.current?.previousEpoch;
+        settingsReconnectRef.current = null;
+        controlReconnectRef.current = null;
+        clipboardReconnectIntentRef.current = null;
         clearPrivateScreenPending();
+        releaseInputsRef.current();
+        deactivateWhiteboardRef.current();
         if (deskId) {
             if (isPrivateScreen) {
                 console.log(`Disabling private screen before disconnect`);
                 sendMessage(SIGNALING_TYPE_CODE_SET_PRIVATE_SCREEN_VISIBILITY, { visible: false }, deskId);
             }
-            sendMessage(SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION, null, deskId);
+            if (finalEpoch) {
+                sendMessage(
+                    SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION,
+                    {
+                        connection_epoch: finalEpoch,
+                        finalize_logical_connection: true,
+                    },
+                    deskId,
+                );
+            }
         }
         closeRTC();
         navigate(`/desk/${deskId}`);
@@ -910,10 +1436,11 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
 
     const handleMediaPipelineRetry = () => {
         if (!deskId || mediaRetryPending) return;
+        beginVideoTransition();
         setMediaRetryPending(true);
         mediaRetryRequestIdRef.current = sendMessage(
             SIGNALING_TYPE_CODE_RETRY_MEDIA_PIPELINE,
-            null,
+            { connection_epoch: initData?.connection_epoch },
             deskId,
         );
     };
@@ -999,18 +1526,27 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                 open={isConfigOpen}
                 onOpenChange={setIsConfigOpen}
                 initData={initData}
+                preferences={devicePreferences}
                 onSubmit={handleConfigSubmit}
                 onCancel={handleConfigCancel}
                 adaptiveQualityEnabled={adaptiveQualityEnabled}
                 onAdaptiveQualityChange={setAdaptiveQualityEnabled}
                 adaptiveBitrateEnabled={adaptiveBitrateEnabled}
                 onAdaptiveBitrateChange={setAdaptiveBitrateEnabled}
+                systemAudioAllowed={restricted.capabilityVisible('allow_system_audio_capture')}
             />
             <div className="flex items-center justify-between border-b p-4">
                 <h2 className="text-lg font-semibold">{t('pages.desk.title')} - {deskId}</h2>
                 <div className="flex items-center gap-4">
                     {hasControl && (
                         <div className="text-sm font-medium text-blue-500">{t('pages.desk.status.controlling')}</div>
+                    )}
+                    {systemAudioState && (
+                        <div className="text-sm text-muted-foreground">
+                            {t('pages.desk.systemAudioState', {
+                                state: t(systemAudioStateTranslationKey(systemAudioState.state)),
+                            })}
+                        </div>
                     )}
                     {isConnected && (
                         <ConnectionQualityBadge packetLoss={rtcStats.packetLoss} rtt={rtcStats.rtt} />
@@ -1042,7 +1578,12 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                             playsInline
                             muted={isMuted}
                             tabIndex={0}
-                            onCanPlay={() => setIsVideoReady(true)}
+                            onCanPlay={() => {
+                                setIsVideoReady(true);
+                                if (!settingsApplyRef.current && !mediaRetryRequestIdRef.current) {
+                                    finishVideoTransition();
+                                }
+                            }}
                         />
 
                         {/* Escape hint shown in fullscreen when the Keyboard
@@ -1060,7 +1601,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                         {/* Whiteboard canvas overlay */}
                         <WhiteboardCanvas
                             elements={whiteboard.elements}
-                            isActive={whiteboard.isActive}
+                            isActive={whiteboard.isInteractive}
                             videoRef={videoRef}
                             onPointerDown={whiteboard.handlePointerDown}
                             onPointerMove={whiteboard.handlePointerMove}
@@ -1069,7 +1610,7 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                         />
 
                         {/* Whiteboard toolbar */}
-                        {whiteboard.isActive && (
+                        {whiteboard.isInteractive && (
                             <WhiteboardToolbar
                                 tool={whiteboard.tool}
                                 setTool={whiteboard.setTool}
@@ -1130,15 +1671,19 @@ export default function DeskSession({ orgId }: DeskSessionProps = {}) {
                         )}
 
                         <div
-                            className={`videoPlaceholder ${isVideoReady ? 'hidden' : ''}`}
+                            className={`videoPlaceholder ${isVideoReady && !isVideoTransitioning ? 'hidden' : ''}`}
                             onContextMenu={(e) => { e.preventDefault() }}
                         >
                             <div className="placeholderContent">
                                 <span className="artText">LCXL Remote Desk</span>
+                                <div className="videoLoadingBar" aria-hidden="true" />
+                                <p className="videoLoadingText" aria-live="polite">
+                                    {t(isVideoTransitioning
+                                        ? 'pages.desk.applyingVideoSettings'
+                                        : 'pages.desk.connectingVideo')}
+                                </p>
                                 {!initData && (
-                                    <p className="mt-3 text-sm text-white/80">
-                                        {t('pages.desk.initializingCapture')}
-                                        <br />
+                                    <p className="mt-1 text-sm text-white/60">
                                         {t('pages.desk.waitingPermission')}
                                     </p>
                                 )}

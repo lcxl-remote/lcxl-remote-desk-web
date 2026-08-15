@@ -32,6 +32,7 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::UpdateRemoteAccessLock
         | SignalingType::TerminateRemotePeer
         | SignalingType::RetryMediaPipeline
+        | SignalingType::ApplyRemoteSessionSettings
         | SignalingType::GetSystemInfo
         | SignalingType::ListFiles
         | SignalingType::DeleteFile
@@ -60,6 +61,7 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::RemoteAccessLockUpdated
         | SignalingType::RemotePeerTerminationResolved
         | SignalingType::MediaPipelineRetryCompleted
+        | SignalingType::RemoteSessionSettingsApplied
         | SignalingType::SystemInfoRetrieved
         | SignalingType::FilesListed
         | SignalingType::FileDeleted
@@ -79,7 +81,7 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         SignalingType::RevokeSupportCode
         | SignalingType::RevokeAccessGrant
         | SignalingType::CloseRemoteSession
-        | SignalingType::UpdateDeskSettings
+        | SignalingType::UpdateAdaptiveVideoQuality
         | SignalingType::SendTerminalInput
         | SignalingType::ResizeTerminal
         | SignalingType::CloseTerminal
@@ -93,6 +95,7 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::PrivateScreenStateChanged
         | SignalingType::AudioPlaybackFailed
         | SignalingType::MediaPipelineStateChanged
+        | SignalingType::SystemAudioCaptureStateChanged
         | SignalingType::TerminalOutputProduced
         | SignalingType::TerminalClosed
         | SignalingType::DesktopSwitching
@@ -121,6 +124,7 @@ pub fn response_type_for_request(t: SignalingType) -> Option<SignalingType> {
         SignalingType::UpdateRemoteAccessLock => SignalingType::RemoteAccessLockUpdated,
         SignalingType::TerminateRemotePeer => SignalingType::RemotePeerTerminationResolved,
         SignalingType::RetryMediaPipeline => SignalingType::MediaPipelineRetryCompleted,
+        SignalingType::ApplyRemoteSessionSettings => SignalingType::RemoteSessionSettingsApplied,
         SignalingType::GetSystemInfo => SignalingType::SystemInfoRetrieved,
         SignalingType::ListFiles => SignalingType::FilesListed,
         SignalingType::DeleteFile => SignalingType::FileDeleted,
@@ -157,6 +161,7 @@ pub fn response_types_for_request(t: SignalingType) -> &'static [SignalingType] 
         UpdateRemoteAccessLock => &[RemoteAccessLockUpdated],
         TerminateRemotePeer => &[RemotePeerTerminationResolved],
         RetryMediaPipeline => &[MediaPipelineRetryCompleted],
+        ApplyRemoteSessionSettings => &[RemoteSessionSettingsApplied],
         GetSystemInfo => &[SystemInfoRetrieved],
         ListFiles => &[FilesListed],
         DeleteFile => &[FileDeleted],

@@ -7,6 +7,7 @@ import { deskErrorCodeEnum } from "@/services/types"
 export const SECURITY_CAPABILITIES = [
     "allow_remote_control",
     "allow_clipboard_sync",
+    "allow_system_audio_capture",
     "allow_private_screen",
     "allow_whiteboard",
     "allow_terminal",

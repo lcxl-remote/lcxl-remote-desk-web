@@ -108,7 +108,8 @@ mod request_remote_ice_tests;
 /// authorization point — a capability-scoped code-session (routed as
 /// `device_user`) can never originate one (see
 /// [`ConnectionState::forward_to_peer`]). Session-scoped media tuning
-/// (`UpdateDeskSettings`) is deliberately excluded — it is not host config.
+/// (`ApplyRemoteSessionSettings` / `UpdateAdaptiveVideoQuality`) is deliberately
+/// excluded — it is not host config.
 pub(crate) fn is_owner_plane_management_frame(t: SignalingType) -> bool {
     matches!(
         t,
@@ -510,7 +511,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // authorization point. door1 denies them for an *admitted* capped
             // session; blocking here also closes the pre-`RequestRemoteAccess` window,
             // where the host has no admission record yet and would otherwise pass
-            // them. Session media tuning (`UpdateDeskSettings`) is
+            // them. Session media tuning (`ApplyRemoteSessionSettings` /
+            // `UpdateAdaptiveVideoQuality`) is
             // session-scoped, not host config, so it is intentionally not listed.
             if is_owner_plane_management_frame(signaling_model.signaling_type) {
                 return DeskSignalFacadeError::custom_error(
@@ -995,7 +997,10 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::ReleaseControl
             | SignalingType::ControlReleased
             | SignalingType::CloseRemoteSession
-            | SignalingType::UpdateDeskSettings
+            | SignalingType::ApplyRemoteSessionSettings
+            | SignalingType::RemoteSessionSettingsApplied
+            | SignalingType::UpdateAdaptiveVideoQuality
+            | SignalingType::SystemAudioCaptureStateChanged
             | SignalingType::ListFiles
             | SignalingType::FilesListed
             | SignalingType::DeleteFile

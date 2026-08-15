@@ -5,9 +5,17 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import DeskSession from './desk-session';
 import {
+  armControlReconnect,
+  armSettingsApplyTimeout,
   buildDesktopRequestRemotePayload,
+  claimControlReconnect,
+  isRemoteSettingsFailure,
+  resolveAdaptiveBitrateForHost,
   shouldOpenConfigDialog,
   shouldShowMediaPipelineOverlay,
+  systemAudioStateTranslationKey,
+  videoSettingsMayInterrupt,
+  waitForVideoPresentation,
 } from './desk-session-model';
 import React from 'react';
 import { SIGNALING_TYPE_CODE_MEDIA_PIPELINE_STATE_CHANGED } from './constants';
@@ -15,6 +23,65 @@ import { SIGNALING_TYPE_CODE_MEDIA_PIPELINE_STATE_CHANGED } from './constants';
 const signalingHarness = vi.hoisted(() => ({
   subscribers: new Set<(message: any) => void>(),
 }));
+
+describe('settings apply model', () => {
+  it('keeps an unsupported host adaptive-bitrate setting at its suggestion', () => {
+    expect(resolveAdaptiveBitrateForHost('unsupported', false, true)).toBe(false);
+    expect(resolveAdaptiveBitrateForHost('apply', false, true)).toBe(true);
+  });
+
+  it('replaces the offline deadline when the request reaches the wire', () => {
+    vi.useFakeTimers();
+    const pending = { requestId: 'settings-1', timer: null as number | null };
+    const queuedTimeout = vi.fn();
+    const responseTimeout = vi.fn();
+
+    expect(armSettingsApplyTimeout(pending, 'settings-1', queuedTimeout, 1_000)).toBe(true);
+    vi.advanceTimersByTime(500);
+    expect(armSettingsApplyTimeout(pending, 'settings-1', responseTimeout, 1_000)).toBe(true);
+    vi.advanceTimersByTime(500);
+    expect(queuedTimeout).not.toHaveBeenCalled();
+    expect(responseTimeout).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(500);
+    expect(responseTimeout).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it('localizes every system-audio state and has an unknown fallback', () => {
+    expect(systemAudioStateTranslationKey('off')).toBe('pages.desk.systemAudioStateValue.off');
+    expect(systemAudioStateTranslationKey('starting')).toBe('pages.desk.systemAudioStateValue.starting');
+    expect(systemAudioStateTranslationKey('active')).toBe('pages.desk.systemAudioStateValue.active');
+    expect(systemAudioStateTranslationKey('restarting')).toBe('pages.desk.systemAudioStateValue.restarting');
+    expect(systemAudioStateTranslationKey('denied')).toBe('pages.desk.systemAudioStateValue.denied');
+    expect(systemAudioStateTranslationKey('failed')).toBe('pages.desk.systemAudioStateValue.failed');
+    expect(systemAudioStateTranslationKey('future-state')).toBe('pages.desk.systemAudioStateValue.unknown');
+  });
+});
+
+describe('settings reconnect control restoration', () => {
+  it('does not carry authorization into the replacement epoch', () => {
+    const intent = armControlReconnect(true, 'epoch-1');
+
+    expect(claimControlReconnect(intent, 'epoch-1', true)).toEqual({
+      intent,
+      shouldRequest: false,
+    });
+    expect(claimControlReconnect(intent, 'epoch-2', false)).toEqual({
+      intent,
+      shouldRequest: false,
+    });
+  });
+
+  it('requests control once the replacement PC connects', () => {
+    const intent = armControlReconnect(true, 'epoch-1');
+
+    expect(claimControlReconnect(intent, 'epoch-2', true)).toEqual({
+      intent: null,
+      shouldRequest: true,
+    });
+    expect(armControlReconnect(false, 'epoch-1')).toBeNull();
+  });
+});
 
 // Mock routing
 vi.mock('react-router-dom', () => ({
@@ -56,6 +123,7 @@ vi.mock('./use-desk-rtc', () => ({
 vi.mock('./use-desk-input', () => ({
   useDeskInput: () => ({
     sendKeyboardEvents: vi.fn(),
+    releaseAllInputs: vi.fn(),
   }),
 }));
 
@@ -64,15 +132,19 @@ vi.mock('./use-desk-clipboard', () => ({
     clipboardEnabled: false,
     transferStatus: 'idle',
     fallbackToast: { show: false },
+    toggleClipboard: vi.fn(),
+    enableClipboard: vi.fn(),
   }),
 }));
 
 vi.mock('./use-desk-whiteboard', () => ({
   useDeskWhiteboard: () => ({
     isActive: false,
+    isInteractive: false,
     canActivate: true,
     elements: [],
     toggleWhiteboard: vi.fn(),
+    deactivateWhiteboard: vi.fn(),
   }),
 }));
 
@@ -86,6 +158,17 @@ vi.mock('./use-desk-microphone', () => ({
 vi.mock('./use-cursor-sync', () => ({
   useCursorSync: () => ({
     cursorStyle: 'default',
+  }),
+}));
+
+vi.mock('@/hooks/use-device-id', () => ({
+  useDeviceConnectionResolution: () => ({
+    status: 'persistent',
+    connection: {
+      connection_id: 'test-desk',
+      version_info: { client_id: 'standalone-test-host' },
+    },
+    deviceKey: 'client:standalone-test-host',
   }),
 }));
 
@@ -258,6 +341,83 @@ describe('shouldShowMediaPipelineOverlay', () => {
   });
 });
 
+describe('isRemoteSettingsFailure', () => {
+  it('accepts a typed success response whose response_state has code zero', () => {
+    expect(isRemoteSettingsFailure(false, 0)).toBe(false);
+  });
+
+  it('rejects both typed failures and correlated protocol Error frames', () => {
+    expect(isRemoteSettingsFailure(false, 4)).toBe(true);
+    expect(isRemoteSettingsFailure(true, 0)).toBe(true);
+  });
+});
+
+describe('videoSettingsMayInterrupt', () => {
+  const baseline = {
+    adaptive_bitrate: true,
+    audio: null,
+    enable_dirty_rect: true,
+    image_capture: 'WGC',
+    show_mouse: true,
+    video_device_name: 'DISPLAY1',
+    video_encoder: 'X264' as const,
+    video_fps: 60,
+    video_quality: 22,
+  };
+
+  it('covers capture, display and encoder replacement', () => {
+    expect(videoSettingsMayInterrupt(baseline, { ...baseline, image_capture: 'DXGI' })).toBe(true);
+    expect(videoSettingsMayInterrupt(baseline, { ...baseline, video_device_name: 'DISPLAY2' })).toBe(true);
+    expect(videoSettingsMayInterrupt(baseline, { ...baseline, video_encoder: 'VP8' })).toBe(true);
+  });
+
+  it('does not cover settings applied to the current video generation', () => {
+    expect(videoSettingsMayInterrupt(baseline, { ...baseline, video_fps: 30 })).toBe(false);
+    expect(videoSettingsMayInterrupt(baseline, { ...baseline, video_quality: 30 })).toBe(false);
+    expect(videoSettingsMayInterrupt(baseline, { ...baseline, show_mouse: false })).toBe(false);
+  });
+});
+
+describe('waitForVideoPresentation', () => {
+  it('uses the browser video-frame callback when available', () => {
+    const video = document.createElement('video');
+    let callback: (() => void) | null = null;
+    video.requestVideoFrameCallback = vi.fn((next) => {
+      callback = next as unknown as () => void;
+      return 7;
+    });
+    video.cancelVideoFrameCallback = vi.fn();
+    const presented = vi.fn();
+
+    waitForVideoPresentation(video, presented);
+    expect(presented).not.toHaveBeenCalled();
+    expect(callback).not.toBeNull();
+    callback!();
+    expect(presented).toHaveBeenCalledTimes(1);
+  });
+
+  it('finishes early when playback quality reports another frame', () => {
+    vi.useFakeTimers();
+    const video = document.createElement('video');
+    let totalVideoFrames = 10;
+    video.getVideoPlaybackQuality = () => ({
+      corruptedVideoFrames: 0,
+      creationTime: 0,
+      droppedVideoFrames: 0,
+      totalVideoFrames,
+    });
+    const presented = vi.fn();
+
+    waitForVideoPresentation(video, presented);
+    totalVideoFrames = 11;
+    vi.advanceTimersByTime(100);
+    expect(presented).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(5_000);
+    expect(presented).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+});
+
 describe('buildDesktopRequestRemotePayload', () => {
   it('always identifies desktop sessions explicitly', () => {
     expect(buildDesktopRequestRemotePayload('desk-1', null, 'auto')).toEqual({
@@ -275,6 +435,14 @@ describe('buildDesktopRequestRemotePayload', () => {
 });
 
 describe('DeskSession Video Sizing', () => {
+  it('shows the shared animated loading treatment before the first video frame', () => {
+    const { container } = render(<DeskSession />);
+
+    expect(container.querySelector('.videoPlaceholder')).not.toHaveClass('hidden');
+    expect(container.querySelector('.videoLoadingBar')).toBeInTheDocument();
+    expect(screen.getByText('pages.desk.connectingVideo')).toBeInTheDocument();
+  });
+
   it('keeps the video element using object-contain so it letterboxes inside the wrapper', () => {
     const { container } = render(<DeskSession />);
 

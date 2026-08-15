@@ -323,8 +323,6 @@ pub struct DeskSettings {
     pub video_quality: u32,
     /// Enable adaptive web page resolution
     pub adaptive_web_page_resolution: bool,
-    /// Video zoom ratio (e.g., 50 for 50% zoom)
-    pub video_zoom_ratio: u32,
     /// Video frame rate (e.g., 30 fps)
     pub video_fps: u32,
     /// Enable mouse display on the screen
@@ -369,7 +367,7 @@ pub struct DeskSettings {
     /// Whether the daemon's REMB-driven adaptive bitrate cap is active
     /// for this connection. Defaults to `true`. Session-scoped state:
     /// it takes effect per connection (initialised from the offer's
-    /// desk settings, live-toggled via `UpdateDeskSettings` for the
+    /// session settings, live-toggled via `ApplyRemoteSessionSettings` for the
     /// originating connection only) and is not persisted server-side —
     /// the browser keeps the user's preference. Distinct from the
     /// browser-side adaptive *quality* loop: the cap only trims
@@ -482,7 +480,6 @@ impl Default for DeskSettings {
             video_device_name: String::new(),
             video_quality: 22,
             adaptive_web_page_resolution: false,
-            video_zoom_ratio: 100,
             video_fps: 60,
             show_mouse: true,
             image_capture: None,
@@ -696,7 +693,6 @@ mod wincode_tests {
             video_device_name: r"\\.\DISPLAY2".to_string(),
             video_quality: 33,
             adaptive_web_page_resolution: true,
-            video_zoom_ratio: 75,
             video_fps: 45,
             show_mouse: false,
             image_capture: Some("dxgi".to_string()),
@@ -706,7 +702,7 @@ mod wincode_tests {
                 audio_data_flow: AudioDataFlow::Render,
                 audio_device_id: Some("device-1".to_string()),
             }),
-            audio_encoder: Some("OPUS".to_string()),
+            audio_encoder: Some("Opus".to_string()),
             x264_encoder: Some(X264EncoderSettings {
                 quality: 18,
                 gop: 240,

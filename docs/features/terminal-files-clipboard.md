@@ -64,4 +64,4 @@ are the same machine.
 
 ## System Audio
 
-Remote audio playback is captured and synchronized to the controller (Opus-encoded). See [Remote Control & Streaming](/features/streaming#audio).
+When requested by the controller and allowed by the host's independent system-audio permission, remote playback is captured and sent live to the controller as Opus. It is separate from controller-microphone uplink and is not recorded or persisted by this feature. See [Remote Control & Streaming](/features/streaming#audio).

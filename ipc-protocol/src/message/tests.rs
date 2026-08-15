@@ -1,11 +1,13 @@
 use super::*;
-use desk_signal_facade::model::desk_settings::{DeskSettings, LinuxInputControlMode};
+use desk_signal_facade::model::audio_capture::{AudioDataFlow, SelectedAudioDevice};
+use desk_signal_facade::model::desk_settings::LinuxInputControlMode;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
 use desk_signal_facade::model::image_capture::Resolution;
 use desk_signal_facade::model::media_capability::VideoEncoderId;
 use desk_signal_facade::model::media_pipeline::{MediaPipelinePhase, MediaPipelineStateData};
 use desk_signal_facade::model::policy_snapshot::{PolicyGenerations, PolicySnapshot};
 use desk_signal_facade::model::private_screen::PrivateScreenStateChangedData;
+use desk_signal_facade::model::remote_session::AudioPipelineSettings;
 use desk_signal_facade::model::security_settings::{SecurityPermissionType, SecuritySettings};
 use desk_signal_facade::model::signal::SignalingType;
 use desk_signal_facade::model::system_info::SystemInfo;
@@ -133,36 +135,53 @@ where
 fn start_media_round_trips_wincode() {
     let msg = ServiceToWorker::StartMedia(StartMediaPayload {
         connection_id: "conn-1".to_string(),
+        connection_epoch: "epoch-1".to_string(),
+        video_generation: 2,
+        audio_generation: 3,
         video_codec: MediaCodec::H264,
-        video_encoder: Some(VideoEncoderId::X264),
-        audio_codec: MediaCodec::Opus,
+        video_encoder: VideoEncoderId::X264,
         video_device: Some("\\\\.\\DISPLAY1".to_string()),
-        audio_device: None,
         fps: 60,
         bitrate_kbps: 6_000,
         quality: 0,
         start_video: true,
-        start_audio: true,
-        image_capture: None,
+        audio: Some(StartAudioSettings {
+            codec: MediaCodec::Opus,
+            pipeline: AudioPipelineSettings {
+                audio_capture: "wasapi".to_string(),
+                audio_device: SelectedAudioDevice {
+                    audio_data_flow: AudioDataFlow::Render,
+                    audio_device_id: None,
+                },
+                audio_encoder: desk_signal_facade::model::remote_session::AudioEncoderId::Opus,
+            },
+        }),
+        image_capture: "default".to_string(),
         resolved_wayland_control_mode: Some(LinuxInputControlMode::Portal),
-        enable_dirty_rect: Some(false),
+        enable_dirty_rect: false,
+        show_mouse: true,
     });
     match wincode_round_trip(&msg) {
         ServiceToWorker::StartMedia(p) => {
             assert_eq!(p.connection_id, "conn-1");
             assert_eq!(p.video_codec, MediaCodec::H264);
-            assert_eq!(p.video_encoder, Some(VideoEncoderId::X264));
-            assert_eq!(p.audio_codec, MediaCodec::Opus);
+            assert_eq!(p.video_encoder, VideoEncoderId::X264);
+            assert_eq!(p.connection_epoch, "epoch-1");
+            assert_eq!(p.video_generation, 2);
+            assert_eq!(p.audio_generation, 3);
+            assert_eq!(
+                p.audio.as_ref().map(|audio| audio.codec),
+                Some(MediaCodec::Opus)
+            );
             assert_eq!(
                 p.resolved_wayland_control_mode,
                 Some(LinuxInputControlMode::Portal)
             );
             assert_eq!(p.fps, 60);
             assert!(p.start_video);
-            assert!(p.start_audio);
+            assert!(p.audio.is_some());
             assert_eq!(
-                p.enable_dirty_rect,
-                Some(false),
+                p.enable_dirty_rect, false,
                 "enable_dirty_rect must survive StartMedia wincode round-trip"
             );
         }
@@ -171,43 +190,42 @@ fn start_media_round_trips_wincode() {
 }
 
 /// DataChannel-only connections (browser file-management UI) ship
-/// `start_video=false, start_audio=false` so the worker skips both
+/// `start_video=false, audio=None` so the worker skips both
 /// capture pipelines. Round-trip the negative case so a wincode
 /// schema bump that drops the new fields is caught here.
 #[test]
 fn start_media_data_channel_only_round_trips() {
     let msg = ServiceToWorker::StartMedia(StartMediaPayload {
         connection_id: "conn-files".to_string(),
+        connection_epoch: "epoch-files".to_string(),
+        video_generation: 1,
+        audio_generation: 1,
         video_codec: MediaCodec::H264,
-        video_encoder: None,
-        audio_codec: MediaCodec::Opus,
+        video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
         video_device: None,
-        audio_device: None,
         fps: 0,
         bitrate_kbps: 0,
         quality: 0,
         start_video: false,
-        start_audio: false,
-        image_capture: None,
+        audio: None,
+        image_capture: "default".to_string(),
         resolved_wayland_control_mode: None,
-        enable_dirty_rect: None,
+        enable_dirty_rect: false,
+        show_mouse: false,
     });
     match wincode_round_trip(&msg) {
         ServiceToWorker::StartMedia(p) => {
             assert!(!p.start_video, "start_video=false must round-trip");
-            assert!(!p.start_audio, "start_audio=false must round-trip");
+            assert!(p.audio.is_none(), "audio=None must round-trip");
         }
         other => panic!("unexpected: {other:?}"),
     }
 }
 
-/// `default_true` exists for the JSON deserialisation back-compat
-/// path: a payload missing both fields must default to "media on"
-/// so an old daemon talking to a new worker keeps the legacy
-/// behaviour. Bincode is positional and will not exercise this
-/// branch, so this test pokes the JSON path directly.
+/// The unpublished protocol switches atomically: required media fields must
+/// not be inferred from an older payload.
 #[test]
-fn start_media_json_missing_flags_defaults_to_media_on() {
+fn start_media_json_missing_required_fields_is_rejected() {
     let json = r#"{
             "connection_id": "conn-legacy",
             "video_codec": "H264",
@@ -218,20 +236,12 @@ fn start_media_json_missing_flags_defaults_to_media_on() {
             "bitrate_kbps": 0,
             "quality": 0
         }"#;
-    let payload: StartMediaPayload = serde_json::from_str(json).expect("parse");
-    assert!(
-        payload.start_video,
-        "missing start_video must default to true"
-    );
-    assert!(
-        payload.start_audio,
-        "missing start_audio must default to true"
-    );
+    assert!(serde_json::from_str::<StartMediaPayload>(json).is_err());
 }
 
 /// `UpdateMediaSettings` carries the live-tune knobs the daemon
-/// sniffs out of an inbound `UpdateDeskSettings` and fans out to
-/// every active worker. Round-trip pins the field set (especially
+/// receives from connection-scoped settings commands. Round-trip pins
+/// the field set (especially
 /// `enable_dirty_rect`) so a future schema bump that drops the
 /// dirty-rect flag fails this test instead of silently regressing
 /// the kill-switch back to "frontend toggle ignored".
@@ -239,10 +249,13 @@ fn start_media_json_missing_flags_defaults_to_media_on() {
 fn update_media_settings_round_trips_wincode_with_dirty_rect() {
     let msg = ServiceToWorker::UpdateMediaSettings(UpdateMediaSettingsPayload {
         connection_id: "conn-dr".to_string(),
+        connection_epoch: "epoch-dr".to_string(),
+        video_generation: 4,
         fps: Some(45),
         bitrate_kbps: None,
         quality: Some(22),
         enable_dirty_rect: Some(false),
+        show_mouse: Some(true),
     });
     match wincode_round_trip(&msg) {
         ServiceToWorker::UpdateMediaSettings(p) => {
@@ -260,26 +273,23 @@ fn update_media_settings_round_trips_wincode_with_dirty_rect() {
     }
 }
 
-/// JSON back-compat: a payload from an older daemon that does not
-/// know about `enable_dirty_rect` must deserialise with the field
-/// as `None` (meaning: "leave current setting alone") rather than
-/// erroring or defaulting to `Some(false)`.
+/// Required terminal-state protocol fields are rejected when absent.
 #[test]
-fn update_media_settings_json_missing_enable_dirty_rect_is_none() {
+fn update_media_settings_json_missing_required_fields_is_rejected() {
     let json = r#"{
             "connection_id": "conn-legacy",
             "fps": 30,
             "bitrate_kbps": null,
             "quality": 50
         }"#;
-    let payload: UpdateMediaSettingsPayload = serde_json::from_str(json).expect("parse");
-    assert_eq!(payload.enable_dirty_rect, None);
+    assert!(serde_json::from_str::<UpdateMediaSettingsPayload>(json).is_err());
 }
 
 #[test]
 fn stop_media_round_trips_wincode() {
     let msg = ServiceToWorker::StopMedia(StopMediaPayload {
         connection_id: "conn-2".to_string(),
+        connection_epoch: "epoch-2".to_string(),
     });
     match wincode_round_trip(&msg) {
         ServiceToWorker::StopMedia(p) => assert_eq!(p.connection_id, "conn-2"),
@@ -366,7 +376,7 @@ fn capabilities_round_trips_wincode() {
         audio_codecs: vec![MediaCodec::Opus],
         video_encoders: vec!["X264".to_string(), "H264".to_string(), "VP9".to_string()],
         video_encoder_capabilities: vec![],
-        audio_encoders: vec!["OPUS".to_string()],
+        audio_encoders: vec!["Opus".to_string()],
         video_device_list: video_device_list.clone(),
         audio_device_list: audio_device_list.clone(),
         has_tauri: true,
@@ -382,7 +392,7 @@ fn capabilities_round_trips_wincode() {
                 "X264 and H264 must remain distinct entries — the UI \
                      needs them to expose the libx264 vs OpenH264 choice"
             );
-            assert_eq!(c.audio_encoders, vec!["OPUS".to_string()]);
+            assert_eq!(c.audio_encoders, vec!["Opus".to_string()]);
             assert_eq!(c.video_device_list.len(), 1);
             assert_eq!(
                 c.video_device_list["dxgi"][0].device_name,
@@ -594,6 +604,8 @@ fn media_frame_round_trips_wincode_200kb() {
     let payload = vec![0xABu8; 200 * 1024];
     let original = MediaFrame {
         connection_id: "conn-1".to_string(),
+        connection_epoch: "epoch-1".to_string(),
+        generation: 9,
         seq: 42,
         ts_ns: 1_700_000_000_000_000_000,
         duration_ns: 16_666_666,
@@ -628,34 +640,6 @@ fn set_private_screen_visibility_round_trips_wincode() {
             }
             other => panic!("unexpected: {other:?}"),
         }
-    }
-}
-
-/// `UpdateDeskSettings` ferries `DeskSettings` over the wincode
-/// derive. Verify non-default media + non-media
-/// fields both survive — these are the ones the worker's
-/// `handle_update_desk_settings` and the daemon's
-/// `broadcast_media_settings_update` both read.
-#[test]
-fn update_desk_settings_round_trips_wincode() {
-    let settings = DeskSettings {
-        video_fps: 45,
-        video_quality: 33,
-        wayland_control_mode: Some("portal".to_string()),
-        ..DeskSettings::default()
-    };
-    let msg = ServiceToWorker::UpdateDeskSettings(UpdateDeskSettingsPayload {
-        connection_id: "conn-uds".to_string(),
-        settings: settings.clone(),
-    });
-    match wincode_round_trip(&msg) {
-        ServiceToWorker::UpdateDeskSettings(p) => {
-            assert_eq!(p.connection_id, "conn-uds");
-            assert_eq!(p.settings.video_fps, 45);
-            assert_eq!(p.settings.video_quality, 33);
-            assert_eq!(p.settings.wayland_control_mode.as_deref(), Some("portal"));
-        }
-        other => panic!("unexpected: {other:?}"),
     }
 }
 
@@ -1113,29 +1097,45 @@ fn service_to_worker_all_variants_round_trip() {
         }),
         ServiceToWorker::StartMedia(StartMediaPayload {
             connection_id: "c".to_string(),
+            connection_epoch: "epoch-c".to_string(),
+            video_generation: 1,
+            audio_generation: 1,
             video_codec: MediaCodec::H264,
-            video_encoder: None,
-            audio_codec: MediaCodec::Opus,
+            video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
             video_device: None,
-            audio_device: None,
             fps: 30,
             bitrate_kbps: 4_000,
             quality: 0,
             start_video: true,
-            start_audio: true,
-            image_capture: None,
+            audio: Some(StartAudioSettings {
+                codec: MediaCodec::Opus,
+                pipeline: AudioPipelineSettings {
+                    audio_capture: "default".to_string(),
+                    audio_device: SelectedAudioDevice {
+                        audio_data_flow: AudioDataFlow::Render,
+                        audio_device_id: None,
+                    },
+                    audio_encoder: desk_signal_facade::model::remote_session::AudioEncoderId::Opus,
+                },
+            }),
+            image_capture: "default".to_string(),
             resolved_wayland_control_mode: None,
-            enable_dirty_rect: None,
+            enable_dirty_rect: false,
+            show_mouse: false,
         }),
         ServiceToWorker::StopMedia(StopMediaPayload {
             connection_id: "c".to_string(),
+            connection_epoch: "epoch-c".to_string(),
         }),
         ServiceToWorker::UpdateMediaSettings(UpdateMediaSettingsPayload {
             connection_id: "c".to_string(),
+            connection_epoch: "epoch-c".to_string(),
+            video_generation: 1,
             fps: Some(60),
             bitrate_kbps: Some(6_000),
             quality: Some(50),
             enable_dirty_rect: Some(false),
+            show_mouse: Some(true),
         }),
         ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
             connection_id: "c".to_string(),
@@ -1167,10 +1167,6 @@ fn service_to_worker_all_variants_round_trip() {
             request_id: "r-ps".to_string(),
             connection_id: "c".to_string(),
             visible: true,
-        }),
-        ServiceToWorker::UpdateDeskSettings(UpdateDeskSettingsPayload {
-            connection_id: "c".to_string(),
-            settings: DeskSettings::default(),
         }),
         ServiceToWorker::GetSystemInfo(ManagerRequestRefPayload {
             request_id: "r1".to_string(),
@@ -1226,6 +1222,7 @@ fn service_to_worker_all_variants_round_trip() {
         ServiceToWorker::SetVirtualDisplayMode(SetVirtualDisplayModePayload {
             request_id: "r8".to_string(),
             connection_id: "c".to_string(),
+            connection_epoch: "epoch".to_string(),
             width: 1920,
             height: 1080,
             refresh_hz: 60,
@@ -1486,6 +1483,8 @@ fn worker_to_service_all_variants_round_trip() {
         }),
         WorkerToService::MediaPipelineState(MediaPipelineStatePayload {
             connection_id: "c".to_string(),
+            connection_epoch: "epoch-c".to_string(),
+            video_generation: 1,
             data: MediaPipelineStateData {
                 phase: MediaPipelinePhase::Blocked,
                 encoder: Some(VideoEncoderId::OpenH264),
@@ -1552,6 +1551,7 @@ fn worker_to_service_all_variants_round_trip() {
         WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
             request_id: "r".to_string(),
             connection_id: "c".to_string(),
+            connection_epoch: "epoch".to_string(),
             outcome: VirtualDisplayModeOutcome::Applied(VirtualDisplayModeData {
                 width: 1920,
                 height: 1080,
@@ -1610,7 +1610,7 @@ fn worker_to_service_all_variants_round_trip() {
 
 /// `SignalingErrorPayload.signaling_type` rides the wincode tag
 /// on the `SignalingType` enum. Iterate every one of
-/// the 36 variants so a missing `#[wincode(tag = N)]` (or a
+/// every error-routable variant so a missing `#[wincode(tag = N)]` (or a
 /// wrongly-numbered one) surfaces here instead of as a silent
 /// browser-side mismatch on a SignalingError reply.
 #[test]
@@ -1641,7 +1641,10 @@ fn signaling_error_round_trips_wincode_for_every_signaling_type() {
         SignalingType::PrivateScreenVisibilitySet,
         SignalingType::DisplaySettingsChanged,
         SignalingType::MediaPipelineRetryCompleted,
-        SignalingType::UpdateDeskSettings,
+        SignalingType::ApplyRemoteSessionSettings,
+        SignalingType::RemoteSessionSettingsApplied,
+        SignalingType::UpdateAdaptiveVideoQuality,
+        SignalingType::SystemAudioCaptureStateChanged,
         SignalingType::GetSystemInfo,
         SignalingType::SystemInfoRetrieved,
         SignalingType::ListFiles,
@@ -1664,7 +1667,7 @@ fn signaling_error_round_trips_wincode_for_every_signaling_type() {
     ];
     assert_eq!(
         all_types.len(),
-        45,
+        48,
         "SignalingType variant count drift — add new variant + tag here"
     );
     for ty in all_types {
@@ -1695,6 +1698,7 @@ fn set_virtual_display_mode_round_trips_wincode() {
     let msg = ServiceToWorker::SetVirtualDisplayMode(SetVirtualDisplayModePayload {
         request_id: "req-1".to_string(),
         connection_id: "conn-1".to_string(),
+        connection_epoch: "epoch-1".to_string(),
         width: 2560,
         height: 1440,
         refresh_hz: 144,
@@ -1716,6 +1720,7 @@ fn set_virtual_display_mode_round_trips_serde_json() {
     let msg = ServiceToWorker::SetVirtualDisplayMode(SetVirtualDisplayModePayload {
         request_id: "req-1".to_string(),
         connection_id: "conn-1".to_string(),
+        connection_epoch: "epoch-1".to_string(),
         width: 1280,
         height: 720,
         refresh_hz: 60,
@@ -1870,6 +1875,7 @@ fn virtual_display_mode_response_applied_round_trips_wincode() {
     let msg = WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
         request_id: "req-9".to_string(),
         connection_id: "conn-9".to_string(),
+        connection_epoch: "epoch-9".to_string(),
         outcome: VirtualDisplayModeOutcome::Applied(VirtualDisplayModeData {
             width: 1920,
             height: 1080,
@@ -1898,6 +1904,7 @@ fn virtual_display_mode_response_failed_round_trips_wincode() {
     let msg = WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
         request_id: "req-10".to_string(),
         connection_id: "conn-10".to_string(),
+        connection_epoch: "epoch-10".to_string(),
         outcome: VirtualDisplayModeOutcome::Failed("driver pipe IO failed".to_string()),
     });
     match wincode_round_trip(&msg) {

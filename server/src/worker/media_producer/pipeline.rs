@@ -81,6 +81,8 @@ pub(super) fn spawn_audio_pipeline_thread(
     stop_flag: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     let connection_id = payload.connection_id.clone();
+    let connection_epoch = payload.connection_epoch.clone();
+    let audio_generation = payload.audio_generation;
     let thread_name = format!("media-audio-{}", &connection_id);
     thread::Builder::new()
         .name(thread_name)
@@ -100,14 +102,50 @@ pub(super) fn spawn_audio_pipeline_thread(
             };
             let local = tokio::task::LocalSet::new();
             runtime.block_on(local.run_until(async move {
-                if let Err(e) =
-                    audio_pipeline_loop(base_settings, payload, media_sender, error_tx, stop_flag)
-                        .await
-                {
+                let _ = error_tx.send(WorkerToService::AudioPipelineStateChanged(
+                    AudioPipelineStateChangedPayload {
+                        connection_id: connection_id.clone(),
+                        connection_epoch: connection_epoch.clone(),
+                        audio_generation,
+                        phase: AudioPipelinePhase::Starting,
+                        resolved_audio_device_id: None,
+                        error_code: None,
+                    },
+                ));
+                let result = audio_pipeline_loop(
+                    base_settings,
+                    payload,
+                    media_sender,
+                    error_tx.clone(),
+                    stop_flag,
+                )
+                .await;
+                if let Err(e) = result {
                     // Audio failures degrade the stream to video-only
                     // but must not crash the connection; logged so the
                     // operator can investigate.
                     warn!("[MediaProducer] Audio pipeline for {connection_id} exited: {e}");
+                    let _ = error_tx.send(WorkerToService::AudioPipelineStateChanged(
+                        AudioPipelineStateChangedPayload {
+                            connection_id,
+                            connection_epoch,
+                            audio_generation,
+                            phase: AudioPipelinePhase::Failed,
+                            resolved_audio_device_id: None,
+                            error_code: Some(DeskErrorCode::SYSTEM_ERROR.code()),
+                        },
+                    ));
+                } else {
+                    let _ = error_tx.send(WorkerToService::AudioPipelineStateChanged(
+                        AudioPipelineStateChangedPayload {
+                            connection_id,
+                            connection_epoch,
+                            audio_generation,
+                            phase: AudioPipelinePhase::Off,
+                            resolved_audio_device_id: None,
+                            error_code: None,
+                        },
+                    ));
                 }
             }));
         })

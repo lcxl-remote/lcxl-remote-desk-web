@@ -447,6 +447,7 @@ fn should_refresh_after_set_mode_returns_true_on_applied() {
         VirtualDisplayModeData, VirtualDisplayModeOutcome, VirtualDisplayModeResponsePayload,
     };
     let response = WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
+        connection_epoch: "epoch".to_string(),
         request_id: "r".into(),
         connection_id: "c".into(),
         outcome: VirtualDisplayModeOutcome::Applied(VirtualDisplayModeData {
@@ -467,6 +468,7 @@ fn should_refresh_after_set_mode_returns_false_on_failed() {
         VirtualDisplayModeOutcome, VirtualDisplayModeResponsePayload,
     };
     let response = WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
+        connection_epoch: "epoch".to_string(),
         request_id: "r".into(),
         connection_id: "c".into(),
         outcome: VirtualDisplayModeOutcome::Failed("invalid mode".into()),
@@ -499,18 +501,20 @@ fn make_step(connection_id: &str, device: &str) -> RestartStep {
         active: StartMediaPayload {
             resolved_wayland_control_mode: None,
             connection_id: connection_id.to_string(),
+            connection_epoch: "test-epoch".to_string(),
+            video_generation: 1,
+            audio_generation: 1,
             video_codec: MediaCodec::H264,
-            video_encoder: None,
-            audio_codec: MediaCodec::Opus,
+            video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
             video_device: Some(device.to_string()),
-            audio_device: None,
             fps: 60,
             bitrate_kbps: 4_000,
             quality: 0,
             start_video: true,
-            start_audio: true,
-            image_capture: None,
-            enable_dirty_rect: None,
+            audio: None,
+            image_capture: "default".to_string(),
+            enable_dirty_rect: false,
+            show_mouse: false,
         },
     }
 }
@@ -634,6 +638,7 @@ fn wgc_restart_decoupled_from_failed_outcome() {
     };
     // Failed outcome (the CDS BADMODE case).
     let failed_response = WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
+        connection_epoch: "epoch".to_string(),
         request_id: "r".into(),
         connection_id: "c".into(),
         outcome: VirtualDisplayModeOutcome::Failed(

@@ -5,6 +5,10 @@ use desk_signal_facade::model::{
     connection::ConnectionsFetchedData,
     desk_settings::DeskSettings,
     media_pipeline::MediaPipelineStateData,
+    remote_session::{
+        AudioEncoderId, AudioPipelineSettings, RemoteSessionSettings, RemoteSessionSettingsApplied,
+        SuggestedSessionSettings, SystemAudioCaptureStateData,
+    },
     signal::{RemoteAccessInitializedData, RequestRemoteModel, SignalingModel},
     terminal::{TerminalInputData, TerminalOutputData, TerminalResizeData},
 };
@@ -56,5 +60,11 @@ use desk_input_injection::model::data_channel::{KeyboardEventData, MouseEventDat
     // named constants instead of the numbers being mirrored by hand.
     DeskErrorCode,
     MediaPipelineStateData,
+    SuggestedSessionSettings,
+    RemoteSessionSettings,
+    AudioPipelineSettings,
+    AudioEncoderId,
+    RemoteSessionSettingsApplied,
+    SystemAudioCaptureStateData,
 )))]
 pub struct ExtraSchemas;

@@ -1,0 +1,1 @@
+{"type":"string","enum":["unchanged","needs_reconnect"],"x-readme-ref-name":"ConnectionSettingsEffect"}

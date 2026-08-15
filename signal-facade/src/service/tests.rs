@@ -2,7 +2,8 @@ use super::*;
 
 /// The owner-plane host-management frames the central refuses to forward
 /// from a capability-scoped code-session (`device_user`). Session-scoped media
-/// tuning (`UpdateDeskSettings`) and the session/capability frames must NOT be
+/// tuning (`ApplyRemoteSessionSettings` / `UpdateAdaptiveVideoQuality`) and the
+/// session/capability frames must NOT be
 /// classified owner-plane, or a legitimate support session would break.
 #[test]
 fn owner_plane_frames_are_classified_for_code_session_denial() {
@@ -25,7 +26,8 @@ fn owner_plane_frames_are_classified_for_code_session_denial() {
         ListFiles,
         DeleteFile,
         SetPrivateScreenVisibility,
-        UpdateDeskSettings,
+        ApplyRemoteSessionSettings,
+        UpdateAdaptiveVideoQuality,
         RetryMediaPipeline,
     ] {
         assert!(

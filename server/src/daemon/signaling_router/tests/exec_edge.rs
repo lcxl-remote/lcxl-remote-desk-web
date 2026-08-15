@@ -1319,12 +1319,18 @@ pub(super) async fn session_approval_revoked_on_close_remote_session() {
     let _ = read_response(&mut rx);
     assert_eq!(ctx.session_approvals.granted_count("conn-1"), 1);
 
-    route(
-        &connection_lifecycle_model(SignalingType::CloseRemoteSession, "conn-1"),
-        &ctx,
-    )
-    .await
-    .unwrap();
+    let close = SignalingModel::new(
+        "rc",
+        SignalingType::CloseRemoteSession,
+        Some("conn-1".to_string()),
+        None,
+        Some(serde_json::json!({
+            "connection_epoch": "epoch-1",
+            "finalize_logical_connection": true
+        })),
+        None,
+    );
+    route(&close, &ctx).await.unwrap();
     assert_eq!(ctx.session_approvals.granted_count("conn-1"), 0);
 
     handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r3", "Get-Service -Name Spooler"))

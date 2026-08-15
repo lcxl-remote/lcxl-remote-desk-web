@@ -19,9 +19,7 @@ pub(super) fn codec_from_str(name: &str, is_video: bool) -> Option<MediaCodec> {
         }
     } else {
         match name {
-            // Capture-engine factory uses upper-case variant names
-            // (`AudioEncoderType::OPUS` → "OPUS") via `IntoStaticStr`.
-            "Opus" | "OPUS" => Some(MediaCodec::Opus),
+            "Opus" => Some(MediaCodec::Opus),
             _ => None,
         }
     }
@@ -116,6 +114,12 @@ pub(super) struct SettingsDrainOutcome {
     /// At least one knob that requires an encoder rebuild (fps /
     /// quality) actually changed.
     pub(super) needs_rebuild: bool,
+    /// At least one user-facing live video setting was consumed and
+    /// applied. This is deliberately broader than `needs_rebuild`:
+    /// dirty-rect and cursor visibility take effect without recreating
+    /// the encoder, but the daemon still needs a terminal Streaming
+    /// acknowledgement to complete the correlated settings request.
+    pub(super) live_settings_applied: bool,
     /// Latest bitrate-cap directive in the drained batch, if any:
     /// `Some(Some(k))` caps at `k` kbps, `Some(None)` clears the cap
     /// (wire sentinel `bitrate_kbps == Some(0)`), `None` means the
@@ -134,9 +138,7 @@ pub(super) struct SettingsDrainOutcome {
 /// `needs_rebuild` is only set when a knob actually changed — we
 /// compare to the *current* `merged_settings` rather than the IPC
 /// payload directly so coalesced updates that converge to the same
-/// value as the live state are no-ops (the daemon fans out on every
-/// `UpdateDeskSettings`, including ones that don't move encoder-
-/// relevant fields).
+/// value as the live state are no-ops.
 pub(super) fn drain_settings_updates(
     connection_id: &str,
     settings_rx: &mut mpsc::UnboundedReceiver<UpdateMediaSettingsPayload>,
@@ -145,26 +147,29 @@ pub(super) fn drain_settings_updates(
     frame_duration_ns: &mut u64,
 ) -> SettingsDrainOutcome {
     let mut changed = false;
+    let mut live_settings_applied = false;
     let mut cap_directive: Option<Option<u32>> = None;
     while let Ok(payload) = settings_rx.try_recv() {
         if let Some(fps) = payload.fps
             && fps > 0
-            && fps != merged_settings.video_fps
         {
-            merged_settings.video_fps = fps;
-            *frame_interval = merged_settings.get_duration_by_video_fps();
-            *frame_duration_ns = frame_interval.as_nanos().min(u64::MAX as u128) as u64;
-            changed = true;
+            live_settings_applied = true;
+            if fps != merged_settings.video_fps {
+                merged_settings.video_fps = fps;
+                *frame_interval = merged_settings.get_duration_by_video_fps();
+                *frame_duration_ns = frame_interval.as_nanos().min(u64::MAX as u128) as u64;
+                changed = true;
+            }
         }
-        if let Some(q) = payload.quality
-            && q != merged_settings.video_quality
-        {
-            merged_settings.video_quality = q;
-            changed = true;
+        if let Some(q) = payload.quality {
+            live_settings_applied = true;
+            if q != merged_settings.video_quality {
+                merged_settings.video_quality = q;
+                changed = true;
+            }
         }
-        if let Some(enable) = payload.enable_dirty_rect
-            && enable != merged_settings.enable_dirty_rect
-        {
+        if let Some(enable) = payload.enable_dirty_rect {
+            live_settings_applied = true;
             // Live-apply the browser's Advanced-tab kill-switch. We do
             // *not* flip the `changed` flag because the encoder
             // doesn't need to be rebuilt — `merged_settings.
@@ -172,7 +177,13 @@ pub(super) fn drain_settings_updates(
             // `encode(..., enable_dirty_rect)`, so the next frame
             // picks up the new value without a `create_video_encoder`
             // round-trip.
-            merged_settings.enable_dirty_rect = enable;
+            if enable != merged_settings.enable_dirty_rect {
+                merged_settings.enable_dirty_rect = enable;
+            }
+        }
+        if let Some(show_mouse) = payload.show_mouse {
+            live_settings_applied = true;
+            merged_settings.show_mouse = show_mouse;
         }
         if let Some(kbps) = payload.bitrate_kbps {
             // Tri-state wire semantics (see the IPC field's doc):
@@ -190,6 +201,7 @@ pub(super) fn drain_settings_updates(
     }
     SettingsDrainOutcome {
         needs_rebuild: changed,
+        live_settings_applied,
         cap_directive,
     }
 }
@@ -218,10 +230,7 @@ pub(super) fn replay_bitrate_cap(
 /// encoder default" per the IPC docstring.
 pub(super) fn payload_overrides(base: &DeskSettings, payload: &StartMediaPayload) -> DeskSettings {
     let mut s = base.clone();
-    s.video_encoder = payload
-        .video_encoder
-        .map(|encoder| encoder.setting_name().to_string())
-        .or_else(|| video_codec_name(payload.video_codec).map(str::to_string));
+    s.video_encoder = Some(payload.video_encoder.setting_name().to_string());
     if payload.fps > 0 {
         s.video_fps = payload.fps;
     }
@@ -231,27 +240,18 @@ pub(super) fn payload_overrides(base: &DeskSettings, payload: &StartMediaPayload
     // Without this override the worker would always see `base.image_capture`
     // and a second browser could not pick a different backend than the
     // first — see the IPC field's doc comment for the failure mode.
-    if let Some(backend) = payload.image_capture.as_deref() {
-        s.image_capture = Some(backend.to_string());
-    }
+    s.image_capture = Some(payload.image_capture.clone());
     // Per-connection dirty-rect kill-switch — when the daemon sniffed
     // the value out of the SDP offer's `desk_settings`, honour it
-    // here. `None` means the daemon is older than the field (or the
-    // offer never carried it) and we keep the worker's base setting,
-    // matching the back-compat contract documented on the IPC field.
-    if let Some(enable) = payload.enable_dirty_rect {
-        s.enable_dirty_rect = enable;
-    }
+    s.enable_dirty_rect = payload.enable_dirty_rect;
+    s.show_mouse = payload.show_mouse;
     // v4 capture-selection fix: the IPC field carries the exact
     // `\\.\DISPLAYn` string the browser selected from the dropdown
     // (sourced via daemon → `StartMediaPayload.video_device`).
     // Overriding the worker's base setting here lets a second browser
     // pick a different monitor than the first without colliding on
-    // shared capture state. `None` (legacy daemons or callers that
-    // really want the worker default) leaves `s.video_device_name`
-    // untouched — the capture-engine surfaces INVALID_PARAMS at
-    // `new()` time if it is still empty, which the daemon prevents
-    // by gating on the browser dialog's form validation.
+    // shared capture state. `None` is reserved for a connection with no
+    // video pipeline; remote-desktop offers provide a concrete display.
     if let Some(name) = payload.video_device.as_deref() {
         s.video_device_name = name.to_string();
     }

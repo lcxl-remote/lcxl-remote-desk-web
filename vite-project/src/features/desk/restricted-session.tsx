@@ -27,6 +27,7 @@ import { readSessionGrant } from './session-grant';
 export type CapabilityKey =
     | 'allow_remote_control'
     | 'allow_clipboard_sync'
+    | 'allow_system_audio_capture'
     | 'allow_private_screen'
     | 'allow_whiteboard'
     | 'allow_terminal'

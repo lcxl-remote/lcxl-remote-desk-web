@@ -303,6 +303,7 @@ mod tests {
             allow_terminal: Some(true),
             ..SecuritySettings {
                 allow_remote_control: None,
+                allow_system_audio_capture: None,
                 allow_clipboard_sync: None,
                 allow_private_screen: None,
                 allow_whiteboard: None,

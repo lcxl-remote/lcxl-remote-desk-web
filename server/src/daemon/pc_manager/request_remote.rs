@@ -75,6 +75,26 @@ pub async fn handle_request_remote(
     let from_connection_id = model.check_and_get_from_connection_id()?;
     let request_remote = model.get_data::<RequestRemoteModel>()?;
 
+    if request_remote.purpose
+        == desk_signal_facade::model::signal::RemoteSessionPurpose::RemoteDesktop
+        && worker_mgr.is_some_and(WorkerManager::media_worker_restart_required)
+    {
+        return Err(DeskError::CustomError(CustomDeskError::new(
+            DeskErrorCode::MEDIA_WORKER_RESTART_REQUIRED,
+            "the host media worker could not be stopped safely; restart the host application or service",
+        )));
+    }
+
+    if request_remote.purpose
+        == desk_signal_facade::model::signal::RemoteSessionPurpose::RemoteDesktop
+        && capabilities.is_none()
+    {
+        return Err(DeskError::CustomError(CustomDeskError::new(
+            DeskErrorCode::REMOTE_DESKTOP_CAPABILITIES_NOT_READY,
+            "the current desktop worker has not published media capabilities yet",
+        )));
+    }
+
     #[cfg(target_os = "linux")]
     let resolved_wayland_control_mode = {
         let portal_snapshot = worker_mgr.and_then(WorkerManager::wayland_portal_snapshot);
@@ -178,6 +198,7 @@ pub async fn handle_request_remote(
             Arc::clone(&ctx_guard.pc),
             outbound.clone(),
             from_connection_id.to_string(),
+            ctx_guard.connection_epoch.clone(),
         );
     }
 
@@ -298,6 +319,8 @@ pub async fn handle_request_remote(
         debounce_ms: settings.virtual_display.adaptive_debounce_ms,
         min_delta_px: settings.virtual_display.adaptive_min_delta_px,
     };
+    let audio_capable = !audio_encoder_list.is_empty() && !audio_device_list.is_empty();
+    let connection_epoch = ctx.read().await.connection_epoch.clone();
     let init_data = RemoteAccessInitializedData {
         ice_servers: vec![],
         user_name: user_name.to_string(),
@@ -306,7 +329,16 @@ pub async fn handle_request_remote(
         video_device_list,
         video_encoder_list,
         video_encoder_capabilities,
-        desk_settings: settings.desk.clone(),
+        suggested_session_settings:
+            desk_signal_facade::model::remote_session::SuggestedSessionSettings::from_host_settings(
+                &settings.desk,
+                audio_capable,
+            ),
+        session_settings_capabilities:
+            desk_signal_facade::model::remote_session::SessionSettingsCapabilities::desktop(
+                audio_capable,
+            ),
+        connection_epoch,
         has_tauri,
         is_admin: is_admin_value,
         virtual_display_active,

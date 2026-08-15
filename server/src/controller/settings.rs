@@ -737,11 +737,15 @@ mod tests {
         // The test binary is not inside /Applications, so enabling auto-start
         // must fail the app-dir guard, return a business error (HTTP 200 + a
         // non-success body code), and must NOT fall through to persisting.
-        let shared = web::Data::new(SharedSettings::from(Settings::default()));
+        let shared = Arc::new(settings_with_temp_path());
+        let coordinator = web::Data::from(Arc::new(
+            SettingsCoordinator::from_settings(Arc::clone(&shared)).await,
+        ));
         let gate = web::Data::new(Arc::new(ManagerLinkGate::new(false)));
         let app = test::init_service(
             App::new()
-                .app_data(shared)
+                .app_data(web::Data::from(shared))
+                .app_data(coordinator)
                 .app_data(gate)
                 .service(update_settings),
         )

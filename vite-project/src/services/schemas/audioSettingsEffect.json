@@ -1,0 +1,1 @@
+{"type":"string","enum":["unchanged","started","stopped","restarted"],"x-readme-ref-name":"AudioSettingsEffect"}

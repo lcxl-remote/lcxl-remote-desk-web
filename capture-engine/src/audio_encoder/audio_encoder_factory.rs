@@ -37,7 +37,7 @@ pub fn create_audio_encoder(
     wave_format: WaveFormat,
 ) -> Result<Box<dyn AudioEncoder>, CaptureError> {
     let capture: Box<dyn AudioEncoder> = match desk_settings.get_audio_encoder_type()? {
-        AudioEncoderType::OPUS => Box::new(OpusAudioEncoder::new(desk_settings, wave_format)?),
+        AudioEncoderType::Opus => Box::new(OpusAudioEncoder::new(desk_settings, wave_format)?),
     };
     Ok(capture)
 }
@@ -46,4 +46,27 @@ pub fn list_audio_encoder() -> Vec<String> {
     AudioEncoderType::iter()
         .map(|x| Into::<&'static str>::into(x).to_string())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_opus_setting_parses_without_fallback() {
+        let settings = DeskSettings {
+            audio_encoder: Some("Opus".to_string()),
+            ..DeskSettings::default()
+        };
+
+        assert!(matches!(
+            settings.get_audio_encoder_type().unwrap(),
+            AudioEncoderType::Opus
+        ));
+    }
+
+    #[test]
+    fn advertised_audio_encoder_uses_protocol_spelling() {
+        assert_eq!(list_audio_encoder(), vec!["Opus"]);
+    }
 }

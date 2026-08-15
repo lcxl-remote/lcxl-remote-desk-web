@@ -18,6 +18,10 @@ import {
     type IceRetryCoordinator,
 } from './ice-retry-coordinator';
 import { normalizeOpusStereoSdp } from './opus-sdp';
+import type {
+    RemoteAccessInitializedData,
+    RemoteSessionSettings,
+} from '@/services/types';
 
 // Auto-retry tuning. With lossless candidate delivery in place a healthy
 // attempt completes its ICE checks in well under a couple of seconds on a
@@ -62,14 +66,20 @@ function offerReplaceKey(id: string | null): string {
 type UseDeskRTCProps = {
     deskId: string | null;
     subscribe: (handler: SignalingSubscriber) => () => void;
-    sendMessage: (
-        type: number,
-        data: any,
-        connectionId?: string,
-        requestId?: string,
-    ) => string;
     sendTracked: (opts: SendTrackedOptions) => SendTrackedResult;
     cancelQueued: (replaceKey: string) => void;
+    cancelQueuedScope: (scope: string) => void;
+};
+
+type IceCandidatePayload = {
+    connection_epoch: string;
+    candidate: RTCIceCandidateInit;
+};
+
+type OfferPayload = {
+    offer: RTCSessionDescription | null;
+    connection_epoch: string;
+    session_settings: RemoteSessionSettings | null;
 };
 
 export type RTCStatsData = {
@@ -111,10 +121,11 @@ export type RTCStatsData = {
     jitterMs: number;
 };
 
-export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancelQueued }: UseDeskRTCProps) {
+export function useDeskRTC({ deskId, subscribe, sendTracked, cancelQueued, cancelQueuedScope }: UseDeskRTCProps) {
     const peerConnection = useRef<RTCPeerConnection | null>(null);
     const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
-    const [initData, setInitData] = useState<any | null>(null);
+    const [initData, setInitData] = useState<RemoteAccessInitializedData | null>(null);
+    const connectionEpochRef = useRef<string | null>(null);
     const mouseChannel = useRef<RTCDataChannel | null>(null);
     const keyboardChannel = useRef<RTCDataChannel | null>(null);
     const mouseMoveChannel = useRef<RTCDataChannel | null>(null);
@@ -154,6 +165,7 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
         cancelQueued,
         settings: undefined as any,
         cachedOfferModel: undefined as any,
+        pcScope: undefined as string | undefined,
     });
     rtcDeps.current.deskId = deskId;
     rtcDeps.current.sendTracked = sendTracked;
@@ -173,6 +185,7 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
                     toConnectionId: d.deskId ?? undefined,
                     requestId,
                     replaceKey: offerReplaceKey(d.deskId),
+                    scope: d.pcScope,
                     onSent,
                 });
             },
@@ -181,9 +194,12 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
                 if (!pc) throw new Error('No peer connection for ICE restart');
                 await createAndSetStereoOffer(pc, { iceRestart: true });
                 const d = rtcDeps.current;
-                const offerModel = {
+                const connectionEpoch = connectionEpochRef.current;
+                if (!connectionEpoch) throw new Error('No host connection epoch');
+                const offerModel: OfferPayload = {
                     offer: pc.localDescription,
-                    desk_settings: d.settings,
+                    connection_epoch: connectionEpoch,
+                    session_settings: d.settings,
                 };
                 d.cachedOfferModel = offerModel;
                 d.sendTracked({
@@ -192,6 +208,7 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
                     toConnectionId: d.deskId ?? undefined,
                     requestId,
                     replaceKey: offerReplaceKey(d.deskId),
+                    scope: d.pcScope,
                     onSent,
                 });
             },
@@ -252,7 +269,20 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
         // tear-down-and-reconnect path that lived here is gone.
         if (signaling_type === SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED) {
             console.log('Received REMOTE_ACCESS_INITIALIZED', signaling_data);
-            setInitData(signaling_data);
+            const initialized = signaling_data as RemoteAccessInitializedData;
+            if (
+                connectionEpochRef.current
+                && connectionEpochRef.current !== initialized.connection_epoch
+            ) {
+                const staleScope = rtcDeps.current.pcScope;
+                if (staleScope) cancelQueuedScope(staleScope);
+                peerConnection.current?.close();
+                peerConnection.current = null;
+                coordinatorRef.current?.resetForNewPc();
+                remoteCandidatesQueue.current = [];
+            }
+            connectionEpochRef.current = initialized.connection_epoch;
+            setInitData(initialized);
 
         } else if (
             signaling_type === SIGNALING_TYPE_CODE_OFFER
@@ -314,7 +344,12 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
             const pc = peerConnection.current;
             if (pc) {
                 const coordinator = coordinatorRef.current;
-                const candidate = signaling_data as RTCIceCandidateInit;
+                const payload = signaling_data as IceCandidatePayload;
+                if (payload.connection_epoch !== connectionEpochRef.current) {
+                    console.log('[WebRTC] Dropping ICE candidate from stale connection epoch');
+                    return;
+                }
+                const candidate = payload.candidate;
                 const disposition = coordinator
                     ? coordinator.classifyCandidate(candidate.usernameFragment)
                     : (pc.remoteDescription?.type ? 'apply' : 'queue');
@@ -332,7 +367,7 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
                 }
             }
         }
-    }, []);
+    }, [cancelQueuedScope]);
 
     // Serialized FIFO drain: guarantees in-order, lossless processing even
     // when several messages land before the first one finishes its async
@@ -365,11 +400,13 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
         return unsubscribe;
     }, [subscribe, deskId, drainInbound]);
 
-    const connect = useCallback(async (settings: any) => {
+    const connect = useCallback(async (settings: RemoteSessionSettings) => {
         if (!initData || !deskId) return;
 
         console.log('Connecting with settings', settings);
 
+        const priorScope = rtcDeps.current.pcScope;
+        if (priorScope) cancelQueuedScope(priorScope);
         if (peerConnection.current) {
             peerConnection.current.close();
         }
@@ -380,6 +417,10 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
         if (!coordinator) return;
         coordinator.resetForNewPc();
         const epoch = coordinator.currentEpoch();
+        const hostEpoch = initData.connection_epoch;
+        connectionEpochRef.current = hostEpoch;
+        const pcScope = `pc:${hostEpoch}:${epoch}`;
+        rtcDeps.current.pcScope = pcScope;
 
         const pc = new RTCPeerConnection({
             iceServers: initData.ice_servers || [],
@@ -391,7 +432,15 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
         pc.onicecandidate = (event) => {
             if (event.candidate !== null) {
                 console.log("[WebRTC] Send ICE canididate:", event.candidate);
-                sendMessage(SIGNALING_TYPE_CODE_ICE_CANDIDATE, event.candidate, deskId);
+                sendTracked({
+                    type: SIGNALING_TYPE_CODE_ICE_CANDIDATE,
+                    data: {
+                        connection_epoch: hostEpoch,
+                        candidate: event.candidate.toJSON(),
+                    } satisfies IceCandidatePayload,
+                    toConnectionId: deskId,
+                    scope: pcScope,
+                });
             }
         };
 
@@ -480,9 +529,10 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
 
         // Cache the immutable OfferModel so the coordinator can re-send it
         // verbatim on an awaiting-answer timeout (signaling loss).
-        const offerModel = {
+        const offerModel: OfferPayload = {
             offer: pc.localDescription,
-            desk_settings: settings,
+            connection_epoch: hostEpoch,
+            session_settings: settings,
         };
         rtcDeps.current.settings = settings;
         rtcDeps.current.cachedOfferModel = offerModel;
@@ -497,12 +547,13 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
             toConnectionId: deskId ?? undefined,
             requestId,
             replaceKey: offerReplaceKey(deskId),
+            scope: pcScope,
             onSent: (id) => coordinator.markOfferSent(id),
         });
 
-    }, [initData, deskId, sendMessage, sendTracked]);
+    }, [initData, deskId, sendTracked, cancelQueuedScope]);
 
-    const renegotiate = useCallback(async (settings: any) => {
+    const renegotiate = useCallback(async (settings: RemoteSessionSettings) => {
         const pc = peerConnection.current;
         if (!pc || pc.signalingState !== 'stable') {
             // An initial Offer rejection leaves the PC in `have-local-offer`;
@@ -512,9 +563,12 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
         }
 
         await createAndSetStereoOffer(pc);
-        const offerModel = {
+        const hostEpoch = connectionEpochRef.current;
+        if (!hostEpoch) return;
+        const offerModel: OfferPayload = {
             offer: pc.localDescription,
-            desk_settings: settings,
+            connection_epoch: hostEpoch,
+            session_settings: settings,
         };
         rtcDeps.current.settings = settings;
         rtcDeps.current.cachedOfferModel = offerModel;
@@ -528,6 +582,7 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
             toConnectionId: deskId ?? undefined,
             requestId,
             replaceKey: offerReplaceKey(deskId),
+            scope: rtcDeps.current.pcScope,
             onSent: (id) => coordinator.markOfferSent(id),
         });
     }, [connect, deskId, sendTracked]);
@@ -538,13 +593,17 @@ export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancel
         // signaling reconnect doesn't replay a stale negotiation.
         coordinatorRef.current?.dispose();
         cancelQueued(offerReplaceKey(rtcDeps.current.deskId));
+        if (rtcDeps.current.pcScope) {
+            cancelQueuedScope(rtcDeps.current.pcScope);
+            rtcDeps.current.pcScope = undefined;
+        }
         if (peerConnection.current) {
             peerConnection.current.close();
             peerConnection.current = null;
         }
         setIsRTCConnected(false);
         setRemoteStream(null);
-    }, [cancelQueued]);
+    }, [cancelQueued, cancelQueuedScope]);
 
     // RTCPeerConnection Stats Monitor
     useEffect(() => {

@@ -13,6 +13,7 @@ refreshing the card does not take keyboard focus from the local user's active
 application. The collapsed card distinguishes:
 
 - screen viewing from mouse and keyboard control;
+- active host-system audio capture;
 - remote terminal activity;
 - file-manager activity;
 - uploads and downloads.
@@ -42,13 +43,19 @@ The host daemon derives the status from execution-side facts:
 
 - screen viewing requires both an established peer connection and negotiated
   video;
+- system audio appears only while the daemon output fence is open for the
+  current connection and audio generation;
 - remote control follows the host's accepted control state;
 - terminals appear only after the host creates the terminal;
 - file browsing and transfers follow typed host-side lifecycle events.
 
-Disconnects, failed peer connections and worker restarts clear the corresponding
-state. Restarting or reconnecting the Tauri shell restores the current complete
-snapshot instead of reconstructing it from old notifications.
+A replacement peer connection keeps the logical screen-view session in the
+indicator, avoiding a false stop/start notification, while system-audio and
+remote-control badges clear until their new pipelines or authorization become
+active. A signaling disconnect, host-initiated disconnect, or worker restart
+clears the corresponding logical state. Restarting or reconnecting the Tauri
+shell restores the current complete snapshot instead of reconstructing it from
+old notifications.
 
 ## Local Setting
 
@@ -62,6 +69,10 @@ permissions, cleanup, or established remote sessions. The host continues to
 track activity, so turning the setting back on restores the current state
 immediately. This local preference is not exposed through manager remote
 settings.
+
+The system-audio badge follows this same visibility switch; it is not a separate
+always-on window. The independent **System audio capture** Allow/Prompt/Deny
+permission remains enforced even when the indicator is hidden.
 
 ## Displays and Headless Modes
 

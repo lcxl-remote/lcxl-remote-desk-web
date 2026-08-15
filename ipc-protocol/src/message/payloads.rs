@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use desk_signal_facade::model::audio_capture::AudioDevice;
-use desk_signal_facade::model::desk_settings::{DeskSettings, LinuxInputControlMode};
+use desk_signal_facade::model::desk_settings::LinuxInputControlMode;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
 use desk_signal_facade::model::image_capture::DisplayInfo;
 use desk_signal_facade::model::policy_snapshot::{PolicyGenerations, PolicySnapshot};
@@ -100,7 +100,29 @@ pub struct RemoteAccessStateAppliedPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
 pub struct MediaPipelineStatePayload {
     pub connection_id: String,
+    pub connection_epoch: String,
+    pub video_generation: u32,
     pub data: MediaPipelineStateData,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioPipelinePhase {
+    Off,
+    Starting,
+    Active,
+    Restarting,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+pub struct AudioPipelineStateChangedPayload {
+    pub connection_id: String,
+    pub connection_epoch: String,
+    pub audio_generation: u32,
+    pub phase: AudioPipelinePhase,
+    pub resolved_audio_device_id: Option<String>,
+    pub error_code: Option<i32>,
 }
 
 /// Payload for [`WorkerToService::SignalingError`]. Carries the
@@ -132,6 +154,9 @@ pub struct SignalingErrorPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct MediaFrame {
     pub connection_id: String,
+    pub connection_epoch: String,
+    /// Video or audio generation, selected by `kind`.
+    pub generation: u32,
     pub seq: u64,
     /// Wall-clock ns since `UNIX_EPOCH` at encode-out time.
     pub ts_ns: u64,
@@ -198,7 +223,7 @@ pub struct MediaCapabilities {
     /// Strongly typed input constraints for each concrete encoder.
     #[serde(default)]
     pub video_encoder_capabilities: Vec<VideoEncoderCapability>,
-    /// Audio counterpart of `video_encoders`. Today only `"OPUS"` is
+    /// Audio counterpart of `video_encoders`. Today only `"Opus"` is
     /// reported, but kept symmetrical so a future encoder addition
     /// doesn't need a wire-format bump.
     #[serde(default)]
@@ -221,15 +246,13 @@ pub struct MediaCapabilities {
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct StartMediaPayload {
     pub connection_id: String,
+    pub connection_epoch: String,
+    pub video_generation: u32,
+    pub audio_generation: u32,
     pub video_codec: MediaCodec,
     /// Concrete implementation selected before the SDP answer is created.
-    /// `None` is reserved for legacy callers and falls back to the codec-based
-    /// mapping in the worker.
-    #[serde(default)]
-    pub video_encoder: Option<VideoEncoderId>,
-    pub audio_codec: MediaCodec,
+    pub video_encoder: VideoEncoderId,
     pub video_device: Option<String>,
-    pub audio_device: Option<String>,
     /// Frames per second the encoder should target.
     pub fps: u32,
     /// Encoder bitrate in kbps (0 = encoder default). Historic field:
@@ -245,43 +268,22 @@ pub struct StartMediaPayload {
     /// (DXGI capture + encoder) for this connection — typical for the
     /// browser file-management page, which opens a PC purely for the
     /// `file_transfer_event` DataChannel and never wants screen capture.
-    /// Defaults to `true` for back-compat with older daemons that did not
-    /// thread through SDP track presence.
-    #[serde(default = "default_true")]
     pub start_video: bool,
-    /// Whether the connection's SDP offer included an `m=audio` section.
-    /// `false` means the worker should *not* spawn the audio pipeline
-    /// (WASAPI capture + Opus encoder) for this connection. Defaults to
-    /// `true` for back-compat (see `start_video`).
-    #[serde(default = "default_true")]
-    pub start_audio: bool,
-    /// Per-connection image-capture backend choice (e.g. "DXGI", "GDI"
-    /// on Windows). `None` lets the worker fall back to its
-    /// startup-time `DeskSettings.image_capture` (which itself
-    /// defaults to the platform's preferred backend). Threading the
-    /// per-connection choice through the IPC payload is required
-    /// because the worker's base settings are a snapshot taken at
-    /// worker spawn — without this field, a browser opening a second
-    /// connection cannot pick a different backend than the first.
-    #[serde(default)]
-    pub image_capture: Option<String>,
+    /// `None` is the single source of truth for disabled host audio.
+    pub audio: Option<StartAudioSettings>,
+    /// Per-connection image-capture backend choice (e.g. "DXGI", "GDI").
+    pub image_capture: String,
     /// Linux input mode frozen by daemon admission; Offer cannot override it.
     pub resolved_wayland_control_mode: Option<LinuxInputControlMode>,
-    /// Per-connection override for the BGRA→YUV dirty-rect fast path
-    /// in `PersistentYuvBuffer`. `None` means "use the worker's base
-    /// `DeskSettings.enable_dirty_rect`" (back-compat with older
-    /// daemons). `Some(false)` forces every frame through a full
-    /// conversion — needed for the browser Advanced-tab kill-switch
-    /// to take effect on the *first* StartMedia, before any live
-    /// `UpdateMediaSettings` would be issued. Without this field a
-    /// fresh connection always picks up the worker's default
-    /// (`true`) regardless of the browser's offer-time setting.
-    #[serde(default)]
-    pub enable_dirty_rect: Option<bool>,
+    /// Per-connection BGRA→YUV dirty-rect fast-path switch.
+    pub enable_dirty_rect: bool,
+    pub show_mouse: bool,
 }
 
-fn default_true() -> bool {
-    true
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct StartAudioSettings {
+    pub codec: MediaCodec,
+    pub pipeline: desk_signal_facade::model::remote_session::AudioPipelineSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
@@ -304,6 +306,7 @@ pub struct WaylandPortalStatusPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct StopMediaPayload {
     pub connection_id: String,
+    pub connection_epoch: String,
 }
 
 /// Registers a connection's validated capability ceiling with the worker (see
@@ -318,6 +321,8 @@ pub struct SetConnectionCeilingPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct UpdateMediaSettingsPayload {
     pub connection_id: String,
+    pub connection_epoch: String,
+    pub video_generation: u32,
     pub fps: Option<u32>,
     /// Runtime bitrate-cap directive with tri-state semantics —
     /// **`Some(0)` is meaningful, do not filter it out as an invalid
@@ -339,8 +344,64 @@ pub struct UpdateMediaSettingsPayload {
     /// re-enables partial updates. Threaded through so the browser's
     /// Advanced-tab kill-switch can be retuned mid-stream without
     /// tearing down the encoder.
-    #[serde(default)]
     pub enable_dirty_rect: Option<bool>,
+    pub show_mouse: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    Video,
+    Audio,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+pub enum MediaSettingsAction {
+    LiveVideo {
+        target_generation: u32,
+        settings: UpdateMediaSettingsPayload,
+    },
+    Start {
+        new_generation: u32,
+        settings: StartMediaPayload,
+    },
+    Stop {
+        target_generation: u32,
+    },
+    Restart {
+        current_generation: u32,
+        new_generation: u32,
+        settings: StartMediaPayload,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ApplyMediaSettingsPayload {
+    pub source_request_id: Option<String>,
+    pub connection_id: String,
+    pub connection_epoch: String,
+    pub media_kind: MediaKind,
+    pub action: MediaSettingsAction,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaSettingsApplyOutcome {
+    Accepted,
+    GenerationMismatch,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct MediaSettingsAppliedPayload {
+    pub source_request_id: Option<String>,
+    pub connection_id: String,
+    pub connection_epoch: String,
+    pub media_kind: MediaKind,
+    pub generation: u32,
+    pub outcome: MediaSettingsApplyOutcome,
+    pub error_code: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
@@ -519,17 +580,6 @@ pub struct SetPrivateScreenVisibilityPayload {
     pub request_id: String,
     pub connection_id: String,
     pub visible: bool,
-}
-
-/// Payload for [`ServiceToWorker::UpdateDeskSettings`]. Carries the
-/// full `DeskSettings` struct so the worker applies every field; the
-/// daemon separately sniffs the media-relevant knobs and emits
-/// [`ServiceToWorker::UpdateMediaSettings`] for the encoder pipeline
-/// (see `pc_manager::broadcast_media_settings_update`).
-#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
-pub struct UpdateDeskSettingsPayload {
-    pub connection_id: String,
-    pub settings: DeskSettings,
 }
 
 /// Payload for [`WorkerToService::PrivateScreenStateChanged`].

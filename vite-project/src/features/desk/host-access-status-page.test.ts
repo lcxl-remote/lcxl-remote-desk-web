@@ -12,6 +12,7 @@ const session: HostAccessSession = {
     actor: { display_name: 'Alice', access_source: 'authenticated_account' },
     started_at: '2026-07-21T00:00:00Z',
     desktop_view: true,
+    system_audio_capture: true,
     remote_control: false,
     terminal_count: 1,
     file_manager: true,
@@ -26,7 +27,7 @@ const session: HostAccessSession = {
 
 describe('host access status helpers', () => {
     it('summarizes every active capability in a session', () => {
-        expect(activeKinds(session)).toEqual(['desktop', 'terminal', 'files', 'transfer']);
+        expect(activeKinds(session)).toEqual(['desktop', 'audio', 'terminal', 'files', 'transfer']);
     });
 
     it('formats transfer sizes for compact status display', () => {

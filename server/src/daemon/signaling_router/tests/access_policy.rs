@@ -23,6 +23,10 @@ pub(super) fn classify_daemon_owned_types() {
         SignalingType::AudioPlaybackFailed,
         SignalingType::MediaPipelineStateChanged,
         SignalingType::RetryMediaPipeline,
+        SignalingType::ApplyRemoteSessionSettings,
+        SignalingType::RemoteSessionSettingsApplied,
+        SignalingType::UpdateAdaptiveVideoQuality,
+        SignalingType::SystemAudioCaptureStateChanged,
         SignalingType::SystemInfoRetrieved,
         SignalingType::TerminalOutputProduced,
         SignalingType::TerminalStarted,
@@ -64,7 +68,6 @@ pub(super) fn classify_daemon_owned_types() {
 pub(super) fn classify_worker_owned_types() {
     for t in [
         SignalingType::SetPrivateScreenVisibility,
-        SignalingType::UpdateDeskSettings,
         SignalingType::GetSystemInfo,
         SignalingType::ListFiles,
         SignalingType::StartTerminal,
@@ -124,6 +127,8 @@ pub(super) fn capped_session_permits_matrix_over_all_signaling_types() {
 
     for t in SignalingType::iter() {
         let baseline = is_baseline_signaling_type(t);
+        let is_connection_settings =
+            matches!(t, ApplyRemoteSessionSettings | UpdateAdaptiveVideoQuality);
         let is_family = terminal_family.contains(&t)
             || file_family.contains(&t)
             || t == SetPrivateScreenVisibility;
@@ -137,14 +142,14 @@ pub(super) fn capped_session_permits_matrix_over_all_signaling_types() {
         // Deny-all ceiling: only baseline passes.
         assert_eq!(
             capped_session_permits(t, &deny_all),
-            baseline,
+            baseline || is_connection_settings,
             "deny-all ceiling: {t:?}"
         );
         // Permissive ceiling: baseline + the three families pass; owner-plane /
         // unknown stays denied (the `_ => false` fail-closed arm).
         assert_eq!(
             capped_session_permits(t, &allow_families),
-            baseline || is_family,
+            baseline || is_family || is_connection_settings,
             "permissive ceiling: {t:?}"
         );
     }
@@ -286,6 +291,14 @@ pub(super) fn door1_permits_gates_capped_sessions_and_fails_closed_unadmitted_ca
     // connection now that their REST entry points no longer exist.
     assert!(!door1_permits(&ConnectionGate::ServerInternal, ListFiles));
     assert!(!door1_permits(&ConnectionGate::ServerInternal, DeleteFile));
+    assert!(!door1_permits(
+        &ConnectionGate::ServerInternal,
+        ApplyRemoteSessionSettings
+    ));
+    assert!(!door1_permits(
+        &ConnectionGate::ServerInternal,
+        UpdateAdaptiveVideoQuality
+    ));
     assert!(door1_permits(
         &ConnectionGate::ServerInternal,
         ListTerminalCommands

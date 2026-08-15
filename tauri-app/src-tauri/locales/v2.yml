@@ -70,6 +70,9 @@ permission:
   clipboard_sync:
     en: "Clipboard Sync"
     zh-CN: "剪贴板同步"
+  system_audio_capture:
+    en: "System Audio Capture"
+    zh-CN: "系统音频采集"
   private_screen:
     en: "Private Screen"
     zh-CN: "隐私屏"

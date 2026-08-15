@@ -54,10 +54,12 @@ pub(super) fn register_local_ice_candidate_forwarder(
     pc: Arc<RTCPeerConnection>,
     outbound: OutboundSink,
     from_connection_id: String,
+    connection_epoch: String,
 ) {
     pc.on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
         let outbound = outbound.clone();
         let from_connection_id = from_connection_id.clone();
+        let connection_epoch = connection_epoch.clone();
         Box::pin(async move {
             // None signals end-of-candidates; nothing to ship in that case.
             let Some(candidate) = c else {
@@ -76,10 +78,14 @@ pub(super) fn register_local_ice_candidate_forwarder(
                     return;
                 }
             };
+            let payload = desk_signal_facade::model::remote_session::IceCandidatePayload {
+                connection_epoch,
+                candidate: init.clone(),
+            };
             let model = match SignalingModel::new_request(
                 SignalingType::IceCandidate,
                 Some(from_connection_id.clone()),
-                Some(&init),
+                Some(&payload),
             ) {
                 Ok(m) => m,
                 Err(e) => {

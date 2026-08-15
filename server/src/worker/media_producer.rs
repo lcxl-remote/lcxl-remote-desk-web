@@ -92,8 +92,10 @@ use desk_capture_engine::video_encoder::video_encoder_factory::{
 };
 use desk_ipc_protocol::dual_transport::{MediaSender, TransportError};
 use desk_ipc_protocol::message::{
+    ApplyMediaSettingsPayload, AudioPipelinePhase, AudioPipelineStateChangedPayload,
     ERROR_CODE_MEDIA_TRANSPORT_STUCK, ErrorPayload, MediaCapabilities, MediaCodec, MediaFrame,
-    MediaFrameKind, MediaPipelineStatePayload, StartMediaPayload, StopMediaPayload,
+    MediaFrameKind, MediaKind, MediaPipelineStatePayload, MediaSettingsAction,
+    MediaSettingsAppliedPayload, MediaSettingsApplyOutcome, StartMediaPayload, StopMediaPayload,
     UpdateMediaSettingsPayload, WorkerToService,
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
@@ -128,8 +130,9 @@ type GeometryUpdateHandler = dyn Fn(&str, u64, (i32, i32, i32, i32)) + Send + Sy
 struct ConnectionTask {
     generation: u64,
     start_payload: StartMediaPayload,
-    stop_flag: Arc<AtomicBool>,
-    stop_tx: watch::Sender<bool>,
+    video_stop_flag: Arc<AtomicBool>,
+    video_stop_tx: watch::Sender<bool>,
+    audio_stop_flag: Arc<AtomicBool>,
     keyframe_requested: Arc<AtomicBool>,
     /// Live-update channel feeding fresh `UpdateMediaSettingsPayload`
     /// values into the video pipeline thread. `update_settings` posts
@@ -165,8 +168,9 @@ fn should_retry_blocked_video(state: u8, start_video: bool, thread_finished: boo
 
 impl ConnectionTask {
     fn request_stop(&self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
-        self.stop_tx.send_replace(true);
+        self.video_stop_flag.store(true, Ordering::Relaxed);
+        self.video_stop_tx.send_replace(true);
+        self.audio_stop_flag.store(true, Ordering::Relaxed);
     }
 }
 
@@ -355,9 +359,9 @@ impl MediaProducer {
     /// duplicate `connection_id` — duplicates log a warning and are
     /// ignored (the daemon should never legitimately double-start).
     ///
-    /// `payload.start_video` / `payload.start_audio` mirror the
-    /// `m=video` / `m=audio` sections in the connection's SDP offer.
-    /// When *both* are false the connection is a pure DataChannel
+    /// `payload.start_video` and `payload.audio` carry the terminal
+    /// per-connection media intent resolved from the SDP + Offer settings.
+    /// When video is false and audio is `None` the connection is a pure DataChannel
     /// session (e.g. the browser file-management page, which only
     /// opens `file_transfer_event`) and we skip both pipelines —
     /// otherwise we would spin up DXGI capture + WASAPI capture for a
@@ -379,7 +383,16 @@ impl MediaProducer {
         F: FnOnce(u64),
     {
         let connection_id = payload.connection_id.clone();
-        let (generation, stop_flag, stop_tx, stop_rx, keyframe_requested, video_state, settings_rx) = {
+        let (
+            generation,
+            video_stop_flag,
+            video_stop_tx,
+            video_stop_rx,
+            audio_stop_flag,
+            keyframe_requested,
+            video_state,
+            settings_rx,
+        ) = {
             let mut map = self.inner.lock().expect("media producer lock poisoned");
             if map.contains_key(&connection_id) {
                 warn!(
@@ -391,8 +404,9 @@ impl MediaProducer {
                 .capture_key_generation
                 .fetch_add(1, Ordering::Relaxed)
                 .saturating_add(1);
-            let stop_flag = Arc::new(AtomicBool::new(false));
-            let (stop_tx, stop_rx) = watch::channel(false);
+            let video_stop_flag = Arc::new(AtomicBool::new(false));
+            let (video_stop_tx, video_stop_rx) = watch::channel(false);
+            let audio_stop_flag = Arc::new(AtomicBool::new(false));
             let keyframe_requested = Arc::new(AtomicBool::new(false));
             let video_state = Arc::new(AtomicU8::new(if payload.start_video {
                 VIDEO_STATE_STARTING
@@ -406,8 +420,9 @@ impl MediaProducer {
                 ConnectionTask {
                     generation,
                     start_payload: payload.clone(),
-                    stop_flag: Arc::clone(&stop_flag),
-                    stop_tx: stop_tx.clone(),
+                    video_stop_flag: Arc::clone(&video_stop_flag),
+                    video_stop_tx: video_stop_tx.clone(),
+                    audio_stop_flag: Arc::clone(&audio_stop_flag),
                     keyframe_requested: Arc::clone(&keyframe_requested),
                     settings_tx,
                     video_state: Arc::clone(&video_state),
@@ -417,9 +432,10 @@ impl MediaProducer {
             );
             (
                 generation,
-                stop_flag,
-                stop_tx,
-                stop_rx,
+                video_stop_flag,
+                video_stop_tx,
+                video_stop_rx,
+                audio_stop_flag,
                 keyframe_requested,
                 video_state,
                 settings_rx,
@@ -437,7 +453,7 @@ impl MediaProducer {
             .lock()
             .expect("media producer geometry handler lock poisoned")
             .clone();
-        if !payload.start_video && !payload.start_audio {
+        if !payload.start_video && payload.audio.is_none() {
             info!(
                 "[MediaProducer] StartMedia for {connection_id} requests neither video nor audio (DataChannel-only connection); skipping capture pipelines"
             );
@@ -448,8 +464,8 @@ impl MediaProducer {
                 payload.clone(),
                 Arc::clone(&self.media_sender),
                 self.error_tx.clone(),
-                Arc::clone(&stop_flag),
-                stop_rx,
+                Arc::clone(&video_stop_flag),
+                video_stop_rx,
                 Arc::clone(&keyframe_requested),
                 settings_rx,
                 Arc::clone(&self.capture_registry),
@@ -463,7 +479,7 @@ impl MediaProducer {
             // connection don't accumulate unbounded; closing it here is
             // symmetric with not spawning a consumer.
             drop(settings_rx);
-            drop(stop_rx);
+            drop(video_stop_rx);
             debug!("[MediaProducer] {connection_id}: skipping video pipeline (start_video=false)");
             None
         };
@@ -471,16 +487,16 @@ impl MediaProducer {
         // / PipeWire / SCKit handles are COM/system-thread-bound the
         // same way as the video capture, so a separate thread + a
         // current-thread Tokio runtime is the right shape).
-        let mut audio_handle = if payload.start_audio {
+        let mut audio_handle = if payload.audio.is_some() {
             Some(spawn_audio_pipeline_thread(
                 self.desk_settings.clone(),
                 payload,
                 Arc::clone(&self.media_sender),
                 self.error_tx.clone(),
-                Arc::clone(&stop_flag),
+                Arc::clone(&audio_stop_flag),
             ))
         } else {
-            debug!("[MediaProducer] {connection_id}: skipping audio pipeline (start_audio=false)");
+            debug!("[MediaProducer] {connection_id}: skipping audio pipeline (audio=None)");
             None
         };
 
@@ -500,8 +516,9 @@ impl MediaProducer {
             // may reserve the same id after a concurrent StopMedia. The
             // generation fence prevents old thread handles from being attached
             // to the replacement task.
-            stop_flag.store(true, Ordering::Relaxed);
-            stop_tx.send_replace(true);
+            video_stop_flag.store(true, Ordering::Relaxed);
+            video_stop_tx.send_replace(true);
+            audio_stop_flag.store(true, Ordering::Relaxed);
             drop(video_handle);
             drop(audio_handle);
             debug!(
@@ -556,8 +573,8 @@ impl MediaProducer {
                 task.start_payload.clone(),
                 Arc::clone(&self.media_sender),
                 self.error_tx.clone(),
-                Arc::clone(&task.stop_flag),
-                task.stop_tx.subscribe(),
+                Arc::clone(&task.video_stop_flag),
+                task.video_stop_tx.subscribe(),
                 Arc::clone(&task.keyframe_requested),
                 settings_rx,
                 Arc::clone(&self.capture_registry),
@@ -582,6 +599,16 @@ impl MediaProducer {
     /// Stop a per-connection pipeline. No-op on unknown id.
     pub fn stop_media(&self, payload: &StopMediaPayload) {
         let mut map = self.inner.lock().expect("media producer lock poisoned");
+        if map
+            .get(&payload.connection_id)
+            .is_some_and(|task| task.start_payload.connection_epoch != payload.connection_epoch)
+        {
+            warn!(
+                "[MediaProducer] rejected stale StopMedia for {} epoch={}",
+                payload.connection_id, payload.connection_epoch
+            );
+            return;
+        }
         if let Some(mut task) = map.remove(&payload.connection_id) {
             task.request_stop();
             // We do not block-join the threads here: the worker IPC
@@ -607,16 +634,19 @@ impl MediaProducer {
     /// Used when the desktop Portal revokes the shared screen session: no
     /// connection may keep a stale capture or input pipeline alive.
     pub fn stop_all_media(&self) -> Vec<String> {
-        let connection_ids = {
+        let connections = {
             let map = self.inner.lock().expect("media producer lock poisoned");
-            map.keys().cloned().collect::<Vec<_>>()
+            map.iter()
+                .map(|(id, task)| (id.clone(), task.start_payload.connection_epoch.clone()))
+                .collect::<Vec<_>>()
         };
-        for connection_id in &connection_ids {
+        for (connection_id, connection_epoch) in &connections {
             self.stop_media(&StopMediaPayload {
                 connection_id: connection_id.clone(),
+                connection_epoch: connection_epoch.clone(),
             });
         }
-        connection_ids
+        connections.into_iter().map(|(id, _)| id).collect()
     }
 
     /// Flag the next encode pass on the per-connection encoder to
@@ -653,14 +683,23 @@ impl MediaProducer {
     /// (20 ms fixed) and bitrate is set at create time; runtime audio
     /// retuning needs a separate variant once any UI exposes it.
     pub fn update_settings(&self, payload: UpdateMediaSettingsPayload) {
-        let map = self.inner.lock().expect("media producer lock poisoned");
-        let Some(task) = map.get(&payload.connection_id) else {
+        let mut map = self.inner.lock().expect("media producer lock poisoned");
+        let Some(task) = map.get_mut(&payload.connection_id) else {
             debug!(
                 "[MediaProducer] UpdateMediaSettings for unknown connection {}; ignoring",
                 payload.connection_id
             );
             return;
         };
+        if task.start_payload.connection_epoch != payload.connection_epoch
+            || task.start_payload.video_generation != payload.video_generation
+        {
+            warn!(
+                "[MediaProducer] rejected stale UpdateMediaSettings for {} epoch={} generation={}",
+                payload.connection_id, payload.connection_epoch, payload.video_generation
+            );
+            return;
+        }
         // Reject codec swap attempts at the IPC boundary — the IPC
         // schema doesn't carry a codec field, but be explicit about
         // what does flow.
@@ -669,12 +708,228 @@ impl MediaProducer {
              quality={:?})",
             payload.connection_id, payload.fps, payload.bitrate_kbps, payload.quality
         );
+        if let Some(fps) = payload.fps {
+            task.start_payload.fps = fps;
+        }
+        if let Some(quality) = payload.quality {
+            task.start_payload.quality = quality;
+        }
+        if let Some(enable_dirty_rect) = payload.enable_dirty_rect {
+            task.start_payload.enable_dirty_rect = enable_dirty_rect;
+        }
+        if let Some(show_mouse) = payload.show_mouse {
+            task.start_payload.show_mouse = show_mouse;
+        }
         if task.settings_tx.send(payload).is_err() {
             // The receiver lives in the pipeline thread; if it's gone
             // the thread already exited (stop_flag, capture failure,
             // etc.) and the next StopMedia / drop will reap us.
             debug!("[MediaProducer] UpdateMediaSettings receiver gone; pipeline already stopped");
         }
+    }
+
+    fn stop_media_slot(&self, connection_id: &str, media_kind: MediaKind) -> bool {
+        let mut map = self.inner.lock().expect("media producer lock poisoned");
+        let Some(task) = map.get_mut(connection_id) else {
+            return false;
+        };
+        let mut stopped_audio = None;
+        match media_kind {
+            MediaKind::Video => {
+                task.video_stop_flag.store(true, Ordering::Relaxed);
+                task.video_stop_tx.send_replace(true);
+                drop(task.video_handle.take());
+                task.start_payload.start_video = false;
+                task.video_state
+                    .store(VIDEO_STATE_DISABLED, Ordering::Release);
+            }
+            MediaKind::Audio => {
+                stopped_audio = Some((
+                    task.start_payload.connection_epoch.clone(),
+                    task.start_payload.audio_generation,
+                ));
+                task.audio_stop_flag.store(true, Ordering::Relaxed);
+                drop(task.audio_handle.take());
+                task.start_payload.audio = None;
+            }
+        }
+        drop(map);
+        // Stop is the worker slot's final decision for this generation. Emit
+        // an explicit terminal even when the runner already exited and cannot
+        // produce another `Off`; the daemon has closed its output fence before
+        // issuing this command, so no sample can cross this acknowledgement.
+        if let Some((connection_epoch, audio_generation)) = stopped_audio {
+            let _ = self
+                .error_tx
+                .send(WorkerToService::AudioPipelineStateChanged(
+                    AudioPipelineStateChangedPayload {
+                        connection_id: connection_id.to_string(),
+                        connection_epoch,
+                        audio_generation,
+                        phase: AudioPipelinePhase::Off,
+                        resolved_audio_device_id: None,
+                        error_code: None,
+                    },
+                ));
+        }
+        true
+    }
+
+    fn start_or_restart_media_slot(
+        &self,
+        connection_id: &str,
+        media_kind: MediaKind,
+        settings: StartMediaPayload,
+    ) -> bool {
+        let geometry_update_handler = self
+            .geometry_update_handler
+            .lock()
+            .expect("media producer geometry handler lock poisoned")
+            .clone();
+        let mut map = self.inner.lock().expect("media producer lock poisoned");
+        let Some(task) = map.get_mut(connection_id) else {
+            return false;
+        };
+        match media_kind {
+            MediaKind::Video => {
+                task.video_stop_flag.store(true, Ordering::Relaxed);
+                task.video_stop_tx.send_replace(true);
+                drop(task.video_handle.take());
+
+                let mut next = settings;
+                next.audio = task.start_payload.audio.clone();
+                next.audio_generation = task.start_payload.audio_generation;
+                next.start_video = true;
+                let video_stop_flag = Arc::new(AtomicBool::new(false));
+                let (video_stop_tx, video_stop_rx) = watch::channel(false);
+                let (settings_tx, settings_rx) =
+                    mpsc::unbounded_channel::<UpdateMediaSettingsPayload>();
+                let keyframe_requested = Arc::new(AtomicBool::new(true));
+                let video_state = Arc::new(AtomicU8::new(VIDEO_STATE_STARTING));
+                let capture_generation = self
+                    .capture_key_generation
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1);
+                task.generation = capture_generation;
+                task.start_payload = next.clone();
+                task.video_stop_flag = Arc::clone(&video_stop_flag);
+                task.video_stop_tx = video_stop_tx;
+                task.settings_tx = settings_tx;
+                task.keyframe_requested = Arc::clone(&keyframe_requested);
+                task.video_state = Arc::clone(&video_state);
+                task.video_handle = Some(spawn_video_pipeline_thread(
+                    self.desk_settings.clone(),
+                    next,
+                    Arc::clone(&self.media_sender),
+                    self.error_tx.clone(),
+                    video_stop_flag,
+                    video_stop_rx,
+                    keyframe_requested,
+                    settings_rx,
+                    Arc::clone(&self.capture_registry),
+                    Arc::clone(&self.capture_keys),
+                    capture_generation,
+                    geometry_update_handler,
+                    video_state,
+                ));
+            }
+            MediaKind::Audio => {
+                task.audio_stop_flag.store(true, Ordering::Relaxed);
+                drop(task.audio_handle.take());
+                let mut next = task.start_payload.clone();
+                next.audio = settings.audio;
+                next.audio_generation = settings.audio_generation;
+                let audio_stop_flag = Arc::new(AtomicBool::new(false));
+                task.audio_stop_flag = Arc::clone(&audio_stop_flag);
+                task.start_payload.audio = next.audio.clone();
+                task.start_payload.audio_generation = next.audio_generation;
+                if next.audio.is_some() {
+                    task.audio_handle = Some(spawn_audio_pipeline_thread(
+                        self.desk_settings.clone(),
+                        next,
+                        Arc::clone(&self.media_sender),
+                        self.error_tx.clone(),
+                        audio_stop_flag,
+                    ));
+                }
+            }
+        }
+        true
+    }
+
+    /// Execute one FIFO media-slot command. Command acceptance is echoed on
+    /// the reliable event lane; actual streaming/active/off truth is emitted
+    /// separately by the runner threads with the same epoch/generation.
+    pub fn apply_media_settings(&self, command: ApplyMediaSettingsPayload) {
+        let generation = match &command.action {
+            MediaSettingsAction::LiveVideo {
+                target_generation, ..
+            }
+            | MediaSettingsAction::Stop { target_generation } => *target_generation,
+            MediaSettingsAction::Start { new_generation, .. }
+            | MediaSettingsAction::Restart { new_generation, .. } => *new_generation,
+        };
+        let (epoch_matches, current_generation) = {
+            let map = self.inner.lock().expect("media producer lock poisoned");
+            match map.get(&command.connection_id) {
+                Some(task) if task.start_payload.connection_epoch == command.connection_epoch => (
+                    true,
+                    Some(match command.media_kind {
+                        MediaKind::Video => task.start_payload.video_generation,
+                        MediaKind::Audio => task.start_payload.audio_generation,
+                    }),
+                ),
+                _ => (false, None),
+            }
+        };
+        let expected_current = match &command.action {
+            MediaSettingsAction::Restart {
+                current_generation, ..
+            } => Some(*current_generation),
+            MediaSettingsAction::LiveVideo {
+                target_generation, ..
+            }
+            | MediaSettingsAction::Stop { target_generation } => Some(*target_generation),
+            MediaSettingsAction::Start { .. } => None,
+        };
+        // Start has no current-generation operand, but it is still an update
+        // to an existing logical connection. Requiring the task epoch for every
+        // action prevents a delayed authorization from an old PC from creating
+        // or replacing a pipeline after the connection id has been reused.
+        let guard_matches =
+            epoch_matches && (expected_current.is_none() || current_generation == expected_current);
+
+        let outcome = match command.action.clone() {
+            MediaSettingsAction::LiveVideo { settings, .. } if guard_matches => {
+                self.update_settings(settings);
+                MediaSettingsApplyOutcome::Accepted
+            }
+            MediaSettingsAction::Start { settings, .. } if guard_matches => self
+                .start_or_restart_media_slot(&command.connection_id, command.media_kind, settings)
+                .then_some(MediaSettingsApplyOutcome::Accepted)
+                .unwrap_or(MediaSettingsApplyOutcome::Failed),
+            MediaSettingsAction::Stop { .. } if guard_matches => self
+                .stop_media_slot(&command.connection_id, command.media_kind)
+                .then_some(MediaSettingsApplyOutcome::Accepted)
+                .unwrap_or(MediaSettingsApplyOutcome::Failed),
+            MediaSettingsAction::Restart { settings, .. } if guard_matches => self
+                .start_or_restart_media_slot(&command.connection_id, command.media_kind, settings)
+                .then_some(MediaSettingsApplyOutcome::Accepted)
+                .unwrap_or(MediaSettingsApplyOutcome::Failed),
+            _ => MediaSettingsApplyOutcome::GenerationMismatch,
+        };
+        let _ = self.error_tx.send(WorkerToService::MediaSettingsApplied(
+            MediaSettingsAppliedPayload {
+                source_request_id: command.source_request_id,
+                connection_id: command.connection_id,
+                connection_epoch: command.connection_epoch,
+                media_kind: command.media_kind,
+                generation,
+                outcome,
+                error_code: (outcome != MediaSettingsApplyOutcome::Accepted)
+                    .then_some(DeskErrorCode::ACTION_NEED_RETRY.code()),
+            },
+        ));
     }
 
     /// Stop every active pipeline. Called by `worker::session` on

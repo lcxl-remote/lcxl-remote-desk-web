@@ -18,9 +18,11 @@ use desk_agent_protocol::audit::AuditSink;
 use desk_agent_protocol::authz::{AuthorizationBlock, AuthorizedControlPayload};
 use desk_agent_protocol::exec_lifecycle::{ExecLifecycleEvent, ExecLifecyclePayload};
 use desk_ipc_protocol::message::{
-    ERROR_CODE_MEDIA_TRANSPORT_STUCK, VirtualDisplayModeOutcome, WorkerToService,
+    ERROR_CODE_MEDIA_TRANSPORT_STUCK, MediaKind, MediaSettingsAppliedPayload,
+    MediaSettingsApplyOutcome, VirtualDisplayModeOutcome, WorkerToService,
 };
 use desk_signal_facade::model::{
+    remote_session::{SystemAudioCaptureState, SystemAudioCaptureStateData},
     request_remote_authz::{AuthorizedRequestRemote, AuthorizedTerminalStart, RequestRemoteAuthz},
     signal::{RemoteDeskTypeEnum, SignalingModel, SignalingResponseState, SignalingType},
     version::VersionInfo,
@@ -42,6 +44,69 @@ fn take_edge_exec_correlation(
         .lock()
         .map(|mut pending| pending.remove(request_id))
         .unwrap_or(false)
+}
+
+fn audio_phase_is_authorized(
+    expected_terminal: Option<desk_ipc_protocol::message::AudioPipelinePhase>,
+    desired_active: bool,
+    phase: desk_ipc_protocol::message::AudioPipelinePhase,
+) -> bool {
+    if phase == desk_ipc_protocol::message::AudioPipelinePhase::Active && !desired_active {
+        return false;
+    }
+    expected_terminal != Some(desk_ipc_protocol::message::AudioPipelinePhase::Off)
+        || matches!(
+            phase,
+            desk_ipc_protocol::message::AudioPipelinePhase::Off
+                | desk_ipc_protocol::message::AudioPipelinePhase::Failed
+        )
+}
+
+fn reject_media_settings_command(
+    coordinator: &mut crate::daemon::pc_manager::PerConnectionMediaCoordinator,
+    payload: &MediaSettingsAppliedPayload,
+) -> bool {
+    if payload.outcome == MediaSettingsApplyOutcome::Accepted
+        || payload
+            .source_request_id
+            .as_deref()
+            .is_some_and(|request_id| {
+                coordinator.current_apply_request_id.as_deref() != Some(request_id)
+            })
+    {
+        return false;
+    }
+    match payload.media_kind {
+        MediaKind::Video if coordinator.video.generation == payload.generation => {
+            coordinator.video.lifecycle = crate::daemon::pc_manager::MediaSlotLifecycle::Stable;
+            coordinator.video.pending_generation = None;
+            if coordinator
+                .video_terminal_waiter
+                .as_ref()
+                .is_some_and(|(generation, _)| *generation == payload.generation)
+                && let Some((_, waiter)) = coordinator.video_terminal_waiter.take()
+            {
+                let _ = waiter.send(Err(payload.outcome));
+            }
+            true
+        }
+        MediaKind::Audio if coordinator.audio.generation == payload.generation => {
+            coordinator.audio.lifecycle = crate::daemon::pc_manager::MediaSlotLifecycle::Stable;
+            coordinator.audio.pending_generation = None;
+            coordinator.audio_expected_terminal = None;
+            coordinator.audio_desired_active = false;
+            if coordinator
+                .audio_terminal_waiter
+                .as_ref()
+                .is_some_and(|(generation, _)| *generation == payload.generation)
+                && let Some((_, waiter)) = coordinator.audio_terminal_waiter.take()
+            {
+                let _ = waiter.send(Err(payload.outcome));
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Whether the host should keep the manager link connected right now: the
@@ -94,6 +159,7 @@ pub async fn run_signaling_proxy(
     let host_activity = host_control_hub.host_activity();
 
     let (outbound_tx, _seed_rx) = broadcast::channel::<String>(128);
+    pc_registry.set_outbound_tx(outbound_tx.clone());
     let credential_scopes =
         crate::daemon::manager_credential_scope::ManagerCredentialScopeRegistry::default();
     pc_registry.set_manager_credential_scopes(credential_scopes.clone());
@@ -795,7 +861,12 @@ pub async fn run_signaling_proxy(
             }
             WorkerToService::MediaPipelineState(payload) => {
                 if !pc_registry
-                    .record_media_pipeline_state(&payload.connection_id, payload.data.clone())
+                    .record_media_pipeline_state(
+                        &payload.connection_id,
+                        &payload.connection_epoch,
+                        payload.video_generation,
+                        payload.data.clone(),
+                    )
                     .await
                 {
                     debug!(
@@ -822,6 +893,134 @@ pub async fn run_signaling_proxy(
                         "[SignalingProxy] Failed to build MediaPipelineStateChanged for {}: {e}",
                         payload.connection_id
                     ),
+                }
+            }
+            WorkerToService::AudioPipelineStateChanged(payload) => {
+                let Some(pc) = pc_registry.get(&payload.connection_id).await else {
+                    debug!(
+                        "[SignalingProxy] dropping audio state for unknown connection {}",
+                        payload.connection_id
+                    );
+                    continue;
+                };
+                let pc = pc.read().await;
+                if pc.connection_epoch != payload.connection_epoch {
+                    continue;
+                }
+                let mut coordinator = pc.media_coordinator.lock().await;
+                if coordinator.audio.generation != payload.audio_generation {
+                    continue;
+                }
+                let expected_terminal = coordinator.audio_expected_terminal;
+                if !audio_phase_is_authorized(
+                    expected_terminal,
+                    coordinator.audio_desired_active,
+                    payload.phase,
+                ) {
+                    debug!(
+                        "[SignalingProxy] ignoring late {:?} while audio generation {} is stopping for {}",
+                        payload.phase, payload.audio_generation, payload.connection_id
+                    );
+                    continue;
+                }
+                coordinator.actual_audio_phase = Some(payload.phase);
+                let terminal = matches!(
+                    payload.phase,
+                    desk_ipc_protocol::message::AudioPipelinePhase::Off
+                        | desk_ipc_protocol::message::AudioPipelinePhase::Active
+                        | desk_ipc_protocol::message::AudioPipelinePhase::Failed
+                );
+                let expected_terminal_reached = terminal
+                    && (expected_terminal.is_none()
+                        || expected_terminal == Some(payload.phase)
+                        || payload.phase == desk_ipc_protocol::message::AudioPipelinePhase::Failed);
+                if expected_terminal_reached {
+                    coordinator.audio.lifecycle =
+                        crate::daemon::pc_manager::MediaSlotLifecycle::Stable;
+                    coordinator.audio.pending_generation = None;
+                    coordinator.audio_expected_terminal = None;
+                    if matches!(
+                        payload.phase,
+                        desk_ipc_protocol::message::AudioPipelinePhase::Off
+                            | desk_ipc_protocol::message::AudioPipelinePhase::Failed
+                    ) {
+                        coordinator.audio_desired_active = false;
+                    }
+                }
+                if coordinator
+                    .audio_terminal_waiter
+                    .as_ref()
+                    .is_some_and(|(generation, _)| *generation == payload.audio_generation)
+                    && expected_terminal_reached
+                    && let Some((_, waiter)) = coordinator.audio_terminal_waiter.take()
+                {
+                    let _ = waiter.send(Ok(payload.phase));
+                }
+                let state = match payload.phase {
+                    desk_ipc_protocol::message::AudioPipelinePhase::Off => {
+                        SystemAudioCaptureState::Off
+                    }
+                    desk_ipc_protocol::message::AudioPipelinePhase::Starting => {
+                        SystemAudioCaptureState::Starting
+                    }
+                    desk_ipc_protocol::message::AudioPipelinePhase::Active => {
+                        SystemAudioCaptureState::Active
+                    }
+                    desk_ipc_protocol::message::AudioPipelinePhase::Restarting => {
+                        SystemAudioCaptureState::Restarting
+                    }
+                    desk_ipc_protocol::message::AudioPipelinePhase::Failed => {
+                        SystemAudioCaptureState::Failed
+                    }
+                };
+                {
+                    let mut fence = pc.media_output_fence.write().await;
+                    fence.audio_open = state == SystemAudioCaptureState::Active
+                        && coordinator.audio_desired_active;
+                    fence.audio_epoch = payload.connection_epoch.clone();
+                    fence.audio_generation = payload.audio_generation;
+                }
+                pc_registry.set_system_audio_capture_activity(
+                    &payload.connection_id,
+                    state == SystemAudioCaptureState::Active,
+                );
+                let accepted_audio = coordinator
+                    .accepted_baseline
+                    .as_ref()
+                    .and_then(|settings| settings.audio.clone());
+                drop(coordinator);
+                let snapshot = SystemAudioCaptureStateData {
+                    connection_epoch: payload.connection_epoch,
+                    state,
+                    accepted_audio,
+                    resolved_audio_device_id: payload.resolved_audio_device_id,
+                    error_code: payload
+                        .error_code
+                        .and_then(|code| serde_json::from_value(serde_json::json!(code)).ok()),
+                };
+                if let Ok(model) = SignalingModel::new_request(
+                    SignalingType::SystemAudioCaptureStateChanged,
+                    Some(payload.connection_id),
+                    Some(&snapshot),
+                ) && let Ok(text) = serde_json::to_string(&model)
+                {
+                    let _ = outbound_tx.send(text);
+                }
+            }
+            WorkerToService::MediaSettingsApplied(payload) => {
+                debug!(
+                    "[SignalingProxy] media action {:?} for {} generation={} outcome={:?}",
+                    payload.media_kind, payload.connection_id, payload.generation, payload.outcome
+                );
+                if payload.outcome != MediaSettingsApplyOutcome::Accepted
+                    && let Some(pc) = pc_registry.get(&payload.connection_id).await
+                {
+                    let pc = pc.read().await;
+                    if pc.connection_epoch != payload.connection_epoch {
+                        continue;
+                    }
+                    let mut coordinator = pc.media_coordinator.lock().await;
+                    reject_media_settings_command(&mut coordinator, &payload);
                 }
             }
             WorkerToService::FileManagerOpened(payload) => {

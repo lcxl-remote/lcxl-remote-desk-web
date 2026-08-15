@@ -1,0 +1,1 @@
+{"type":"object","properties":{"adaptive_video_quality":{"type":["integer","null"],"format":"int32","minimum":0}},"x-readme-ref-name":"RemoteSessionSettingsRuntimeOverrides"}

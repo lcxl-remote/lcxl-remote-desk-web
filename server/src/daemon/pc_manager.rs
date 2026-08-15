@@ -23,6 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use desk_signal_facade::model::desk_settings::DeskSettings;
 #[cfg(target_os = "linux")]
 use desk_signal_facade::model::desk_settings::LinuxInputControlMode;
 use desk_signal_facade::model::image_capture::Resolution;
@@ -43,7 +44,7 @@ use webrtc::api::media_engine::{
     MIME_TYPE_AV1, MIME_TYPE_H264, MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9,
 };
 use webrtc::data_channel::RTCDataChannel;
-use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
+use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::peer_connection::{RTCPeerConnection, peer_connection_state::RTCPeerConnectionState};
 use webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
@@ -71,10 +72,10 @@ use desk_capture_engine::audio_encoder::audio_encoder_factory::list_audio_encode
 use desk_capture_engine::model::video_encoder::VideoEncoderType;
 use desk_capture_engine::video_encoder::video_encoder_factory::list_video_encoder;
 use desk_ipc_protocol::message::{
-    ClipboardPayload, CursorDataPayload, FileTransferPayload, FileTransferSendErrorKind,
-    FileTransferSendFailedPayload, ForceKeyframePayload, MediaCapabilities, MediaCodec, MediaFrame,
-    MediaFrameKind, ServiceToWorker, StartMediaPayload, StopMediaPayload,
-    UpdateMediaSettingsPayload,
+    AudioPipelinePhase, ClipboardPayload, CursorDataPayload, FileTransferPayload,
+    FileTransferSendErrorKind, FileTransferSendFailedPayload, ForceKeyframePayload,
+    MediaCapabilities, MediaCodec, MediaFrame, MediaFrameKind, MediaSettingsApplyOutcome,
+    ServiceToWorker, StartMediaPayload, StopMediaPayload, UpdateMediaSettingsPayload,
 };
 use desk_signal_facade::model::signal::RemoteAccessInitializedData;
 use std::time::{Duration, Instant};
@@ -250,6 +251,75 @@ pub use ice::{
 // Per-connection PC context + registry
 // =====================================================================
 
+#[derive(Debug, Clone, Default)]
+pub struct MediaOutputFenceState {
+    pub video_epoch: String,
+    pub video_generation: u32,
+    pub audio_epoch: String,
+    pub audio_generation: u32,
+    pub audio_open: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaSlotLifecycle {
+    Stable,
+    Transitioning,
+}
+
+#[derive(Debug, Clone)]
+pub struct MediaSlot {
+    pub lifecycle: MediaSlotLifecycle,
+    pub generation: u32,
+    pub pending_generation: Option<u32>,
+}
+
+impl Default for MediaSlot {
+    fn default() -> Self {
+        Self {
+            lifecycle: MediaSlotLifecycle::Stable,
+            generation: 0,
+            pending_generation: None,
+        }
+    }
+}
+
+/// Single writer for controller-owned media state on one logical PC.
+/// Async work records a candidate/target generation here, releases the lock,
+/// and commits only after a matching worker terminal event returns.
+#[derive(Default)]
+pub struct PerConnectionMediaCoordinator {
+    pub accepted_baseline: Option<desk_signal_facade::model::remote_session::RemoteSessionSettings>,
+    pub recovery_start_media: Option<StartMediaPayload>,
+    pub video: MediaSlot,
+    pub audio: MediaSlot,
+    pub adaptive_quality_override: Option<u32>,
+    pub current_apply_request_id: Option<String>,
+    pub pending_audio_approval_id: Option<String>,
+    pub pending_audio_candidate:
+        Option<desk_signal_facade::model::remote_session::AudioPipelineSettings>,
+    pub actual_video_phase: Option<MediaPipelinePhase>,
+    pub actual_audio_phase: Option<desk_ipc_protocol::message::AudioPipelinePhase>,
+    /// The terminal currently authorized for the audio slot. A Stop keeps the
+    /// same generation, so generation alone cannot distinguish its expected
+    /// `Off` from a late `Active` emitted by the cancelled runner.
+    pub audio_expected_terminal: Option<desk_ipc_protocol::message::AudioPipelinePhase>,
+    /// Desired output state for the current generation. This remains false
+    /// after an `Off` terminal so an even later duplicate `Active` cannot
+    /// reopen the daemon output fence.
+    pub audio_desired_active: bool,
+    pub video_terminal_waiter: Option<(
+        u32,
+        tokio::sync::oneshot::Sender<Result<MediaPipelinePhase, MediaSettingsApplyOutcome>>,
+    )>,
+    pub audio_terminal_waiter: Option<(
+        u32,
+        tokio::sync::oneshot::Sender<
+            Result<desk_ipc_protocol::message::AudioPipelinePhase, MediaSettingsApplyOutcome>,
+        >,
+    )>,
+    pub closed: bool,
+}
+
 /// All daemon-side state for one browser connection. Each browser
 /// gets exactly one of these; multi-browser concurrency = many
 /// `PeerConnectionContext`s sharing the same daemon process.
@@ -263,6 +333,8 @@ pub use ice::{
 /// updates to be pushed back to.
 pub struct PeerConnectionContext {
     pub connection_id: String,
+    pub connection_epoch: String,
+    pub host_settings: DeskSettings,
     pub pc: Arc<RTCPeerConnection>,
     pub signaling_state: Arc<RwLock<SignalingState>>,
     /// Set on the first `Offer` whose SDP carries `m=video`. Driven from
@@ -317,6 +389,10 @@ pub struct PeerConnectionContext {
     /// resync. Audio falls under the same flag — the brief silence is
     /// preferable to playing audio against a frozen video frame.
     pub media_paused: Arc<AtomicBool>,
+    /// Serialized output gate shared with `write_video_frame`. Audio starts
+    /// closed and is opened only after a matching active terminal event.
+    pub media_output_fence: Arc<RwLock<MediaOutputFenceState>>,
+    pub media_coordinator: Arc<tokio::sync::Mutex<PerConnectionMediaCoordinator>>,
     /// Cached payload from the most recent `handle_offer` for
     /// this connection. After a worker swap [`PcRegistry::resume_active_media`]
     /// re-issues this (plus a `ForceKeyframe`) so the new worker
@@ -339,27 +415,29 @@ pub struct PeerConnectionContext {
 }
 
 impl PeerConnectionContext {
-    /// Record this connection's latest `StartMediaPayload` and report
-    /// whether this was the *first* offer to do so.
-    ///
-    /// `handle_offer` uses the result to gate worker `StartMedia` to the
-    /// first negotiation: a later renegotiation (an ICE-restart re-offer)
-    /// overwrites the cached payload — so a future worker-swap
-    /// [`PcRegistry::resume_active_media`] re-issues the most recent one —
-    /// but returns `false`, telling the caller to skip re-issuing
-    /// `StartMedia`. Re-issuing on every offer would make the worker
-    /// rebuild its per-connection input handlers and log a duplicate-start
-    /// warning (`MediaProducer::start_media` ignores the duplicate).
-    ///
-    /// The check-and-set is atomic on `cached_start_media`. Concurrent
-    /// offers for one connection are additionally serialized by the caller
-    /// holding the `PeerConnectionContext` write lock across this call, so
-    /// exactly one of them observes `true`.
-    pub async fn record_start_media_was_first(&self, payload: StartMediaPayload) -> bool {
+    /// Install the recovery snapshot once. ICE restart/re-offer must not
+    /// overwrite the accepted baseline with settings cached by the browser.
+    pub async fn install_initial_media(
+        &self,
+        payload: StartMediaPayload,
+        baseline: Option<desk_signal_facade::model::remote_session::RemoteSessionSettings>,
+    ) -> bool {
         let mut slot = self.cached_start_media.write().await;
-        let was_first = slot.is_none();
-        *slot = Some(payload);
-        was_first
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(payload.clone());
+        let mut coordinator = self.media_coordinator.lock().await;
+        coordinator.accepted_baseline = baseline;
+        coordinator.recovery_start_media = Some(payload.clone());
+        coordinator.video.generation = payload.video_generation;
+        coordinator.audio.generation = payload.audio_generation;
+        coordinator.audio_desired_active = payload.audio.is_some();
+        coordinator.audio_expected_terminal = payload
+            .audio
+            .as_ref()
+            .map(|_| desk_ipc_protocol::message::AudioPipelinePhase::Active);
+        true
     }
 }
 
@@ -425,6 +503,7 @@ struct GrantSessionEntry {
 pub struct PcRegistry {
     inner: Arc<RwLock<HashMap<String, Arc<RwLock<PeerConnectionContext>>>>>,
     worker_mgr: Arc<tokio::sync::OnceCell<WorkerManager>>,
+    outbound_tx: Arc<tokio::sync::OnceCell<broadcast::Sender<String>>>,
     host_activity: Arc<tokio::sync::OnceCell<crate::host_activity::HostActivityRegistry>>,
     manager_credential_scopes: Arc<
         tokio::sync::OnceCell<
@@ -495,6 +574,9 @@ pub struct PcRegistry {
     /// `PeerConnectionContext` instances.
     #[cfg(test)]
     test_len_extra: Arc<AtomicUsize>,
+    /// Test-only extra remote-desktop count kept separate from lifecycle len.
+    #[cfg(test)]
+    test_remote_desktop_extra: Arc<AtomicUsize>,
 }
 
 /// Errors produced by [`PcRegistry`] handlers. Worker-side equivalents
@@ -514,6 +596,15 @@ impl Drop for PendingRequestGuard {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+fn security_permission_is_tighter(previous: Option<bool>, current: Option<bool>) -> bool {
+    let strictness = |permission: Option<bool>| match permission {
+        Some(false) => 0,
+        None => 1,
+        Some(true) => 2,
+    };
+    strictness(current) < strictness(previous)
 }
 
 impl PcRegistry {
@@ -545,9 +636,266 @@ impl PcRegistry {
         }
     }
 
+    /// Enforce hot tightening of the independent system-audio permission.
+    /// Every affected output fence is closed before the first worker await;
+    /// widening to allow only invalidates old decisions and never starts audio.
+    pub fn spawn_system_audio_policy_enforcer(
+        &self,
+        mut policy_rx: tokio::sync::watch::Receiver<
+            desk_signal_facade::model::policy_snapshot::PolicySnapshot,
+        >,
+        worker_mgr: WorkerManager,
+    ) {
+        let registry = self.clone();
+        tokio::spawn(async move {
+            let mut previous_audio = policy_rx
+                .borrow()
+                .capability(SecurityPermissionType::SystemAudioCapture);
+            while policy_rx.changed().await.is_ok() {
+                let snapshot = policy_rx.borrow_and_update().clone();
+                let current_audio = snapshot.capability(SecurityPermissionType::SystemAudioCapture);
+                if current_audio.generation == previous_audio.generation {
+                    // Approval timeout, clipboard, terminal, etc. may publish a
+                    // new whole-policy snapshot. They must not invalidate a
+                    // one-time system-audio approval while this dimension is
+                    // still Prompt.
+                    continue;
+                }
+                let prior_audio = previous_audio;
+                previous_audio = current_audio;
+                let pcs: Vec<_> = registry.inner.read().await.values().cloned().collect();
+                let mut revoke = Vec::new();
+
+                // Linearization pass: close every affected fence first.
+                for pc in &pcs {
+                    let pc_guard = pc.read().await;
+                    let ceiling = pc_guard.signaling_state.read().await.access_ceiling.clone();
+                    let previous_effective = effective_permission(
+                        ceiling.as_ref(),
+                        prior_audio.permission,
+                        |settings| settings.allow_system_audio_capture,
+                    );
+                    let current_effective = effective_permission(
+                        ceiling.as_ref(),
+                        current_audio.permission,
+                        |settings| settings.allow_system_audio_capture,
+                    );
+                    if !security_permission_is_tighter(previous_effective, current_effective) {
+                        continue;
+                    }
+                    let coordinator = pc_guard.media_coordinator.lock().await;
+                    let had_audio = coordinator
+                        .accepted_baseline
+                        .as_ref()
+                        .and_then(|settings| settings.audio.as_ref())
+                        .is_some()
+                        || coordinator.pending_audio_candidate.is_some()
+                        || coordinator
+                            .recovery_start_media
+                            .as_ref()
+                            .and_then(|payload| payload.audio.as_ref())
+                            .is_some();
+                    let generation = coordinator.audio.generation;
+                    drop(coordinator);
+                    if had_audio {
+                        pc_guard.media_output_fence.write().await.audio_open = false;
+                        registry.set_system_audio_capture_activity(&pc_guard.connection_id, false);
+                        revoke.push((
+                            pc_guard.connection_id.clone(),
+                            pc_guard.connection_epoch.clone(),
+                            generation,
+                            Arc::clone(pc),
+                        ));
+                    }
+                }
+
+                let revocation_deadline =
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                let mut revocation_waiters = Vec::new();
+                let mut recycle_worker = false;
+                for (connection_id, connection_epoch, generation, pc) in revoke {
+                    let pc_guard = pc.read().await;
+                    let mut coordinator = pc_guard.media_coordinator.lock().await;
+                    let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
+                    coordinator.pending_audio_approval_id = None;
+                    coordinator.pending_audio_candidate = None;
+                    if let Some(baseline) = coordinator.accepted_baseline.as_mut() {
+                        baseline.audio = None;
+                    }
+                    if let Some(recovery) = coordinator.recovery_start_media.as_mut() {
+                        recovery.audio = None;
+                    }
+                    coordinator.audio.lifecycle = MediaSlotLifecycle::Transitioning;
+                    coordinator.audio.pending_generation = Some(generation);
+                    coordinator.audio_desired_active = false;
+                    coordinator.audio_expected_terminal = Some(AudioPipelinePhase::Off);
+                    coordinator.audio_terminal_waiter = Some((generation, terminal_tx));
+                    if let Some(cached) = pc_guard.cached_start_media.write().await.as_mut() {
+                        cached.audio = None;
+                    }
+                    drop(coordinator);
+                    drop(pc_guard);
+                    if let Err(error) = worker_mgr
+                        .send_to_worker(ServiceToWorker::ApplyMediaSettings(
+                            desk_ipc_protocol::message::ApplyMediaSettingsPayload {
+                                source_request_id: None,
+                                connection_id: connection_id.clone(),
+                                connection_epoch: connection_epoch.clone(),
+                                media_kind: desk_ipc_protocol::message::MediaKind::Audio,
+                                action: desk_ipc_protocol::message::MediaSettingsAction::Stop {
+                                    target_generation: generation,
+                                },
+                            },
+                        ))
+                        .await
+                    {
+                        log::warn!(
+                            "[audio-policy] failed to stop revoked audio for {connection_id}: {error}"
+                        );
+                        recycle_worker = true;
+                    } else {
+                        revocation_waiters.push((connection_id, connection_epoch, terminal_rx));
+                    }
+                }
+
+                for (connection_id, connection_epoch, waiter) in revocation_waiters {
+                    let terminal_ok = match tokio::time::timeout_at(revocation_deadline, waiter)
+                        .await
+                    {
+                        Ok(Ok(Ok(desk_ipc_protocol::message::AudioPipelinePhase::Off))) => true,
+                        Ok(Ok(Ok(phase))) => {
+                            log::warn!(
+                                "[audio-policy] revoked audio for {connection_id} reached \
+                                 unexpected terminal {phase:?}; recycling worker"
+                            );
+                            false
+                        }
+                        Ok(Ok(Err(outcome))) => {
+                            log::warn!(
+                                "[audio-policy] worker rejected audio revocation for \
+                                 {connection_id}: {outcome:?}"
+                            );
+                            false
+                        }
+                        Ok(Err(_)) => {
+                            log::warn!(
+                                "[audio-policy] revoked audio waiter closed for {connection_id}; \
+                                 recycling worker"
+                            );
+                            false
+                        }
+                        Err(_) => {
+                            log::warn!(
+                                "[audio-policy] revoked audio for {connection_id} did not stop \
+                                 within the 5 second hard deadline; recycling worker"
+                            );
+                            false
+                        }
+                    };
+                    if !terminal_ok {
+                        let still_current = match registry.get(&connection_id).await {
+                            Some(pc) => pc.read().await.connection_epoch == connection_epoch,
+                            None => false,
+                        };
+                        if still_current {
+                            recycle_worker = true;
+                        } else {
+                            log::debug!(
+                                "[audio-policy] ignoring revocation failure for finalized \
+                                 connection {connection_id}"
+                            );
+                        }
+                    }
+                }
+                if recycle_worker
+                    && let Err(error) = worker_mgr.recycle_for_remote_access_timeout().await
+                {
+                    log::error!(
+                        "[audio-policy] failed to recycle worker after revocation timeout: {error}"
+                    );
+                }
+            }
+        });
+    }
+
     pub fn set_host_activity(&self, registry: crate::host_activity::HostActivityRegistry) {
         if self.host_activity.set(registry).is_err() {
             log::debug!("[pc_manager] host activity registry already installed; ignoring");
+        }
+    }
+
+    pub fn set_outbound_tx(&self, outbound: broadcast::Sender<String>) {
+        if self.outbound_tx.set(outbound).is_err() {
+            log::debug!("[pc_manager] outbound signaling sender already installed; ignoring");
+        }
+    }
+
+    /// Enter the permanent in-process media fail-safe state. Every current PC is
+    /// notified with the dedicated error, its output fences are closed, and the
+    /// PC is removed/closed. New remote-desktop admissions are rejected by
+    /// `WorkerManager::media_worker_restart_required` until process restart.
+    pub async fn fail_media_worker_restart_required(&self) {
+        let ids = self.all_connection_ids().await;
+        for connection_id in ids {
+            let Some(pc) = self.remove(&connection_id).await else {
+                continue;
+            };
+            let pc = pc.read().await;
+            pc.media_paused.store(true, Ordering::Release);
+            pc.media_output_fence.write().await.audio_open = false;
+            let mut coordinator = pc.media_coordinator.lock().await;
+            coordinator.closed = true;
+            coordinator.current_apply_request_id = None;
+            coordinator.pending_audio_approval_id = None;
+            coordinator.pending_audio_candidate = None;
+            coordinator.video_terminal_waiter = None;
+            coordinator.audio_terminal_waiter = None;
+            coordinator.audio_expected_terminal = None;
+            coordinator.audio_desired_active = false;
+            coordinator.actual_audio_phase = Some(AudioPipelinePhase::Failed);
+            let accepted_audio = coordinator
+                .accepted_baseline
+                .as_ref()
+                .and_then(|settings| settings.audio.clone());
+            drop(coordinator);
+            if let Some(activity) = self.host_activity() {
+                // This path bypasses `cleanup_pc`, so remove the complete
+                // connection footprint (view/control/audio), not just its
+                // system-audio bit.
+                activity.remove_connection(&connection_id);
+            }
+            if let Some(hub) = self.host_control_hub() {
+                hub.cancel_pending_for_connection(&connection_id);
+            }
+
+            if let Some(outbound) = self.outbound_tx.get() {
+                let payload = desk_signal_facade::model::remote_session::SystemAudioCaptureStateData {
+                    connection_epoch: pc.connection_epoch.clone(),
+                    state: desk_signal_facade::model::remote_session::SystemAudioCaptureState::Failed,
+                    accepted_audio,
+                    resolved_audio_device_id: None,
+                    error_code: Some(DeskErrorCode::MEDIA_WORKER_RESTART_REQUIRED),
+                };
+                if let Ok(model) = SignalingModel::new_request(
+                    SignalingType::SystemAudioCaptureStateChanged,
+                    Some(connection_id.clone()),
+                    Some(&payload),
+                ) && let Ok(text) = serde_json::to_string(&model)
+                {
+                    let _ = outbound.send(text);
+                }
+            }
+            if let Err(error) = pc.pc.close().await {
+                log::warn!(
+                    "[pc_manager] failed to close {connection_id} after unsafe media-worker stop: {error}"
+                );
+            }
+            drop(pc);
+            self.unindex_grant_connection(&connection_id).await;
+            self.clear_admission(&connection_id).await;
+            log::error!(
+                "[pc_manager] closed {connection_id}: media worker requires host process restart"
+            );
         }
     }
 
@@ -572,6 +920,12 @@ impl PcRegistry {
 
     fn host_activity(&self) -> Option<crate::host_activity::HostActivityRegistry> {
         self.host_activity.get().cloned()
+    }
+
+    pub fn set_system_audio_capture_activity(&self, connection_id: &str, active: bool) {
+        if let Some(activity) = self.host_activity() {
+            activity.set_system_audio_capture(connection_id, active);
+        }
     }
 
     pub(crate) fn clear_worker_activity(&self) {
@@ -599,12 +953,41 @@ impl PcRegistry {
     pub async fn record_media_pipeline_state(
         &self,
         connection_id: &str,
+        connection_epoch: &str,
+        video_generation: u32,
         state: MediaPipelineStateData,
     ) -> bool {
         let Some(ctx) = self.get(connection_id).await else {
             return false;
         };
-        *ctx.read().await.media_pipeline_state.write().await = Some(state);
+        let ctx = ctx.read().await;
+        if ctx.connection_epoch != connection_epoch {
+            return false;
+        }
+        let mut coordinator = ctx.media_coordinator.lock().await;
+        if coordinator.video.generation != video_generation {
+            return false;
+        }
+        coordinator.actual_video_phase = Some(state.phase);
+        if matches!(
+            state.phase,
+            MediaPipelinePhase::Streaming
+                | MediaPipelinePhase::Blocked
+                | MediaPipelinePhase::Failed
+        ) {
+            coordinator.video.lifecycle = MediaSlotLifecycle::Stable;
+            coordinator.video.pending_generation = None;
+        }
+        if coordinator
+            .video_terminal_waiter
+            .as_ref()
+            .is_some_and(|(generation, _)| *generation == video_generation)
+            && let Some((_, waiter)) = coordinator.video_terminal_waiter.take()
+        {
+            let _ = waiter.send(Ok(state.phase));
+        }
+        drop(coordinator);
+        *ctx.media_pipeline_state.write().await = Some(state);
         true
     }
 
@@ -711,9 +1094,10 @@ impl PcRegistry {
     }
 
     /// Drop `connection_id` from whatever grant session held it, removing the
-    /// grant key entirely once its last connection departs. Called by
-    /// [`cleanup_pc`] on every teardown path and by the terminal connection's own
-    /// `CloseTerminal` cleanup; a no-op for connections that carry no grant.
+    /// grant key entirely once its last logical signaling connection departs.
+    /// PeerConnection-only replacement deliberately keeps the index so grant
+    /// revocation still reaches the controller during the handoff gap. A no-op
+    /// for connections that carry no grant.
     pub(crate) async fn unindex_grant_connection(&self, connection_id: &str) {
         let mut map = self.grant_sessions.write().await;
         map.retain(|_, entry| {
@@ -912,6 +1296,31 @@ impl PcRegistry {
         }
     }
 
+    pub async fn remote_desktop_count(&self) -> usize {
+        let pcs: Vec<_> = self.inner.read().await.values().cloned().collect();
+        let mut count = 0usize;
+        for pc in pcs {
+            if pc.read().await.signaling_state.read().await.purpose
+                == desk_signal_facade::model::signal::RemoteSessionPurpose::RemoteDesktop
+            {
+                count += 1;
+            }
+        }
+        #[cfg(test)]
+        {
+            count += self
+                .test_remote_desktop_extra
+                .load(std::sync::atomic::Ordering::Relaxed);
+        }
+        count
+    }
+
+    #[cfg(test)]
+    pub fn set_test_remote_desktop_extra(&self, extra: usize) {
+        self.test_remote_desktop_extra
+            .store(extra, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Test-only knob: simulate additional registered PCs without having
     /// to build real `PeerConnectionContext` instances (which depend on
     /// a fully constructed `RTCPeerConnection`). The router's
@@ -1007,6 +1416,8 @@ impl PcRegistry {
 
         let ctx = Arc::new(RwLock::new(PeerConnectionContext {
             connection_id: connection_id.to_string(),
+            connection_epoch: uuid::Uuid::new_v4().to_string(),
+            host_settings: local_settings.desk.clone(),
             pc: Arc::new(pc),
             signaling_state: Arc::new(RwLock::new(SignalingState::default())),
             video_track: None,
@@ -1016,6 +1427,10 @@ impl PcRegistry {
             file_transfer_data_channel,
             file_transfer_writer_tx,
             media_paused: Arc::new(AtomicBool::new(false)),
+            media_output_fence: Arc::new(RwLock::new(MediaOutputFenceState::default())),
+            media_coordinator: Arc::new(tokio::sync::Mutex::new(
+                PerConnectionMediaCoordinator::default(),
+            )),
             cached_start_media: Arc::new(RwLock::new(None)),
             media_pipeline_state: Arc::new(RwLock::new(None)),
             last_media_retry_request_id: Arc::new(RwLock::new(None)),
@@ -1060,6 +1475,69 @@ impl PcRegistry {
         }
     }
 
+    /// Build the authoritative worker-recovery payload with fresh per-media
+    /// generations. The accepted recovery snapshot, cache, coordinator slots
+    /// and output fence advance together before anything reaches the worker, so
+    /// frames or terminal events from the old incarnation can never reopen the
+    /// new pipeline.
+    async fn prepare_fresh_recovery_payload(
+        &self,
+        connection_id: &str,
+    ) -> Result<Option<StartMediaPayload>, ()> {
+        let Some(ctx) = self.get(connection_id).await else {
+            return Ok(None);
+        };
+        let pc = ctx.read().await;
+        pc.media_paused.store(true, Ordering::Relaxed);
+        let mut coordinator = pc.media_coordinator.lock().await;
+        let Some(mut payload) = coordinator.recovery_start_media.clone() else {
+            return Ok(None);
+        };
+        let Some(video_generation) = coordinator.video.generation.checked_add(1) else {
+            return Err(());
+        };
+        let Some(audio_generation) = coordinator.audio.generation.checked_add(1) else {
+            return Err(());
+        };
+        payload.video_generation = video_generation;
+        payload.audio_generation = audio_generation;
+        coordinator.video.generation = video_generation;
+        coordinator.video.pending_generation = Some(video_generation);
+        coordinator.video.lifecycle = MediaSlotLifecycle::Transitioning;
+        coordinator.audio.generation = audio_generation;
+        coordinator.audio.pending_generation = payload.audio.as_ref().map(|_| audio_generation);
+        coordinator.audio.lifecycle = if payload.audio.is_some() {
+            MediaSlotLifecycle::Transitioning
+        } else {
+            MediaSlotLifecycle::Stable
+        };
+        coordinator.actual_video_phase = None;
+        coordinator.actual_audio_phase = Some(if payload.audio.is_some() {
+            AudioPipelinePhase::Starting
+        } else {
+            AudioPipelinePhase::Off
+        });
+        coordinator.audio_desired_active = payload.audio.is_some();
+        coordinator.audio_expected_terminal =
+            payload.audio.as_ref().map(|_| AudioPipelinePhase::Active);
+        // Adaptive quality is an ephemeral controller decision, not part of
+        // the accepted recovery snapshot. A new worker incarnation always
+        // starts from the user's baseline and lets the controller converge
+        // again from fresh telemetry.
+        coordinator.adaptive_quality_override = None;
+        coordinator.video_terminal_waiter = None;
+        coordinator.audio_terminal_waiter = None;
+        coordinator.recovery_start_media = Some(payload.clone());
+        *pc.cached_start_media.write().await = Some(payload.clone());
+        let mut fence = pc.media_output_fence.write().await;
+        fence.video_epoch = pc.connection_epoch.clone();
+        fence.video_generation = video_generation;
+        fence.audio_epoch = pc.connection_epoch.clone();
+        fence.audio_generation = audio_generation;
+        fence.audio_open = false;
+        Ok(Some(payload))
+    }
+
     /// Re-issue the cached `StartMediaPayload` + a `ForceKeyframe`
     /// to the worker for every PC that already negotiated an offer.
     /// Called by `signaling_proxy` once the new worker reports
@@ -1071,15 +1549,13 @@ impl PcRegistry {
         worker_mgr: &WorkerManager,
         virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
     ) {
-        let snapshot: Vec<(String, Option<StartMediaPayload>, Option<Admission>)> = {
+        let snapshot: Vec<(String, Option<Admission>)> = {
             let map = self.inner.read().await;
             let admissions = self.admissions.read().await;
             let mut out = Vec::with_capacity(map.len());
-            for (id, ctx) in map.iter() {
-                let cached = ctx.read().await.cached_start_media.read().await.clone();
+            for id in map.keys() {
                 out.push((
                     id.clone(),
-                    cached,
                     admissions
                         .by_connection
                         .get(id)
@@ -1088,7 +1564,7 @@ impl PcRegistry {
             }
             out
         };
-        for (id, payload, admission) in snapshot {
+        for (id, admission) in snapshot {
             // Re-register the capability ceiling with the freshly spawned worker
             // before any media / terminal / file frame for this connection. A worker
             // swap (desktop change / UAC / lock screen / crash recovery) starts a
@@ -1125,13 +1601,27 @@ impl PcRegistry {
                     continue;
                 }
             }
-            let payload = match payload {
-                Some(p) => p,
-                None => {
+            let payload = match self.prepare_fresh_recovery_payload(&id).await {
+                Ok(Some(payload)) => payload,
+                Ok(None) => {
                     log::debug!(
-                        "[pc_manager] resume: no cached StartMedia for {id} (offer not exchanged \
+                        "[pc_manager] resume: no accepted recovery media for {id} (offer not exchanged \
                          yet) — skipping"
                     );
+                    continue;
+                }
+                Err(()) => {
+                    log::warn!(
+                        "[pc_manager] resume: media generation exhausted for {id}; tearing down"
+                    );
+                    cleanup_pc(
+                        self,
+                        worker_mgr,
+                        virtual_display,
+                        &id,
+                        "resume: media generation exhausted",
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -1185,24 +1675,35 @@ impl PcRegistry {
         worker_mgr: &WorkerManager,
         trigger: MediaRestartTrigger,
     ) -> RestartOutcome {
-        let cached = match self.get(connection_id).await {
-            Some(ctx) => ctx.read().await.cached_start_media.read().await.clone(),
-            None => {
-                log::debug!(
-                    "[pc_manager] restart_media_from_cached_payload: unknown connection \
+        if !self.contains(connection_id).await {
+            log::debug!(
+                "[pc_manager] restart_media_from_cached_payload: unknown connection \
                      {connection_id}; trigger={trigger:?}"
+            );
+            return RestartOutcome::Failed {
+                stage: MediaRestartStage::UnknownConnection,
+            };
+        }
+        let payload = match self.prepare_fresh_recovery_payload(connection_id).await {
+            Ok(Some(payload)) => payload,
+            Ok(None) => {
+                log::warn!(
+                    "[pc_manager] restart_media_from_cached_payload {connection_id}: \
+                     trigger={trigger:?}; no cached StartMedia (offer never landed); leaving \
+                     connection paused — caller must redo handle_offer"
+                );
+                return RestartOutcome::NoCachedPayload { left_paused: true };
+            }
+            Err(()) => {
+                log::warn!(
+                    "[pc_manager] restart_media_from_cached_payload {connection_id}: \
+                     media generation exhausted"
                 );
                 return RestartOutcome::Failed {
-                    stage: MediaRestartStage::UnknownConnection,
+                    stage: MediaRestartStage::StartMedia,
                 };
             }
         };
-
-        // Pause this PC's media ingestion until the new IDR clears the flag
-        // — same pattern as `pause_all_media` but scoped to one connection.
-        if let Some(ctx) = self.get(connection_id).await {
-            ctx.read().await.media_paused.store(true, Ordering::Relaxed);
-        }
 
         log::info!(
             "[pc_manager] restart_media_from_cached_payload {connection_id}: trigger={trigger:?}; \
@@ -1211,6 +1712,7 @@ impl PcRegistry {
         if let Err(e) = worker_mgr
             .send_to_worker(ServiceToWorker::StopMedia(StopMediaPayload {
                 connection_id: connection_id.to_string(),
+                connection_epoch: payload.connection_epoch.clone(),
             }))
             .await
         {
@@ -1220,18 +1722,6 @@ impl PcRegistry {
             );
             // Continue anyway — StartMedia is the actual recovery action.
         }
-
-        let payload = match cached {
-            Some(p) => p,
-            None => {
-                log::warn!(
-                    "[pc_manager] restart_media_from_cached_payload {connection_id}: \
-                     trigger={trigger:?}; no cached StartMedia (offer never landed); leaving \
-                     connection paused — caller must redo handle_offer"
-                );
-                return RestartOutcome::NoCachedPayload { left_paused: true };
-            }
-        };
 
         if let Err(e) = worker_mgr
             .send_to_worker(ServiceToWorker::StartMedia(payload))
@@ -1262,59 +1752,54 @@ impl PcRegistry {
         RestartOutcome::Restarted
     }
 
-    /// Fan out an `UpdateMediaSettings` to every PC that has already
-    /// negotiated a `StartMedia` (i.e. has a `cached_start_media`
-    /// snapshot). Called by `signaling_router` when the browser sends
-    /// `SignalingType::UpdateDeskSettings` so encoder fps / quality
-    /// changes flow into the live worker pipeline rather than waiting
-    /// for the next StopMedia / StartMedia cycle.
-    ///
-    /// PCs without a cached payload (offer hasn't landed) are skipped
-    /// — `handle_offer` will pick up the new daemon-wide settings on
-    /// its first StartMedia anyway. All-`None` payloads short-circuit
-    /// without iterating to keep the path quiet for unrelated
-    /// `UpdateDeskSettings` messages.
-    pub async fn broadcast_media_settings_update(
+    /// Apply encoder-relevant live settings to exactly one admitted
+    /// connection. Session settings are never broadcast to sibling browsers.
+    pub async fn update_media_settings_for_connection(
         &self,
         worker_mgr: &WorkerManager,
+        connection_id: &str,
         fps: Option<u32>,
         bitrate_kbps: Option<u32>,
         quality: Option<u32>,
         enable_dirty_rect: Option<bool>,
-    ) {
+        show_mouse: Option<bool>,
+    ) -> bool {
         if fps.is_none()
             && bitrate_kbps.is_none()
             && quality.is_none()
             && enable_dirty_rect.is_none()
+            && show_mouse.is_none()
         {
-            return;
+            return true;
         }
-        let connection_ids: Vec<String> = {
-            let map = self.inner.read().await;
-            let mut ids = Vec::with_capacity(map.len());
-            for (id, ctx) in map.iter() {
-                let ctx = ctx.read().await;
-                if ctx.cached_start_media.read().await.is_some() {
-                    ids.push(id.clone());
-                }
-            }
-            ids
+        let Some(ctx) = self.get(connection_id).await else {
+            return false;
         };
-        for id in connection_ids {
-            let payload = UpdateMediaSettingsPayload {
-                connection_id: id.clone(),
-                fps,
-                bitrate_kbps,
-                quality,
-                enable_dirty_rect,
-            };
-            if let Err(e) = worker_mgr
-                .send_to_worker(ServiceToWorker::UpdateMediaSettings(payload))
-                .await
-            {
-                log::warn!("[pc_manager] broadcast_media_settings_update {id}: send failed: {e}");
-            }
+        let ctx = ctx.read().await;
+        let Some(cached) = ctx.cached_start_media.read().await.clone() else {
+            return false;
+        };
+        let payload = UpdateMediaSettingsPayload {
+            connection_id: connection_id.to_string(),
+            connection_epoch: cached.connection_epoch,
+            video_generation: cached.video_generation,
+            fps,
+            bitrate_kbps,
+            quality,
+            enable_dirty_rect,
+            show_mouse,
+        };
+        drop(ctx);
+        if let Err(e) = worker_mgr
+            .send_to_worker(ServiceToWorker::UpdateMediaSettings(payload))
+            .await
+        {
+            log::warn!(
+                "[pc_manager] update_media_settings_for_connection {connection_id}: send failed: {e}"
+            );
+            return false;
         }
+        true
     }
 }
 
@@ -1337,15 +1822,20 @@ use data_channel::{DcRoute, classify_dc_label, route_is_permitted, route_to_serv
 pub(crate) async fn send_cap_directive(
     worker_mgr: &WorkerManager,
     connection_id: &str,
+    connection_epoch: &str,
+    video_generation: u32,
     directive: CapDirective,
     state: &mut AdaptiveBitrateState,
 ) {
     let payload = UpdateMediaSettingsPayload {
         connection_id: connection_id.to_string(),
+        connection_epoch: connection_epoch.to_string(),
+        video_generation,
         fps: None,
         bitrate_kbps: Some(directive.wire_kbps()),
         quality: None,
         enable_dirty_rect: None,
+        show_mouse: None,
     };
     match worker_mgr
         .send_to_worker(ServiceToWorker::UpdateMediaSettings(payload))
@@ -1364,6 +1854,11 @@ pub(crate) async fn send_cap_directive(
             log::warn!("[BitrateCap] {connection_id}: failed to send {directive:?}: {e}");
         }
     }
+}
+
+fn stable_video_generation(coordinator: &PerConnectionMediaCoordinator) -> Option<u32> {
+    (coordinator.video.lifecycle == MediaSlotLifecycle::Stable)
+        .then_some(coordinator.video.generation)
 }
 
 /// Spawn a task that reads RTCP feedback off `rtp_sender`:
@@ -1386,8 +1881,10 @@ pub(crate) async fn send_cap_directive(
 fn spawn_rtcp_feedback_task(
     rtp_sender: Arc<RTCRtpSender>,
     connection_id: String,
+    connection_epoch: String,
     worker_mgr: WorkerManager,
     adaptive_bitrate: Arc<AdaptiveBitrateShared>,
+    media_coordinator: Arc<tokio::sync::Mutex<PerConnectionMediaCoordinator>>,
 ) {
     tokio::spawn(async move {
         log::info!("[RtcpReader] {connection_id}: starting");
@@ -1416,6 +1913,17 @@ fn spawn_rtcp_feedback_task(
                                 "[RtcpReader] {connection_id}: REMB estimate {:.0} bps",
                                 remb.bitrate
                             );
+                            // Serialize with a 301 video transition. If a
+                            // restart has reserved a new generation but has not
+                            // yet reached its terminal, neither the old nor the
+                            // pending encoder is a safe bitrate target.
+                            let video_generation = {
+                                let coordinator = media_coordinator.lock().await;
+                                stable_video_generation(&coordinator)
+                            };
+                            let Some(video_generation) = video_generation else {
+                                continue;
+                            };
                             let mut state = adaptive_bitrate.state.lock().await;
                             if let Some(directive) =
                                 state.decide_on_remb(std::time::Instant::now(), remb.bitrate as f64)
@@ -1423,11 +1931,14 @@ fn spawn_rtcp_feedback_task(
                                 send_cap_directive(
                                     &worker_mgr,
                                     &connection_id,
+                                    &connection_epoch,
+                                    video_generation,
                                     directive,
                                     &mut state,
                                 )
                                 .await;
                             }
+                            drop(state);
                         }
                     }
                 }

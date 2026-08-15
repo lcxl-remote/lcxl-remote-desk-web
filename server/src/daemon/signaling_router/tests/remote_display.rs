@@ -1,5 +1,6 @@
 use super::routing::make_change_display_settings_model;
 use super::*;
+use desk_ipc_protocol::message::MediaCapabilities;
 
 // ===== RequestRemoteAccess virtual-display lifecycle =====
 
@@ -154,6 +155,8 @@ pub(super) async fn request_remote_skips_ensure_when_no_supervisor() {
     let (mut ctx, _rx) = make_ctx_with_rx().await;
     ctx.settings.write().await.virtual_display.enabled = true;
     ctx.virtual_display = None;
+    ctx.worker_mgr
+        .set_worker_capabilities(MediaCapabilities::default());
 
     let model = make_request_remote_model("conn-no-supervisor");
     route(&model, &ctx)
@@ -197,6 +200,8 @@ pub(super) async fn request_remote_continues_when_provider_not_supported() {
         ctx.worker_mgr.clone(),
     ));
     ctx.virtual_display = Some(supervisor);
+    ctx.worker_mgr
+        .set_worker_capabilities(MediaCapabilities::default());
 
     let model = make_request_remote_model("conn-unavailable");
     route(&model, &ctx)
@@ -221,8 +226,8 @@ pub(super) async fn request_remote_continues_when_provider_not_supported() {
 pub(super) async fn auto_request_rejected_when_multiple_pcs() {
     let (ctx, mut rx, _worker_rx) = make_ctx_with_attached_supervisor().await;
     // Simulate 2 PCs via the test-only override.
-    ctx.pc_registry.set_test_len_extra(2);
-    assert_eq!(ctx.pc_registry.len().await, 2);
+    ctx.pc_registry.set_test_remote_desktop_extra(1);
+    assert_eq!(ctx.pc_registry.remote_desktop_count().await, 2);
 
     let model = make_change_display_settings_model(
         "req-multi",
@@ -236,7 +241,10 @@ pub(super) async fn auto_request_rejected_when_multiple_pcs() {
     route(&model, &ctx).await.expect("route must not error");
     let response = read_response(&mut rx);
     let state = response.response_state.expect("must have error state");
-    assert_eq!(state.error_code, DeskErrorCode::INVALID_STATE.code());
+    assert_eq!(
+        state.error_code,
+        DeskErrorCode::ADAPTIVE_RESOLUTION_REQUIRES_SINGLE_CLIENT.code()
+    );
     assert!(
         state
             .message
@@ -251,7 +259,7 @@ pub(super) async fn auto_request_rejected_when_multiple_pcs() {
 /// Regression: the daemon must NOT gate auto requests on the
 /// server-wide `settings.desk.adaptive_web_page_resolution` value.
 /// That field is per-connection (the browser dialog collects it and
-/// ships it via `UpdateDeskSettings`, which the router forwards to
+/// ships it via `ApplyRemoteSessionSettings`, which the router forwards to
 /// the worker without writing back to `ctx.settings.desk`), so the
 /// server-wide snapshot is always whatever the operator put in
 /// `config.toml` — typically `false` (the `DeskSettings::default`).

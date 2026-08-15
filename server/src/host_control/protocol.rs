@@ -32,6 +32,7 @@ pub struct HostAccessSession {
     pub actor: ActorSummary,
     pub started_at: String,
     pub desktop_view: bool,
+    pub system_audio_capture: bool,
     pub remote_control: bool,
     pub terminal_count: u32,
     pub file_manager: bool,
@@ -41,6 +42,7 @@ pub struct HostAccessSession {
 impl HostAccessSession {
     pub fn is_active(&self) -> bool {
         self.desktop_view
+            || self.system_audio_capture
             || self.remote_control
             || self.terminal_count > 0
             || self.file_manager
@@ -369,6 +371,7 @@ mod tests {
                         remote_control: false,
                         terminal_count: 0,
                         file_manager: false,
+                        system_audio_capture: false,
                         transfers: Vec::new(),
                     }],
                     remote_access: HostRemoteAccessStatus::default(),

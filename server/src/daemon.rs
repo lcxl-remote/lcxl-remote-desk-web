@@ -213,6 +213,10 @@ pub async fn run_service_daemon_inner(
         worker_manager::WorkerManager::new(shared_settings_data.clone(), pc_registry.clone());
     worker_mgr.bind_remote_access_gate(host_control_hub.remote_access_gate());
     settings_coordinator.bind_worker_manager(worker_mgr.clone());
+    pc_registry.spawn_system_audio_policy_enforcer(
+        settings_coordinator.subscribe_policy(),
+        worker_mgr.clone(),
+    );
 
     // Allow the per-connection file-transfer writer task to push a
     // `FileTransferSendFailed` back to the worker on a daemon-side
@@ -475,6 +479,10 @@ pub async fn start_inprocess_daemon(
         worker_manager::WorkerManager::new(settings.clone(), pc_registry.clone());
     worker_mgr.bind_remote_access_gate(host_control_hub.remote_access_gate());
     settings_coordinator.bind_worker_manager(worker_mgr.clone());
+    pc_registry.spawn_system_audio_policy_enforcer(
+        settings_coordinator.subscribe_policy(),
+        worker_mgr.clone(),
+    );
     if let Some(coordinator) = host_control_hub.remote_access_coordinator() {
         coordinator.attach_runtime(
             pc_registry.clone(),

@@ -12,12 +12,6 @@ pub const DEFAULT_ADAPTIVE_DEBOUNCE_MS: u64 = 5_000;
 /// height changes are skipped to suppress micro-jitter.
 pub const DEFAULT_ADAPTIVE_MIN_DELTA_PX: u32 = 16;
 
-/// serde `skip_serializing_if` helper. The stdlib `Not::not` takes `self`
-/// by value, not `&bool`, so we cannot reference it directly.
-fn is_false(v: &bool) -> bool {
-    !*v
-}
-
 /// Data payload for `SignalingType::ChangeDisplaySettings` (numeric tag
 /// 205). Carries the browser-requested virtual monitor mode. The desk
 /// server's signaling router validates the values via
@@ -34,16 +28,12 @@ fn is_false(v: &bool) -> bool {
 /// requests (`auto = false`, the default) bypass those gates and any
 /// echo is treated as a normal response.
 ///
-/// `auto` defaults to `false` and is skipped on the wire when false
-/// (`skip_serializing_if`), so the JSON shape stays backward
-/// compatible: a peer that only knows the old three-field schema
-/// keeps working.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, ToSchema)]
 pub struct ChangeDisplaySettingsPayload {
+    pub connection_epoch: String,
     pub width: u32,
     pub height: u32,
     pub refresh_hz: u32,
-    #[serde(default, skip_serializing_if = "is_false")]
     pub auto: bool,
 }
 
@@ -54,6 +44,7 @@ mod tests {
     #[test]
     fn change_display_settings_payload_serde_roundtrip() {
         let original = ChangeDisplaySettingsPayload {
+            connection_epoch: "epoch".into(),
             width: 1920,
             height: 1080,
             refresh_hz: 60,
@@ -70,21 +61,11 @@ mod tests {
         // the signaling envelope). Pin that contract so a future
         // `#[serde(rename_all = "camelCase")]` accidentally added here
         // would break browsers in flight.
-        let raw = r#"{"width":1280,"height":720,"refresh_hz":60}"#;
+        let raw = r#"{"connection_epoch":"epoch","width":1280,"height":720,"refresh_hz":60,"auto":false}"#;
         let p: ChangeDisplaySettingsPayload = serde_json::from_str(raw).expect("decode");
         assert_eq!(p.width, 1280);
         assert_eq!(p.height, 720);
         assert_eq!(p.refresh_hz, 60);
-    }
-
-    /// A legacy peer's JSON predates the `auto` field. `#[serde(default)]`
-    /// must populate it with `false` so the daemon's auto-only gates do
-    /// not fire on manual requests from older clients.
-    #[test]
-    fn change_display_settings_payload_omits_auto_defaults_to_false() {
-        let raw = r#"{"width":1280,"height":720,"refresh_hz":60}"#;
-        let p: ChangeDisplaySettingsPayload = serde_json::from_str(raw).expect("decode");
-        assert!(!p.auto);
     }
 
     /// Auto-true requests round-trip intact, so the daemon sees the flag
@@ -92,6 +73,7 @@ mod tests {
     #[test]
     fn change_display_settings_payload_roundtrip_with_auto_true() {
         let original = ChangeDisplaySettingsPayload {
+            connection_epoch: "epoch".into(),
             width: 1280,
             height: 720,
             refresh_hz: 60,
@@ -107,22 +89,17 @@ mod tests {
         );
     }
 
-    /// Response payloads constructed with `auto: false` must NOT serialise
-    /// the field. This keeps the wire shape backward compatible — peers
-    /// that only know the original three-field schema would never see
-    /// an unexpected key, and the response stream stays terse.
+    /// Required false values remain explicit in the terminal wire shape.
     #[test]
     fn change_display_settings_payload_auto_false_skipped_from_json() {
         let p = ChangeDisplaySettingsPayload {
+            connection_epoch: "epoch".into(),
             width: 1920,
             height: 1080,
             refresh_hz: 60,
             auto: false,
         };
         let json = serde_json::to_string(&p).expect("encode");
-        assert!(
-            !json.contains("\"auto\""),
-            "auto:false must be skipped from JSON, got {json}",
-        );
+        assert!(json.contains("\"auto\":false"));
     }
 }

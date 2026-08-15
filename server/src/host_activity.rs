@@ -31,7 +31,9 @@ struct SessionState {
     actor: ActorSummary,
     started_at: String,
     pc_connected: bool,
+    pc_handoff: bool,
     video_negotiated: bool,
+    system_audio_capture: bool,
     remote_control: bool,
     terminal_count: u32,
     file_manager: bool,
@@ -44,7 +46,9 @@ impl SessionState {
             actor: sanitize_actor(actor),
             started_at: chrono::Utc::now().to_rfc3339(),
             pc_connected: false,
+            pc_handoff: false,
             video_negotiated: false,
+            system_audio_capture: false,
             remote_control: false,
             terminal_count: 0,
             file_manager: false,
@@ -57,7 +61,8 @@ impl SessionState {
             connection_id: connection_id.to_string(),
             actor: self.actor.clone(),
             started_at: self.started_at.clone(),
-            desktop_view: self.pc_connected && self.video_negotiated,
+            desktop_view: (self.pc_connected || self.pc_handoff) && self.video_negotiated,
+            system_audio_capture: self.system_audio_capture,
             remote_control: self.remote_control,
             terminal_count: self.terminal_count,
             file_manager: self.file_manager,
@@ -67,7 +72,9 @@ impl SessionState {
 
     fn has_recorded_state(&self) -> bool {
         self.pc_connected
+            || self.pc_handoff
             || self.video_negotiated
+            || self.system_audio_capture
             || self.remote_control
             || self.terminal_count != 0
             || self.file_manager
@@ -136,12 +143,30 @@ impl HostActivityRegistry {
 
     pub fn set_pc_connected(&self, connection_id: &str, connected: bool) {
         self.mutate_session(connection_id, |session| {
-            if session.pc_connected == connected {
+            if session.pc_connected == connected && (!connected || !session.pc_handoff) {
                 false
             } else {
                 session.pc_connected = connected;
+                if connected {
+                    session.pc_handoff = false;
+                }
                 true
             }
+        });
+    }
+
+    pub fn begin_pc_handoff(&self, connection_id: &str) {
+        self.mutate_session(connection_id, |session| {
+            let keep_desktop = session.pc_connected && session.video_negotiated;
+            let changed = session.pc_connected
+                || session.pc_handoff != keep_desktop
+                || session.system_audio_capture
+                || session.remote_control;
+            session.pc_connected = false;
+            session.pc_handoff = keep_desktop;
+            session.system_audio_capture = false;
+            session.remote_control = false;
+            changed
         });
     }
 
@@ -151,6 +176,17 @@ impl HostActivityRegistry {
                 false
             } else {
                 session.video_negotiated = true;
+                true
+            }
+        });
+    }
+
+    pub fn set_system_audio_capture(&self, connection_id: &str, active: bool) {
+        self.mutate_session(connection_id, |session| {
+            if session.system_audio_capture == active {
+                false
+            } else {
+                session.system_audio_capture = active;
                 true
             }
         });
@@ -248,9 +284,11 @@ impl HostActivityRegistry {
             for session in state.sessions.values_mut() {
                 changed |= session.terminal_count != 0
                     || session.file_manager
+                    || session.system_audio_capture
                     || !session.transfers.is_empty();
                 session.terminal_count = 0;
                 session.file_manager = false;
+                session.system_audio_capture = false;
                 session.transfers.clear();
             }
             state
@@ -365,6 +403,28 @@ mod tests {
         let session = &registry.snapshot().sessions[0];
         assert!(session.desktop_view);
         assert!(!session.remote_control);
+    }
+
+    #[test]
+    fn peer_connection_handoff_preserves_view_without_preserving_grants() {
+        let registry = registry();
+        registry.mark_video_negotiated("c1");
+        registry.set_pc_connected("c1", true);
+        registry.set_remote_control("c1", true);
+        registry.set_system_audio_capture("c1", true);
+        let started_at = registry.snapshot().sessions[0].started_at.clone();
+
+        registry.begin_pc_handoff("c1");
+        let handoff = registry.snapshot();
+        assert_eq!(handoff.total_session_count, 1);
+        assert!(handoff.sessions[0].desktop_view);
+        assert!(!handoff.sessions[0].remote_control);
+        assert!(!handoff.sessions[0].system_audio_capture);
+
+        registry.set_pc_connected("c1", true);
+        let reconnected = registry.snapshot();
+        assert_eq!(reconnected.sessions[0].started_at, started_at);
+        assert!(reconnected.sessions[0].desktop_view);
     }
 
     #[test]

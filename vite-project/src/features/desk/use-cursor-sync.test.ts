@@ -290,4 +290,45 @@ describe('useCursorSync — embed transition toast', () => {
         });
         expect(toastMock).not.toHaveBeenCalled();
     });
+
+    it('restores the local browser cursor when remote cursor display is disabled', () => {
+        const { cursorSyncChannel, videoRef, channel } = makeRefs();
+        const { result, rerender } = renderHook(
+            ({ enabled }) => useCursorSync(cursorSyncChannel, videoRef, enabled),
+            { initialProps: { enabled: true } },
+        );
+
+        act(() => {
+            channel.__dispatch({
+                base64_png: '',
+                hotspot_x: 0,
+                hotspot_y: 0,
+                visible: false,
+                shape_id: 1,
+                screen_width: 1920,
+                screen_height: 1080,
+                embedded: false,
+            });
+        });
+        expect(result.current.cursorStyle).toBe('none');
+
+        rerender({ enabled: false });
+        expect(result.current.cursorStyle).toBe('default');
+
+        // A cursor packet already queued on the DataChannel must not reinstall
+        // the remote cursor after the user has disabled the setting.
+        act(() => {
+            channel.__dispatch({
+                base64_png: '',
+                hotspot_x: 0,
+                hotspot_y: 0,
+                visible: false,
+                shape_id: 2,
+                screen_width: 1920,
+                screen_height: 1080,
+                embedded: false,
+            });
+        });
+        expect(result.current.cursorStyle).toBe('default');
+    });
 });

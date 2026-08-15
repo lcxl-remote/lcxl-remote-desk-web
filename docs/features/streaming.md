@@ -14,7 +14,9 @@ The capture engine supports software and hardware encoding across multiple codec
 
 Capture backends: Windows (**DXGI / WGC**), Linux (**X11 / Wayland portal + PipeWire**). Linux backends are filtered by the active desktop session: native X11 advertises X11, while Wayland advertises only the ScreenCast portal so XWayland is not mistaken for full-desktop capture.
 
-The encoder can be auto-selected or pinned via `desk.video_encoder`. Frame rate (`video_fps`), quality (`video_quality`, 0–63, lower is better), and dirty-rectangle incremental encoding (`enable_dirty_rect`) are all configurable — see the [config.toml Reference](/config/config-toml#desktop-desk).
+The controller resolves the capture backend, display, encoder, frame rate, quality, cursor and dirty-rectangle choices for each remote-desktop connection. These choices no longer overwrite the host's configuration file. A submitted change takes effect without reloading the page: the host either applies it live, rebuilds only the affected media pipeline, or automatically establishes a replacement WebRTC session when the wire codec changes. The dialog reports the actual effect. If the controller held remote control before a replacement session, it requests control again after the new PeerConnection is connected; authorization is never copied across session epochs, so an ask policy still prompts the host again.
+
+Before replacing a PeerConnection, the controller releases held keys and mouse buttons. Clipboard and whiteboard interaction pause until control is accepted again, and an enabled controller microphone is attached to the replacement audio transceiver without asking for capture permission again. Host-system audio is interrupted and restarted with the new media session. An attached virtual display stays attached across the handoff, but exclusive mode exits while control is unapproved so local approval UI remains visible; it may enter again after the fresh control grant.
 
 When the encoder is set to **Auto**, the host selects the first installed encoder whose declared limits accept the selected display resolution and whose codec the controller can decode. The order is stable and runtime-probe-only encoders are not selected automatically. When an encoder is selected explicitly, that choice is strict: the host does not silently substitute another implementation or codec.
 
@@ -27,6 +29,14 @@ No CPU-side frame scaling is performed. This avoids the high memory-bandwidth co
 ## Audio
 
 System audio is captured and encoded with **Opus** (libopus). The Web controller explicitly requests stereo Opus reception; audible channel separation still depends on the captured source and the controller's output device. Capture backends: Windows (**WASAPI**), Linux (**ALSA / PipeWire**).
+
+On a capable desktop host, a new browser preference starts with **Capture system audio** enabled. This is only the controller's request: the host has an independent **System audio capture** permission with Allow, Prompt and Deny behavior, and a temporary support grant may further restrict it. Denial or timeout leaves video, input and microphone uplink available while host-system audio remains off. Android hosts currently report system-audio capture as unsupported.
+
+The controller shows the actual audio state (starting, active, denied, failed or off). The host's existing remote-access status card adds a system-audio badge only while audio is really passing its daemon output gate. Audio is WebRTC media and is not recorded or persisted by this feature. Host-system audio and controller-microphone uplink are separate features.
+
+## Browser preferences
+
+For signed-in owner access, the Web controller saves device settings in this browser under the controller account plus target device. Personal and organization views therefore reuse the same preference for the same account and device. The two adaptive encoder toggles are saved once per controller account. Preferences do not sync to another browser and are removed when site data is cleared. Temporary support-code/grant sessions never read or write the owner's saved preferences.
 
 ## Input
 

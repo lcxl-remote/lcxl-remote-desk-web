@@ -65,7 +65,7 @@ export function computeCursorScale(
 export function useCursorSync(
     cursorSyncChannel: RefObject<RTCDataChannel | null>,
     videoRef: RefObject<HTMLVideoElement | null>,
-    hasControl: boolean
+    remoteCursorEnabled: boolean
 ) {
     const [cursorStyle, setCursorStyle] = useState<string>('default');
     const lastDataRef = useRef<CursorSyncData | null>(null);
@@ -81,7 +81,7 @@ export function useCursorSync(
         // mode would otherwise spam every cursor data tick.
         const wasEmbedded = lastEmbeddedRef.current;
         const isEmbedded = !!data?.embedded;
-        if (hasControl && isEmbedded && !wasEmbedded) {
+        if (remoteCursorEnabled && isEmbedded && !wasEmbedded) {
             toast({
                 title: t(
                     'pages.desk.remoteCursorActive.title',
@@ -94,7 +94,7 @@ export function useCursorSync(
         }
         lastEmbeddedRef.current = isEmbedded;
 
-        if (!hasControl) {
+        if (!remoteCursorEnabled) {
             setCursorStyle('default');
             return;
         }
@@ -186,7 +186,7 @@ export function useCursorSync(
         return () => {
             channel.removeEventListener('message', handleMessage);
         };
-    }, [cursorSyncChannel, hasControl]);
+    }, [cursorSyncChannel, remoteCursorEnabled]);
 
     // Recompute cursor scale when the video element resizes in the
     // page (CSS reflow, sidebar toggle, etc.).
@@ -199,7 +199,7 @@ export function useCursorSync(
         return () => {
             window.removeEventListener('resize', handleResize);
         };
-    }, [hasControl]);
+    }, [remoteCursorEnabled]);
 
     // Recompute cursor scale when the *video stream's intrinsic*
     // dimensions change — e.g. the remote desktop switched
@@ -218,12 +218,15 @@ export function useCursorSync(
         return () => {
             video.removeEventListener('resize', handleVideoResize);
         };
-    }, [videoRef, hasControl]);
+    }, [videoRef, remoteCursorEnabled]);
 
-    // Apply cursor when control state changes
+    // Apply immediately when control or the "show remote cursor" setting changes.
+    // The backend stops forwarding cursor updates when the setting is disabled,
+    // so waiting for another DataChannel message would leave the last remote
+    // cursor image installed as the browser's CSS cursor indefinitely.
     useEffect(() => {
         applyCursor(lastDataRef.current);
-    }, [hasControl]);
+    }, [remoteCursorEnabled]);
 
     return { cursorStyle };
 }

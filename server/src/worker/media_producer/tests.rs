@@ -33,6 +33,8 @@ fn unsupported_dimensions_emit_one_typed_blocked_event() {
     video::report_dimension_blocked(
         &tx,
         "conn-4k",
+        "epoch-4k",
+        1,
         Some(VideoEncoderId::OpenH264),
         (4096, 2160),
         EncoderCompatibilityError::DimensionsExceeded {
@@ -69,6 +71,8 @@ fn encoder_rebuild_failure_emits_one_typed_failed_event() {
         &video_state,
         &tx,
         "conn-rebuild",
+        "epoch-rebuild",
+        1,
         Some(VideoEncoderId::Vp9),
         (4096, 2160),
         "runtime probe rejected dimensions".to_string(),
@@ -196,7 +200,7 @@ fn video_codec_name_round_trips() {
     assert!(video_codec_name(MediaCodec::Opus).is_none());
 }
 
-/// The payload override path picks the per-connection codec / fps
+/// The payload override path picks the concrete per-connection encoder / fps
 /// over the worker default settings. A zero `fps` means "keep
 /// default" so the daemon does not have to know the worker's
 /// preferred fallback.
@@ -210,21 +214,23 @@ fn payload_overrides_apply_codec_and_fps() {
     let payload = StartMediaPayload {
         resolved_wayland_control_mode: None,
         connection_id: "c1".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
+        audio_generation: 1,
         video_codec: MediaCodec::Vp9,
-        video_encoder: None,
-        audio_codec: MediaCodec::Opus,
+        video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
         video_device: Some(r"\\.\DISPLAY7".to_string()),
-        audio_device: None,
         fps: 60,
         bitrate_kbps: 0,
         quality: 0,
         start_video: true,
-        start_audio: true,
-        image_capture: None,
-        enable_dirty_rect: None,
+        audio: None,
+        image_capture: "default".to_string(),
+        enable_dirty_rect: false,
+        show_mouse: false,
     };
     let merged = payload_overrides(&base, &payload);
-    assert_eq!(merged.video_encoder.as_deref(), Some("VP9"));
+    assert_eq!(merged.video_encoder.as_deref(), Some("X264"));
     assert_eq!(merged.video_fps, 60);
     // v4 capture-selection fix: payload_overrides must propagate
     // the per-connection device_name so each browser binds capture
@@ -248,18 +254,20 @@ fn payload_overrides_preserves_base_video_device_name_when_payload_is_none() {
     let payload = StartMediaPayload {
         resolved_wayland_control_mode: None,
         connection_id: "c1".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
+        audio_generation: 1,
         video_codec: MediaCodec::Vp9,
-        video_encoder: None,
-        audio_codec: MediaCodec::Opus,
+        video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
         video_device: None,
-        audio_device: None,
         fps: 60,
         bitrate_kbps: 0,
         quality: 0,
         start_video: true,
-        start_audio: true,
-        image_capture: None,
-        enable_dirty_rect: None,
+        audio: None,
+        image_capture: "default".to_string(),
+        enable_dirty_rect: false,
+        show_mouse: false,
     };
     let merged = payload_overrides(&base, &payload);
     assert_eq!(merged.video_device_name, r"\\.\DISPLAY1");
@@ -281,18 +289,20 @@ fn payload_overrides_apply_per_connection_image_capture() {
     let payload = StartMediaPayload {
         resolved_wayland_control_mode: None,
         connection_id: "c2".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
+        audio_generation: 1,
         video_codec: MediaCodec::H264,
-        video_encoder: None,
-        audio_codec: MediaCodec::Opus,
+        video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
         video_device: None,
-        audio_device: None,
         fps: 0,
         bitrate_kbps: 0,
         quality: 0,
         start_video: true,
-        start_audio: true,
-        image_capture: Some("GDI".into()),
-        enable_dirty_rect: None,
+        audio: None,
+        image_capture: "GDI".into(),
+        enable_dirty_rect: false,
+        show_mouse: false,
     };
     let merged = payload_overrides(&base, &payload);
     assert_eq!(
@@ -302,12 +312,10 @@ fn payload_overrides_apply_per_connection_image_capture() {
     );
 }
 
-/// Conversely, when the daemon does not specify a backend (e.g. an
-/// older daemon that predates the IPC field, or an offer with no
-/// preference), the worker must keep its base setting unchanged so
-/// the platform default still applies.
+/// The terminal protocol always carries the concrete backend and overrides
+/// the worker's startup snapshot.
 #[test]
-fn payload_overrides_image_capture_none_preserves_base() {
+fn payload_overrides_image_capture_is_required() {
     let base = DeskSettings {
         image_capture: Some("DXGI".into()),
         ..DeskSettings::default()
@@ -315,21 +323,23 @@ fn payload_overrides_image_capture_none_preserves_base() {
     let payload = StartMediaPayload {
         resolved_wayland_control_mode: None,
         connection_id: "c3".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
+        audio_generation: 1,
         video_codec: MediaCodec::H264,
-        video_encoder: None,
-        audio_codec: MediaCodec::Opus,
+        video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
         video_device: None,
-        audio_device: None,
         fps: 0,
         bitrate_kbps: 0,
         quality: 0,
         start_video: true,
-        start_audio: true,
-        image_capture: None,
-        enable_dirty_rect: None,
+        audio: None,
+        image_capture: "default".to_string(),
+        enable_dirty_rect: false,
+        show_mouse: false,
     };
     let merged = payload_overrides(&base, &payload);
-    assert_eq!(merged.image_capture.as_deref(), Some("DXGI"));
+    assert_eq!(merged.image_capture.as_deref(), Some("default"));
 }
 
 #[test]
@@ -341,25 +351,27 @@ fn payload_overrides_fps_zero_keeps_default() {
     let payload = StartMediaPayload {
         resolved_wayland_control_mode: None,
         connection_id: "c1".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
+        audio_generation: 1,
         video_codec: MediaCodec::H264,
-        video_encoder: None,
-        audio_codec: MediaCodec::Opus,
+        video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
         video_device: None,
-        audio_device: None,
         fps: 0,
         bitrate_kbps: 0,
         quality: 0,
         start_video: true,
-        start_audio: true,
-        image_capture: None,
-        enable_dirty_rect: None,
+        audio: None,
+        image_capture: "default".to_string(),
+        enable_dirty_rect: false,
+        show_mouse: false,
     };
     let merged = payload_overrides(&base, &payload);
     assert_eq!(merged.video_fps, 24);
 }
 
 /// Regression: a `StartMedia` payload with `start_video = false`
-/// and `start_audio = false` must register a `ConnectionTask`
+/// and `audio = None` must register a `ConnectionTask`
 /// slot (so subsequent `StopMedia` / `ForceKeyframe` find it) but
 /// must NOT spawn either pipeline thread. Bug fix 2026-05-05:
 /// previously the worker always lit up DXGI + WASAPI capture for
@@ -373,18 +385,20 @@ fn start_media_data_channel_only_skips_both_pipelines() {
     producer.start_media(StartMediaPayload {
         resolved_wayland_control_mode: None,
         connection_id: "files".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
+        audio_generation: 1,
         video_codec: MediaCodec::H264,
-        video_encoder: None,
-        audio_codec: MediaCodec::Opus,
+        video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
         video_device: None,
-        audio_device: None,
         fps: 0,
         bitrate_kbps: 0,
         quality: 0,
         start_video: false,
-        start_audio: false,
-        image_capture: None,
-        enable_dirty_rect: None,
+        audio: None,
+        image_capture: "default".to_string(),
+        enable_dirty_rect: false,
+        show_mouse: false,
     });
     let state = producer
         .connection_pipeline_state("files")
@@ -399,11 +413,110 @@ fn start_media_data_channel_only_skips_both_pipelines() {
     // passes either way but keeps the symmetry pinned.
     producer.stop_media(&StopMediaPayload {
         connection_id: "files".into(),
+        connection_epoch: "test-epoch".to_string(),
     });
     assert!(
         producer.connection_pipeline_state("files").is_none(),
         "stop_media must drop the slot"
     );
+}
+
+#[test]
+fn stale_epoch_start_cannot_replace_a_reused_connection_slot() {
+    let (sender, _rx) = inprocess::make_media();
+    let (err_tx, mut err_rx) = mpsc::unbounded_channel::<WorkerToService>();
+    let producer = MediaProducer::new(DeskSettings::default(), sender, err_tx);
+    let current = StartMediaPayload {
+        resolved_wayland_control_mode: None,
+        connection_id: "epoch-reuse".into(),
+        connection_epoch: "new-epoch".into(),
+        video_generation: 1,
+        audio_generation: 1,
+        video_codec: MediaCodec::H264,
+        video_encoder: VideoEncoderId::X264,
+        video_device: None,
+        fps: 60,
+        bitrate_kbps: 0,
+        quality: 22,
+        start_video: false,
+        audio: None,
+        image_capture: "default".into(),
+        enable_dirty_rect: true,
+        show_mouse: true,
+    };
+    producer.start_media(current.clone());
+
+    let mut stale = current;
+    stale.connection_epoch = "old-epoch".into();
+    stale.audio_generation = 2;
+    producer.apply_media_settings(ApplyMediaSettingsPayload {
+        source_request_id: None,
+        connection_id: "epoch-reuse".into(),
+        connection_epoch: "old-epoch".into(),
+        media_kind: MediaKind::Audio,
+        action: MediaSettingsAction::Start {
+            new_generation: 2,
+            settings: stale,
+        },
+    });
+
+    let event = err_rx.try_recv().expect("terminal apply acknowledgement");
+    let WorkerToService::MediaSettingsApplied(applied) = event else {
+        panic!("unexpected event: {event:?}");
+    };
+    assert_eq!(
+        applied.outcome,
+        MediaSettingsApplyOutcome::GenerationMismatch
+    );
+    let map = producer.inner.lock().unwrap();
+    let task = map.get("epoch-reuse").unwrap();
+    assert_eq!(task.start_payload.connection_epoch, "new-epoch");
+    assert_eq!(task.start_payload.audio_generation, 1);
+}
+
+#[test]
+fn audio_stop_emits_a_fresh_off_terminal_even_without_a_live_runner() {
+    let (sender, _rx) = inprocess::make_media();
+    let (err_tx, mut err_rx) = mpsc::unbounded_channel::<WorkerToService>();
+    let producer = MediaProducer::new(DeskSettings::default(), sender, err_tx);
+    producer.start_media(StartMediaPayload {
+        resolved_wayland_control_mode: None,
+        connection_id: "audio-already-exited".into(),
+        connection_epoch: "epoch-audio".into(),
+        video_generation: 1,
+        audio_generation: 4,
+        video_codec: MediaCodec::H264,
+        video_encoder: VideoEncoderId::X264,
+        video_device: None,
+        fps: 60,
+        bitrate_kbps: 0,
+        quality: 22,
+        start_video: false,
+        audio: None,
+        image_capture: "default".into(),
+        enable_dirty_rect: true,
+        show_mouse: true,
+    });
+
+    producer.apply_media_settings(ApplyMediaSettingsPayload {
+        source_request_id: Some("stop-audio".into()),
+        connection_id: "audio-already-exited".into(),
+        connection_epoch: "epoch-audio".into(),
+        media_kind: MediaKind::Audio,
+        action: MediaSettingsAction::Stop {
+            target_generation: 4,
+        },
+    });
+
+    let WorkerToService::AudioPipelineStateChanged(off) = err_rx.try_recv().unwrap() else {
+        panic!("Stop must emit an Off terminal before its apply acknowledgement");
+    };
+    assert_eq!(off.audio_generation, 4);
+    assert_eq!(off.phase, AudioPipelinePhase::Off);
+    let WorkerToService::MediaSettingsApplied(applied) = err_rx.try_recv().unwrap() else {
+        panic!("Stop must retain the normal apply acknowledgement");
+    };
+    assert_eq!(applied.outcome, MediaSettingsApplyOutcome::Accepted);
 }
 
 #[test]
@@ -414,18 +527,20 @@ fn start_media_accepted_callback_runs_once_and_duplicate_preserves_state() {
     let payload = StartMediaPayload {
         resolved_wayland_control_mode: None,
         connection_id: "callback".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
+        audio_generation: 1,
         video_codec: MediaCodec::H264,
-        video_encoder: None,
-        audio_codec: MediaCodec::Opus,
+        video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
         video_device: None,
-        audio_device: None,
         fps: 0,
         bitrate_kbps: 0,
         quality: 0,
         start_video: false,
-        start_audio: false,
-        image_capture: None,
-        enable_dirty_rect: None,
+        audio: None,
+        image_capture: "default".to_string(),
+        enable_dirty_rect: false,
+        show_mouse: false,
     };
     let seen = AtomicU64::new(0);
 
@@ -458,21 +573,24 @@ fn start_media_reports_cancelled_when_callback_removes_reservation() {
     let payload = StartMediaPayload {
         resolved_wayland_control_mode: None,
         connection_id: "cancelled-callback".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
+        audio_generation: 1,
         video_codec: MediaCodec::H264,
-        video_encoder: None,
-        audio_codec: MediaCodec::Opus,
+        video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
         video_device: None,
-        audio_device: None,
         fps: 0,
         bitrate_kbps: 0,
         quality: 0,
         start_video: false,
-        start_audio: false,
-        image_capture: None,
-        enable_dirty_rect: None,
+        audio: None,
+        image_capture: "default".to_string(),
+        enable_dirty_rect: false,
+        show_mouse: false,
     };
     let stop = StopMediaPayload {
         connection_id: payload.connection_id.clone(),
+        connection_epoch: "test-epoch".to_string(),
     };
 
     let result = producer.start_media_with(payload, |_| producer.stop_media(&stop));
@@ -498,6 +616,7 @@ fn force_keyframe_and_stop_media_unknown_id_is_noop() {
     producer.force_keyframe("never-existed");
     producer.stop_media(&StopMediaPayload {
         connection_id: "never-existed".into(),
+        connection_epoch: "test-epoch".to_string(),
     });
     // Nothing to assert beyond "did not panic" — the unit test
     // exists to guard against `unwrap()` on a missing entry.
@@ -514,10 +633,13 @@ fn update_settings_does_not_panic_on_unknown_connection() {
     let producer = MediaProducer::new(DeskSettings::default(), sender, err_tx);
     producer.update_settings(UpdateMediaSettingsPayload {
         connection_id: "anything".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
         fps: Some(30),
         bitrate_kbps: Some(2_000),
         quality: Some(50),
-        enable_dirty_rect: None,
+        enable_dirty_rect: Some(false),
+        show_mouse: None,
     });
 }
 
@@ -545,6 +667,7 @@ async fn drain_settings_updates_applies_fps_and_quality() {
         &mut frame_duration_ns,
     );
     assert!(!outcome.needs_rebuild);
+    assert!(!outcome.live_settings_applied);
     assert!(outcome.cap_directive.is_none());
     assert_eq!(merged.video_fps, 30);
 
@@ -552,10 +675,13 @@ async fn drain_settings_updates_applies_fps_and_quality() {
     // duration recomputed.
     tx.send(UpdateMediaSettingsPayload {
         connection_id: "c1".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
         fps: Some(60),
         bitrate_kbps: None,
         quality: Some(40),
         enable_dirty_rect: None,
+        show_mouse: None,
     })
     .unwrap();
     let outcome = drain_settings_updates(
@@ -566,6 +692,7 @@ async fn drain_settings_updates_applies_fps_and_quality() {
         &mut frame_duration_ns,
     );
     assert!(outcome.needs_rebuild);
+    assert!(outcome.live_settings_applied);
     assert_eq!(merged.video_fps, 60);
     assert_eq!(merged.video_quality, 40);
     assert_eq!(
@@ -580,10 +707,13 @@ async fn drain_settings_updates_applies_fps_and_quality() {
     // Same values again → no-op, no rebuild.
     tx.send(UpdateMediaSettingsPayload {
         connection_id: "c1".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
         fps: Some(60),
         bitrate_kbps: None,
         quality: Some(40),
         enable_dirty_rect: None,
+        show_mouse: None,
     })
     .unwrap();
     let outcome = drain_settings_updates(
@@ -594,6 +724,7 @@ async fn drain_settings_updates_applies_fps_and_quality() {
         &mut frame_duration_ns,
     );
     assert!(!outcome.needs_rebuild);
+    assert!(outcome.live_settings_applied);
 }
 
 /// Regression for the dirty-rect kill-switch wiring: the browser's
@@ -610,6 +741,7 @@ async fn drain_settings_updates_applies_enable_dirty_rect() {
     let (tx, mut rx) = mpsc::unbounded_channel::<UpdateMediaSettingsPayload>();
     let mut merged = DeskSettings {
         enable_dirty_rect: true,
+        show_mouse: false,
         ..DeskSettings::default()
     };
     let mut frame_interval = merged.get_duration_by_video_fps();
@@ -617,10 +749,13 @@ async fn drain_settings_updates_applies_enable_dirty_rect() {
 
     tx.send(UpdateMediaSettingsPayload {
         connection_id: "c1".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
         fps: None,
         bitrate_kbps: None,
         quality: None,
         enable_dirty_rect: Some(false),
+        show_mouse: None,
     })
     .unwrap();
     let outcome = drain_settings_updates(
@@ -637,6 +772,10 @@ async fn drain_settings_updates_applies_enable_dirty_rect() {
         "enable_dirty_rect-only change must not force encoder rebuild"
     );
     assert!(
+        outcome.live_settings_applied,
+        "enable_dirty_rect-only change must still receive terminal confirmation"
+    );
+    assert!(
         !merged.enable_dirty_rect,
         "enable_dirty_rect must be applied to merged_settings"
     );
@@ -644,10 +783,13 @@ async fn drain_settings_updates_applies_enable_dirty_rect() {
     // Re-enabling round-trips just as cleanly.
     tx.send(UpdateMediaSettingsPayload {
         connection_id: "c1".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
         fps: None,
         bitrate_kbps: None,
         quality: None,
         enable_dirty_rect: Some(true),
+        show_mouse: None,
     })
     .unwrap();
     let _ = drain_settings_updates(
@@ -658,6 +800,43 @@ async fn drain_settings_updates_applies_enable_dirty_rect() {
         &mut frame_duration_ns,
     );
     assert!(merged.enable_dirty_rect);
+}
+
+/// Cursor visibility is read by the compositor on every frame and therefore
+/// must not rebuild the encoder, but it still completes a correlated live
+/// settings request and needs a terminal acknowledgement.
+#[tokio::test(flavor = "current_thread")]
+async fn drain_settings_updates_applies_show_mouse_without_rebuild() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<UpdateMediaSettingsPayload>();
+    let mut merged = DeskSettings {
+        show_mouse: false,
+        ..DeskSettings::default()
+    };
+    let mut frame_interval = merged.get_duration_by_video_fps();
+    let mut frame_duration_ns = frame_interval.as_nanos().min(u64::MAX as u128) as u64;
+
+    tx.send(UpdateMediaSettingsPayload {
+        connection_id: "c1".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
+        fps: None,
+        bitrate_kbps: None,
+        quality: None,
+        enable_dirty_rect: None,
+        show_mouse: Some(true),
+    })
+    .unwrap();
+    let outcome = drain_settings_updates(
+        "c1",
+        &mut rx,
+        &mut merged,
+        &mut frame_interval,
+        &mut frame_duration_ns,
+    );
+
+    assert!(!outcome.needs_rebuild);
+    assert!(outcome.live_settings_applied);
+    assert!(merged.show_mouse);
 }
 
 /// `payload_overrides` must honour `StartMediaPayload.
@@ -672,23 +851,26 @@ async fn drain_settings_updates_applies_enable_dirty_rect() {
 fn payload_overrides_applies_enable_dirty_rect() {
     let base = DeskSettings {
         enable_dirty_rect: true,
+        show_mouse: false,
         ..DeskSettings::default()
     };
     let payload = StartMediaPayload {
         resolved_wayland_control_mode: None,
         connection_id: "c-dr".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
+        audio_generation: 1,
         video_codec: MediaCodec::H264,
-        video_encoder: None,
-        audio_codec: MediaCodec::Opus,
+        video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
         video_device: None,
-        audio_device: None,
         fps: 0,
         bitrate_kbps: 0,
         quality: 0,
         start_video: true,
-        start_audio: true,
-        image_capture: None,
-        enable_dirty_rect: Some(false),
+        audio: None,
+        image_capture: "default".to_string(),
+        enable_dirty_rect: false,
+        show_mouse: false,
     };
     let merged = payload_overrides(&base, &payload);
     assert!(
@@ -696,15 +878,14 @@ fn payload_overrides_applies_enable_dirty_rect() {
         "payload override must replace the worker's base value"
     );
 
-    // `None` preserves base — back-compat path with older daemons
-    // that do not yet sniff the field.
-    let payload_none = StartMediaPayload {
+    let payload_enabled = StartMediaPayload {
         resolved_wayland_control_mode: None,
-        enable_dirty_rect: None,
+        enable_dirty_rect: true,
+        show_mouse: false,
         ..payload
     };
-    let merged_none = payload_overrides(&base, &payload_none);
-    assert!(merged_none.enable_dirty_rect);
+    let merged_enabled = payload_overrides(&base, &payload_enabled);
+    assert!(merged_enabled.enable_dirty_rect);
 }
 
 #[test]
@@ -713,24 +894,26 @@ fn payload_overrides_prefers_concrete_encoder_over_wire_codec() {
     let mut payload = StartMediaPayload {
         resolved_wayland_control_mode: None,
         connection_id: "concrete-encoder".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
+        audio_generation: 1,
         video_codec: MediaCodec::H264,
-        video_encoder: Some(VideoEncoderId::X264),
-        audio_codec: MediaCodec::Opus,
+        video_encoder: VideoEncoderId::X264,
         video_device: None,
-        audio_device: None,
         fps: 0,
         bitrate_kbps: 0,
         quality: 0,
         start_video: true,
-        start_audio: false,
-        image_capture: None,
-        enable_dirty_rect: None,
+        audio: None,
+        image_capture: "default".to_string(),
+        enable_dirty_rect: false,
+        show_mouse: false,
     };
 
     let x264 = payload_overrides(&base, &payload);
     assert_eq!(x264.video_encoder.as_deref(), Some("X264"));
 
-    payload.video_encoder = Some(VideoEncoderId::OpenH264);
+    payload.video_encoder = VideoEncoderId::OpenH264;
     let openh264 = payload_overrides(&base, &payload);
     assert_eq!(openh264.video_encoder.as_deref(), Some("H264"));
 }
@@ -753,10 +936,13 @@ async fn drain_settings_updates_fps_zero_ignored_bitrate_is_cap_directive() {
 
     tx.send(UpdateMediaSettingsPayload {
         connection_id: "c1".into(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
         fps: Some(0), // sentinel — must NOT replace 30 with 0 fps
         bitrate_kbps: Some(8_000),
         quality: None,
         enable_dirty_rect: None,
+        show_mouse: None,
     })
     .unwrap();
     let outcome = drain_settings_updates(
@@ -793,10 +979,13 @@ async fn drain_settings_updates_zero_bitrate_clears_and_latest_wins() {
     let send_cap = |kbps: u32| {
         tx.send(UpdateMediaSettingsPayload {
             connection_id: "c1".into(),
+            connection_epoch: "test-epoch".to_string(),
+            video_generation: 1,
             fps: None,
             bitrate_kbps: Some(kbps),
             quality: None,
             enable_dirty_rect: None,
+            show_mouse: None,
         })
         .unwrap();
     };
@@ -837,6 +1026,8 @@ async fn drain_settings_updates_zero_bitrate_clears_and_latest_wins() {
 fn build_media_frame_produces_consistent_payload() {
     let frame = build_media_frame(
         "c-x",
+        "epoch-x",
+        3,
         42,
         16_666_666,
         MediaFrameKind::VideoI,
@@ -905,10 +1096,8 @@ fn build_capabilities_preserves_x264_h264_distinction() {
         caps.video_codecs
     );
     assert!(
-        caps.audio_encoders
-            .iter()
-            .any(|s| s.eq_ignore_ascii_case("OPUS")),
-        "audio_encoders must include Opus: {:?}",
+        caps.audio_encoders.contains(&"Opus".to_string()),
+        "audio_encoders must include canonical Opus: {:?}",
         caps.audio_encoders
     );
 }
@@ -1126,6 +1315,8 @@ fn classify_video_frame_kind_any_keyframe_in_access_unit_wins() {
 fn build_media_frame_audio_kind_and_opus_codec() {
     let frame = build_media_frame(
         "c-audio",
+        "epoch-audio",
+        4,
         7,
         20_000_000, // 20 ms — Opus packet duration
         MediaFrameKind::Audio,
@@ -1647,6 +1838,8 @@ async fn stop_interrupts_backpressured_i_frame_send_before_timeout() {
         media_sender
             .send_p_frame(build_media_frame(
                 "blocked",
+                "epoch-blocked",
+                1,
                 seq as u64,
                 1,
                 MediaFrameKind::VideoP,
@@ -1669,6 +1862,8 @@ async fn stop_interrupts_backpressured_i_frame_send_before_timeout() {
         "blocked",
         build_media_frame(
             "blocked",
+            "epoch-blocked",
+            1,
             100,
             1,
             MediaFrameKind::VideoI,

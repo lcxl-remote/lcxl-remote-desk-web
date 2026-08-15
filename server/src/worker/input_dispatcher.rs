@@ -44,7 +44,7 @@
 //! re-establishes and we re-query. Live resolution change mid-session
 //! is out of scope.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use desk_capture_engine::image_capture::image_capture_factory::list_desktop_geometry;
@@ -71,6 +71,9 @@ struct ConnectionInputState {
     generation: u64,
     mouse: Box<dyn MouseEventHandler + Send + Sync>,
     keyboard: Box<dyn KeyboardEventHandler + Send + Sync>,
+    pressed_mouse_buttons: HashSet<i32>,
+    last_mouse_event: Option<MouseEventData>,
+    pressed_keys: HashMap<String, KeyboardEventData>,
     /// Last sequence number observed for mouse events. Discards late
     /// out-of-order packets to match the legacy `handle_mouse_event`
     /// behaviour (browser sends `sequence_number` to deduplicate
@@ -197,12 +200,16 @@ impl InputDispatcher {
                 generation,
                 mouse,
                 keyboard,
+                pressed_mouse_buttons: HashSet::new(),
+                last_mouse_event: None,
+                pressed_keys: HashMap::new(),
                 last_mouse_seq: 0,
                 geometry,
                 video_device: payload.video_device.clone(),
             },
         );
-        if prev.is_some() {
+        if let Some(mut previous) = prev {
+            release_input_state(&mut previous, &payload.connection_id);
             warn!(
                 "[InputDispatcher] {}: replaced existing input handlers (duplicate StartMedia?)",
                 payload.connection_id
@@ -299,11 +306,19 @@ impl InputDispatcher {
     /// Drop per-connection input handlers. Called from
     /// `ServiceToWorker::StopMedia`. No-op on unknown id.
     pub fn stop_connection(&self, payload: &StopMediaPayload) {
+        self.stop_connection_by_id(&payload.connection_id);
+    }
+
+    /// Drop per-connection input handlers when only the logical connection id
+    /// is available (for example when a Wayland portal session disappears and
+    /// invalidates every generation at once).
+    pub fn stop_connection_by_id(&self, connection_id: &str) {
         let mut map = self.inner.lock().expect("input dispatcher lock poisoned");
-        if map.remove(&payload.connection_id).is_some() {
+        if let Some(mut state) = map.remove(connection_id) {
+            release_input_state(&mut state, connection_id);
             info!(
                 "[InputDispatcher] {}: input handlers released",
-                payload.connection_id
+                connection_id
             );
         }
     }
@@ -318,7 +333,9 @@ impl InputDispatcher {
             .get(connection_id)
             .is_some_and(|state| state.generation == generation)
         {
-            map.remove(connection_id);
+            if let Some(mut state) = map.remove(connection_id) {
+                release_input_state(&mut state, connection_id);
+            }
             info!(
                 "[InputDispatcher] {connection_id}: cancelled-generation input handlers released"
             );
@@ -329,7 +346,9 @@ impl InputDispatcher {
     /// shutdown so injection threads do not outlive the worker.
     pub fn shutdown(&self) {
         let mut map = self.inner.lock().expect("input dispatcher lock poisoned");
-        map.clear();
+        for (connection_id, mut state) in map.drain() {
+            release_input_state(&mut state, &connection_id);
+        }
     }
 
     /// Decode + inject a mouse non-move event. Late out-of-order
@@ -358,11 +377,25 @@ impl InputDispatcher {
             }
             state.last_mouse_seq = seq;
         }
-        if let Err(e) = state.mouse.handle_mouse_event(&event) {
-            error!(
-                "[InputDispatcher] {}: mouse event injection failed: {e}",
-                payload.connection_id
-            );
+        match state.mouse.handle_mouse_event(&event) {
+            Ok(()) => {
+                state.last_mouse_event = Some(event.clone());
+                match event.event.as_str() {
+                    "mousedown" => {
+                        state.pressed_mouse_buttons.insert(event.button);
+                    }
+                    "mouseup" => {
+                        state.pressed_mouse_buttons.remove(&event.button);
+                    }
+                    _ => {}
+                }
+            }
+            Err(e) => {
+                error!(
+                    "[InputDispatcher] {}: mouse event injection failed: {e}",
+                    payload.connection_id
+                );
+            }
         }
     }
 
@@ -391,11 +424,61 @@ impl InputDispatcher {
                 return;
             }
         };
-        if let Err(e) = state.keyboard.handle_keyboard_event(&event) {
-            error!(
-                "[InputDispatcher] {}: keyboard event injection failed: {e}",
-                payload.connection_id
-            );
+        match state.keyboard.handle_keyboard_event(&event) {
+            Ok(()) => {
+                let key = keyboard_identity(&event);
+                match event.event.as_str() {
+                    "keydown" => {
+                        state.pressed_keys.insert(key, event);
+                    }
+                    "keyup" => {
+                        state.pressed_keys.remove(&key);
+                    }
+                    _ => {}
+                }
+            }
+            Err(e) => {
+                error!(
+                    "[InputDispatcher] {}: keyboard event injection failed: {e}",
+                    payload.connection_id
+                );
+            }
+        }
+    }
+}
+
+fn keyboard_identity(event: &KeyboardEventData) -> String {
+    if event.code.is_empty() {
+        format!("key_code:{}", event.key_code)
+    } else {
+        event.code.clone()
+    }
+}
+
+fn release_input_state(state: &mut ConnectionInputState, connection_id: &str) {
+    let mut last_mouse = state.last_mouse_event.clone().unwrap_or_default();
+    last_mouse.event = "mouseup".to_string();
+    last_mouse.buttons = 0;
+    last_mouse.alt_key = false;
+    last_mouse.delta_x = 0.0;
+    last_mouse.delta_y = 0.0;
+    last_mouse.sequence_number = None;
+    for button in state.pressed_mouse_buttons.drain() {
+        last_mouse.button = button;
+        if let Err(error) = state.mouse.handle_mouse_event(&last_mouse) {
+            warn!("[InputDispatcher] {connection_id}: mouse release failed: {error}");
+        }
+    }
+
+    for (_, mut event) in state.pressed_keys.drain() {
+        event.event = "keyup".to_string();
+        event.alt_key = false;
+        event.ctrl_key = false;
+        event.shift_key = false;
+        event.meta_key = false;
+        event.repeat = false;
+        if let Err(error) = state.keyboard.handle_keyboard_event(&event) {
+            warn!("[InputDispatcher] {connection_id}: key release failed: {error}");
         }
     }
 }
@@ -595,18 +678,20 @@ mod tests {
         StartMediaPayload {
             resolved_wayland_control_mode: None,
             connection_id: connection_id.to_string(),
+            connection_epoch: "test-epoch".to_string(),
+            video_generation: 1,
+            audio_generation: 1,
             video_codec: desk_ipc_protocol::message::MediaCodec::H264,
-            video_encoder: None,
-            audio_codec: desk_ipc_protocol::message::MediaCodec::Opus,
+            video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
             video_device: None,
-            audio_device: None,
             fps: 30,
             bitrate_kbps: 0,
             quality: 0,
             start_video: true,
-            start_audio: true,
-            image_capture: None,
-            enable_dirty_rect: None,
+            audio: None,
+            image_capture: "default".to_string(),
+            enable_dirty_rect: false,
+            show_mouse: false,
         }
     }
 
@@ -650,6 +735,7 @@ mod tests {
         let d = dispatcher();
         d.stop_connection(&StopMediaPayload {
             connection_id: "ghost".into(),
+            connection_epoch: "test-epoch".to_string(),
         });
     }
 
@@ -665,11 +751,13 @@ mod tests {
         d.start_connection(&payload);
         d.stop_connection(&StopMediaPayload {
             connection_id: "conn-x".into(),
+            connection_epoch: "test-epoch".to_string(),
         });
         // Second stop is a no-op; the assertion is just that this
         // doesn't panic — entry was removed by the first stop.
         d.stop_connection(&StopMediaPayload {
             connection_id: "conn-x".into(),
+            connection_epoch: "test-epoch".to_string(),
         });
     }
 
@@ -812,6 +900,38 @@ mod tests {
         }
     }
 
+    struct RecordingMouse(Arc<StdMutex<Vec<MouseEventData>>>);
+    impl MouseEventHandler for RecordingMouse {
+        fn handle_mouse_move(&mut self, event: &MouseEventData) -> Result<(), InputError> {
+            self.0.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+        fn handle_mouse_down(&mut self, event: &MouseEventData) -> Result<(), InputError> {
+            self.0.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+        fn handle_mouse_up(&mut self, event: &MouseEventData) -> Result<(), InputError> {
+            self.0.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+        fn handle_mouse_wheel(&mut self, event: &MouseEventData) -> Result<(), InputError> {
+            self.0.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+    }
+
+    struct RecordingKeyboard(Arc<StdMutex<Vec<KeyboardEventData>>>);
+    impl KeyboardEventHandler for RecordingKeyboard {
+        fn handle_key_down(&mut self, event: &KeyboardEventData) -> Result<(), InputError> {
+            self.0.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+        fn handle_key_up(&mut self, event: &KeyboardEventData) -> Result<(), InputError> {
+            self.0.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+    }
+
     fn fake_state(
         video_device: Option<&str>,
         geometry: SharedMonitorGeometry,
@@ -820,10 +940,81 @@ mod tests {
             generation: 1,
             mouse: Box::new(NoopMouse),
             keyboard: Box::new(NoopKeyboard),
+            pressed_mouse_buttons: HashSet::new(),
+            last_mouse_event: None,
+            pressed_keys: HashMap::new(),
             last_mouse_seq: 0,
             geometry,
             video_device: video_device.map(|s| s.to_string()),
         }
+    }
+
+    #[test]
+    fn teardown_releases_every_tracked_key_and_mouse_button() {
+        let mouse_events = Arc::new(StdMutex::new(Vec::new()));
+        let keyboard_events = Arc::new(StdMutex::new(Vec::new()));
+        let geometry = shared_geometry(MonitorGeometry::new(0, 0, 1920, 1080));
+        let mut state = ConnectionInputState {
+            generation: 1,
+            mouse: Box::new(RecordingMouse(Arc::clone(&mouse_events))),
+            keyboard: Box::new(RecordingKeyboard(Arc::clone(&keyboard_events))),
+            pressed_mouse_buttons: HashSet::from([0, 2]),
+            last_mouse_event: Some(MouseEventData {
+                event: "mousemove".to_string(),
+                x: 0.25,
+                y: 0.75,
+                ..MouseEventData::default()
+            }),
+            pressed_keys: HashMap::from([
+                (
+                    "ControlLeft".to_string(),
+                    KeyboardEventData {
+                        event: "keydown".to_string(),
+                        code: "ControlLeft".to_string(),
+                        key_code: 17,
+                        ctrl_key: true,
+                        ..KeyboardEventData::default()
+                    },
+                ),
+                (
+                    "KeyA".to_string(),
+                    KeyboardEventData {
+                        event: "keydown".to_string(),
+                        code: "KeyA".to_string(),
+                        key_code: 65,
+                        ctrl_key: true,
+                        ..KeyboardEventData::default()
+                    },
+                ),
+            ]),
+            last_mouse_seq: 0,
+            geometry,
+            video_device: None,
+        };
+
+        release_input_state(&mut state, "conn-a");
+
+        let mouse_events = mouse_events.lock().unwrap();
+        assert_eq!(mouse_events.len(), 2);
+        assert!(mouse_events.iter().all(|event| event.event == "mouseup"));
+        assert!(mouse_events.iter().all(|event| event.buttons == 0));
+        assert!(
+            mouse_events
+                .iter()
+                .all(|event| event.x == 0.25 && event.y == 0.75)
+        );
+        let released_buttons = mouse_events
+            .iter()
+            .map(|event| event.button)
+            .collect::<HashSet<_>>();
+        assert_eq!(released_buttons, HashSet::from([0, 2]));
+
+        let keyboard_events = keyboard_events.lock().unwrap();
+        assert_eq!(keyboard_events.len(), 2);
+        assert!(keyboard_events.iter().all(|event| event.event == "keyup"));
+        assert!(keyboard_events.iter().all(|event| !event.ctrl_key));
+        assert!(state.pressed_mouse_buttons.is_empty());
+        assert!(state.pressed_keys.is_empty());
     }
 
     /// `refresh_geometry_in(Some(device))` writes only into the
@@ -949,6 +1140,7 @@ mod tests {
 
         dispatcher.stop_connection(&StopMediaPayload {
             connection_id: "conn-a".to_string(),
+            connection_epoch: "test-epoch".to_string(),
         });
         dispatcher.set_connection_geometry_if_current("conn-a", 2, (50, 60, 1920, 1080));
         assert_eq!(

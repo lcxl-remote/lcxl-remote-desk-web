@@ -19,7 +19,7 @@ pub trait AudioEncoder {
 pub enum AudioEncoderType {
     /// Opus encoder
     #[default]
-    OPUS,
+    Opus,
 }
 
 pub trait AudioEncoderTypeHelper {

@@ -10,6 +10,101 @@ const RR_AUDIENCE: &str = "host-client-abc";
 const RR_NOW: &str = "2026-01-01T00:00:00Z";
 
 #[test]
+fn stopping_audio_rejects_late_active_for_the_same_generation() {
+    use desk_ipc_protocol::message::AudioPipelinePhase;
+
+    assert!(!audio_phase_is_authorized(
+        Some(AudioPipelinePhase::Off),
+        false,
+        AudioPipelinePhase::Active,
+    ));
+    assert!(audio_phase_is_authorized(
+        Some(AudioPipelinePhase::Off),
+        false,
+        AudioPipelinePhase::Off,
+    ));
+    assert!(audio_phase_is_authorized(
+        Some(AudioPipelinePhase::Off),
+        false,
+        AudioPipelinePhase::Failed,
+    ));
+    assert!(audio_phase_is_authorized(
+        Some(AudioPipelinePhase::Active),
+        true,
+        AudioPipelinePhase::Active,
+    ));
+    // Once Off has settled, desired=false remains the fence against a still
+    // later duplicate Active even though there is no pending terminal.
+    assert!(!audio_phase_is_authorized(
+        None,
+        false,
+        AudioPipelinePhase::Active,
+    ));
+}
+
+#[test]
+fn rejected_media_command_wakes_the_matching_terminal_waiter() {
+    use crate::daemon::pc_manager::{MediaSlotLifecycle, PerConnectionMediaCoordinator};
+    use desk_ipc_protocol::message::{
+        MediaKind, MediaSettingsAppliedPayload, MediaSettingsApplyOutcome,
+    };
+
+    let mut coordinator = PerConnectionMediaCoordinator::default();
+    coordinator.current_apply_request_id = Some("settings-1".to_string());
+    coordinator.video.generation = 2;
+    coordinator.video.lifecycle = MediaSlotLifecycle::Transitioning;
+    coordinator.video.pending_generation = Some(2);
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    coordinator.video_terminal_waiter = Some((2, tx));
+    let payload = MediaSettingsAppliedPayload {
+        source_request_id: Some("settings-1".to_string()),
+        connection_id: "conn-1".to_string(),
+        connection_epoch: "epoch-1".to_string(),
+        media_kind: MediaKind::Video,
+        generation: 2,
+        outcome: MediaSettingsApplyOutcome::GenerationMismatch,
+        error_code: None,
+    };
+
+    assert!(reject_media_settings_command(&mut coordinator, &payload));
+    assert_eq!(
+        rx.try_recv(),
+        Ok(Err(MediaSettingsApplyOutcome::GenerationMismatch))
+    );
+    assert_eq!(coordinator.video.lifecycle, MediaSlotLifecycle::Stable);
+    assert_eq!(coordinator.video.pending_generation, None);
+}
+
+#[test]
+fn rejected_media_command_ignores_a_stale_request_correlation() {
+    use crate::daemon::pc_manager::PerConnectionMediaCoordinator;
+    use desk_ipc_protocol::message::{
+        MediaKind, MediaSettingsAppliedPayload, MediaSettingsApplyOutcome,
+    };
+
+    let mut coordinator = PerConnectionMediaCoordinator::default();
+    coordinator.current_apply_request_id = Some("settings-2".to_string());
+    coordinator.audio.generation = 3;
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    coordinator.audio_terminal_waiter = Some((3, tx));
+    let payload = MediaSettingsAppliedPayload {
+        source_request_id: Some("settings-1".to_string()),
+        connection_id: "conn-1".to_string(),
+        connection_epoch: "epoch-1".to_string(),
+        media_kind: MediaKind::Audio,
+        generation: 3,
+        outcome: MediaSettingsApplyOutcome::Failed,
+        error_code: None,
+    };
+
+    assert!(!reject_media_settings_command(&mut coordinator, &payload));
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+}
+
+#[test]
 fn manager_heartbeat_probe_only_accepts_the_dedicated_correlated_response() {
     let acknowledged = SignalingModel::success_response::<()>(
         "heartbeat-1",
@@ -1541,6 +1636,7 @@ use desk_ipc_protocol::message::{VirtualDisplayModeData, VirtualDisplayModeRespo
 #[test]
 fn build_virtual_display_response_applied_emits_success_with_mode() {
     let payload = VirtualDisplayModeResponsePayload {
+        connection_epoch: "epoch".to_string(),
         request_id: "req-42".to_string(),
         connection_id: "conn-7".to_string(),
         outcome: VirtualDisplayModeOutcome::Applied(VirtualDisplayModeData {
@@ -1553,7 +1649,7 @@ fn build_virtual_display_response_applied_emits_success_with_mode() {
     assert_eq!(model.request_id, "req-42");
     assert_eq!(
         model.signaling_type as i32,
-        SignalingType::ChangeDisplaySettings as i32
+        SignalingType::DisplaySettingsChanged as i32
     );
     assert_eq!(model.to_connection_id.as_deref(), Some("conn-7"));
     let state = model
@@ -1572,6 +1668,7 @@ fn build_virtual_display_response_applied_emits_success_with_mode() {
 #[test]
 fn build_virtual_display_response_failed_emits_invalid_state_error() {
     let payload = VirtualDisplayModeResponsePayload {
+        connection_epoch: "epoch".to_string(),
         request_id: "req-43".to_string(),
         connection_id: "conn-8".to_string(),
         outcome: VirtualDisplayModeOutcome::Failed("driver pipe IO failed".to_string()),
@@ -1580,7 +1677,7 @@ fn build_virtual_display_response_failed_emits_invalid_state_error() {
     assert_eq!(model.request_id, "req-43");
     assert_eq!(
         model.signaling_type as i32,
-        SignalingType::ChangeDisplaySettings as i32
+        SignalingType::DisplaySettingsChanged as i32
     );
     assert_eq!(model.to_connection_id.as_deref(), Some("conn-8"));
     let state = model.response_state.expect("error response carries state");
@@ -1613,6 +1710,7 @@ fn build_virtual_display_response_applied_updates_supervisor_cache() {
     assert!(supervisor.last_known_mode().is_none());
 
     let payload = VirtualDisplayModeResponsePayload {
+        connection_epoch: "epoch".to_string(),
         request_id: "req-cache".to_string(),
         connection_id: "conn-cache".to_string(),
         outcome: VirtualDisplayModeOutcome::Applied(VirtualDisplayModeData {
@@ -1655,6 +1753,7 @@ fn build_virtual_display_response_applied_zero_dimension_is_ignored() {
     supervisor.record_applied_mode(1920, 1080, 60);
 
     let payload = VirtualDisplayModeResponsePayload {
+        connection_epoch: "epoch".to_string(),
         request_id: "req-zero".to_string(),
         connection_id: "conn-zero".to_string(),
         outcome: VirtualDisplayModeOutcome::Applied(VirtualDisplayModeData {
@@ -1693,6 +1792,7 @@ fn build_virtual_display_response_failed_does_not_update_supervisor_cache() {
     supervisor.record_applied_mode(1280, 720, 120);
 
     let payload = VirtualDisplayModeResponsePayload {
+        connection_epoch: "epoch".to_string(),
         request_id: "req-fail".to_string(),
         connection_id: "conn-fail".to_string(),
         outcome: VirtualDisplayModeOutcome::Failed("driver pipe IO failed".to_string()),

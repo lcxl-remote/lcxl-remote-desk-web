@@ -15,6 +15,7 @@ pub mod policy_snapshot;
 pub mod private_screen;
 pub mod probe;
 pub mod remote_access;
+pub mod remote_session;
 pub mod request_remote_authz;
 pub mod security_settings;
 pub mod signal;

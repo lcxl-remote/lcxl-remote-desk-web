@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState } from 'react';
+import { useRef, useCallback, useEffect, useState } from 'react';
 import type { RefObject } from 'react';
 import { computeVideoContentRect } from './video-content-rect';
 
@@ -151,8 +151,22 @@ export function useDeskWhiteboard({ videoRef, whiteboardChannel, isConnected, ha
         sendMessage({ type: 'undo' });
     }, [sendMessage]);
 
+    const canActivate = isConnected && hasTauri;
+    const isInteractive = isActive && canActivate;
+
+    useEffect(() => {
+        if (canActivate) return;
+        // Keep the user's active-mode intent across a replacement PC, but discard
+        // an unfinished gesture that cannot be delivered to the old host overlay.
+        isDrawingRef.current = false;
+        currentPointsRef.current = [];
+        setElements([]);
+        setTextInput(null);
+    }, [canActivate]);
+
     const toggleWhiteboard = useCallback(() => {
         setIsActive(prev => {
+            if (!prev && !canActivate) return prev;
             const next = !prev;
             if (!next) {
                 // Clear local elements and remote elements when turning off whiteboard
@@ -162,9 +176,18 @@ export function useDeskWhiteboard({ videoRef, whiteboardChannel, isConnected, ha
             }
             return next;
         });
-    }, [sendMessage]);
+    }, [canActivate, sendMessage]);
 
-    const canActivate = isConnected && hasTauri;
+    const deactivateWhiteboard = useCallback(() => {
+        if (isActive && isConnected) {
+            sendMessage({ type: 'clear' });
+        }
+        isDrawingRef.current = false;
+        currentPointsRef.current = [];
+        setElements([]);
+        setTextInput(null);
+        setIsActive(false);
+    }, [isActive, isConnected, sendMessage]);
 
     return {
         isActive,
@@ -177,7 +200,9 @@ export function useDeskWhiteboard({ videoRef, whiteboardChannel, isConnected, ha
         confirmTextInput,
         cancelTextInput,
         canActivate,
+        isInteractive,
         toggleWhiteboard,
+        deactivateWhiteboard,
         clearAll,
         undo,
         handlePointerDown,

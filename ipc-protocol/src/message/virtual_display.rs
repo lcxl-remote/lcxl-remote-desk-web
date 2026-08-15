@@ -16,6 +16,7 @@ use super::{ServiceToWorker, WorkerToService};
 pub struct SetVirtualDisplayModePayload {
     pub request_id: String,
     pub connection_id: String,
+    pub connection_epoch: String,
     pub width: u32,
     pub height: u32,
     pub refresh_hz: u32,
@@ -65,6 +66,7 @@ pub enum VirtualDisplayModeOutcome {
 pub struct VirtualDisplayModeResponsePayload {
     pub request_id: String,
     pub connection_id: String,
+    pub connection_epoch: String,
     pub outcome: VirtualDisplayModeOutcome,
 }
 

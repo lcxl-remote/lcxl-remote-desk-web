@@ -107,6 +107,7 @@ export default function InitPage() {
     const [security, setSecurity] = useState<SecurityToggles>({
         allow_remote_control: true,
         allow_clipboard_sync: true,
+        allow_system_audio_capture: true,
         allow_private_screen: true,
         allow_whiteboard: true,
         allow_terminal: true,

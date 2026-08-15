@@ -54,6 +54,9 @@ pub enum ServiceToWorker {
     /// Update encoder parameters mid-stream (bitrate / fps / quality).
     UpdateMediaSettings(UpdateMediaSettingsPayload),
 
+    /// Apply one serialized video/audio slot action for a connection.
+    ApplyMediaSettings(ApplyMediaSettingsPayload),
+
     /// Force the per-connection encoder to emit an IDR (key-) frame on the
     /// next encode call. Sent by the daemon when (a) a new worker is taking
     /// over the connection, or (b) the daemon's RTCP reader saw a PLI for
@@ -96,15 +99,6 @@ pub enum ServiceToWorker {
     /// Browser-issued private-screen toggle. Worker enables / disables
     /// the per-connection private screen via its `host_control_helper`.
     SetPrivateScreenVisibility(SetPrivateScreenVisibilityPayload),
-
-    /// Browser-issued desk-settings update. Carries the full
-    /// `DeskSettings` so the worker can apply non-media fields
-    /// (`wayland_control_mode`, `private_screen`, ...). The daemon
-    /// also sniffs the media-relevant knobs and fans them out as
-    /// [`Self::UpdateMediaSettings`] separately so the per-connection
-    /// encoder pipeline retunes live (see `pc_manager::
-    /// broadcast_media_settings_update`).
-    UpdateDeskSettings(UpdateDeskSettingsPayload),
 
     // ---------- Manager plane (typed) ----------
     /// Browser → worker request for the host's [`SystemInfo`]. Worker
@@ -344,6 +338,10 @@ pub enum WorkerToService {
     /// Worker → daemon media state transition. Kept on the reliable event lane
     /// so a blocked notification cannot be dropped behind video backpressure.
     MediaPipelineState(MediaPipelineStatePayload),
+
+    AudioPipelineStateChanged(AudioPipelineStateChangedPayload),
+
+    MediaSettingsApplied(MediaSettingsAppliedPayload),
 
     // ---------- Manager plane (typed) ----------
     /// Worker → daemon response to

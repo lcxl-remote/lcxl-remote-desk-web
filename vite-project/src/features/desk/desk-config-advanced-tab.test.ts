@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+    canonicalVideoEncoderOptions,
     encoderIdForSetting,
     limitsAcceptResolution,
     shouldShowWaylandControlMode,
@@ -17,6 +18,20 @@ describe("encoder resolution filtering", () => {
     it("keeps concrete H.264 implementations distinct", () => {
         expect(encoderIdForSetting("X264")).toBe("X264")
         expect(encoderIdForSetting("H264")).toBe("OpenH264")
+    })
+
+    it("uses canonical encoder ids as select values", () => {
+        expect(canonicalVideoEncoderOptions(["H264", "X264", "VP8"])).toEqual([
+            { id: "OpenH264", settingName: "H264" },
+            { id: "X264", settingName: "X264" },
+            { id: "VP8", settingName: "VP8" },
+        ])
+    })
+
+    it("deduplicates legacy and canonical OpenH264 spellings", () => {
+        expect(canonicalVideoEncoderOptions(["H264", "OpenH264"])).toEqual([
+            { id: "OpenH264", settingName: "H264" },
+        ])
     })
 
     it("accepts UHD but rejects DCI 4K for OpenH264", () => {

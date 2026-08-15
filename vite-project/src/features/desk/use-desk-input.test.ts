@@ -87,7 +87,7 @@ describe('useDeskInput — blur release uses last known cursor position', () => 
         const mouseMoveChannel = makeChannel();
         const keyboardChannel = makeChannel();
         const videoRef = { current: element };
-        renderHook(() =>
+        const hook = renderHook(() =>
             useDeskInput({
                 videoRef,
                 mouseChannel: { current: mouseChannel as unknown as RTCDataChannel },
@@ -109,7 +109,7 @@ describe('useDeskInput — blur release uses last known cursor position', () => 
                 }
             });
         };
-        return { handlers, mouseChannel, fire };
+        return { handlers, keyboardChannel, mouseChannel, fire, hook };
     }
 
     it('sends the synthetic mouseup at the last cursor position, not (0,0)', () => {
@@ -152,6 +152,23 @@ describe('useDeskInput — blur release uses last known cursor position', () => 
         fire('blur', {});
         // No held button → nothing to release on the reliable channel.
         expect(mouseChannel.send).not.toHaveBeenCalled();
+    });
+
+    it('exposes a synchronous release for callers that are about to close the PC', () => {
+        const { keyboardChannel, mouseChannel, fire, hook } = setup();
+
+        fire('mousedown', { offsetX: 960, offsetY: 540, button: 0, buttons: 1, altKey: false });
+        fire('keydown', {
+            key: 'Control', code: 'ControlLeft', keyCode: 17,
+            altKey: false, ctrlKey: true, shiftKey: false, metaKey: false,
+            repeat: false, location: 1, isComposing: false,
+        });
+        act(() => hook.result.current.releaseAllInputs());
+
+        expect(lastSentPayload(mouseChannel)).toMatchObject({ event: 'mouseup', button: 0 });
+        expect(lastSentPayload(keyboardChannel)).toMatchObject({
+            event: 'keyup', code: 'ControlLeft', key_code: 17,
+        });
     });
 });
 

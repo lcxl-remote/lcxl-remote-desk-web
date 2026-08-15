@@ -48,16 +48,23 @@ use desk_agent_protocol::{
     ProtocolVersion, RequestId, TargetRef,
 };
 use desk_ipc_protocol::message::{
-    AgentRequestPayload, CloseTerminalPayload, DeleteFilePayload, ExecCancelPayload,
-    ExecPlanPayload, ListFilesPayload, ListTerminalCommandsPayload, ManagerRequestRefPayload,
-    ResizeTerminalPayload, SendTerminalInputPayload, ServiceToWorker,
-    SetPrivateScreenVisibilityPayload, SetVirtualDisplayModePayload, StartTerminalPayload,
-    UpdateDeskSettingsPayload,
+    AgentRequestPayload, ApplyMediaSettingsPayload, AudioPipelinePhase, CloseTerminalPayload,
+    DeleteFilePayload, ExecCancelPayload, ExecPlanPayload, ListFilesPayload,
+    ListTerminalCommandsPayload, ManagerRequestRefPayload, MediaCodec, MediaKind,
+    MediaSettingsAction, ResizeTerminalPayload, SendTerminalInputPayload, ServiceToWorker,
+    SetPrivateScreenVisibilityPayload, SetVirtualDisplayModePayload, StartAudioSettings,
+    StartMediaPayload, StartTerminalPayload, UpdateMediaSettingsPayload,
 };
-use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams};
 use desk_signal_facade::model::media_pipeline::{MediaPipelinePhase, MediaPipelineStateData};
 use desk_signal_facade::model::private_screen::SetPrivateScreenVisibilityData;
+use desk_signal_facade::model::remote_session::{
+    ApplyRemoteSessionSettings, AudioSettingsEffect, ConnectionSettingsEffect,
+    RemoteSessionSettings, RemoteSessionSettingsApplied, RemoteSessionSettingsEffects,
+    RemoteSessionSettingsFieldError, RemoteSessionSettingsRuntimeOverrides,
+    SystemAudioCaptureState, SystemAudioCaptureStateData, UpdateAdaptiveVideoQuality,
+    VideoSettingsEffect,
+};
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_signal_facade::model::signal::{
     OfferModel, RemoteSessionPurpose, RequestRemoteModel, SignalingModel, SignalingType,
@@ -67,12 +74,13 @@ use desk_signal_facade::model::terminal::{
 };
 use desk_signal_facade::model::virtual_display::ChangeDisplaySettingsPayload;
 use desk_signal_facade::service::response_type_for_request;
-use desk_utils::error::DeskErrorCode;
+use desk_utils::error::{CustomDeskError, DeskErrorCode};
 use desk_virtual_display::{VirtualDisplayMode, validate_mode};
 use tokio::sync::broadcast;
 
 use crate::daemon::pc_manager::{
-    self, MediaRestartStage, MediaRestartTrigger, MediaRetryAdmission, PcRegistry, RestartOutcome,
+    self, MediaRestartStage, MediaRestartTrigger, MediaRetryAdmission, MediaSlotLifecycle,
+    PcRegistry, RestartOutcome,
 };
 use crate::daemon::virtual_display::{EnsureAttachedOutcome, VirtualDisplaySupervisor};
 use crate::daemon::worker_manager::WorkerManager;
@@ -87,8 +95,14 @@ use crate::diagnose::DiagnoseOrchestrator;
 /// another second. 5 s covers the typical cold-bring-up while still
 /// bounding browser-perceived dialog latency if the driver hangs.
 const VIRTUAL_DISPLAY_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bound for obtaining the current worker incarnation's real media capability
+/// snapshot before creating any remote-desktop admission state.
+const REMOTE_DESKTOP_CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(3);
 use crate::error::DeskError;
 use crate::host_control::HostControlHub;
+use crate::model::security_approval::{
+    SecurityPermissionType, check_security_permission, effective_permission,
+};
 use crate::model::settings::SharedSettings;
 
 mod access_policy;
@@ -205,7 +219,11 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // Browser → daemon media control. This is a local bounded restart of
         // the already-negotiated pipeline and never enters the worker's generic
         // signaling dispatcher.
-        SignalingType::RetryMediaPipeline => RouteOwnership::Daemon,
+        SignalingType::RetryMediaPipeline
+        | SignalingType::ApplyRemoteSessionSettings
+        | SignalingType::RemoteSessionSettingsApplied
+        | SignalingType::UpdateAdaptiveVideoQuality
+        | SignalingType::SystemAudioCaptureStateChanged => RouteOwnership::Daemon,
 
         // AI Diagnose request: control end → daemon. Unlike `InvokeAgentCapability`
         // (worker-bound raw capability call), the diagnose orchestrator runs
@@ -329,7 +347,6 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // typed `SetVirtualDisplayMode` IPC when the supervisor is
         // active in service mode.
         SignalingType::SetPrivateScreenVisibility
-        | SignalingType::UpdateDeskSettings
         | SignalingType::GetSystemInfo
         | SignalingType::ListFiles
         | SignalingType::DeleteFile
@@ -673,6 +690,17 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             "[router] capability-restricted session: rejecting {:?} frame",
             model.signaling_type
         );
+        if matches!(
+            model.signaling_type,
+            SignalingType::ApplyRemoteSessionSettings | SignalingType::UpdateAdaptiveVideoQuality
+        ) {
+            emit_standard_error_response(
+                ctx,
+                model,
+                DeskErrorCode::PERMISSION_ERROR,
+                "This connection is not permitted to perform the requested action",
+            );
+        }
         return Ok(());
     }
     match model.signaling_type {
@@ -683,27 +711,6 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             let connection_id = model
                 .check_and_get_from_connection_id()
                 .map_err(DeskError::from)?;
-            let manager_permit = if let Some(link) = ctx.manager_credential_link.as_ref() {
-                match link.begin_admission(connection_id).await {
-                    Ok(permit) => Some(permit),
-                    Err(
-                        crate::daemon::manager_credential_scope::AdmissionRejection::AwaitingProof,
-                    ) => {
-                        send_manager_admission_retry(ctx, model);
-                        return Ok(());
-                    }
-                    Err(crate::daemon::manager_credential_scope::AdmissionRejection::Terminal) => {
-                        return Ok(());
-                    }
-                }
-            } else {
-                None
-            };
-            // Hold a pending guard for the lifetime
-            // of this handler so cleanup_pc on a concurrently-closing
-            // old PC cannot N→0 detach the IDD out from under us.
-            let pending_guard = ctx.pc_registry.enter_pending();
-
             let s = ctx.settings.read().await.clone();
             // Block on virtual display attach BEFORE assembling the
             // RemoteAccessInitialized response so the daemon's capabilities cache reflects
@@ -737,9 +744,49 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                 }
             }
 
+            let capabilities = if request_remote.purpose == RemoteSessionPurpose::RemoteDesktop {
+                Some(
+                    ctx.worker_mgr
+                        .wait_current_worker_capabilities(
+                            REMOTE_DESKTOP_CAPABILITIES_TIMEOUT,
+                        )
+                        .await
+                        .ok_or_else(|| {
+                            DeskError::CustomError(CustomDeskError::new(
+                                DeskErrorCode::REMOTE_DESKTOP_CAPABILITIES_NOT_READY,
+                                "the current desktop worker has not published media capabilities yet",
+                            ))
+                        })?,
+                )
+            } else {
+                ctx.worker_mgr.worker_capabilities()
+            };
+
+            // Capability readiness is checked before creating manager admission,
+            // PC, pending-request, or HostActivity residue.
+            let manager_permit = if let Some(link) = ctx.manager_credential_link.as_ref() {
+                match link.begin_admission(connection_id).await {
+                    Ok(permit) => Some(permit),
+                    Err(
+                        crate::daemon::manager_credential_scope::AdmissionRejection::AwaitingProof,
+                    ) => {
+                        send_manager_admission_retry(ctx, model);
+                        return Ok(());
+                    }
+                    Err(crate::daemon::manager_credential_scope::AdmissionRejection::Terminal) => {
+                        return Ok(());
+                    }
+                }
+            } else {
+                None
+            };
+            // Hold a pending guard for the lifetime of PC creation so cleanup_pc
+            // on a concurrently-closing old PC cannot N→0 detach the IDD out
+            // from under us.
+            let pending_guard = ctx.pc_registry.enter_pending();
+
             let user_name = "worker_node".to_string();
             let has_tauri = ctx.host_control_hub.has_tauri_ui();
-            let capabilities = ctx.worker_mgr.worker_capabilities();
             // Resolve the connection's capability ceiling. A redeemed-grant stamp
             // carries one directly (an owner stamp carries `None` = no ceiling); a
             // bare (non-central) request carries none. A temporary-support session
@@ -796,6 +843,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             if let Some(supervisor) = ctx.virtual_display.as_ref()
                 && ctx.pc_registry.len().await == 0
                 && ctx.pc_registry.pending_requests() == 0
+                && ctx.pc_registry.admission(connection_id).await.is_none()
             {
                 log::info!(
                     "[router] post-RequestRemoteAccess cleanup: registry empty and no pending; \
@@ -841,7 +889,12 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             )
             .await
             {
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    if let Some(connection_id) = model.from_connection_id.clone() {
+                        desktop_settings::spawn_initial_audio_authorization(ctx, connection_id);
+                    }
+                    Ok(())
+                }
                 Err(DeskError::CustomError(error))
                     if is_offer_business_error(error.error_code) =>
                 {
@@ -877,6 +930,12 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             ctx.host_control_hub
                 .host_activity()
                 .set_remote_control(&outcome.connection_id, false);
+            pc_manager::hide_private_screen_best_effort(
+                &ctx.worker_mgr,
+                &outcome.connection_id,
+                "control_released",
+            )
+            .await;
             update_exclusive_after_control_change(ctx, &outcome).await;
             Ok(())
         }
@@ -918,6 +977,14 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             ctx.host_control_hub
                 .host_activity()
                 .set_remote_control(&outcome.connection_id, outcome.accept_control);
+            if !outcome.accept_control {
+                pc_manager::hide_private_screen_best_effort(
+                    &ctx.worker_mgr,
+                    &outcome.connection_id,
+                    "control_denied",
+                )
+                .await;
+            }
             update_exclusive_after_control_change(ctx, &outcome).await;
             Ok(())
         }
@@ -938,6 +1005,8 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         | SignalingType::AudioPlaybackFailed
         | SignalingType::MediaPipelineStateChanged
         | SignalingType::MediaPipelineRetryCompleted
+        | SignalingType::RemoteSessionSettingsApplied
+        | SignalingType::SystemAudioCaptureStateChanged
         | SignalingType::SystemInfoRetrieved
         | SignalingType::DisplaySettingsChanged
         | SignalingType::FilesListed
@@ -985,7 +1054,12 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         SignalingType::SetPrivateScreenVisibility => {
             handle_set_private_screen_visibility_inbound(ctx, model).await
         }
-        SignalingType::UpdateDeskSettings => handle_update_desk_settings_inbound(ctx, model).await,
+        SignalingType::ApplyRemoteSessionSettings => {
+            handle_apply_remote_session_settings_inbound(ctx, model).await
+        }
+        SignalingType::UpdateAdaptiveVideoQuality => {
+            handle_update_adaptive_video_quality_inbound(ctx, model).await
+        }
         // Manager-plane typed-IPC dispatch.
         SignalingType::GetSystemInfo => handle_manager_system_info_inbound(ctx, model).await,
         SignalingType::ListFiles => handle_manager_file_list_inbound(ctx, model).await,
@@ -1112,6 +1186,32 @@ async fn handle_retry_media_pipeline(
         );
         return Ok(());
     };
+    let payload = match model
+        .get_data::<desk_signal_facade::model::remote_session::ConnectionEpochPayload>()
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            send_media_retry_error(
+                ctx,
+                model,
+                DeskErrorCode::INVALID_PARAMS,
+                &format!("bad RetryMediaPipeline payload: {error}"),
+            );
+            return Ok(());
+        }
+    };
+    let Some(pc) = ctx.pc_registry.get(connection_id).await else {
+        send_media_retry_error(
+            ctx,
+            model,
+            DeskErrorCode::CLIENT_ID_NOT_FOUND,
+            "media connection no longer exists",
+        );
+        return Ok(());
+    };
+    if pc.read().await.connection_epoch != payload.connection_epoch {
+        return Ok(());
+    }
 
     match ctx
         .pc_registry
@@ -1225,9 +1325,20 @@ async fn publish_media_pipeline_state(
         reason_code: Some(reason_code),
         message: Some(message),
     };
-    ctx.pc_registry
-        .record_media_pipeline_state(connection_id, data.clone())
-        .await;
+    if let Some(pc) = ctx.pc_registry.get(connection_id).await {
+        let pc = pc.read().await;
+        let connection_epoch = pc.connection_epoch.clone();
+        let generation = pc
+            .cached_start_media
+            .read()
+            .await
+            .as_ref()
+            .map_or(0, |payload| payload.video_generation);
+        drop(pc);
+        ctx.pc_registry
+            .record_media_pipeline_state(connection_id, &connection_epoch, generation, data.clone())
+            .await;
+    }
     if let Ok(model) = SignalingModel::new_request(
         SignalingType::MediaPipelineStateChanged,
         Some(connection_id.to_string()),

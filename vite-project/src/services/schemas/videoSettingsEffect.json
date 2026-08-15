@@ -1,0 +1,1 @@
+{"type":"string","enum":["unchanged","applied_live","restarted"],"x-readme-ref-name":"VideoSettingsEffect"}

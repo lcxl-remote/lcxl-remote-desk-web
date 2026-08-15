@@ -1,0 +1,1 @@
+{"type":"string","enum":["unsupported","offer_only","apply","reconnect"],"x-readme-ref-name":"SessionSettingApplyMode"}

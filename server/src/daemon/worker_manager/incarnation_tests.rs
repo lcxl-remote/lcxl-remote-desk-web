@@ -220,16 +220,24 @@ mod lanes {
         };
         let mut settings = Settings::default();
         settings.args.startup_mode = StartupMode::ServiceDaemon;
-        registry
+        let pc = registry
             .create_for_request_remote(connection_id, &request_remote, &settings)
             .await
             .expect("create");
+        {
+            let pc = pc.read().await;
+            let mut fence = pc.media_output_fence.write().await;
+            fence.video_epoch = "test-epoch".to_string();
+            fence.video_generation = 1;
+        }
         registry.pause_all_media().await;
     }
 
     fn key_frame(connection_id: &str) -> MediaFrame {
         MediaFrame {
             connection_id: connection_id.into(),
+            connection_epoch: "test-epoch".to_string(),
+            generation: 1,
             seq: 0,
             ts_ns: 0,
             duration_ns: 16_666_666,

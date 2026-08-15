@@ -1,0 +1,1 @@
+{"type":"string","enum":["off","starting","active","restarting","denied","failed"],"x-readme-ref-name":"SystemAudioCaptureState"}

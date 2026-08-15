@@ -514,6 +514,7 @@ async fn stop_connection_finishes_active_transfer_once() {
     dispatcher
         .stop_connection(&StopMediaPayload {
             connection_id: "conn".to_string(),
+            connection_epoch: "test-epoch".to_string(),
         })
         .await;
     match events.recv().await.unwrap() {
@@ -526,6 +527,7 @@ async fn stop_connection_finishes_active_transfer_once() {
     dispatcher
         .stop_connection(&StopMediaPayload {
             connection_id: "conn".to_string(),
+            connection_epoch: "test-epoch".to_string(),
         })
         .await;
     assert!(events.try_recv().is_err());
@@ -546,18 +548,20 @@ fn start_payload(connection_id: &str) -> StartMediaPayload {
     StartMediaPayload {
         resolved_wayland_control_mode: None,
         connection_id: connection_id.to_string(),
+        connection_epoch: "test-epoch".to_string(),
+        video_generation: 1,
+        audio_generation: 1,
         video_codec: MediaCodec::H264,
-        video_encoder: None,
-        audio_codec: MediaCodec::Opus,
+        video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
         video_device: None,
-        audio_device: None,
         fps: 30,
         bitrate_kbps: 0,
         quality: 0,
         start_video: true,
-        start_audio: true,
-        image_capture: None,
-        enable_dirty_rect: None,
+        audio: None,
+        image_capture: "default".to_string(),
+        enable_dirty_rect: false,
+        show_mouse: false,
     }
 }
 
@@ -591,6 +595,7 @@ async fn start_then_stop_releases_state() {
     }
     d.stop_connection(&StopMediaPayload {
         connection_id: "c1".into(),
+        connection_epoch: "test-epoch".to_string(),
     })
     .await;
     let g = d.inner.lock().await;
@@ -824,6 +829,7 @@ async fn stop_connection_clears_permission_cache() {
     d.handle_command(payload).await;
     d.stop_connection(&StopMediaPayload {
         connection_id: "c1".into(),
+        connection_epoch: "test-epoch".to_string(),
     })
     .await;
     let g = d.inner.lock().await;
@@ -1199,6 +1205,7 @@ async fn upload_states_with_identical_ids_are_isolated_by_connection() {
 
     d.stop_connection(&StopMediaPayload {
         connection_id: "conn-a".to_string(),
+        connection_epoch: "test-epoch".to_string(),
     })
     .await;
     let inner = d.inner.lock().await;
@@ -1946,6 +1953,7 @@ async fn a_connection_can_end_while_an_upload_write_is_stuck() {
         Duration::from_secs(2),
         d.stop_connection(&StopMediaPayload {
             connection_id: "c1".to_string(),
+            connection_epoch: "test-epoch".to_string(),
         }),
     )
     .await

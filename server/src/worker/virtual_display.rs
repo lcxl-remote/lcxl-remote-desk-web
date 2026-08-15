@@ -233,6 +233,7 @@ pub async fn run_set_mode(
 ) -> WorkerToService {
     let request_id = payload.request_id.clone();
     let connection_id = payload.connection_id.clone();
+    let connection_epoch = payload.connection_epoch.clone();
     let display = match attached_display {
         Some(d) => d,
         None => {
@@ -248,6 +249,7 @@ pub async fn run_set_mode(
             return WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
                 request_id,
                 connection_id,
+                connection_epoch,
                 outcome: VirtualDisplayModeOutcome::Failed(
                     "virtual display not attached".to_string(),
                 ),
@@ -293,6 +295,7 @@ pub async fn run_set_mode(
     WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
         request_id,
         connection_id,
+        connection_epoch,
         outcome,
     })
 }
@@ -836,18 +839,20 @@ mod tests {
         StartMediaPayload {
             resolved_wayland_control_mode: None,
             connection_id: connection_id.to_string(),
+            connection_epoch: "test-epoch".to_string(),
+            video_generation: 1,
+            audio_generation: 1,
             video_codec: MediaCodec::H264,
-            video_encoder: None,
-            audio_codec: MediaCodec::Opus,
+            video_encoder: desk_signal_facade::model::media_capability::VideoEncoderId::X264,
             video_device: video_device.map(|s| s.to_string()),
-            audio_device: None,
             fps: 60,
             bitrate_kbps: 4_000,
             quality: 0,
             start_video: true,
-            start_audio: true,
-            image_capture: None,
-            enable_dirty_rect: None,
+            audio: None,
+            image_capture: "default".to_string(),
+            enable_dirty_rect: false,
+            show_mouse: false,
         }
     }
 
@@ -1129,6 +1134,7 @@ mod tests {
         let payload = SetVirtualDisplayModePayload {
             request_id: "r".to_string(),
             connection_id: "c".to_string(),
+            connection_epoch: "epoch".to_string(),
             width: 1280,
             height: 720,
             refresh_hz: 60,
@@ -1154,6 +1160,7 @@ mod tests {
         let payload = SetVirtualDisplayModePayload {
             request_id: "r".to_string(),
             connection_id: "c".to_string(),
+            connection_epoch: "epoch".to_string(),
             width: 1920,
             height: 1080,
             refresh_hz: 60,
@@ -1185,6 +1192,7 @@ mod tests {
         let payload = SetVirtualDisplayModePayload {
             request_id: "r".to_string(),
             connection_id: "c".to_string(),
+            connection_epoch: "epoch".to_string(),
             width: 1280,
             height: 720,
             refresh_hz: 60,
@@ -1231,6 +1239,7 @@ mod tests {
         let payload = SetVirtualDisplayModePayload {
             request_id: "r-shrink".to_string(),
             connection_id: "c-shrink".to_string(),
+            connection_epoch: "epoch".to_string(),
             width: 850,
             height: 770,
             refresh_hz: 60,

@@ -31,10 +31,9 @@ import {
     TabsTrigger,
 } from "@/components/ui/tabs"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Slider } from "@/components/ui/slider"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { AlertTriangle } from "lucide-react"
-import type { RemoteAccessInitializedData, DeskSettings } from "@/services/types"
+import type { RemoteAccessInitializedData } from "@/services/types"
 import { DeskConfigAdvancedTab } from "./desk-config-advanced-tab"
 import { DeskConfigAudioTab } from "./desk-config-audio-tab"
 import {
@@ -46,26 +45,38 @@ import {
     normalizeCaptureTarget,
     orderCaptureModes,
     pickDefaultDeviceName,
+    preferSavedDeskValue,
+    resolveAudioEncoder,
+    resolveExecutableDeskConfig,
+    resolveVideoEncoder,
     shouldShowAdminPrivilegeWarning,
     shouldShowNoDisplayWarning,
-    toDeskSettings,
+    toDeskDevicePreferences,
+    toRemoteSessionSettings,
 } from "./desk-config-model"
-import type { DeskConfigFormSettings } from "./desk-config-model"
+import type { DeskConfigFormSettings, DeskConfigSubmission } from "./desk-config-model"
+import {
+    DEFAULT_DESK_DEVICE_PREFERENCES,
+    type DeskDevicePreferencesV1,
+} from "./desk-preferences"
 
 interface DeskConfigDialogProps {
     open: boolean
     onOpenChange: (open: boolean) => void
     initData: RemoteAccessInitializedData | null
-    onSubmit: (settings: DeskSettings) => void
+    preferences: DeskDevicePreferencesV1 | null
+    onSubmit: (
+        settings: DeskConfigSubmission,
+        preferences: DeskDevicePreferencesV1,
+    ) => void
     onCancel: () => void
     /**
      * Browser-side adaptive video quality toggle. Owned by the parent
      * (persisted in localStorage there) and surfaced in this dialog so
      * the user can disable the packet-loss / RTT driven encoder
-     * rebuild loop. Not part of `DeskSettings` because it never
-     * crosses the signaling boundary — it only gates whether the
-     * browser sends `UpdateDeskSettings(video_quality=...)` from the
-     * stats observer.
+     * rebuild loop. It is a user-level browser preference; live
+     * samples cross the signaling boundary only through the narrow
+     * `UpdateAdaptiveVideoQuality` command.
      */
     adaptiveQualityEnabled: boolean
     onAdaptiveQualityChange: (enabled: boolean) => void
@@ -73,24 +84,26 @@ interface DeskConfigDialogProps {
      * Server-side adaptive bitrate-cap toggle (the REMB-driven inner
      * loop that trims encoder bitrate spikes without touching the
      * quality knob). Owned by the parent (persisted in localStorage
-     * there); the parent injects it into `DeskSettings.adaptive_bitrate`
-     * on connect / UpdateDeskSettings, where the daemon applies it to
-     * this connection only.
+     * there); the parent injects it into `RemoteSessionSettings` on
+     * connect / apply, where the daemon applies it to this connection only.
      */
     adaptiveBitrateEnabled: boolean
     onAdaptiveBitrateChange: (enabled: boolean) => void
+    systemAudioAllowed: boolean
 }
 
 export function DeskConfigDialog({
     open,
     onOpenChange,
     initData,
+    preferences,
     onSubmit,
     onCancel,
     adaptiveQualityEnabled,
     onAdaptiveQualityChange,
     adaptiveBitrateEnabled,
     onAdaptiveBitrateChange,
+    systemAudioAllowed,
 }: DeskConfigDialogProps) {
     const { t } = useTranslation()
 
@@ -130,29 +143,116 @@ export function DeskConfigDialog({
     }, [watchedDeviceName, watchedAdaptive, virtualDisplayName, form])
 
     useEffect(() => {
-        if (!initData?.desk_settings) {
+        if (!initData?.suggested_session_settings) {
             return
         }
-        const saved = initData.desk_settings
+        const suggested = initData.suggested_session_settings
+        const capabilities = initData.session_settings_capabilities
+        const hasSavedPreferences = preferences !== null
+        const intent = preferences ?? DEFAULT_DESK_DEVICE_PREFERENCES
         const target = normalizeCaptureTarget(
-            saved.image_capture,
-            saved.video_device_name,
+            capabilities.image_capture === "unsupported"
+                ? suggested.image_capture
+                : intent.imageCapture ?? suggested.image_capture,
+            capabilities.video_device_name === "unsupported"
+                ? suggested.video_device_name
+                : intent.videoDeviceName ?? suggested.video_device_name,
             initData.video_device_list,
         )
+        const audioCaptureModes = Object.keys(initData.audio_device_list ?? {})
+        const preferredAudioCapture = capabilities.audio_capture === "unsupported"
+            ? suggested.audio_capture
+            : intent.audioCapture
+        const audioCapture = preferredAudioCapture
+            && audioCaptureModes.includes(preferredAudioCapture)
+            ? preferredAudioCapture
+            : suggested.audio_capture
+                && audioCaptureModes.includes(suggested.audio_capture)
+                ? suggested.audio_capture
+                : audioCaptureModes[0] ?? null
+        const audioDevices = audioCapture
+            ? initData.audio_device_list?.[audioCapture] ?? []
+            : []
+        const explicitAudioDevice = capabilities.audio_device !== "unsupported"
+            && intent.audioDevice
+            && audioDevices.some((device) => (
+                device.id === intent.audioDevice?.audioDeviceId
+                && device.data_flow === intent.audioDevice.audioDataFlow
+            ))
+            ? {
+                audio_data_flow: intent.audioDevice.audioDataFlow,
+                audio_device_id: intent.audioDevice.audioDeviceId,
+            }
+            : null
+        const suggestedAudioDevice = suggested.audio_device
+            && audioDevices.some((device) => (
+                device.data_flow === suggested.audio_device?.audio_data_flow
+                && (suggested.audio_device.audio_device_id === null
+                    || device.id === suggested.audio_device.audio_device_id)
+            ))
+            ? suggested.audio_device
+            : null
+        const defaultAudioDevice = audioDevices.find((device) => device.default)
+            ?? audioDevices[0]
+        const audioDevice = explicitAudioDevice ?? suggestedAudioDevice ?? (defaultAudioDevice
+            ? {
+                audio_data_flow: defaultAudioDevice.data_flow,
+                audio_device_id: null,
+            }
+            : null)
+        const audioCapabilityAvailable = systemAudioAllowed
+            && capabilities.capture_audio !== "unsupported"
+            && audioCaptureModes.length > 0
+            && (initData.audio_encoder_list?.length ?? 0) > 0
         setStaleSavedCaptureMode(target.staleMode)
         setStaleSavedDeviceName(target.staleDevice)
         form.reset({
-            ...saved,
+            ...suggested,
+            audio_capture: audioCapture,
+            audio_device: audioDevice,
+            audio_encoder: resolveAudioEncoder(
+                hasSavedPreferences ? intent.audioEncoder : null,
+                suggested.audio_encoder,
+                initData.audio_encoder_list,
+            ),
+            enable_audio: audioCapabilityAvailable && (
+                hasSavedPreferences ? intent.captureAudio : suggested.capture_audio
+            ),
             image_capture: target.effectiveMode,
             video_device_name: target.effectiveDeviceName,
-            show_mouse: saved.show_mouse ?? true,
-            adaptive_web_page_resolution: saved.adaptive_web_page_resolution ?? true,
-            video_zoom_ratio: saved.video_zoom_ratio ?? 100,
-            video_quality: saved.video_quality ?? 22,
-            wayland_control_mode: saved.wayland_control_mode ?? "auto",
-            enable_dirty_rect: saved.enable_dirty_rect ?? true,
+            show_mouse: capabilities.show_mouse === "unsupported"
+                ? suggested.show_mouse
+                : preferSavedDeskValue(preferences, intent.showMouse, suggested.show_mouse),
+            adaptive_web_page_resolution: intent.adaptiveWebPageResolution,
+            video_encoder: resolveVideoEncoder(
+                hasSavedPreferences ? intent.videoEncoder : null,
+                suggested.video_encoder,
+                initData.video_encoder_list,
+            ),
+            video_fps: capabilities.video_fps === "unsupported"
+                ? suggested.video_fps
+                : preferSavedDeskValue(
+                    preferences,
+                    intent.videoFps ?? suggested.video_fps,
+                    suggested.video_fps,
+                ),
+            video_quality: capabilities.video_quality === "unsupported"
+                ? suggested.video_quality
+                : preferSavedDeskValue(
+                    preferences,
+                    intent.videoQuality,
+                    suggested.video_quality,
+                ),
+            wayland_control_mode: intent.waylandControlMode,
+            enable_dirty_rect: capabilities.enable_dirty_rect === "unsupported"
+                ? suggested.enable_dirty_rect
+                : preferSavedDeskValue(
+                    preferences,
+                    intent.enableDirtyRect,
+                    suggested.enable_dirty_rect,
+                ),
         })
-    }, [initData, form])
+    }, [initData, preferences, form, systemAudioAllowed])
 
     const rawCaptureKeys = initData && initData.video_device_list ? Object.keys(initData.video_device_list) : []
     const imageCaptureList = orderCaptureModes(rawCaptureKeys)
@@ -178,16 +278,26 @@ export function DeskConfigDialog({
     )
 
     const handleSubmit = (values: DeskConfigFormSettings) => {
+        if (!initData) return
+        const executableValues = resolveExecutableDeskConfig(values, initData)
         // Defence in depth: never start a session without a display, even if the
         // disabled submit button is bypassed (e.g. implicit Enter-key submit).
         if (!canConnectCaptureTarget(
-            values.image_capture,
-            values.video_device_name,
-            initData?.video_device_list,
+            executableValues.image_capture,
+            executableValues.video_device_name,
+            initData.video_device_list,
         )) {
             return
         }
-        onSubmit(toDeskSettings(values))
+        onSubmit(
+            toRemoteSessionSettings(
+                executableValues,
+                initData.session_settings_capabilities.adaptive_bitrate === "unsupported"
+                    ? initData.suggested_session_settings.adaptive_bitrate
+                    : adaptiveBitrateEnabled,
+            ),
+            toDeskDevicePreferences(values),
+        )
     }
 
     const handleInteractOutside = (e: Event) => {
@@ -234,6 +344,7 @@ export function DeskConfigDialog({
                                                 const currentValue = field.value || ""
                                                 return (
                                             <Select
+                                                disabled={initData?.session_settings_capabilities.image_capture === "unsupported"}
                                                 key={`image-capture-${currentValue || "empty"}`}
                                                 onValueChange={(value: string) => {
                                                     field.onChange(value)
@@ -382,6 +493,7 @@ export function DeskConfigDialog({
                                                         const currentValue = field.value ?? ""
                                                         return (
                                                     <Select
+                                                        disabled={initData?.session_settings_capabilities.video_device_name === "unsupported"}
                                                         onValueChange={(value: string) => {
                                                             field.onChange(value)
                                                             setStaleSavedDeviceName(null)
@@ -442,6 +554,7 @@ export function DeskConfigDialog({
                                             <FormControl>
                                                 <Checkbox
                                                     checked={field.value}
+                                                    disabled={initData?.session_settings_capabilities.show_mouse === "unsupported"}
                                                     onCheckedChange={field.onChange}
                                                 />
                                             </FormControl>
@@ -491,33 +604,14 @@ export function DeskConfigDialog({
                                     }}
                                 />
 
-                                <FormField
-                                    control={form.control}
-                                    name="video_zoom_ratio"
-                                    render={({ field }) => (
-                                        <FormItem className="pt-2">
-                                            <FormLabel className="flex justify-between">
-                                                <span>{t('pages.desk.remoteResolutionScale')}</span>
-                                                <span className="text-muted-foreground">{field.value}%</span>
-                                            </FormLabel>
-                                            <FormControl>
-                                                <Slider
-                                                    min={10}
-                                                    max={100}
-                                                    step={1}
-                                                    value={[field.value || 100]}
-                                                    onValueChange={(vals: number[]) => field.onChange(vals[0])}
-                                                    className="py-2"
-                                                />
-                                            </FormControl>
-                                            <FormMessage />
-                                        </FormItem>
-                                    )}
-                                />
                             </TabsContent>
 
                             {/* --- AUDIO TAB --- */}
-                            <DeskConfigAudioTab form={form} initData={initData} />
+                            <DeskConfigAudioTab
+                                form={form}
+                                initData={initData}
+                                systemAudioAllowed={systemAudioAllowed}
+                            />
 
                             {/* --- ADVANCED TAB --- */}
                             <DeskConfigAdvancedTab
