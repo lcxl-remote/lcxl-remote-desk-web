@@ -2,15 +2,17 @@
 
 The backend's REST API is annotated with [`utoipa`](https://github.com/juhaku/utoipa) and an OpenAPI specification is generated from the route registration.
 
-## No runtime docs endpoints
+## Generating the spec offline
 
-The server does **not** serve interactive API documentation or a raw spec at runtime: the Swagger UI / ReDoc / RapiDoc / Scalar endpoints and `/openapi.json` have been removed. They were unauthenticated and, on a public self-hosted deployment, would only expose the API surface to anyone — while the frontend client is generated **offline** (see below), so a runtime spec served no purpose.
+The spec is generated locally, on demand. A running server serves neither interactive API documentation nor a raw spec endpoint, so a public self-hosted deployment does not publish a readable inventory of its API surface — and the frontend client is generated **offline** anyway (see below), so nothing needs a runtime spec.
 
-To inspect the spec, generate it locally with the offline `dump-openapi` subcommand:
+Use the `dump-openapi` subcommand to produce one:
 
 ```bash
 cargo run -p lcxl-remote-desk-server -- dump-openapi --out openapi.json
 ```
+
+The subcommand exports straight from the route registration; it touches no DB or Redis and starts no HTTP server, so it runs against any checkout.
 
 ## Regenerating the Frontend Client
 
@@ -25,7 +27,7 @@ npm ci        # installs the exact Kubb version the lockfile pins
 ./update_openapi.sh
 ```
 
-The scripts use the `dump-openapi` subcommand to export the spec from the route registration offline — no DB / Redis / HTTP needed. The spec is passed to Kubb through a temporary file and deleted afterward; generated `openapi.json` files are not tracked in the repository.
+The scripts use that same `dump-openapi` subcommand to export the spec offline. The spec is passed to Kubb through a temporary file and deleted afterward; generated `openapi.json` files are not tracked in the repository.
 
 Kubb is pinned to an exact version and invoked as `npx --no-install`, so the generator can neither drift across patch releases nor be silently downloaded when dependencies are missing — the committed client stays reproducible from the lockfile. Run `npm ci` first if the regeneration fails to find Kubb.
 

@@ -1,69 +1,96 @@
 # LCXL Remote Desk Web
 
-[English](README.md) | [中文](README_CN.md)
-
-LCXL Remote Desk Web is an **AI-native**, open-source high-performance remote desktop. It treats AI as a **first-class control plane alongside the browser**: the built-in diagnostic agent can inspect a device and, only after the device owner confirms each exact command, execute approved remediation; external AI assistants receive a separate, permanently **read-only** [MCP](https://modelcontextprotocol.io/) surface. The central signaling service owns model access, orchestration, authorization, and audit, while the controlled device remains a thin evidence-collection and execution edge. The backend is written in Rust; the frontend uses React, Vite, and Tailwind CSS.
+[中文](README_CN.md)
 
 > [!WARNING]
-> **Disclaimer**: This project is currently in the early development stage. The codebase may be unstable, contain unfixed bugs, or have incomplete features.
-> **Security Warning**: Remote desktop technology involves deep access to computer systems. Ensure your network environment is secure when using this project. The author(s) shall not be held liable for any damages arising from the use of this project.
+>
+> **Disclaimer**: This project is in an early stage of development. The codebase may be unstable, contain unfixed issues, or have incomplete features.
+>
+> **Security Warning**: This project must not be used for any unlawful purpose. The author(s) accept no liability for any damage arising from its use.
+
+LCXL Remote Desk Web is an **AI-native**, open-source high-performance remote desktop.
+
+* Built natively on WebRTC — there is no separate control client to install; any modern browser gives you a native remote-desktop experience.
+* The host runs natively on Windows, macOS, and Linux, with 4K @ 60 Hz screen capture and output.
+* AI is a first-class control plane: ask in plain language and let the agent diagnose the problem and help fix it.
+* Rust backend; React, Vite, and Tailwind CSS frontend.
 
 ---
 
 ## Key Features
 
-- **Central AI Diagnostics**: Ask troubleshooting questions in plain language. The signaling service drives a bounded tool-calling loop, while the controlled device collects only requested evidence and strictly redacts it before transmission. OpenAI-compatible and Anthropic APIs are supported.
-- **Owner-Confirmed Command Execution**: The model suggests commands but never executes them directly. The server risk-classifies and blocklist-checks each proposal; after the device owner confirms the exact command, it seals an argv-level plan that the edge re-validates field-for-field before execution. Results are backfilled into the diagnosis and audited.
-- **Read-Only MCP Server**: `--startup-mode mcp-stdio` exposes a static four-tool whitelist for system information, processes, listening ports, and policy-gated recent logs. It contains no model call, screenshot, execution, control, or write tool.
 - **Capability-Scoped Access**: Device codes can carry per-capability ceilings for remote control, file browsing/transfer/delete, terminal, clipboard, privacy screen, and whiteboard. Host policy and live approval still apply.
 - **High-Performance Streaming**: WebRTC video with X264 / OpenH264 / VP8 / VP9 / AV1 software encoders, plus Opus system audio.
 - **Remote Terminal**: A built-in xterm.js terminal over a separately authenticated WebSocket.
 - **File Management**: Upload, download, delete, and Recycle Bin workflows.
-- **Clipboard Sync**: Bidirectional text clipboard synchronization.
+- **Clipboard Sync**: Bidirectional text clipboard synchronization (requires an HTTPS context).
 - **Remote Whiteboard**: Draw and annotate on the remote screen (requires `tauri-app`).
 - **Privacy Screen**: Lock the local display and input during remote operation (requires `tauri-app`).
-- **Windows Virtual Display**: An IddCx virtual monitor with adaptive resolution and optional exclusive mode, available in Windows `service-daemon` mode.
+- **Windows Virtual Display (experimental)**: An IddCx virtual monitor with adaptive resolution and optional exclusive mode, available in Windows `service-daemon` mode.
 - **Cross-Platform Capture**: Windows WASAPI, Linux PipeWire, and macOS ScreenCaptureKit system-audio paths, with desktop capture and input support across Windows, Linux, and macOS.
+- **AI Diagnostics**: Ask troubleshooting questions in plain language. The signaling service drives a bounded tool-calling loop, while the controlled device collects only requested evidence and strictly redacts it before transmission. OpenAI-compatible and Anthropic APIs are supported.
+- **Owner-Confirmed Command Execution**: The model suggests commands but never executes them directly. The server risk-classifies and blocklist-checks each proposal; after the device owner confirms the exact command, it seals an argv-level plan that the edge re-validates field-for-field before execution. Results are backfilled into the diagnosis and audited.
+- **Read-Only MCP Server (experimental)**: `--startup-mode mcp-stdio` exposes a static four-tool whitelist for system information, processes, listening ports, and policy-gated recent logs. It contains no model call, screenshot, execution, control, or write tool.
 - **Multi-language Support**: UI and documentation are available in English and Chinese.
+
+> For per-feature detail and step-by-step usage, see [Remote Control & Streaming](docs/features/streaming.md), [Terminal, Files & Clipboard](docs/features/terminal-files-clipboard.md), [Privacy Screen & Whiteboard](docs/features/privacy-whiteboard.md), [Virtual Display](docs/features/virtual-display.md), [Access Codes](docs/guide/access-codes.md), [AI Diagnostics](docs/features/ai-diagnostics.md), and [MCP Server](docs/features/mcp-server.md).
 
 ---
 
 ## Quick Start
 
-### Option 1: Docker Signaling Service
+### Option 1: Download and Run the Host
 
-The provided image starts in `signaling` mode. It hosts the web control plane, signaling, and optional TURN relay; desktop capture and input injection still run on controlled devices outside the container.
+**This is the best option when the controlled device is on your LAN or has a public IP of its own** — the host bundles signaling, STUN / TURN, and the web console, so no extra server is involved and the browser connects to it directly.
 
-```bash
-printf 'LRD_BOOTSTRAP_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
-docker compose up -d
-```
+1. Download the host package for your platform from the [Releases page](https://github.com/lcxl/lcxl-remote-desk-web/releases):
 
-Open `http://localhost:8081`, create the admin account, and enter the token saved
-in `.env`. Keep that value in `.env`: Compose validates the required variable on
-every startup even though the token no longer authorizes operations after the
-server has been initialized.
+   | Platform | Package |
+   |---|---|
+   | Windows x86_64 | `windows-x86_64-server.zip` |
+   | Linux x86_64 | `linux-x86_64-server.tar.gz` |
+   | macOS Apple Silicon | `macos-aarch64-server.tar.gz` |
+   | macOS Intel | `macos-x86_64-server.tar.gz` |
 
-### Option 2: Tauri Desktop Client
+2. The archive contains the executable plus a sibling `static/` directory (the web console assets); **keep them side by side**. Run it as-is — `default` mode (embedded signaling plus the controlled-device pipeline) is the default:
 
-Use this when you need local GUI integrations such as the Privacy Screen or Whiteboard:
+   ```bash
+   ./lcxl-remote-desk-server          # lcxl-remote-desk-server.exe on Windows
+   ```
 
-```bash
-cd tauri-app
-cargo tauri dev
-```
+3. Open `http://<host-address>:8081`, follow the wizard to create the admin account and set the inbound security policy, then control the device from the same LAN — or from anywhere that can reach its public IP.
+
+> **No public IP, but the device can reach the internet?**
+> In the wizard's connection step (or the **Outbound Connection** settings page afterwards), set the **manager domain** to the public server `lcxbox.app` and paste an API token created in its console. It handles signaling and NAT traversal, and control ends then reach the device through `https://lcxbox.app`.
+>
+> That public server currently runs in the United States, so **access from outside the US may be slow or fail outright**. If latency matters or the link is unreliable, self-host signaling with Option 2 instead.
+
+### Option 2: Self-Hosted Signaling Server
+
+Use this when the controlled device has no public IP and you want to own the whole path: rent a VPS with a public IP from a cloud provider, run signaling there, and point the host at it.
+
+1. On the VPS, clone the repository and start the service with Docker Compose. The image starts in `signaling` mode, hosting the web control plane, signaling, and optional TURN relay; desktop capture and input injection still run on controlled devices outside the container:
+
+   ```bash
+   git clone https://github.com/lcxl/lcxl-remote-desk-web.git
+   cd lcxl-remote-desk-web
+   printf 'LRD_BOOTSTRAP_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
+   docker compose up -d
+   ```
+
+2. Open `http://<vps-address>:8081`, create the admin account, and enter the token saved in `.env`. Keep that value: Compose validates the required variable on every startup even though the token no longer authorizes operations after the server has been initialized.
+
+3. For a public deployment, terminate TLS on a reverse proxy (and forward the signaling WebSocket `Upgrade` header). Per the [config.toml reference](docs/config/config-toml.md), configure the `listen` / `external` addresses under `[[turn.interfaces]]` on the **TURN Settings** page, publish the relay port range in `docker-compose.yml`, and open it in your security group (`50000-50050/udp` by default).
+
+4. Copy the token from the signaling server's **Signaling Access Token** page. Download and run the host exactly as in Option 1, then on its **Outbound Connection** settings page set the signaling URL to `wss://<your-domain>/api/desk/signaling` (a LAN deployment without TLS can use `ws://<vps-address>:8081/api/desk/signaling`) and paste the token.
+
+> Hosts refuse plaintext `ws://` dials to **public** signaling addresses by default (`require_secure_signaling`). Loopback, private, and LAN addresses are exempt.
 
 ### Option 3: Run from Source
 
 1. Install the repository-pinned Rust 1.90 toolchain, Node.js 22.16+, and the platform dependencies listed in the [Development Guide](DEVELOPMENT.md).
 
-2. Start the portable backend. `default` embeds both signaling and the controlled-device pipeline:
-
-   ```bash
-   cargo run -p lcxl-remote-desk-server --release -- --startup-mode default
-   ```
-
-3. Start the frontend in another terminal:
+2. **Start the frontend first.** A debug build of the desktop shell loads the Vite dev server, so it shows a blank window if the frontend is not up yet:
 
    ```bash
    cd vite-project
@@ -71,13 +98,34 @@ cargo tauri dev
    npm run dev
    ```
 
-   Open `http://localhost:5174`.
+   The dev server listens on `http://localhost:5174`.
+
+3. Once the frontend is ready, start the Tauri host shell in another terminal. It embeds the full server, and local GUI integrations such as the Privacy Screen and Whiteboard are only available in this shell:
+
+   ```bash
+   cargo run -p lcxl-remote-desk-tauri
+   ```
+
+   For a headless backend without the GUI shell, run `cargo run -p lcxl-remote-desk-server` (`default` mode) instead and open `http://localhost:5174` in a browser.
+
+> For the full walkthrough of all three options, their prerequisites, and next steps, see [Quick Start](docs/guide/quick-start.md). Public-endpoint hardening, system dependencies, container persistence, and the `LRD_*` variables are covered in [Deployment](docs/guide/deployment.md).
 
 ---
 
 ## Configuration
 
-Controlled-device settings use one platform default profile across portable, desk-server, service-daemon, MCP, and local access commands. Use `-c, --config-file-path` only for an explicit profile override; `LRD_*` environment variables can still override individual settings. The local console persists host settings such as:
+Controlled-device settings live at **platform-standard paths** — one profile shared by the portable, desk-server, service-daemon, MCP, and local-access commands:
+
+| Platform | Config file | Log directory |
+|---|---|---|
+| Windows | `%ProgramData%\LCXL Remote Desktop\config\config.toml` | `%ProgramData%\LCXL Remote Desktop\logs` |
+| Linux (root) | `/etc/lcxl-remote-desk/config.toml` | `/var/log/lcxl-remote-desk` |
+| Linux (regular user) | `$XDG_CONFIG_HOME/lcxl-remote-desk/config.toml` (`~/.config/lcxl-remote-desk/config.toml` when unset) | `$XDG_STATE_HOME/lcxl-remote-desk/logs` (`~/.local/state/lcxl-remote-desk/logs` when unset) |
+| macOS | `~/Library/Application Support/com.lcxl.remote-desk/config/config.toml` | `~/Library/Logs/lcxl-remote-desk` |
+
+Use `-c, --config-file-path <PATH>` for an explicit profile override; the databases, runtime socket, and other sibling files follow that path. `LRD_*` environment variables can still override individual settings. When the file is absent it is generated from defaults: port `8081` bound to `0.0.0.0` / `::`, IPv6 enabled, no signaling or manager URL (embedded signaling only), and plaintext dials to public signaling refused. The bundled TURN switch defaults on, but relays nothing until `[[turn.interfaces]]` is configured. See the [config.toml reference](docs/config/config-toml.md) for every field.
+
+The local console persists host settings such as:
 
 - **System & Connectivity**: Listen address, ports, local/remote signaling, manager links, logging, and bundled TURN interfaces.
 - **Desktop & Encoding**: Display, frame rate, encoder, cursor, audio, and per-session media settings.
@@ -88,7 +136,7 @@ Model provider settings are different: the central signaling service stores the 
 
 `--startup-mode` supports `default`, `signaling`, `desk-server`, `service-daemon`, `session-worker`, and `mcp-stdio`. `session-worker` is an internal child-process mode launched by the daemon.
 
-> See the [Development Guide](DEVELOPMENT.md) for build dependencies and detailed architecture notes.
+> For the field-by-field reference see [config.toml Reference](docs/config/config-toml.md), for every command-line flag see [CLI Arguments](docs/config/cli.md), and for the process layout behind each mode see [Startup Modes](docs/guide/startup-modes.md). Build dependencies are in the [Development Guide](DEVELOPMENT.md).
 
 ---
 
@@ -112,6 +160,8 @@ The long-lived ServiceDaemon owns signaling, the WebRTC PeerConnection, and work
 
 Windows currently provides the actual system-service integration. On other platforms, `service-daemon` runs interactively rather than through a native service manager.
 
+> For the full component breakdown and data flow see [Architecture](docs/reference/architecture.md), for terminology and roles see [Core Concepts](docs/guide/concepts.md), for the per-mode process layout see [Startup Modes](docs/guide/startup-modes.md), and for the frame definitions see [Signaling Protocol](docs/reference/signaling-protocol.md).
+
 ---
 
 ## AI Architecture
@@ -129,6 +179,8 @@ AI inference is centrally orchestrated, while the controlled device is a thin ev
 
 **MCP Server.** `mcp-stdio` is intentionally separate from the diagnostic agent. It exposes exactly `lcxl_system_info`, `lcxl_process_list`, `lcxl_network_ports`, and `lcxl_recent_logs`; the last tool is evaluated against `allow_logs` on every call. The MCP server never calls a model and never exposes screenshots, execution, remote control, or writes.
 
+> For provider configuration and day-to-day usage see [AI Diagnostics](docs/features/ai-diagnostics.md), for the complete trust boundary, redaction, and audit constraints see [AI Security Model](docs/security/ai-security-model.md), and for wiring up an external assistant see [MCP Server](docs/features/mcp-server.md).
+
 ---
 
 ## Project Structure
@@ -140,7 +192,7 @@ AI inference is centrally orchestrated, while the controlled device is a thin ev
 - **`tauri-app`**: Desktop GUI shell and local integrations such as Privacy Screen and Whiteboard.
 - **`vite-project`**: React web console and browser remote-control client.
 
-> See the [Development Guide](DEVELOPMENT.md) for module-level build and platform details.
+> For each module's responsibilities and dependency edges see [Module Map](docs/reference/modules.md), for the HTTP surface see [REST API](docs/reference/api.md), and for module-level build and platform details see the [Development Guide](DEVELOPMENT.md).
 
 ---
 
@@ -156,7 +208,6 @@ AI inference is centrally orchestrated, while the controlled device is a thin ev
 - [x] Read-only MCP server integration
 - [x] AI command execution with per-command owner confirmation, sealed plans, and edge re-validation
 - [ ] Mobile interface optimizations
-- [ ] Role-Based Access Control (RBAC) and multi-user management
 - [ ] Session recording support
 
 ---

@@ -25,7 +25,7 @@
 - **会话管理**: Actix-Session with Cookie
 - **日志**: env_logger 0.11
 - **配置管理**: config 0.15 (TOML)
-- **API 文档**: Utoipa 5（OpenAPI 规范经 `dump-openapi` 离线生成；运行时不再提供文档 UI）
+- **API 文档**: Utoipa 5（OpenAPI 规范经 `dump-openapi` 离线生成；运行时不提供文档 UI）
 - **TURN 服务**: turn 0.17
 - **Prometheus 监控**: Prometheus 0.13.4
 
@@ -139,7 +139,7 @@ show_mouse = true             # 是否显示鼠标指针
 enabled = false               # 是否启用虚拟显示器
 ```
 
-> 实际首次启动会在平台默认 profile 生成包含全部字段的 `config.toml`。默认路径不随 portable、desk-server、service-daemon、MCP 等启动模式变化；旧 cwd `conf/config.toml` 不会自动迁移。上面仅列出常用项。
+> 实际首次启动会在平台默认 profile 生成包含全部字段的 `config.toml`。默认路径不随 portable、desk-server、service-daemon、MCP 等启动模式变化。上面仅列出常用项。
 
 #### 构建并运行服务器
 
@@ -253,13 +253,13 @@ video_fps = 30               # 开发时可降低帧率以减少资源消耗
 
 ### 访问 API 文档
 
-服务器运行时**不再**提供 API 文档 UI（Swagger UI / ReDoc / RapiDoc / Scalar）和 `/openapi.json`：这些端点无需鉴权，公网部署会暴露 API 攻击面，且前端客户端已走离线生成。如需查看规范，用离线子命令在本地生成：
+运行中的服务器不提供 API 文档 UI（Swagger UI / ReDoc / RapiDoc / Scalar），也不提供 `/openapi.json`，公网部署因此不会暴露出一份可被任意访问的 API 清单；前端客户端本来就走离线生成。如需查看规范，用离线子命令在本地生成：
 
 ```bash
 cargo run -p lcxl-remote-desk-server -- dump-openapi --out openapi.json
 ```
 
-前端重新生成脚本使用生成后自动清理的临时规范文件，因此 Git 不再跟踪生成的 `openapi.json`。
+前端重新生成脚本使用生成后自动清理的临时规范文件，因此 Git 不跟踪生成的 `openapi.json`。
 
 ### API 端点
 
@@ -440,10 +440,10 @@ npm run build
 
 #### 4. 使用 Docker Compose
 
-推荐开发环境下使用 `docker-compose` 进行快速部署验证：
+推荐开发环境下使用 `docker compose` 进行快速部署验证：
 
 ```bash
-docker-compose up --build -d
+docker compose up --build -d
 ```
 
 注意：构建时必须确保本地 Docker 版本支持 BuildKit（脚本已自动设置 `DOCKER_BUILDKIT=1`）。

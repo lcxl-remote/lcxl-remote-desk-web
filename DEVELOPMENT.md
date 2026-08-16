@@ -90,7 +90,8 @@ No extra dependencies; everything is managed automatically through Cargo.
 
 ### 1. Backend Development
 
-Configure `conf/config.toml` and run:
+Run the backend once to generate the config file at its platform default path,
+adjust it, and restart:
 
 ```bash
 cargo run
@@ -106,7 +107,12 @@ npm run dev
 
 ## Configuration Details
 
-### Server Configuration (conf/config.toml)
+### Server Configuration (config.toml)
+
+The file lives at a startup-mode-independent platform default path — see the
+[config.toml Reference](docs/config/config-toml.md) for the per-platform
+locations and the full field list. `-c, --config-file-path <PATH>` selects
+another profile.
 
 #### System [system]
 
@@ -134,7 +140,7 @@ npm run dev
 - `realm`: TURN server realm for authentication.
 - `interfaces`: Network interface configuration (`udp` / `tcp` protocols, listen and external addresses).
 - `static_auth_secret`: Static authentication secret.
-- `enable_stun` / `enable_turn`: Toggle STUN and TURN relay respectively.
+- `enable_turn`: Whether to run the bundled TURN service (default true). STUN and TURN relay are served by the same component, so this switch covers both.
 - `relay_min_port` / `relay_max_port`: Relay port allocation range.
 - `[turn.static_credentials]`: Optional static username / password credential table.
 
@@ -182,10 +188,10 @@ video_fps = 30               # Reduce FPS during development to save resources
 
 ## API Documentation
 
-The server no longer serves runtime API docs (Swagger UI / ReDoc / RapiDoc /
-Scalar) or `/openapi.json`: those endpoints were unauthenticated and exposed the
-API surface on a public deployment, and the frontend client is generated offline
-anyway. Generate the spec locally with the offline subcommand:
+A running server serves no API docs UI (Swagger UI / ReDoc / RapiDoc / Scalar)
+and no `/openapi.json`, so a public deployment does not publish a readable
+inventory of its API surface; the frontend client is generated offline anyway.
+Generate the spec locally with the offline subcommand:
 
 ```bash
 cargo run -p lcxl-remote-desk-server -- dump-openapi --out openapi.json
@@ -251,7 +257,7 @@ npm run build
 
 ### Docker
 
-Use `./build_docker.sh` for easy building, or `docker-compose` for quick deployment.
+Use `./build_docker.sh` for easy building, or `docker compose up --build -d` for quick deployment.
 
 ## FAQ
 

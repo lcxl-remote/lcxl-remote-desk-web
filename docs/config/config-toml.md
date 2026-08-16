@@ -1,6 +1,6 @@
 # config.toml Reference
 
-Server settings use a startup-mode-independent platform default: `%ProgramData%\LCXL Remote Desktop\config\config.toml` on Windows, `XDG_CONFIG_HOME/lcxl-remote-desk/config.toml` (or `~/.config/lcxl-remote-desk/config.toml`) for a non-root Linux user, `/etc/lcxl-remote-desk/config.toml` for Linux root, and `~/Library/Application Support/com.lcxl.remote-desk/config/config.toml` on macOS. `-c, --config-file-path <PATH>` explicitly selects another profile; services and LaunchAgents inherit it only when it was explicitly supplied. Old cwd-relative `conf/config.toml` files are not discovered or migrated automatically.
+Server settings use a startup-mode-independent platform default: `%ProgramData%\LCXL Remote Desktop\config\config.toml` on Windows, `XDG_CONFIG_HOME/lcxl-remote-desk/config.toml` (or `~/.config/lcxl-remote-desk/config.toml`) for a non-root Linux user, `/etc/lcxl-remote-desk/config.toml` for Linux root, and `~/Library/Application Support/com.lcxl.remote-desk/config/config.toml` on macOS. `-c, --config-file-path <PATH>` explicitly selects another profile; services and LaunchAgents inherit it only when it was explicitly supplied.
 
 ## System `[system]`
 
@@ -136,8 +136,8 @@ The page also has a collapsed **Advanced statistics lookup**. Given a known
 client `IP:port` and interface, it shows relay and control bytes/packets for that
 address and distinguishes a stopped runtime from an address with no record.
 This TURN implementation cannot enumerate all sessions or force-close one, so
-the former `GET /api/turn/session` and `DELETE /api/turn/session` placeholders
-are not part of the API; only `/api/turn/session/statistics` remains.
+`/api/turn/session/statistics` is the only session endpoint the API exposes —
+a per-address lookup, with no list or teardown counterpart.
 
 ## Desktop `[desk]` {#desktop-desk}
 

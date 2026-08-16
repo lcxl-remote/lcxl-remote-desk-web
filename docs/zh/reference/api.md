@@ -2,15 +2,17 @@
 
 后端 REST API 使用 [`utoipa`](https://github.com/juhaku/utoipa) 注解，并从路由注册生成 OpenAPI 规范。
 
-## 运行时不再提供文档端点
+## 离线生成规范
 
-server **不再**在运行时提供交互式 API 文档或原始规范：Swagger UI / ReDoc / RapiDoc / Scalar 端点以及 `/openapi.json` 均已移除。它们无需鉴权，在公网自建部署上只会把 API 攻击面暴露给任何人——而前端客户端是**离线**生成的（见下文），运行时规范并无用途。
+规范按需在本地生成。运行中的 server 不提供交互式 API 文档，也不提供原始规范端点——公网自建部署因此不会暴露出一份可被任意访问的 API 清单，而前端客户端本来就是**离线**生成的（见下文），并不需要运行时规范。
 
-如需查看规范，用离线的 `dump-openapi` 子命令在本地生成：
+用 `dump-openapi` 子命令生成一份查看：
 
 ```bash
 cargo run -p lcxl-remote-desk-server -- dump-openapi --out openapi.json
 ```
+
+该子命令直接从路由注册导出，不连 DB / Redis，也不启动 HTTP 服务，因此在任何一份源码副本上都能跑。
 
 ## 重新生成前端客户端
 
@@ -25,7 +27,7 @@ npm ci        # 装上 lockfile 钉死的那个 Kubb 版本
 ./update_openapi.sh
 ```
 
-脚本走 `dump-openapi` 子命令，从路由注册离线导出规范——不连 DB / Redis / HTTP。规范通过临时文件交给 Kubb，生成结束后自动删除；仓库不再跟踪生成的 `openapi.json`。
+脚本走同一个 `dump-openapi` 子命令离线导出规范。规范通过临时文件交给 Kubb，生成结束后自动删除；仓库不跟踪生成的 `openapi.json`。
 
 Kubb 的版本被精确钉死，且以 `npx --no-install` 调用，因此生成器既不会跨 patch 版本漂移，也不会在依赖缺失时被悄悄下载——committed 的客户端始终能从 lockfile 复现。若重新生成时提示找不到 Kubb，先跑 `npm ci`。
 

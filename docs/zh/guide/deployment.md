@@ -1,14 +1,34 @@
 # 部署
 
-## Docker（推荐）
+## Docker（信令服务器推荐方式）
 
 ```bash
 printf 'LRD_BOOTSTRAP_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
-docker-compose up -d
+docker compose up -d
 ```
 
 访问 `http://localhost:8081`，填写 `.env` 中的令牌并设置管理员账户。初始化后仍需保留
 `.env`，Compose 每次启动都会校验该必填变量。如需自定义镜像，使用 `./build_docker.sh`。
+
+### 需要持久化的状态
+
+服务端写入的是 [config.toml 参考](/zh/config/config-toml)中说明的平台标准路径，而不是运行
+目录。容器内以 root 运行，因而落在 Linux 系统级路径上，所以 Compose 文件把三个必须比容器
+活得更久的目录做了 bind mount：
+
+| 宿主机路径 | 容器内路径 | 内容 |
+|---|---|---|
+| `./conf` | `/etc/lcxl-remote-desk` | `config.toml` |
+| `./data` | `/var/lib/lcxl-remote-desk` | 信令与执行台账数据库、远程访问状态 |
+| `./logs` | `/var/log/lcxl-remote-desk` | 滚动日志 |
+
+丢失 `./data` 会一并丢掉信令侧状态、访问码、AI 服务商配置与审计记录，请与 `./conf` 一起备份。
+
+### TURN 中继端口
+
+中继端口范围（`[turn]` 的 `relay_min_port` / `relay_max_port`，默认 `50000-50050`）**默认
+不映射**。若要由这台服务器承担中继，请在 `docker-compose.yml` 中取消该端口范围的注释、在安全组
+放行，并把 `[[turn.interfaces]]` 的 `external` 设为本机公网地址——见下方[网络与 NAT 穿透](#网络与-nat-穿透)。
 
 ## 从源码构建生产版本
 
@@ -80,7 +100,7 @@ server 内置信令、STUN 与 TURN。跨 NAT 连接时：
   - `relaxed`（默认）——允许私网 / 回环目标（本地模型网关，如 `http://localhost:11434`）。
   - `strict`——拒绝私网 / 回环 / CGNAT / ULA 目标；连接期再校验解析到的 IP（防 DNS 重绑定）。当不可信用户可配置供应商时使用。
 - **`LRD_ENFORCE_PUBLIC_TLS`**——是否允许以**明文**（`http`）拨号**公网**目标。默认 `true`（仅显式设为 `false` / `0` / `no` / `off` 才关闭）。开启时，对公网地址的明文拨号会在连接前被拒（api_key 绝不明文外泄）；私网 / 回环 / 局域网目标始终豁免，云元数据段无论如何始终拦截。与 SSRF 模式正交：要放行公网明文供应商，关闭本开关即可，**无需**切到 `relaxed`（那会额外放开私网目标）。
-- **运行时不再提供 API 文档端点**（Swagger UI / ReDoc / RapiDoc / Scalar / `/openapi.json`）；用离线 `dump-openapi` 生成规范（见 [REST API 参考](/zh/reference/api)）。
+- **没有运行时 API 文档端点**：server 不提供 Swagger UI / ReDoc / RapiDoc / Scalar，也不提供 `/openapi.json`，公网上因此没有这一类可被探测的面。需要规范时用离线 `dump-openapi` 生成（见 [REST API 参考](/zh/reference/api)）。
 - 把 server 置于反向代理之后，由其终结 TLS、透传 `Host`，并为信令转发 WebSocket `Upgrade` 头。
 - 同机原生反向代理通常从 loopback 连接，可直接使用默认信任；代理容器通常从 bridge/container 地址连接，必须显式加入其实际 peer CIDR。若 Docker 或四层代理已经丢失真实源地址且不提供 XFF，应用无法恢复，所有客户端只能共享一个限流 bucket。
 - server 当前没有 CORS 中间件，浏览器无法通过跨源预检向 loopback peer 发送自定义 XFF。未来增加 CORS、Private Network Access 放行或 XFF 请求头放行时，必须重新评审默认 loopback 信任边界。

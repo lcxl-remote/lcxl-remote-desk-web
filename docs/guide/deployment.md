@@ -1,15 +1,39 @@
 # Deployment
 
-## Docker (Recommended)
+## Docker (Recommended for a Signaling Server)
 
 ```bash
 printf 'LRD_BOOTSTRAP_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
-docker-compose up -d
+docker compose up -d
 ```
 
 Access `http://localhost:8081`, enter the token from `.env`, and set up the admin
 account. Keep `.env` after initialization: Compose validates the required
 variable on every startup. To build a custom image, use `./build_docker.sh`.
+
+### Persisted State
+
+The server writes to the platform-standard paths described in the
+[config.toml Reference](/config/config-toml), not to its working directory. It
+runs as root in the container, which selects the Linux system scope, so the
+Compose file bind-mounts the three directories that must outlive the container:
+
+| Host path | Container path | Contents |
+|---|---|---|
+| `./conf` | `/etc/lcxl-remote-desk` | `config.toml` |
+| `./data` | `/var/lib/lcxl-remote-desk` | Signal and execution-ledger databases, remote-access state |
+| `./logs` | `/var/log/lcxl-remote-desk` | Rolling logs |
+
+Losing `./data` discards the admin account's signaling state, access codes, AI
+provider configuration, and audit history — back it up alongside `./conf`.
+
+### TURN Relay Ports
+
+The relay port range (`[turn] relay_min_port` / `relay_max_port`, `50000-50050`
+by default) is **not** published by default. When this server should relay media
+itself, uncomment the range in `docker-compose.yml`, open it in the security
+group, and set `[[turn.interfaces]] external` to the host's public address —
+see [Networking & NAT Traversal](#networking-nat-traversal) below.
 
 ## Production Build from Source
 
@@ -83,7 +107,7 @@ When exposing the server to the public internet (typically behind a TLS-terminat
   - `relaxed` (default) — allows private / loopback targets (local model gateways like `http://localhost:11434`).
   - `strict` — rejects private / loopback / CGNAT / ULA targets; re-validates the resolved IP at connect time (anti DNS-rebinding). Use this if untrusted users can configure the provider.
 - **`LRD_ENFORCE_PUBLIC_TLS`** — whether a *public* target may be dialed over *plaintext* (`http`). Defaults to `true` (only an explicit `false` / `0` / `no` / `off` turns it off). When on, a plaintext dial to a public address is refused before connecting, so the api_key never leaves in the clear; private / loopback / LAN targets are always exempt and the cloud-metadata floor is always blocked regardless. Orthogonal to the SSRF mode: to allow a public plaintext provider, turn this off — you do **not** need `relaxed` (which would additionally open private targets).
-- **Runtime API docs endpoints are not served** (Swagger UI / ReDoc / RapiDoc / Scalar / `/openapi.json`); generate the spec offline with `dump-openapi` (see the [REST API reference](/reference/api)).
+- **There are no runtime API docs endpoints**: the server serves no Swagger UI / ReDoc / RapiDoc / Scalar and no `/openapi.json`, so none of that is probeable on a public host. Generate the spec offline with `dump-openapi` when you need it (see the [REST API reference](/reference/api)).
 - Put the server behind a reverse proxy that terminates TLS, passes through `Host`, and forwards the WebSocket `Upgrade` headers for signaling.
 - A native reverse proxy on the same host normally connects from loopback and works with the default trust. A proxy container normally connects from a bridge/container address, so add that actual peer CIDR explicitly. If Docker or a layer-4 proxy has already discarded the original source address and supplies no XFF, the application cannot reconstruct it and clients share one rate-limit bucket.
 - The server currently has no CORS middleware. Browsers therefore cannot use a cross-origin preflight to send a custom XFF header to a loopback peer. Adding CORS, Private Network Access allowances, or XFF header allowances requires re-reviewing the default loopback trust boundary.

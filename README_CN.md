@@ -2,67 +2,95 @@
 
 [English](README.md)
 
-LCXL Remote Desk Web 是一款 **AI 原生（AI-Native）**的开源高性能远程桌面。AI 与浏览器一样，都是系统的一等控制端：内置诊断助手可以读取设备状态，并在设备所有者逐条确认后执行获批的修复命令；面向外部 AI 助手的 [MCP](https://modelcontextprotocol.io/) 接口则始终保持**只读**。中心信令服务负责模型访问、任务编排、授权和审计，被控设备专注于证据采集和最终执行，形成“中心大脑 + 瘦被控端”的架构。后端采用 Rust，前端基于 React、Vite 和 Tailwind CSS。
-
 > [!WARNING]
+> 
 > **免责声明**：本项目目前处于早期开发阶段，代码库可能存在不稳定性、未修复的问题或功能不完整。
-> **安全风险提示**：远程桌面技术涉及对计算机系统的深度访问。使用时请务必确保网络环境安全。作者不对因使用本项目而导致的任何损害承担责任。
+> 
+> **安全风险提示**：本项目禁止在任何非法场景下使用，作者不对因使用本项目而导致的任何损害承担责任。
+
+LCXL Remote Desk Web 是一款 **AI 原生（AI-Native）**的开源高性能远程桌面。
+
+* 原生基于 WebRTC 技术，不需要下载单独的控制端，只需要有现代游览器就能拥有原生的远程桌面的体验；
+* 被控端原生支持 Windows，MacOS 和 Linux，支持 4K @ 60 Hz 屏幕采集和输出；
+* 原生支持 AI 接入，可以通过 AI 快速帮你分析和解决问题；
+* 后端采用 Rust，前端基于 React、Vite 和 Tailwind CSS。
 
 ---
 
 ## 核心功能
 
-- **中心化 AI 故障诊断**：用户可以直接用自然语言提问。中心信令服务会在设定的推理轮次和工具重复调用上限内自主收集证据、分析问题；被控端只采集当前请求所需的信息，并在上传前严格脱敏。支持 OpenAI 兼容接口和 Anthropic API。
-- **由设备所有者确认命令执行**：模型只能提出命令建议，不能自行执行。服务端会完成风险分级，并直接拒绝命中黑名单的命令；设备所有者确认完整命令后，服务端固化执行计划，被控端再次核对各项参数和风险上限，确认无误后执行，并将结果返回诊断流程、写入审计记录。
-- **只读 MCP 服务**：`--startup-mode mcp-stdio` 仅提供系统信息、进程、监听端口和受策略控制的近期日志四个静态白名单工具，不调用模型，也没有截图、执行、控制或写入能力。
 - **能力分级的访问码**：可为设备访问码分别设置远程控制、文件浏览/传输/删除、终端、剪贴板、隐私屏与白板的能力上限；被控端全局策略与实时确认仍会继续生效。
-- **高性能桌面连接**：基于 WebRTC，支持 X264 / OpenH264 / VP8 / VP9 / AV1 软件编码与 Opus 系统音频。
+- **高性能桌面连接**：基于 WebRTC，支持 X264 / OpenH264 / VP8 / VP9 / AV1 视频编码与 Opus 音频编码。
 - **远程终端**：内置 xterm.js，通过独立且经过身份认证的 WebSocket 提供完整的命令行交互。
 - **文件管理**：支持上传、下载、删除及回收站流程。
-- **剪贴板同步**：支持文本剪贴板双向同步。
+- **剪贴板同步**：支持文本剪贴板双向同步（需 HTTPS 环境）。
 - **远程白板**：在远端屏幕上标注与绘画（需配合 `tauri-app`）。
 - **隐私屏模式**：远程操作期间锁定本地显示与输入（需配合 `tauri-app`）。
-- **Windows 虚拟屏**：在 Windows `service-daemon` 模式下提供 IddCx 虚拟显示器、自适应分辨率和可选独占模式。
+- **Windows 虚拟屏（实验性）**：在 Windows `service-daemon` 模式下提供 IddCx 虚拟显示器、自适应分辨率和可选独占模式。
 - **跨平台采集**：Windows WASAPI、Linux PipeWire、macOS ScreenCaptureKit 系统音频链路，以及 Windows、Linux、macOS 的桌面采集与输入支持。
+- **AI 诊断**：用户可以直接用自然语言提问。AI 通过调用本项目所提供的接口自主的收集信息和分析问题，如果开启了执行权限，还可以让用户通过确认的方式来运行命令，支持 OpenAI 兼容接口和 Anthropic API。
+- **由设备所有者确认命令执行**：特别提示一点，模型只能提出命令建议，不能自行执行。服务端会完成风险分级，并直接拒绝命中黑名单的命令；设备所有者确认完整命令后，服务端固化执行计划，被控端再次核对各项参数和风险上限，确认无误后执行，并将结果返回诊断流程、写入审计记录。
+- **只读 MCP 服务（实验性）**：`--startup-mode mcp-stdio` 仅提供系统信息、进程、监听端口和受策略控制的近期日志四个静态白名单工具，不调用模型，也没有截图、执行、控制或写入能力。
 - **多语言支持**：界面与文档提供中英双语。
+
+> 各项能力的详细说明与操作步骤请参考文档站：[远程控制与串流](docs/zh/features/streaming.md)、[终端、文件与剪贴板](docs/zh/features/terminal-files-clipboard.md)、[防窥屏与白板](docs/zh/features/privacy-whiteboard.md)、[虚拟显示器](docs/zh/features/virtual-display.md)、[访问码](docs/zh/guide/access-codes.md)、[AI 诊断](docs/zh/features/ai-diagnostics.md)、[MCP 服务](docs/zh/features/mcp-server.md)。
 
 ---
 
 ## 快速开始
 
-### 方式 1：Docker 信令服务
+### 方式 1：下载被控端直接运行
 
-仓库提供的镜像默认以 `signaling` 模式启动，承载 Web 控制台、信令与可选 TURN 中继；桌面采集和输入注入仍由容器外的被控设备完成。
+**被控机在局域网内、或本身有公网 IP 时，这是最佳方式**——被控端自带信令、STUN / TURN 与 Web 控制台，不需要任何额外服务器，浏览器直连即可。
 
-```bash
-printf 'LRD_BOOTSTRAP_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
-docker compose up -d
-```
+1. 从 [Releases 页面](https://github.com/lcxl/lcxl-remote-desk-web/releases)下载对应平台的被控端压缩包：
 
-启动后访问 `http://localhost:8081`，创建管理员账号，并填写 `.env` 中保存的令牌。
-请长期保留该值：服务器初始化完成后令牌不再授权任何操作，但 Compose 每次启动时仍会
-校验这个必填变量。
+   | 平台 | 压缩包 |
+   |---|---|
+   | Windows x86_64 | `windows-x86_64-server.zip` |
+   | Linux x86_64 | `linux-x86_64-server.tar.gz` |
+   | macOS Apple Silicon | `macos-aarch64-server.tar.gz` |
+   | macOS Intel | `macos-x86_64-server.tar.gz` |
 
-### 方式 2：Tauri 桌面客户端
+2. 解压后目录里是可执行文件与同级的 `static/`（Web 控制台静态资源），**两者必须保持同级**。直接运行即可，默认就是 `default` 模式（内置信令 + 被控端流水线）：
 
-需要隐私屏、远程白板等本地 GUI 集成时使用：
+   ```bash
+   ./lcxl-remote-desk-server          # Windows 为 lcxl-remote-desk-server.exe
+   ```
 
-```bash
-cd tauri-app
-cargo tauri dev
-```
+3. 浏览器访问 `http://<被控机地址>:8081`，按向导创建管理员账号并设置入站安全策略，随后即可从同一局域网（或可直连该公网 IP 的任意网络）远程控制这台设备。
+
+> **没有公网 IP，但被控机能访问公网？**
+> 可以在初始化向导的连接步骤（或之后的**出站连接**设置页）把 **Manager 域名**填成公共服务器 `lcxbox.app`，并粘贴在其控制台创建的 API 令牌，由它完成信令与 NAT 穿透，控制端随后从 `https://lcxbox.app` 访问该设备。
+>
+> 该公共服务器目前部署在美国，**非美国地区访问可能较慢甚至连不通**；对时延敏感或访问不畅时，请改用下面的方式 2 自建信令服务器。
+
+### 方式 2：自建信令服务器
+
+被控机没有公网 IP，又希望链路完全自主可控时使用：向云服务商购买一台有公网 IP 的 VPS，在上面跑信令服务，被控端把信令地址指向它。
+
+1. 在 VPS 上克隆仓库并用 Docker Compose 拉起服务。镜像默认以 `signaling` 模式启动，承载 Web 控制台、信令与可选 TURN 中继；桌面采集和输入注入仍由容器外的被控设备完成：
+
+   ```bash
+   git clone https://github.com/lcxl/lcxl-remote-desk-web.git
+   cd lcxl-remote-desk-web
+   printf 'LRD_BOOTSTRAP_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
+   docker compose up -d
+   ```
+
+2. 访问 `http://<VPS 地址>:8081`，创建管理员账号并填写 `.env` 中保存的令牌。请长期保留该值：服务器初始化完成后令牌不再授权任何操作，但 Compose 每次启动时仍会校验这个必填变量。
+
+3. 公网部署请在反向代理上终结 TLS（并放行信令的 WebSocket `Upgrade`）。若需要本机中继，按 [config.toml 参考](docs/zh/config/config-toml.md)在 **TURN 设置**页配置 `[[turn.interfaces]]` 的 `listen` / `external` 地址，在 `docker-compose.yml` 中放开中继端口范围的映射，并在安全组一并放行（默认 `50000-50050/udp`）。
+
+4. 在信令服务器控制台的**信令接入令牌**页复制令牌；被控端仍按方式 1 下载运行，然后在它的**出站连接**设置页把**信令服务器地址**填成 `wss://<你的域名>/api/desk/signaling`（未配 TLS 的内网可用 `ws://<VPS 地址>:8081/api/desk/signaling`），令牌填刚才复制的值。
+
+> 出于安全考虑，被控端默认拒绝以明文 `ws://` 连接**公网**信令地址（`require_secure_signaling`）；回环与内网 / 局域网地址不受此限制。
 
 ### 方式 3：源码运行
 
 1. 安装仓库钉定的 Rust 1.90 工具链、Node.js 22.16+，以及[开发指南](DEVELOPMENT_CN.md)列出的平台依赖。
 
-2. 启动便携后端。`default` 同时内置信令与被控端流水线：
-
-   ```bash
-   cargo run -p lcxl-remote-desk-server --release -- --startup-mode default
-   ```
-
-3. 在另一个终端启动前端：
+2. **先启动前端。**Debug 构建的桌面外壳会加载 Vite 开发服务器，前端没起来会白屏：
 
    ```bash
    cd vite-project
@@ -70,13 +98,34 @@ cargo tauri dev
    npm run dev
    ```
 
-   启动后访问 `http://localhost:5174`。
+   开发服务器监听 `http://localhost:5174`。
+
+3. 前端就绪后，在另一个终端启动带 Tauri 界面的被控端（内嵌完整服务端，隐私屏、远程白板等本地 GUI 集成只在这个外壳里可用）：
+
+   ```bash
+   cargo run -p lcxl-remote-desk-tauri
+   ```
+
+   如果只需要纯后端而不要 GUI 外壳，改跑 `cargo run -p lcxl-remote-desk-server`（默认 `default` 模式），然后在浏览器访问 `http://localhost:5174`。
+
+> 三种方式的完整步骤、前置条件与下一步指引请参考[快速开始](docs/zh/guide/quick-start.md)；公网加固、系统依赖、容器持久化目录与 `LRD_*` 环境变量请参考[部署](docs/zh/guide/deployment.md)。
 
 ---
 
 ## 核心配置说明
 
-被控端配置默认从 `conf/config.toml` 读取，可用 `-c` 指定其他路径，也可通过 `LRD_*` 环境变量覆盖。以下主机侧设置可在本地控制台保存：
+被控端配置保存在与启动模式无关的**平台标准路径**——portable、desk-server、service-daemon、MCP 与本地访问命令共用同一份 profile：
+
+| 平台 | 配置文件 | 日志目录 |
+|---|---|---|
+| Windows | `%ProgramData%\LCXL Remote Desktop\config\config.toml` | `%ProgramData%\LCXL Remote Desktop\logs` |
+| Linux（root） | `/etc/lcxl-remote-desk/config.toml` | `/var/log/lcxl-remote-desk` |
+| Linux（普通用户） | `$XDG_CONFIG_HOME/lcxl-remote-desk/config.toml`（未设置时为 `~/.config/lcxl-remote-desk/config.toml`） | `$XDG_STATE_HOME/lcxl-remote-desk/logs`（未设置时为 `~/.local/state/lcxl-remote-desk/logs`） |
+| macOS | `~/Library/Application Support/com.lcxl.remote-desk/config/config.toml` | `~/Library/Logs/lcxl-remote-desk` |
+
+用 `-c, --config-file-path <PATH>` 可显式切换到其他 profile，数据库、运行时套接字等同级文件会跟随该路径；部分设置也可用 `LRD_*` 环境变量覆盖。文件不存在时按默认值自动生成：监听 `0.0.0.0` / `::` 的 `8081` 端口、启用 IPv6、信令与 Manager 地址为空（即只用内置信令）、默认拒绝以明文连接公网信令；内置 TURN 开关默认打开，但要等配置了 `[[turn.interfaces]]` 才会真正提供中继。完整字段见 [config.toml 参考](docs/zh/config/config-toml.md)。
+
+以下主机侧设置可在本地控制台保存：
 
 - **系统与连接**：监听地址和端口、本地与远程信令、Manager 连接、日志和内置 TURN 接口。
 - **桌面与编码**：显示器、帧率、编码器、光标、音频及每会话媒体参数。
@@ -87,7 +136,7 @@ cargo tauri dev
 
 `--startup-mode` 支持 `default`、`signaling`、`desk-server`、`service-daemon`、`session-worker` 和 `mcp-stdio`。其中 `session-worker` 是由守护进程启动的内部工作进程。
 
-> 构建依赖与详细架构请参考[开发指南](DEVELOPMENT_CN.md)。
+> 逐字段的配置说明请参考 [config.toml 参考](docs/zh/config/config-toml.md)，全部命令行参数请参考 [CLI 参数](docs/zh/config/cli.md)，各启动模式的进程布局请参考[启动模式](docs/zh/guide/startup-modes.md)；构建依赖见[开发指南](DEVELOPMENT_CN.md)。
 
 ---
 
@@ -111,6 +160,8 @@ cargo tauri dev
 
 目前只有 Windows 接入了真正的系统服务管理；其他平台运行 `service-daemon` 时会退化为交互式进程。
 
+> 完整的组件划分与数据流请参考[架构](docs/zh/reference/architecture.md)，术语与角色关系请参考[核心概念](docs/zh/guide/concepts.md)，逐模式的进程布局请参考[启动模式](docs/zh/guide/startup-modes.md)，信令帧定义请参考[信令协议](docs/zh/reference/signaling-protocol.md)。
+
 ---
 
 ## AI 诊断架构
@@ -127,6 +178,8 @@ AI 推理由中心服务统一编排，被控设备只负责证据采集和最�
 
 **面向外部的 MCP 服务。** `mcp-stdio` 与内置诊断助手完全分离，只提供 `lcxl_system_info`、`lcxl_process_list`、`lcxl_network_ports` 和 `lcxl_recent_logs`。其中日志工具每次调用都会实时检查 `allow_logs`；MCP 不调用模型，也不提供截图、命令执行、远程控制或其他写入工具。
 
+> 模型服务商配置与实际使用步骤请参考 [AI 诊断](docs/zh/features/ai-diagnostics.md)，信任边界、脱敏与审计的完整约束请参考 [AI 安全模型](docs/zh/security/ai-security-model.md)，外部助手接入方式请参考 [MCP 服务](docs/zh/features/mcp-server.md)。
+
 ---
 
 ## 项目结构
@@ -138,7 +191,7 @@ AI 推理由中心服务统一编排，被控设备只负责证据采集和最�
 - **`tauri-app`**：桌面 GUI 外壳，以及隐私屏、白板等本地集成。
 - **`vite-project`**：React Web 控制台与浏览器远程控制端。
 
-> 各模块的构建与平台细节请查阅[开发指南](DEVELOPMENT_CN.md)。
+> 各模块的职责边界与依赖关系请参考[模块地图](docs/zh/reference/modules.md)，REST 接口请参考 [REST API](docs/zh/reference/api.md)，构建与平台细节请查阅[开发指南](DEVELOPMENT_CN.md)。
 
 ---
 
@@ -154,7 +207,6 @@ AI 推理由中心服务统一编排，被控设备只负责证据采集和最�
 - [x] 面向外部 AI 助手的只读 MCP 服务
 - [x] 设备所有者逐条确认、服务端固化计划、被控端再次核验的 AI 命令执行
 - [ ] 移动端浏览体验优化
-- [ ] 基于角色的权限系统与多用户管理
 - [ ] 远程会话录制
 
 ---

@@ -46,5 +46,5 @@ publishes it to GitHub Pages.
 - Add a page → create the `.md` file under both the English and `zh/` trees, then add
   it to the matching sidebar array in `.vitepress/config.ts`.
 - Mermaid diagrams are supported via `vitepress-plugin-mermaid` — use ` ```mermaid ` blocks.
-- API docs are intentionally not hand-written; the REST API page links to the
-  server-served Swagger/Scalar UIs generated from `utoipa`.
+- API docs are intentionally not hand-written; the REST API page explains how to
+  generate the `utoipa` spec offline with the `dump-openapi` subcommand.

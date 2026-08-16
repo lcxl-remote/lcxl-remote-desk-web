@@ -1,6 +1,6 @@
 # config.toml 参考
 
-服务端设置使用与启动模式无关的平台默认路径：Windows 为 `%ProgramData%\LCXL Remote Desktop\config\config.toml`；Linux 普通用户为 `XDG_CONFIG_HOME/lcxl-remote-desk/config.toml`（未设置时 `~/.config/lcxl-remote-desk/config.toml`），root 为 `/etc/lcxl-remote-desk/config.toml`；macOS 为 `~/Library/Application Support/com.lcxl.remote-desk/config/config.toml`。`-c, --config-file-path <PATH>` 用于显式选择其他 profile；只有显式传值时服务或 LaunchAgent 才继承该路径。系统不会自动发现或迁移旧的 cwd 相对 `conf/config.toml`。
+服务端设置使用与启动模式无关的平台默认路径：Windows 为 `%ProgramData%\LCXL Remote Desktop\config\config.toml`；Linux 普通用户为 `XDG_CONFIG_HOME/lcxl-remote-desk/config.toml`（未设置时 `~/.config/lcxl-remote-desk/config.toml`），root 为 `/etc/lcxl-remote-desk/config.toml`；macOS 为 `~/Library/Application Support/com.lcxl.remote-desk/config/config.toml`。`-c, --config-file-path <PATH>` 用于显式选择其他 profile；只有显式传值时服务或 LaunchAgent 才继承该路径。
 
 ## 系统 `[system]`
 
@@ -98,8 +98,8 @@ external = "[2001:db8::1]:3478"
 
 页面还提供折叠的**高级统计查询**：输入已知客户端 `IP:端口` 与接口后，可查看该地址
 的 relay/control 收发字节与包数，并区分“TURN 未运行”和“地址无记录”。当前 TURN
-实现无法枚举全部会话或强制关闭单会话，因此原来的 `GET /api/turn/session` 与
-`DELETE /api/turn/session` 空壳不再属于 API，只保留 `/api/turn/session/statistics`。
+实现无法枚举全部会话或强制关闭单会话，因此 API 只提供
+`/api/turn/session/statistics` 这一个按地址查询的端点。
 
 ## 桌面 `[desk]` {#desktop-desk}
 
