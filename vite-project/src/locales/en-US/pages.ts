@@ -149,7 +149,7 @@ export default {
   'pages.legal.privacy.s7.body': 'You may access, correct, or delete your account information and may delete your account. In organization / private-cloud deployments, the relevant administrator can assist with these actions.',
   'pages.legal.privacy.s8.heading': '8. Contact & Changes',
   'pages.legal.privacy.s8.body': 'Updates to this policy will be published on this page. To exercise the rights above or for any privacy-related questions, contact us through the operator’s published contact details.',
-  'pages.login.forgotPasswordContent': 'Open conf/config.toml and check the contents of the [user] table',
+  'pages.login.forgotPasswordContent': 'Open the host config.toml and check the contents of the [user] table',
   'pages.welcome.link': 'Welcome',
   'pages.welcome.alertMessage': 'Faster and stronger heavy-duty components have been released.',
   'pages.404.subTitle': 'Sorry, the page you visited does not exist.',

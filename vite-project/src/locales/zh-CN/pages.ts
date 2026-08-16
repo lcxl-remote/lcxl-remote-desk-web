@@ -24,7 +24,7 @@ export default {
   'pages.login.loggingIn': '登录中…',
   'pages.login.loginWith': '其他登录方式 :',
   'pages.login.registerAccount': '注册账户',
-  'pages.login.forgotPasswordContent': '打开 conf/config.toml 文件并检查 [user] 中的内容',
+  'pages.login.forgotPasswordContent': '打开被控端的 config.toml 配置文件并检查 [user] 中的内容',
   'pages.init.title': '系统初始化',
   'pages.init.welcome': '欢迎使用 LCXL Remote Desk',
   'pages.init.subWelcome': 'AI 赋能，连接无界',
