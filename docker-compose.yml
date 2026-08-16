@@ -5,9 +5,18 @@ services:
     container_name: remote-desk
     ports:
       - "8081:8081"
+      # TURN relay range, from `[turn] relay_min_port` / `relay_max_port`.
+      # Publish it — and point `[[turn.interfaces]] external` at this host's
+      # public address — only when this server should relay media itself.
+      # - "50000-50050:50000-50050/udp"
     volumes:
-      - ./conf:/app/conf
-      - ./logs:/app/logs
+      # The server writes to platform-standard paths, not to its working
+      # directory. It runs as root here, which selects the Linux system scope,
+      # so these three hold everything that must outlive the container:
+      # config.toml, the signal / exec-ledger databases, and rolling logs.
+      - ./conf:/etc/lcxl-remote-desk
+      - ./data:/var/lib/lcxl-remote-desk
+      - ./logs:/var/log/lcxl-remote-desk
     environment:
       LRD_BOOTSTRAP_TOKEN: ${LRD_BOOTSTRAP_TOKEN:?Set LRD_BOOTSTRAP_TOKEN in .env before starting}
     restart: always

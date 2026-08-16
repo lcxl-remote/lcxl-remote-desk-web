@@ -30,8 +30,12 @@ target/
 
 .vscode/
 conf/
+data/
 sample/
 node_modules/
 logs/
 .idea/
 .DS_Store
+
+# Compose env file: holds LRD_BOOTSTRAP_TOKEN
+/.env

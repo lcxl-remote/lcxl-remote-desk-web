@@ -4,6 +4,8 @@
 target/
 logs/
 conf/
+data/
+.env
 vite-project/node_modules/
 node_modules/
 # *.lock is removed to allow Cargo.lock and package-lock.json

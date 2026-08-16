@@ -93,8 +93,10 @@ RUN apt-get update && apt-get install -y \
 COPY --from=rust-builder /app/lcxl-remote-desk-server ./
 COPY --from=rust-builder /app/server/static ./static
 
-# Create logs and conf directories
-RUN mkdir -p logs conf
+# Runtime state lives under the platform-standard paths the server resolves for
+# the Linux system scope (it runs as root here), not under the working
+# directory. Pre-creating them keeps the bind-mount targets explicit.
+RUN mkdir -p /etc/lcxl-remote-desk /var/lib/lcxl-remote-desk /var/log/lcxl-remote-desk
 
 # Set environment variables
 ENV RUST_LOG=info

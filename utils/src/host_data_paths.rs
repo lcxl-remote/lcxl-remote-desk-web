@@ -518,6 +518,32 @@ mod tests {
         assert!(!paths.is_explicit());
     }
 
+    /// The container image runs the server as root, which selects the system
+    /// scope, and `docker-compose.yml` bind-mounts exactly these three
+    /// directories to persist config, databases, and logs across recreation.
+    /// Moving any of them silently strands that state in the container layer,
+    /// so the layout is pinned here rather than left to the deployment docs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_system_scope_matches_the_compose_bind_mounts() {
+        let paths = HostDataPaths::resolve(HostDataScope::System, None).expect("system paths");
+        assert_eq!(
+            paths.config_file(),
+            Path::new("/etc/lcxl-remote-desk/config.toml")
+        );
+        assert_eq!(paths.data_root(), Path::new("/var/lib/lcxl-remote-desk"));
+        assert_eq!(
+            paths.signal_db_dir(),
+            Path::new("/var/lib/lcxl-remote-desk")
+        );
+        assert_eq!(
+            paths.exec_ledger_dir(),
+            Path::new("/var/lib/lcxl-remote-desk")
+        );
+        assert_eq!(paths.log_dir(), Path::new("/var/log/lcxl-remote-desk"));
+        assert!(!paths.is_explicit());
+    }
+
     #[test]
     fn profile_identity_changes_with_config_path() {
         let first =
