@@ -58,6 +58,17 @@ COPY . .
 # Copy frontend build results to server/static
 COPY --from=frontend-builder /app/vite-project/dist ./server/static
 
+# The SVT-AV1 crate's build script derives its prebuilt archive name from
+# VERSION_ID in /etc/os-release and unconditionally prefixes it with "ubuntu-",
+# without ever looking at ID. On Debian bookworm that yields the nonexistent
+# "libSvtAv1Enc-ubuntu-12_x86_64.tar.gz" and the download fails with HTTP 404;
+# upstream publishes Linux archives only for ubuntu-22.04 and ubuntu-24.04.
+# Claiming 22.04 picks the archive built against the oldest supported glibc
+# (2.35), which links cleanly into bookworm's 2.36. Both Ubuntu archives expose
+# an identical undefined-symbol set, so this choice is about headroom, not about
+# working around a missing symbol.
+RUN sed -i 's/^VERSION_ID=.*/VERSION_ID="22.04"/' /etc/os-release
+
 # Build the main server
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
