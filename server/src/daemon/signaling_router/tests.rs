@@ -102,6 +102,7 @@ async fn seed_test_desktop_pc(ctx: &RouterContext, connection_id: &str) {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let pc = ctx
         .pc_registry

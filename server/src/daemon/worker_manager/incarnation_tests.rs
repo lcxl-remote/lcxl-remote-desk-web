@@ -217,6 +217,7 @@ mod lanes {
             purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],
             grant_session_id: None,
+            org_id: None,
         };
         let mut settings = Settings::default();
         settings.args.startup_mode = StartupMode::ServiceDaemon;

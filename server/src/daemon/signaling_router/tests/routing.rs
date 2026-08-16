@@ -45,6 +45,7 @@ pub(super) async fn make_ctx_with_attached_supervisor() -> (
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let pc = ctx
         .pc_registry
@@ -600,6 +601,7 @@ pub(super) async fn route_revoke_access_grant_session_scoped_closes_only_that_gr
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: Some("GS-supp".to_string()),
+        org_id: None,
     };
     // Two grant sessions live; only GS-supp is targeted.
     ctx.pc_registry
@@ -659,6 +661,7 @@ pub(super) async fn apply_remote_settings_adaptive_bitrate_scopes_to_source_conn
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let local_settings = crate::model::settings::Settings::default();
     let ctx_a = ctx
@@ -826,6 +829,7 @@ pub(super) async fn codec_change_compares_the_accepted_offer_baseline() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let pc = ctx
         .pc_registry
@@ -919,6 +923,7 @@ pub(super) async fn same_wire_codec_restart_advances_video_output_fence() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let pc = ctx
         .pc_registry
@@ -1071,6 +1076,7 @@ pub(super) async fn audio_stop_compares_the_accepted_baseline_not_host_defaults(
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let pc = ctx
         .pc_registry
@@ -1188,6 +1194,7 @@ pub(super) async fn audio_prompt_does_not_block_the_signaling_handler() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let pc = ctx
         .pc_registry
@@ -1343,6 +1350,7 @@ pub(super) async fn adaptive_quality_command_updates_only_runtime_override() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let local_settings = crate::model::settings::Settings::default();
     let pc = ctx

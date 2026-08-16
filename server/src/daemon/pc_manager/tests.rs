@@ -719,6 +719,7 @@ async fn any_with_accept_control_covers_empty_single_and_multi() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
 
@@ -774,6 +775,7 @@ async fn pc_registry_create_get_remove_cycle() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
 
@@ -804,6 +806,7 @@ async fn pc_registry_rejects_duplicate_connection_id() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
 
@@ -853,6 +856,7 @@ async fn install_initial_media_marks_only_first_offer() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     let ctx = registry
@@ -891,6 +895,7 @@ async fn concurrent_offers_mark_first_once() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     let ctx = registry
@@ -980,6 +985,7 @@ async fn write_video_frame_no_track_yet_is_silent_noop() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -1014,6 +1020,7 @@ async fn pause_all_media_marks_every_pc() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     for id in ["alpha", "beta", "gamma"] {
@@ -1053,6 +1060,7 @@ async fn write_video_frame_paused_p_frame_keeps_flag_set() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -1094,6 +1102,7 @@ async fn write_video_frame_paused_i_frame_clears_flag() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     let pc = registry
@@ -1173,6 +1182,7 @@ async fn reset_media_for_pauses_pc_even_without_cached_offer() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -1215,6 +1225,7 @@ async fn resume_active_media_skips_pc_without_cached_offer() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -1246,6 +1257,7 @@ async fn resume_active_media_allocates_fresh_generations_and_advances_fence() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     let ctx = registry
@@ -1302,6 +1314,7 @@ async fn resume_active_media_resends_ceiling_for_capped_admission() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -1354,6 +1367,7 @@ async fn resume_active_media_tears_down_capped_when_ceiling_undeliverable() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -1393,6 +1407,7 @@ async fn write_video_frame_audio_kind_uses_audio_track_slot() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -1446,6 +1461,7 @@ async fn handle_request_remote_uses_worker_capabilities_when_present() {
                 purpose: RemoteSessionPurpose::RemoteDesktop,
                 ice_servers: vec![],
                 grant_session_id: None,
+                org_id: None,
             })
             .unwrap(),
         ),
@@ -1506,6 +1522,7 @@ async fn handle_request_remote_fails_closed_when_no_capabilities() {
                 purpose: RemoteSessionPurpose::RemoteDesktop,
                 ice_servers: vec![],
                 grant_session_id: None,
+                org_id: None,
             })
             .unwrap(),
         ),
@@ -1569,6 +1586,7 @@ async fn handle_request_remote_stamps_ceiling_and_grant_onto_signaling_state() {
                 purpose: RemoteSessionPurpose::RemoteDesktop,
                 ice_servers: vec![],
                 grant_session_id: Some("GS-1".to_string()),
+                org_id: None,
             })
             .unwrap(),
         ),
@@ -1659,6 +1677,7 @@ async fn handle_request_remote_grant_fails_closed_without_worker() {
                 purpose: RemoteSessionPurpose::RemoteDesktop,
                 ice_servers: vec![],
                 grant_session_id: Some("GS-2".to_string()),
+                org_id: None,
             })
             .unwrap(),
         ),
@@ -1736,6 +1755,7 @@ async fn handle_request_remote_preserves_x264_h264_distinction_in_encoder_list()
                 purpose: RemoteSessionPurpose::RemoteDesktop,
                 ice_servers: vec![],
                 grant_session_id: None,
+                org_id: None,
             })
             .unwrap(),
         ),
@@ -1877,6 +1897,7 @@ async fn handle_request_remote_registers_ice_candidate_forwarder() {
                 purpose: RemoteSessionPurpose::RemoteDesktop,
                 ice_servers: vec![],
                 grant_session_id: None,
+                org_id: None,
             })
             .unwrap(),
         ),
@@ -1962,6 +1983,7 @@ async fn peer_connection_state_change_terminal_removes_registry_entry() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     let ctx = registry
@@ -2037,6 +2059,7 @@ async fn cleanup_pc_removes_registry_entry_even_without_worker() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -2066,6 +2089,7 @@ async fn handle_connection_removed_clears_registry_for_existing_pc() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -2136,6 +2160,7 @@ async fn cleanup_pc_detaches_supervisor_when_last_pc_removed_and_no_pending() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -2178,6 +2203,7 @@ async fn cleanup_pc_keeps_virtual_display_for_an_admitted_replacement_session() 
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -2225,6 +2251,7 @@ async fn pc_cleanup_preserves_logical_activity_until_signaling_connection_ends()
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -2303,6 +2330,7 @@ async fn cleanup_pc_keeps_supervisor_when_other_pcs_remain() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     for id in ["conn-a", "conn-b"] {
@@ -2350,6 +2378,7 @@ async fn cleanup_pc_keeps_supervisor_when_pending_request_active() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -2400,6 +2429,7 @@ async fn cleanup_pc_unknown_connection_does_not_detach_supervisor() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -2462,6 +2492,7 @@ async fn cleanup_pc_triggers_exclusive_recompute_when_other_pcs_remain() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     let ctx_a = registry
@@ -2554,6 +2585,7 @@ async fn cleanup_pc_does_not_recompute_on_stale_unknown_removal() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -2606,6 +2638,7 @@ async fn cleanup_pc_skips_supervisor_when_none() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -3009,6 +3042,7 @@ async fn close_grant_session_tears_down_all_grant_connections() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     for id in ["conn-g1-main", "conn-g1-file", "conn-other"] {
@@ -3052,6 +3086,7 @@ async fn close_grants_up_to_generation_closes_only_superseded_grants() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     for id in ["conn-old", "conn-new"] {
@@ -3094,6 +3129,7 @@ async fn cleanup_pc_preserves_grant_index_until_logical_connection_ends() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -3292,6 +3328,7 @@ async fn admission_survives_close_control_but_cleared_on_connection_removed() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -3393,6 +3430,7 @@ async fn write_cursor_data_no_dc_registered_is_silent_noop() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -3421,6 +3459,7 @@ async fn write_cursor_data_invalid_utf8_is_silent_noop() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -3463,6 +3502,7 @@ async fn write_clipboard_data_drops_when_permission_not_granted() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -3489,6 +3529,7 @@ async fn write_clipboard_data_no_dc_is_silent_noop() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     let ctx = registry
@@ -3520,6 +3561,7 @@ async fn write_clipboard_data_invalid_utf8_is_silent_noop() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     let ctx = registry
@@ -3580,6 +3622,7 @@ async fn write_file_transfer_data_does_not_gate_on_accept_control() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -3612,6 +3655,7 @@ async fn write_file_transfer_data_binary_no_dc_is_silent_noop() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -3649,6 +3693,7 @@ async fn write_file_transfer_data_dispatch_returns_quickly_under_backlog() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -3694,6 +3739,7 @@ async fn write_file_transfer_data_after_registry_remove_is_silent_noop() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -3780,6 +3826,7 @@ async fn write_file_transfer_data_awaits_when_writer_queue_full() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
     registry
@@ -4216,6 +4263,7 @@ async fn handle_require_control_auto_allows_and_emits_accept() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     registry
         .create_for_request_remote("conn-rc", &request_remote, &*settings.read().await)
@@ -4259,6 +4307,7 @@ async fn handle_require_control_auto_denies_and_emits_deny() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     registry
         .create_for_request_remote("conn-deny", &request_remote, &*settings.read().await)
@@ -4304,6 +4353,7 @@ async fn handle_require_control_meets_ceiling_and_denies_when_ceiling_denies() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let ctx = registry
         .create_for_request_remote("conn-cap", &request_remote, &*settings.read().await)
@@ -4350,6 +4400,7 @@ async fn handle_release_control_emits_result_and_resets_state() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let ctx = registry
         .create_for_request_remote("conn-release", &request_remote, &*settings.read().await)
@@ -4403,6 +4454,7 @@ async fn handle_release_control_does_not_prompt_when_ask_mode() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let ctx = registry
         .create_for_request_remote("conn-ask-release", &request_remote, &*settings.read().await)
@@ -4463,6 +4515,7 @@ async fn handle_require_control_regrant_short_circuits() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let ctx = registry
         .create_for_request_remote("conn-regrant", &request_remote, &*settings.read().await)
@@ -4519,6 +4572,7 @@ async fn pc_registry_supports_multiple_independent_connections() {
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let s = settings_with_startup(StartupMode::ServiceDaemon);
 

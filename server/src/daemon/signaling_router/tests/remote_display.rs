@@ -24,6 +24,7 @@ pub(super) fn make_request_remote_model_with_purpose(
                 purpose,
                 ice_servers: vec![],
                 grant_session_id: None,
+                org_id: None,
             })
             .unwrap(),
         ),
