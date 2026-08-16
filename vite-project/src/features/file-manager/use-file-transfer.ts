@@ -97,7 +97,7 @@ interface DownloadMeta {
 }
 
 
-export function useFileTransfer(deskId: string | undefined) {
+export function useFileTransfer(deskId: string | undefined, orgId?: number) {
     const wsRef = useRef<WebSocket | null>(null);
     const pcRef = useRef<RTCPeerConnection | null>(null);
     const dcRef = useRef<RTCDataChannel | null>(null);
@@ -448,11 +448,18 @@ export function useFileTransfer(deskId: string | undefined) {
                 // The trusted central validates the token and stamps the capability ceiling;
                 // owner sessions omit it.
                 const grant = readSessionGrant(deskId);
-                const signaling_data: { purpose: "file_manager"; grant_session_id?: string } = {
+                const signaling_data: {
+                    purpose: "file_manager";
+                    grant_session_id?: string;
+                    org_id?: number;
+                } = {
                     purpose: "file_manager",
                 };
                 if (grant?.grantSessionId) {
                     signaling_data.grant_session_id = grant.grantSessionId;
+                }
+                if (!grant?.grantSessionId && orgId != null) {
+                    signaling_data.org_id = orgId;
                 }
                 const msg = {
                     request_id: uuidv4(),
@@ -602,7 +609,7 @@ export function useFileTransfer(deskId: string | undefined) {
                 }
             };
         return promise;
-    }, [deskId, setupDataChannelHandlers]);
+    }, [deskId, orgId, setupDataChannelHandlers]);
 
     const sendFileRequest = useCallback(async <T,>(
         signalingType: number,

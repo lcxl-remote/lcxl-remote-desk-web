@@ -21,7 +21,9 @@ use sha2::{Digest, Sha256};
 use crate::chat::{ChatMessage, ChatRole};
 use crate::exec_classify::classify_command;
 use crate::parser::{extract_json_object, truncate_on_char_boundary};
+use crate::prompt::ResponseFormatSpec;
 use crate::redaction::Redactor;
+use crate::seam::ModelRequest;
 
 /// Max command-line candidates kept from one completion turn. Ghost-text shows the
 /// best one inline; the rest back a cycle-through affordance.
@@ -32,6 +34,17 @@ pub const MAX_COMPLETIONS: usize = 5;
 /// typing is preserved.
 pub const MAX_PREFIX_BYTES: usize = 1_024;
 
+/// Raw browser-input limits enforced before redaction or any cache/governance work.
+pub const MAX_RAW_OS_BYTES: usize = 256;
+pub const MAX_RAW_SHELL_BYTES: usize = 256;
+pub const MAX_RAW_CWD_BYTES: usize = 4_096;
+pub const MAX_RAW_RECENT_OUTPUT_BYTES: usize = 8_192;
+
+/// Provider-bound environment limits applied only after full-field redaction.
+pub const MAX_PROVIDER_OS_BYTES: usize = 64;
+pub const MAX_PROVIDER_SHELL_BYTES: usize = 64;
+pub const MAX_PROVIDER_CWD_BYTES: usize = 1_024;
+
 /// Max bytes of recent terminal output forwarded to the model (after the runtime
 /// has redacted it). Caps prompt size / latency.
 pub const MAX_RECENT_OUTPUT_BYTES: usize = 2_048;
@@ -39,6 +52,55 @@ pub const MAX_RECENT_OUTPUT_BYTES: usize = 2_048;
 /// Max bytes kept for a single completion suffix. A candidate longer than this is
 /// dropped rather than truncated (a half command is worse than none).
 pub const MAX_COMPLETION_BYTES: usize = 512;
+
+/// Hard output cap for a latency-sensitive, non-agentic completion turn.
+pub const COMPLETION_MAX_OUTPUT_TOKENS: u32 = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionRawField {
+    Os,
+    Shell,
+    Cwd,
+    RecentOutput,
+    Prefix,
+}
+
+/// Reject oversized raw fields before redaction, normalization, cache lookup or
+/// model governance. This bounds the work performed on attacker-controlled text.
+pub fn validate_completion_raw_input(ask: &TerminalCompleteAsk) -> Result<(), CompletionRawField> {
+    for (field, len, max) in [
+        (
+            CompletionRawField::Os,
+            ask.context.os.len(),
+            MAX_RAW_OS_BYTES,
+        ),
+        (
+            CompletionRawField::Shell,
+            ask.context.shell.len(),
+            MAX_RAW_SHELL_BYTES,
+        ),
+        (
+            CompletionRawField::Cwd,
+            ask.context.cwd.as_deref().map(str::len).unwrap_or(0),
+            MAX_RAW_CWD_BYTES,
+        ),
+        (
+            CompletionRawField::RecentOutput,
+            ask.context.recent_output.len(),
+            MAX_RAW_RECENT_OUTPUT_BYTES,
+        ),
+        (
+            CompletionRawField::Prefix,
+            ask.prefix.len(),
+            MAX_PREFIX_BYTES,
+        ),
+    ] {
+        if len > max {
+            return Err(field);
+        }
+    }
+    Ok(())
+}
 
 /// Build the completion system prompt. Not persisted (completion is stateless):
 /// re-sent on every call.
@@ -77,10 +139,22 @@ pub fn build_completion_user_message(ask: &TerminalCompleteAsk) -> ChatMessage {
     if !recent.is_empty() {
         body.push_str(&format!("\nRecent terminal output:\n{recent}\n"));
     }
-    // Keep the actively-typed tail when the prefix is improbably long.
-    let prefix = tail_bytes(&ask.prefix, MAX_PREFIX_BYTES);
-    body.push_str(&format!("\nPrefix to complete:\n{prefix}\n"));
+    body.push_str(&format!("\nPrefix to complete:\n{}\n", ask.prefix));
     ChatMessage::text("complete-user", ChatRole::User, body)
+}
+
+/// Build the shared model request so manager and OSS signal apply the same output
+/// cap and tool-free response contract.
+pub fn build_completion_model_request(ask: &TerminalCompleteAsk) -> ModelRequest {
+    let mut request = ModelRequest::text_only(
+        vec![
+            build_completion_system_message(),
+            build_completion_user_message(ask),
+        ],
+        ResponseFormatSpec::None,
+    );
+    request.max_output_tokens = Some(COMPLETION_MAX_OUTPUT_TOKENS);
+    request
 }
 
 /// Outcome of redacting a completion ask before any model dial. Shared by both
@@ -102,7 +176,7 @@ pub enum CompletionRedaction {
 
 /// Redact a completion ask fail-closed before any model dial.
 ///
-/// `recent_output` is scrubbed in place. The `prefix` is then checked: if
+/// Every environment field is scrubbed and capped in place. The `prefix` is then checked: if
 /// redacting it would change it, the prefix carries sensitive content and the
 /// turn is declined ([`CompletionRedaction::DeclineSensitivePrefix`]) rather than
 /// dialled — the prefix must reach the model verbatim (it is the suffix anchor),
@@ -112,10 +186,32 @@ pub fn redact_completion_ask(
     redactor: &dyn Redactor,
     ask: &mut TerminalCompleteAsk,
 ) -> CompletionRedaction {
-    match redactor.redact(&ask.context.recent_output) {
-        Ok(r) => ask.context.recent_output = r.text,
-        Err(e) => return CompletionRedaction::Failed(e.reason),
+    let redact = |value: &str| {
+        redactor
+            .redact(value)
+            .map(|result| result.text)
+            .map_err(|error| CompletionRedaction::Failed(error.reason))
+    };
+    ask.context.os = match redact(&ask.context.os) {
+        Ok(value) => truncate_on_char_boundary(&value, MAX_PROVIDER_OS_BYTES).to_string(),
+        Err(outcome) => return outcome,
+    };
+    ask.context.shell = match redact(&ask.context.shell) {
+        Ok(value) => truncate_on_char_boundary(&value, MAX_PROVIDER_SHELL_BYTES).to_string(),
+        Err(outcome) => return outcome,
+    };
+    if let Some(cwd) = ask.context.cwd.take() {
+        ask.context.cwd = match redact(&cwd) {
+            Ok(value) => {
+                Some(truncate_on_char_boundary(&value, MAX_PROVIDER_CWD_BYTES).to_string())
+            }
+            Err(outcome) => return outcome,
+        };
     }
+    ask.context.recent_output = match redact(&ask.context.recent_output) {
+        Ok(value) => truncate_on_char_boundary(&value, MAX_RECENT_OUTPUT_BYTES).to_string(),
+        Err(outcome) => return outcome,
+    };
     match redactor.redact(&ask.prefix) {
         Ok(r) if r.text == ask.prefix => CompletionRedaction::Ready,
         Ok(_) => CompletionRedaction::DeclineSensitivePrefix,
@@ -217,18 +313,6 @@ fn classify_full_command(command: &str, shell: &str) -> FullClassification {
     }
 }
 
-/// Keep the trailing `max_bytes` of `s` on a char boundary (front-truncating).
-fn tail_bytes(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut start = s.len() - max_bytes;
-    while start < s.len() && !s.is_char_boundary(start) {
-        start += 1;
-    }
-    &s[start..]
-}
-
 /// Append one length-prefixed field (u32 little-endian length + raw bytes) to the
 /// hash. The length prefix makes the concatenation unambiguous, so distinct
 /// subjects / environments can never alias onto one cache entry.
@@ -249,16 +333,19 @@ fn absorb_field(hasher: &mut Sha256, field: &[u8]) {
 pub fn derive_completion_cache_key(
     actor_id: &str,
     device_id: &str,
-    os: &str,
-    shell: &str,
-    prefix: &str,
+    ask: &TerminalCompleteAsk,
 ) -> String {
     let mut hasher = Sha256::new();
     absorb_field(&mut hasher, actor_id.as_bytes());
     absorb_field(&mut hasher, device_id.as_bytes());
-    absorb_field(&mut hasher, os.as_bytes());
-    absorb_field(&mut hasher, shell.as_bytes());
-    absorb_field(&mut hasher, prefix.as_bytes());
+    absorb_field(&mut hasher, ask.context.os.as_bytes());
+    absorb_field(&mut hasher, ask.context.shell.as_bytes());
+    absorb_field(
+        &mut hasher,
+        ask.context.cwd.as_deref().unwrap_or_default().as_bytes(),
+    );
+    absorb_field(&mut hasher, ask.context.recent_output.as_bytes());
+    absorb_field(&mut hasher, ask.prefix.as_bytes());
 
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(digest.len() * 2);
@@ -272,6 +359,7 @@ pub fn derive_completion_cache_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redaction::RegexRedactor;
     use desk_agent_protocol::RiskLevel;
     use desk_agent_protocol::terminal_complete::TerminalCompletionContext;
 
@@ -382,7 +470,10 @@ mod tests {
     }
 
     fn key(actor: &str, device: &str, os: &str, shell: &str, prefix: &str) -> String {
-        derive_completion_cache_key(actor, device, os, shell, prefix)
+        let mut ask = ask(prefix);
+        ask.context.os = os.to_string();
+        ask.context.shell = shell.to_string();
+        derive_completion_cache_key(actor, device, &ask)
     }
 
     #[test]
@@ -423,6 +514,71 @@ mod tests {
         let mut a = ask("aws configure set secret AKIAIOSFODNN7EXAMPLE");
         let outcome = redact_completion_ask(&RegexRedactor::new(), &mut a);
         assert_eq!(outcome, CompletionRedaction::DeclineSensitivePrefix);
+    }
+
+    #[test]
+    fn raw_gate_rejects_each_field_before_processing() {
+        let mut cases = Vec::new();
+        let mut value = ask("ok");
+        value.context.os = "x".repeat(MAX_RAW_OS_BYTES + 1);
+        cases.push((value, CompletionRawField::Os));
+        let mut value = ask("ok");
+        value.context.shell = "x".repeat(MAX_RAW_SHELL_BYTES + 1);
+        cases.push((value, CompletionRawField::Shell));
+        let mut value = ask("ok");
+        value.context.cwd = Some("x".repeat(MAX_RAW_CWD_BYTES + 1));
+        cases.push((value, CompletionRawField::Cwd));
+        let mut value = ask("ok");
+        value.context.recent_output = "x".repeat(MAX_RAW_RECENT_OUTPUT_BYTES + 1);
+        cases.push((value, CompletionRawField::RecentOutput));
+        let value = ask(&"x".repeat(MAX_PREFIX_BYTES + 1));
+        cases.push((value, CompletionRawField::Prefix));
+
+        for (ask, expected) in cases {
+            assert_eq!(validate_completion_raw_input(&ask), Err(expected));
+        }
+    }
+
+    #[test]
+    fn redaction_caps_all_provider_bound_context_and_request_output() {
+        let mut ask = ask("echo ");
+        ask.context.os = "o".repeat(MAX_PROVIDER_OS_BYTES + 10);
+        ask.context.shell = "s".repeat(MAX_PROVIDER_SHELL_BYTES + 10);
+        ask.context.cwd = Some("c".repeat(MAX_PROVIDER_CWD_BYTES + 10));
+        ask.context.recent_output = "r".repeat(MAX_RECENT_OUTPUT_BYTES + 10);
+        assert_eq!(
+            redact_completion_ask(&RegexRedactor::new(), &mut ask),
+            CompletionRedaction::Ready
+        );
+        assert_eq!(ask.context.os.len(), MAX_PROVIDER_OS_BYTES);
+        assert_eq!(ask.context.shell.len(), MAX_PROVIDER_SHELL_BYTES);
+        assert_eq!(
+            ask.context.cwd.as_ref().unwrap().len(),
+            MAX_PROVIDER_CWD_BYTES
+        );
+        assert_eq!(ask.context.recent_output.len(), MAX_RECENT_OUTPUT_BYTES);
+        assert_eq!(
+            build_completion_model_request(&ask).max_output_tokens,
+            Some(COMPLETION_MAX_OUTPUT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn cache_key_includes_cwd_and_recent_output() {
+        let base = ask("echo ");
+        let mut changed_cwd = base.clone();
+        changed_cwd.context.cwd = Some("/other".into());
+        let mut changed_output = base.clone();
+        changed_output.context.recent_output = "different".into();
+        let key = derive_completion_cache_key("actor", "device", &base);
+        assert_ne!(
+            key,
+            derive_completion_cache_key("actor", "device", &changed_cwd)
+        );
+        assert_ne!(
+            key,
+            derive_completion_cache_key("actor", "device", &changed_output)
+        );
     }
 
     #[test]

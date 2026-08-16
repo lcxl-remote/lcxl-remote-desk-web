@@ -22,7 +22,7 @@ use crate::{
         signal::{
             ForwardSignalingSender, LcxlRTCIceServer, RemoteAccessInitializedData,
             RemoteDeskTypeEnum, RequestRemoteModel, SignalingModel, SignalingType, SignalingUser,
-            TurnProvider,
+            TurnProvider, TurnRemoteSessionPeerRequest, TurnRemoteSessionRequest,
         },
         version::VersionInfo,
     },
@@ -40,11 +40,48 @@ const REQUEST_REMOTE_TURN_TTL_SECS: u64 = 86_400;
 /// I/O), so it is unit-testable without a WebSocket session.
 async fn build_request_remote_ice(
     model: &SignalingModel,
+    controller_connection_id: &str,
+    actor_user_id: i32,
     turn: Option<&Arc<dyn TurnProvider>>,
     ttl_secs: u64,
 ) -> Option<LcxlRTCIceServer> {
-    let to_connection_id = model.to_connection_id.as_deref()?;
-    turn?.get_rest_ice_servers(to_connection_id, ttl_secs).await
+    let request =
+        build_remote_session_request(model, controller_connection_id, actor_user_id, ttl_secs)?;
+    turn?.get_remote_session_ice_servers(&request).await
+}
+
+fn build_remote_session_request(
+    model: &SignalingModel,
+    controller_connection_id: &str,
+    actor_user_id: i32,
+    ttl_secs: u64,
+) -> Option<TurnRemoteSessionRequest> {
+    Some(TurnRemoteSessionRequest {
+        request_id: model.request_id.clone(),
+        controller_connection_id: controller_connection_id.to_string(),
+        host_connection_id: model.to_connection_id.clone()?,
+        actor_user_id,
+        org_id: model
+            .get_data_with_default::<RequestRemoteModel>()
+            .ok()?
+            .org_id,
+        ttl_secs,
+    })
+}
+
+fn build_remote_session_peer_request(
+    model: &SignalingModel,
+    host_connection_id: &str,
+    legacy_credential: Option<String>,
+    ttl_secs: u64,
+) -> Option<TurnRemoteSessionPeerRequest> {
+    Some(TurnRemoteSessionPeerRequest {
+        request_id: model.request_id.clone(),
+        controller_connection_id: model.to_connection_id.clone()?,
+        host_connection_id: host_connection_id.to_string(),
+        legacy_credential,
+        ttl_secs,
+    })
 }
 
 /// Rebuild a `RequestRemoteAccess` after optionally injecting recipient TURN data.
@@ -54,16 +91,29 @@ fn rebuild_request_remote_with_ice(
     model: &SignalingModel,
     ice_server: Option<LcxlRTCIceServer>,
 ) -> Result<SignalingModel, DeskSignalFacadeError> {
-    let mut data = model.get_data_with_default::<RequestRemoteModel>()?;
-    if let Some(ice_server) = ice_server {
-        data.ice_servers.push(ice_server);
-    }
+    let Some(ice_server) = ice_server else {
+        return Ok(model.clone());
+    };
+    let raw = model.get_raw_data().clone().unwrap_or_default();
+    let data = if let Ok(mut wrapped) = serde_json::from_value::<
+        crate::model::request_remote_authz::AuthorizedRequestRemote,
+    >(raw.clone())
+    {
+        let mut inner: RequestRemoteModel = serde_json::from_value(wrapped.inner)?;
+        inner.ice_servers.push(ice_server);
+        wrapped.inner = serde_json::to_value(inner)?;
+        serde_json::to_value(wrapped)?
+    } else {
+        let mut inner: RequestRemoteModel = serde_json::from_value(raw)?;
+        inner.ice_servers.push(ice_server);
+        serde_json::to_value(inner)?
+    };
     Ok(SignalingModel::new(
         model.request_id.as_str(),
         model.signaling_type,
         model.from_connection_id.clone(),
         model.to_connection_id.clone(),
-        Some(serde_json::to_value(data)?),
+        Some(data),
         model.response_state.clone(),
     ))
 }
@@ -856,26 +906,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
             }
 
             SignalingType::RequestRemoteAccess => {
-                // Inject a TURN REST ICE server for the RECIPIENT (the desk
-                // server / host this REQUEST_REMOTE is forwarded to) so it can
-                // gather srflx/relay candidates for NAT traversal. Keyed on
-                // `to_connection_id`, not the sender: a browser requester has no
-                // usable TURN identity, which would otherwise leave the host
-                // with no ICE servers (`iceServers=0`).
-                let ice_server = build_request_remote_ice(
-                    &signaling_model,
-                    self.turn.as_ref(),
-                    REQUEST_REMOTE_TURN_TTL_SECS,
-                )
-                .await;
-                let new_signaling_model =
-                    rebuild_request_remote_with_ice(&signaling_model, ice_server)?;
                 // Stamp the trusted capability ceiling (owner → none / grant →
                 // ceiling / neither → default-deny) before relaying. With no
                 // authorizer the frame relays unstamped.
                 let to_forward = if let Some(authorizer) = self.request_remote_authorizer.clone() {
                     match authorizer
-                        .authorize(&self.connection_state, &self.connection_map, &new_signaling_model)
+                        .authorize(&self.connection_state, &self.connection_map, &signaling_model)
                         .await
                     {
                         RequestRemoteOutcome::Forward(m) => m,
@@ -884,8 +920,19 @@ impl<U: SignalingUser> SignalingHandler<U> {
                         }
                     }
                 } else {
-                    new_signaling_model
+                    signaling_model.clone()
                 };
+                // Only an authorized request may freeze a consumer and receive a
+                // manager-issued credential. Failure degrades to P2P/STUN.
+                let ice_server = build_request_remote_ice(
+                    &signaling_model,
+                    &self.connection_state.model.connection_id,
+                    self.connection_state.auth_context.user_id.unwrap_or(0),
+                    self.turn.as_ref(),
+                    REQUEST_REMOTE_TURN_TTL_SECS,
+                )
+                .await;
+                let to_forward = rebuild_request_remote_with_ice(&to_forward, ice_server)?;
                 self.forward_to_peer(&to_forward, false).await?;
             }
 
@@ -903,37 +950,29 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     return Ok(MessageControl::Continue);
                 }
 
-                // TODO need to support static auth secret
-                // ice servers
-                // username is connection_id
-                // password is client id
                 let mut ice_server = None;
-                let client_id_opt = self.connection_state.model.version_info.client_id.clone();
-                if let Some(client_id) = client_id_opt {
-                    if let Some(turn) = &self.turn {
-                        let candidate = turn
-                            .get_ice_servers(
-                                &self.connection_state.model.connection_id,
-                                &client_id,
-                            )
-                            .await;
-                        if !candidate.urls.is_empty() {
-                            ice_server = Some(candidate);
-                        } else {
-                            log::warn!(
-                                "Skipping empty TURN ICE servers for connection {}",
-                                self.connection_state.model.connection_id
-                            );
-                        }
+                if let Some(turn) = &self.turn
+                    && let Some(peer_request) = build_remote_session_peer_request(
+                        &signaling_model,
+                        &self.connection_state.model.connection_id,
+                        self.connection_state.model.version_info.client_id.clone(),
+                        REQUEST_REMOTE_TURN_TTL_SECS,
+                    )
+                {
+                    let candidate = turn
+                        .get_remote_session_peer_ice_servers(&peer_request)
+                        .await;
+                    if candidate.as_ref().is_some_and(|ice| !ice.urls.is_empty()) {
+                        ice_server = Some(candidate);
                     } else {
                         log::warn!(
-                            "TURN settings unavailable, skip injecting TURN ICE for connection {}",
-                            self.connection_state.model.connection_id
+                            "Skipping TURN ICE: no frozen session for request {}",
+                            signaling_model.request_id
                         );
                     }
                 }
                 let new_signaling_model =
-                    rebuild_remote_access_initialized_with_ice(&signaling_model, ice_server)?;
+                    rebuild_remote_access_initialized_with_ice(&signaling_model, ice_server.flatten())?;
                 self.forward_to_peer(&new_signaling_model, false).await?;
             }
             // Owner-plane device-management frames. These carry no capability

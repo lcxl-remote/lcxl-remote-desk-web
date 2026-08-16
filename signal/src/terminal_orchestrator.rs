@@ -25,8 +25,8 @@ use desk_diagnose_core::prompt::ResponseFormatSpec;
 use desk_diagnose_core::redaction::{Redactor, RegexRedactor};
 use desk_diagnose_core::seam::{ModelRequest, ModelSeam, NullTurnSink, TurnSink};
 use desk_diagnose_core::terminal_complete::{
-    CompletionRedaction, build_completion_system_message, build_completion_user_message,
-    parse_completions, redact_completion_ask,
+    CompletionRedaction, build_completion_model_request, parse_completions, redact_completion_ask,
+    validate_completion_raw_input,
 };
 use desk_diagnose_core::terminal_copilot::{
     CopilotFrameSink, CopilotStreamSink, build_copilot_history_messages,
@@ -107,11 +107,19 @@ async fn dial(
     messages: Vec<ChatMessage>,
     sink: &mut dyn TurnSink,
 ) -> Result<(ModelTurn, Option<String>), AgentError> {
+    let request = ModelRequest::text_only(messages, ResponseFormatSpec::None);
+    dial_request(db, request, sink).await
+}
+
+async fn dial_request(
+    db: &DatabaseConnection,
+    request: ModelRequest,
+    sink: &mut dyn TurnSink,
+) -> Result<(ModelTurn, Option<String>), AgentError> {
     let config = model_provider::load(db)
         .await
         .map_err(|e| transport_error(format!("failed to load model provider config: {e}")))?;
     let seam = SignalModelSeam::from_config(&config)?;
-    let request = ModelRequest::text_only(messages, ResponseFormatSpec::None);
     let turn = seam.call(request, sink).await?;
     record_usage(db, config.model.as_deref().unwrap_or_default(), &turn.usage).await;
     // Return the model name so the caller can stamp AI provenance on the answer.
@@ -156,6 +164,9 @@ async fn run_completion_turn(
     request_id: &str,
     mut ask: TerminalCompleteAsk,
 ) -> TerminalCompleteResult {
+    if validate_completion_raw_input(&ask).is_err() {
+        return TerminalCompleteResult::ok(request_id, Vec::new());
+    }
     let redactor = RegexRedactor::new();
     match redact_completion_ask(&redactor, &mut ask) {
         CompletionRedaction::Ready => {}
@@ -172,13 +183,10 @@ async fn run_completion_turn(
 
     let default_shell = ask.context.shell.clone();
     let prefix = ask.prefix.clone();
-    let messages = vec![
-        build_completion_system_message(),
-        build_completion_user_message(&ask),
-    ];
+    let request = build_completion_model_request(&ask);
     // Completion has no progressive UI: the candidates render together, so the
     // model text is not streamed.
-    match dial(db, messages, &mut NullTurnSink).await {
+    match dial_request(db, request, &mut NullTurnSink).await {
         Ok((turn, model)) => {
             let completions = parse_completions(&turn.text, &prefix, &default_shell);
             mark_completions(TerminalCompleteResult::ok(request_id, completions), model)

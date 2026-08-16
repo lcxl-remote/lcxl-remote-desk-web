@@ -2690,6 +2690,11 @@ export type RequestRemoteModel = {
     */
     ice_servers?: LcxlRTCIceServer[];
     /**
+     * @description Browser-supplied organization-context selector. It never grants access or\nchooses a payer by itself: a central manager must validate membership and\nthe organization\'s target-device grant before using it. Standalone signal\nservers ignore it. `None` is personal context.
+     * @type integer,null, int32
+    */
+    org_id?: number | null;
+    /**
      * @description Required session purpose hint. It only controls resource preparation and\nnever grants a capability.
      * @type string
     */

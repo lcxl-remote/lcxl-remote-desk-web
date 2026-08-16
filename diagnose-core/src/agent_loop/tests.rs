@@ -2111,7 +2111,7 @@ async fn enforced_model_turn_block_reviews_once_and_persists_only_fixed_placehol
 }
 
 #[tokio::test]
-async fn enforced_safety_unavailable_fails_without_placeholder_or_provider_detail() {
+async fn enforced_terminal_safety_unavailable_stays_terminal_and_hides_provider_detail() {
     use desk_agent_protocol::content_safety::StreamRetractionReason;
     use desk_agent_protocol::{AgentError, AgentErrorKind};
     use desk_utils::error::DeskErrorCode;
@@ -2161,7 +2161,7 @@ async fn enforced_safety_unavailable_fails_without_placeholder_or_provider_detai
         panic!("expected the distinct unavailable outcome");
     };
     assert_eq!(error.kind, AgentErrorKind::ContentSafetyUnavailable);
-    assert!(error.retryable);
+    assert!(!error.retryable);
     assert_eq!(
         error.error_code,
         Some(DeskErrorCode::AI_CONTENT_SAFETY_UNAVAILABLE.code())

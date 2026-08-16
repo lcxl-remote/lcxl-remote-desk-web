@@ -135,10 +135,17 @@ impl ContentSafetyMode<'_> {
 /// errors. The image-capability code remains distinct; all other details are
 /// deliberately discarded.
 pub fn normalize_safety_error(error: &AgentError) -> AgentError {
-    if error.error_code == Some(DeskErrorCode::AI_CONTENT_SAFETY_IMAGE_UNSUPPORTED.code()) {
-        return content_safety_image_unsupported();
-    }
-    content_safety_unavailable()
+    let mut normalized =
+        if error.error_code == Some(DeskErrorCode::AI_CONTENT_SAFETY_IMAGE_UNSUPPORTED.code()) {
+            content_safety_image_unsupported()
+        } else {
+            content_safety_unavailable()
+        };
+    // Keep the fixed public shape while allowing a caller with a permanent
+    // at-most-once fence to make the failure stricter. Normalization may never
+    // turn a terminal error back into a retryable provider call.
+    normalized.retryable &= error.retryable;
+    normalized
 }
 
 #[cfg(test)]
@@ -172,5 +179,9 @@ mod tests {
             blocked.error_code,
             Some(DeskErrorCode::AI_CONTENT_BLOCKED.code())
         );
+
+        let mut terminal = content_safety_unavailable();
+        terminal.retryable = false;
+        assert!(!normalize_safety_error(&terminal).retryable);
     }
 }

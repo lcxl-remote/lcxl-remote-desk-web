@@ -111,6 +111,12 @@ pub struct RequestRemoteModel {
     /// check. `None` on a normal owner/org request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant_session_id: Option<String>,
+    /// Browser-supplied organization-context selector. It never grants access or
+    /// chooses a payer by itself: a central manager must validate membership and
+    /// the organization's target-device grant before using it. Standalone signal
+    /// servers ignore it. `None` is personal context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i32>,
 }
 
 /// Browser-facing knobs that drive the adaptive-resolution hook. Server
@@ -360,4 +366,53 @@ pub trait TurnProvider: Send + Sync {
     async fn get_rest_ice_servers(&self, _name: &str, _ttl_secs: u64) -> Option<LcxlRTCIceServer> {
         None
     }
+
+    /// Issue the host-side credential for one already-authorized remote session.
+    /// The manager overrides this to freeze the validated consumer before any
+    /// credential leaves it; standalone providers keep their legacy name-based
+    /// behavior through this default.
+    async fn get_remote_session_ice_servers(
+        &self,
+        request: &TurnRemoteSessionRequest,
+    ) -> Option<LcxlRTCIceServer> {
+        self.get_rest_ice_servers(&request.host_connection_id, request.ttl_secs)
+            .await
+    }
+
+    /// Issue the controller-side credential by looking up the session frozen for
+    /// the matching request/controller/host tuple. A manager lookup miss returns
+    /// no TURN rather than inventing a payer.
+    async fn get_remote_session_peer_ice_servers(
+        &self,
+        request: &TurnRemoteSessionPeerRequest,
+    ) -> Option<LcxlRTCIceServer> {
+        let candidate = self
+            .get_ice_servers(
+                &request.host_connection_id,
+                request.legacy_credential.as_deref().unwrap_or_default(),
+            )
+            .await;
+        (!candidate.urls.is_empty()).then_some(candidate)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnRemoteSessionRequest {
+    pub request_id: String,
+    pub controller_connection_id: String,
+    pub host_connection_id: String,
+    pub actor_user_id: i32,
+    pub org_id: Option<i32>,
+    pub ttl_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnRemoteSessionPeerRequest {
+    pub request_id: String,
+    pub controller_connection_id: String,
+    pub host_connection_id: String,
+    /// Legacy single-node provider credential input (the host client id). Manager
+    /// ignores it; keeping it here preserves open-source signal behavior.
+    pub legacy_credential: Option<String>,
+    pub ttl_secs: u64,
 }

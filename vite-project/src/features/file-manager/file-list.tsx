@@ -69,7 +69,7 @@ function formatRemainingTime(seconds: number): string {
     return `${h}:${rm.toString().padStart(2, '0')}:${rs.toString().padStart(2, '0')}`;
 }
 
-export default function FileList() {
+export default function FileList({ orgId }: { orgId?: number } = {}) {
     const { id: connectionId } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const { t } = useTranslation()
@@ -104,7 +104,7 @@ export default function FileList() {
         deleteFile,
         querySystemInfo,
         closeConnection,
-    } = useFileTransfer(connectionId)
+    } = useFileTransfer(connectionId, orgId)
     const restricted = useRestrictedSession(connectionId)
     const canDelete = restricted.capabilityVisible("allow_file_delete")
     const [data, setData] = useState<any>(null)

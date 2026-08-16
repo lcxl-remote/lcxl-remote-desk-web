@@ -431,6 +431,18 @@ describe('buildDesktopRequestRemotePayload', () => {
       requested_wayland_control_mode: 'uinput',
       grant_session_id: 'grant-1',
     });
+    expect(buildDesktopRequestRemotePayload('desk-1', null, 'auto', 9)).toEqual({
+      connection_id: 'desk-1',
+      purpose: 'remote_desktop',
+      requested_wayland_control_mode: 'auto',
+      org_id: 9,
+    });
+    expect(buildDesktopRequestRemotePayload('desk-1', 'grant-1', 'auto', 9)).toEqual({
+      connection_id: 'desk-1',
+      purpose: 'remote_desktop',
+      requested_wayland_control_mode: 'auto',
+      grant_session_id: 'grant-1',
+    });
   });
 });
 

@@ -400,6 +400,7 @@ mod tests {
             allow_file_browse: None,
             allow_file_delete: None,
             allow_file_transfer: None,
+            allow_system_audio_capture: None,
             approval_timeout: None,
         }
     }

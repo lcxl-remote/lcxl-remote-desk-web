@@ -235,6 +235,7 @@ export default function DeskSession({
             deskId,
             grantSessionId,
             admittedWaylandModeRef.current,
+            orgId,
         )
         const requestId = sendMessage(
             SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS,
@@ -248,6 +249,7 @@ export default function DeskSession({
         deskId,
         deviceConnectionResolution.status,
         grantSessionId,
+        orgId,
         preferenceOwnerLoading,
         preferenceScope,
         sendMessage,

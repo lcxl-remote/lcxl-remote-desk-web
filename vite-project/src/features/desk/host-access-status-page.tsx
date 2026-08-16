@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { v4 as uuidv4 } from 'uuid';
 import {
     ChevronDown,
     Download,
@@ -167,7 +168,7 @@ export default function HostAccessStatusPage() {
 
     const requestControl = async (payload: Record<string, unknown>) => {
         if (pendingRequestRef.current !== null) return;
-        const request_id = crypto.randomUUID();
+        const request_id = uuidv4();
         pendingRequestRef.current = request_id;
         setPendingRequest(request_id);
         setPendingDisconnectId(

@@ -50,7 +50,18 @@ fn model(to: Option<&str>) -> SignalingModel {
     SignalingModel::new(
         "req-1",
         SignalingType::RequestRemoteAccess,
-        Some("browser-conn".to_string()),
+        None,
+        to.map(str::to_string),
+        None,
+        None,
+    )
+}
+
+fn initialized_model(to: Option<&str>) -> SignalingModel {
+    SignalingModel::new(
+        "req-1",
+        SignalingType::RemoteAccessInitialized,
+        None,
         to.map(str::to_string),
         None,
         None,
@@ -64,7 +75,7 @@ fn provider(issue: bool) -> Arc<dyn TurnProvider> {
 #[tokio::test]
 async fn injects_for_recipient_via_trait_object() {
     let turn = provider(true);
-    let ice = build_request_remote_ice(&model(Some("host-1")), Some(&turn), 60)
+    let ice = build_request_remote_ice(&model(Some("host-1")), "browser-conn", 7, Some(&turn), 60)
         .await
         .expect("ice server");
     // Username embeds the RECIPIENT id, proving recipient identity is used
@@ -72,11 +83,21 @@ async fn injects_for_recipient_via_trait_object() {
     assert!(ice.username.ends_with(":host-1"));
 }
 
+#[test]
+fn session_request_uses_authenticated_controller_not_inbound_sender() {
+    let mut inbound = model(Some("host-1"));
+    inbound.from_connection_id = Some("forged-browser".into());
+    let request = build_remote_session_request(&inbound, "authenticated-browser", 7, 60)
+        .expect("session request");
+    assert_eq!(request.controller_connection_id, "authenticated-browser");
+    assert_eq!(request.host_connection_id, "host-1");
+}
+
 #[tokio::test]
 async fn none_without_recipient() {
     let turn = provider(true);
     assert!(
-        build_request_remote_ice(&model(None), Some(&turn), 60)
+        build_request_remote_ice(&model(None), "browser-conn", 7, Some(&turn), 60)
             .await
             .is_none()
     );
@@ -85,7 +106,7 @@ async fn none_without_recipient() {
 #[tokio::test]
 async fn none_without_turn() {
     assert!(
-        build_request_remote_ice(&model(Some("host-1")), None, 60)
+        build_request_remote_ice(&model(Some("host-1")), "browser-conn", 7, None, 60)
             .await
             .is_none()
     );
@@ -95,10 +116,23 @@ async fn none_without_turn() {
 async fn none_when_provider_declines() {
     let turn = provider(false);
     assert!(
-        build_request_remote_ice(&model(Some("host-1")), Some(&turn), 60)
+        build_request_remote_ice(&model(Some("host-1")), "browser-conn", 7, Some(&turn), 60,)
             .await
             .is_none()
     );
+}
+
+#[test]
+fn peer_request_uses_authenticated_host_when_inbound_sender_is_absent() {
+    let request = build_remote_session_peer_request(
+        &initialized_model(Some("browser-conn")),
+        "authenticated-host",
+        Some("legacy-client-id".into()),
+        60,
+    )
+    .expect("peer request");
+    assert_eq!(request.controller_connection_id, "browser-conn");
+    assert_eq!(request.host_connection_id, "authenticated-host");
 }
 
 #[test]

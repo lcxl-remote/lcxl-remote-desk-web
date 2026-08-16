@@ -195,7 +195,7 @@ export function waitForVideoPresentation(
 
 type DesktopRequestRemotePayload = Pick<
     RequestRemoteModel,
-    "purpose" | "grant_session_id" | "requested_wayland_control_mode"
+    "purpose" | "grant_session_id" | "requested_wayland_control_mode" | "org_id"
 > & {
     connection_id: string
 }
@@ -204,11 +204,13 @@ export function buildDesktopRequestRemotePayload(
     connectionId: string,
     grantSessionId: string | null,
     requestedWaylandControlMode: string,
+    orgId?: number,
 ): DesktopRequestRemotePayload {
     return {
         connection_id: connectionId,
         purpose: "remote_desktop",
         requested_wayland_control_mode: requestedWaylandControlMode,
         ...(grantSessionId ? { grant_session_id: grantSessionId } : {}),
+        ...(grantSessionId == null && orgId != null ? { org_id: orgId } : {}),
     }
 }
