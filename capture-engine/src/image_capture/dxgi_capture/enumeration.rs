@@ -87,6 +87,7 @@ pub fn from_dxgi_output_desc(output_desc: &DXGI_OUTPUT_DESC) -> DisplayInfo {
         resolutions,
         attached_to_desktop,
         rotation,
+        current_capture_resolution: None,
     }
 }
 
