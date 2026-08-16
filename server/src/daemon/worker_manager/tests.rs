@@ -143,8 +143,10 @@ async fn notify_desktop_switch_pauses_all_pcs() {
     let pc_registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
         purpose: desk_signal_facade::model::signal::RemoteSessionPurpose::RemoteDesktop,
+        requested_wayland_control_mode: None,
         ice_servers: vec![],
         grant_session_id: None,
+        org_id: None,
     };
     let mut s = crate::model::settings::Settings::default();
     s.args.startup_mode = crate::model::settings::StartupMode::ServiceDaemon;

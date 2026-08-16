@@ -488,10 +488,15 @@ fn windows_program_data() -> Result<PathBuf, HostDataPathError> {
 mod tests {
     use super::*;
 
+    /// The scope is whatever the running platform supports (Windows only admits
+    /// `Machine`, Linux `System` / `User`, macOS `User`), because `resolve` still
+    /// consults the platform defaults for the log directory even when the config
+    /// path is overridden. Pinning one scope here would fail to build a default
+    /// layout on the other platforms.
     #[test]
     fn explicit_override_is_absolute_and_normalized_once() {
         let root = std::env::temp_dir().join(format!("host-data-paths-{}", std::process::id()));
-        let paths = HostDataPaths::resolve(HostDataScope::User, Some(&root.join("profile")))
+        let paths = HostDataPaths::resolve(HostDataScope::current(), Some(&root.join("profile")))
             .expect("explicit paths");
         assert_eq!(paths.config_file(), root.join("profile.toml"));
         assert_eq!(paths.data_root(), root);
