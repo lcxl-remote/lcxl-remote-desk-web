@@ -69,16 +69,18 @@ jobs:
             arch: x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-          # Both macOS entries need a runner image that ships Xcode 26 (see the
+          # The macOS entry needs a runner image that ships Xcode 26 (see the
           # "Select macOS SDK" step); macos-14 tops out at Xcode 16.2.
           - platform: macos
             arch: aarch64
             os: macos-15
             target: aarch64-apple-darwin
-          - platform: macos
-            arch: x86_64
-            os: macos-15-intel
-            target: x86_64-apple-darwin
+          # macOS x86_64 is temporarily disabled; no package is published for
+          # that target until this entry is restored.
+          # - platform: macos
+          #   arch: x86_64
+          #   os: macos-15-intel
+          #   target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
