@@ -19,8 +19,8 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Build the React frontend once and share it with every server package so the
-  # binary ships with its static assets (the server reads ./static at runtime).
+  # Build the React frontend once and share it with the desktop packages so the
+  # bundled server ships with its static assets (it reads ./static at runtime).
   # ---------------------------------------------------------------------------
   frontend:
     runs-on: ubuntu-latest
@@ -44,111 +44,16 @@ jobs:
           path: vite-project/dist
 
   # ---------------------------------------------------------------------------
-  # Build the server binary on every target and package it with its static
-  # assets. macOS x86_64 builds natively on the Intel runner (macos-15-intel)
-  # instead of cross-compiling on Apple Silicon, which avoids libvpx/x264 link
-  # failures.
-  # ---------------------------------------------------------------------------
-  build:
-    needs: frontend
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux
-            arch: x86_64
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            bin_name: lcxl-remote-desk-server
-          - platform: windows
-            arch: x86_64
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
-            bin_name: lcxl-remote-desk-server.exe
-          - platform: macos
-            arch: aarch64
-            os: macos-14
-            target: aarch64-apple-darwin
-            bin_name: lcxl-remote-desk-server
-          - platform: macos
-            arch: x86_64
-            os: macos-15-intel
-            target: x86_64-apple-darwin
-            bin_name: lcxl-remote-desk-server
-
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Stamp Version
-        uses: ./.github/actions/stamp-version
-
-      - name: Download Frontend Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-dist
-          path: server/static
-
-      - name: Install Linux Dependencies
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libpipewire-0.3-dev pkg-config \
-            libclang-dev libasound2-dev libssl-dev libvpx-dev libx264-dev cmake nasm \
-            libx11-dev libxcb1-dev libxcb-randr0-dev libxext-dev
-
-      - name: Install macOS Dependencies
-        if: matrix.platform == 'macos'
-        run: brew install libvpx x264 nasm pkg-config
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: ${{ matrix.target }}
-
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: server-${{ matrix.target }}
-
-      - name: Build Server
-        run: cargo build --release --bin lcxl-remote-desk-server --target ${{ matrix.target }}
-
-      - name: Create Package (Unix)
-        if: matrix.platform != 'windows'
-        run: |
-          mkdir -p release
-          cp "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" release/
-          cp -r server/static release/static
-          tar -czf "${{ matrix.platform }}-${{ matrix.arch }}-server.tar.gz" -C release .
-
-      - name: Create Package (Windows)
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path release | Out-Null
-          Copy-Item "target\${{ matrix.target }}\release\${{ matrix.bin_name }}" -Destination release\
-          Copy-Item -Recurse "server\static" -Destination release\static
-          Compress-Archive -Path release\* -DestinationPath "${{ matrix.platform }}-${{ matrix.arch }}-server.zip"
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: server-${{ matrix.platform }}-${{ matrix.arch }}
-          path: |
-            *.tar.gz
-            *.zip
-
-  # ---------------------------------------------------------------------------
   # Build the Tauri desktop shell as a portable zip. The shell spawns the
   # lcxl-remote-desk-server sidecar from its own directory (find_server_binary)
   # and that server serves the frontend from a sibling static/ dir, so the zip
   # ships all three flat in one directory:
   #   lcxl-remote-desk-tauri[.exe] + lcxl-remote-desk-server[.exe] + static/
-  # This sidesteps installer-bundle layouts (.dmg/.msi/.AppImage) entirely; the
-  # icon is embedded at build time by tauri-build, so no cargo tauri build /
-  # bundling toolchain is needed.
+  # macOS gets the same three files inside a hand-assembled .app in a drag-to-
+  # Applications .dmg. Either way the icon is embedded at build time by
+  # tauri-build, so no cargo tauri build / bundling toolchain is needed.
+  # These are the only release assets: the standalone server packages are no
+  # longer published, and the signaling image is built separately by `docker`.
   # ---------------------------------------------------------------------------
   tauri:
     needs: frontend
@@ -164,9 +69,11 @@ jobs:
             arch: x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
+          # Both macOS entries need a runner image that ships Xcode 26 (see the
+          # "Select macOS SDK" step); macos-14 tops out at Xcode 16.2.
           - platform: macos
             arch: aarch64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
           - platform: macos
             arch: x86_64
@@ -199,6 +106,30 @@ jobs:
       - name: Install macOS Dependencies
         if: matrix.platform == 'macos'
         run: brew install libvpx x264 nasm pkg-config
+
+      # screencapturekit pulls in apple-metal, whose Swift bridge touches
+      # MTLSamplerDescriptor.reductionMode / .lodBias. Those calls sit behind an
+      # `if #available(macOS 26.0, *)` guard, but compiling them still requires
+      # the macOS 26 SDK. Runner images default to Xcode 16.x (macOS 15 SDK), so
+      # switch to the newest installed Xcode 26 before anything invokes swiftc.
+      - name: Select macOS SDK
+        if: matrix.platform == 'macos'
+        run: |
+          set -euo pipefail
+          xcode_app=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1 || true)
+          if [ -z "$xcode_app" ]; then
+            echo "::error::No Xcode 26 on this runner image; apple-metal needs the macOS 26 SDK."
+            ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          developer_dir="$xcode_app/Contents/Developer"
+          sudo xcode-select -s "$developer_dir"
+          echo "DEVELOPER_DIR=$developer_dir" >> "$GITHUB_ENV"
+          # Keep the runtime floor at the documented minimum even though the
+          # build now uses a much newer SDK.
+          echo "MACOSX_DEPLOYMENT_TARGET=13.0" >> "$GITHUB_ENV"
+          xcodebuild -version
+          echo "macOS SDK: $(xcrun --sdk macosx --show-sdk-version)"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -342,11 +273,11 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ---------------------------------------------------------------------------
-  # Collect the server + tauri packages and publish them as a GitHub Release.
-  # Runs only for tag pushes; workflow_dispatch runs stop after the build jobs.
+  # Collect the tauri packages and publish them as a GitHub Release. Runs only
+  # for tag pushes; workflow_dispatch runs stop after the build jobs.
   # ---------------------------------------------------------------------------
   release:
-    needs: [build, tauri, docker]
+    needs: [tauri, docker]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -358,7 +289,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: '{server,tauri}-*'
+          pattern: 'tauri-*'
 
       - name: Create Release
         uses: softprops/action-gh-release@v2

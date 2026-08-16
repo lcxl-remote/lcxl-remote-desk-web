@@ -47,18 +47,16 @@ LCXL Remote Desk Web is an **AI-native**, open-source high-performance remote de
 
    | Platform | Package |
    |---|---|
-   | Windows x86_64 | `windows-x86_64-server.zip` |
-   | Linux x86_64 | `linux-x86_64-server.tar.gz` |
-   | macOS Apple Silicon | `macos-aarch64-server.tar.gz` |
-   | macOS Intel | `macos-x86_64-server.tar.gz` |
+   | Windows x86_64 | `tauri-windows-x86_64.zip` |
+   | Linux x86_64 | `tauri-linux-x86_64.zip` |
+   | macOS Apple Silicon | `tauri-macos-aarch64.dmg` |
+   | macOS Intel | `tauri-macos-x86_64.dmg` |
 
-2. The archive contains the executable plus a sibling `static/` directory (the web console assets); **keep them side by side**. Run it as-is — `default` mode (embedded signaling plus the controlled-device pipeline) is the default:
+   Every package is the Tauri desktop shell: it embeds the host server in-process — `default` mode, i.e. embedded signaling plus the controlled-device pipeline — and adds the locally-rendered privacy screen and whiteboard.
 
-   ```bash
-   ./lcxl-remote-desk-server          # lcxl-remote-desk-server.exe on Windows
-   ```
+2. Run it. On **Windows / Linux**, unpack the zip and launch `lcxl-remote-desk-tauri`; the archive also holds `lcxl-remote-desk-server` and a `static/` directory (the web console assets), and **all three must stay side by side**. On **macOS**, open the `.dmg` and drag **LCXL Remote Desktop** into Applications, then launch it.
 
-3. Open `http://<host-address>:8081`, follow the wizard to create the admin account and set the inbound security policy, then control the device from the same LAN — or from anywhere that can reach its public IP.
+3. The shell opens the console in its own window — from another machine the same console is at `http://<host-address>:8081`. Follow the wizard to create the admin account and set the inbound security policy, then control the device from the same LAN — or from anywhere that can reach its public IP.
 
 > **No public IP, but the device can reach the internet?**
 > In the wizard's connection step (or the **Outbound Connection** settings page afterwards), set the **manager domain** to the public server `lcxbox.app` and paste an API token created in its console. It handles signaling and NAT traversal, and control ends then reach the device through `https://lcxbox.app`.

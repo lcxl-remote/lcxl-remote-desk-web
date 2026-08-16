@@ -10,20 +10,19 @@ There are three ways to get LCXL Remote Desk running. Pick the one that matches 
 
    | Platform | Package |
    |---|---|
-   | Windows x86_64 | `windows-x86_64-server.zip` |
-   | Linux x86_64 | `linux-x86_64-server.tar.gz` |
-   | macOS Apple Silicon | `macos-aarch64-server.tar.gz` |
-   | macOS Intel | `macos-x86_64-server.tar.gz` |
+   | Windows x86_64 | `tauri-windows-x86_64.zip` |
+   | Linux x86_64 | `tauri-linux-x86_64.zip` |
+   | macOS Apple Silicon | `tauri-macos-aarch64.dmg` |
+   | macOS Intel | `tauri-macos-x86_64.dmg` |
 
-   The same release also ships the Tauri desktop shell as `tauri-<platform>-<arch>.zip` (`.dmg` on macOS). It embeds the same server and adds the locally-rendered [Privacy Screen and Whiteboard](/features/privacy-whiteboard).
+   Every package is the Tauri desktop shell. It embeds the host server in-process — running in [`default` mode](/guide/startup-modes), with signaling, STUN / TURN and the web console — and adds the locally-rendered [Privacy Screen and Whiteboard](/features/privacy-whiteboard).
 
-2. Unpack it. The archive holds the executable plus a sibling `static/` directory (the web console assets) — keep the two side by side. Run it as-is; [`default` mode](/guide/startup-modes) is the default:
+2. Run it:
 
-   ```bash
-   ./lcxl-remote-desk-server          # lcxl-remote-desk-server.exe on Windows
-   ```
+   - **Windows / Linux** — unpack the zip and launch `lcxl-remote-desk-tauri`. The archive holds that executable plus `lcxl-remote-desk-server` and a `static/` directory (the web console assets); **keep all three side by side**.
+   - **macOS** — open the `.dmg` and drag **LCXL Remote Desktop** into Applications, then launch it.
 
-3. Open `http://<host-address>:8081`. The wizard creates the admin account, optionally connects a manager, and configures inbound security and telemetry. After that, control the device from the same LAN — or from anywhere that can reach its public IP.
+3. The shell opens the console in its own window and finishes setup there. From another machine on the network the same console is at `http://<host-address>:8081`. The wizard creates the admin account, optionally connects a manager, and configures inbound security and telemetry. After that, control the device from the same LAN — or from anywhere that can reach its public IP.
 
 ::: tip No public IP, but the device can reach the internet?
 In the wizard's connection step — or the **Outbound Connection** settings page afterwards — set the manager domain to the public server `lcxbox.app` and paste an API token created in its console. It handles signaling and NAT traversal, and control ends then reach the device through `https://lcxbox.app`.

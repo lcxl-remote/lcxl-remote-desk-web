@@ -6,24 +6,23 @@
 
 **被控机在局域网内、或本身有公网 IP 时最合适。**被控端自带信令、STUN / TURN 与 Web 控制台，不需要任何额外服务器，浏览器直连即可。
 
-1. 从 [Releases 页面](https://github.com/lcxl/lcxl-remote-desk-web/releases)下载对应平台的被控端压缩包：
+1. 从 [Releases 页面](https://github.com/lcxl/lcxl-remote-desk-web/releases)下载对应平台的被控端安装包：
 
-   | 平台 | 压缩包 |
+   | 平台 | 安装包 |
    |---|---|
-   | Windows x86_64 | `windows-x86_64-server.zip` |
-   | Linux x86_64 | `linux-x86_64-server.tar.gz` |
-   | macOS Apple Silicon | `macos-aarch64-server.tar.gz` |
-   | macOS Intel | `macos-x86_64-server.tar.gz` |
+   | Windows x86_64 | `tauri-windows-x86_64.zip` |
+   | Linux x86_64 | `tauri-linux-x86_64.zip` |
+   | macOS Apple Silicon | `tauri-macos-aarch64.dmg` |
+   | macOS Intel | `tauri-macos-x86_64.dmg` |
 
-   同一个 release 还提供 Tauri 桌面外壳 `tauri-<平台>-<架构>.zip`（macOS 为 `.dmg`）。它内嵌同一套服务端，并额外提供本地渲染的[防窥屏与白板](/zh/features/privacy-whiteboard)。
+   这些包都是 Tauri 桌面外壳：它在进程内内嵌被控端服务（以 [`default` 模式](/zh/guide/startup-modes)运行，自带信令、STUN / TURN 与 Web 控制台），并额外提供本地渲染的[防窥屏与白板](/zh/features/privacy-whiteboard)。
 
-2. 解压。压缩包内是可执行文件与同级的 `static/`（Web 控制台静态资源），**两者必须保持同级**。直接运行即可，默认就是 [`default` 模式](/zh/guide/startup-modes)：
+2. 运行：
 
-   ```bash
-   ./lcxl-remote-desk-server          # Windows 为 lcxl-remote-desk-server.exe
-   ```
+   - **Windows / Linux**：解压后运行 `lcxl-remote-desk-tauri`。压缩包内还有 `lcxl-remote-desk-server` 与 `static/`（Web 控制台静态资源），**三者必须保持同级**。
+   - **macOS**：打开 `.dmg`，把 **LCXL Remote Desktop** 拖入「应用程序」后启动。
 
-3. 浏览器访问 `http://<被控机地址>:8081`。向导会引导你创建管理员账户、可选地连接 Manager，并设置入站安全策略与遥测选项。之后即可从同一局域网（或任何能直连该公网 IP 的网络）远程控制这台设备。
+3. 外壳会自带窗口打开控制台，初始化在其中完成；局域网内其他机器访问同一控制台的地址是 `http://<被控机地址>:8081`。向导会引导你创建管理员账户、可选地连接 Manager，并设置入站安全策略与遥测选项。之后即可从同一局域网（或任何能直连该公网 IP 的网络）远程控制这台设备。
 
 ::: tip 没有公网 IP，但被控机能访问公网？
 可以在向导的连接步骤（或之后的**出站连接**设置页）把 Manager 域名填成公共服务器 `lcxbox.app`，并粘贴在其控制台创建的 API 令牌，由它完成信令与 NAT 穿透，控制端随后从 `https://lcxbox.app` 访问该设备。
