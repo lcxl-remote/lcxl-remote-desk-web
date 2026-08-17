@@ -26,6 +26,12 @@ pub struct LoginOutcomeDto {
     pub retry_after_sec: Option<u64>,
     pub api_version: Option<i32>,
     pub startup_mode: Option<StartupMode>,
+    /// Masked address the verification mail was sent to, carried only when the
+    /// login was rejected because the account is still awaiting email
+    /// verification. Services without email verification always leave it null,
+    /// and clients must also tolerate the member being absent entirely.
+    #[serde(default)]
+    pub email_masked: Option<String>,
 }
 
 /// Verify the current credentials and optionally replace either credential.
@@ -60,14 +66,38 @@ mod tests {
             retry_after_sec: None,
             api_version: Some(7),
             startup_mode: None,
+            email_masked: None,
         })
         .unwrap();
 
         assert_eq!(encoded["captcha_required"], serde_json::Value::Null);
         assert_eq!(encoded["retry_after_sec"], serde_json::Value::Null);
         assert_eq!(encoded["startup_mode"], serde_json::Value::Null);
+        assert_eq!(encoded["email_masked"], serde_json::Value::Null);
         assert!(encoded.get("captchaRequired").is_none());
         assert!(encoded.get("retryAfterSec").is_none());
+        assert!(encoded.get("emailMasked").is_none());
+    }
+
+    #[test]
+    fn login_outcome_decodes_without_service_specific_members() {
+        // A control client talks to both the manager and the standalone signaling
+        // server; members only one of them emits must decode as absent, not fail.
+        let decoded: LoginOutcomeDto = serde_json::from_str("{}").unwrap();
+
+        assert!(decoded.captcha_required.is_none());
+        assert!(decoded.retry_after_sec.is_none());
+        assert!(decoded.api_version.is_none());
+        assert!(decoded.startup_mode.is_none());
+        assert!(decoded.email_masked.is_none());
+    }
+
+    #[test]
+    fn login_outcome_carries_masked_email_verbatim() {
+        let decoded: LoginOutcomeDto =
+            serde_json::from_str(r#"{"email_masked":"a***@ex****.com"}"#).unwrap();
+
+        assert_eq!(decoded.email_masked.as_deref(), Some("a***@ex****.com"));
     }
 
     #[test]

@@ -87,6 +87,8 @@ pub async fn login_account(
         retry_after_sec: None,
         api_version: Some(SERVER_API_VERSION),
         startup_mode: Some(startup_mode),
+        // The standalone server has no email-verified account state.
+        email_masked: None,
     };
     let user_info = CurrentUser::new_admin(&params.username);
     // Store user information in session
@@ -109,6 +111,7 @@ fn login_failure_response(
             retry_after_sec,
             api_version: Some(SERVER_API_VERSION),
             startup_mode: Some(startup_mode),
+            email_masked: None,
         }),
     ))
 }
@@ -280,6 +283,7 @@ pub async fn login_tauri(
         retry_after_sec: None,
         api_version: Some(SERVER_API_VERSION),
         startup_mode: Some(startup_mode),
+        email_masked: None,
     };
 
     info!("Tauri auto-login successful, username: {}", username);

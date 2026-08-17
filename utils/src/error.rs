@@ -184,10 +184,12 @@ desk_error_codes! {
     /// Carried in `RestResponse.code`, never an HTTP status.
     CAPTCHA_FAILED = 34,
     /// The account exists but its email address has not been verified, so the
-    /// requested action is refused. Surfaced only by the explicit verification /
-    /// resend flows; the ordinary login path stays generic (`ILLEGAL_CREDENTIALS`)
-    /// to avoid account-state enumeration. Carried in `RestResponse.code`, never
-    /// an HTTP status.
+    /// requested action is refused. It is only ever returned once the caller has
+    /// proven possession of the account — a correct password on the login path, a
+    /// completed OAuth binding, or an explicit verification / resend flow — so it
+    /// cannot be used to enumerate account state: every credential rejection stays
+    /// generic (`ILLEGAL_CREDENTIALS`). Carried in `RestResponse.code`, never an
+    /// HTTP status.
     EMAIL_NOT_VERIFIED = 35,
     /// Registration was refused because the (canonicalized) email or username is
     /// already taken. Returned with generic wording so it cannot be used to probe

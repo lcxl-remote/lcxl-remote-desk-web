@@ -1827,6 +1827,11 @@ export type LoginOutcomeDto = {
     */
     captcha_required?: boolean | null;
     /**
+     * @description Masked address the verification mail was sent to, carried only when the\nlogin was rejected because the account is still awaiting email\nverification. Services without email verification always leave it null,\nand clients must also tolerate the member being absent entirely.
+     * @type string,null
+    */
+    email_masked?: string | null;
+    /**
      * @minLength 0
      * @type integer,null, int64
     */
@@ -3144,6 +3149,11 @@ export type RestResponseLoginOutcomeDto = {
          * @type boolean,null
         */
         captcha_required?: boolean | null;
+        /**
+         * @description Masked address the verification mail was sent to, carried only when the\nlogin was rejected because the account is still awaiting email\nverification. Services without email verification always leave it null,\nand clients must also tolerate the member being absent entirely.
+         * @type string,null
+        */
+        email_masked?: string | null;
         /**
          * @minLength 0
          * @type integer,null, int64
