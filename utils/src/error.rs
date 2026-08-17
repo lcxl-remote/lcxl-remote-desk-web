@@ -487,6 +487,12 @@ desk_error_codes! {
     /// authenticated user unlocks it. This is a security state, not an offline
     /// or retryable transport failure.
     REMOTE_ACCESS_LOCKED = 69,
+    /// The shared coordination store (Redis) could not be reached, so a view that
+    /// is sourced from it cannot be served. Distinct from `SYSTEM_ERROR` so an
+    /// operator reading the console sees an infrastructure dependency being down
+    /// rather than an opaque internal failure, and so the UI can say which
+    /// dependency. Carried in `RestResponse.code`, never an HTTP status.
+    SHARED_STORE_UNAVAILABLE = 70,
 
     ACTION_NEED_RETRY = 1001,
 
