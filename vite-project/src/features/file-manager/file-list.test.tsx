@@ -11,8 +11,12 @@ const h = vi.hoisted(() => ({
     toast: vi.fn(),
     querySystemInfo: vi.fn().mockResolvedValue(null),
     closeConnection: vi.fn(),
+    prepareTransfers: vi.fn(),
 }))
-vi.mock("./use-file-transfer", () => ({
+vi.mock("./use-file-transfer", async (importOriginal) => ({
+    // The real module is kept for the error helpers the page imports alongside
+    // the hook; only the hook itself is replaced.
+    ...(await importOriginal<typeof import("./use-file-transfer")>()),
     useFileTransfer: () => ({
         transfers: [],
         downloadFile: vi.fn(),
@@ -23,6 +27,9 @@ vi.mock("./use-file-transfer", () => ({
         deleteFile: vi.fn(),
         querySystemInfo: h.querySystemInfo,
         closeConnection: h.closeConnection,
+        prepareTransfers: h.prepareTransfers,
+        channelStatus: 'ready' as const,
+        channelFailure: null,
     }),
 }))
 vi.mock("@/features/desk/restricted-session", () => ({

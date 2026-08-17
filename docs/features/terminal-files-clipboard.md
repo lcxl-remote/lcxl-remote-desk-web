@@ -44,6 +44,21 @@ file that is there, and the temporary one is removed. Two transfers uploading
 to the same path at once would each replace the other's result, so the second
 one is refused rather than accepted.
 
+### When file transfers are unavailable
+
+Browsing and deleting travel over the signaling connection, while the file bytes
+themselves need a WebRTC data channel. The two are established independently, so
+a device the browser cannot reach over WebRTC — most often because the TURN relay
+is unreachable — still lists its files: only uploads and downloads are withdrawn,
+and a banner says why.
+
+The banner also carries the connection diagnostics behind that verdict: which ICE
+servers the server advertised, how many candidates of each type the browser
+managed to gather, and where negotiation stopped. A relay server in the list with
+**zero relay candidates** gathered means the browser cannot reach the relay, which
+is worth passing on to whoever operates it — the panel's copy button produces
+exactly that summary. TURN credentials are never part of it.
+
 ### Mapped network drives on a Windows service host
 
 A host running as the Windows system service browses files from an elevated

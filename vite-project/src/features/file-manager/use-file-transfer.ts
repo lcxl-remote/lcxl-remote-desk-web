@@ -13,6 +13,7 @@ import {
     SIGNALING_TYPE_CODE_DELETE_FILE,
     SIGNALING_TYPE_CODE_FILE_DELETED,
     SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION,
+    SIGNALING_TYPE_CODE_ERROR,
 } from '../desk/constants';
 import { createAcceptGate } from './upload-accept-gate';
 import { readSessionGrant } from '@/features/desk/session-grant';
@@ -40,6 +41,11 @@ import {
     openStreamingWritable,
 } from './file-save';
 import { TransferRegistry } from './transfer-registry';
+import {
+    createDiagnosticsCollector,
+    type ConnectionDiagnostics,
+    type DiagnosticsCollector,
+} from './connection-diagnostics';
 import { deskErrorCodeEnum, type SystemInfo } from '@/services/types';
 
 /**
@@ -63,6 +69,122 @@ export class SignalingError extends Error {
     }
 }
 
+/**
+ * Which stage of the connection failed locally, as opposed to being refused by
+ * the host.
+ *
+ * The two stages fail for different reasons and the user can act on different
+ * things: a session that never comes up means the central or the host is
+ * unreachable, while a data channel that never opens means media/relay
+ * connectivity is broken but browsing still works. Carrying the stage lets the
+ * page say which, instead of showing one generic timeout for both.
+ */
+export type ConnectionFailureKind =
+    | 'session-timeout'
+    | 'session-closed'
+    | 'channel-timeout'
+    | 'ice-failed'
+    | 'channel-closed';
+
+/**
+ * A locally-detected connection failure (timeout, socket loss, ICE failure).
+ *
+ * It carries `TIMEOUT` as its `DeskErrorCode` so callers that only read codes
+ * keep working, while `kind` is what a caller uses to name the actual stage.
+ */
+export class ConnectionError extends Error {
+    readonly kind: ConnectionFailureKind;
+    readonly code: number;
+
+    constructor(kind: ConnectionFailureKind, message: string) {
+        super(message);
+        this.name = 'ConnectionError';
+        this.kind = kind;
+        this.code = deskErrorCodeEnum.TIMEOUT;
+    }
+}
+
+export function isConnectionError(error: unknown): error is ConnectionError {
+    return error instanceof ConnectionError;
+}
+
+/**
+ * How long the signaling session (WebSocket + `RequestRemoteAccess` round trip)
+ * may take.
+ *
+ * This is a single signaling round trip, so a healthy central answers in well
+ * under a second. Timing it separately — rather than sharing one budget with
+ * WebRTC — is what lets an unreachable central be reported promptly instead of
+ * after the entire ICE allowance has been spent.
+ */
+export const SESSION_TIMEOUT_MS = 10_000;
+
+/**
+ * How long the data channel may take once the session is up. ICE can legitimately
+ * be slow on a poor network, so this keeps the original budget; it simply no
+ * longer has the session handshake subtracted from it.
+ */
+export const DATA_CHANNEL_TIMEOUT_MS = 20_000;
+
+/**
+ * Bounded retries for a host that answers `RequestRemoteAccess` with
+ * `ACTION_NEED_RETRY` because it is still waiting for its manager credential
+ * proof. The desk and terminal sessions retry the same way.
+ */
+const REMOTE_ACCESS_RETRY_LIMIT = 3;
+const REMOTE_ACCESS_RETRY_DELAY_MS = 500;
+
+/** The host's answer to `RequestRemoteAccess`. Fields are read defensively: it is
+ * whatever the host and the central put on the wire. */
+interface RemoteAccessInit {
+    ice_servers?: unknown;
+    connection_epoch?: unknown;
+}
+
+/** A live signaling session: the socket plus the host's initialization payload. */
+interface SignalingSession {
+    ws: WebSocket;
+    init: RemoteAccessInit;
+}
+
+/** An in-flight connection attempt, shared by every caller that awaits it. */
+interface Attempt<T> {
+    promise: Promise<T>;
+    resolve: (value: T) => void;
+    reject: (error: Error) => void;
+    timeout?: ReturnType<typeof setTimeout>;
+}
+
+function createAttempt<T>(): Attempt<T> {
+    let resolve!: (value: T) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+    });
+    return { promise, resolve, reject };
+}
+
+/**
+ * Unbind and close a socket.
+ *
+ * Unbinding first is what makes this safe to call while replacing a connection:
+ * the discarded socket's `onclose` must not run against state that now belongs
+ * to its successor.
+ */
+function detachAndCloseSocket(socket: WebSocket | null) {
+    if (!socket) return;
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onerror = null;
+    socket.onclose = null;
+    try {
+        socket.close();
+    } catch {
+        // Already closing or closed — nothing to release.
+    }
+}
+
 // --- Transfer state ---
 
 export interface TransferProgress {
@@ -82,6 +204,21 @@ export interface TransferProgress {
      * this and falls back to `errorMessage` for codes it has no text for.
      */
     errorCode?: number;
+}
+
+/** Where the file-transfer data channel currently stands. */
+export type TransferChannelStatus = 'idle' | 'connecting' | 'ready' | 'failed';
+
+/** Why the data channel is unavailable, with the evidence behind it. */
+export interface TransferChannelFailure {
+    /** Set when the failure was detected locally. */
+    kind: ConnectionFailureKind | null;
+    /** Set when the host or central refused the request. */
+    errorCode?: number;
+    /** The raw text that came with the failure, if any. */
+    message: string | null;
+    /** What was observed while trying to connect, for display and for a report. */
+    diagnostics: ConnectionDiagnostics;
 }
 
 // Lightweight per-download progress metadata. The actual file bytes go
@@ -122,14 +259,22 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
         lastUIUpdate: number;
         emaSpeed: number;
     }>>(new Map());
-    const connectPromiseRef = useRef<{
-        promise: Promise<RTCDataChannel>;
-        resolve: (dc: RTCDataChannel) => void;
-        reject: (err: Error) => void;
-        timeout?: ReturnType<typeof setTimeout>;
-    } | null>(null);
-    // Store init data received from signaling
-    const initDataRef = useRef<any>(null);
+
+    // The connection is two planes with separate lifetimes. The signaling
+    // session (WebSocket + `RequestRemoteAccess`) is all that directory listing,
+    // deletion and host queries need — the host admits the connection when it
+    // answers that request, long before any peer connection exists. Only file
+    // bytes need the data channel on top of it. Keeping the two apart is what
+    // lets browsing survive a WebRTC path that cannot be established at all.
+    const sessionRef = useRef<SignalingSession | null>(null);
+    const sessionAttemptRef = useRef<Attempt<SignalingSession> | null>(null);
+    const channelAttemptRef = useRef<Attempt<RTCDataChannel> | null>(null);
+    const remoteAccessRetryRef = useRef(0);
+    const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const diagnosticsRef = useRef<DiagnosticsCollector>(createDiagnosticsCollector());
+    const [channelStatus, setChannelStatus] = useState<TransferChannelStatus>('idle');
+    const [channelFailure, setChannelFailure] = useState<TransferChannelFailure | null>(null);
+
     const pendingRequests = useRef(new Map<string, {
         resolve: (value: any) => void;
         reject: (error: Error) => void;
@@ -398,234 +543,490 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
         };
     }, [updateTransfer, computeSpeedInfo, handleControlMessage, failDownload]);
 
-    // Establish WebRTC connection via signaling, return data channel
-    const ensureConnection = useCallback(async (): Promise<RTCDataChannel> => {
-        // Already connected
-        if (dcRef.current && dcRef.current.readyState === 'open') {
-            return dcRef.current;
+    // --- Connection lifecycle ---
+
+    /** Reject every request still waiting for a reply. Used when the session that
+     * would have carried those replies goes away. */
+    const rejectPendingRequests = useCallback((error: Error) => {
+        for (const pending of pendingRequests.current.values()) {
+            clearTimeout(pending.timeout);
+            pending.reject(error);
+        }
+        pendingRequests.current.clear();
+    }, []);
+
+    /**
+     * Close the data plane and only the data plane.
+     *
+     * Callbacks are unbound before closing so a peer connection being replaced
+     * cannot fire into state that now belongs to its successor — replacing
+     * without this is how a failed attempt used to leave an orphan behind.
+     */
+    const closeDataPlane = useCallback(() => {
+        const dc = dcRef.current;
+        dcRef.current = null;
+        if (dc) {
+            dc.onopen = null;
+            dc.onmessage = null;
+            dc.onerror = null;
+            try {
+                dc.close();
+            } catch {
+                // Already closed.
+            }
+        }
+        const pc = pcRef.current;
+        pcRef.current = null;
+        if (pc) {
+            pc.onicecandidate = null;
+            pc.oniceconnectionstatechange = null;
+            try {
+                pc.close();
+            } catch {
+                // Already closed.
+            }
+        }
+    }, []);
+
+    /**
+     * End the data-channel attempt, keeping the signaling session alive.
+     *
+     * This is the split that lets the page degrade instead of going dark: file
+     * bytes become unavailable and say why, while listing and deletion carry on
+     * over the session.
+     */
+    const failChannelAttempt = useCallback((error: Error) => {
+        const diagnostics = diagnosticsRef.current;
+        const pc = pcRef.current;
+        diagnostics.noteStates(pc?.iceGatheringState ?? null, pc?.iceConnectionState ?? null);
+        diagnostics.failStage('dataChannel');
+        closeDataPlane();
+        // Wake any upload parked on the gate; without the channel it will never
+        // be accepted.
+        acceptGate.current.rejectAll(error.message);
+        setChannelStatus('failed');
+        setChannelFailure({
+            kind: isConnectionError(error) ? error.kind : null,
+            errorCode: error instanceof SignalingError ? error.code : undefined,
+            message: error.message,
+            diagnostics: diagnostics.snapshot(),
+        });
+        const attempt = channelAttemptRef.current;
+        if (attempt) {
+            channelAttemptRef.current = null;
+            if (attempt.timeout) clearTimeout(attempt.timeout);
+            attempt.reject(error);
+        }
+    }, [closeDataPlane]);
+
+    /**
+     * End the signaling session and everything that depends on it.
+     *
+     * The data plane goes with it: without signaling there is no way to finish
+     * or repair a peer connection, and no way to deliver a reply.
+     */
+    const teardownSession = useCallback((error: Error) => {
+        if (retryTimerRef.current) {
+            clearTimeout(retryTimerRef.current);
+            retryTimerRef.current = null;
+        }
+        const socket = wsRef.current;
+        wsRef.current = null;
+        sessionRef.current = null;
+        detachAndCloseSocket(socket);
+        failChannelAttempt(error);
+        rejectPendingRequests(error);
+        const attempt = sessionAttemptRef.current;
+        if (attempt) {
+            sessionAttemptRef.current = null;
+            if (attempt.timeout) clearTimeout(attempt.timeout);
+            diagnosticsRef.current.failStage('session');
+            attempt.reject(error);
+        }
+    }, [failChannelAttempt, rejectPendingRequests]);
+
+    /**
+     * The signaling session, establishing it if necessary.
+     *
+     * A session that is already up is reused, so repeated operations — and a
+     * data-channel retry — never open a second socket. A socket that never
+     * finished its handshake is discarded instead of reused: re-sending
+     * `RequestRemoteAccess` over it would admit a second session on the host.
+     */
+    const ensureSession = useCallback((): Promise<SignalingSession> => {
+        const live = sessionRef.current;
+        if (live && live.ws.readyState === WebSocket.OPEN) return Promise.resolve(live);
+        const inFlight = sessionAttemptRef.current;
+        if (inFlight) return inFlight.promise;
+        if (!deskId) {
+            return Promise.reject(new ConnectionError('session-closed', 'No desk ID'));
         }
 
-        if (!deskId) throw new Error('No desk ID');
+        // Whatever is left of a previous, unfinished session goes now — before a
+        // replacement exists, so no orphan can outlive this call.
+        detachAndCloseSocket(wsRef.current);
+        wsRef.current = null;
+        sessionRef.current = null;
+        closeDataPlane();
 
-        const existingAttempt = connectPromiseRef.current;
-        if (existingAttempt) return existingAttempt.promise;
+        const attempt = createAttempt<SignalingSession>();
+        sessionAttemptRef.current = attempt;
+        remoteAccessRetryRef.current = 0;
+        const diagnostics = diagnosticsRef.current;
+        diagnostics.startStage('session');
 
-        let resolveAttempt!: (dc: RTCDataChannel) => void;
-        let rejectAttempt!: (error: Error) => void;
-        const promise = new Promise<RTCDataChannel>((resolve, reject) => {
-            resolveAttempt = resolve;
-            rejectAttempt = reject;
-        });
-        const attempt: NonNullable<typeof connectPromiseRef.current> = {
-            promise,
-            resolve: resolveAttempt,
-            reject: rejectAttempt,
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host;
+        const url = new URL(`${protocol}//${host}/api/desk/signaling`);
+        url.searchParams.append('api_version', '1');
+        url.searchParams.append('build_number', '1');
+        url.searchParams.append('commit_hash', '1');
+        url.searchParams.append('operation_system', 'wasm');
+        url.searchParams.append('remote_desk_type', 'browser');
+
+        const ws = new WebSocket(url.toString());
+        wsRef.current = ws;
+
+        const settle = (init: RemoteAccessInit) => {
+            if (sessionAttemptRef.current !== attempt) return;
+            sessionAttemptRef.current = null;
+            if (attempt.timeout) clearTimeout(attempt.timeout);
+            diagnostics.endStage('session');
+            const session: SignalingSession = { ws, init };
+            sessionRef.current = session;
+            attempt.resolve(session);
         };
-        connectPromiseRef.current = attempt;
+
         attempt.timeout = setTimeout(() => {
-            if (connectPromiseRef.current !== attempt) return;
-            connectPromiseRef.current = null;
-            attempt.reject(new Error('File manager connection timed out'));
-            wsRef.current?.close();
-        }, 20_000);
+            if (sessionAttemptRef.current !== attempt) return;
+            teardownSession(new ConnectionError('session-timeout', 'File manager session timed out'));
+        }, SESSION_TIMEOUT_MS);
 
-        // 1. Connect WebSocket
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const host = window.location.host;
-            const url = new URL(`${protocol}//${host}/api/desk/signaling`);
-            url.searchParams.append('api_version', '1');
-            url.searchParams.append('build_number', '1');
-            url.searchParams.append('commit_hash', '1');
-            url.searchParams.append('operation_system', 'wasm');
-            url.searchParams.append('remote_desk_type', 'browser');
-
-            const ws = new WebSocket(url.toString());
-            wsRef.current = ws;
-
-            ws.onopen = () => {
-                if (wsRef.current !== ws) return;
-                // Start the file page session with its restricted grant context when present.
-                // The trusted central validates the token and stamps the capability ceiling;
-                // owner sessions omit it.
-                const grant = readSessionGrant(deskId);
-                const signaling_data: {
-                    purpose: "file_manager";
-                    grant_session_id?: string;
-                    org_id?: number;
-                } = {
-                    purpose: "file_manager",
-                };
-                if (grant?.grantSessionId) {
-                    signaling_data.grant_session_id = grant.grantSessionId;
-                }
-                if (!grant?.grantSessionId && orgId != null) {
-                    signaling_data.org_id = orgId;
-                }
-                const msg = {
-                    request_id: uuidv4(),
-                    signaling_type: SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS,
-                    signaling_data,
-                    to_connection_id: deskId,
-                };
-                ws.send(JSON.stringify(msg));
+        // Start the file page session with its restricted grant context when present.
+        // The trusted central validates the token and stamps the capability ceiling;
+        // owner sessions omit it.
+        const sendRemoteAccessRequest = () => {
+            const grant = readSessionGrant(deskId);
+            const signaling_data: {
+                purpose: "file_manager";
+                grant_session_id?: string;
+                org_id?: number;
+            } = {
+                purpose: "file_manager",
             };
+            if (grant?.grantSessionId) {
+                signaling_data.grant_session_id = grant.grantSessionId;
+            }
+            if (!grant?.grantSessionId && orgId != null) {
+                signaling_data.org_id = orgId;
+            }
+            ws.send(JSON.stringify({
+                request_id: uuidv4(),
+                signaling_type: SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS,
+                signaling_data,
+                to_connection_id: deskId,
+            }));
+        };
 
-            ws.onerror = (err) => {
-                console.error("File transfer WS error:", err);
-                if (connectPromiseRef.current === attempt) {
-                    if (attempt.timeout) clearTimeout(attempt.timeout);
-                    connectPromiseRef.current = null;
-                    attempt.reject(new Error("WebSocket connection failed"));
-                    ws.close();
-                }
-            };
+        ws.onopen = () => {
+            if (wsRef.current !== ws) return;
+            sendRemoteAccessRequest();
+        };
 
-            ws.onclose = () => {
-                if (wsRef.current !== ws) return;
-                wsRef.current = null;
-                console.log("File transfer WS closed");
-                if (connectPromiseRef.current === attempt) {
-                    if (attempt.timeout) clearTimeout(attempt.timeout);
-                    connectPromiseRef.current = null;
-                    attempt.reject(new Error("File manager connection closed"));
+        ws.onerror = (err) => {
+            console.error("File transfer WS error:", err);
+            if (wsRef.current !== ws) return;
+            teardownSession(new ConnectionError('session-closed', 'WebSocket connection failed'));
+        };
+
+        ws.onclose = () => {
+            if (wsRef.current !== ws) return;
+            console.log("File transfer WS closed");
+            teardownSession(new ConnectionError('session-closed', 'File manager connection closed'));
+        };
+
+        /**
+         * Handle the reply to `RequestRemoteAccess`.
+         *
+         * A business failure arrives as an initialization frame carrying an error
+         * state, and a frame rejected before its handler ran arrives as the
+         * protocol-level `Error`. Neither used to be inspected, so both were
+         * silently dropped and every refusal looked like a timeout.
+         */
+        const handleRemoteAccessReply = (signaling: any) => {
+            const errorCode: number | undefined = signaling.response_state?.error_code;
+            const message: string | undefined = signaling.response_state?.message;
+            if (sessionAttemptRef.current !== attempt) {
+                // The session is already up, so this belongs to something built on
+                // top of it — a rejected offer or candidate — and must not take
+                // browsing down with it. It fails the data channel if one is being
+                // set up, and is otherwise only worth a log.
+                if (signaling.signaling_type === SIGNALING_TYPE_CODE_ERROR) {
+                    const failure = new SignalingError(
+                        message || 'The host rejected the connection',
+                        errorCode ?? 0,
+                    );
+                    if (channelAttemptRef.current) {
+                        failChannelAttempt(failure);
+                    } else {
+                        console.warn('File transfer: unmatched error frame', errorCode, message);
+                    }
                 }
-                for (const pending of pendingRequests.current.values()) {
+                return;
+            }
+            if (errorCode) {
+                if (
+                    errorCode === deskErrorCodeEnum.ACTION_NEED_RETRY
+                    && remoteAccessRetryRef.current < REMOTE_ACCESS_RETRY_LIMIT
+                ) {
+                    // The host is waiting on its manager credential proof. Ask
+                    // again shortly rather than failing the page.
+                    remoteAccessRetryRef.current += 1;
+                    retryTimerRef.current = setTimeout(() => {
+                        retryTimerRef.current = null;
+                        if (wsRef.current !== ws || ws.readyState !== WebSocket.OPEN) return;
+                        sendRemoteAccessRequest();
+                    }, REMOTE_ACCESS_RETRY_DELAY_MS);
+                    return;
+                }
+                teardownSession(new SignalingError(message || 'Remote access was refused', errorCode));
+                return;
+            }
+            if (signaling.signaling_type === SIGNALING_TYPE_CODE_ERROR) {
+                // An error frame with no code: still a refusal, and must not be
+                // mistaken for a successful initialization.
+                teardownSession(new SignalingError(message || 'Remote access failed', 0));
+                return;
+            }
+            settle((signaling.signaling_data ?? {}) as RemoteAccessInit);
+        };
+
+        ws.onmessage = async (event) => {
+            if (wsRef.current !== ws) return;
+            try {
+                const signaling = JSON.parse(event.data);
+                const { signaling_type, signaling_data } = signaling;
+                const pending = pendingRequests.current.get(signaling.request_id);
+                if (pending && signaling_type === pending.expectedResponseType) {
                     clearTimeout(pending.timeout);
-                    pending.reject(new Error("File manager connection closed"));
+                    pendingRequests.current.delete(signaling.request_id);
+                    if (signaling.response_state?.error_code) {
+                        pending.reject(new SignalingError(
+                            signaling.response_state.message || "File operation failed",
+                            signaling.response_state.error_code,
+                        ));
+                    } else {
+                        pending.resolve(signaling_data);
+                    }
+                    return;
                 }
-                pendingRequests.current.clear();
-                dcRef.current?.close();
-                dcRef.current = null;
-                pcRef.current?.close();
-                pcRef.current = null;
-            };
+                if (pending && signaling_type === SIGNALING_TYPE_CODE_ERROR) {
+                    // A request refused before its own handler ran comes back as the
+                    // protocol-level error rather than the request's response type.
+                    // Failing the caller here is what stops it from waiting out its
+                    // full timeout for a reply that has already arrived.
+                    clearTimeout(pending.timeout);
+                    pendingRequests.current.delete(signaling.request_id);
+                    pending.reject(new SignalingError(
+                        signaling.response_state?.message || "File operation failed",
+                        signaling.response_state?.error_code ?? 0,
+                    ));
+                    return;
+                }
+                if (pending && (
+                    signaling_type === SIGNALING_TYPE_CODE_FILES_LISTED
+                    || signaling_type === SIGNALING_TYPE_CODE_FILE_DELETED
+                    || signaling_type === SIGNALING_TYPE_CODE_SYSTEM_INFO_RETRIEVED
+                )) {
+                    console.error(
+                        "Protocol error: signaling response type did not match pending request",
+                        { requestId: signaling.request_id, signaling_type, expected: pending.expectedResponseType },
+                    );
+                    return;
+                }
 
-            ws.onmessage = async (event) => {
-                if (wsRef.current !== ws) return;
-                try {
-                    const signaling = JSON.parse(event.data);
-                    const { signaling_type, signaling_data } = signaling;
-                    const pending = pendingRequests.current.get(signaling.request_id);
-                    if (pending && signaling_type === pending.expectedResponseType) {
-                        clearTimeout(pending.timeout);
-                        pendingRequests.current.delete(signaling.request_id);
-                        if (signaling.response_state?.error_code) {
-                            pending.reject(new SignalingError(
-                                signaling.response_state.message || "File operation failed",
-                                signaling.response_state.error_code,
-                            ));
-                        } else {
-                            pending.resolve(signaling_data);
-                        }
-                        return;
+                if (
+                    signaling_type === SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED
+                    || signaling_type === SIGNALING_TYPE_CODE_ERROR
+                ) {
+                    handleRemoteAccessReply(signaling);
+                } else if (signaling_type === SIGNALING_TYPE_CODE_ANSWER) {
+                    const pc = pcRef.current;
+                    if (pc) {
+                        await pc.setRemoteDescription(new RTCSessionDescription(signaling_data));
                     }
-                    if (pending && (
-                        signaling_type === SIGNALING_TYPE_CODE_FILES_LISTED
-                        || signaling_type === SIGNALING_TYPE_CODE_FILE_DELETED
-                        || signaling_type === SIGNALING_TYPE_CODE_SYSTEM_INFO_RETRIEVED
-                    )) {
-                        console.error(
-                            "Protocol error: signaling response type did not match pending request",
-                            { requestId: signaling.request_id, signaling_type, expected: pending.expectedResponseType },
-                        );
-                        return;
-                    }
-
-                    if (signaling_type === SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED) {
-                        initDataRef.current = signaling_data;
-                        // 2. Create RTCPeerConnection
-                        const pc = new RTCPeerConnection({
-                            iceServers: signaling_data.ice_servers || [],
-                        });
-                        pcRef.current = pc;
-
-                        // 3. Create data channel (only file transfer, no video/audio)
-                        const dc = pc.createDataChannel('file_transfer_event', { ordered: true });
-                        dcRef.current = dc;
-
-                        setupDataChannelHandlers(dc);
-
-                        dc.onopen = () => {
-                            console.log("File transfer data channel open");
-                            if (connectPromiseRef.current === attempt) {
-                                if (attempt.timeout) clearTimeout(attempt.timeout);
-                                connectPromiseRef.current = null;
-                                attempt.resolve(dc);
-                            }
-                        };
-
-                        pc.onicecandidate = (event) => {
-                            if (event.candidate === null && pc.localDescription) {
-                                // DataChannel-only Offer carries an explicit null
-                                // session-settings field by protocol.
-                                const offerModel = {
-                                    offer: pc.localDescription,
-                                    connection_epoch: signaling_data.connection_epoch,
-                                    session_settings: null,
-                                };
-                                const msg = {
-                                    request_id: uuidv4(),
-                                    signaling_type: SIGNALING_TYPE_CODE_OFFER,
-                                    signaling_data: offerModel,
-                                    to_connection_id: deskId,
-                                };
-                                ws.send(JSON.stringify(msg));
-                            }
-                        };
-
-                        pc.oniceconnectionstatechange = () => {
-                            if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-                                console.warn('File transfer ICE connection state:', pc.iceConnectionState);
-                            }
-                        };
-
-                        // Create offer
-                        const offer = await pc.createOffer();
-                        await pc.setLocalDescription(offer);
-
-                    } else if (signaling_type === SIGNALING_TYPE_CODE_ANSWER) {
-                        const pc = pcRef.current;
-                        if (pc) {
-                            await pc.setRemoteDescription(new RTCSessionDescription(signaling_data));
-                        }
-                    } else if (signaling_type === SIGNALING_TYPE_CODE_ICE_CANDIDATE) {
-                        const pc = pcRef.current;
-                        if (
-                            pc
-                            && signaling_data.connection_epoch
-                                === initDataRef.current?.connection_epoch
-                        ) {
-                            await pc.addIceCandidate(new RTCIceCandidate(signaling_data.candidate));
-                        }
-                    }
-                } catch (e) {
-                    console.error("File transfer signaling error:", e);
-                    if (connectPromiseRef.current === attempt) {
-                        if (attempt.timeout) clearTimeout(attempt.timeout);
-                        connectPromiseRef.current = null;
-                        attempt.reject(e instanceof Error ? e : new Error("File manager signaling failed"));
-                        ws.close();
+                } else if (signaling_type === SIGNALING_TYPE_CODE_ICE_CANDIDATE) {
+                    const pc = pcRef.current;
+                    if (
+                        pc
+                        && signaling_data.connection_epoch
+                            === sessionRef.current?.init?.connection_epoch
+                    ) {
+                        await pc.addIceCandidate(new RTCIceCandidate(signaling_data.candidate));
                     }
                 }
+            } catch (e) {
+                console.error("File transfer signaling error:", e);
+            }
+        };
+
+        return attempt.promise;
+    }, [deskId, orgId, closeDataPlane, teardownSession, failChannelAttempt]);
+
+    /** Send a signaling frame over an established session. */
+    const sendSignaling = useCallback((
+        ws: WebSocket,
+        signalingType: number,
+        signalingData: unknown,
+    ) => {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({
+            request_id: uuidv4(),
+            signaling_type: signalingType,
+            signaling_data: signalingData,
+            to_connection_id: deskId,
+        }));
+    }, [deskId]);
+
+    /**
+     * The file-transfer data channel, establishing it if necessary.
+     *
+     * Only file bytes come through here; everything else rides the session, so a
+     * failure at this stage disables transfers without taking the page with it.
+     */
+    const ensureDataChannel = useCallback(async (): Promise<RTCDataChannel> => {
+        const open = dcRef.current;
+        if (open && open.readyState === 'open') return open;
+        const inFlight = channelAttemptRef.current;
+        if (inFlight) return inFlight.promise;
+
+        const attempt = createAttempt<RTCDataChannel>();
+        channelAttemptRef.current = attempt;
+        setChannelStatus('connecting');
+        setChannelFailure(null);
+        const diagnostics = diagnosticsRef.current;
+        // A retry reports its own candidates, not the previous attempt's.
+        diagnostics.resetDataChannel();
+        diagnostics.startStage('dataChannel');
+
+        attempt.timeout = setTimeout(() => {
+            if (channelAttemptRef.current !== attempt) return;
+            failChannelAttempt(new ConnectionError('channel-timeout', 'File transfer channel timed out'));
+        }, DATA_CHANNEL_TIMEOUT_MS);
+
+        try {
+            const session = await ensureSession();
+            // A newer attempt (or a teardown) took over while the session was
+            // being established; this one no longer owns anything.
+            if (channelAttemptRef.current !== attempt) return attempt.promise;
+
+            // Replace, never stack.
+            closeDataPlane();
+
+            const iceServers = (session.init.ice_servers ?? []) as RTCIceServer[];
+            diagnostics.noteIceServers(iceServers);
+            const epoch = session.init.connection_epoch;
+            const pc = new RTCPeerConnection({ iceServers });
+            pcRef.current = pc;
+
+            const dc = pc.createDataChannel('file_transfer_event', { ordered: true });
+            dcRef.current = dc;
+            setupDataChannelHandlers(dc);
+
+            dc.onopen = () => {
+                console.log("File transfer data channel open");
+                if (channelAttemptRef.current !== attempt) return;
+                channelAttemptRef.current = null;
+                if (attempt.timeout) clearTimeout(attempt.timeout);
+                diagnostics.endStage('dataChannel');
+                diagnostics.noteStates(pc.iceGatheringState ?? null, pc.iceConnectionState ?? null);
+                setChannelStatus('ready');
+                setChannelFailure(null);
+                attempt.resolve(dc);
             };
-        return promise;
-    }, [deskId, orgId, setupDataChannelHandlers]);
+
+            pc.onicecandidate = (event) => {
+                if (pcRef.current !== pc) return;
+                const candidate = event.candidate;
+                if (!candidate) {
+                    // End of gathering. Nothing is sent for it: the offer and every
+                    // candidate have already gone out as they were produced.
+                    diagnostics.noteStates(pc.iceGatheringState ?? 'complete', null);
+                    return;
+                }
+                diagnostics.noteCandidate(candidate.candidate);
+                sendSignaling(session.ws, SIGNALING_TYPE_CODE_ICE_CANDIDATE, {
+                    connection_epoch: epoch,
+                    candidate: candidate.toJSON(),
+                });
+            };
+
+            pc.oniceconnectionstatechange = () => {
+                if (pcRef.current !== pc) return;
+                diagnostics.noteStates(pc.iceGatheringState ?? null, pc.iceConnectionState);
+                if (pc.iceConnectionState === 'failed') {
+                    failChannelAttempt(new ConnectionError('ice-failed', 'ICE negotiation failed'));
+                }
+            };
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            if (pcRef.current !== pc) return attempt.promise;
+
+            // Trickle ICE: the offer goes out now and candidates follow as they are
+            // gathered. Holding it back until gathering completed made every slow or
+            // unreachable ICE server fatal, because gathering does not finish until
+            // each configured server's allocation attempt has timed out.
+            sendSignaling(session.ws, SIGNALING_TYPE_CODE_OFFER, {
+                offer: pc.localDescription,
+                connection_epoch: epoch,
+                // DataChannel-only offer carries an explicit null session-settings
+                // field by protocol.
+                session_settings: null,
+            });
+        } catch (error) {
+            if (channelAttemptRef.current === attempt) {
+                failChannelAttempt(
+                    error instanceof Error
+                        ? error
+                        : new ConnectionError('channel-closed', 'File transfer channel failed'),
+                );
+            }
+        }
+        return attempt.promise;
+    }, [ensureSession, closeDataPlane, failChannelAttempt, setupDataChannelHandlers, sendSignaling]);
+
+    /**
+     * Warm the data channel in the background.
+     *
+     * Transfers do not need it until the user asks for one, but finding out it is
+     * broken only at that point would hide the failure behind a click and make
+     * the first transfer pay the whole ICE cost. The rejection is deliberately
+     * swallowed: the outcome is reported through `channelStatus` /
+     * `channelFailure`, not by throwing at a caller that is not waiting.
+     */
+    const prepareTransfers = useCallback(() => {
+        void ensureDataChannel().catch(() => { });
+    }, [ensureDataChannel]);
 
     const sendFileRequest = useCallback(async <T,>(
         signalingType: number,
         expectedResponseType: number,
         signalingData: unknown,
     ): Promise<T> => {
-        await ensureConnection();
-        const ws = wsRef.current;
-        if (!deskId || !ws || ws.readyState !== WebSocket.OPEN) {
-            throw new Error("File manager connection is not open");
+        // Only the session is required. These requests travel over the WebSocket,
+        // and the host admits the connection when it answers `RequestRemoteAccess`
+        // — long before any peer connection exists.
+        const session = await ensureSession();
+        const ws = session.ws;
+        if (!deskId || ws.readyState !== WebSocket.OPEN) {
+            throw new ConnectionError('session-closed', "File manager connection is not open");
         }
         const requestId = uuidv4();
         return new Promise<T>((resolve, reject) => {
             const timeout = setTimeout(() => {
                 pendingRequests.current.delete(requestId);
-                reject(new Error("File operation timed out"));
+                reject(new ConnectionError('session-closed', "File operation timed out"));
             }, 30_000);
             pendingRequests.current.set(requestId, {
                 resolve: value => resolve(value as T),
@@ -646,7 +1047,7 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
                 reject(error instanceof Error ? error : new Error("File request send failed"));
             }
         });
-    }, [deskId, ensureConnection]);
+    }, [deskId, ensureSession]);
 
     const listFiles = useCallback((params: unknown) => (
         sendFileRequest<any>(SIGNALING_TYPE_CODE_LIST_FILES, SIGNALING_TYPE_CODE_FILES_LISTED, params)
@@ -672,7 +1073,8 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
         )
     ), [sendFileRequest]);
 
-    // Close WebRTC and WebSocket connections
+    // Close WebRTC and WebSocket connections. Idempotent: a second call finds
+    // nothing left to settle and must not reject anything twice.
     const closeConnection = useCallback(() => {
         // End every transfer still in flight. Without this the connection went
         // away while their sinks stayed open, their watchdogs stayed armed and
@@ -687,43 +1089,44 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
         }
         // Wake every pending upload waiter before tearing down.
         acceptGate.current.rejectAll('Connection closed');
-        for (const pending of pendingRequests.current.values()) {
-            clearTimeout(pending.timeout);
-            pending.reject(new Error("File manager connection closed"));
+        const closed = new ConnectionError('session-closed', "File manager connection closed");
+        rejectPendingRequests(closed);
+        if (retryTimerRef.current) {
+            clearTimeout(retryTimerRef.current);
+            retryTimerRef.current = null;
         }
-        pendingRequests.current.clear();
-        const attempt = connectPromiseRef.current;
-        if (attempt) {
-            if (attempt.timeout) clearTimeout(attempt.timeout);
-            connectPromiseRef.current = null;
-            attempt.reject(new Error("File manager connection closed"));
+        const channelAttempt = channelAttemptRef.current;
+        if (channelAttempt) {
+            channelAttemptRef.current = null;
+            if (channelAttempt.timeout) clearTimeout(channelAttempt.timeout);
+            channelAttempt.reject(closed);
         }
-        if (dcRef.current) {
-            dcRef.current.close();
-            dcRef.current = null;
+        const sessionAttempt = sessionAttemptRef.current;
+        if (sessionAttempt) {
+            sessionAttemptRef.current = null;
+            if (sessionAttempt.timeout) clearTimeout(sessionAttempt.timeout);
+            sessionAttempt.reject(closed);
         }
-        if (pcRef.current) {
+        const ws = wsRef.current;
+        if (pcRef.current && ws && ws.readyState === WebSocket.OPEN && deskId) {
             // Send close control
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && deskId) {
-                const msg = {
-                    request_id: uuidv4(),
-                    signaling_type: SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION,
-                    signaling_data: {
-                        connection_epoch: initDataRef.current?.connection_epoch,
-                        finalize_logical_connection: true,
-                    },
-                    to_connection_id: deskId,
-                };
-                wsRef.current.send(JSON.stringify(msg));
-            }
-            pcRef.current.close();
-            pcRef.current = null;
+            ws.send(JSON.stringify({
+                request_id: uuidv4(),
+                signaling_type: SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION,
+                signaling_data: {
+                    connection_epoch: sessionRef.current?.init?.connection_epoch,
+                    finalize_logical_connection: true,
+                },
+                to_connection_id: deskId,
+            }));
         }
-        if (wsRef.current) {
-            wsRef.current.close();
-            wsRef.current = null;
-        }
-    }, [deskId]);
+        closeDataPlane();
+        wsRef.current = null;
+        sessionRef.current = null;
+        detachAndCloseSocket(ws);
+        setChannelStatus('idle');
+        setChannelFailure(null);
+    }, [deskId, cleanupDownload, updateTransfer, removeTransferAfterDelay, rejectPendingRequests, closeDataPlane]);
 
     // Download a file
     const downloadFile = useCallback(async (filePath: string, fileName: string) => {
@@ -758,7 +1161,7 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
         transferSpeedState.current.set(transferId, { startTime: Date.now(), lastCalcTime: Date.now(), lastCalcBytes: 0, lastUIUpdate: Date.now(), emaSpeed: 0 });
 
         try {
-            const dc = await ensureConnection();
+            const dc = await ensureDataChannel();
             const request: DownloadRequest = {
                 type: 'download_request',
                 transfer_id: transferId,
@@ -780,9 +1183,10 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
             settleTransfer(transferId, {
                 status: 'error',
                 errorMessage: err instanceof Error ? err.message : 'Connection failed',
+                errorCode: err instanceof SignalingError || isConnectionError(err) ? err.code : undefined,
             });
         }
-    }, [ensureConnection, updateTransfer, settleTransfer, failDownload]);
+    }, [ensureDataChannel, updateTransfer, settleTransfer, failDownload]);
 
     // Upload a file
     const uploadFile = useCallback(async (targetDir: string, file: File) => {
@@ -803,7 +1207,7 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
         transferSpeedState.current.set(transferId, { startTime: Date.now(), lastCalcTime: Date.now(), lastCalcBytes: 0, lastUIUpdate: Date.now(), emaSpeed: 0 });
 
         try {
-            const dc = await ensureConnection();
+            const dc = await ensureDataChannel();
 
             const chunkSize = FILE_TRANSFER_CHUNK_SIZE;
             // Exactly the number of chunks the loop below will send. An empty
@@ -945,9 +1349,10 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
             settleTransfer(transferId, {
                 status: 'error',
                 errorMessage: err instanceof Error ? err.message : 'Upload failed',
+                errorCode: err instanceof SignalingError || isConnectionError(err) ? err.code : undefined,
             });
         }
-    }, [ensureConnection, updateTransfer, computeSpeedInfo, removeTransferAfterDelay, settleTransfer]);
+    }, [ensureDataChannel, updateTransfer, computeSpeedInfo, removeTransferAfterDelay, settleTransfer]);
 
     // Cancel an active transfer (download or upload)
     const cancelTransfer = useCallback((transferId: string) => {
@@ -972,5 +1377,8 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
         deleteFile,
         querySystemInfo,
         closeConnection,
+        prepareTransfers,
+        channelStatus,
+        channelFailure,
     };
 }

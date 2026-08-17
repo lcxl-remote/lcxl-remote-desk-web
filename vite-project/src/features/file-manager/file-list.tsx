@@ -35,7 +35,8 @@ import {
 import { Progress } from "@/components/ui/progress"
 import { Skeleton } from "@/components/ui/skeleton"
 import { formatBytes } from "@/lib/utils"
-import { useFileTransfer, type TransferProgress } from "./use-file-transfer"
+import { useFileTransfer, isConnectionError, type TransferProgress } from "./use-file-transfer"
+import { CONNECTION_FAILURE_KEYS, TransferUnavailableAlert } from "./transfer-unavailable-alert"
 import { useRestrictedSession } from "@/features/desk/restricted-session"
 import { useToast } from "@/hooks/use-toast"
 import { deskErrorCodeEnum, startupModeEnum, type StartupMode } from "@/services/types"
@@ -104,6 +105,9 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
         deleteFile,
         querySystemInfo,
         closeConnection,
+        prepareTransfers,
+        channelStatus,
+        channelFailure,
     } = useFileTransfer(connectionId, orgId)
     const restricted = useRestrictedSession(connectionId)
     const canDelete = restricted.capabilityVisible("allow_file_delete")
@@ -111,6 +115,29 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
     const [isLoading, setIsLoading] = useState(true)
     const [isDeleting, setIsDeleting] = useState(false)
     const listGeneration = useRef(0)
+    // Transfers need the data channel; browsing does not. Only a failed channel
+    // takes the buttons away — while it is still being set up a click simply
+    // waits for it.
+    const transfersUnavailable = channelStatus === 'failed'
+
+    /**
+     * What to tell the user about a failed operation.
+     *
+     * A locally-detected failure names its stage; anything else is a host
+     * rejection and follows the file manager's usual policy of showing the
+     * host's own text when there is no localized line for the code.
+     */
+    const describeError = useCallback((error: unknown): string => (
+        isConnectionError(error)
+            ? t(CONNECTION_FAILURE_KEYS[error.kind])
+            : deskErrorMessage(
+                t,
+                FILE_ERROR_CODE_TO_KEY,
+                errorCodeOf(error),
+                error instanceof Error ? error.message : null,
+                t("common.unknownError"),
+            )
+    ), [t])
 
     const loadFiles = useCallback(async () => {
         if (!connectionId) return
@@ -129,13 +156,7 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
             if (generation === listGeneration.current) {
                 toast({
                     title: t("pages.fileManager.error"),
-                    description: deskErrorMessage(
-                        t,
-                        FILE_ERROR_CODE_TO_KEY,
-                        errorCodeOf(error),
-                        error instanceof Error ? error.message : null,
-                        t("common.unknownError"),
-                    ),
+                    description: describeError(error),
                     variant: "destructive",
                 })
             }
@@ -144,11 +165,19 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
                 setIsLoading(false)
             }
         }
-    }, [connectionId, currentPath, page, listFiles, toast, t])
+    }, [connectionId, currentPath, page, listFiles, toast, t, describeError])
 
     useEffect(() => {
         void loadFiles()
     }, [loadFiles])
+
+    // Warm the transfer channel alongside the first listing. Browsing no longer
+    // waits for it, but a channel that cannot be established should say so up
+    // front rather than surfacing on the first download click.
+    useEffect(() => {
+        if (!connectionId) return
+        prepareTransfers()
+    }, [connectionId, prepareTransfers])
 
     // Ask the host what it is, once per connection. A rejection is expected
     // rather than exceptional — a session holding a capped grant may not query
@@ -263,13 +292,7 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
             // it twice, since the toast renders the two lines separately.
             toast({
                 title: t("pages.fileManager.deleteFailed"),
-                description: deskErrorMessage(
-                    t,
-                    FILE_ERROR_CODE_TO_KEY,
-                    errorCodeOf(error),
-                    error instanceof Error ? error.message : null,
-                    t("common.unknownError"),
-                ),
+                description: describeError(error),
                 variant: "destructive",
             })
         } finally {
@@ -342,7 +365,13 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
                     >
                         <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
                     </Button>
-                    <Button variant="outline" size="sm" onClick={handleUploadClick}>
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleUploadClick}
+                        disabled={transfersUnavailable}
+                        title={transfersUnavailable ? t('pages.fileManager.transferUnavailable.title') : undefined}
+                    >
                         <Upload className="h-4 w-4 mr-1" />
                         {t('pages.fileManager.upload')}
                     </Button>
@@ -418,6 +447,13 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
                 </div>
             )}
 
+            {channelStatus === 'failed' && channelFailure && (
+                <TransferUnavailableAlert
+                    failure={channelFailure}
+                    onRetry={prepareTransfers}
+                />
+            )}
+
             {showDaemonMappedDriveHint && (
                 <Alert className="mx-4">
                     <Info className="h-4 w-4" />
@@ -477,7 +513,10 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
                                                 size="icon"
                                                 className="h-7 w-7"
                                                 onClick={(e) => handleDownload(e, file)}
-                                                title={t('pages.fileManager.download')}
+                                                disabled={transfersUnavailable}
+                                                title={transfersUnavailable
+                                                    ? t('pages.fileManager.transferUnavailable.title')
+                                                    : t('pages.fileManager.download')}
                                             >
                                                 <Download className="h-3.5 w-3.5" />
                                             </Button>

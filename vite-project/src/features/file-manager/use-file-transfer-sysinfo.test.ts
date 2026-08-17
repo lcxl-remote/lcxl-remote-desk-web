@@ -2,11 +2,13 @@ import { renderHook, act, cleanup } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { useFileTransfer } from './use-file-transfer';
 import {
+    deliverSignaling,
     installSignalingStubs,
-    openChannel,
+    openSession,
     parseSent,
     restoreSignalingStubs,
     flush,
+    StubPeerConnection,
     StubWebSocket,
     type SignalingGlobals,
 } from './file-transfer-test-harness';
@@ -17,8 +19,9 @@ import { deskErrorCodeEnum } from '@/services/types';
 // whose startup mode describes neither the host nor anything the file manager
 // shows. The wire contract is what matters here — the request goes out as
 // `GetSystemInfo` (10003) and its `SystemInfoRetrieved` response are matched by request id —
-// so that is what this asserts. One comprehensive `renderHook` test per file:
-// see the note in `file-transfer-test-harness.ts`.
+// so that is what this asserts. It rides the signaling session alone, which is
+// why the handshake here stops before any data channel. One comprehensive
+// `renderHook` test per file: see the note in `file-transfer-test-harness.ts`.
 
 const GET_SYSTEM_INFO = 10003;
 const SYSTEM_INFO_RETRIEVED = 10004;
@@ -47,9 +50,13 @@ describe('useFileTransfer host system info', () => {
                 resolved = info;
             });
         });
-        await openChannel();
+        await openSession();
         const ws = StubWebSocket.instances[StubWebSocket.instances.length - 1];
         await flush();
+
+        // The signaling session alone carries this: no peer connection is built,
+        // so a host the browser cannot reach over WebRTC can still be asked.
+        expect(StubPeerConnection.instances).toHaveLength(0);
 
         const asked = ws.sent.map(parseSent).find(m => m.signaling_type === GET_SYSTEM_INFO);
         expect(asked).toBeDefined();
@@ -57,13 +64,11 @@ describe('useFileTransfer host system info', () => {
         expect(asked.request_id).toBeTruthy();
 
         // --- The host's answer settles that exact request ---
-        act(() => ws.onmessage?.({
-            data: JSON.stringify({
-                request_id: asked.request_id,
-                signaling_type: SYSTEM_INFO_RETRIEVED,
-                signaling_data: { startup_mode: 'service-daemon', host_name: 'alice-pc' },
-            }),
-        }));
+        await deliverSignaling({
+            request_id: asked.request_id,
+            signaling_type: SYSTEM_INFO_RETRIEVED,
+            signaling_data: { startup_mode: 'service-daemon', host_name: 'alice-pc' },
+        });
         await flush();
         expect(resolved).toEqual({ startup_mode: 'service-daemon', host_name: 'alice-pc' });
 
@@ -84,16 +89,14 @@ describe('useFileTransfer host system info', () => {
             .filter(m => m.signaling_type === GET_SYSTEM_INFO)
             .at(-1);
         expect(refused.request_id).not.toBe(asked.request_id);
-        act(() => ws.onmessage?.({
-            data: JSON.stringify({
-                request_id: refused.request_id,
-                signaling_type: SYSTEM_INFO_RETRIEVED,
-                response_state: {
-                    error_code: deskErrorCodeEnum.PERMISSION_ERROR,
-                    message: 'the target is not reachable',
-                },
-            }),
-        }));
+        await deliverSignaling({
+            request_id: refused.request_id,
+            signaling_type: SYSTEM_INFO_RETRIEVED,
+            response_state: {
+                error_code: deskErrorCodeEnum.PERMISSION_ERROR,
+                message: 'the target is not reachable',
+            },
+        });
         await flush();
         expect(rejection).toBeInstanceOf(Error);
         expect((rejection as Error).message).toBe('the target is not reachable');
