@@ -42,10 +42,12 @@ import {
     DESK_CONFIG_DEFAULTS,
     formatDisplayLabel,
     hasNoDisplaysForMode,
+    isAudioCapabilityAvailable,
     normalizeCaptureTarget,
     orderCaptureModes,
     pickDefaultDeviceName,
     preferSavedDeskValue,
+    resolveAudioCaptureMode,
     resolveAudioEncoder,
     resolveExecutableDeskConfig,
     resolveVideoEncoder,
@@ -159,17 +161,13 @@ export function DeskConfigDialog({
                 : intent.videoDeviceName ?? suggested.video_device_name,
             initData.video_device_list,
         )
-        const audioCaptureModes = Object.keys(initData.audio_device_list ?? {})
-        const preferredAudioCapture = capabilities.audio_capture === "unsupported"
-            ? suggested.audio_capture
-            : intent.audioCapture
-        const audioCapture = preferredAudioCapture
-            && audioCaptureModes.includes(preferredAudioCapture)
-            ? preferredAudioCapture
-            : suggested.audio_capture
-                && audioCaptureModes.includes(suggested.audio_capture)
+        const audioCapture = resolveAudioCaptureMode(
+            capabilities.audio_capture === "unsupported"
                 ? suggested.audio_capture
-                : audioCaptureModes[0] ?? null
+                : intent.audioCapture,
+            suggested.audio_capture,
+            initData.audio_device_list,
+        )
         const audioDevices = audioCapture
             ? initData.audio_device_list?.[audioCapture] ?? []
             : []
@@ -200,10 +198,10 @@ export function DeskConfigDialog({
                 audio_device_id: null,
             }
             : null)
-        const audioCapabilityAvailable = systemAudioAllowed
-            && capabilities.capture_audio !== "unsupported"
-            && audioCaptureModes.length > 0
-            && (initData.audio_encoder_list?.length ?? 0) > 0
+        const audioCapabilityAvailable = isAudioCapabilityAvailable(
+            initData,
+            systemAudioAllowed,
+        )
         setStaleSavedCaptureMode(target.staleMode)
         setStaleSavedDeviceName(target.staleDevice)
         form.reset({

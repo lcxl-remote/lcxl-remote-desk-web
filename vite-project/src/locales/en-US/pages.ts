@@ -867,6 +867,7 @@ export default {
   'pages.desk.enableDirtyRectDescription': 'Only re-encode changed regions of the screen. Turn off if you see transient black bars during animations.',
   'pages.desk.audioConfig': 'Audio Configuration',
   'pages.desk.captureAudio': 'Capture Audio',
+  'pages.desk.noAudioDeviceOnHost': 'The remote host has no usable audio device; this session carries video only.',
   'pages.desk.systemAudioState': 'System audio: {{state}}',
   'pages.desk.systemAudioStateValue.off': 'Off',
   'pages.desk.systemAudioStateValue.starting': 'Starting',

@@ -319,7 +319,7 @@ pub async fn handle_request_remote(
         debounce_ms: settings.virtual_display.adaptive_debounce_ms,
         min_delta_px: settings.virtual_display.adaptive_min_delta_px,
     };
-    let audio_capable = !audio_encoder_list.is_empty() && !audio_device_list.is_empty();
+    let audio_capable = host_audio_capable(&audio_encoder_list, &audio_device_list);
     let connection_epoch = ctx.read().await.connection_epoch.clone();
     let init_data = RemoteAccessInitializedData {
         ice_servers: vec![],
@@ -365,6 +365,67 @@ pub async fn handle_request_remote(
         from_connection_id,
         Some(&init_data),
     )
+}
+
+/// Whether this host can offer an audio track at all.
+///
+/// The device map carries one key per compiled capture backend, so it stays
+/// non-empty even on a machine without any sound hardware (Windows without an
+/// audio device still reports `{ "WASAPI": [] }`). Keying off the map alone
+/// would advertise `capture_audio` to the controller, which then cannot build
+/// the capture/device/encoder triple the wire settings require.
+fn host_audio_capable(
+    audio_encoder_list: &[String],
+    audio_device_list: &std::collections::BTreeMap<
+        String,
+        Vec<desk_signal_facade::model::audio_capture::AudioDevice>,
+    >,
+) -> bool {
+    !audio_encoder_list.is_empty()
+        && audio_device_list
+            .values()
+            .any(|devices| !devices.is_empty())
+}
+
+#[cfg(test)]
+mod audio_capability_tests {
+    use super::*;
+    use desk_signal_facade::model::audio_capture::{AudioDataFlow, AudioDevice};
+    use std::collections::BTreeMap;
+
+    fn device() -> AudioDevice {
+        AudioDevice {
+            id: "device-1".to_string(),
+            firendly_name: "Speakers".to_string(),
+            data_flow: AudioDataFlow::Render,
+            default: true,
+        }
+    }
+
+    #[test]
+    fn a_backend_without_devices_does_not_make_the_host_audio_capable() {
+        // A Windows host with no sound hardware still reports its compiled
+        // backend key with an empty device list.
+        let mut devices = BTreeMap::new();
+        devices.insert("WASAPI".to_string(), Vec::new());
+        assert!(!host_audio_capable(&["Opus".to_string()], &devices));
+    }
+
+    #[test]
+    fn one_backend_with_a_device_makes_the_host_audio_capable() {
+        let mut devices = BTreeMap::new();
+        devices.insert("SILENT".to_string(), Vec::new());
+        devices.insert("WASAPI".to_string(), vec![device()]);
+        assert!(host_audio_capable(&["Opus".to_string()], &devices));
+    }
+
+    #[test]
+    fn devices_without_an_encoder_are_not_offerable() {
+        let mut devices = BTreeMap::new();
+        devices.insert("WASAPI".to_string(), vec![device()]);
+        assert!(!host_audio_capable(&[], &devices));
+        assert!(!host_audio_capable(&[], &BTreeMap::new()));
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

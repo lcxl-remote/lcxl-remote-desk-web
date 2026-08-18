@@ -1,4 +1,5 @@
 import type {
+    AudioDevice,
     AudioEncoderId,
     DisplayInfo,
     OperationSystemEnum,
@@ -185,6 +186,55 @@ export function canConnectCaptureTarget(
         .some((device) => device.device_name === deviceName)
 }
 
+export type AudioDeviceMap = Readonly<Record<string, ReadonlyArray<AudioDevice>>>
+
+/**
+ * A host advertises one capture-mode key per compiled audio backend, so the
+ * map stays non-empty even on a machine without a single sound device (a
+ * Windows box with no audio hardware still reports `{ WASAPI: [] }`). Only a
+ * mode that actually enumerates devices can drive a capture pipeline.
+ */
+export function usableAudioCaptureModes(
+    audioDeviceList: AudioDeviceMap | undefined | null,
+): string[] {
+    const devicesByMode = audioDeviceList ?? {}
+    return Object.keys(devicesByMode)
+        .filter((mode) => (devicesByMode[mode]?.length ?? 0) > 0)
+}
+
+export function hasUsableAudioDevices(
+    audioDeviceList: AudioDeviceMap | undefined | null,
+): boolean {
+    return usableAudioCaptureModes(audioDeviceList).length > 0
+}
+
+export function resolveAudioCaptureMode(
+    preferred: string | null | undefined,
+    suggested: string | null | undefined,
+    audioDeviceList: AudioDeviceMap | undefined | null,
+): string | null {
+    const usable = usableAudioCaptureModes(audioDeviceList)
+    for (const candidate of [preferred, suggested]) {
+        if (candidate && usable.includes(candidate)) return candidate
+    }
+    return usable[0] ?? null
+}
+
+/**
+ * Whether this session can carry audio at all: the browser must be allowed to
+ * play system audio, the host must accept a controller-owned audio toggle, and
+ * it must expose both a real capture device and an encoder for it.
+ */
+export function isAudioCapabilityAvailable(
+    initData: RemoteAccessInitializedData | null | undefined,
+    systemAudioAllowed: boolean,
+): boolean {
+    if (!initData || !systemAudioAllowed) return false
+    return initData.session_settings_capabilities.capture_audio !== "unsupported"
+        && hasUsableAudioDevices(initData.audio_device_list)
+        && (initData.audio_encoder_list?.length ?? 0) > 0
+}
+
 function videoEncoderId(value: string | null | undefined): VideoEncoderId | null {
     switch (value?.toUpperCase()) {
         case "X264": return "X264"
@@ -263,17 +313,11 @@ export function resolveExecutableDeskConfig(
     )
 
     if (resolved.enable_audio) {
-        const captureModes = Object.keys(initData.audio_device_list ?? {})
-        const preferredCapture = fixed("audio_capture")
-            ? suggested.audio_capture
-            : resolved.audio_capture
-        resolved.audio_capture = preferredCapture
-            && captureModes.includes(preferredCapture)
-            ? preferredCapture
-            : suggested.audio_capture
-                && captureModes.includes(suggested.audio_capture)
-                ? suggested.audio_capture
-                : captureModes[0] ?? null
+        resolved.audio_capture = resolveAudioCaptureMode(
+            fixed("audio_capture") ? suggested.audio_capture : resolved.audio_capture,
+            suggested.audio_capture,
+            initData.audio_device_list,
+        )
         const devices = resolved.audio_capture
             ? initData.audio_device_list[resolved.audio_capture] ?? []
             : []
@@ -304,6 +348,16 @@ export function resolveExecutableDeskConfig(
             suggested.audio_encoder,
             initData.audio_encoder_list,
         )
+        // A host can advertise an audio backend with nothing behind it, and a
+        // host-fixed `capture_audio` suggestion is no guarantee either. Without
+        // a complete capture/device/encoder triple the wire settings cannot
+        // describe an audio pipeline, so fall back to a video-only session
+        // instead of an unusable configuration the host would reject.
+        if (!resolved.audio_capture
+            || !resolved.audio_device
+            || !resolved.audio_encoder) {
+            resolved.enable_audio = false
+        }
     }
 
     return resolved

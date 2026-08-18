@@ -865,6 +865,7 @@ export default {
   'pages.desk.enableDirtyRectDescription': '只重编码屏幕上发生变化的区域。若动画时出现瞬时黑条，可关闭。',
   'pages.desk.audioConfig': '音频配置',
   'pages.desk.captureAudio': '捕获音频',
+  'pages.desk.noAudioDeviceOnHost': '远端设备没有可用的音频设备，本次会话仅传输画面。',
   'pages.desk.systemAudioState': '系统音频：{{state}}',
   'pages.desk.systemAudioStateValue.off': '已关闭',
   'pages.desk.systemAudioStateValue.starting': '正在启动',

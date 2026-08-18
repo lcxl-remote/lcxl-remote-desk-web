@@ -18,6 +18,11 @@ import {
 } from "@/components/ui/select"
 import { TabsContent } from "@/components/ui/tabs"
 import type { RemoteAccessInitializedData } from "@/services/types"
+import {
+    hasUsableAudioDevices,
+    isAudioCapabilityAvailable,
+    usableAudioCaptureModes,
+} from "./desk-config-model"
 import type { DeskConfigFormSettings } from "./desk-config-model"
 
 type DeskConfigAudioTabProps = {
@@ -33,9 +38,16 @@ export function DeskConfigAudioTab({
 }: DeskConfigAudioTabProps) {
     const { t } = useTranslation()
     const enableAudio = form.watch("enable_audio")
-    const audioCaptureList = Object.keys(initData?.audio_device_list ?? {})
-    const audioCapabilityAvailable = systemAudioAllowed && audioCaptureList.length > 0
-        && (initData?.audio_encoder_list?.length ?? 0) > 0
+    // Only backends that enumerate at least one device are offerable: a host
+    // without audio hardware still reports its compiled backend with an empty
+    // device list, and picking it would yield a session the host cannot run.
+    const audioCaptureList = usableAudioCaptureModes(initData?.audio_device_list)
+    const audioCapabilityAvailable = isAudioCapabilityAvailable(
+        initData,
+        systemAudioAllowed,
+    )
+    const hostAudioUnavailable = !!initData
+        && !hasUsableAudioDevices(initData.audio_device_list)
     const selectedAudioCapture = form.watch("audio_capture")
     const audioDeviceList = selectedAudioCapture
         ? initData?.audio_device_list?.[selectedAudioCapture] ?? []
@@ -57,6 +69,11 @@ export function DeskConfigAudioTab({
                         </FormControl>
                         <div className="space-y-1 leading-none">
                             <FormLabel>{t("pages.desk.captureAudio")}</FormLabel>
+                            {hostAudioUnavailable && (
+                                <p className="text-xs text-muted-foreground">
+                                    {t("pages.desk.noAudioDeviceOnHost")}
+                                </p>
+                            )}
                         </div>
                     </FormItem>
                 )}

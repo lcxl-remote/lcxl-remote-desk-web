@@ -5,10 +5,13 @@ import {
     DESK_CONFIG_DEFAULTS,
     formatDisplayLabel,
     hasNoDisplaysForMode,
+    hasUsableAudioDevices,
+    isAudioCapabilityAvailable,
     normalizeCaptureTarget,
     orderCaptureModes,
     pickDefaultDeviceName,
     preferSavedDeskValue,
+    resolveAudioCaptureMode,
     resolveAudioEncoder,
     resolveExecutableDeskConfig,
     resolveVideoEncoder,
@@ -16,6 +19,7 @@ import {
     shouldShowNoDisplayWarning,
     toDeskDevicePreferences,
     toRemoteSessionSettings,
+    usableAudioCaptureModes,
 } from "./desk-config-model"
 import type { DisplayInfo, RemoteAccessInitializedData } from "@/services/types"
 import { DEFAULT_DESK_DEVICE_PREFERENCES } from "./desk-preferences"
@@ -388,5 +392,138 @@ describe("capture target normalization", () => {
         expect(canConnectCaptureTarget("X11", "primary", { X11: [primary] })).toBe(true)
         expect(canConnectCaptureTarget("X11", "missing", { X11: [primary] })).toBe(false)
         expect(canConnectCaptureTarget("", "", { X11: [primary] })).toBe(false)
+    })
+})
+
+describe("hosts without usable audio devices", () => {
+    // A Windows host without any sound hardware still advertises its compiled
+    // capture backend, so `audio_device_list` reads `{ WASAPI: [] }` rather
+    // than `{}`. Everything below guards that shape.
+    const speakers = {
+        id: "speaker-1",
+        firendly_name: "Speakers",
+        data_flow: "Render",
+        default: true,
+    } as const
+
+    function makeInitData(
+        audioDeviceList: RemoteAccessInitializedData["audio_device_list"],
+    ): RemoteAccessInitializedData {
+        return {
+            audio_device_list: audioDeviceList,
+            audio_encoder_list: ["Opus"],
+            video_device_list: {
+                WGC: [makeDisplayInfo({
+                    device_name: "primary",
+                    desktop_coordinates: { left: 0, top: 0, right: 1920, bottom: 1080 },
+                })],
+            },
+            video_encoder_list: ["X264"],
+            suggested_session_settings: {
+                capture_audio: true,
+                image_capture: "WGC",
+                video_device_name: "primary",
+                show_mouse: true,
+                video_encoder: "X264",
+                video_quality: 22,
+                video_fps: 60,
+                enable_dirty_rect: true,
+                adaptive_bitrate: true,
+                audio_capture: "WASAPI",
+                audio_device: null,
+                audio_encoder: "Opus",
+            },
+            session_settings_capabilities: {
+                capture_audio: "apply",
+                image_capture: "apply",
+                video_device_name: "apply",
+                show_mouse: "apply",
+                video_encoder: "apply",
+                video_quality: "apply",
+                video_fps: "apply",
+                enable_dirty_rect: "apply",
+                adaptive_bitrate: "apply",
+                audio_capture: "apply",
+                audio_device: "apply",
+                audio_encoder: "apply",
+            },
+        } as RemoteAccessInitializedData
+    }
+
+    it("treats a backend with an empty device list as unusable", () => {
+        expect(usableAudioCaptureModes({ WASAPI: [] })).toEqual([])
+        expect(usableAudioCaptureModes({ SILENT: [], WASAPI: [speakers] }))
+            .toEqual(["WASAPI"])
+        expect(hasUsableAudioDevices({ WASAPI: [] })).toBe(false)
+        expect(hasUsableAudioDevices(null)).toBe(false)
+        expect(hasUsableAudioDevices({ WASAPI: [speakers] })).toBe(true)
+    })
+
+    it("never selects a capture mode that enumerates no device", () => {
+        expect(resolveAudioCaptureMode("WASAPI", "WASAPI", { WASAPI: [] }))
+            .toBeNull()
+        expect(resolveAudioCaptureMode("SILENT", null, {
+            SILENT: [],
+            WASAPI: [speakers],
+        })).toBe("WASAPI")
+        expect(resolveAudioCaptureMode(null, "WASAPI", {
+            SILENT: [speakers],
+            WASAPI: [speakers],
+        })).toBe("WASAPI")
+    })
+
+    it("reports the audio toggle as unavailable even when the host says apply", () => {
+        expect(isAudioCapabilityAvailable(makeInitData({ WASAPI: [] }), true))
+            .toBe(false)
+        expect(isAudioCapabilityAvailable(makeInitData({ WASAPI: [speakers] }), true))
+            .toBe(true)
+        // A browser denied system-audio capture cannot enable it either.
+        expect(isAudioCapabilityAvailable(makeInitData({ WASAPI: [speakers] }), false))
+            .toBe(false)
+        expect(isAudioCapabilityAvailable(null, true)).toBe(false)
+    })
+
+    it("degrades to a video-only session instead of an unusable audio triple", () => {
+        // Regression: the host suggested capture_audio=true, so the form kept
+        // enable_audio on while no device could be resolved, and building the
+        // wire settings threw "incomplete executable audio settings" — the
+        // dialog's submit silently did nothing.
+        const initData = makeInitData({ WASAPI: [] })
+        const resolved = resolveExecutableDeskConfig({
+            ...DESK_CONFIG_DEFAULTS,
+            enable_audio: true,
+            image_capture: "WGC",
+            video_device_name: "primary",
+            video_encoder: "X264",
+        }, initData)
+
+        expect(resolved.enable_audio).toBe(false)
+        expect(resolved.audio_capture).toBeNull()
+        expect(resolved.audio_device).toBeNull()
+        expect(() => toRemoteSessionSettings(resolved, true)).not.toThrow()
+        expect(toRemoteSessionSettings(resolved, true).audio).toBeNull()
+    })
+
+    it("still resolves a full audio pipeline once the host has a device", () => {
+        const initData = makeInitData({ WASAPI: [speakers] })
+        const resolved = resolveExecutableDeskConfig({
+            ...DESK_CONFIG_DEFAULTS,
+            enable_audio: true,
+            image_capture: "WGC",
+            video_device_name: "primary",
+            video_encoder: "X264",
+        }, initData)
+
+        expect(resolved.enable_audio).toBe(true)
+        expect(resolved.audio_capture).toBe("WASAPI")
+        expect(resolved.audio_device).toEqual({
+            audio_data_flow: "Render",
+            audio_device_id: null,
+        })
+        expect(toRemoteSessionSettings(resolved, true).audio).toEqual({
+            audio_capture: "WASAPI",
+            audio_device: { audio_data_flow: "Render", audio_device_id: null },
+            audio_encoder: "Opus",
+        })
     })
 })
