@@ -214,3 +214,24 @@ export function buildDesktopRequestRemotePayload(
         ...(grantSessionId == null && orgId != null ? { org_id: orgId } : {}),
     }
 }
+
+/**
+ * The video quality the encoder is running at right now.
+ *
+ * Adaptive adjustments travel as the `UpdateAdaptiveVideoQuality` command,
+ * which by contract has no correlated response — the host never echoes back a
+ * new accepted baseline, so `lastSettings` keeps reporting the value agreed at
+ * session start no matter how far the adaptive loop has stepped the encoder.
+ * The override is the only record that it moved. The loop and the stats panel
+ * must therefore read the same expression; when they drifted apart the panel
+ * showed a frozen quality next to a climbing adjustment counter.
+ *
+ * Larger is worse: this is a QP/CRF-style knob, so degrading steps up and
+ * recovering steps down.
+ */
+export function effectiveVideoQuality(
+    override: number | null,
+    baseline: number | null | undefined,
+): number | null {
+    return override ?? baseline ?? null
+}

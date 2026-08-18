@@ -9,6 +9,7 @@ import {
   armSettingsApplyTimeout,
   buildDesktopRequestRemotePayload,
   claimControlReconnect,
+  effectiveVideoQuality,
   isRemoteSettingsFailure,
   resolveAdaptiveBitrateForHost,
   shouldOpenConfigDialog,
@@ -283,6 +284,28 @@ describe('DeskSession Control Bar', () => {
 
     // We expect it to still be expanded
     expect(content).toHaveClass('expanded');
+  });
+});
+
+describe('effectiveVideoQuality', () => {
+  it('reports the adaptive override once the loop has stepped the encoder', () => {
+    // The host never echoes a new baseline back for an adaptive step, so the
+    // override is the only record that the encoder moved. Reading the baseline
+    // alone froze the panel at the session-start value.
+    expect(effectiveVideoQuality(37, 22)).toBe(37);
+  });
+
+  it('falls back to the host-accepted baseline while no override is in force', () => {
+    expect(effectiveVideoQuality(null, 22)).toBe(22);
+  });
+
+  it('reports nothing when neither an override nor a baseline exists', () => {
+    expect(effectiveVideoQuality(null, null)).toBeNull();
+    expect(effectiveVideoQuality(null, undefined)).toBeNull();
+  });
+
+  it('keeps a zero override, which is a valid (best) quality value', () => {
+    expect(effectiveVideoQuality(0, 22)).toBe(0);
   });
 });
 

@@ -42,6 +42,7 @@ import {
     armSettingsApplyTimeout,
     buildDesktopRequestRemotePayload,
     claimControlReconnect,
+    effectiveVideoQuality,
     isRemoteSettingsFailure,
     resolveAdaptiveBitrateForHost,
     shouldOpenConfigDialog,
@@ -1110,9 +1111,12 @@ export default function DeskSession({
         const avgRtt = win.reduce((s, x) => s + x.rtt, 0) / win.length;
         const now = Date.now();
         const elapsed = now - lastQualityAdjustRef.current;
-        const currentQuality = adaptiveQualityOverrideRef.current
-            ?? lastSettingsRef.current.video_quality
-            ?? 22;
+        // `?? 22` is the encoder's own default, applied only when neither an
+        // override nor a host-accepted baseline exists yet.
+        const currentQuality = effectiveVideoQuality(
+            adaptiveQualityOverrideRef.current,
+            lastSettingsRef.current.video_quality,
+        ) ?? 22;
 
         let newQuality: number | null = null;
         if ((avgPacketLoss > 3 || avgRtt > 200) && elapsed >= 3000) {
@@ -1753,7 +1757,10 @@ export default function DeskSession({
                         {showStats && isConnected && (
                             <DeskSessionStats
                                 adaptiveQualityEnabled={adaptiveQualityEnabled}
-                                currentVideoQuality={lastSettingsRef.current?.video_quality ?? null}
+                                currentVideoQuality={effectiveVideoQuality(
+                                    adaptiveQualityOverrideRef.current,
+                                    lastSettingsRef.current?.video_quality,
+                                )}
                                 lastQualityAdjustedAt={lastQualityAdjustRef.current}
                                 onClose={() => setShowStats(false)}
                                 qualityAdjustmentCount={qualityAdjustmentCountRef.current}
