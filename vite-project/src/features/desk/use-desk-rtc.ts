@@ -18,6 +18,10 @@ import {
     type IceRetryCoordinator,
 } from './ice-retry-coordinator';
 import { normalizeOpusStereoSdp } from './opus-sdp';
+import {
+    samplePacketLossPercent,
+    type PacketCounters,
+} from './connection-quality';
 import type {
     RemoteAccessInitializedData,
     RemoteSessionSettings,
@@ -232,8 +236,11 @@ export function useDeskRTC({ deskId, subscribe, sendTracked, cancelQueued, cance
 
     const lastBytesReceivedRef = useRef<number>(0);
     const lastStatsTimeRef = useRef<number>(0);
-    const lastPacketsLostRef = useRef<number>(0);
-    const lastPacketsReceivedRef = useRef<number>(0);
+    // `null` = no baseline yet, so the first window after a fresh
+    // PeerConnection reports "no measurement" instead of differencing
+    // against a fabricated zero (which would read as the cumulative loss
+    // since the stream started, not the current window).
+    const lastPacketCountersRef = useRef<PacketCounters | null>(null);
     // Snapshots of monotonically-increasing video counters so we can
     // derive per-sample-window deltas. We display both the absolute
     // total (e.g. "120 I frames since start") and the rate (e.g.
@@ -416,6 +423,10 @@ export function useDeskRTC({ deskId, subscribe, sendTracked, cancelQueued, cance
         const coordinator = coordinatorRef.current;
         if (!coordinator) return;
         coordinator.resetForNewPc();
+        // A fresh PeerConnection restarts the inbound RTP counters, so the
+        // previous stream's totals are not a valid baseline to difference
+        // against — drop them and let the first window report no measurement.
+        lastPacketCountersRef.current = null;
         const epoch = coordinator.currentEpoch();
         const hostEpoch = initData.connection_epoch;
         connectionEpochRef.current = hostEpoch;
@@ -620,7 +631,7 @@ export function useDeskRTC({ deskId, subscribe, sendTracked, cancelQueued, cance
                 let currentHeight = 0;
                 let currentVideoCodec = '';
                 let currentAudioCodec = '';
-                let currentPacketLoss = 0;
+                let currentPacketLoss: number | null = null;
                 let currentNetworkType = '';
 
                 let videoCodecId = '';
@@ -683,18 +694,20 @@ export function useDeskRTC({ deskId, subscribe, sendTracked, cancelQueued, cance
                         lastBytesReceivedRef.current = bytes;
                         lastStatsTimeRef.current = now;
 
-                        // Packet loss calculation
-                        const packetsLost = report.packetsLost || 0;
-                        const packetsReceived = report.packetsReceived || 0;
-                        if (lastPacketsLostRef.current !== undefined && lastPacketsReceivedRef.current !== undefined) {
-                            const lostDiff = packetsLost - lastPacketsLostRef.current;
-                            const recvDiff = packetsReceived - lastPacketsReceivedRef.current;
-                            if (lostDiff + recvDiff > 0) {
-                                currentPacketLoss = Number(((lostDiff / (lostDiff + recvDiff)) * 100).toFixed(2));
-                            }
-                        }
-                        lastPacketsLostRef.current = packetsLost;
-                        lastPacketsReceivedRef.current = packetsReceived;
+                        // Packet loss for this window. The clamping and the
+                        // "no measurement" case live in the shared helper
+                        // because the adaptive-quality loop averages this
+                        // value — a negative sample there reads as a healthy
+                        // link and pushes quality the wrong way.
+                        const packetCounters: PacketCounters = {
+                            packetsLost: report.packetsLost ?? 0,
+                            packetsReceived: report.packetsReceived ?? 0,
+                        };
+                        currentPacketLoss = samplePacketLossPercent(
+                            lastPacketCountersRef.current,
+                            packetCounters,
+                        );
+                        lastPacketCountersRef.current = packetCounters;
                     }
 
                     if (report.type === 'inbound-rtp' && report.kind === 'audio') {
@@ -757,7 +770,7 @@ export function useDeskRTC({ deskId, subscribe, sendTracked, cancelQueued, cance
                     height: currentHeight || prev.height,
                     videoCodec: currentVideoCodec || prev.videoCodec,
                     audioCodec: currentAudioCodec || prev.audioCodec,
-                    packetLoss: currentPacketLoss || prev.packetLoss,
+                    packetLoss: currentPacketLoss ?? prev.packetLoss,
                     networkType: currentNetworkType || prev.networkType,
                     framesDecoded,
                     keyFramesDecoded,
