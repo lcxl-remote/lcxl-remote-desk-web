@@ -3,9 +3,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import HostAccessStatusPage, { type HostAccessSnapshot } from './host-access-status-page';
 
-const { emit } = vi.hoisted(() => ({ emit: vi.fn(async () => undefined) }));
+const { emit, uuidV4, REQUEST_ID } = vi.hoisted(() => {
+    const requestId = '11111111-1111-4111-8111-111111111111';
+    return {
+        REQUEST_ID: requestId,
+        emit: vi.fn(async () => undefined),
+        uuidV4: vi.fn(() => requestId),
+    };
+});
 
 vi.mock('@tauri-apps/api/event', () => ({ emit }));
+// The page mints its correlation id with `uuid`'s `v4`, matching the rest of
+// the desk feature. Stubbing `crypto.randomUUID` instead left the real id in
+// place, so every assertion on the emitted payload compared against a random
+// value and could never hold.
+vi.mock('uuid', () => ({ v4: uuidV4 }));
 vi.mock('react-i18next', () => ({
     useTranslation: () => ({ t: (key: string) => key }),
 }));
@@ -42,9 +54,7 @@ describe('host access status controls', () => {
             configurable: true,
             value: snapshot,
         });
-        vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue(
-            '11111111-1111-4111-8111-111111111111',
-        );
+        uuidV4.mockReturnValue(REQUEST_ID);
     });
 
     afterEach(() => vi.restoreAllMocks());
@@ -62,7 +72,7 @@ describe('host access status controls', () => {
         await waitFor(() => expect(emit).toHaveBeenCalledWith(
             'lcxl-host-access-control',
             {
-                request_id: '11111111-1111-4111-8111-111111111111',
+                request_id: REQUEST_ID,
                 action: 'lock',
             },
         ));
@@ -71,7 +81,7 @@ describe('host access status controls', () => {
 
         act(() => window.dispatchEvent(new CustomEvent('lcxl-host-access-control-result', {
             detail: {
-                request_id: '11111111-1111-4111-8111-111111111111',
+                request_id: REQUEST_ID,
                 ok: true,
                 error: null,
             },
@@ -94,7 +104,7 @@ describe('host access status controls', () => {
         expect(screen.getByRole('button', { name: 'hostAccess.disconnecting' })).toBeDisabled();
         act(() => window.dispatchEvent(new CustomEvent('lcxl-host-access-control-result', {
             detail: {
-                request_id: '11111111-1111-4111-8111-111111111111',
+                request_id: REQUEST_ID,
                 ok: true,
                 error: null,
             },
@@ -130,7 +140,7 @@ describe('host access status controls', () => {
         await waitFor(() => expect(emit).toHaveBeenCalledWith(
             'lcxl-host-access-control',
             {
-                request_id: '11111111-1111-4111-8111-111111111111',
+                request_id: REQUEST_ID,
                 action: 'unlock',
                 expected_version: 4,
             },
@@ -182,7 +192,7 @@ describe('host access status controls', () => {
         await waitFor(() => expect(emit).toHaveBeenCalledWith(
             'lcxl-host-access-control',
             {
-                request_id: '11111111-1111-4111-8111-111111111111',
+                request_id: REQUEST_ID,
                 action: 'lock',
             },
         ));
