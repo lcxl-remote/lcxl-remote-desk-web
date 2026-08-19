@@ -43,4 +43,4 @@ AI 层是**安全优先、模型无关**的（兼容 OpenAI 与 Anthropic API）
 
 ## 许可证
 
-本项目采用 [Apache-2.0](https://github.com/lcxl/lcxl-remote-desk-web/blob/main/LICENSE) 许可证。
+本项目采用 [Apache-2.0](https://github.com/lcxl-remote/lcxl-remote-desk-web/blob/main/LICENSE) 许可证。

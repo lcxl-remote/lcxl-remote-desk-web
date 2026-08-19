@@ -4,7 +4,7 @@ We take the security of LCXL Remote Desk seriously. Remote desktop technology in
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability, please **report it privately** rather than opening a public issue. Refer to the [`SECURITY.md`](https://github.com/lcxl/lcxl-remote-desk-web/blob/main/SECURITY.md) file in the repository for the current reporting channel and process.
+If you discover a security vulnerability, please **report it privately** rather than opening a public issue. Refer to the [`SECURITY.md`](https://github.com/lcxl-remote/lcxl-remote-desk-web/blob/main/SECURITY.md) file in the repository for the current reporting channel and process.
 
 Please include:
 

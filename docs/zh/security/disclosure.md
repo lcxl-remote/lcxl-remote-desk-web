@@ -4,7 +4,7 @@
 
 ## 报告漏洞
 
-若你发现安全漏洞，请**私下报告**，而不要公开提 issue。当前的报告渠道与流程请参阅仓库中的 [`SECURITY.md`](https://github.com/lcxl/lcxl-remote-desk-web/blob/main/SECURITY.md)。
+若你发现安全漏洞，请**私下报告**，而不要公开提 issue。当前的报告渠道与流程请参阅仓库中的 [`SECURITY.md`](https://github.com/lcxl-remote/lcxl-remote-desk-web/blob/main/SECURITY.md)。
 
 请包含：
 

@@ -6,7 +6,7 @@ Currently, we only provide security updates via the `main` branch on GitHub. For
 
 ## Reporting a Vulnerability
 
-We take the security of our systems very seriously. If you find any security vulnerabilities in this project, please **do not** disclose them publicly through issues. Instead, use the GitHub "[Private Vulnerability Reporting](https://github.com/lcxl/lcxl-remote-desk-web/security/advisories/new)" feature.
+We take the security of our systems very seriously. If you find any security vulnerabilities in this project, please **do not** disclose them publicly through issues. Instead, use the GitHub "[Private Vulnerability Reporting](https://github.com/lcxl-remote/lcxl-remote-desk-web/security/advisories/new)" feature.
 
 You can submit a private report by clicking the **Vulnerability reporting** button in the **Security** tab of this repository.
 

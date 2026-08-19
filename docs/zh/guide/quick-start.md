@@ -6,7 +6,7 @@
 
 **被控机在局域网内、或本身有公网 IP 时最合适。**被控端自带信令、STUN / TURN 与 Web 控制台，不需要任何额外服务器，浏览器直连即可。
 
-1. 从 [Releases 页面](https://github.com/lcxl/lcxl-remote-desk-web/releases)下载对应平台的被控端安装包：
+1. 从 [Releases 页面](https://github.com/lcxl-remote/lcxl-remote-desk-web/releases)下载对应平台的被控端安装包：
 
    | 平台 | 安装包 |
    |---|---|
@@ -37,7 +37,7 @@
 1. 在 VPS 上克隆仓库并启动服务。镜像默认以 `signaling` 模式启动，承载 Web 控制台、信令与可选 TURN 中继；桌面采集和输入注入仍由容器外的被控设备完成：
 
    ```bash
-   git clone https://github.com/lcxl/lcxl-remote-desk-web.git
+   git clone https://github.com/lcxl-remote/lcxl-remote-desk-web.git
    cd lcxl-remote-desk-web
    printf 'LRD_BOOTSTRAP_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
    docker compose up -d

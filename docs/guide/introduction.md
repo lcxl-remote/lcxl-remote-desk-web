@@ -43,4 +43,4 @@ See the [AI Security Model](/security/ai-security-model) for the full picture.
 
 ## License
 
-This project is licensed under the [Apache-2.0](https://github.com/lcxl/lcxl-remote-desk-web/blob/main/LICENSE) License.
+This project is licensed under the [Apache-2.0](https://github.com/lcxl-remote/lcxl-remote-desk-web/blob/main/LICENSE) License.

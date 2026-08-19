@@ -6,7 +6,7 @@ There are three ways to get LCXL Remote Desk running. Pick the one that matches 
 
 **Best when the controlled device is on your LAN or has a public IP of its own.** The host bundles signaling, STUN / TURN, and the web console, so no extra server is involved and the browser connects to it directly.
 
-1. Download the host package for your platform from the [Releases page](https://github.com/lcxl/lcxl-remote-desk-web/releases):
+1. Download the host package for your platform from the [Releases page](https://github.com/lcxl-remote/lcxl-remote-desk-web/releases):
 
    | Platform | Package |
    |---|---|
@@ -37,7 +37,7 @@ Use this when the controlled device has no public IP and you want to own the who
 1. On the VPS, clone the repository and start the service. The image starts in `signaling` mode, hosting the web control plane, signaling, and optional TURN relay; capture and input injection stay on the controlled devices outside the container:
 
    ```bash
-   git clone https://github.com/lcxl/lcxl-remote-desk-web.git
+   git clone https://github.com/lcxl-remote/lcxl-remote-desk-web.git
    cd lcxl-remote-desk-web
    printf 'LRD_BOOTSTRAP_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
    docker compose up -d

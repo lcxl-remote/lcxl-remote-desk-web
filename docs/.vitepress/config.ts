@@ -2,7 +2,7 @@ import { defineConfig } from 'vitepress'
 import { withMermaid } from 'vitepress-plugin-mermaid'
 
 // GitHub repository the open-source `web` project mirrors to.
-const REPO_URL = 'https://github.com/lcxl/lcxl-remote-desk-web'
+const REPO_URL = 'https://github.com/lcxl-remote/lcxl-remote-desk-web'
 
 // When publishing to a GitHub Pages *project* site
 // (https://<user>.github.io/<repo>/), set DOCS_BASE to '/<repo>/'.
