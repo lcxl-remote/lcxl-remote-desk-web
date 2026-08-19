@@ -97,6 +97,50 @@ pub(super) async fn video_pipeline_loop(
 
     let mut frame_rx = capture_handle.subscribe();
     let (mut source_generation, mut display_info) = capture_handle.geometry_snapshot();
+
+    // `encoder_init_size` is the *only* authoritative source of the
+    // encoder's current width/height. Every `create_video_encoder`
+    // call below feeds through `display_info_for_size(&display_info,
+    // encoder_init_size)` so settings_changed / keyframe_requested
+    // rebuilds never accidentally drop back to the (stale) subscribe-
+    // time resolution after a mid-session display mode change.
+    //
+    // It is never allowed to be zero: `initial_encoder_size` filters
+    // degenerate snapshots out, and when nothing usable is known yet we
+    // wait for the first frame that actually carries dimensions instead
+    // of handing a 0x0 to the encoder (libvpx answers that with a bare
+    // "error code 8", which the browser then renders as "source 0x0").
+    let mut encoder_init_size: (u32, u32) = match initial_encoder_size(&display_info) {
+        Some(size) => size,
+        None => {
+            info!(
+                "[MediaProducer:{connection_id}] capture geometry not published yet; \
+                 waiting up to {:?} for the first sized frame",
+                FIRST_SIZED_FRAME_TIMEOUT
+            );
+            match wait_for_first_sized_frame(&connection_id, &mut frame_rx, &mut stop_rx).await {
+                FirstSizedFrame::Frame(frame) => {
+                    source_generation = frame.source_generation;
+                    display_info = frame.display_info.clone();
+                    (frame.width, frame.height)
+                }
+                FirstSizedFrame::Stopped => return Ok(()),
+                FirstSizedFrame::TimedOut => {
+                    video_state.store(VIDEO_STATE_BLOCKED, Ordering::Release);
+                    report_dimension_blocked(
+                        &error_tx,
+                        &connection_id,
+                        &payload.connection_epoch,
+                        payload.video_generation,
+                        Some(payload.video_encoder),
+                        (0, 0),
+                        EncoderCompatibilityError::EmptyDimensions,
+                    );
+                    return Ok(());
+                }
+            }
+        }
+    };
     let coordinates = display_info.desktop_coordinates;
     if coordinates.width() > 0
         && coordinates.height() > 0
@@ -113,22 +157,6 @@ pub(super) async fn video_pipeline_loop(
             ),
         );
     }
-
-    // `encoder_init_size` is the *only* authoritative source of the
-    // encoder's current width/height. Every `create_video_encoder`
-    // call below feeds through `display_info_for_size(&display_info,
-    // encoder_init_size)` so settings_changed / keyframe_requested
-    // rebuilds never accidentally drop back to the (stale) subscribe-
-    // time resolution after a mid-session display mode change.
-    let mut encoder_init_size: (u32, u32) = display_info
-        .current_capture_resolution
-        .map(|resolution| (resolution.width, resolution.height))
-        .unwrap_or_else(|| {
-            (
-                display_info.desktop_coordinates.width().max(0) as u32,
-                display_info.desktop_coordinates.height().max(0) as u32,
-            )
-        });
     let encoder_id = Some(payload.video_encoder);
     if let Err(reason) = preflight_encoder_dimensions(encoder_id, encoder_init_size) {
         video_state.store(VIDEO_STATE_BLOCKED, Ordering::Release);
@@ -681,6 +709,71 @@ pub(super) async fn video_pipeline_loop(
 
     info!("[MediaProducer:{connection_id}] Pipeline exiting (stop_flag observed)");
     Ok(())
+}
+
+/// Upper bound on the startup wait for a frame carrying real
+/// dimensions. Ten times the 500ms frame-wait budget both Windows
+/// backends use, so it spans several placeholder ticks on a fully
+/// static desktop without leaving a genuinely dead capture hanging.
+const FIRST_SIZED_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Outcome of [`wait_for_first_sized_frame`]. `Stopped` and `TimedOut`
+/// are kept apart on purpose: a stop is an orderly teardown and must
+/// stay silent, while a timeout is a real "we cannot start video"
+/// condition the browser has to be told about.
+enum FirstSizedFrame {
+    Frame(Arc<SharedFrame>),
+    Stopped,
+    TimedOut,
+}
+
+/// Bounded wait for the first frame that carries real dimensions.
+///
+/// Only reached when the capture backend has published no usable
+/// geometry at subscribe time. Placeholder frames (the static-desktop
+/// heartbeat ticks) are skipped rather than treated as a size, which is
+/// the whole point of the wait.
+async fn wait_for_first_sized_frame(
+    connection_id: &str,
+    frame_rx: &mut broadcast::Receiver<Arc<SharedFrame>>,
+    stop_rx: &mut watch::Receiver<bool>,
+) -> FirstSizedFrame {
+    let deadline = tokio::time::sleep(FIRST_SIZED_FRAME_TIMEOUT);
+    tokio::pin!(deadline);
+    loop {
+        if *stop_rx.borrow() {
+            return FirstSizedFrame::Stopped;
+        }
+        let next_frame = tokio::select! {
+            biased;
+            _ = stop_rx.changed() => return FirstSizedFrame::Stopped,
+            _ = &mut deadline => {
+                warn!(
+                    "[MediaProducer:{connection_id}] no sized frame within \
+                     {FIRST_SIZED_FRAME_TIMEOUT:?}; cannot determine encoder input size"
+                );
+                return FirstSizedFrame::TimedOut;
+            }
+            frame = frame_rx.recv() => frame,
+        };
+        match next_frame {
+            Ok(frame) if frame.width > 0 && frame.height > 0 => {
+                return FirstSizedFrame::Frame(frame);
+            }
+            // Placeholder tick — carries no size, keep waiting.
+            Ok(_) => continue,
+            // Falling behind while waiting for *any* sized frame is
+            // harmless: the next recv still yields the newest ones.
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => {
+                warn!(
+                    "[MediaProducer:{connection_id}] shared-capture broadcast closed while \
+                     waiting for the first sized frame"
+                );
+                return FirstSizedFrame::Stopped;
+            }
+        }
+    }
 }
 
 fn preflight_encoder_dimensions(

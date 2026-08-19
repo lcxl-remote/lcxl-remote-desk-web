@@ -155,12 +155,17 @@ pub fn check_encoder_input(
     source: Resolution,
     support: &EncoderInputSupport,
 ) -> Result<EncoderCompatibility, EncoderCompatibilityError> {
-    let EncoderInputSupport::Known(limits) = support else {
-        return Ok(EncoderCompatibility::RuntimeProbeRequired);
-    };
+    // Ahead of the capability lookup: an empty source is invalid for
+    // *every* encoder, and the encoders whose limits we cannot advertise
+    // (`RuntimeProbeRequired`: VP8 / VP9 / AV1) are exactly the ones that
+    // would otherwise carry a zero all the way into the wrapper and come
+    // back with an opaque library error instead of a stated reason.
     if source.width == 0 || source.height == 0 {
         return Err(EncoderCompatibilityError::EmptyDimensions);
     }
+    let EncoderInputSupport::Known(limits) = support else {
+        return Ok(EncoderCompatibility::RuntimeProbeRequired);
+    };
     if limits.width_alignment > 1 && !source.width.is_multiple_of(limits.width_alignment) {
         return Err(EncoderCompatibilityError::WidthAlignment {
             required: limits.width_alignment,
@@ -266,6 +271,43 @@ mod tests {
                 max_width: 3840,
                 max_height: 2160,
             })
+        );
+    }
+
+    /// An empty source must be rejected for the encoders whose limits
+    /// cannot be advertised (VP8 / VP9 / AV1). Before this guard the
+    /// zero check sat behind the `Known(limits)` early return, so a 0x0
+    /// snapshot sailed past preflight into libvpx and came back as a
+    /// bare "error code 8" with no stated reason.
+    #[test]
+    fn runtime_probe_encoders_still_reject_empty_dimensions() {
+        for id in [
+            VideoEncoderId::Vp8,
+            VideoEncoderId::Vp9,
+            VideoEncoderId::Av1,
+        ] {
+            let capability = VideoEncoderCapability::for_id(id);
+            assert_eq!(
+                check_encoder_input(Resolution::new(0, 0), &capability.input_support),
+                Err(EncoderCompatibilityError::EmptyDimensions),
+                "{id:?} must reject an empty source"
+            );
+            assert_eq!(
+                check_encoder_input(Resolution::new(1280, 0), &capability.input_support),
+                Err(EncoderCompatibilityError::EmptyDimensions),
+                "{id:?} must reject a zero-height source"
+            );
+        }
+    }
+
+    /// The zero guard must not swallow the runtime-probe verdict for
+    /// sizes that are actually fine.
+    #[test]
+    fn runtime_probe_encoders_still_probe_valid_dimensions() {
+        let capability = VideoEncoderCapability::for_id(VideoEncoderId::Vp8);
+        assert_eq!(
+            check_encoder_input(Resolution::new(1280, 800), &capability.input_support),
+            Ok(EncoderCompatibility::RuntimeProbeRequired)
         );
     }
 

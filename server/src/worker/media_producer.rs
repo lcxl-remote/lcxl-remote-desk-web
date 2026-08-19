@@ -109,7 +109,7 @@ use desk_utils::error::DeskErrorCode;
 use log::{debug, error, info, warn};
 use tokio::sync::{broadcast, mpsc, watch};
 
-use crate::worker::shared_capture::{CaptureKey, SharedCaptureRegistry};
+use crate::worker::shared_capture::{CaptureKey, SharedCaptureRegistry, SharedFrame};
 #[cfg(target_os = "linux")]
 use desk_wayland_portal::WaylandPortalBroker;
 
@@ -1006,8 +1006,8 @@ use frame::{build_media_frame, log_post_rebuild_emit, send_frame, send_frame_or_
 use pipeline::{spawn_audio_pipeline_thread, spawn_video_pipeline_thread};
 use settings::{
     capturable_device_name, classify_video_frame_kind, codec_from_str, compute_emit_duration_ns,
-    display_info_for_size, drain_settings_updates, handle_broadcast_lag, payload_overrides,
-    replay_bitrate_cap, should_recreate_for_resolution,
+    display_info_for_size, drain_settings_updates, handle_broadcast_lag, initial_encoder_size,
+    payload_overrides, replay_bitrate_cap, should_recreate_for_resolution,
 };
 use video::video_pipeline_loop;
 

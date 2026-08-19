@@ -1472,6 +1472,81 @@ fn should_recreate_for_resolution_returns_none_when_init_zero_and_frame_zero() {
     assert!(should_recreate_for_resolution((0, 0), (0, 0)).is_none());
 }
 
+// ---- initial_encoder_size ----
+
+/// The capture backend's own resolution wins when it is present and
+/// sane — it is the only field that describes real pixels (desktop
+/// coordinates are point-sized on Retina).
+#[test]
+fn initial_encoder_size_prefers_capture_resolution() {
+    let display_info = DisplayInfo {
+        desktop_coordinates: DisplayRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        },
+        current_capture_resolution: Some(Resolution::new(1280, 800)),
+        ..DisplayInfo::default()
+    };
+    assert_eq!(initial_encoder_size(&display_info), Some((1280, 800)));
+}
+
+/// The 2026-08-18 regression: a placeholder frame had published a 0x0
+/// capture resolution, and the startup path fed it straight to libvpx
+/// ("error code 8", surfaced to the browser as "source 0x0"). A
+/// degenerate resolution must be ignored, not trusted.
+#[test]
+fn initial_encoder_size_ignores_zero_capture_resolution() {
+    let display_info = DisplayInfo {
+        desktop_coordinates: DisplayRect {
+            left: 0,
+            top: 0,
+            right: 1280,
+            bottom: 800,
+        },
+        current_capture_resolution: Some(Resolution::new(0, 0)),
+        ..DisplayInfo::default()
+    };
+    assert_eq!(initial_encoder_size(&display_info), Some((1280, 800)));
+}
+
+/// Windows enumeration leaves `current_capture_resolution` unset, so
+/// the desktop rectangle is the normal path there — including on a
+/// non-origin monitor, where the size must come from the rect's extent
+/// rather than its far corner.
+#[test]
+fn initial_encoder_size_falls_back_to_desktop_coordinates() {
+    let display_info = DisplayInfo {
+        desktop_coordinates: DisplayRect {
+            left: 1920,
+            top: 0,
+            right: 3200,
+            bottom: 800,
+        },
+        current_capture_resolution: None,
+        ..DisplayInfo::default()
+    };
+    assert_eq!(initial_encoder_size(&display_info), Some((1280, 800)));
+}
+
+/// Nothing usable anywhere → `None`, which tells the caller to wait for
+/// a real frame instead of inventing a size.
+#[test]
+fn initial_encoder_size_returns_none_when_everything_is_zero() {
+    let display_info = DisplayInfo {
+        desktop_coordinates: DisplayRect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
+        current_capture_resolution: Some(Resolution::new(0, 0)),
+        ..DisplayInfo::default()
+    };
+    assert_eq!(initial_encoder_size(&display_info), None);
+}
+
 // ---- display_info_for_size ----
 
 fn make_base_display_info() -> DisplayInfo {

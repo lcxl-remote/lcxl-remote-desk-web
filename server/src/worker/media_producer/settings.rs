@@ -279,6 +279,30 @@ pub(super) fn should_recreate_for_resolution(
     if init != frame { Some(frame) } else { None }
 }
 
+/// Resolve the encoder's initial width/height from a geometry snapshot,
+/// rejecting every degenerate value on the way.
+///
+/// The capture backend's `current_capture_resolution` is authoritative
+/// when present, with the desktop rectangle as fallback (Windows
+/// enumeration leaves the former `None` — see
+/// `capture-engine`'s `monitors.rs` — so the rectangle is the normal
+/// path there). `None` means "the source size is not known yet"; the
+/// caller must wait for a real frame rather than hand a zero to the
+/// encoder. Mirrors `should_recreate_for_resolution`'s zero guard on the
+/// mid-stream path — the startup path used to lack it, which is how a
+/// 0x0 geometry snapshot reached `create_video_encoder`.
+pub(super) fn initial_encoder_size(display_info: &DisplayInfo) -> Option<(u32, u32)> {
+    let from_capture = display_info
+        .current_capture_resolution
+        .map(|resolution| (resolution.width, resolution.height))
+        .filter(|(width, height)| *width > 0 && *height > 0);
+    from_capture.or_else(|| {
+        let width = display_info.desktop_coordinates.width();
+        let height = display_info.desktop_coordinates.height();
+        (width > 0 && height > 0).then_some((width as u32, height as u32))
+    })
+}
+
 /// Build a synthetic `DisplayInfo` carrying `(width, height)` but
 /// preserving every other field from `base` (device_name, resolutions,
 /// rotation, attached_to_desktop, display_device_name). Used to feed

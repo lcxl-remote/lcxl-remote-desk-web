@@ -642,11 +642,27 @@ fn run_capture_loop(
         let image_type = result.image.get_type();
         let data = Bytes::copy_from_slice(result.image.get_data());
         let mut geometry_snapshot = geometry.read();
-        if geometry_snapshot
-            .display_info
-            .current_capture_resolution
-            .map(|resolution| (resolution.width, resolution.height))
-            != Some((width, height))
+        // Placeholder frames must never rewrite the geometry. A backend
+        // returning `content_changed == false` (WGC's 500ms frame-wait
+        // timeout, its frame-pool resize hand-off, DXGI's cursor-only
+        // events) hands us an `EmptyImageInfo` whose width/height are
+        // hard-coded to 0 — that means "no new content this round", not
+        // "the source is now 0x0". Publishing it poisoned both
+        // `current_capture_resolution` *and* `desktop_coordinates` (see
+        // `display_info_for_frame_size`, which derives right/bottom from
+        // the frame size), so a pipeline starting inside that window
+        // built its encoder at 0x0 and died on the spot.
+        //
+        // The frame itself is still broadcast below: the static-desktop
+        // heartbeat in `media_producer::video` has no timer of its own
+        // and uses these placeholder ticks as its clock. It just carries
+        // the last published geometry and generation.
+        if frame_carries_geometry(width, height, result.content_changed)
+            && geometry_snapshot
+                .display_info
+                .current_capture_resolution
+                .map(|resolution| (resolution.width, resolution.height))
+                != Some((width, height))
         {
             let refreshed = capture.get_current_output().unwrap_or_else(|error| {
                 debug!(
@@ -688,6 +704,23 @@ fn run_capture_loop(
     );
 }
 
+/// Whether a captured frame may be trusted to describe the source
+/// geometry.
+///
+/// Both conditions are load-bearing:
+///
+/// - `content_changed == false` is the backend's own statement that the
+///   image field is a placeholder (`CaptureResult::content_changed`:
+///   "when false the caller should skip YUV conversion and encoding"),
+///   so its dimensions describe nothing.
+/// - Zero dimensions are rejected outright, because a placeholder image
+///   is what a zero-sized frame *is* — no backend legitimately captures
+///   an empty surface, and letting one through re-creates the 0x0
+///   geometry poisoning this guard exists to prevent.
+fn frame_carries_geometry(width: u32, height: u32, content_changed: bool) -> bool {
+    content_changed && width > 0 && height > 0
+}
+
 fn display_info_for_frame_size(
     mut display_info: DisplayInfo,
     width: u32,
@@ -712,6 +745,179 @@ fn display_info_for_frame_size(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use desk_capture_engine::model::image_capture::CaptureResult;
+    use desk_signal_facade::model::image_capture::{DisplayRect, Resolution};
+
+    /// Only a frame that both claims new content *and* has real
+    /// dimensions describes the source geometry.
+    #[test]
+    fn placeholder_frames_do_not_carry_geometry() {
+        assert!(frame_carries_geometry(1280, 800, true));
+        // WGC / DXGI frame-wait timeout: EmptyImageInfo is 0x0.
+        assert!(!frame_carries_geometry(0, 0, false));
+        // Backend says "no new content" — its image field is a
+        // placeholder even if some future backend sizes it.
+        assert!(!frame_carries_geometry(1280, 800, false));
+        // Degenerate dimensions are never a real capture.
+        assert!(!frame_carries_geometry(0, 800, true));
+        assert!(!frame_carries_geometry(1280, 0, true));
+    }
+
+    struct TestImage {
+        data: Vec<u8>,
+        width: u32,
+        height: u32,
+    }
+
+    impl ImageInfo for TestImage {
+        fn get_type(&self) -> ImageType {
+            ImageType::BGRA
+        }
+        fn get_data(&self) -> &[u8] {
+            &self.data
+        }
+        fn get_width(&self) -> u32 {
+            self.width
+        }
+        fn get_height(&self) -> u32 {
+            self.height
+        }
+    }
+
+    /// Replays a scripted frame sequence, then flips `stop_flag` so
+    /// `run_capture_loop` exits on its next tick.
+    struct ScriptedCapture {
+        /// `Some((w, h))` = a real content frame, `None` = the
+        /// placeholder every Windows backend emits on a frame-wait
+        /// timeout (`EmptyImageInfo`, 0x0, `content_changed == false`).
+        script: std::vec::IntoIter<Option<(u32, u32)>>,
+        display_info: DisplayInfo,
+        stop_flag: Arc<AtomicBool>,
+    }
+
+    impl ImageCapture for ScriptedCapture {
+        fn capture(&mut self, _request: CaptureRequest) -> Result<CaptureResult, CaptureError> {
+            let next = self.script.next();
+            if next.is_none() {
+                self.stop_flag.store(true, Ordering::Release);
+            }
+            let (width, height) = next.flatten().unwrap_or((0, 0));
+            let content_changed = width > 0 && height > 0;
+            Ok(CaptureResult {
+                image: Box::new(TestImage {
+                    data: vec![0u8; (width as usize) * (height as usize) * 4],
+                    width,
+                    height,
+                }),
+                cursor_update: None,
+                content_changed,
+                dirty_rects: None,
+            })
+        }
+
+        fn get_capture_type(&self) -> ImageCaptureType {
+            unimplemented!("run_capture_loop never queries the capture type")
+        }
+
+        fn get_current_output(&self) -> Result<DisplayInfo, CaptureError> {
+            // Mirrors the Windows backends: the cached snapshot answers
+            // with the monitor rectangle and no capture resolution.
+            Ok(self.display_info.clone())
+        }
+    }
+
+    fn display_info_sized(width: i32, height: i32) -> DisplayInfo {
+        DisplayInfo {
+            device_name: "display-1".to_string(),
+            desktop_coordinates: DisplayRect {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            },
+            current_capture_resolution: Some(Resolution::new(width as u32, height as u32)),
+            ..Default::default()
+        }
+    }
+
+    /// The regression guard for the 0x0 geometry poisoning: placeholder
+    /// frames still reach subscribers (the static-desktop heartbeat is
+    /// clocked by them) but they neither bump the generation nor rewrite
+    /// the published resolution.
+    #[test]
+    fn capture_loop_keeps_geometry_across_placeholder_frames() {
+        let geometry = SharedGeometryState::new(display_info_sized(1280, 800));
+        let (sender, mut receiver) = broadcast::channel::<Arc<SharedFrame>>(16);
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let capture = ScriptedCapture {
+            // The exhaustion tick past the end of the script is itself
+            // delivered as a placeholder, so the sequence observed by
+            // subscribers is: real, placeholder, real, placeholder,
+            // real, placeholder(exhausted).
+            script: vec![
+                Some((1280, 800)),
+                None,
+                Some((1280, 800)),
+                None,
+                Some((1920, 1080)),
+            ]
+            .into_iter(),
+            display_info: display_info_sized(1280, 800),
+            stop_flag: Arc::clone(&stop_flag),
+        };
+
+        run_capture_loop(
+            Box::new(capture),
+            sender,
+            Arc::clone(&stop_flag),
+            CaptureKey {
+                backend: "TEST".to_string(),
+                device_name: "display-1".to_string(),
+            },
+            Arc::clone(&geometry),
+        );
+
+        // One real resolution change in the script (800 → 1080), so the
+        // generation moves exactly once off its initial value of 1.
+        let snapshot = geometry.read();
+        assert_eq!(snapshot.generation, 2);
+        assert_eq!(
+            snapshot.display_info.current_capture_resolution,
+            Some(Resolution::new(1920, 1080))
+        );
+        assert_eq!(snapshot.display_info.desktop_coordinates.width(), 1920);
+
+        let mut frames = Vec::new();
+        while let Ok(frame) = receiver.try_recv() {
+            frames.push(frame);
+        }
+        // Every scripted tick — placeholders included — was broadcast.
+        assert_eq!(frames.len(), 6);
+
+        let placeholders: Vec<_> = frames.iter().filter(|f| !f.content_changed).collect();
+        assert_eq!(placeholders.len(), 3);
+        for frame in &frames {
+            let resolution = frame
+                .display_info
+                .current_capture_resolution
+                .expect("frames always carry a published resolution");
+            assert!(
+                resolution.width > 0 && resolution.height > 0,
+                "a placeholder frame published a degenerate resolution: {resolution:?}"
+            );
+            assert!(frame.display_info.desktop_coordinates.width() > 0);
+        }
+        // The placeholder immediately after the 1920x1080 frame inherits
+        // that geometry instead of publishing 0x0 over it.
+        let last = frames.last().expect("scripted frames were broadcast");
+        assert!(!last.content_changed);
+        assert_eq!(last.width, 0);
+        assert_eq!(
+            last.display_info.current_capture_resolution,
+            Some(Resolution::new(1920, 1080))
+        );
+        assert_eq!(last.source_generation, 2);
+    }
 
     #[test]
     fn geometry_publication_is_generation_fenced_and_uses_frame_dimensions() {
