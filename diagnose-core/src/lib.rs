@@ -36,12 +36,15 @@ pub mod exec_classify;
 pub mod exec_tools;
 pub mod image_input;
 pub mod model_capability;
+pub mod model_context;
+pub mod model_profile;
 pub mod parser;
 pub mod prompt;
 pub mod provider_probe;
 pub mod read_tools;
 pub mod redaction;
 pub mod registry;
+pub mod replay;
 pub mod seam;
 pub mod selection;
 pub mod session;
@@ -52,7 +55,20 @@ pub mod trim;
 pub mod wait_tools;
 
 /// Default model context budget when `max_context_bytes` is unset (128 KB).
+///
+/// This value is retained only for upgrading legacy OSS configurations. New and
+/// edited profiles must provide an explicit value and must not silently use this
+/// constant as a model capability default.
 pub const DEFAULT_MAX_CONTEXT_BYTES: usize = 131_072;
+
+/// Smallest application-supported model history budget (4 KiB).
+pub const MIN_MODEL_CONTEXT_BYTES: usize = 4_096;
+
+/// Largest application-supported model history budget (16 MiB).
+///
+/// This is a resource-safety ceiling, not a statement about any provider's token
+/// context window.
+pub const MAX_MODEL_CONTEXT_BYTES: usize = 16 * 1_024 * 1_024;
 
 /// Default circuit-breaker bound on model reasoning rounds within a single turn.
 ///

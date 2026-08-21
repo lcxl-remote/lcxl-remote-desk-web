@@ -24,6 +24,7 @@ const CODE_TO_KEY: ErrorCodeKeyMap = {
     [deskErrorCodeEnum.AGENT_SAME_TOOL_REPEAT_LIMIT]: 'pages.agentError.sameToolRepeatLimit',
     [deskErrorCodeEnum.RATE_LIMITED]: 'pages.agentError.aiRateDisabled',
     [deskErrorCodeEnum.AI_CONTEXT_LIMIT_EXCEEDED]: 'pages.agentError.aiContextLimitExceeded',
+    [deskErrorCodeEnum.AI_CONTEXT_ITEM_TOO_LARGE]: 'pages.agentError.aiContextItemTooLarge',
     [deskErrorCodeEnum.AI_PLATFORM_BUSY]: 'pages.agentError.aiPlatformBusy',
     [deskErrorCodeEnum.AI_MODEL_IMAGE_INPUT_UNSUPPORTED]:
         'pages.agentError.aiModelImageInputUnsupported',

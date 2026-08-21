@@ -207,6 +207,31 @@ describe('useDeskDiagnose', () => {
         expect(result.current.state.result?.collected).toEqual(['network.ports']);
     });
 
+    it('adds one turn-scoped inline notice for repeated context-trimmed status', () => {
+        const { result, feed } = renderDiagnose();
+        act(() => result.current.start('why?', {}));
+
+        feed(frame({
+            request_id: 'req-1',
+            seq: 0,
+            kind: 'status',
+            status: 'context_trimmed',
+            turn_id: 'turn-1',
+        }));
+        feed(frame({
+            request_id: 'req-1',
+            seq: 1,
+            kind: 'status',
+            status: 'context_trimmed',
+            turn_id: 'turn-1',
+        }));
+
+        expect(result.current.state.timeline).toEqual([
+            { kind: 'context_notice', id: 'context-trimmed:turn-1', turnId: 'turn-1' },
+        ]);
+        expect(result.current.state.status).toBeNull();
+    });
+
     it('ignores frames for a different request and stale seq numbers', () => {
         const { result, feed } = renderDiagnose();
         act(() => result.current.start('why?', {}));
@@ -966,6 +991,29 @@ describe('buildSnapshotTranscript', () => {
             kind: 'assistant',
             text: 'Memory is fine.',
         });
+    });
+
+    it('restores and deduplicates durable trim notices in their matching turn', () => {
+        const messages: SnapshotMessage[] = [
+            { id: 'u1', turnId: 'turn-1', role: 'user', text: 'first' },
+            { id: 'a1', turnId: 'turn-1', role: 'assistant', text: 'answer one' },
+            { id: 'u2', turnId: 'turn-2', role: 'user', text: 'second' },
+            { id: 'a2', turnId: 'turn-2', role: 'assistant', text: 'answer two' },
+        ];
+        const notices = [
+            { id: 'notice-1', turnId: 'turn-1', kind: 'trimmed' },
+            { id: 'notice-1', turnId: 'turn-1', kind: 'trimmed' },
+            { id: 'ignored', turnId: 'missing', kind: 'trimmed' },
+        ];
+
+        const turns = buildSnapshotTranscript(messages, notices);
+        expect(turns[0].timeline[0]).toEqual({
+            kind: 'context_notice',
+            id: 'notice-1',
+            turnId: 'turn-1',
+        });
+        expect(turns[0].timeline.filter(item => item.kind === 'context_notice')).toHaveLength(1);
+        expect(turns[1].timeline.some(item => item.kind === 'context_notice')).toBe(false);
     });
 
     it('appends background completion between the command result and automation follow-up', () => {

@@ -17,6 +17,8 @@ use desk_agent_protocol::content_safety::StreamRetractionReason;
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope};
 
 use crate::chat::{ChatMessage, ModelTurn, ToolCall, ToolChoice, ToolSpec};
+use crate::model_context::PinnedContextPolicy;
+use crate::model_profile::ModelUseCase;
 use crate::prompt::ResponseFormatSpec;
 use crate::session::{PersistedAgentSession, SubjectMismatch};
 
@@ -33,11 +35,11 @@ pub struct ModelRequest {
     pub tool_requirements: crate::model_capability::ModelRequirements,
     pub tool_choice: ToolChoice,
     pub response_format: ResponseFormatSpec,
-    /// Optional upper bound on the model's output tokens. `None` leaves the seam's
-    /// own default in effect. Currently honored only by the signal seam's body
-    /// builders (`web/signal/src/model_dial.rs`), used by the provider connectivity
-    /// probe to keep the test reply tiny; other seams may ignore it.
-    pub max_output_tokens: Option<u32>,
+    /// Purpose used to resolve the configured probe/runtime output budget.
+    pub use_case: ModelUseCase,
+    /// Optional business hard cap. This may only narrow the configured runtime
+    /// limit; probe requests must leave it unset.
+    pub caller_output_hard_cap: Option<i64>,
 }
 
 impl ModelRequest {
@@ -50,7 +52,8 @@ impl ModelRequest {
             tool_requirements: crate::model_capability::ModelRequirements::TEXT_ONLY,
             tool_choice: ToolChoice::Auto,
             response_format,
-            max_output_tokens: None,
+            use_case: ModelUseCase::Agent,
+            caller_output_hard_cap: None,
         }
     }
 
@@ -128,6 +131,11 @@ pub trait TurnSink {
         let _ = text;
     }
 
+    /// The persisted floor for this turn advanced before the provider dial.
+    fn on_context_trimmed(&mut self, turn_id: &str) {
+        let _ = turn_id;
+    }
+
     /// The turn was truncated (`MaxTokens` / `Other`) and discarded; any
     /// provisional text streamed for it must be dropped by the UI.
     fn on_turn_discarded(&mut self) {}
@@ -145,6 +153,22 @@ impl TurnSink for NullTurnSink {
 /// (text + tool calls + stop reason + usage).
 #[async_trait(?Send)]
 pub trait ModelSeam {
+    /// Resolve and pin the model/source/profile needed to build a safe history
+    /// view before the provider body is rendered.
+    async fn context_policy(
+        &self,
+        requirements: crate::model_capability::ModelRequirements,
+    ) -> Result<PinnedContextPolicy, AgentError> {
+        let _ = requirements;
+        Err(AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "model seam does not expose a pinned context policy".to_string(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        })
+    }
+
     async fn call(
         &self,
         request: ModelRequest,
@@ -444,7 +468,8 @@ mod tests {
             tool_requirements: crate::model_capability::ModelRequirements::IMAGE_INPUT,
             tool_choice: ToolChoice::Auto,
             response_format: ResponseFormatSpec::None,
-            max_output_tokens: None,
+            use_case: ModelUseCase::Agent,
+            caller_output_hard_cap: None,
         };
 
         assert!(request.requirements().image_input);

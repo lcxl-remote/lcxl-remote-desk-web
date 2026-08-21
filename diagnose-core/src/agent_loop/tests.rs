@@ -1,6 +1,8 @@
 use super::*;
 use crate::chat::{ChatRole, ModelTurn, StopReason, ToolCall, ToolSpec};
+use crate::model_profile::WireProtocol;
 use crate::prompt::ResponseFormatSpec;
+use crate::replay::{ProviderResponseMeta, ReplayDisposition, SourceContextKey};
 use crate::seam::{ToolRunOutput, TurnSink, WaitOutcome};
 use crate::session::PersistedAgentSession;
 use async_trait::async_trait;
@@ -59,6 +61,24 @@ struct ScriptModel {
 }
 #[async_trait(?Send)]
 impl ModelSeam for ScriptModel {
+    async fn context_policy(
+        &self,
+        _requirements: crate::model_capability::ModelRequirements,
+    ) -> Result<crate::model_context::PinnedContextPolicy, AgentError> {
+        crate::model_context::PinnedContextPolicy::window(
+            SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test"),
+            1,
+            crate::MIN_MODEL_CONTEXT_BYTES,
+        )
+        .map_err(|error| AgentError {
+            kind: desk_agent_protocol::AgentErrorKind::Internal,
+            message: error.to_string(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        })
+    }
+
     async fn call(
         &self,
         request: ModelRequest,
@@ -131,12 +151,23 @@ fn answer(text: &str) -> ModelTurn {
     ModelTurn {
         text: text.into(),
         stop_reason: StopReason::EndTurn,
+        provider_meta: ProviderResponseMeta::without_reasoning(StopReason::EndTurn),
         ..Default::default()
     }
 }
 
 fn tool_use(id: &str, name: &str) -> ModelTurn {
     tool_use_args(id, name, "{}")
+}
+
+fn tool_meta() -> ProviderResponseMeta {
+    let source_context_key =
+        SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test");
+    ProviderResponseMeta {
+        stop_reason: StopReason::ToolUse,
+        replay: Some(ReplayDisposition::NotRequired { source_context_key }),
+        ..Default::default()
+    }
 }
 
 fn tool_use_args(id: &str, name: &str, args: &str) -> ModelTurn {
@@ -147,6 +178,7 @@ fn tool_use_args(id: &str, name: &str, args: &str) -> ModelTurn {
             name: name.into(),
             arguments_json: args.into(),
         }],
+        provider_meta: tool_meta(),
         ..Default::default()
     }
 }
@@ -173,7 +205,6 @@ fn deps<'a>(
         registry,
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
-        max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
         max_same_tool_per_turn: crate::MAX_SAME_TOOL_PER_TURN,
         clock,
@@ -669,8 +700,7 @@ async fn trims_history_to_budget() {
     let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
     let clock = || "t".to_string();
     let mut sink = Collector(Rc::new(RefCell::new(String::new())));
-    let mut d = deps(&sess, &model, &tools, &reg, &clock);
-    d.max_context_bytes = 500;
+    let d = deps(&sess, &model, &tools, &reg, &clock);
     run_agent_turn(
         &d,
         claim(),
@@ -805,7 +835,6 @@ fn exec_deps<'a>(
         registry,
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
-        max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
         max_same_tool_per_turn: crate::MAX_SAME_TOOL_PER_TURN,
         clock,
@@ -1463,6 +1492,7 @@ async fn mutating_rejected_skips_remaining_in_turn() {
                 arguments_json: "{}".into(),
             },
         ],
+        provider_meta: tool_meta(),
         ..Default::default()
     };
     let model = ScriptModel {
@@ -1592,7 +1622,6 @@ async fn mutating_backend_error_fails_turn() {
         registry: &reg,
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
-        max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
         max_same_tool_per_turn: crate::MAX_SAME_TOOL_PER_TURN,
         clock: &clock,
@@ -1691,7 +1720,6 @@ async fn retryable_mutating_error_returns_to_model_for_correction() {
         registry: &reg,
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
-        max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
         max_same_tool_per_turn: crate::MAX_SAME_TOOL_PER_TURN,
         clock: &clock,
@@ -1847,6 +1875,7 @@ async fn streams_discarded_on_truncated_turn() {
     let truncated = ModelTurn {
         text: "half".into(),
         stop_reason: StopReason::MaxTokens,
+        provider_meta: ProviderResponseMeta::without_reasoning(StopReason::MaxTokens),
         ..Default::default()
     };
     let model = ScriptModel {
@@ -2027,6 +2056,7 @@ async fn enforced_model_turn_block_reviews_once_and_persists_only_fixed_placehol
                     },
                 ],
                 stop_reason: StopReason::ToolUse,
+                provider_meta: tool_meta(),
                 ..Default::default()
             }]
             .into(),
@@ -2206,6 +2236,7 @@ async fn enforced_allow_persists_and_commits_before_tool_dispatch() {
                         arguments_json: "{}".into(),
                     }],
                     stop_reason: StopReason::ToolUse,
+                    provider_meta: tool_meta(),
                     ..Default::default()
                 },
                 answer("done"),
@@ -2312,6 +2343,7 @@ async fn rejected_tool_image_is_not_persisted_and_remaining_calls_are_paired() {
                     },
                 ],
                 stop_reason: StopReason::ToolUse,
+                provider_meta: tool_meta(),
                 ..Default::default()
             }]
             .into(),
@@ -2356,7 +2388,6 @@ async fn rejected_tool_image_is_not_persisted_and_remaining_calls_are_paired() {
         registry: &registry,
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
-        max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
         max_same_tool_per_turn: crate::MAX_SAME_TOOL_PER_TURN,
         clock: &clock,

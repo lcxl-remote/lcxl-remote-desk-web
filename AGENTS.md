@@ -59,7 +59,7 @@ sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev \
 
 | 模块 | 角色 |
 |---|---|
-| `server/` | Desk server: REST API (Actix-Web), WebRTC, 设置, 文件/终端管理（支持 ServiceDaemon 和 SessionWorker 模式）；AI 诊断编排器在 `server/src/diagnose/`（采集 → 脱敏 → 模型 → 渲染），模型适配在 `server/src/diagnose/model/`（`openai.rs` / `anthropic.rs`） |
+| `server/` | Desk server: REST API (Actix-Web), WebRTC, 设置, 文件/终端管理（支持 ServiceDaemon 和 SessionWorker 模式）；AI 诊断的共享编排契约在 `diagnose-core/`，中心模型适配分别位于 `signal/src/model_dial.rs`（OSS）与父仓 `backend/manager/src/service/model_dialect.rs`（Manager） |
 | `signal/` | 信令服务器 + TURN (核心文件: `signal/src/service.rs`) |
 | `vite-project/` | React 19 + TanStack Query 前端 — 包含管理 UI 和 Web 控制端客户端（含 AI 设置页与诊断面板 `features/desk/diagnose-panel.tsx`） |
 | `tauri-app/` | Tauri 壳程序，用于在被控机本地渲染防窥屏/白板功能 |
@@ -112,7 +112,7 @@ sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev \
 - **默认只给建议，执行须 owner 逐条确认**：`ExecutionMode` 默认 `SuggestOnly`（模型只能建议命令、不能执行）。要真正执行必须走服务端中介的确认闭环（`agent-protocol/src/exec.rs`：suggest → confirm → execute → backfill）——服务端做风险分级与黑名单硬拒，把批准的命令冻结成 `ExecPlan`（program + argv，参数已绑定、无 shell 元字符），**worker 只按 argv 逐字执行、从不重新解析命令字符串**，每次真实执行都由服务端铸出 `approval_id`。
 - **脱敏 fail-closed**：诊断编排器（`server/src/diagnose/mod.rs`）按 **采集 → 脱敏 → 模型 → 渲染** 运行；脱敏失败会在调用模型**之前**中止。证据在到达模型 trait 之前一定已脱敏。
 - **API Key 是服务端密钥**：AI 模型 api_key 绝不回传浏览器、不进任何 `/settings` 公开 DTO、不写日志。审计只记录无内容的摘要（计数 / 大小 / token 用量 / provider / adapter），绝不留存原始输出、截图或 prompt。
-- **模型无关**：`server/src/diagnose/model/` 用 adapter 隔离 wire 协议（`openai.rs` = OpenAI 兼容、`anthropic.rs` = Anthropic Messages），按调用解析 provider。新增供应商 = 新增一个 adapter，不改编排器。
+- **模型无关**：`diagnose-core/src/model_profile.rs` 冻结通用 profile / wire contract；`signal/src/model_dial.rs` 与父仓 `backend/manager/src/service/model_dialect.rs` 用 adapter 隔离 OpenAI-compatible Chat Completions / Anthropic Messages。新增 wire 协议需新增 adapter，不改共享编排器，也不得按模型名猜测协议行为。
 - **MCP 只读**：`mcp-server` 工具集是**静态白名单**，刻意不存在 exec / write / control 工具（「未定义即不可达」）；`lcxl_diagnose` 的 provider 签名不带截图选项，MCP 客户端在结构上无法抓屏。`mcp-stdio` 模式下 stdin/stdout 承载 MCP JSON-RPC，**绝不能向 stdout 打日志**。
 
 ## 前端规则

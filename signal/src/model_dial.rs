@@ -27,20 +27,23 @@ use async_trait::async_trait;
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_diagnose_core::chat::{
     ChatMessage, ChatRole, ModelTurn, StopReason, TokenUsage, ToolCall, ToolChoice,
-    frame_background_task_output, frame_untrusted_output,
+    frame_background_task_output, frame_context_summary, frame_untrusted_output,
 };
 use desk_diagnose_core::image_input::validate_image_request;
 use desk_diagnose_core::model_capability::{ModelCapabilities, ModelRequirements};
+use desk_diagnose_core::model_profile::{
+    ModelRequestProfile, PositiveOutputLimit, WireProtocol, apply_model_request_profile,
+    resolve_effective_output_limit,
+};
 use desk_diagnose_core::prompt::ResponseFormatSpec;
+use desk_diagnose_core::replay::{
+    ProviderReplayEnvelope, ProviderResponseMeta, ReplayCodec, ReplayDisposition, SourceContextKey,
+};
 use desk_diagnose_core::seam::{ModelRequest, ModelSeam, TurnSink};
 use serde_json::{Value, json};
 
 use crate::model_provider::ModelProviderConfig;
 
-/// Upper bound on generated tokens for the Anthropic dialect, which requires
-/// `max_tokens`. Generous for a structured diagnosis; the prompt and the parser
-/// degrade gracefully if the model runs long.
-const ANTHROPIC_MAX_TOKENS: u32 = 4096;
 /// Delimiter used when an in-conversation system event must be represented as
 /// an Anthropic user turn (Anthropic only supports one hoisted system prompt).
 const SYSTEM_EVENT_PREFIX: &str = "[system-event] ";
@@ -165,13 +168,13 @@ pub enum Dialect {
 }
 
 impl Dialect {
-    /// Resolve the dialect from the configured provider identifier, normalized
-    /// case-insensitively. `anthropic` selects the Anthropic dialect; everything
-    /// else (including empty / unset) falls back to OpenAI-compatible.
-    pub fn from_provider(provider: Option<&str>) -> Self {
-        match provider.map(|p| p.trim().to_ascii_lowercase()).as_deref() {
-            Some("anthropic") => Dialect::Anthropic,
-            _ => Dialect::OpenAiCompatible,
+    pub fn from_protocol(protocol: WireProtocol) -> Result<Self, AgentError> {
+        match protocol {
+            WireProtocol::OpenAiChatCompletions => Ok(Dialect::OpenAiCompatible),
+            WireProtocol::AnthropicMessages => Ok(Dialect::Anthropic),
+            WireProtocol::OpenAiResponses => Err(config_error(
+                "open_ai_responses is reserved but not implemented",
+            )),
         }
     }
 }
@@ -203,6 +206,9 @@ pub struct SignalModelSeam {
     api_key: String,
     model: String,
     capabilities: ModelCapabilities,
+    protocol: WireProtocol,
+    profile: ModelRequestProfile,
+    source_context_key: SourceContextKey,
 }
 
 impl SignalModelSeam {
@@ -215,14 +221,30 @@ impl SignalModelSeam {
             .ok_or_else(|| config_error("model provider api_key is not configured"))?;
         let model = non_empty(config.model.as_deref())
             .ok_or_else(|| config_error("model provider model is not configured"))?;
+        let protocol = config
+            .wire_protocol
+            .ok_or_else(|| config_error("model provider wire_protocol is not configured"))?;
+        let profile = config
+            .request_profile()
+            .map_err(|error| config_error(error.to_string()))?;
+        let source_context_key = SourceContextKey::derive_for_endpoint(
+            protocol,
+            "oss-singleton:1",
+            &base_url,
+            "oss-model:1",
+            &model,
+        );
         Ok(Self {
-            dialect: Dialect::from_provider(config.provider.as_deref()),
+            dialect: Dialect::from_protocol(protocol)?,
             base_url,
             api_key,
             model,
             capabilities: ModelCapabilities {
                 image_input: config.supports_image_input,
             },
+            protocol,
+            profile,
+            source_context_key,
         })
     }
 
@@ -234,11 +256,31 @@ impl SignalModelSeam {
         }
     }
 
-    fn build_body(&self, request: &ModelRequest) -> Value {
+    fn build_body(&self, request: &ModelRequest) -> Result<Value, AgentError> {
+        let effective = resolve_effective_output_limit(
+            request.use_case,
+            self.profile.probe_max_output_tokens,
+            self.profile.runtime_max_output_tokens,
+            request.caller_output_hard_cap,
+        )
+        .map_err(|error| config_error(error.to_string()))?;
         match self.dialect {
-            Dialect::OpenAiCompatible => build_openai_body(&self.model, request),
-            Dialect::Anthropic => build_anthropic_body(&self.model, request),
+            Dialect::OpenAiCompatible => build_openai_body_profiled(
+                &self.model,
+                request,
+                self.protocol,
+                &self.profile,
+                effective,
+            ),
+            Dialect::Anthropic => build_anthropic_body_profiled(
+                &self.model,
+                request,
+                self.protocol,
+                &self.profile,
+                effective,
+            ),
         }
+        .map_err(|error| config_error(error.to_string()))
     }
 }
 
@@ -251,6 +293,25 @@ fn non_empty(value: Option<&str>) -> Option<String> {
 
 #[async_trait(?Send)]
 impl ModelSeam for SignalModelSeam {
+    async fn context_policy(
+        &self,
+        requirements: ModelRequirements,
+    ) -> Result<desk_diagnose_core::model_context::PinnedContextPolicy, AgentError> {
+        if !self.capabilities.satisfies(requirements) {
+            return Err(config_error(
+                "the selected AI model does not satisfy the request capabilities",
+            ));
+        }
+        desk_diagnose_core::model_context::PinnedContextPolicy::window(
+            self.source_context_key.clone(),
+            self.profile.profile_revision,
+            self.profile
+                .max_context_bytes()
+                .map_err(|error| config_error(error.to_string()))?,
+        )
+        .map_err(|error| config_error(error.to_string()))
+    }
+
     async fn call(
         &self,
         request: ModelRequest,
@@ -336,7 +397,7 @@ impl ModelSeam for SignalModelSeam {
             self.dialect,
             request.tools.len()
         );
-        let body = self.build_body(&request);
+        let body = self.build_body(&request)?;
         let mut http = client
             .post(self.endpoint())
             .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS));
@@ -375,7 +436,7 @@ impl ModelSeam for SignalModelSeam {
         // dialect accumulator, and forward any text delta to the sink as it
         // arrives. The fully assembled, normalized turn is returned at the end.
         let mut decoder = SseDecoder::new();
-        let mut state = StreamState::new(self.dialect);
+        let mut state = StreamState::new(self.dialect, self.source_context_key.clone());
         while let Some(item) = response.next().await {
             let chunk =
                 item.map_err(|e| transport_error(format!("model stream interrupted: {e}")))?;
@@ -475,10 +536,16 @@ enum StreamState {
 }
 
 impl StreamState {
-    fn new(dialect: Dialect) -> Self {
+    fn new(dialect: Dialect, source_context_key: SourceContextKey) -> Self {
         match dialect {
-            Dialect::OpenAiCompatible => StreamState::OpenAi(OpenAiStreamState::default()),
-            Dialect::Anthropic => StreamState::Anthropic(AnthropicStreamState::default()),
+            Dialect::OpenAiCompatible => StreamState::OpenAi(OpenAiStreamState {
+                source_context_key: Some(source_context_key),
+                ..Default::default()
+            }),
+            Dialect::Anthropic => StreamState::Anthropic(AnthropicStreamState {
+                source_context_key: Some(source_context_key),
+                ..Default::default()
+            }),
         }
     }
 
@@ -523,6 +590,9 @@ fn openai_message_to_json(m: &ChatMessage) -> Value {
     if m.role == ChatRole::SystemEvent {
         return json!({ "role": "system", "content": m.text });
     }
+    if m.role == ChatRole::ContextSummary {
+        return json!({ "role": "user", "content": frame_context_summary(&m.text) });
+    }
     // Completed command output that can no longer close its tool call renders as a
     // fenced `user` turn — never `system` — so device bytes cannot steer the model.
     // Kept in step with the agentic adapter via the shared fence.
@@ -547,7 +617,7 @@ fn openai_message_to_json(m: &ChatMessage) -> Value {
             {"type": "image_url", "image_url": {"url": url}},
         ]),
         None if m.role == ChatRole::Assistant && m.text.is_empty() && !m.tool_calls.is_empty() => {
-            Value::Null
+            json!("")
         }
         None => json!(m.text),
     };
@@ -568,6 +638,12 @@ fn openai_message_to_json(m: &ChatMessage) -> Value {
                 })
                 .collect(),
         );
+        if let Some(ReplayDisposition::Present { envelope }) = &m.replay_disposition
+            && envelope.codec == ReplayCodec::OpenAiReasoningContent
+            && let Some(reasoning_content) = envelope.payload.as_str()
+        {
+            obj["reasoning_content"] = json!(reasoning_content);
+        }
     }
     obj
 }
@@ -607,7 +683,13 @@ fn openai_messages_to_json(messages: &[ChatMessage]) -> Vec<Value> {
 /// Build the streaming `/chat/completions` body, including any tools exposed by
 /// the agent loop. `stream_options.include_usage` asks the gateway to emit a final
 /// usage chunk (omitted by default when streaming).
-fn build_openai_body(model: &str, request: &ModelRequest) -> Value {
+fn build_openai_body_profiled(
+    model: &str,
+    request: &ModelRequest,
+    protocol: WireProtocol,
+    profile: &ModelRequestProfile,
+    effective_output_limit: PositiveOutputLimit,
+) -> Result<Value, desk_diagnose_core::model_profile::ProfileError> {
     let messages = openai_messages_to_json(&request.messages);
     let mut body = json!({
         "model": model,
@@ -615,9 +697,6 @@ fn build_openai_body(model: &str, request: &ModelRequest) -> Value {
         "stream": true,
         "stream_options": { "include_usage": true },
     });
-    if let Some(max) = request.max_output_tokens {
-        body["max_tokens"] = json!(max);
-    }
     if !request.tools.is_empty() {
         body["tools"] = Value::Array(
             request
@@ -635,11 +714,11 @@ fn build_openai_body(model: &str, request: &ModelRequest) -> Value {
                 })
                 .collect(),
         );
-        body["tool_choice"] = match request.tool_choice {
-            ToolChoice::Auto => json!("auto"),
-            ToolChoice::None => json!("none"),
-            ToolChoice::Required => json!("required"),
-        };
+        match request.tool_choice {
+            ToolChoice::Auto => {}
+            ToolChoice::None => body["tool_choice"] = json!("none"),
+            ToolChoice::Required => body["tool_choice"] = json!("required"),
+        }
     }
     match &request.response_format {
         ResponseFormatSpec::None => {}
@@ -653,7 +732,14 @@ fn build_openai_body(model: &str, request: &ModelRequest) -> Value {
             });
         }
     }
-    body
+    apply_model_request_profile(
+        protocol,
+        request.use_case,
+        profile,
+        effective_output_limit,
+        &mut body,
+    )?;
+    Ok(body)
 }
 
 /// Map an OpenAI `finish_reason` onto the neutral [`StopReason`].
@@ -692,6 +778,9 @@ struct OpenAiStreamState {
     usage: Option<Value>,
     tool_calls: Vec<ToolCallBuilder>,
     error: Option<String>,
+    source_context_key: Option<SourceContextKey>,
+    reasoning_content: String,
+    reasoning_observed: bool,
 }
 
 #[derive(Default)]
@@ -724,6 +813,10 @@ impl OpenAiStreamState {
             self.finish_reason = Some(fr.to_string());
         }
         let delta = choice.get("delta")?;
+        if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
+            self.reasoning_observed = true;
+            self.reasoning_content.push_str(reasoning);
+        }
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in calls {
                 self.accumulate_tool_call(call);
@@ -760,19 +853,42 @@ impl OpenAiStreamState {
     }
 
     fn into_turn(self) -> ModelTurn {
+        let stop_reason = openai_stop_reason(self.finish_reason.as_deref());
+        let tool_calls: Vec<_> = self
+            .tool_calls
+            .into_iter()
+            .map(|call| ToolCall {
+                id: call.id,
+                name: call.name,
+                arguments_json: call.arguments,
+            })
+            .collect();
+        let replay = (!tool_calls.is_empty()).then(|| match self.source_context_key {
+            Some(source_context_key) if self.reasoning_observed => ReplayDisposition::Present {
+                envelope: ProviderReplayEnvelope::new(
+                    ReplayCodec::OpenAiReasoningContent,
+                    source_context_key,
+                    json!(self.reasoning_content),
+                ),
+            },
+            Some(source_context_key) => ReplayDisposition::NotRequired { source_context_key },
+            None => ReplayDisposition::legacy_unknown(),
+        });
+        let reasoning_tokens = self
+            .usage
+            .as_ref()
+            .and_then(|usage| usage["completion_tokens_details"]["reasoning_tokens"].as_u64());
         ModelTurn {
-            stop_reason: openai_stop_reason(self.finish_reason.as_deref()),
+            stop_reason,
             usage: openai_usage(self.usage.as_ref()),
             text: self.text,
-            tool_calls: self
-                .tool_calls
-                .into_iter()
-                .map(|call| ToolCall {
-                    id: call.id,
-                    name: call.name,
-                    arguments_json: call.arguments,
-                })
-                .collect(),
+            tool_calls,
+            provider_meta: ProviderResponseMeta {
+                reasoning_observed: self.reasoning_observed,
+                reasoning_tokens,
+                stop_reason,
+                replay,
+            },
         }
     }
 }
@@ -811,6 +927,12 @@ fn anthropic_message_to_json(m: &ChatMessage) -> Value {
             "content": format!("{SYSTEM_EVENT_PREFIX}{}", m.text),
         });
     }
+    if m.role == ChatRole::ContextSummary {
+        return json!({
+            "role": "user",
+            "content": frame_context_summary(&m.text),
+        });
+    }
     // Completed command output for an already-closed call: a fenced `user` turn via
     // the shared fence, so device bytes are read as inert data, not instructions.
     if m.role == ChatRole::UntrustedOutput {
@@ -833,6 +955,12 @@ fn anthropic_message_to_json(m: &ChatMessage) -> Value {
         return json!({"role": "user", "content": content});
     }
     if m.role == ChatRole::Assistant && !m.tool_calls.is_empty() {
+        if let Some(ReplayDisposition::Present { envelope }) = &m.replay_disposition
+            && envelope.codec == ReplayCodec::AnthropicContentBlocks
+            && envelope.payload.is_array()
+        {
+            return json!({"role": "assistant", "content": envelope.payload});
+        }
         let mut blocks = Vec::new();
         if !m.text.is_empty() {
             blocks.push(json!({"type": "text", "text": m.text}));
@@ -879,7 +1007,13 @@ fn split_data_url(url: &str) -> Option<(String, String)> {
 
 /// Build the streaming `/v1/messages` body. System text is hoisted to the
 /// top-level `system` field; the rest become `messages`.
-fn build_anthropic_body(model: &str, request: &ModelRequest) -> Value {
+fn build_anthropic_body_profiled(
+    model: &str,
+    request: &ModelRequest,
+    protocol: WireProtocol,
+    profile: &ModelRequestProfile,
+    effective_output_limit: PositiveOutputLimit,
+) -> Result<Value, desk_diagnose_core::model_profile::ProfileError> {
     let mut system = String::new();
     let mut messages: Vec<Value> = Vec::new();
     for m in &request.messages {
@@ -894,7 +1028,6 @@ fn build_anthropic_body(model: &str, request: &ModelRequest) -> Value {
     }
     let mut body = json!({
         "model": model,
-        "max_tokens": request.max_output_tokens.unwrap_or(ANTHROPIC_MAX_TOKENS),
         "messages": messages,
         "stream": true,
     });
@@ -916,12 +1049,18 @@ fn build_anthropic_body(model: &str, request: &ModelRequest) -> Value {
                 })
                 .collect(),
         );
-        body["tool_choice"] = match request.tool_choice {
-            ToolChoice::Required => json!({"type": "any"}),
-            ToolChoice::Auto | ToolChoice::None => json!({"type": "auto"}),
-        };
+        if request.tool_choice == ToolChoice::Required {
+            body["tool_choice"] = json!({"type": "any"});
+        }
     }
-    body
+    apply_model_request_profile(
+        protocol,
+        request.use_case,
+        profile,
+        effective_output_limit,
+        &mut body,
+    )?;
+    Ok(body)
 }
 
 /// Map an Anthropic `stop_reason` onto the neutral [`StopReason`].
@@ -948,6 +1087,9 @@ struct AnthropicStreamState {
     cache_read: Option<i64>,
     cache_write: Option<i64>,
     error: Option<String>,
+    source_context_key: Option<SourceContextKey>,
+    content_blocks: BTreeMap<usize, Value>,
+    reasoning_observed: bool,
 }
 
 impl AnthropicStreamState {
@@ -978,6 +1120,14 @@ impl AnthropicStreamState {
             "content_block_start" => {
                 let index = v.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 let block = v.get("content_block")?;
+                self.content_blocks.insert(index, block.clone());
+                if matches!(
+                    block.get("type").and_then(Value::as_str),
+                    Some("thinking" | "redacted_thinking")
+                ) || block.get("signature").is_some()
+                {
+                    self.reasoning_observed = true;
+                }
                 if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                     let builder = self.tool_uses.entry(index).or_default();
                     if let Some(id) = block.get("id").and_then(Value::as_str) {
@@ -990,10 +1140,12 @@ impl AnthropicStreamState {
                 None
             }
             "content_block_delta" => {
+                let index = v.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 let d = v.get("delta")?;
                 match d.get("type").and_then(Value::as_str) {
                     Some("text_delta") => {
                         let text = d.get("text")?.as_str()?;
+                        append_block_string(&mut self.content_blocks, index, "text", text);
                         if text.is_empty() {
                             return None;
                         }
@@ -1001,13 +1153,29 @@ impl AnthropicStreamState {
                         Some(text.to_string())
                     }
                     Some("input_json_delta") => {
-                        let index = v.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                         let fragment = d.get("partial_json").and_then(Value::as_str)?;
                         self.tool_uses
                             .entry(index)
                             .or_default()
                             .arguments
                             .push_str(fragment);
+                        None
+                    }
+                    Some("thinking_delta") => {
+                        let thinking = d.get("thinking")?.as_str()?;
+                        self.reasoning_observed = true;
+                        append_block_string(&mut self.content_blocks, index, "thinking", thinking);
+                        None
+                    }
+                    Some("signature_delta") => {
+                        let signature = d.get("signature")?.as_str()?;
+                        self.reasoning_observed = true;
+                        append_block_string(
+                            &mut self.content_blocks,
+                            index,
+                            "signature",
+                            signature,
+                        );
                         None
                     }
                     _ => None,
@@ -1031,8 +1199,40 @@ impl AnthropicStreamState {
     }
 
     fn into_turn(self) -> ModelTurn {
+        let stop_reason = anthropic_stop_reason(self.stop_reason.as_deref());
+        let mut content_blocks = self.content_blocks;
+        for (index, call) in &self.tool_uses {
+            if let Some(block) = content_blocks.get_mut(index)
+                && let Some(object) = block.as_object_mut()
+            {
+                let input = serde_json::from_str(&call.arguments)
+                    .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
+                object.insert("input".to_string(), input);
+            }
+        }
+        let replay_payload = Value::Array(content_blocks.into_values().collect());
+        let tool_calls: Vec<_> = self
+            .tool_uses
+            .into_values()
+            .map(|call| ToolCall {
+                id: call.id,
+                name: call.name,
+                arguments_json: call.arguments,
+            })
+            .collect();
+        let replay = (!tool_calls.is_empty()).then(|| match self.source_context_key {
+            Some(source_context_key) if self.reasoning_observed => ReplayDisposition::Present {
+                envelope: ProviderReplayEnvelope::new(
+                    ReplayCodec::AnthropicContentBlocks,
+                    source_context_key,
+                    replay_payload,
+                ),
+            },
+            Some(source_context_key) => ReplayDisposition::NotRequired { source_context_key },
+            None => ReplayDisposition::legacy_unknown(),
+        });
         ModelTurn {
-            stop_reason: anthropic_stop_reason(self.stop_reason.as_deref()),
+            stop_reason,
             usage: TokenUsage {
                 // Anthropic's `input_tokens` already excludes cache, so it maps as-is.
                 input_tokens: self.input_tokens,
@@ -1041,25 +1241,87 @@ impl AnthropicStreamState {
                 cache_write_tokens: self.cache_write,
             },
             text: self.text,
-            tool_calls: self
-                .tool_uses
-                .into_values()
-                .map(|call| ToolCall {
-                    id: call.id,
-                    name: call.name,
-                    arguments_json: call.arguments,
-                })
-                .collect(),
+            tool_calls,
+            provider_meta: ProviderResponseMeta {
+                reasoning_observed: self.reasoning_observed,
+                reasoning_tokens: None,
+                stop_reason,
+                replay,
+            },
         }
+    }
+}
+
+fn append_block_string(
+    blocks: &mut BTreeMap<usize, Value>,
+    index: usize,
+    field: &str,
+    delta: &str,
+) {
+    let Some(object) = blocks.get_mut(&index).and_then(Value::as_object_mut) else {
+        return;
+    };
+    let current = object.entry(field.to_string()).or_insert_with(|| json!(""));
+    if let Some(value) = current.as_str() {
+        *current = json!(format!("{value}{delta}"));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_provider::ResponseFormatMode;
     use desk_diagnose_core::chat::{ToolCallRef, ToolSpec};
     use desk_utils::ssrf::ProviderSsrfMode;
+
+    fn test_profile() -> ModelRequestProfile {
+        ModelRequestProfile {
+            profile_schema_version: desk_diagnose_core::model_profile::MODEL_PROFILE_SCHEMA_VERSION,
+            request_options: json!({}),
+            output_limit_field: desk_diagnose_core::model_profile::OutputLimitField::MaxTokens,
+            probe_max_output_tokens: 512,
+            runtime_max_output_tokens: 4096,
+            max_context_bytes: 131_072,
+            profile_revision: 1,
+        }
+    }
+
+    fn build_openai_body(model: &str, request: &ModelRequest) -> Value {
+        let profile = test_profile();
+        let effective = resolve_effective_output_limit(
+            request.use_case,
+            profile.probe_max_output_tokens,
+            profile.runtime_max_output_tokens,
+            request.caller_output_hard_cap,
+        )
+        .unwrap();
+        build_openai_body_profiled(
+            model,
+            request,
+            WireProtocol::OpenAiChatCompletions,
+            &profile,
+            effective,
+        )
+        .unwrap()
+    }
+
+    fn build_anthropic_body(model: &str, request: &ModelRequest) -> Value {
+        let profile = test_profile();
+        let effective = resolve_effective_output_limit(
+            request.use_case,
+            profile.probe_max_output_tokens,
+            profile.runtime_max_output_tokens,
+            request.caller_output_hard_cap,
+        )
+        .unwrap();
+        build_anthropic_body_profiled(
+            model,
+            request,
+            WireProtocol::AnthropicMessages,
+            &profile,
+            effective,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn ssrf_mode_defaults_to_relaxed_and_parses_overrides() {
@@ -1150,29 +1412,22 @@ mod tests {
             tool_requirements: desk_diagnose_core::model_capability::ModelRequirements::TEXT_ONLY,
             tool_choice: choice,
             response_format: ResponseFormatSpec::None,
-            max_output_tokens: None,
+            use_case: desk_diagnose_core::model_profile::ModelUseCase::Agent,
+            caller_output_hard_cap: None,
         }
     }
 
     #[test]
-    fn dialect_resolves_case_insensitively_with_openai_fallback() {
+    fn dialect_is_resolved_from_the_typed_protocol_without_fallback() {
         assert_eq!(
-            Dialect::from_provider(Some("anthropic")),
+            Dialect::from_protocol(WireProtocol::AnthropicMessages).unwrap(),
             Dialect::Anthropic
         );
         assert_eq!(
-            Dialect::from_provider(Some(" Anthropic ")),
-            Dialect::Anthropic
-        );
-        assert_eq!(
-            Dialect::from_provider(Some("openai-compatible")),
+            Dialect::from_protocol(WireProtocol::OpenAiChatCompletions).unwrap(),
             Dialect::OpenAiCompatible
         );
-        assert_eq!(
-            Dialect::from_provider(Some("something-else")),
-            Dialect::OpenAiCompatible
-        );
-        assert_eq!(Dialect::from_provider(None), Dialect::OpenAiCompatible);
+        assert!(Dialect::from_protocol(WireProtocol::OpenAiResponses).is_err());
     }
 
     #[test]
@@ -1182,6 +1437,8 @@ mod tests {
         assert!(SignalModelSeam::from_config(&cfg).is_err());
         cfg.base_url = Some("https://api.example.com".to_string());
         cfg.model = Some("gpt-test".to_string());
+        cfg.wire_protocol = Some(WireProtocol::OpenAiChatCompletions);
+        cfg.max_context_bytes = Some(131_072);
         // Still missing api_key.
         assert!(SignalModelSeam::from_config(&cfg).is_err());
         cfg.api_key = Some("sk-secret".to_string());
@@ -1193,16 +1450,13 @@ mod tests {
     #[test]
     fn anthropic_endpoint_and_dialect_from_config() {
         let cfg = ModelProviderConfig {
-            provider: Some("anthropic".to_string()),
+            wire_protocol: Some(WireProtocol::AnthropicMessages),
             model: Some("claude-x".to_string()),
             supports_image_input: true,
             base_url: Some("https://api.anthropic.com/".to_string()),
             api_key: Some("sk-ant".to_string()),
-            max_context_bytes: None,
-            response_format: ResponseFormatMode::JsonObject,
-            execution_mode: Default::default(),
-            max_same_tool_calls_per_turn: crate::model_provider::MAX_SAME_TOOL_CALLS_DEFAULT,
-            max_steps_per_turn: crate::model_provider::MAX_STEPS_DEFAULT,
+            max_context_bytes: Some(131_072),
+            ..Default::default()
         };
         let seam = SignalModelSeam::from_config(&cfg).expect("seam builds");
         assert_eq!(seam.dialect, Dialect::Anthropic);
@@ -1241,9 +1495,9 @@ mod tests {
             body["tools"][0]["function"]["parameters"]["properties"]["detail"]["type"],
             "string"
         );
-        assert_eq!(body["tool_choice"], "auto");
+        assert!(body.get("tool_choice").is_none());
         assert_eq!(body["messages"][2]["role"], "assistant");
-        assert!(body["messages"][2]["content"].is_null());
+        assert_eq!(body["messages"][2]["content"], "");
         assert_eq!(
             body["messages"][2]["tool_calls"][0]["function"]["arguments"],
             r#"{"detail":"brief"}"#
@@ -1256,7 +1510,7 @@ mod tests {
     fn anthropic_body_hoists_system_and_requires_max_tokens() {
         let body = build_anthropic_body("claude-x", &text_request(ResponseFormatSpec::JsonObject));
         assert_eq!(body["model"], "claude-x");
-        assert_eq!(body["max_tokens"], ANTHROPIC_MAX_TOKENS);
+        assert_eq!(body["max_tokens"], 4096);
         // System text is hoisted to the top-level field, not left in messages.
         assert_eq!(body["system"], "you are a diagnostician");
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
@@ -1384,6 +1638,29 @@ mod tests {
         assert_eq!(msgs[0]["content"], "[system-event] task finished: exit 0");
     }
 
+    #[test]
+    fn future_context_summary_is_fenced_user_data_in_both_dialects() {
+        use desk_diagnose_core::chat::{CONTEXT_SUMMARY_CLOSE, CONTEXT_SUMMARY_OPEN};
+        let req = ModelRequest::text_only(
+            vec![
+                ChatMessage::text("s", ChatRole::System, "rules"),
+                ChatMessage::context_summary("cp", "Earlier lossy history"),
+            ],
+            ResponseFormatSpec::None,
+        );
+        let openai = build_openai_body("gpt-test", &req);
+        assert_eq!(openai["messages"][1]["role"], "user");
+        let openai_text = openai["messages"][1]["content"].as_str().unwrap();
+        assert!(openai_text.starts_with(CONTEXT_SUMMARY_OPEN));
+        assert!(openai_text.ends_with(CONTEXT_SUMMARY_CLOSE));
+
+        let anthropic = build_anthropic_body("claude-x", &req);
+        assert_eq!(anthropic["messages"][0]["role"], "user");
+        let anthropic_text = anthropic["messages"][0]["content"].as_str().unwrap();
+        assert!(anthropic_text.starts_with(CONTEXT_SUMMARY_OPEN));
+        assert!(anthropic_text.ends_with(CONTEXT_SUMMARY_CLOSE));
+    }
+
     /// Untrusted command output is fenced as a `user` turn on both dialects and is
     /// never emitted as a `system` message (which would grant device bytes the
     /// authority of the steering prompt). The raw text stays inside the fence.
@@ -1419,17 +1696,14 @@ mod tests {
     }
 
     #[test]
-    fn max_output_tokens_caps_both_dialects_when_set() {
+    fn caller_output_cap_narrows_both_dialects() {
         let mut req = text_request(ResponseFormatSpec::None);
-        req.max_output_tokens = Some(16);
-        // OpenAI: no cap by default, present when requested.
-        assert!(
-            build_openai_body("gpt-test", &text_request(ResponseFormatSpec::None))
-                .get("max_tokens")
-                .is_none()
+        req.caller_output_hard_cap = Some(16);
+        assert_eq!(
+            build_openai_body("gpt-test", &text_request(ResponseFormatSpec::None))["max_tokens"],
+            4096
         );
         assert_eq!(build_openai_body("gpt-test", &req)["max_tokens"], 16);
-        // Anthropic: the override replaces the default ceiling.
         assert_eq!(build_anthropic_body("claude-x", &req)["max_tokens"], 16);
     }
 
@@ -1539,6 +1813,63 @@ mod tests {
         assert_eq!(turn.tool_calls[0].id, "toolu_9");
         assert_eq!(turn.tool_calls[0].name, "exec_command");
         assert_eq!(turn.tool_calls[0].arguments_json, r#"{"command":"ps aux"}"#);
+    }
+
+    #[test]
+    fn openai_reasoning_content_and_anthropic_blocks_are_retained_as_opaque_replay() {
+        let openai_source = SourceContextKey::derive(
+            WireProtocol::OpenAiChatCompletions,
+            "oss:connection:2",
+            "oss:model:3",
+            "deepseek-r1",
+        );
+        let mut openai = OpenAiStreamState {
+            source_context_key: Some(openai_source),
+            ..Default::default()
+        };
+        for payload in [
+            r#"{"choices":[{"delta":{"reasoning_content":"step "}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_content":"two","tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_system_info","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ] {
+            let _ = openai.apply(payload);
+        }
+        let turn = openai.into_turn();
+        let Some(ReplayDisposition::Present { envelope }) = turn.provider_meta.replay else {
+            panic!("OpenAI-compatible reasoning tool call must retain replay");
+        };
+        assert_eq!(envelope.codec, ReplayCodec::OpenAiReasoningContent);
+        assert_eq!(envelope.payload, json!("step two"));
+
+        let anthropic_source = SourceContextKey::derive(
+            WireProtocol::AnthropicMessages,
+            "oss:connection:2",
+            "oss:model:3",
+            "claude-x",
+        );
+        let mut anthropic = AnthropicStreamState {
+            source_context_key: Some(anthropic_source),
+            ..Default::default()
+        };
+        for payload in [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-only"}}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"opaque"}}"#,
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_system_info","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}"#,
+        ] {
+            let _ = anthropic.apply(payload);
+        }
+        let turn = anthropic.into_turn();
+        assert!(turn.provider_meta.reasoning_observed);
+        let Some(ReplayDisposition::Present { envelope }) = turn.provider_meta.replay else {
+            panic!("Anthropic signature-only thinking must retain replay");
+        };
+        assert_eq!(envelope.codec, ReplayCodec::AnthropicContentBlocks);
+        let blocks = envelope.payload.as_array().unwrap();
+        assert_eq!(blocks[0]["signature"], "sig-only");
+        assert_eq!(blocks[1]["type"], "redacted_thinking");
+        assert_eq!(blocks[2]["type"], "tool_use");
     }
 
     /// A mid-stream Anthropic `error` event is surfaced.

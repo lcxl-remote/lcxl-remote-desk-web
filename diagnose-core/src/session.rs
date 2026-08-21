@@ -21,7 +21,49 @@ use std::collections::HashSet;
 use desk_agent_protocol::AgentScope;
 use serde::{Deserialize, Serialize};
 
-use crate::chat::TokenUsage;
+use crate::chat::{ChatRole, TokenUsage};
+use crate::model_context::{ContextNotice, MAX_CONTEXT_NOTICES, ModelContextState};
+use crate::replay::{ReplayDisposition, ReplayUnavailableReason};
+
+pub const CONVERSATION_SCHEMA_VERSION: u16 = 1;
+/// Opaque replay is bounded independently from visible transcript text.
+pub const MAX_REPLAY_ENVELOPE_BYTES: usize = 256 * 1024;
+pub const MAX_SESSION_REPLAY_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Debug)]
+pub enum SessionDecodeError {
+    Json(serde_json::Error),
+    UnsupportedVersion(u64),
+    MissingReplayDisposition(String),
+    PersistedContextSummary(String),
+}
+
+impl std::fmt::Display for SessionDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Json(error) => write!(f, "invalid agent session JSON: {error}"),
+            Self::UnsupportedVersion(version) => {
+                write!(f, "unsupported conversation schema version {version}")
+            }
+            Self::MissingReplayDisposition(message_id) => write!(
+                f,
+                "assistant tool-call message {message_id} has no replay disposition"
+            ),
+            Self::PersistedContextSummary(message_id) => write!(
+                f,
+                "synthetic context summary {message_id} must not be persisted in conversation"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SessionDecodeError {}
+
+impl From<serde_json::Error> for SessionDecodeError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
 
 /// The conversational turn machine. A new turn may be claimed only from
 /// [`TurnState::Idle`]; `claim_turn` is the only `Idle → Running` transition.
@@ -244,7 +286,16 @@ pub struct PersistedAgentSession {
     /// User-facing surface that created this session.
     #[serde(default)]
     pub surface: AgentSessionSurface,
+    /// Version of persisted conversation/replay/context semantics. Fresh
+    /// sessions always write version 1; storage adapters explicitly upgrade
+    /// legacy version 0 before saving.
+    #[serde(default)]
+    pub conversation_schema_version: u16,
     pub conversation: Vec<crate::chat::ChatMessage>,
+    #[serde(default)]
+    pub model_context_state: ModelContextState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_notices: Vec<ContextNotice>,
 
     // ---- Persistent security subject (validated each follow-up; never rebinds) ----
     pub actor_id: String,
@@ -334,6 +385,101 @@ pub enum SubjectMismatch {
 }
 
 impl PersistedAgentSession {
+    /// Replace oversized/old opaque replay payloads with fail-closed tombstones.
+    /// Visible transcript fields and tool grouping are never removed.
+    pub fn enforce_replay_storage_limits(&mut self) {
+        let mut total = 0usize;
+        for message in &mut self.conversation {
+            let Some(ReplayDisposition::Present { envelope }) = message.replay_disposition.as_ref()
+            else {
+                continue;
+            };
+            let cost = envelope.encoded_cost();
+            if cost > MAX_REPLAY_ENVELOPE_BYTES {
+                let source_context_key = envelope.source_context_key.clone();
+                message.replay_disposition = Some(ReplayDisposition::Unavailable {
+                    source_context_key: Some(source_context_key),
+                    reason: ReplayUnavailableReason::EvictedByStorageLimit,
+                });
+            } else {
+                total = total.saturating_add(cost);
+            }
+        }
+        if total <= MAX_SESSION_REPLAY_BYTES {
+            return;
+        }
+        for message in &mut self.conversation {
+            let Some(ReplayDisposition::Present { envelope }) = message.replay_disposition.as_ref()
+            else {
+                continue;
+            };
+            let cost = envelope.encoded_cost();
+            let source_context_key = envelope.source_context_key.clone();
+            message.replay_disposition = Some(ReplayDisposition::Unavailable {
+                source_context_key: Some(source_context_key),
+                reason: ReplayUnavailableReason::EvictedByStorageLimit,
+            });
+            total = total.saturating_sub(cost);
+            if total <= MAX_SESSION_REPLAY_BYTES {
+                break;
+            }
+        }
+    }
+
+    /// Apply storage-only replay bounds before encoding durable state.
+    pub fn encode_json_for_storage(&mut self) -> Result<String, serde_json::Error> {
+        self.enforce_replay_storage_limits();
+        serde_json::to_string(self)
+    }
+
+    /// Decode the persisted envelope with an explicit legacy-v0 upgrade. Unknown
+    /// versions fail closed instead of being partially interpreted by serde.
+    pub fn decode_json(input: &str) -> Result<Self, SessionDecodeError> {
+        let value: serde_json::Value = serde_json::from_str(input)?;
+        let version = value
+            .get("conversation_schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if version > u64::from(CONVERSATION_SCHEMA_VERSION) {
+            return Err(SessionDecodeError::UnsupportedVersion(version));
+        }
+        let mut session: Self = serde_json::from_value(value)?;
+        if let Some(message) = session
+            .conversation
+            .iter()
+            .find(|message| message.role == ChatRole::ContextSummary)
+        {
+            return Err(SessionDecodeError::PersistedContextSummary(
+                message.message_id.clone(),
+            ));
+        }
+        if version == 0 {
+            session.conversation_schema_version = CONVERSATION_SCHEMA_VERSION;
+            session.model_context_state = ModelContextState::default();
+            session.context_notices.clear();
+            for message in &mut session.conversation {
+                if message.role == crate::chat::ChatRole::Assistant
+                    && !message.tool_calls.is_empty()
+                    && message.replay_disposition.is_none()
+                {
+                    message.replay_disposition = Some(ReplayDisposition::legacy_unknown());
+                }
+            }
+            return Ok(session);
+        }
+        for message in &session.conversation {
+            if message.role == crate::chat::ChatRole::Assistant
+                && !message.tool_calls.is_empty()
+                && message.replay_disposition.is_none()
+            {
+                return Err(SessionDecodeError::MissingReplayDisposition(
+                    message.message_id.clone(),
+                ));
+            }
+        }
+        Ok(session)
+    }
+
     /// Start a brand-new session bound to a subject, with a turn-boundary scope.
     pub fn new(
         conversation_id: impl Into<String>,
@@ -347,7 +493,10 @@ impl PersistedAgentSession {
             conversation_id: conversation_id.into(),
             client_conversation_id: None,
             surface: AgentSessionSurface::Unknown,
+            conversation_schema_version: CONVERSATION_SCHEMA_VERSION,
             conversation: Vec::new(),
+            model_context_state: ModelContextState::default(),
+            context_notices: Vec::new(),
             actor_id: actor_id.into(),
             device_id: device_id.into(),
             policy_revision,
@@ -386,6 +535,20 @@ impl PersistedAgentSession {
         if self.surface == AgentSessionSurface::Unknown {
             self.surface = surface;
         }
+    }
+
+    /// Add a deterministic per-turn context notice without exposing omitted
+    /// content. The bounded list is transcript metadata, not model history.
+    pub fn add_context_notice(&mut self, notice: ContextNotice) -> bool {
+        if self.context_notices.iter().any(|item| item.id == notice.id) {
+            return false;
+        }
+        self.context_notices.push(notice);
+        if self.context_notices.len() > MAX_CONTEXT_NOTICES {
+            let excess = self.context_notices.len() - MAX_CONTEXT_NOTICES;
+            self.context_notices.drain(..excess);
+        }
+        true
     }
 
     /// Validate that a follow-up turn comes from the same subject. The connection
@@ -1722,7 +1885,7 @@ mod tests {
         s.trigger_origin = TriggerOrigin::ExecCompletion;
         s.add_pending_auto_trigger(pending("ev-a", "2026-07-20T00:00:01Z"));
         let json = serde_json::to_string(&s).unwrap();
-        let back: PersistedAgentSession = serde_json::from_str(&json).unwrap();
+        let back = PersistedAgentSession::decode_json(&json).unwrap();
         assert_eq!(back, s);
         assert_eq!(back.trigger_origin, TriggerOrigin::ExecCompletion);
         assert_eq!(back.pending_auto_triggers.len(), 1);
@@ -1732,6 +1895,102 @@ mod tests {
         old.as_object_mut().unwrap().remove("pending_auto_triggers");
         let back: PersistedAgentSession = serde_json::from_value(old).unwrap();
         assert!(back.pending_auto_triggers.is_empty());
+    }
+
+    #[test]
+    fn decoder_upgrades_v0_tool_calls_and_rejects_unknown_versions() {
+        use crate::chat::ToolCallRef;
+        let mut legacy = session();
+        legacy
+            .conversation
+            .push(crate::chat::ChatMessage::assistant_tool_calls(
+                "a1",
+                "",
+                vec![ToolCallRef {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    arguments_json: "{}".into(),
+                }],
+            ));
+        let mut value = serde_json::to_value(legacy).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("conversation_schema_version");
+        value["conversation"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("replay_disposition");
+        let upgraded = PersistedAgentSession::decode_json(&value.to_string()).unwrap();
+        assert_eq!(
+            upgraded.conversation_schema_version,
+            CONVERSATION_SCHEMA_VERSION
+        );
+        assert!(matches!(
+            upgraded.conversation[0].replay_disposition,
+            Some(ReplayDisposition::Unavailable { .. })
+        ));
+
+        value["conversation_schema_version"] = serde_json::json!(99);
+        assert!(matches!(
+            PersistedAgentSession::decode_json(&value.to_string()),
+            Err(SessionDecodeError::UnsupportedVersion(99))
+        ));
+
+        let mut invalid = session();
+        invalid
+            .conversation
+            .push(crate::chat::ChatMessage::context_summary(
+                "cp",
+                "must remain synthetic",
+            ));
+        assert!(matches!(
+            PersistedAgentSession::decode_json(&serde_json::to_string(&invalid).unwrap()),
+            Err(SessionDecodeError::PersistedContextSummary(id)) if id == "cp"
+        ));
+    }
+
+    #[test]
+    fn storage_limit_tombstones_opaque_replay_without_deleting_transcript() {
+        use crate::chat::ToolCallRef;
+        use crate::model_profile::WireProtocol;
+        use crate::replay::{ProviderReplayEnvelope, ReplayCodec, SourceContextKey};
+
+        let mut value = session();
+        let source = SourceContextKey::derive(
+            WireProtocol::OpenAiChatCompletions,
+            "connection-1",
+            "model-1",
+            "model",
+        );
+        value
+            .conversation
+            .push(crate::chat::ChatMessage::assistant_tool_calls_with_replay(
+                "a1",
+                "visible",
+                vec![ToolCallRef {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    arguments_json: "{}".into(),
+                }],
+                ReplayDisposition::Present {
+                    envelope: ProviderReplayEnvelope::new(
+                        ReplayCodec::OpenAiReasoningContent,
+                        source.clone(),
+                        serde_json::Value::String("x".repeat(MAX_REPLAY_ENVELOPE_BYTES)),
+                    ),
+                },
+            ));
+
+        let encoded = value.encode_json_for_storage().unwrap();
+        assert!(encoded.contains("visible"));
+        assert!(matches!(
+            value.conversation[0].replay_disposition,
+            Some(ReplayDisposition::Unavailable {
+                source_context_key: Some(ref key),
+                reason: ReplayUnavailableReason::EvictedByStorageLimit,
+            }) if key == &source
+        ));
     }
 
     fn pending(event_id: &str, since: &str) -> PendingAutoTrigger {

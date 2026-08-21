@@ -40,8 +40,10 @@ use desk_agent_protocol::{AgentError, AgentScope, Capability, ExecutionMode};
 use crate::agent_loop::{CircuitBreakReason, LoopDeps, LoopOutcome, run_agent_turn};
 use crate::agentic_prompt::build_agentic_system_message;
 use crate::chat::{ChatMessage, ChatRole, ModelTurn, StopReason, ToolCall};
+use crate::model_profile::WireProtocol;
 use crate::prompt::ResponseFormatSpec;
 use crate::registry::{RegisteredTool, ToolEffect};
+use crate::replay::{ProviderResponseMeta, ReplayDisposition, SourceContextKey};
 use crate::seam::{
     ClaimError, ClaimTurnParams, ExecContext, ExecIdentity, ExecOutcome, ModelRequest, ModelSeam,
     NullTurnSink, SessionSeam, ToolRunOutput, ToolSeam, TurnSink,
@@ -108,6 +110,24 @@ struct CapturedModel {
 }
 #[async_trait(?Send)]
 impl ModelSeam for CapturedModel {
+    async fn context_policy(
+        &self,
+        _requirements: crate::model_capability::ModelRequirements,
+    ) -> Result<crate::model_context::PinnedContextPolicy, AgentError> {
+        crate::model_context::PinnedContextPolicy::window(
+            SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test"),
+            1,
+            crate::MIN_MODEL_CONTEXT_BYTES,
+        )
+        .map_err(|error| AgentError {
+            kind: desk_agent_protocol::AgentErrorKind::Internal,
+            message: error.to_string(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        })
+    }
+
     async fn call(
         &self,
         request: ModelRequest,
@@ -229,11 +249,14 @@ fn answer(text: &str) -> ModelTurn {
     ModelTurn {
         text: text.into(),
         stop_reason: StopReason::EndTurn,
+        provider_meta: ProviderResponseMeta::without_reasoning(StopReason::EndTurn),
         ..Default::default()
     }
 }
 
 fn tool_use(id: &str, name: &str) -> ModelTurn {
+    let source_context_key =
+        SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test");
     ModelTurn {
         stop_reason: StopReason::ToolUse,
         tool_calls: vec![ToolCall {
@@ -241,6 +264,11 @@ fn tool_use(id: &str, name: &str) -> ModelTurn {
             name: name.into(),
             arguments_json: "{}".into(),
         }],
+        provider_meta: ProviderResponseMeta {
+            stop_reason: StopReason::ToolUse,
+            replay: Some(ReplayDisposition::NotRequired { source_context_key }),
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
@@ -267,7 +295,6 @@ fn deps<'a>(
         registry,
         response_format: ResponseFormatSpec::None,
         system_prompt: build_agentic_system_message(None),
-        max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
         max_same_tool_per_turn: crate::MAX_SAME_TOOL_PER_TURN,
         clock,

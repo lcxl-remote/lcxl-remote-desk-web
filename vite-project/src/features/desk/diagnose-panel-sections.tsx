@@ -249,10 +249,18 @@ export function ConversationTimeline({
 }: {
     items: DiagnoseTimelineItem[]
 }) {
+    const { t } = useTranslation()
     if (items.length === 0) return null
     return (
         <div className="flex flex-col gap-2">
             {items.map((item) => {
+                if (item.kind === "context_notice") {
+                    return (
+                        <div key={item.id} role="note" className="rounded-md border border-amber-400/30 bg-amber-400/10 px-2.5 py-1.5 text-xs text-amber-100">
+                            {t("pages.desk.diagnose.contextTrimmed")}
+                        </div>
+                    )
+                }
                 if (item.kind === "assistant") {
                     return (
                         <div key={item.id} className="flex flex-col gap-1.5">

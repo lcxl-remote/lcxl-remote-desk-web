@@ -24,7 +24,8 @@ const RESPONSE_FORMATS = ["none", "json_object", "json_schema"] as const
 
 // Providers the backend maps to a wire adapter. "openai-compatible" covers
 // OpenAI and any OpenAI-compatible gateway; "anthropic" uses the Messages API.
-const PROVIDERS = ["openai-compatible", "anthropic"] as const
+const PROVIDERS = ["open_ai_chat_completions", "anthropic_messages"] as const
+const PROFILE_PRESETS = ["standard", "deepseek", "anthropic_adaptive", "anthropic_manual", "custom"] as const
 
 // The execution modes the confirm-execute flow supports. `session_approved` /
 // `automated` are frozen in the protocol but not selectable yet (the backend
@@ -38,13 +39,24 @@ const SAME_TOOL_LIMIT_MAX = 50
 const SAME_TOOL_LIMIT_DEFAULT = 20
 
 const providerSchema = z.object({
-    provider: z.enum(PROVIDERS),
+    wire_protocol: z.string().refine(value => PROVIDERS.includes(value as (typeof PROVIDERS)[number])),
     model: z.string(),
     base_url: z.string(),
     api_key: z.string(),
     clear_api_key: z.boolean(),
     supports_image_input: z.boolean(),
-    max_context_bytes: z.number().min(0),
+    max_context_bytes: z.number().int().min(4096).max(16777216),
+    // The preset is an editor convenience, not part of the persisted profile.
+    // Radix Select can briefly unregister it during hydration, so preserve the
+    // hydrated custom-profile semantics instead of blocking an otherwise valid save.
+    profile_preset: z.enum(PROFILE_PRESETS).catch("custom"),
+    request_options_text: z.string().refine(value => {
+        try { return typeof JSON.parse(value) === "object" && !Array.isArray(JSON.parse(value)) }
+        catch { return false }
+    }),
+    output_limit_field: z.string(),
+    probe_max_output_tokens: z.number().int().positive(),
+    runtime_max_output_tokens: z.number().int().positive(),
     response_format: z.enum(RESPONSE_FORMATS),
     execution_mode: z.enum(EXECUTION_MODES),
     max_steps_per_turn: z
@@ -64,6 +76,28 @@ type ProviderFormValues = z.infer<typeof providerSchema>
 function pendingApiKey(values: ProviderFormValues): string | undefined {
     if (values.clear_api_key) return ""
     return values.api_key.trim() === "" ? undefined : values.api_key
+}
+
+export function presetProfile(preset: (typeof PROFILE_PRESETS)[number]) {
+    if (preset === "deepseek") {
+        return {
+            requestOptions: { thinking: { type: "disabled" } },
+            probeBudget: 512,
+            runtimeBudget: 4096,
+        }
+    }
+    if (preset === "anthropic_adaptive") {
+        return {
+            requestOptions: { thinking: { type: "adaptive", display: "omitted" } },
+            probeBudget: 4096,
+            runtimeBudget: 8192,
+        }
+    }
+    return { requestOptions: {}, probeBudget: 512, runtimeBudget: 4096 }
+}
+
+export function isProfilePresetSelectable(preset: (typeof PROFILE_PRESETS)[number]): boolean {
+    return preset !== "anthropic_manual"
 }
 
 // Render the central execution-grant choices.
@@ -125,13 +159,18 @@ export function AiModelSettings() {
     const form = useForm<ProviderFormValues>({
         resolver: zodResolver(providerSchema),
         defaultValues: {
-            provider: "openai-compatible",
+            wire_protocol: "open_ai_chat_completions",
             model: "",
             base_url: "",
             api_key: "",
             clear_api_key: false,
             supports_image_input: false,
             max_context_bytes: 0,
+            profile_preset: "standard",
+            request_options_text: "{}",
+            output_limit_field: "max_tokens",
+            probe_max_output_tokens: 512,
+            runtime_max_output_tokens: 4096,
             response_format: "json_object",
             execution_mode: "confirm_each_action",
             max_steps_per_turn: MAX_STEPS_DEFAULT,
@@ -148,21 +187,19 @@ export function AiModelSettings() {
             const rf = RESPONSE_FORMATS.includes(data.response_format as (typeof RESPONSE_FORMATS)[number])
                 ? (data.response_format as (typeof RESPONSE_FORMATS)[number])
                 : "json_object"
-            // Normalize like the backend (trim + lowercase) before matching, so a
-            // stored "Anthropic" / " anthropic " is recognized rather than being
-            // silently switched to openai-compatible. Unknown / legacy values map
-            // to openai-compatible (the backend's fallback adapter).
-            const provider = (data.provider ?? "").trim().toLowerCase() === "anthropic"
-                ? "anthropic"
-                : "openai-compatible"
             form.reset({
-                provider,
+                wire_protocol: data.wire_protocol ?? "",
                 model: data.model ?? "",
                 base_url: data.base_url ?? "",
                 api_key: "",
                 clear_api_key: false,
                 supports_image_input: data.supports_image_input,
                 max_context_bytes: data.max_context_bytes ?? 0,
+                profile_preset: "custom",
+                request_options_text: JSON.stringify(data.request_options ?? {}, null, 2),
+                output_limit_field: data.output_limit_field,
+                probe_max_output_tokens: data.probe_max_output_tokens,
+                runtime_max_output_tokens: data.runtime_max_output_tokens,
                 response_format: rf,
                 execution_mode: normalizeExecutionMode(data.execution_mode),
                 max_steps_per_turn: data.max_steps_per_turn ?? MAX_STEPS_DEFAULT,
@@ -185,11 +222,16 @@ export function AiModelSettings() {
         const api_key = pendingApiKey(values)
 
         const payload: ModelProviderUpdate = {
-            provider: values.provider,
+            expected_connection_revision: providerResponse?.data?.connection_revision,
+            expected_profile_revision: providerResponse?.data?.profile_revision,
+            wire_protocol: values.wire_protocol,
             model: values.model,
             base_url: values.base_url,
-            // 0 means "use the default budget" — leave the stored value unchanged.
-            max_context_bytes: values.max_context_bytes > 0 ? values.max_context_bytes : undefined,
+            max_context_bytes: values.max_context_bytes,
+            request_options: JSON.parse(values.request_options_text),
+            output_limit_field: values.output_limit_field,
+            probe_max_output_tokens: values.probe_max_output_tokens,
+            runtime_max_output_tokens: values.runtime_max_output_tokens,
             response_format: values.response_format,
             execution_mode: values.execution_mode,
             max_steps_per_turn: values.max_steps_per_turn,
@@ -224,12 +266,18 @@ export function AiModelSettings() {
     // backend-provided reason remains visible to the operator.
     const onTestConnection = async () => {
         try {
+            if (!(await form.trigger())) return
             const values = form.getValues()
             const payload: ProviderTestParams = {
-                provider: values.provider,
+                wire_protocol: values.wire_protocol,
                 model: values.model,
                 supports_image_input: values.supports_image_input,
                 base_url: values.base_url,
+                request_options: JSON.parse(values.request_options_text),
+                output_limit_field: values.output_limit_field,
+                probe_max_output_tokens: values.probe_max_output_tokens,
+                runtime_max_output_tokens: values.runtime_max_output_tokens,
+                max_context_bytes: values.max_context_bytes,
                 api_key: pendingApiKey(values),
             }
             const res = await testProvider({ data: payload })
@@ -283,6 +331,20 @@ export function AiModelSettings() {
                 <p className="mt-2 text-sm text-amber-600 dark:text-amber-500">
                     {t("pages.aiModel.settings.tlsHint")}
                 </p>
+                {providerResponse?.data && (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                        {t("pages.aiModel.settings.revisions", {
+                            connection: providerResponse.data.connection_revision,
+                            profile: providerResponse.data.profile_revision,
+                        })}
+                        {" · "}
+                        {providerResponse.data.probe_observation
+                            ? t(providerResponse.data.probe_observation.current
+                                ? "pages.aiModel.settings.observationCurrent"
+                                : "pages.aiModel.settings.observationStale", { time: providerResponse.data.probe_observation.tested_at })
+                            : t("pages.aiModel.settings.observationMissing")}
+                    </p>
+                )}
             </div>
 
             <Card>
@@ -298,7 +360,7 @@ export function AiModelSettings() {
                             <div className="grid gap-6 md:grid-cols-2">
                                 <FormField
                                     control={form.control}
-                                    name="provider"
+                                    name="wire_protocol"
                                     render={({ field }) => (
                                         <FormItem>
                                             <FormLabel>{t("pages.aiModel.settings.provider")}</FormLabel>
@@ -313,8 +375,13 @@ export function AiModelSettings() {
                                                     </SelectTrigger>
                                                 </FormControl>
                                                 <SelectContent>
-                                                    <SelectItem value="openai-compatible">{t("pages.aiModel.settings.provider.openaiCompatible")}</SelectItem>
-                                                    <SelectItem value="anthropic">{t("pages.aiModel.settings.provider.anthropic")}</SelectItem>
+                                                    <SelectItem value="open_ai_chat_completions">{t("pages.aiModel.settings.provider.openaiCompatible")}</SelectItem>
+                                                    <SelectItem value="anthropic_messages">{t("pages.aiModel.settings.provider.anthropic")}</SelectItem>
+                                                    {!PROVIDERS.includes(field.value as (typeof PROVIDERS)[number]) && field.value && (
+                                                        <SelectItem value={field.value} disabled>
+                                                            {t("pages.aiModel.settings.provider.unsupported", { protocol: field.value })}
+                                                        </SelectItem>
+                                                    )}
                                                 </SelectContent>
                                             </Select>
                                             <FormDescription>
@@ -343,7 +410,7 @@ export function AiModelSettings() {
                                 control={form.control}
                                 name="base_url"
                                 render={({ field }) => {
-                                    const isAnthropic = form.watch("provider") === "anthropic"
+                                    const isAnthropic = form.watch("wire_protocol") === "anthropic_messages"
                                     return (
                                         <FormItem>
                                             <FormLabel>{t("pages.aiModel.settings.baseUrl")}</FormLabel>
@@ -437,6 +504,115 @@ export function AiModelSettings() {
                             <div className="grid gap-6 md:grid-cols-2">
                                 <FormField
                                     control={form.control}
+                                    name="profile_preset"
+                                    render={({ field }) => (
+                                        <FormItem>
+                                            <FormLabel>{t("pages.aiModel.settings.profilePreset")}</FormLabel>
+                                            <Select
+                                                value={field.value}
+                                                onValueChange={(value: (typeof PROFILE_PRESETS)[number]) => {
+                                                    field.onChange(value)
+                                                    if (value !== "custom") {
+                                                        const profile = presetProfile(value)
+                                                        form.setValue("request_options_text", JSON.stringify(profile.requestOptions, null, 2))
+                                                        form.setValue("probe_max_output_tokens", profile.probeBudget)
+                                                        form.setValue("runtime_max_output_tokens", profile.runtimeBudget)
+                                                        form.setValue("output_limit_field", "max_tokens")
+                                                        if (value.startsWith("anthropic")) {
+                                                            form.setValue("wire_protocol", "anthropic_messages")
+                                                        }
+                                                    }
+                                                }}
+                                            >
+                                                <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                                                <SelectContent>
+                                                    {PROFILE_PRESETS.map(preset => (
+                                                        <SelectItem
+                                                            key={preset}
+                                                            value={preset}
+                                                            disabled={!isProfilePresetSelectable(preset)}
+                                                        >
+                                                            {t(`pages.aiModel.settings.preset.${preset}`)}
+                                                        </SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
+                                            <FormDescription>
+                                                {t("pages.aiModel.settings.preset.manualUnavailable")}
+                                            </FormDescription>
+                                        </FormItem>
+                                    )}
+                                />
+                                <FormField
+                                    control={form.control}
+                                    name="output_limit_field"
+                                    render={({ field }) => (
+                                        <FormItem>
+                                            <FormLabel>{t("pages.aiModel.settings.outputLimitField")}</FormLabel>
+                                            <Select value={field.value} onValueChange={field.onChange}>
+                                                <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                                                <SelectContent>
+                                                    <SelectItem value="max_tokens">max_tokens</SelectItem>
+                                                    <SelectItem value="max_completion_tokens">max_completion_tokens</SelectItem>
+                                                </SelectContent>
+                                            </Select>
+                                        </FormItem>
+                                    )}
+                                />
+                            </div>
+
+                            <FormField
+                                control={form.control}
+                                name="request_options_text"
+                                render={({ field }) => (
+                                    <FormItem>
+                                        <FormLabel>{t("pages.aiModel.settings.requestOptions")}</FormLabel>
+                                        <FormControl>
+                                            <textarea
+                                                className="min-h-32 w-full rounded-md border bg-background px-3 py-2 font-mono text-xs"
+                                                {...field}
+                                                onChange={event => {
+                                                    field.onChange(event)
+                                                    form.setValue("profile_preset", "custom")
+                                                }}
+                                            />
+                                        </FormControl>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+
+                            <div className="grid gap-6 md:grid-cols-2">
+                                <FormField control={form.control} name="probe_max_output_tokens" render={({ field }) => (
+                                    <FormItem>
+                                        <FormLabel>{t("pages.aiModel.settings.probeBudget")}</FormLabel>
+                                        <FormControl><Input type="number" min={1} {...field} onChange={event => field.onChange(Number(event.target.value))} /></FormControl>
+                                        <FormMessage />
+                                    </FormItem>
+                                )} />
+                                <FormField control={form.control} name="runtime_max_output_tokens" render={({ field }) => (
+                                    <FormItem>
+                                        <FormLabel>{t("pages.aiModel.settings.runtimeBudget")}</FormLabel>
+                                        <FormControl><Input type="number" min={1} {...field} onChange={event => field.onChange(Number(event.target.value))} /></FormControl>
+                                        <FormMessage />
+                                    </FormItem>
+                                )} />
+                            </div>
+
+                            <div className="space-y-2">
+                                <div className="text-sm font-medium leading-none">
+                                    {t("pages.aiModel.settings.requestPreview")}
+                                </div>
+                                <pre className="max-h-40 overflow-auto rounded-md bg-muted p-3 text-xs">{JSON.stringify({
+                                    model: form.watch("model"),
+                                    [form.watch("output_limit_field")]: form.watch("runtime_max_output_tokens"),
+                                    ...(() => { try { return JSON.parse(form.watch("request_options_text") || "{}") } catch { return {} } })(),
+                                }, null, 2)}</pre>
+                            </div>
+
+                            <div className="grid gap-6 md:grid-cols-2">
+                                <FormField
+                                    control={form.control}
                                     name="response_format"
                                     render={({ field }) => (
                                         <FormItem>
@@ -474,6 +650,8 @@ export function AiModelSettings() {
                                                 <Input
                                                     key={`max-context-${field.value ?? "empty"}`}
                                                     type="number"
+                                                    min={4096}
+                                                    max={16777216}
                                                     {...field}
                                                     value={field.value ?? ""}
                                                     onChange={e => field.onChange(e.target.value === "" ? 0 : Number(e.target.value))}
@@ -589,11 +767,11 @@ export function AiModelSettings() {
                             />
 
                             <div className="flex justify-end gap-2">
-                                <Button type="button" variant="outline" onClick={onTestConnection} disabled={isTesting || isProviderUpdating}>
+                                <Button type="button" variant="outline" onClick={onTestConnection} disabled={isTesting || isProviderUpdating || !PROVIDERS.includes(form.watch("wire_protocol") as (typeof PROVIDERS)[number])}>
                                     {isTesting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PlugZap className="mr-2 h-4 w-4" />}
                                     {t("pages.aiModel.settings.testConnection")}
                                 </Button>
-                                <Button type="submit" disabled={isProviderUpdating}>
+                                <Button type="submit" disabled={isProviderUpdating || !PROVIDERS.includes(form.watch("wire_protocol") as (typeof PROVIDERS)[number])}>
                                     {isProviderUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t("pages.system.settings.save")}
                                 </Button>

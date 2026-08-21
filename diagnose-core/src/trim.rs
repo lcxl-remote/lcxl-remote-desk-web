@@ -14,15 +14,43 @@
 //! mutates the stored conversation (which the manager persists and reconciles by
 //! `message_id`).
 
-use crate::chat::{ChatMessage, ChatRole};
+use serde::Serialize;
+
+use crate::chat::{ChatMessage, ChatRole, ToolCallRef, frame_context_summary};
 
 /// The serialized byte cost charged against the budget for one message. Uses the
 /// JSON encoding (what actually crosses to the gateway) and falls back to the text
 /// length if encoding somehow fails.
-fn message_cost(msg: &ChatMessage) -> usize {
-    serde_json::to_string(msg)
-        .map(|s| s.len())
-        .unwrap_or(msg.text.len())
+pub fn model_context_cost(msg: &ChatMessage) -> usize {
+    #[derive(Serialize)]
+    struct ModelContextCostView<'a> {
+        role: ChatRole,
+        text: &'a str,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        tool_calls: &'a Vec<ToolCallRef>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_call_id: &'a Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        background_task_id: &'a Option<String>,
+    }
+
+    let framed_summary =
+        (msg.role == ChatRole::ContextSummary).then(|| frame_context_summary(&msg.text));
+    let model_text = framed_summary.as_deref().unwrap_or(&msg.text);
+    let base = serde_json::to_string(&ModelContextCostView {
+        role: msg.role,
+        text: model_text,
+        tool_calls: &msg.tool_calls,
+        tool_call_id: &msg.tool_call_id,
+        background_task_id: &msg.background_task_id,
+    })
+    .map(|s| s.len())
+    .unwrap_or(msg.text.len());
+    base.saturating_add(
+        msg.replay_disposition
+            .as_ref()
+            .map_or(0, crate::replay::ReplayDisposition::model_context_cost),
+    )
 }
 
 /// Return the trailing window of `messages` that fits `max_bytes`, never starting
@@ -44,7 +72,7 @@ pub fn trim_conversation(messages: &[ChatMessage], max_bytes: usize) -> Vec<Chat
     let mut start = messages.len();
     let mut used = 0usize;
     for (idx, msg) in messages.iter().enumerate().rev() {
-        let cost = message_cost(msg);
+        let cost = model_context_cost(msg);
         if start != messages.len() && used + cost > max_bytes {
             break;
         }
@@ -192,5 +220,26 @@ mod tests {
             ChatRole::Tool,
             "window starts on a safe boundary"
         );
+    }
+
+    #[test]
+    fn context_cost_ignores_server_id_and_image_payload() {
+        let base = user("short-id", "same model content");
+        let mut metadata_heavy = base
+            .clone()
+            .with_image(format!("data:image/png;base64,{}", "A".repeat(100_000)));
+        metadata_heavy.message_id = "server-only-id".repeat(1000);
+        assert_eq!(
+            model_context_cost(&base),
+            model_context_cost(&metadata_heavy)
+        );
+    }
+
+    #[test]
+    fn context_cost_counts_tool_protocol_payload() {
+        let short = calls("a1", "c1");
+        let mut long = short.clone();
+        long.tool_calls[0].arguments_json = format!("{{\"value\":\"{}\"}}", "x".repeat(1000));
+        assert!(model_context_cost(&long) > model_context_cost(&short) + 900);
     }
 }

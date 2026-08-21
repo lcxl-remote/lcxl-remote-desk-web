@@ -147,7 +147,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
         if (activeRequest !== null && snapshot.requestId !== activeRequest) return;
         activeRequestRef.current = null;
         lastAppliedSeqRef.current = snapshot.seq;
-        const history = buildSnapshotTranscript(snapshot.messages);
+        const history = buildSnapshotTranscript(snapshot.messages, snapshot.contextNotices ?? []);
         // The snapshot is the whole settled transcript, so collapse any stale live
         // display into it. A non-empty transcript remains in the completed view,
         // where it is visible and the user can ask a follow-up.
@@ -476,6 +476,19 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
             setState((prev) => {
                 switch (event.kind) {
                     case 'status':
+                        if (event.status === 'context_trimmed') {
+                            const turnId = event.turn_id ?? prev.turnId ?? '';
+                            const id = `context-trimmed:${turnId}`;
+                            return prev.timeline.some(item => item.id === id)
+                                ? prev
+                                : {
+                                      ...prev,
+                                      timeline: [
+                                          ...prev.timeline,
+                                          { kind: 'context_notice' as const, id, turnId },
+                                      ],
+                                  };
+                        }
                         return { ...prev, status: event.status ?? prev.status };
                     case 'partial':
                         return {

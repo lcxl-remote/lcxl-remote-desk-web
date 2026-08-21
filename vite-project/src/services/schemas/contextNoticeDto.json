@@ -1,0 +1,1 @@
+{"type":"object","required":["id","turnId","kind"],"properties":{"id":{"type":"string"},"kind":{"type":"string"},"turnId":{"type":"string"}},"x-readme-ref-name":"ContextNoticeDto"}

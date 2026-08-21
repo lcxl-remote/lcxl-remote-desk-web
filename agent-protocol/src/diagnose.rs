@@ -421,6 +421,18 @@ impl DiagnoseEvent {
         }
     }
 
+    /// A lifecycle status associated with one agent turn.
+    pub fn status_for_turn(
+        request_id: impl Into<String>,
+        seq: u32,
+        phase: impl Into<String>,
+        turn_id: impl Into<String>,
+    ) -> Self {
+        let mut event = Self::status(request_id, seq, phase);
+        event.turn_id = Some(turn_id.into());
+        event
+    }
+
     /// A `Partial` frame carrying a streaming summary / answer fragment.
     pub fn partial(request_id: impl Into<String>, seq: u32, fragment: impl Into<String>) -> Self {
         Self {

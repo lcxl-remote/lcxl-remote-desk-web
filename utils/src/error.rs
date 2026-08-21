@@ -462,6 +462,11 @@ desk_error_codes! {
     /// fail-safe window. The host process must be restarted before new media
     /// sessions can be admitted.
     MEDIA_WORKER_RESTART_REQUIRED = 100,
+    /// The newest indivisible model-history group alone exceeds the configured
+    /// local history byte budget. The request is rejected before dialing; the
+    /// caller must shorten the current input or increase the explicit model
+    /// profile budget.
+    AI_CONTEXT_ITEM_TOO_LARGE = 101,
 
     /// A connection-verify probe could not reach the target at all (DNS failure,
     /// connection refused, TLS handshake failure). Carried inside the

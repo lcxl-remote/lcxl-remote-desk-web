@@ -619,6 +619,21 @@ export type ConnectionsFetchedData = {
     current_connection_id: string;
 };
 
+export type ContextNoticeDto = {
+    /**
+     * @type string
+    */
+    id: string;
+    /**
+     * @type string
+    */
+    kind: string;
+    /**
+     * @type string
+    */
+    turnId: string;
+};
+
 /**
  * @description CPU information
 */
@@ -790,6 +805,7 @@ export const deskErrorCodeEnum = {
     ADAPTIVE_RESOLUTION_REQUIRES_SINGLE_CLIENT: 98,
     REMOTE_DESKTOP_CAPABILITIES_NOT_READY: 99,
     MEDIA_WORKER_RESTART_REQUIRED: 100,
+    AI_CONTEXT_ITEM_TOO_LARGE: 101,
     CONNECTION_UNREACHABLE: 64,
     CONNECTION_NOT_SIGNALING: 65,
     CONNECTION_AUTH_FAILED: 66,
@@ -1273,6 +1289,10 @@ export type SnapshotMessageDto = {
      * @type array | undefined
     */
     toolCalls?: SnapshotToolCallDto[];
+    /**
+     * @type string,null
+    */
+    turnId?: string | null;
 };
 
 export type DiagnoseSessionSnapshotDto = {
@@ -1286,6 +1306,11 @@ export type DiagnoseSessionSnapshotDto = {
      * @type string,null
     */
     activeExecutionGeneration?: string | null;
+    /**
+     * @description Durable transcript metadata for context-window changes. No omitted text is exposed.
+     * @type array
+    */
+    contextNotices: ContextNoticeDto[];
     /**
      * @type array
     */
@@ -1986,6 +2011,42 @@ export type MediaPipelineStateData = {
     source_resolution?: (null | Resolution);
 };
 
+export type ModelProbeObservation = {
+    /**
+     * @type integer, int64
+    */
+    connection_revision: number;
+    /**
+     * @description Whether the observation still describes the currently saved connection\nand profile revisions. Stale observations remain visible as history but\nmust never be presented as current validation.
+     * @type boolean
+    */
+    current: boolean;
+    /**
+     * @type integer, int64
+    */
+    profile_revision: number;
+    /**
+     * @type boolean
+    */
+    reasoning_observed: boolean;
+    /**
+     * @type integer,null, int64
+    */
+    reasoning_tokens?: number | null;
+    /**
+     * @type string,null
+    */
+    stop_reason?: string | null;
+    /**
+     * @type string, date-time
+    */
+    tested_at: string;
+    /**
+     * @type object
+    */
+    validated_capabilities: object;
+};
+
 export const responseFormatModeEnum = {
     none: "none",
     json_object: "json_object",
@@ -2013,11 +2074,16 @@ export type ModelProviderPublic = {
     */
     base_url?: string | null;
     /**
+     * @type integer, int64
+    */
+    connection_revision: number;
+    /**
      * @type string
     */
     execution_mode: ExecutionMode;
     /**
-     * @minLength 0
+     * @minLength 4096
+     * @maxLength 16777216
      * @type integer,null, int64
     */
     max_context_bytes?: number | null;
@@ -2038,22 +2104,48 @@ export type ModelProviderPublic = {
     */
     model?: string | null;
     /**
-     * @type string,null
+     * @type string
     */
-    provider?: string | null;
+    output_limit_field: string;
+    /**
+     * @type integer, int64
+    */
+    probe_max_output_tokens: number;
+    probe_observation?: (null | ModelProbeObservation);
+    /**
+     * @type integer, int64
+    */
+    profile_revision: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    profile_schema_version: number;
+    /**
+     * @type object
+    */
+    request_options: object;
     /**
      * @description How the model gateway is asked to constrain its output format.\n\nThe diagnosis parser degrades gracefully regardless of this setting, so it is\npurely an enforcement hint to the gateway. This is a signal-local copy of the\nedge\'s enum (the two crates keep separate implementations of the same shape).
      * @type string
     */
     response_format: ResponseFormatMode;
     /**
+     * @type integer, int64
+    */
+    runtime_max_output_tokens: number;
+    /**
      * @type boolean
     */
     supports_image_input: boolean;
+    /**
+     * @type string,null
+    */
+    wire_protocol?: string | null;
 };
 
 /**
- * @description Update body for the provider-config update endpoint.\n\nEvery field is optional: `None` leaves the stored value unchanged. `api_key`\nis write-only with three-way semantics (see [`ModelProviderConfig::apply_update`]).
+ * @description Update body for the provider-config update endpoint.\n\nConfiguration fields are optional: `None` leaves the stored value unchanged.\nThe update API separately requires both expected revisions. `api_key` is\nwrite-only with three-way semantics (see [`ModelProviderConfig::apply_update`]).
 */
 export type ModelProviderUpdate = {
     /**
@@ -2067,7 +2159,18 @@ export type ModelProviderUpdate = {
     base_url?: string | null;
     execution_mode?: (null | ExecutionMode);
     /**
-     * @minLength 0
+     * @description Optimistic-lock revision from the last GET. Required by the update API;\nit is not itself persisted as a client-selected value.
+     * @type integer,null, int64
+    */
+    expected_connection_revision?: number | null;
+    /**
+     * @description Optimistic-lock revision from the last GET. Required by the update API;\nit is not itself persisted as a client-selected value.
+     * @type integer,null, int64
+    */
+    expected_profile_revision?: number | null;
+    /**
+     * @minLength 4096
+     * @maxLength 16777216
      * @type integer,null, int64
     */
     max_context_bytes?: number | null;
@@ -2092,13 +2195,29 @@ export type ModelProviderUpdate = {
     /**
      * @type string,null
     */
-    provider?: string | null;
+    output_limit_field?: string | null;
+    /**
+     * @type integer,null, int64
+    */
+    probe_max_output_tokens?: number | null;
+    /**
+     * @type object
+    */
+    request_options: object;
     response_format?: (null | ResponseFormatMode);
+    /**
+     * @type integer,null, int64
+    */
+    runtime_max_output_tokens?: number | null;
     /**
      * @description `None` leaves the stored image-input capability unchanged.
      * @type boolean,null
     */
     supports_image_input?: boolean | null;
+    /**
+     * @type string,null
+    */
+    wire_protocol?: string | null;
 };
 
 /**
@@ -2229,10 +2348,22 @@ export type ProviderTestDto = {
     latency_ms: number;
     provenance?: (null | AiProvenance);
     /**
+     * @type boolean
+    */
+    reasoning_observed: boolean;
+    /**
+     * @type integer,null, int64
+    */
+    reasoning_tokens?: number | null;
+    /**
      * @description A short snippet of the model\'s reply (bounded), when it returned text.
      * @type string,null
     */
     sample?: string | null;
+    /**
+     * @type string
+    */
+    stop_reason: string;
     /**
      * @description Capabilities that this exact probe exercised successfully.
      * @type array
@@ -2254,17 +2385,39 @@ export type ProviderTestParams = {
     */
     base_url: string;
     /**
+     * @minLength 4096
+     * @maxLength 16777216
+     * @type integer, int64
+    */
+    max_context_bytes: number;
+    /**
      * @type string
     */
     model: string;
     /**
      * @type string
     */
-    provider: string;
+    output_limit_field: string;
+    /**
+     * @type integer, int64
+    */
+    probe_max_output_tokens: number;
+    /**
+     * @type object
+    */
+    request_options: object;
+    /**
+     * @type integer, int64
+    */
+    runtime_max_output_tokens: number;
     /**
      * @type boolean
     */
     supports_image_input: boolean;
+    /**
+     * @type string
+    */
+    wire_protocol: string;
 };
 
 export type RedeemCodeParams = {
@@ -3005,6 +3158,11 @@ export type RestResponseDiagnoseSessionSnapshotDto = {
         */
         activeExecutionGeneration?: string | null;
         /**
+         * @description Durable transcript metadata for context-window changes. No omitted text is exposed.
+         * @type array
+        */
+        contextNotices: ContextNoticeDto[];
+        /**
          * @type array
         */
         messages: SnapshotMessageDto[];
@@ -3288,11 +3446,16 @@ export type RestResponseModelProviderPublic = {
         */
         base_url?: string | null;
         /**
+         * @type integer, int64
+        */
+        connection_revision: number;
+        /**
          * @type string
         */
         execution_mode: ExecutionMode;
         /**
-         * @minLength 0
+         * @minLength 4096
+         * @maxLength 16777216
          * @type integer,null, int64
         */
         max_context_bytes?: number | null;
@@ -3313,18 +3476,44 @@ export type RestResponseModelProviderPublic = {
         */
         model?: string | null;
         /**
-         * @type string,null
+         * @type string
         */
-        provider?: string | null;
+        output_limit_field: string;
+        /**
+         * @type integer, int64
+        */
+        probe_max_output_tokens: number;
+        probe_observation?: (null | ModelProbeObservation);
+        /**
+         * @type integer, int64
+        */
+        profile_revision: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        profile_schema_version: number;
+        /**
+         * @type object
+        */
+        request_options: object;
         /**
          * @description How the model gateway is asked to constrain its output format.\n\nThe diagnosis parser degrades gracefully regardless of this setting, so it is\npurely an enforcement hint to the gateway. This is a signal-local copy of the\nedge\'s enum (the two crates keep separate implementations of the same shape).
          * @type string
         */
         response_format: ResponseFormatMode;
         /**
+         * @type integer, int64
+        */
+        runtime_max_output_tokens: number;
+        /**
          * @type boolean
         */
         supports_image_input: boolean;
+        /**
+         * @type string,null
+        */
+        wire_protocol?: string | null;
     };
     /**
      * @type string,null
@@ -3383,10 +3572,22 @@ export type RestResponseProviderTestDto = {
         latency_ms: number;
         provenance?: (null | AiProvenance);
         /**
+         * @type boolean
+        */
+        reasoning_observed: boolean;
+        /**
+         * @type integer,null, int64
+        */
+        reasoning_tokens?: number | null;
+        /**
          * @description A short snippet of the model\'s reply (bounded), when it returned text.
          * @type string,null
         */
         sample?: string | null;
+        /**
+         * @type string
+        */
+        stop_reason: string;
         /**
          * @description Capabilities that this exact probe exercised successfully.
          * @type array

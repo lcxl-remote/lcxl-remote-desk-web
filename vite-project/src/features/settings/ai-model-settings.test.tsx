@@ -26,7 +26,11 @@ vi.mock("@/services/hooks/modelProviderController/useTestModelProvider", () => (
     useTestModelProvider: () => ({ mutateAsync: h.testMutateAsync, isPending: false }),
 }))
 
-import { AiModelSettings } from "./ai-model-settings"
+import {
+    AiModelSettings,
+    isProfilePresetSelectable,
+    presetProfile,
+} from "./ai-model-settings"
 import { RestResponseError } from "@/lib/kubb-client"
 
 function lastProviderPayload() {
@@ -39,10 +43,17 @@ beforeEach(() => {
     h.testMutateAsync.mockResolvedValue({})
     h.toast.mockClear()
     h.providerData = {
-        provider: "openai-compatible",
+        wire_protocol: "open_ai_chat_completions",
         model: "gpt-4o-mini",
         base_url: "https://api.example/v1",
-        max_context_bytes: 0,
+        max_context_bytes: 131072,
+        request_options: {},
+        output_limit_field: "max_tokens",
+        probe_max_output_tokens: 512,
+        runtime_max_output_tokens: 4096,
+        supports_image_input: false,
+        connection_revision: 1,
+        profile_revision: 1,
         response_format: "json_schema",
         execution_mode: "read_only",
         max_steps_per_turn: 20,
@@ -52,7 +63,7 @@ beforeEach(() => {
 })
 
 describe("AiModelSettings", () => {
-    it("hydrates the provider form and saves it, omitting a blank api_key and a zero budget", async () => {
+    it("hydrates the provider form and saves its complete profile while omitting a blank api_key", async () => {
         render(<AiModelSettings />)
         // Hydration populated the form from the masked public view.
         await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
@@ -61,8 +72,10 @@ describe("AiModelSettings", () => {
         await waitFor(() => expect(h.providerMutateAsync).toHaveBeenCalled())
 
         const payload = lastProviderPayload()
+        expect(payload.expected_connection_revision).toBe(1)
+        expect(payload.expected_profile_revision).toBe(1)
         expect(payload.response_format).toBe("json_schema")
-        expect(payload.provider).toBe("openai-compatible")
+        expect(payload.wire_protocol).toBe("open_ai_chat_completions")
         expect(payload.base_url).toBe("https://api.example/v1")
         // The central grant carries the execution mode.
         expect(payload.execution_mode).toBe("read_only")
@@ -71,9 +84,9 @@ describe("AiModelSettings", () => {
         // The provider form no longer carries the collection policy.
         expect(payload.allow_logs).toBeUndefined()
         expect(payload.allow_screen).toBeUndefined()
-        // Blank key field → leave unchanged (omitted); 0 budget → default (omitted).
+        // Blank key field → leave unchanged; context capacity is required.
         expect(payload.api_key).toBeUndefined()
-        expect(payload.max_context_bytes).toBeUndefined()
+        expect(payload.max_context_bytes).toBe(131072)
     })
 
     it("rejects a reasoning-round limit below the same-tool limit", async () => {
@@ -152,7 +165,7 @@ describe("AiModelSettings", () => {
     })
 
     it("hydrates the anthropic provider, shows its base-URL hint, and saves it", async () => {
-        h.providerData = { ...h.providerData, provider: "anthropic" }
+        h.providerData = { ...h.providerData, wire_protocol: "anthropic_messages" }
         render(<AiModelSettings />)
         await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
         // The provider-specific base URL hint warns against appending /v1.
@@ -160,28 +173,24 @@ describe("AiModelSettings", () => {
 
         fireEvent.click(screen.getAllByText("Save Settings")[0])
         await waitFor(() => expect(h.providerMutateAsync).toHaveBeenCalled())
-        expect(lastProviderPayload().provider).toBe("anthropic")
+        expect(lastProviderPayload().wire_protocol).toBe("anthropic_messages")
     })
 
-    it("recognizes a mixed-case / padded anthropic provider on hydration", async () => {
-        h.providerData = { ...h.providerData, provider: "  Anthropic  " }
+    it("rejects a mixed-case / padded protocol instead of guessing an adapter", async () => {
+        h.providerData = { ...h.providerData, wire_protocol: "  Anthropic_Messages  " }
         render(<AiModelSettings />)
         await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
-        // Normalized to anthropic — its base-URL hint is shown, not silently
-        // switched to openai-compatible.
-        expect(screen.getByText(/Host root only/i)).toBeInTheDocument()
-        fireEvent.click(screen.getAllByText("Save Settings")[0])
-        await waitFor(() => expect(h.providerMutateAsync).toHaveBeenCalled())
-        expect(lastProviderPayload().provider).toBe("anthropic")
+        expect(screen.getAllByText(/Unsupported:/i).length).toBeGreaterThan(0)
+        expect(screen.getAllByText("Save Settings")[0]).toBeDisabled()
+        expect(screen.getByRole("button", { name: "Test connection" })).toBeDisabled()
     })
 
-    it("normalizes an unknown stored provider to openai-compatible", async () => {
-        h.providerData = { ...h.providerData, provider: "some-legacy-value" }
+    it("rejects an unknown stored protocol instead of silently switching adapters", async () => {
+        h.providerData = { ...h.providerData, wire_protocol: "some-legacy-value" }
         render(<AiModelSettings />)
         await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
-        fireEvent.click(screen.getAllByText("Save Settings")[0])
-        await waitFor(() => expect(h.providerMutateAsync).toHaveBeenCalled())
-        expect(lastProviderPayload().provider).toBe("openai-compatible")
+        expect(screen.getAllByText(/Unsupported:/i).length).toBeGreaterThan(0)
+        expect(screen.getAllByText("Save Settings")[0]).toBeDisabled()
     })
 
     it("hides the clear toggle when no key is configured", async () => {
@@ -228,14 +237,38 @@ describe("AiModelSettings", () => {
         await waitFor(() =>
             expect(h.testMutateAsync).toHaveBeenCalledWith({
                 data: {
-                    provider: "openai-compatible",
+                    wire_protocol: "open_ai_chat_completions",
                     model: "unsaved-vision-model",
                     supports_image_input: true,
                     base_url: "https://unsaved.example/v1",
+                    request_options: {},
+                    output_limit_field: "max_tokens",
+                    probe_max_output_tokens: 512,
+                    runtime_max_output_tokens: 4096,
+                    max_context_bytes: 131072,
                     api_key: "unsaved-key",
                 },
             }),
         )
         expect(h.providerMutateAsync).not.toHaveBeenCalled()
+    })
+
+    it("materializes the frozen preset budgets and disables the incompatible manual preset", async () => {
+        expect(presetProfile("deepseek")).toEqual({
+            requestOptions: { thinking: { type: "disabled" } },
+            probeBudget: 512,
+            runtimeBudget: 4096,
+        })
+        expect(presetProfile("anthropic_adaptive")).toEqual({
+            requestOptions: { thinking: { type: "adaptive", display: "omitted" } },
+            probeBudget: 4096,
+            runtimeBudget: 8192,
+        })
+        expect(isProfilePresetSelectable("anthropic_manual")).toBe(false)
+        expect(isProfilePresetSelectable("anthropic_adaptive")).toBe(true)
+
+        render(<AiModelSettings />)
+        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+        expect(screen.getByText(/terminal completion has a 512-token hard cap/i)).toBeInTheDocument()
     })
 })

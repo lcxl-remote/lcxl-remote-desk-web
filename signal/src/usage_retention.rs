@@ -219,12 +219,10 @@ async fn cleanup_agent_sessions(
         let ids: Vec<i64> = rows
             .iter()
             .filter_map(|row| {
-                serde_json::from_str::<desk_diagnose_core::session::PersistedAgentSession>(
-                    &row.state_json,
-                )
-                .ok()
-                .filter(|session| !session.turn_state.is_active())
-                .map(|_| row.id)
+                desk_diagnose_core::session::PersistedAgentSession::decode_json(&row.state_json)
+                    .ok()
+                    .filter(|session| !session.turn_state.is_active())
+                    .map(|_| row.id)
             })
             .collect();
         if ids.is_empty() {

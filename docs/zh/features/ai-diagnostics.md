@@ -60,6 +60,16 @@ graph LR
 
 保存按钮旁的**「测试连接」**按钮会对表单中当前显示的提供方配置做端到端探测，包括尚未保存的修改，并且测试本身不会保存配置。文本模型会收到极小的单词回复探针；开启“支持图片输入”后，同一个按钮会发送仓库内置的视觉探针，只有模型读出其中的标记才算成功，结果会列出已验证的 `text` / `image_input` 能力。API Key 输入框留空时复用已保存的密钥；新输入的密钥只用于本次测试，直到点击保存才会持久化。API Key 全程留在服务端。
 
+接口协议采用精确值并 fail-closed：只能选择 `open_ai_chat_completions` 或 `anthropic_messages`；空值、未知值和预留值会显示为“不支持”，不能保存或测试。Standard、DeepSeek、Anthropic adaptive/manual 与 Custom preset 只会填充明确请求选项，运行时绝不根据模型名或服务商名称猜测行为。
+
+OSS 的预设会把 Standard 物化为 `{}` 与 512/4096 的探针/运行预算；DeepSeek 显式关闭 thinking，预算为 512/4096；Anthropic adaptive 使用 `display: omitted` 与 4096/8192。由于该 singleton 还承担存在 512 token 硬上限的终端补全，manual 预设被禁用；仅当目标服务接受小于 512 的手动预算时，才通过 Custom 配置。任何预设都不会填写 `max_context_bytes`。
+
+表单还要求填写 4 KiB–16 MiB 的**历史上下文字节预算**（`max_context_bytes`）。它衡量从本地历史发送的序列化对话，包含工具调用/结果以及必需的 replay 状态，但不计另行注入的 system prompt、工具定义、服务端元数据与图片 data URL 字节。它不是服务商的 Token 上下文窗口。程序和小型连接探针都无法取得任意兼容端点的真实上限，请根据上游模型文档和实际请求组成保守填写。探针 observation 绑定配置 revision；配置变化后会明确显示为陈旧。
+
+推理/thinking 是私有协议状态，不是回答正文，UI 不展示。当工具续调要求精确状态时，信令服务可能保存不透明 replay envelope，例如 DeepSeek `reasoning_content`，或保持原序的 Anthropic thinking/redacted-thinking、签名与 tool block。它不会进入 transcript 响应、安全审核输入或日志，但仍可能增加服务商 Token 用量。
+
+长对话会完整持久化并继续显示。历史越过所配高水位后，只向模型发送按完整消息/工具组截取的尾部窗口，并在该回合显示行内提示，明确说明较早历史本次未发送；可见记录没有被删除。若最新不可拆分消息或工具组本身超过预算，请求返回 `AI_CONTEXT_ITEM_TOO_LARGE`；请提高配置预算，或缩短本次输入后重试。
+
 每台设备另在自己的设置里保留两项**本地**控制：**执行上限**（AI 在该设备上可用的最高模式，用于收紧中心授权）与**证据采集策略**（`allow_logs` / `allow_screen`，设备对“哪些证据可以离开本机”的最终决定权）。
 
 ## 安全

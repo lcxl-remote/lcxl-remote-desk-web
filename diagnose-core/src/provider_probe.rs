@@ -9,7 +9,6 @@ const VISION_PROBE_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAASgAAABICAYAAABFh
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeExpectation {
     pub message: ChatMessage,
-    pub max_output_tokens: u32,
     pub required_marker: Option<&'static str>,
 }
 
@@ -34,7 +33,6 @@ pub fn provider_probe_request(capabilities: ModelCapabilities) -> ProbeExpectati
             .with_image(format!(
                 "data:image/png;base64,{VISION_PROBE_PNG_BASE64}"
             )),
-            max_output_tokens: 64,
             required_marker: Some(VISION_MARKER),
         }
     } else {
@@ -44,7 +42,6 @@ pub fn provider_probe_request(capabilities: ModelCapabilities) -> ProbeExpectati
                 ChatRole::User,
                 "Reply with the single word: pong",
             ),
-            max_output_tokens: 16,
             required_marker: None,
         }
     }
@@ -81,7 +78,6 @@ mod tests {
                 .unwrap()
                 .starts_with("data:image/png;base64,")
         );
-        assert_eq!(probe.max_output_tokens, 64);
         assert!(verify_probe_response(&probe, "LCXL7F").is_ok());
         assert!(verify_probe_response(&probe, "I can see an image").is_err());
         assert_eq!(probe.validated_capabilities(), vec!["text", "image_input"]);
@@ -91,7 +87,6 @@ mod tests {
     fn text_probe_only_requires_nonempty_response() {
         let probe = provider_probe_request(ModelCapabilities::default());
         assert!(probe.message.image_data_url.is_none());
-        assert_eq!(probe.max_output_tokens, 16);
         assert!(verify_probe_response(&probe, " pong ").is_ok());
         assert!(verify_probe_response(&probe, "arbitrary provider prose").is_err());
         assert!(verify_probe_response(&probe, " ").is_err());

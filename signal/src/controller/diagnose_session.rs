@@ -46,6 +46,8 @@ pub struct SnapshotToolCallDto {
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotMessageDto {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
     pub role: String,
     pub text: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -62,6 +64,7 @@ impl From<ChatMessage> for SnapshotMessageDto {
     fn from(message: ChatMessage) -> Self {
         Self {
             id: message.message_id,
+            turn_id: message.turn_id,
             role: message.role.as_str().to_string(),
             text: message.text,
             tool_calls: message
@@ -81,6 +84,24 @@ impl From<ChatMessage> for SnapshotMessageDto {
 
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct ContextNoticeDto {
+    pub id: String,
+    pub turn_id: String,
+    pub kind: String,
+}
+
+impl From<desk_diagnose_core::model_context::ContextNotice> for ContextNoticeDto {
+    fn from(notice: desk_diagnose_core::model_context::ContextNotice) -> Self {
+        Self {
+            id: notice.id,
+            turn_id: notice.turn_id,
+            kind: "trimmed".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct DiagnoseSessionSnapshotDto {
     pub seq: i64,
     /// Whether the persisted turn is still running or awaiting approval.
@@ -90,6 +111,8 @@ pub struct DiagnoseSessionSnapshotDto {
     /// Running background command generation that may be cancelled.
     pub active_execution_generation: Option<String>,
     pub messages: Vec<SnapshotMessageDto>,
+    /// Durable transcript metadata for context-window changes. No omitted text is exposed.
+    pub context_notices: Vec<ContextNoticeDto>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -179,6 +202,11 @@ pub async fn get_diagnose_session(
                 request_id: snapshot.request_id,
                 active_execution_generation: snapshot.active_execution_generation,
                 messages: snapshot.messages.into_iter().map(Into::into).collect(),
+                context_notices: snapshot
+                    .context_notices
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
             },
         ))),
         None => Ok(not_accessible()),

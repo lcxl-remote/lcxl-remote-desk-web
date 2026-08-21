@@ -94,6 +94,8 @@ The MCP tool set is a **static whitelist** with no execute / write / control too
 
 Wire protocols are isolated behind adapters on the central brain (OpenAI-compatible chat completions and Anthropic Messages). Adding a provider means adding an adapter — the orchestrator does not change.
 
+Provider reasoning required for tool-call continuity is stored only as an opaque, source-bound replay envelope. It is never exposed in transcript DTOs, audit content, content-safety prompts, or logs. If replay is unavailable or belongs to a different endpoint/protocol/model revision, the complete affected tool group is omitted from the model-facing context rather than reconstructed or partially sent; the user-visible conversation remains intact.
+
 ## AI Interaction Disclosure
 
 The AI diagnose and Terminal Copilot panels disclose, from the first interaction and for every session, that you are interacting with an AI assistant. The notice is a standing element at the top of each panel — never a one-time, dismissible banner — kept clearly distinguishable from the separate accuracy reminder ("AI can make mistakes"). This makes the AI's identity explicit rather than merely implied by naming.

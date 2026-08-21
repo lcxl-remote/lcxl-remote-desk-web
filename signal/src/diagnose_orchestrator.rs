@@ -25,7 +25,6 @@ use desk_agent_protocol::diagnose::{
 use desk_agent_protocol::evidence::EvidenceSnapshot;
 use desk_agent_protocol::provenance::AiProvenance;
 use desk_agent_protocol::{AgentError, AgentErrorKind, Capability, ExecutionMode};
-use desk_diagnose_core::DEFAULT_MAX_CONTEXT_BYTES;
 use desk_diagnose_core::agent_loop::{LoopDeps, LoopOutcome, resume_agent_turn, run_agent_turn};
 use desk_diagnose_core::agentic_prompt::build_agentic_system_message;
 use desk_diagnose_core::chat::{ChatMessage, ChatRole};
@@ -436,6 +435,13 @@ struct MeteredSignalModel {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for MeteredSignalModel {
+    async fn context_policy(
+        &self,
+        requirements: desk_diagnose_core::model_capability::ModelRequirements,
+    ) -> Result<desk_diagnose_core::model_context::PinnedContextPolicy, AgentError> {
+        self.inner.context_policy(requirements).await
+    }
+
     async fn call(
         &self,
         request: ModelRequest,
@@ -521,10 +527,6 @@ pub async fn resume_completion_turn(
         registry: &registry,
         response_format: ResponseFormatSpec::None,
         system_prompt: build_agentic_system_message(None),
-        max_context_bytes: config
-            .max_context_bytes
-            .map(|value| value as usize)
-            .unwrap_or(DEFAULT_MAX_CONTEXT_BYTES),
         max_steps_per_turn: config.max_steps_per_turn.min(AUTO_FOLLOW_UP_MAX_STEPS),
         max_same_tool_per_turn: config
             .max_same_tool_calls_per_turn
@@ -628,10 +630,6 @@ pub async fn run_model_phase(
         }
     };
 
-    let max_ctx = config
-        .max_context_bytes
-        .map(|v| v as usize)
-        .unwrap_or(DEFAULT_MAX_CONTEXT_BYTES);
     let model = MeteredSignalModel {
         inner: seam,
         db: db.clone(),
@@ -698,7 +696,6 @@ pub async fn run_model_phase(
         registry: &registry,
         response_format: ResponseFormatSpec::None,
         system_prompt: build_agentic_system_message(ctx.request.locale.as_deref()),
-        max_context_bytes: max_ctx,
         max_steps_per_turn: config.max_steps_per_turn,
         max_same_tool_per_turn: config.max_same_tool_calls_per_turn,
         clock: &clock,

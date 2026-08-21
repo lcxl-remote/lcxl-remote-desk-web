@@ -57,6 +57,25 @@ fn image_input_error(error: crate::image_input::ImageInputError) -> AgentError {
     }
 }
 
+fn model_context_error(error: crate::model_context::ModelContextError) -> AgentError {
+    let oversized = matches!(
+        error,
+        crate::model_context::ModelContextError::ContextItemTooLarge { .. }
+    );
+    AgentError {
+        kind: if oversized {
+            AgentErrorKind::InvalidInput
+        } else {
+            AgentErrorKind::Internal
+        },
+        message: error.to_string(),
+        retryable: false,
+        safe_for_model: true,
+        error_code: oversized
+            .then(|| desk_utils::error::DeskErrorCode::AI_CONTEXT_ITEM_TOO_LARGE.code()),
+    }
+}
+
 fn retain_latest_session_image(
     session: &mut crate::session::PersistedAgentSession,
 ) -> Result<(), AgentError> {
@@ -112,9 +131,6 @@ pub struct LoopDeps<'a> {
     /// in the persisted conversation, so a prompt-version bump applies to
     /// in-flight conversations.
     pub system_prompt: ChatMessage,
-    /// Byte budget for the conversation history sent to the model (§ trimming).
-    /// The system prompt is prepended on top of this and is not counted against it.
-    pub max_context_bytes: usize,
     /// Per-turn model→tool step budget (circuit breaker). Diagnose passes
     /// [`crate::MAX_STEPS_PER_TURN`]; the latency-sensitive terminal copilot
     /// passes a tighter bound.
@@ -183,7 +199,9 @@ async fn run_or_resume(
     // Append the control-end message (if any) and persist before the first model
     // call. An automation resume appends nothing — it reacts to the existing tail.
     if let Some(message) = to_append {
-        session.conversation.push(message);
+        session
+            .conversation
+            .push(message.with_turn_id(turn_id.clone()));
     }
     deps.session_seam.save(&mut session).await?;
 
@@ -432,15 +450,34 @@ async fn run_inner(
             exposed.iter().copied(),
         );
         let specs = exposed.iter().map(|tool| tool.spec.clone()).collect();
+        let request_requirements = tool_requirements.union(
+            crate::model_capability::ModelRequirements::for_messages(&session.conversation),
+        );
+        let pinned_context = deps.model.context_policy(request_requirements).await?;
+        let previous_context_state = session.model_context_state.clone();
+        let context_view = crate::model_context::build_model_context_view(
+            &session.conversation,
+            &mut session.model_context_state,
+            &pinned_context,
+            session.version,
+        )
+        .map_err(model_context_error)?;
+        let floor_advanced = context_view.floor_advanced;
+        if floor_advanced {
+            session.add_context_notice(crate::model_context::ContextNotice::trimmed(turn_id));
+        }
+        if session.model_context_state != previous_context_state || floor_advanced {
+            deps.session_seam.save(session).await?;
+        }
+        if floor_advanced {
+            sink.on_context_trimmed(turn_id);
+        }
         // Assemble the model request: a freshly built system prompt prepended to a
         // trailing, budget-trimmed window of the stored conversation. The system
         // prompt is never persisted, so it is added here on every call.
         let mut messages = Vec::with_capacity(session.conversation.len() + 1);
         messages.push(deps.system_prompt.clone());
-        messages.extend(crate::trim::trim_conversation(
-            &session.conversation,
-            deps.max_context_bytes,
-        ));
+        messages.extend(context_view.messages);
         // The ids the model is about to see. A pending auto-trigger whose completion
         // message is in this request is cleared once the model reacts to it (the
         // assistant answer / tool-call save below), so it never fires an automation
@@ -453,7 +490,8 @@ async fn run_inner(
             tool_requirements,
             tool_choice: crate::chat::ToolChoice::Auto,
             response_format: deps.response_format.clone(),
-            max_output_tokens: None,
+            use_case: crate::model_profile::ModelUseCase::Agent,
+            caller_output_hard_cap: None,
         };
 
         let turn = deps.model.call(request, sink).await?;
@@ -500,11 +538,10 @@ async fn run_inner(
 
         match disposition {
             TurnDisposition::Answer => {
-                session.conversation.push(ChatMessage::text(
-                    mint(),
-                    crate::chat::ChatRole::Assistant,
-                    turn.text.clone(),
-                ));
+                session.conversation.push(
+                    ChatMessage::text(mint(), crate::chat::ChatRole::Assistant, turn.text.clone())
+                        .with_turn_id(session.current_turn_id.clone().unwrap_or_default()),
+                );
                 // The model reacted to this request; drop any pending auto-trigger
                 // whose completion it saw here so it does not also fire a turn.
                 session.clear_reacted_auto_triggers(&request_message_ids);
@@ -517,19 +554,28 @@ async fn run_inner(
                 // Record the assistant's tool-call message so the conversation
                 // stays well-formed when replayed to the model.
                 let refs = turn.tool_calls.iter().map(|c| c.to_ref()).collect();
-                session.conversation.push(ChatMessage::assistant_tool_calls(
-                    mint(),
-                    turn.text.clone(),
-                    refs,
-                ));
+                let replay = turn
+                    .provider_meta
+                    .replay
+                    .clone()
+                    .expect("classify_model_turn requires tool-call replay disposition");
+                session.conversation.push(
+                    ChatMessage::assistant_tool_calls_with_replay(
+                        mint(),
+                        turn.text.clone(),
+                        refs,
+                        replay,
+                    )
+                    .with_turn_id(session.current_turn_id.clone().unwrap_or_default()),
+                );
                 // The model reacted to this request (with tool calls); drop any
                 // pending auto-trigger whose completion it saw here. Persisted with
                 // the tool results at the save below.
                 session.clear_reacted_auto_triggers(&request_message_ids);
+                // Persist every assistant tool-call and its replay disposition
+                // before any tool lifecycle event or external action.
+                deps.session_seam.save(session).await?;
                 if deps.content_safety.is_enforced() {
-                    // Enforced turns persist the reviewed assistant tool-call
-                    // message before any tool lifecycle event or durable action.
-                    deps.session_seam.save(session).await?;
                     sink.on_partial_committed();
                 }
 

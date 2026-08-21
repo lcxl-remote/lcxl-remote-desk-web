@@ -59,7 +59,7 @@ impl SignalAgentSessionStore {
         else {
             return Ok(None);
         };
-        let session: PersistedAgentSession = serde_json::from_str(&row.state_json)
+        let session = PersistedAgentSession::decode_json(&row.state_json)
             .map_err(|e| internal(format!("decode agent session snapshot: {e}")))?;
         let active_execution_generation = session
             .execution_state
@@ -71,6 +71,7 @@ impl SignalAgentSessionStore {
             request_id: session.current_request_id,
             active_execution_generation,
             messages: session.conversation,
+            context_notices: session.context_notices,
         }))
     }
 
@@ -108,7 +109,7 @@ impl SignalAgentSessionStore {
         Ok(rows
             .into_iter()
             .filter_map(|row| {
-                let session: PersistedAgentSession = match serde_json::from_str(&row.state_json) {
+                let session = match PersistedAgentSession::decode_json(&row.state_json) {
                     Ok(session) => session,
                     Err(error) => {
                         log::warn!(
@@ -148,7 +149,7 @@ impl SignalAgentSessionStore {
         row: &agent_session::Model,
         now: DateTime<Utc>,
     ) -> Result<bool, AgentError> {
-        let mut session: PersistedAgentSession = serde_json::from_str(&row.state_json)
+        let mut session = PersistedAgentSession::decode_json(&row.state_json)
             .map_err(|e| internal(format!("decode lapsed agent session: {e}")))?;
         if !session.turn_state.is_active()
             || row.lease_deadline.is_some_and(|deadline| deadline >= now)
@@ -196,7 +197,8 @@ impl SignalAgentSessionStore {
         }
         let new_version = row.version + 1;
         session.version = new_version;
-        let state_json = serde_json::to_string(&session)
+        let state_json = session
+            .encode_json_for_storage()
             .map_err(|e| internal(format!("encode lapsed agent session: {e}")))?;
         let result = agent_session::Entity::update_many()
             .col_expr(agent_session::Column::StateJson, Expr::value(state_json))
@@ -236,7 +238,7 @@ impl SignalAgentSessionStore {
             else {
                 return Ok(EventAppend::AlreadyPresent);
             };
-            let mut session: PersistedAgentSession = serde_json::from_str(&row.state_json)
+            let mut session = PersistedAgentSession::decode_json(&row.state_json)
                 .map_err(|e| internal(format!("decode completion session: {e}")))?;
             session.version = row.version;
             if session.turn_state.is_active()
@@ -267,7 +269,8 @@ impl SignalAgentSessionStore {
             });
             let new_version = row.version + 1;
             session.version = new_version;
-            let state_json = serde_json::to_string(&session)
+            let state_json = session
+                .encode_json_for_storage()
                 .map_err(|e| internal(format!("encode completion session: {e}")))?;
             let result = agent_session::Entity::update_many()
                 .col_expr(agent_session::Column::StateJson, Expr::value(state_json))
@@ -299,7 +302,7 @@ impl SignalAgentSessionStore {
         else {
             return Ok(None);
         };
-        let mut session: PersistedAgentSession = serde_json::from_str(&row.state_json)
+        let mut session = PersistedAgentSession::decode_json(&row.state_json)
             .map_err(|e| internal(format!("decode pending auto-follow-up: {e}")))?;
         session.version = row.version;
         Ok(session
@@ -325,7 +328,7 @@ impl SignalAgentSessionStore {
             else {
                 return Ok(EventAppend::AlreadyPresent);
             };
-            let mut session: PersistedAgentSession = serde_json::from_str(&row.state_json)
+            let mut session = PersistedAgentSession::decode_json(&row.state_json)
                 .map_err(|e| internal(format!("decode auto-follow-up prune: {e}")))?;
             session.version = row.version;
             if session.turn_state.is_active()
@@ -340,7 +343,8 @@ impl SignalAgentSessionStore {
             }
             let new_version = row.version + 1;
             session.version = new_version;
-            let state_json = serde_json::to_string(&session)
+            let state_json = session
+                .encode_json_for_storage()
                 .map_err(|e| internal(format!("encode auto-follow-up prune: {e}")))?;
             let result = agent_session::Entity::update_many()
                 .col_expr(agent_session::Column::StateJson, Expr::value(state_json))
@@ -374,7 +378,7 @@ impl SignalAgentSessionStore {
             else {
                 return Ok(EventAppend::AlreadyPresent);
             };
-            let mut session: PersistedAgentSession = serde_json::from_str(&row.state_json)
+            let mut session = PersistedAgentSession::decode_json(&row.state_json)
                 .map_err(|e| internal(format!("decode unknown execution session: {e}")))?;
             session.version = row.version;
             if session.turn_state.is_active()
@@ -389,7 +393,8 @@ impl SignalAgentSessionStore {
             }
             let new_version = row.version + 1;
             session.version = new_version;
-            let state_json = serde_json::to_string(&session)
+            let state_json = session
+                .encode_json_for_storage()
                 .map_err(|e| internal(format!("encode unknown execution session: {e}")))?;
             let result = agent_session::Entity::update_many()
                 .col_expr(agent_session::Column::StateJson, Expr::value(state_json))
@@ -422,6 +427,7 @@ pub struct SessionSnapshot {
     pub request_id: Option<String>,
     pub active_execution_generation: Option<String>,
     pub messages: Vec<desk_diagnose_core::chat::ChatMessage>,
+    pub context_notices: Vec<desk_diagnose_core::model_context::ContextNotice>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,7 +442,7 @@ pub struct SessionSummary {
 }
 
 fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, AgentError> {
-    let session: PersistedAgentSession = serde_json::from_str(&row.state_json)
+    let session = PersistedAgentSession::decode_json(&row.state_json)
         .map_err(|e| internal(format!("decode agent session snapshot: {e}")))?;
     let active_execution_generation = session
         .execution_state
@@ -448,6 +454,7 @@ fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, Agent
         request_id: session.current_request_id,
         active_execution_generation,
         messages: session.conversation,
+        context_notices: session.context_notices,
     })
 }
 
@@ -490,8 +497,8 @@ impl SessionSeam for SignalAgentSessionStore {
                 .map_err(|e| ClaimError::Backend(internal(format!("load agent session: {e}"))))?
             {
                 Some(row) => {
-                    let mut session: PersistedAgentSession = serde_json::from_str(&row.state_json)
-                        .map_err(|e| {
+                    let mut session =
+                        PersistedAgentSession::decode_json(&row.state_json).map_err(|e| {
                             ClaimError::Backend(internal(format!(
                                 "decode agent session state: {e}"
                             )))
@@ -579,7 +586,7 @@ impl SessionSeam for SignalAgentSessionStore {
                     let old_version = row.version;
                     let new_version = old_version + 1;
                     session.version = new_version;
-                    let state_json = serde_json::to_string(&session).map_err(|e| {
+                    let state_json = session.encode_json_for_storage().map_err(|e| {
                         ClaimError::Backend(internal(format!("encode agent session state: {e}")))
                     })?;
                     let result = agent_session::Entity::update_many()
@@ -627,7 +634,7 @@ impl SessionSeam for SignalAgentSessionStore {
                         params.now.clone(),
                     );
                     session.adopt_trigger(params.trigger_origin, &params.turn_id);
-                    let state_json = serde_json::to_string(&session).map_err(|e| {
+                    let state_json = session.encode_json_for_storage().map_err(|e| {
                         ClaimError::Backend(internal(format!("encode agent session state: {e}")))
                     })?;
                     let inserted = agent_session::ActiveModel {

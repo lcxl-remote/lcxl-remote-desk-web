@@ -112,6 +112,11 @@ export type ToolActivity = {
 /** One visible item in an agentic turn, kept in backend message order. */
 export type DiagnoseTimelineItem =
     | {
+          kind: 'context_notice';
+          id: string;
+          turnId: string;
+      }
+    | {
           kind: 'assistant';
           id: string;
           text: string;
@@ -233,6 +238,7 @@ export type DiagnosePhase = 'idle' | 'running' | 'done' | 'error';
  */
 export type DiagnoseHistoryTurn = {
     requestId: string;
+    turnId: string | null;
     /** The question the user asked for this turn. */
     question: string;
     /** Structured result, if a `final` frame arrived (single-turn path). */
@@ -351,6 +357,7 @@ export function snapshotLiveTurn(prev: DiagnoseState): DiagnoseHistoryTurn[] {
         ...prev.history,
         {
             requestId: prev.requestId,
+            turnId: prev.turnId,
             question: prev.question,
             result: prev.result,
             summary,
@@ -375,6 +382,7 @@ export function snapshotLiveTurn(prev: DiagnoseState): DiagnoseHistoryTurn[] {
 /** One message in a diagnose-session snapshot (mirrors the manager REST DTO). */
 export type SnapshotMessage = {
     id: string;
+    turnId?: string | null;
     role: 'user' | 'assistant' | 'tool' | 'system_event' | 'untrusted_output' | 'system';
     text: string;
     toolCalls?: { id: string; name: string; argumentsJson: string }[];
@@ -389,6 +397,7 @@ export type SessionSnapshot = {
     requestId?: string | null;
     activeExecutionGeneration?: string | null;
     messages: SnapshotMessage[];
+    contextNotices: { id: string; turnId: string; kind: string }[];
 };
 
 /** One authorized history-list row for the current target device. */
@@ -419,10 +428,14 @@ export function snapshotConversationKey(deskId: string): string {
  * A direct tool result updates its call card; a later background completion is
  * appended as its own event before the automatic assistant follow-up.
  */
-export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHistoryTurn[] {
+export function buildSnapshotTranscript(
+    messages: SnapshotMessage[],
+    contextNotices: SessionSnapshot['contextNotices'] = [],
+): DiagnoseHistoryTurn[] {
     const turns: DiagnoseHistoryTurn[] = [];
-    const open = (id: string, question: string): DiagnoseHistoryTurn => ({
+    const open = (id: string, question: string, turnId: string | null): DiagnoseHistoryTurn => ({
         requestId: id,
+        turnId,
         question,
         result: null,
         summary: '',
@@ -436,9 +449,9 @@ export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHi
     for (const m of messages) {
         if (m.role === 'user') {
             if (current) turns.push(current);
-            current = open(m.id, m.text);
+            current = open(m.id, m.text, m.turnId ?? null);
         } else if (m.role === 'assistant') {
-            if (!current) current = open(m.id, '');
+            if (!current) current = open(m.id, '', m.turnId ?? null);
             if (m.text) {
                 current.timeline.push({
                     kind: 'assistant',
@@ -488,5 +501,11 @@ export function buildSnapshotTranscript(messages: SnapshotMessage[]): DiagnoseHi
         // Unlinked internal/system messages carry no user-facing turn text.
     }
     if (current) turns.push(current);
+    for (const notice of contextNotices) {
+        if (notice.kind !== 'trimmed') continue;
+        const turn = turns.find(candidate => candidate.turnId === notice.turnId);
+        if (!turn || turn.timeline.some(item => item.id === notice.id)) continue;
+        turn.timeline.unshift({ kind: 'context_notice', id: notice.id, turnId: notice.turnId });
+    }
     return turns;
 }

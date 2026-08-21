@@ -153,7 +153,8 @@ pub fn build_completion_model_request(ask: &TerminalCompleteAsk) -> ModelRequest
         ],
         ResponseFormatSpec::None,
     );
-    request.max_output_tokens = Some(COMPLETION_MAX_OUTPUT_TOKENS);
+    request.use_case = crate::model_profile::ModelUseCase::Completion;
+    request.caller_output_hard_cap = Some(i64::from(COMPLETION_MAX_OUTPUT_TOKENS));
     request
 }
 
@@ -558,8 +559,8 @@ mod tests {
         );
         assert_eq!(ask.context.recent_output.len(), MAX_RECENT_OUTPUT_BYTES);
         assert_eq!(
-            build_completion_model_request(&ask).max_output_tokens,
-            Some(COMPLETION_MAX_OUTPUT_TOKENS)
+            build_completion_model_request(&ask).caller_output_hard_cap,
+            Some(i64::from(COMPLETION_MAX_OUTPUT_TOKENS))
         );
     }
 

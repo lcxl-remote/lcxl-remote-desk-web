@@ -3,6 +3,7 @@ use std::time::Instant;
 use actix_web::{HttpResponse, get, post, web};
 use desk_agent_protocol::provenance::AiProvenance;
 use desk_diagnose_core::model_capability::ModelCapabilities;
+use desk_diagnose_core::model_profile::{ModelUseCase, OutputLimitField, WireProtocol};
 use desk_diagnose_core::prompt::ResponseFormatSpec;
 use desk_diagnose_core::provider_probe::{provider_probe_request, verify_probe_response};
 use desk_diagnose_core::seam::{ModelRequest, ModelSeam, NullTurnSink};
@@ -27,6 +28,9 @@ pub struct ProviderTestDto {
     pub sample: Option<String>,
     /// Capabilities that this exact probe exercised successfully.
     pub validated_capabilities: Vec<String>,
+    pub reasoning_observed: bool,
+    pub reasoning_tokens: Option<i64>,
+    pub stop_reason: String,
     /// Machine-readable AI marking for `sample` (EU AI Act Art.50(2)): the snippet
     /// is model-generated text shown to the operator, so it carries a marking.
     /// Present only when a `sample` is returned; absent otherwise.
@@ -38,10 +42,19 @@ pub struct ProviderTestDto {
 /// reuses the stored secret; a supplied key is kept in memory for this request.
 #[derive(Deserialize, ToSchema)]
 pub struct ProviderTestParams {
-    pub provider: String,
+    #[schema(value_type = String)]
+    pub wire_protocol: WireProtocol,
     pub model: String,
     pub supports_image_input: bool,
     pub base_url: String,
+    #[schema(value_type = Object)]
+    pub request_options: serde_json::Value,
+    #[schema(value_type = String)]
+    pub output_limit_field: OutputLimitField,
+    pub probe_max_output_tokens: i64,
+    pub runtime_max_output_tokens: i64,
+    #[schema(minimum = 4096, maximum = 16777216)]
+    pub max_context_bytes: i64,
     /// Write-only. `None` reuses the stored key; an empty string clears it for
     /// this probe; any other value is used only for this probe.
     pub api_key: Option<String>,
@@ -53,10 +66,15 @@ fn config_for_probe(
 ) -> model_provider::ModelProviderConfig {
     let mut candidate = stored.clone();
     candidate.apply_update(ModelProviderUpdate {
-        provider: Some(params.provider),
+        wire_protocol: Some(params.wire_protocol),
         model: Some(params.model),
         supports_image_input: Some(params.supports_image_input),
         base_url: Some(params.base_url),
+        request_options: Some(params.request_options),
+        output_limit_field: Some(params.output_limit_field),
+        probe_max_output_tokens: Some(params.probe_max_output_tokens),
+        runtime_max_output_tokens: Some(params.runtime_max_output_tokens),
+        max_context_bytes: Some(params.max_context_bytes),
         api_key: params.api_key,
         ..Default::default()
     });
@@ -92,6 +110,26 @@ pub async fn update_model_provider(
     let db = crate::db::get_db();
     let mut config = model_provider::load(db).await?;
     let update = body.into_inner();
+    let expected_connection_revision = update.expected_connection_revision.ok_or_else(|| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "provider connection revision is required",
+        )
+    })?;
+    let expected_profile_revision = update.expected_profile_revision.ok_or_else(|| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "provider profile revision is required",
+        )
+    })?;
+    if expected_connection_revision != config.connection_revision
+        || expected_profile_revision != config.profile_revision
+    {
+        return Err(DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "provider configuration revision conflict",
+        ));
+    }
     if let Some(limit) = update.max_steps_per_turn
         && !(model_provider::MAX_STEPS_MIN..=model_provider::MAX_STEPS_MAX).contains(&limit)
     {
@@ -131,6 +169,9 @@ pub async fn update_model_provider(
         ));
     }
     config.apply_update(update);
+    config.request_profile().map_err(|error| {
+        DeskSignalError::new_custom_error(DeskErrorCode::INVALID_PARAMS, &error.to_string())
+    })?;
     // Write-time SSRF check: reject a base_url whose scheme or IP-literal host is
     // not permitted by the active mode. Domain hosts pass here and are re-checked
     // authoritatively at dial time by the connect-time resolver. An unset base_url
@@ -150,7 +191,19 @@ pub async fn update_model_provider(
             )
         })?;
     }
-    model_provider::save(db, config.clone()).await?;
+    if !model_provider::save_if_revisions_match(
+        db,
+        config.clone(),
+        expected_connection_revision,
+        expected_profile_revision,
+    )
+    .await?
+    {
+        return Err(DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "provider configuration revision conflict",
+        ));
+    }
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(config.public_view())))
 }
 
@@ -167,7 +220,7 @@ async fn run_probe(
     });
     let mut request =
         ModelRequest::text_only(vec![expectation.message.clone()], ResponseFormatSpec::None);
-    request.max_output_tokens = Some(expectation.max_output_tokens);
+    request.use_case = ModelUseCase::Probe;
 
     let started = Instant::now();
     let mut sink = NullTurnSink;
@@ -178,6 +231,15 @@ async fn run_probe(
         )
     })?;
     let latency_ms = started.elapsed().as_millis() as u64;
+    if turn.provider_meta.reasoning_observed
+        && turn.stop_reason == desk_diagnose_core::chat::StopReason::MaxTokens
+        && turn.text.trim().is_empty()
+    {
+        return Err(DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "Test failed: the reasoning budget exhausted the probe output limit before any answer was produced; increase probe_max_output_tokens",
+        ));
+    }
     verify_probe_response(&expectation, &turn.text).map_err(|message| {
         DeskSignalError::new_custom_error(
             if expectation.required_marker.is_some() {
@@ -202,6 +264,15 @@ async fn run_probe(
         latency_ms,
         sample,
         validated_capabilities: expectation.validated_capabilities(),
+        reasoning_observed: turn.provider_meta.reasoning_observed,
+        reasoning_tokens: turn
+            .provider_meta
+            .reasoning_tokens
+            .and_then(|tokens| i64::try_from(tokens).ok()),
+        stop_reason: serde_json::to_value(turn.stop_reason)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| "other".to_string()),
         provenance,
     })
 }
@@ -231,6 +302,26 @@ pub async fn test_model_provider(
     // A reachable-but-broken chain (bad key, wrong model, unreachable host) is a
     // business outcome surfaced as the failure body with the real reason.
     let dto = run_probe(&seam, config.model.clone(), config.supports_image_input).await?;
+    let validated_capabilities = serde_json::Value::Object(
+        dto.validated_capabilities
+            .iter()
+            .map(|capability| (capability.clone(), serde_json::Value::Bool(true)))
+            .collect(),
+    );
+    let _stored = model_provider::save_probe_observation_if_current(
+        db,
+        model_provider::ModelProbeObservation {
+            connection_revision: config.connection_revision,
+            profile_revision: config.profile_revision,
+            tested_at: chrono::Utc::now(),
+            reasoning_observed: dto.reasoning_observed,
+            reasoning_tokens: dto.reasoning_tokens,
+            stop_reason: Some(dto.stop_reason.clone()),
+            validated_capabilities,
+            current: true,
+        },
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(dto)))
 }
 
@@ -252,10 +343,8 @@ mod tests {
             _sink: &mut dyn TurnSink,
         ) -> Result<ModelTurn, AgentError> {
             let visual = request.messages[0].image_data_url.is_some();
-            assert_eq!(
-                request.max_output_tokens,
-                Some(if visual { 64 } else { 16 })
-            );
+            assert_eq!(request.use_case, ModelUseCase::Probe);
+            assert_eq!(request.caller_output_hard_cap, None);
             Ok(ModelTurn {
                 text: if visual { "LCXL7F" } else { "pong" }.into(),
                 ..Default::default()
@@ -272,7 +361,7 @@ mod tests {
     #[test]
     fn probe_params_overlay_form_values_without_mutating_stored_config() {
         let stored = model_provider::ModelProviderConfig {
-            provider: Some("openai-compatible".into()),
+            wire_protocol: Some(WireProtocol::OpenAiChatCompletions),
             model: Some("saved-model".into()),
             supports_image_input: false,
             base_url: Some("https://saved.example/v1".into()),
@@ -283,15 +372,23 @@ mod tests {
         let candidate = config_for_probe(
             &stored,
             ProviderTestParams {
-                provider: "anthropic".into(),
+                wire_protocol: WireProtocol::AnthropicMessages,
                 model: "unsaved-model".into(),
                 supports_image_input: true,
                 base_url: "https://unsaved.example".into(),
+                request_options: serde_json::json!({}),
+                output_limit_field: OutputLimitField::MaxTokens,
+                probe_max_output_tokens: 512,
+                runtime_max_output_tokens: 4096,
+                max_context_bytes: 131_072,
                 api_key: Some("unsaved-key".into()),
             },
         );
 
-        assert_eq!(candidate.provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            candidate.wire_protocol,
+            Some(WireProtocol::AnthropicMessages)
+        );
         assert_eq!(candidate.model.as_deref(), Some("unsaved-model"));
         assert!(candidate.supports_image_input);
         assert_eq!(
@@ -312,10 +409,15 @@ mod tests {
         let candidate = config_for_probe(
             &stored,
             ProviderTestParams {
-                provider: "openai-compatible".into(),
+                wire_protocol: WireProtocol::OpenAiChatCompletions,
                 model: "model".into(),
                 supports_image_input: false,
                 base_url: "https://example.com/v1".into(),
+                request_options: serde_json::json!({}),
+                output_limit_field: OutputLimitField::MaxTokens,
+                probe_max_output_tokens: 512,
+                runtime_max_output_tokens: 4096,
+                max_context_bytes: 131_072,
                 api_key: None,
             },
         );
