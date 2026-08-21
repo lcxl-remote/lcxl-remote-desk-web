@@ -989,19 +989,20 @@ impl PersistedAgentSession {
                 self.execution_state = ExecutionState::None;
             }
             RecoveryVerdict::OutcomeUnknown {
+                tool_call_id,
                 work_id,
                 execution_id,
                 exec_request_id,
             } => {
-                // At most one mutating call is in flight at a time; close the first
-                // unclosed call with a placeholder a late result can replace in
-                // place, and record the unknown outcome with its identity.
-                if let Some(call_id) = unclosed.first() {
-                    let placeholder_id = recovery_message_id(call_id);
+                // At most one mutating call is in flight at a time. Bind the
+                // placeholder to the exact call correlated by the runtime's
+                // durable work row; other dangling calls were never started.
+                if unclosed.iter().any(|call_id| call_id == &tool_call_id) {
+                    let placeholder_id = recovery_message_id(&tool_call_id);
                     self.conversation
                         .push(crate::chat::ChatMessage::tool_result(
                             placeholder_id.clone(),
-                            call_id,
+                            &tool_call_id,
                             RECOVER_OUTCOME_UNKNOWN,
                         ));
                     self.execution_state = ExecutionState::OutcomeUnknown {
@@ -1011,9 +1012,13 @@ impl PersistedAgentSession {
                         placeholder_message_id: placeholder_id,
                         since: now.clone(),
                     };
+                } else {
+                    // A runtime supplied an identity that cannot be correlated to
+                    // the persisted conversation. Fail closed rather than attach
+                    // the late result to the wrong tool call.
+                    self.execution_state = ExecutionState::Interrupted { since: now.clone() };
                 }
-                // Defensive: any further stragglers are closed as not-executed.
-                for call_id in unclosed.iter().skip(1) {
+                for call_id in unclosed.iter().filter(|call_id| *call_id != &tool_call_id) {
                     self.conversation
                         .push(crate::chat::ChatMessage::tool_result(
                             recovery_message_id(call_id),
@@ -1090,6 +1095,10 @@ pub enum RecoveryVerdict {
     /// The command was dispatched and carries a recoverable identity; its outcome
     /// is unknown and a late result can reconcile it in place.
     OutcomeUnknown {
+        /// The exact dangling call backed by the durable execution identity. A
+        /// provider may return several tool calls in one assistant message, so it
+        /// is not necessarily the first still-unclosed call after a crash.
+        tool_call_id: String,
         work_id: i64,
         execution_id: String,
         exec_request_id: String,
@@ -1846,14 +1855,22 @@ mod tests {
         s.conversation.push(ChatMessage::assistant_tool_calls(
             "a1",
             String::new(),
-            vec![ToolCallRef {
-                id: "call-z".into(),
-                name: "exec_command".into(),
-                arguments_json: "{}".into(),
-            }],
+            vec![
+                ToolCallRef {
+                    id: "read-before".into(),
+                    name: "system_info".into(),
+                    arguments_json: "{}".into(),
+                },
+                ToolCallRef {
+                    id: "call-z".into(),
+                    name: "exec_command".into(),
+                    arguments_json: "{}".into(),
+                },
+            ],
         ));
         s.recover_session(
             RecoveryVerdict::OutcomeUnknown {
+                tool_call_id: "call-z".into(),
                 work_id: 9,
                 execution_id: "exec-9".into(),
                 exec_request_id: "rq-9".into(),
@@ -1862,6 +1879,10 @@ mod tests {
         );
         assert_eq!(s.turn_state, TurnState::Failed);
         assert!(!s.execution_state.allows_new_mutation());
+        assert!(s.conversation.iter().any(|message| {
+            message.tool_call_id.as_deref() == Some("read-before")
+                && message.text == RECOVER_NOT_EXECUTED
+        }));
         // A late result for exec-9 reconciles the placeholder in place.
         assert!(s.reconcile_late_result("exec-9", "exit_code=0", "t3"));
         assert_eq!(s.execution_state, ExecutionState::None);

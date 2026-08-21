@@ -289,6 +289,14 @@ pub fn terminal_error_for(outcome: &LoopOutcome) -> Option<AgentError> {
             safe_for_model: true,
             error_code: Some(DeskErrorCode::COPILOT_RESPONSE_TRUNCATED.code()),
         },
+        LoopOutcome::ContextWindowExceeded => AgentError {
+            kind: AgentErrorKind::InvalidInput,
+            message: "the model context window was exceeded; shorten the conversation or evidence"
+                .into(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: Some(DeskErrorCode::AI_CONTEXT_LIMIT_EXCEEDED.code()),
+        },
         LoopOutcome::CircuitBreak(reason) => {
             let (message, error_code) = match reason {
                 CircuitBreakReason::StepBudget => (
@@ -505,6 +513,7 @@ mod tests {
     fn finish_outcome_maps_non_answered_to_terminal_error() {
         let outcomes = [
             LoopOutcome::Truncated,
+            LoopOutcome::ContextWindowExceeded,
             LoopOutcome::CircuitBreak(CircuitBreakReason::StepBudget),
             LoopOutcome::CircuitBreak(CircuitBreakReason::SameToolRepeat),
             LoopOutcome::ProtocolError(ModelTurnError::InconsistentStopReason {
@@ -537,6 +546,14 @@ mod tests {
         assert_eq!(
             truncated.error_code,
             Some(DeskErrorCode::COPILOT_RESPONSE_TRUNCATED.code())
+        );
+
+        let context = terminal_error_for(&LoopOutcome::ContextWindowExceeded).unwrap();
+        assert_eq!(context.kind, AgentErrorKind::InvalidInput);
+        assert!(!context.retryable);
+        assert_eq!(
+            context.error_code,
+            Some(DeskErrorCode::AI_CONTEXT_LIMIT_EXCEEDED.code())
         );
 
         let busy = terminal_error_for(&LoopOutcome::TurnBusy).unwrap();

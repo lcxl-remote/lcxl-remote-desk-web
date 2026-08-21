@@ -1069,6 +1069,7 @@ fn anthropic_stop_reason(reason: Option<&str>) -> StopReason {
         Some("end_turn") => StopReason::EndTurn,
         Some("tool_use") => StopReason::ToolUse,
         Some("max_tokens") => StopReason::MaxTokens,
+        Some("model_context_window_exceeded") => StopReason::ContextWindowExceeded,
         _ => StopReason::Other,
     }
 }
@@ -1794,6 +1795,18 @@ mod tests {
         assert_eq!(turn.usage.output_tokens, Some(10));
         assert_eq!(turn.usage.cache_read_tokens, Some(5));
         assert_eq!(turn.usage.cache_write_tokens, Some(7));
+    }
+
+    #[test]
+    fn anthropic_context_window_stop_remains_distinct_from_output_truncation() {
+        assert_eq!(
+            anthropic_stop_reason(Some("model_context_window_exceeded")),
+            StopReason::ContextWindowExceeded
+        );
+        assert_eq!(
+            anthropic_stop_reason(Some("max_tokens")),
+            StopReason::MaxTokens
+        );
     }
 
     #[test]

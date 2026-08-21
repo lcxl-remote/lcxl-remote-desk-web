@@ -1903,6 +1903,38 @@ async fn streams_discarded_on_truncated_turn() {
     assert_eq!(*log.borrow(), vec!["discarded".to_string()]);
 }
 
+#[tokio::test]
+async fn context_window_stop_is_not_reported_as_output_truncation() {
+    let sess = MemSession::default();
+    let stopped = ModelTurn {
+        stop_reason: StopReason::ContextWindowExceeded,
+        provider_meta: ProviderResponseMeta::without_reasoning(StopReason::ContextWindowExceeded),
+        ..Default::default()
+    };
+    let model = ScriptModel {
+        turns: RefCell::new([stopped].into()),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "x".into(),
+    };
+    let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "t".to_string();
+    let log = Rc::new(RefCell::new(vec![]));
+    let mut sink = EventLog(log.clone());
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &reg, &clock),
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "q"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, LoopOutcome::ContextWindowExceeded);
+    assert_eq!(*log.borrow(), vec!["discarded".to_string()]);
+}
+
 // ---------------------------- Content safety ----------------------------
 
 #[derive(Default)]

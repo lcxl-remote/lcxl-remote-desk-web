@@ -7,6 +7,7 @@ use desk_diagnose_core::model_profile::{ModelUseCase, OutputLimitField, WireProt
 use desk_diagnose_core::prompt::ResponseFormatSpec;
 use desk_diagnose_core::provider_probe::{provider_probe_request, verify_probe_response};
 use desk_diagnose_core::seam::{ModelRequest, ModelSeam, NullTurnSink};
+use desk_diagnose_core::terminal_complete::COMPLETION_MAX_OUTPUT_TOKENS;
 use desk_utils::error::DeskErrorCode;
 use desk_utils::rest::RestResponse;
 use serde::{Deserialize, Serialize};
@@ -79,6 +80,34 @@ fn config_for_probe(
         ..Default::default()
     });
     candidate
+}
+
+/// The OSS singleton serves both the conversational agent and terminal
+/// completion. Validate the stored/candidate profile against the completion
+/// caller's smaller hard cap so a successful save or probe cannot create a
+/// configuration that deterministically fails every completion request.
+fn validate_shared_profile(
+    config: &model_provider::ModelProviderConfig,
+) -> Result<(), DeskSignalError> {
+    let profile = config.request_profile().map_err(|error| {
+        DeskSignalError::new_custom_error(DeskErrorCode::INVALID_PARAMS, &error.to_string())
+    })?;
+    let protocol = config.wire_protocol.ok_or_else(|| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::INVALID_PARAMS,
+            "wire protocol is required",
+        )
+    })?;
+    profile
+        .validate_for_use_case(
+            protocol,
+            ModelUseCase::Completion,
+            Some(i64::from(COMPLETION_MAX_OUTPUT_TOKENS)),
+        )
+        .map_err(|error| {
+            DeskSignalError::new_custom_error(DeskErrorCode::INVALID_PARAMS, &error.to_string())
+        })?;
+    Ok(())
 }
 
 #[utoipa::path(
@@ -169,9 +198,7 @@ pub async fn update_model_provider(
         ));
     }
     config.apply_update(update);
-    config.request_profile().map_err(|error| {
-        DeskSignalError::new_custom_error(DeskErrorCode::INVALID_PARAMS, &error.to_string())
-    })?;
+    validate_shared_profile(&config)?;
     // Write-time SSRF check: reject a base_url whose scheme or IP-literal host is
     // not permitted by the active mode. Domain hosts pass here and are re-checked
     // authoritatively at dial time by the connect-time resolver. An unset base_url
@@ -294,6 +321,7 @@ pub async fn test_model_provider(
     // Overlay the form values in memory. The candidate is deliberately never
     // passed to `save`, so testing cannot commit an unverified configuration.
     let config = config_for_probe(&stored, body.into_inner());
+    validate_shared_profile(&config)?;
     // Fail closed with a precondition error when the provider is not fully
     // configured (missing model / base_url / api_key).
     let seam = SignalModelSeam::from_config(&config).map_err(|e| {
@@ -423,6 +451,28 @@ mod tests {
         );
 
         assert_eq!(candidate.api_key.as_deref(), Some("saved-key"));
+    }
+
+    #[test]
+    fn shared_oss_profile_rejects_manual_thinking_above_completion_cap() {
+        let config = model_provider::ModelProviderConfig {
+            wire_protocol: Some(WireProtocol::AnthropicMessages),
+            model: Some("claude-custom".into()),
+            base_url: Some("https://api.example".into()),
+            api_key: Some("secret".into()),
+            request_options: serde_json::json!({
+                "thinking": {"type": "enabled", "budget_tokens": 600}
+            }),
+            output_limit_field: OutputLimitField::MaxTokens,
+            probe_max_output_tokens: 1024,
+            runtime_max_output_tokens: 4096,
+            max_context_bytes: Some(131_072),
+            ..Default::default()
+        };
+
+        let error = validate_shared_profile(&config)
+            .expect_err("the singleton must remain valid for terminal completion");
+        assert!(error.to_string().contains("effective output limit (512)"));
     }
 
     #[async_trait::async_trait(?Send)]

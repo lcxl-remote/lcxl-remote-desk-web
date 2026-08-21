@@ -158,22 +158,15 @@ impl SignalAgentSessionStore {
         }
 
         let unclosed = session.unclosed_tool_call_ids();
-        let task = if unclosed.len() == 1 {
-            agent_exec_task::Entity::find()
-                .filter(agent_exec_task::Column::ConversationId.eq(&session.conversation_id))
-                .filter(agent_exec_task::Column::ToolCallId.eq(unclosed[0].clone()))
-                .order_by_desc(agent_exec_task::Column::Id)
-                .one(&self.db)
-                .await
-                .map_err(|e| internal(format!("load lapsed agent execution: {e}")))?
-        } else {
-            None
-        };
+        let task = find_recovery_task(&self.db, &session.conversation_id, &unclosed)
+            .await
+            .map_err(|e| internal(format!("load lapsed agent execution: {e}")))?;
         let now_text = now.to_rfc3339();
         match task {
             Some(task) => {
                 session.recover_session(
                     RecoveryVerdict::OutcomeUnknown {
+                        tool_call_id: task.tool_call_id.clone(),
                         work_id: task.id,
                         execution_id: task.execution_generation.clone(),
                         exec_request_id: task.exec_request_id.clone(),
@@ -193,7 +186,10 @@ impl SignalAgentSessionStore {
                     );
                 }
             }
-            None => session.recover_session(RecoveryVerdict::InterruptedUnknown, now_text),
+            // No durable task means no mutating command was dispatched. This is
+            // the normal crash window for a read-only tool between the persisted
+            // assistant call and its result, so it is safe to close as not-run.
+            None => session.recover_session(RecoveryVerdict::NotExecuted, now_text),
         }
         let new_version = row.version + 1;
         session.version = new_version;
@@ -484,6 +480,26 @@ async fn find(
         .await
 }
 
+/// Find the newest durable execution correlated to any still-unclosed call. The
+/// loop persists each completed read-only result before advancing, so at most one
+/// of these calls can have an in-flight mutating task; the explicit tool-call id
+/// carried into recovery prevents binding its identity to a different call.
+async fn find_recovery_task(
+    db: &DatabaseConnection,
+    conversation_id: &str,
+    unclosed_tool_call_ids: &[String],
+) -> Result<Option<agent_exec_task::Model>, sea_orm::DbErr> {
+    if unclosed_tool_call_ids.is_empty() {
+        return Ok(None);
+    }
+    agent_exec_task::Entity::find()
+        .filter(agent_exec_task::Column::ConversationId.eq(conversation_id))
+        .filter(agent_exec_task::Column::ToolCallId.is_in(unclosed_tool_call_ids.to_vec()))
+        .order_by_desc(agent_exec_task::Column::Id)
+        .one(db)
+        .await
+}
+
 #[async_trait(?Send)]
 impl SessionSeam for SignalAgentSessionStore {
     async fn claim_turn(
@@ -522,28 +538,19 @@ impl SessionSeam for SignalAgentSessionStore {
                         // reconcilable across a process restart; a terminal result
                         // already in SQLite can be applied immediately.
                         let unclosed = session.unclosed_tool_call_ids();
-                        let task = if unclosed.len() == 1 {
-                            agent_exec_task::Entity::find()
-                                .filter(
-                                    agent_exec_task::Column::ConversationId
-                                        .eq(&session.conversation_id),
-                                )
-                                .filter(agent_exec_task::Column::ToolCallId.eq(unclosed[0].clone()))
-                                .order_by_desc(agent_exec_task::Column::Id)
-                                .one(&self.db)
+                        let task =
+                            find_recovery_task(&self.db, &session.conversation_id, &unclosed)
                                 .await
                                 .map_err(|e| {
                                     ClaimError::Backend(internal(format!(
                                         "load interrupted agent execution: {e}"
                                     )))
-                                })?
-                        } else {
-                            None
-                        };
+                                })?;
                         match task {
                             Some(task) => {
                                 session.recover_session(
                                     RecoveryVerdict::OutcomeUnknown {
+                                        tool_call_id: task.tool_call_id.clone(),
                                         work_id: task.id,
                                         execution_id: task.execution_generation.clone(),
                                         exec_request_id: task.exec_request_id.clone(),
@@ -563,10 +570,8 @@ impl SessionSeam for SignalAgentSessionStore {
                                     );
                                 }
                             }
-                            None => session.recover_session(
-                                RecoveryVerdict::InterruptedUnknown,
-                                params.now.clone(),
-                            ),
+                            None => session
+                                .recover_session(RecoveryVerdict::NotExecuted, params.now.clone()),
                         }
                     }
                     if matches!(
@@ -750,6 +755,9 @@ mod tests {
         db.execute(&schema.create_table_from_entity(agent_session::Entity))
             .await
             .unwrap();
+        db.execute(&schema.create_table_from_entity(agent_exec_task::Entity))
+            .await
+            .unwrap();
         SignalAgentSessionStore::new(db)
     }
 
@@ -908,6 +916,49 @@ mod tests {
             store.claim_turn(claim("turn-2")).await,
             Err(ClaimError::Busy)
         ));
+    }
+
+    #[tokio::test]
+    async fn expired_read_only_call_recovers_as_not_executed() {
+        use desk_diagnose_core::chat::{ChatMessage, ToolCallRef};
+
+        let store = store().await;
+        let mut first = store.claim_turn(claim("turn-1")).await.unwrap();
+        first.conversation.push(ChatMessage::assistant_tool_calls(
+            "assistant-tools",
+            String::new(),
+            vec![ToolCallRef {
+                id: "read-call-1".into(),
+                name: "system_info".into(),
+                arguments_json: "{}".into(),
+            }],
+        ));
+        store.save(&mut first).await.unwrap();
+        agent_session::Entity::update_many()
+            .col_expr(
+                agent_session::Column::LeaseDeadline,
+                Expr::value(Some(Utc::now() - Duration::seconds(1))),
+            )
+            .filter(agent_session::Column::ConversationId.eq("conversation-1"))
+            .exec(&store.db)
+            .await
+            .unwrap();
+
+        let recovered = store.claim_turn(claim("turn-2")).await.unwrap();
+        assert_eq!(recovered.execution_state, ExecutionState::None);
+        let result = recovered
+            .conversation
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some("read-call-1"))
+            .expect("recovery closes the dangling read call");
+        assert!(result.text.contains("not executed"));
+        assert!(
+            !matches!(
+                recovered.execution_state,
+                ExecutionState::Interrupted { .. }
+            ),
+            "a read-only crash must not permanently disable future mutation"
+        );
     }
 
     #[tokio::test]

@@ -104,6 +104,8 @@ pub enum LoopOutcome {
     ContentSafetyUnavailable(AgentError),
     /// The model turn was truncated (`MaxTokens` / `Other`) and discarded.
     Truncated,
+    /// The provider reported that the input exceeded its model context window.
+    ContextWindowExceeded,
     /// A circuit breaker stopped the turn.
     CircuitBreak(CircuitBreakReason),
     /// The model violated the wire contract (inconsistent stop reason / bad args).
@@ -506,13 +508,20 @@ async fn run_inner(
                 return Ok(LoopOutcome::ProtocolError(error));
             }
         };
-        if disposition == TurnDisposition::Discard {
+        if matches!(
+            disposition,
+            TurnDisposition::Discard | TurnDisposition::ContextWindowExceeded
+        ) {
             if deps.content_safety.is_enforced() {
                 sink.on_turn_retracted(StreamRetractionReason::Incomplete, None);
             } else {
                 sink.on_turn_discarded();
             }
-            return Ok(LoopOutcome::Truncated);
+            return Ok(match disposition {
+                TurnDisposition::Discard => LoopOutcome::Truncated,
+                TurnDisposition::ContextWindowExceeded => LoopOutcome::ContextWindowExceeded,
+                _ => unreachable!("only non-actionable dispositions enter this branch"),
+            });
         }
 
         let safety_decision = match review_model_turn(deps, &turn).await {
@@ -550,6 +559,9 @@ async fn run_inner(
                 return Ok(LoopOutcome::Answered(turn.text));
             }
             TurnDisposition::Discard => unreachable!("discard returned before safety review"),
+            TurnDisposition::ContextWindowExceeded => {
+                unreachable!("context-window stop returned before safety review")
+            }
             TurnDisposition::InvokeTools => {
                 // Record the assistant's tool-call message so the conversation
                 // stays well-formed when replayed to the model.
@@ -666,6 +678,12 @@ async fn run_inner(
                                 .await;
                             }
                             finish_tool(session, &call.id, ok, sink);
+                            // Persist each read-only result before advancing to the
+                            // next call. On a crash, the OSS recovery layer can then
+                            // distinguish the still-unstarted calls from any later
+                            // durable mutating task instead of treating the whole
+                            // assistant batch as an unknown execution.
+                            deps.session_seam.save(session).await?;
                         }
                         ToolEffect::Mutating => {
                             if let Some(outcome) = run_mutating(

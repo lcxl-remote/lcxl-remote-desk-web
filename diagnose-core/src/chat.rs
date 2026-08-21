@@ -370,8 +370,9 @@ impl ToolCall {
 /// Why the model stopped producing the turn, normalized across providers.
 ///
 /// OpenAI `finish_reason` (`stop`/`tool_calls`/`length`) and Anthropic
-/// `stop_reason` (`end_turn`/`tool_use`/`max_tokens`) map here; anything
-/// unrecognized becomes [`StopReason::Other`].
+/// `stop_reason` (`end_turn`/`tool_use`/`max_tokens`/
+/// `model_context_window_exceeded`) map here; anything unrecognized becomes
+/// [`StopReason::Other`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
@@ -381,6 +382,9 @@ pub enum StopReason {
     ToolUse,
     /// Truncated by the token cap (the turn is half-produced; do not act on it).
     MaxTokens,
+    /// The provider rejected/stopped the turn because the input context exceeded
+    /// its context window. This is an input-size failure, not output truncation.
+    ContextWindowExceeded,
     /// Anything else / unknown (treated like a truncated turn: do not act on it).
     #[default]
     Other,
@@ -479,6 +483,9 @@ pub enum TurnDisposition {
     /// `MaxTokens` / `Other`: the turn is half-produced — discard it (and its
     /// provisional streamed text) and do not execute anything.
     Discard,
+    /// The provider reported that the input exceeded its context window. Discard
+    /// all provisional output and surface a context-limit error to the caller.
+    ContextWindowExceeded,
 }
 
 /// Validate the `stop_reason × tool_calls` combination and decide what the loop
@@ -489,6 +496,8 @@ pub enum TurnDisposition {
 ///   [`TurnDisposition::InvokeTools`].
 /// - `MaxTokens` / `Other` ⇒ the turn is truncated → [`TurnDisposition::Discard`]
 ///   (never execute a half-produced tool call).
+/// - `ContextWindowExceeded` ⇒ discard the turn but preserve the distinct input
+///   context failure → [`TurnDisposition::ContextWindowExceeded`].
 ///
 /// A mismatch (e.g. `EndTurn` carrying tool calls, `ToolUse` with none, or
 /// unparseable arguments) is a provider protocol error, returned as
@@ -535,6 +544,7 @@ pub fn classify_model_turn(turn: &ModelTurn) -> Result<TurnDisposition, ModelTur
         // A truncated or unknown stop: discard the half-produced turn regardless
         // of whether partial tool calls were assembled.
         StopReason::MaxTokens | StopReason::Other => Ok(TurnDisposition::Discard),
+        StopReason::ContextWindowExceeded => Ok(TurnDisposition::ContextWindowExceeded),
     }
 }
 
@@ -753,8 +763,8 @@ mod tests {
         }
     }
 
-    /// `MaxTokens` and `Other` discard the turn, even if partial tool calls were
-    /// assembled (never act on a truncated turn).
+    /// Output truncation/unknown stops discard the turn, while a provider context
+    /// window stop remains distinguishable so callers can reduce input context.
     #[test]
     fn classify_truncated_turns_discard() {
         for stop in [StopReason::MaxTokens, StopReason::Other] {
@@ -771,6 +781,17 @@ mod tests {
             };
             assert_eq!(classify_model_turn(&turn), Ok(TurnDisposition::Discard));
         }
+
+        let context = ModelTurn {
+            text: "partial".into(),
+            stop_reason: StopReason::ContextWindowExceeded,
+            provider_meta: meta(StopReason::ContextWindowExceeded, false),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_model_turn(&context),
+            Ok(TurnDisposition::ContextWindowExceeded)
+        );
     }
 
     /// `ToolSpec` and `ModelTurn` round-trip through serde (manager persists them).
