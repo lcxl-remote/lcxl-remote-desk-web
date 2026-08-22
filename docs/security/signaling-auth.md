@@ -21,7 +21,7 @@ The same contract holds on both the open-source signaling server and the enterpr
 
 ## Access-grant sessions (device & support codes)
 
-A controller reaches an online host by redeeming an **access code** in the connect box (`POST /api/desk/redeem-code`) — either a permanent **device code** or a **support code** (a device code with a bounded TTL, minted for a one-time assist). A redeemed session connects to the host's **regular live connection**; there is no separate "support" upstream.
+A controller reaches an online host by redeeming an **access code** in the connect box (`POST /api/desk/redeem-code`) — either a permanent **device code** or a short-lived **support code**. A support code may be redeemed again within its TTL for reconnects, with each redemption audited. A redeemed session connects to the host's **regular live connection**; there is no separate "support" upstream.
 
 Because a redeemed session is not the owner, it is **capability-scoped** and enforced **fail-closed by the host**, not by the signaling server:
 

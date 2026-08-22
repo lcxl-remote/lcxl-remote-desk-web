@@ -3,7 +3,7 @@
 An **access code** lets a controller reach an online host by typing a short code into the connect box — no need to know the host's address. There are two kinds, and the **same input box accepts both**; the server detects which was entered:
 
 - **Device code** — a permanent code shown by every online host. Use it to reconnect to a host at any time.
-- **Support code** — a device code with a bounded lifetime (TTL), minted on demand for a one-time assist. Minting a support code requires a **central brain** (the manager); a plain signaling server routes connections but does not issue support codes.
+- **Support code** — a short-lived access code minted on demand for temporary assistance. It may be redeemed again within its TTL for reconnects, and every redemption is audited. Minting a support code requires a **central brain** (the manager); a plain signaling server routes connections but does not issue support codes.
 
 ## Redeeming a code
 

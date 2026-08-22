@@ -1,6 +1,6 @@
 # Terminal, Files & Clipboard
 
-Beyond screen control, LCXL Remote Desk bundles everyday productivity features over dedicated WebRTC data channels.
+Beyond screen control, LCXL Remote Desk combines WebRTC data-channel features with a separately authenticated remote terminal.
 
 ::: info Under a shared access code
 When you connect by redeeming an [access code](/guide/access-codes) (a device or support code) rather than as the device owner, the terminal, file and clipboard capabilities below are subject to that code's capability ceiling, the host's global access settings, and live approval — not automatically available.
@@ -8,7 +8,7 @@ When you connect by redeeming an [access code](/guide/access-codes) (a device or
 
 ## Remote Terminal
 
-A built-in [xterm.js](https://xtermjs.org/) terminal supports full shell interactions over a dedicated data channel. Use it for command-line work without leaving the browser session.
+A built-in [xterm.js](https://xtermjs.org/) terminal supports full shell interactions over its own authenticated WebSocket, separate from the WebRTC data channels. Use it for command-line work without leaving the browser session.
 
 The terminal displays an LCXL Remote Desk welcome banner while connecting. After
 the host confirms that the terminal session has started, closing or reloading the

@@ -1,5 +1,4 @@
 import { defineConfig } from 'vitepress'
-import { withMermaid } from 'vitepress-plugin-mermaid'
 
 // GitHub repository the open-source `web` project mirrors to.
 const REPO_URL = 'https://github.com/lcxl-remote/lcxl-remote-desk-web'
@@ -135,8 +134,7 @@ const zhSidebar = [
   },
 ]
 
-export default withMermaid(
-  defineConfig({
+export default defineConfig({
     base,
     title: 'LCXL Remote Desk',
     description:
@@ -188,5 +186,4 @@ export default withMermaid(
         },
       },
     },
-  }),
-)
+})

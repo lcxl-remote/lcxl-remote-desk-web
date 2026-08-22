@@ -20,32 +20,21 @@ cargo run -- --help
 
 ## 默认模式
 
-最简布局：WebRTC、采集与输入注入都在一个进程里。适合便携使用与开发。
+最简部署：同一套逻辑上的 daemon → 对等连接 → worker 流水线运行在一个操作系统进程内，并使用进程内通道。适合便携使用与开发。
 
 ## service-daemon 进程模型
 
 为了采集 Windows **UAC** 或**锁屏**等安全界面，service-daemon 模式将操作跨权限边界拆分：
 
-```mermaid
-flowchart LR
-    BR["🌐 浏览器"] <==>|"WebRTC"| DM
+![Service-daemon 进程与 IPC 模型](/architecture/process-model-cn.svg)
 
-    subgraph HOST["被控主机 — service-daemon 模式"]
-        direction TB
-        DM["ServiceDaemon (SYSTEM)<br/>SignalingProxy · WebRTC PeerConnection · WorkerManager"]
-        subgraph SESS["用户桌面会话"]
-            WK["SessionWorker<br/>采集 + 编码 · 输入 · 文件 / 剪贴板"]
-        end
-        DM <-->|"event pipe（双向）<br/>信令 · DC 负载 · 控制"| WK
-        WK -->|"media pipe（单向）<br/>编码后的 MediaFrame →"| DM
-    end
+**ServiceDaemon**（以 SYSTEM / root 运行）持有 WebRTC 连接、信令与子进程；它在每个桌面会话中启动一个 **SessionWorker**，负责采集、编码、输入、文件与剪贴板。
 
-    DM <-->|"信令"| SIG2["信令服务"]
-```
-
-**ServiceDaemon**（以 SYSTEM 运行）持有 WebRTC 连接、信令与子进程；它在每个桌面会话中启动一个 **SessionWorker** 处理屏幕采集与输入注入。二者通过双向 **event pipe**（信令与控制）与单向 **media pipe**（编码帧）通信。
+二者使用三条独立传输：双向 **event pipe** 承载信令与控制；单向 **media pipe** 承载编码后的音视频帧；双向 **file pipe** 承载文件命令与数据块。文件传输独立后，其背压不会阻塞控制事件。
 
 这种拆分让会话工作进程可以在用户切换时重启，而**不中断浏览器连接**，因为 WebRTC 对等连接由守护进程持有。
+
+目前只有 Windows 实现了原生系统服务集成；Linux 和 macOS 上的 `service-daemon` 暂时以交互方式运行，但逻辑进程模型相同。
 
 ## MCP stdio 模式
 

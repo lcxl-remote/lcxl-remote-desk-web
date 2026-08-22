@@ -8,21 +8,9 @@
 
 ## 工作原理
 
-AI 由**中心信令服务器**（“中心大脑”）编排；设备只是一个**瘦被控端**，仅在收到请求时提供只读证据。当用户在会话中提问（如*“这个系统为什么这么慢？”*），中心服务器驱动一条严格流水线：
+AI 由**中心信令服务器**（“中心大脑”）编排。设备是**瘦被控端**，按需提供只读证据；所有者确认后的命令通过另一条密封执行路径返回设备。当用户在会话中提问（如*“这个系统为什么这么慢？”*），中心服务器驱动一条严格流水线：
 
-```mermaid
-graph LR
-    user[用户问题] --> central[中心信令大脑]
-    central -->|CollectEvidence| edge[瘦被控端设备]
-    edge -->|只读采集| evidence[设备证据]
-    evidence -->|被控端本地<br/>严格脱敏| redacted[脱敏后证据]
-    redacted -->|EvidenceCollectionUpdated| central
-    central -->|调用模型| model[AI 模型]
-    model -->|工具调用 + 流式| diag[多轮诊断]
-    diag -->|exec_command| approve[完整命令预览<br/>所有者明确批准]
-    approve -->|密封计划| edge
-    central -.审计.-> audit[(审计轨迹)]
-```
+![AI 诊断与所有者确认执行流程](/architecture/ai-diagnostics-cn.svg)
 
 1. 中心大脑向被控端请求**只读证据**（系统信息、进程、端口、日志、截图）。
 2. 被控端在本地**采集并脱敏**证据；脱敏失败会立即中止，原始截图数据也会在离开设备前移除。

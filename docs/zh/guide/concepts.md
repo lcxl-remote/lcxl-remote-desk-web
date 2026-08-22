@@ -11,31 +11,11 @@
 
 ## 连接与媒体路径
 
-```mermaid
-flowchart LR
-    subgraph BR["🌐 浏览器客户端"]
-        direction TB
-        dash["管理控制台"]
-        ctrl["远程控制客户端"]
-    end
-
-    SIG["📨 信令服务<br/>(WebSocket · SDP / ICE)"]
-    ICE["🧭 STUN / TURN<br/>(NAT 穿透 · 中继)"]
-
-    subgraph DS["🖥️ Desk Server（被控设备）"]
-        direction TB
-        CAP["屏幕 / 音频采集 + 编码"]
-        INJ["输入注入 · 文件 · 剪贴板"]
-    end
-
-    ctrl <-->|"① SDP / ICE"| SIG <-->|"① SDP / ICE"| DS
-    ctrl <-->|"② 候选收集"| ICE <-->|"② 候选收集"| DS
-    ctrl <==>|"③ WebRTC P2P · TURN 中继兜底"| DS
-```
+![浏览器到被控设备的连接与媒体路径](/architecture/connection-path-cn.svg)
 
 浏览器与远端设备通过信令服务交换 SDP 和 ICE 信息，并使用 STUN/TURN 收集候选地址。连接会优先采用 WebRTC 点对点直连；只有 NAT 穿透失败时才改用 TURN 中继。信令与 TURN 均内置于服务端程序。
 
-连接建立后，视频、Opus 音频及数据通道（输入、剪贴板、文件管理）都跑在 WebRTC 上。远程终端使用专用数据通道。
+连接建立后，视频、Opus 音频及数据通道（输入、剪贴板、文件管理）都跑在 WebRTC 上。远程终端使用独立的鉴权 WebSocket，而不是 WebRTC 数据通道。
 
 ## 传输一览
 
@@ -46,7 +26,7 @@ flowchart LR
 | 数据通道（输入） | 鼠标 / 键盘注入 |
 | 数据通道（剪贴板） | 双向文本剪贴板 |
 | 数据通道（文件） | 上传、下载、删除 |
-| 数据通道（终端） | 专用的 xterm.js 命令行数据流 |
+| 鉴权 WebSocket（终端） | 专用的 xterm.js 命令行数据流 |
 
 ## AI 作为控制端
 
@@ -54,4 +34,4 @@ flowchart LR
 
 ## 下一步
 
-默认进程把所有功能跑在一个进程里，但采集安全界面（Windows UAC / 锁屏）需要跨权限边界拆分——见[启动模式](/zh/guide/startup-modes)。
+默认模式在同一个操作系统进程内，通过进程内通道运行逻辑上的 daemon → 对等连接 → worker 流水线。采集安全界面（Windows UAC / 锁屏）时才需要跨权限边界拆分——见[启动模式](/zh/guide/startup-modes)。

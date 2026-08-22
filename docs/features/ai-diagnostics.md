@@ -8,21 +8,9 @@ When you connect by an [access code](/guide/access-codes) rather than as the own
 
 ## How It Works
 
-AI is orchestrated by the **central signaling server** (the "central brain"); the device is a **thin edge** that only provides read-only evidence on request. When a user asks a question during a session (e.g. *"Why is this system slow?"*), the central server drives a strict pipeline:
+AI is orchestrated by the **central signaling server** (the "central brain"). The device is a **thin edge** that supplies read-only evidence on request; owner-confirmed commands return through a separate, sealed execution path. When a user asks a question during a session (e.g. *"Why is this system slow?"*), the central server drives a strict pipeline:
 
-```mermaid
-graph LR
-    user[User question] --> central[Central Signaling Brain]
-    central -->|CollectEvidence| edge[Thin Edge Device]
-    edge -->|read-only collect| evidence[Device Evidence]
-    evidence -->|Strict Redaction<br/>on the edge| redacted[Redacted Evidence]
-    redacted -->|EvidenceCollectionUpdated| central
-    central -->|call model| model[AI Model]
-    model -->|tool calls + stream| diag[Multi-turn diagnosis]
-    diag -->|exec_command| approve[Full command preview<br/>explicit owner approval]
-    approve -->|sealed plan| edge
-    central -.audit.-> audit[(Audit Trail)]
-```
+![AI diagnostics and owner-confirmed execution flow](/architecture/ai-diagnostics.svg)
 
 1. The central brain requests **read-only evidence** from the edge (system info, processes, ports, logs, screenshots).
 2. The edge **collects and redacts** the evidence locally — redaction **fails closed**, and raw screenshot bytes are stripped before anything leaves the host.

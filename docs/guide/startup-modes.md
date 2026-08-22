@@ -20,32 +20,21 @@ cargo run -- --help
 
 ## Default Mode
 
-The simplest layout: WebRTC, capturing, and input injection all run in one process. Ideal for portable use and development.
+The simplest deployment: the same logical daemon → peer connection → worker pipeline runs inside one OS process and uses in-process channels. It is ideal for portable use and development.
 
 ## Service-Daemon Process Model
 
 To capture secure environments like the Windows **UAC** or **lock screen**, the service-daemon mode splits operations across privilege boundaries:
 
-```mermaid
-flowchart LR
-    BR["🌐 Browser"] <==>|"WebRTC"| DM
+![Service-daemon process and IPC model](/architecture/process-model.svg)
 
-    subgraph HOST["Controlled Host — service-daemon mode"]
-        direction TB
-        DM["ServiceDaemon (SYSTEM)<br/>SignalingProxy · WebRTC PeerConnection · WorkerManager"]
-        subgraph SESS["User Desktop Session"]
-            WK["SessionWorker<br/>Capture + Encode · Input · File / Clipboard"]
-        end
-        DM <-->|"event pipe (bidirectional)<br/>signaling · DC payloads · control"| WK
-        WK -->|"media pipe (one-way)<br/>encoded MediaFrames →"| DM
-    end
+The **ServiceDaemon** (running as SYSTEM / root) owns the WebRTC connection, signaling, and child processes. It spawns a **SessionWorker** inside each desktop session for capture, encoding, input, files, and clipboard.
 
-    DM <-->|"signaling"| SIG2["Signaling Service"]
-```
-
-The **ServiceDaemon** (running as SYSTEM) owns the WebRTC connection, signaling, and child processes. It spawns a **SessionWorker** inside each desktop session to handle screen capture and input injection. They communicate via a bidirectional **event pipe** (signaling and control) and a one-way **media pipe** (encoded frames).
+They use three independent transports: a bidirectional **event pipe** for signaling and control, a one-way **media pipe** for encoded audio/video frames, and a bidirectional **file pipe** for file commands and chunks. Keeping file transfer separate prevents its backpressure from blocking control events.
 
 This split lets session workers restart during user switching **without dropping the browser connection** — the peer connection lives in the daemon.
+
+Native system-service integration is currently implemented on Windows. On Linux and macOS, `service-daemon` currently runs interactively while retaining the same logical process model.
 
 ## MCP stdio Mode
 
