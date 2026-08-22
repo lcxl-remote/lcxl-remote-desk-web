@@ -98,7 +98,11 @@ pub(super) async fn handle_inbound_signaling_text(
                     &router_ctx.outbound_tx,
                     &request_id,
                     desk_agent_protocol::edge_exec::EdgeExecDisposition::RejectedBeforeDispatch {
-                        reason,
+                        error: desk_agent_protocol::edge_exec::EdgeExecDisposition::safe_error(
+                            desk_agent_protocol::AgentErrorKind::PermissionDenied,
+                            reason,
+                            false,
+                        ),
                     },
                 );
             }

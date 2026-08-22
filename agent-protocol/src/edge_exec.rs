@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::exec::ExecPlan;
-use crate::{AgentOutcome, ExecInput};
+use crate::{AgentError, AgentErrorKind, AgentOutcome, ExecInput};
 
 /// Central → daemon (`EdgeExecRequest`): the sealed [`ExecPlan`] plus the
 /// source-specific context the daemon PEP needs to re-validate it. Wrapped in an
@@ -102,20 +102,20 @@ impl EdgeExecRequestPayload {
 pub enum EdgeExecDisposition {
     /// PEP refused the plan before any worker handoff. Change did not run.
     RejectedBeforeDispatch {
-        /// Model-safe reason (PEP failure class).
-        reason: String,
+        /// Structured failure preserved across the edge and manager routing hops.
+        error: AgentError,
     },
     /// The host is at its own concurrency ceiling. Change did **not** run, and
     /// unlike a policy rejection this will succeed later — the caller should retry
     /// rather than treat the target as settled.
     HostAtCapacity {
-        /// Operator-facing description of the ceiling that was hit.
-        reason: String,
+        /// Retryable capacity failure.
+        error: AgentError,
     },
     /// Plan accepted but could not be handed to the worker. Change did not run.
     DispatchFailedBeforeWorker {
-        /// Model-safe reason (worker offline / IPC send failure).
-        reason: String,
+        /// Worker/session/transport failure that happened before execution.
+        error: AgentError,
     },
     /// Worker ran the plan to completion.
     Executed {
@@ -130,6 +130,21 @@ pub enum EdgeExecDisposition {
 }
 
 impl EdgeExecDisposition {
+    /// Construct a model-safe pre-dispatch error with no business-code mapping.
+    pub fn safe_error(
+        kind: AgentErrorKind,
+        message: impl Into<String>,
+        retryable: bool,
+    ) -> AgentError {
+        AgentError {
+            kind,
+            message: message.into(),
+            retryable,
+            safe_for_model: true,
+            error_code: None,
+        }
+    }
+
     /// Whether this disposition *proves* the change was not executed. Only the
     /// pre-dispatch variants do; `Executed` ran and `ExecutionStateUnknown` is, by
     /// definition, uncertain.
@@ -177,13 +192,21 @@ impl EdgeExecDisposition {
                 },
             },
             ExecState::SpawnFailed => EdgeExecDisposition::DispatchFailedBeforeWorker {
-                reason: reply
-                    .detail
-                    .clone()
-                    .unwrap_or_else(|| "the command failed to start on the host".into()),
+                error: Self::safe_error(
+                    AgentErrorKind::SessionUnavailable,
+                    reply
+                        .detail
+                        .clone()
+                        .unwrap_or_else(|| "the command failed to start on the host".into()),
+                    true,
+                ),
             },
             ExecState::Unknown => EdgeExecDisposition::DispatchFailedBeforeWorker {
-                reason: "the host has no record of accepting this command".into(),
+                error: Self::safe_error(
+                    AgentErrorKind::SessionUnavailable,
+                    "the host has no record of accepting this command",
+                    true,
+                ),
             },
             ExecState::Indeterminate => EdgeExecDisposition::ExecutionStateUnknown {
                 reason: reply.detail.clone().unwrap_or_else(|| {
@@ -234,13 +257,21 @@ mod tests {
     fn pre_dispatch_variants_prove_not_executed() {
         assert!(
             EdgeExecDisposition::RejectedBeforeDispatch {
-                reason: "blocklist".into(),
+                error: EdgeExecDisposition::safe_error(
+                    AgentErrorKind::RiskBlocked,
+                    "blocklist",
+                    false,
+                ),
             }
             .proves_not_executed()
         );
         assert!(
             EdgeExecDisposition::DispatchFailedBeforeWorker {
-                reason: "worker offline".into(),
+                error: EdgeExecDisposition::safe_error(
+                    AgentErrorKind::SessionUnavailable,
+                    "worker offline",
+                    true,
+                ),
             }
             .proves_not_executed()
         );
@@ -355,10 +386,25 @@ mod tests {
     fn payload_json_round_trips_each_variant() {
         let variants = vec![
             EdgeExecDisposition::RejectedBeforeDispatch {
-                reason: "pep_rejected:authz".into(),
+                error: EdgeExecDisposition::safe_error(
+                    AgentErrorKind::PermissionDenied,
+                    "pep_rejected:authz",
+                    false,
+                ),
             },
             EdgeExecDisposition::DispatchFailedBeforeWorker {
-                reason: "worker unavailable".into(),
+                error: EdgeExecDisposition::safe_error(
+                    AgentErrorKind::SessionUnavailable,
+                    "worker unavailable",
+                    true,
+                ),
+            },
+            EdgeExecDisposition::HostAtCapacity {
+                error: EdgeExecDisposition::safe_error(
+                    AgentErrorKind::HostAtCapacity,
+                    "host busy",
+                    true,
+                ),
             },
             executed_ok(),
             EdgeExecDisposition::Executed {
@@ -388,7 +434,7 @@ mod tests {
     #[test]
     fn disposition_tag_is_snake_case() {
         let json = serde_json::to_string(&EdgeExecDisposition::RejectedBeforeDispatch {
-            reason: "x".into(),
+            error: EdgeExecDisposition::safe_error(AgentErrorKind::PermissionDenied, "x", false),
         })
         .unwrap();
         assert!(

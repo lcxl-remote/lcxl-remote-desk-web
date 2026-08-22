@@ -35,6 +35,7 @@ export type ExecPreview = {
     shell: string;
     command: string;
     cwd: string | null;
+    approval_timeout_ms: number;
     timeout_ms: number;
     risk: RiskLevel;
     /** Server-authoritative admission basis; absent on an older server. */

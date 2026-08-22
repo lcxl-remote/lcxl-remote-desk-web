@@ -39,7 +39,6 @@ use desk_signal_facade::service::{EdgeExecObserver, ExecStateReplyObserver};
 use sea_orm::DatabaseConnection;
 use tokio::sync::oneshot;
 
-const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 const RESULT_SLACK: Duration = Duration::from_secs(30);
 const FOREGROUND_THRESHOLD: Duration = Duration::from_secs(8);
 const WAIT_FOR_TASK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -282,6 +281,16 @@ fn safe(kind: AgentErrorKind, message: impl Into<String>) -> AgentError {
         message: message.into(),
         retryable: false,
         safe_for_model: true,
+        error_code: None,
+    }
+}
+
+fn internal(message: impl Into<String>) -> AgentError {
+    AgentError {
+        kind: AgentErrorKind::Internal,
+        message: message.into(),
+        retryable: false,
+        safe_for_model: false,
         error_code: None,
     }
 }
@@ -646,6 +655,14 @@ impl ToolSeam for SignalAgentTools {
                 "no live operator connection is available for approval",
             )
         })?;
+        let approval_timeout_secs = crate::model_provider::load(&self.db)
+            .await
+            .map_err(|error| {
+                log::error!("[agent-exec] failed to load approval timeout: {error}");
+                internal("execution approval settings are unavailable")
+            })?
+            .exec_approval_timeout_secs;
+        let approval_timeout = Duration::from_secs(u64::from(approval_timeout_secs));
         let exec_request_id = ExecRequestId(uuid::Uuid::new_v4().to_string());
         let preview = ExecPreview {
             exec_request_id: Some(exec_request_id.clone()),
@@ -655,6 +672,7 @@ impl ToolSeam for SignalAgentTools {
             },
             command: validation_input.command.clone(),
             cwd: validation_input.cwd.clone(),
+            approval_timeout_ms: approval_timeout.as_millis() as u64,
             timeout_ms: draft.timeout_ms,
             risk: draft.risk,
             execution_basis: draft.execution_basis,
@@ -676,7 +694,7 @@ impl ToolSeam for SignalAgentTools {
             self.pending.cancel_approval(&exec_request_id.0);
             return Err(error);
         }
-        let approved = match tokio::time::timeout(APPROVAL_TIMEOUT, approval_rx).await {
+        let approved = match tokio::time::timeout(approval_timeout, approval_rx).await {
             Ok(Ok(ApprovalDecision::Approve)) => true,
             Ok(Ok(ApprovalDecision::Reject)) => false,
             Ok(Err(_)) => {
@@ -759,16 +777,14 @@ impl ToolSeam for SignalAgentTools {
             SignalDispatch::Settled {
                 task,
                 disposition:
-                    EdgeExecDisposition::RejectedBeforeDispatch { reason }
-                    | EdgeExecDisposition::DispatchFailedBeforeWorker { reason }
-                    | EdgeExecDisposition::HostAtCapacity { reason },
+                    EdgeExecDisposition::RejectedBeforeDispatch { error }
+                    | EdgeExecDisposition::DispatchFailedBeforeWorker { error }
+                    | EdgeExecDisposition::HostAtCapacity { error },
             } => {
                 crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone())
                     .consume_event(&task.event_id)
                     .await?;
-                Ok(ExecOutcome::Rejected {
-                    reason: Some(reason),
-                })
+                Err(error)
             }
             SignalDispatch::Settled {
                 task,
@@ -1027,7 +1043,11 @@ mod tests {
         let payload = EdgeExecResultPayload {
             request_id: "g1".into(),
             disposition: EdgeExecDisposition::RejectedBeforeDispatch {
-                reason: "test".into(),
+                error: EdgeExecDisposition::safe_error(
+                    AgentErrorKind::PermissionDenied,
+                    "test",
+                    false,
+                ),
             },
         };
         assert!(!pending.deliver_result("edge-b", payload.clone()));

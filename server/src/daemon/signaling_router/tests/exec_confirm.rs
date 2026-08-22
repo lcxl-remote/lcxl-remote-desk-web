@@ -265,6 +265,10 @@ pub(super) async fn synced_operator_template_becomes_executable_via_confirm_exec
     let preview = read_preview(&mut rx);
     assert!(preview.executable);
     assert!(preview.requires_confirmation);
+    assert_eq!(
+        preview.approval_timeout_ms,
+        super::super::super::exec_approval::TTL.as_millis() as u64
+    );
 }
 
 pub(super) fn command_blocklist_sync_model(

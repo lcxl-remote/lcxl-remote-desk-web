@@ -42,11 +42,13 @@ fn disposition_text(disposition: &EdgeExecDisposition) -> Option<String> {
             }
             AgentOutcome::Err(_) => "execution failed".to_string(),
         }),
-        EdgeExecDisposition::RejectedBeforeDispatch { reason }
-        | EdgeExecDisposition::DispatchFailedBeforeWorker { reason }
-        | EdgeExecDisposition::HostAtCapacity { reason } => {
-            Some(format!("execution did not complete: {reason}"))
-        }
+        EdgeExecDisposition::RejectedBeforeDispatch { error }
+        | EdgeExecDisposition::DispatchFailedBeforeWorker { error }
+        | EdgeExecDisposition::HostAtCapacity { error } => Some(if error.safe_for_model {
+            format!("execution did not complete: {}", error.message)
+        } else {
+            "execution did not complete".to_string()
+        }),
         EdgeExecDisposition::ExecutionStateUnknown { .. } => None,
     }
 }
@@ -437,7 +439,11 @@ mod tests {
             .unwrap();
         store.mark_running("generation-1").await.unwrap();
         let disposition = EdgeExecDisposition::RejectedBeforeDispatch {
-            reason: "policy changed".to_string(),
+            error: EdgeExecDisposition::safe_error(
+                AgentErrorKind::PermissionDenied,
+                "policy changed",
+                false,
+            ),
         };
 
         assert!(
@@ -532,7 +538,11 @@ mod tests {
                 "edge-a",
                 "generation-expired",
                 &EdgeExecDisposition::RejectedBeforeDispatch {
-                    reason: "timed out".into(),
+                    error: EdgeExecDisposition::safe_error(
+                        AgentErrorKind::Timeout,
+                        "timed out",
+                        true,
+                    ),
                 },
             )
             .await

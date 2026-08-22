@@ -55,6 +55,9 @@ pub const MAX_STEPS_DEFAULT: u32 = desk_diagnose_core::MAX_STEPS_PER_TURN;
 pub const MAX_SAME_TOOL_CALLS_MIN: u32 = desk_diagnose_core::MIN_SAME_TOOL_PER_TURN;
 pub const MAX_SAME_TOOL_CALLS_MAX: u32 = desk_diagnose_core::MAX_SAME_TOOL_PER_TURN_LIMIT;
 pub const MAX_SAME_TOOL_CALLS_DEFAULT: u32 = desk_diagnose_core::MAX_SAME_TOOL_PER_TURN;
+pub const EXEC_APPROVAL_TIMEOUT_MIN_SECS: u32 = 30;
+pub const EXEC_APPROVAL_TIMEOUT_MAX_SECS: u32 = 1800;
+pub const EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS: u32 = 120;
 
 pub fn step_budget_covers_same_tool_limit(max_steps: u32, same_tool_limit: u32) -> bool {
     max_steps >= same_tool_limit
@@ -143,6 +146,8 @@ pub struct ModelProviderConfig {
     /// Per-turn model reasoning-round budget. One round may contain multiple
     /// tool calls and the final answer also consumes a round.
     pub max_steps_per_turn: u32,
+    /// How long a newly created owner-confirmed command approval remains open.
+    pub exec_approval_timeout_secs: u32,
 }
 
 impl Default for ModelProviderConfig {
@@ -169,6 +174,7 @@ impl Default for ModelProviderConfig {
             execution_mode: ExecutionMode::ConfirmEachAction,
             max_same_tool_calls_per_turn: MAX_SAME_TOOL_CALLS_DEFAULT,
             max_steps_per_turn: MAX_STEPS_DEFAULT,
+            exec_approval_timeout_secs: EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS,
         }
     }
 }
@@ -230,6 +236,7 @@ impl ModelProviderConfig {
             execution_mode: self.execution_mode,
             max_same_tool_calls_per_turn: self.max_same_tool_calls_per_turn,
             max_steps_per_turn: self.max_steps_per_turn,
+            exec_approval_timeout_secs: self.exec_approval_timeout_secs,
             api_key_set: self.api_key_set(),
         }
     }
@@ -314,6 +321,12 @@ impl ModelProviderConfig {
         if let Some(limit) = update.max_steps_per_turn {
             self.max_steps_per_turn = limit.clamp(MAX_STEPS_MIN, MAX_STEPS_MAX);
         }
+        if let Some(timeout) = update.exec_approval_timeout_secs {
+            self.exec_approval_timeout_secs = timeout.clamp(
+                EXEC_APPROVAL_TIMEOUT_MIN_SECS,
+                EXEC_APPROVAL_TIMEOUT_MAX_SECS,
+            );
+        }
         // Keep the cross-field invariant even for non-HTTP callers or legacy
         // stored values. The API rejects this shape; the domain layer repairs it.
         self.max_steps_per_turn = self
@@ -335,6 +348,18 @@ impl ModelProviderConfig {
     }
 
     fn from_entity(row: model_provider::Model) -> Self {
+        let exec_approval_timeout_secs = u32::try_from(row.exec_approval_timeout_secs)
+            .ok()
+            .filter(|value| {
+                (EXEC_APPROVAL_TIMEOUT_MIN_SECS..=EXEC_APPROVAL_TIMEOUT_MAX_SECS).contains(value)
+            })
+            .unwrap_or_else(|| {
+                log::warn!(
+                    "stored exec approval timeout is invalid; defaulting to \
+                     {EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS} seconds"
+                );
+                EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS
+            });
         Self {
             wire_protocol: row
                 .wire_protocol
@@ -367,6 +392,7 @@ impl ModelProviderConfig {
                     (row.max_same_tool_calls_per_turn.max(0) as u32)
                         .clamp(MAX_SAME_TOOL_CALLS_MIN, MAX_SAME_TOOL_CALLS_MAX),
                 ),
+            exec_approval_timeout_secs,
         }
     }
 
@@ -407,6 +433,10 @@ impl ModelProviderConfig {
                     self.max_same_tool_calls_per_turn
                         .clamp(MAX_SAME_TOOL_CALLS_MIN, MAX_SAME_TOOL_CALLS_MAX),
                 ) as i32),
+            exec_approval_timeout_secs: Set(self.exec_approval_timeout_secs.clamp(
+                EXEC_APPROVAL_TIMEOUT_MIN_SECS,
+                EXEC_APPROVAL_TIMEOUT_MAX_SECS,
+            ) as i32),
             updated_at: Set(chrono::Utc::now()),
         })
     }
@@ -436,6 +466,10 @@ impl fmt::Debug for ModelProviderConfig {
                 &self.max_same_tool_calls_per_turn,
             )
             .field("max_steps_per_turn", &self.max_steps_per_turn)
+            .field(
+                "exec_approval_timeout_secs",
+                &self.exec_approval_timeout_secs,
+            )
             .finish()
     }
 }
@@ -467,6 +501,8 @@ pub struct ModelProviderPublic {
     pub max_same_tool_calls_per_turn: u32,
     #[schema(minimum = 1, maximum = 80)]
     pub max_steps_per_turn: u32,
+    #[schema(minimum = 30, maximum = 1800)]
+    pub exec_approval_timeout_secs: u32,
     /// Whether a non-empty API key is configured. The key itself is never
     /// returned.
     pub api_key_set: bool,
@@ -517,6 +553,9 @@ pub struct ModelProviderUpdate {
     /// repeat limit. Valid range: 1..=80.
     #[schema(minimum = 1, maximum = 80)]
     pub max_steps_per_turn: Option<u32>,
+    /// Owner-confirmed command approval window. Valid range: 30..=1800 seconds.
+    #[schema(minimum = 30, maximum = 1800)]
+    pub exec_approval_timeout_secs: Option<u32>,
     /// Write-only. `None` = leave unchanged; `Some("")` = clear; `Some(x)` = set.
     pub api_key: Option<String>,
 }
@@ -540,6 +579,10 @@ impl fmt::Debug for ModelProviderUpdate {
                 &self.max_same_tool_calls_per_turn,
             )
             .field("max_steps_per_turn", &self.max_steps_per_turn)
+            .field(
+                "exec_approval_timeout_secs",
+                &self.exec_approval_timeout_secs,
+            )
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
             .finish()
     }
@@ -599,6 +642,7 @@ pub async fn save(db: &DatabaseConnection, config: ModelProviderConfig) -> Resul
                     model_provider::Column::ExecutionMode,
                     model_provider::Column::MaxSameToolCallsPerTurn,
                     model_provider::Column::MaxStepsPerTurn,
+                    model_provider::Column::ExecApprovalTimeoutSecs,
                     model_provider::Column::UpdatedAt,
                 ])
                 .to_owned(),
@@ -730,6 +774,7 @@ mod tests {
             execution_mode: ExecutionMode::SuggestOnly,
             max_same_tool_calls_per_turn: MAX_SAME_TOOL_CALLS_DEFAULT,
             max_steps_per_turn: MAX_STEPS_DEFAULT,
+            exec_approval_timeout_secs: EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS,
         }
     }
 
@@ -834,6 +879,10 @@ mod tests {
             MAX_SAME_TOOL_CALLS_DEFAULT
         );
         assert_eq!(cfg.max_steps_per_turn, MAX_STEPS_DEFAULT);
+        assert_eq!(
+            cfg.exec_approval_timeout_secs,
+            EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS
+        );
     }
 
     #[tokio::test]
@@ -844,6 +893,7 @@ mod tests {
         cfg.execution_mode = ExecutionMode::ConfirmEachAction;
         cfg.max_same_tool_calls_per_turn = 17;
         cfg.max_steps_per_turn = 23;
+        cfg.exec_approval_timeout_secs = 300;
         save(&db, cfg).await.unwrap();
 
         let loaded = load(&db).await.unwrap();
@@ -855,6 +905,28 @@ mod tests {
         assert_eq!(loaded.execution_mode, ExecutionMode::ConfirmEachAction);
         assert_eq!(loaded.max_same_tool_calls_per_turn, 17);
         assert_eq!(loaded.max_steps_per_turn, 23);
+        assert_eq!(loaded.exec_approval_timeout_secs, 300);
+    }
+
+    #[test]
+    fn update_exec_approval_timeout_is_bounded_defensively() {
+        let mut cfg = configured();
+        cfg.apply_update(ModelProviderUpdate {
+            exec_approval_timeout_secs: Some(0),
+            ..Default::default()
+        });
+        assert_eq!(
+            cfg.exec_approval_timeout_secs,
+            EXEC_APPROVAL_TIMEOUT_MIN_SECS
+        );
+        cfg.apply_update(ModelProviderUpdate {
+            exec_approval_timeout_secs: Some(EXEC_APPROVAL_TIMEOUT_MAX_SECS + 1),
+            ..Default::default()
+        });
+        assert_eq!(
+            cfg.exec_approval_timeout_secs,
+            EXEC_APPROVAL_TIMEOUT_MAX_SECS
+        );
     }
 
     #[test]

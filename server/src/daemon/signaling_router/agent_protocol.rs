@@ -383,6 +383,7 @@ pub(super) fn non_executable_preview(
         shell,
         command,
         cwd,
+        approval_timeout_ms: 0,
         timeout_ms,
         risk,
         execution_basis: desk_agent_protocol::exec::ExecExecutionBasis::Template,

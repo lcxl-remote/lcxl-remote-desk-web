@@ -184,6 +184,20 @@ pub async fn update_model_provider(
             ),
         ));
     }
+    if let Some(timeout) = update.exec_approval_timeout_secs
+        && !(model_provider::EXEC_APPROVAL_TIMEOUT_MIN_SECS
+            ..=model_provider::EXEC_APPROVAL_TIMEOUT_MAX_SECS)
+            .contains(&timeout)
+    {
+        return Err(DeskSignalError::new_custom_error(
+            DeskErrorCode::INVALID_PARAMS,
+            &format!(
+                "exec_approval_timeout_secs must be between {} and {}",
+                model_provider::EXEC_APPROVAL_TIMEOUT_MIN_SECS,
+                model_provider::EXEC_APPROVAL_TIMEOUT_MAX_SECS
+            ),
+        ));
+    }
     let next_max_steps = update
         .max_steps_per_turn
         .unwrap_or(config.max_steps_per_turn);

@@ -340,8 +340,8 @@ pub(super) async fn fleet_exec_without_authz_is_denied() {
     let result = read_fleet_result(&mut rx);
     assert_eq!(result.request_id, "a1");
     match result.disposition {
-        EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
-            assert!(reason.contains("missing_authorization"), "{reason}");
+        EdgeExecDisposition::RejectedBeforeDispatch { error } => {
+            assert!(error.message.contains("missing_authorization"), "{error:?}");
         }
         other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
     }
@@ -369,8 +369,11 @@ pub(super) async fn fleet_exec_unsupported_mode_is_denied() {
         .await
         .unwrap();
     match read_fleet_result(&mut rx).disposition {
-        EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
-            assert!(reason.contains("exec_unsupported_in_mode"), "{reason}");
+        EdgeExecDisposition::RejectedBeforeDispatch { error } => {
+            assert!(
+                error.message.contains("exec_unsupported_in_mode"),
+                "{error:?}"
+            );
         }
         other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
     }
@@ -402,8 +405,8 @@ pub(super) async fn fleet_exec_pep_drift_is_denied_and_not_dispatched() {
         .await
         .unwrap();
     match read_fleet_result(&mut rx).disposition {
-        EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
-            assert!(reason.contains("template_drift"), "{reason}");
+        EdgeExecDisposition::RejectedBeforeDispatch { error } => {
+            assert!(error.message.contains("template_drift"), "{error:?}");
         }
         other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
     }
@@ -469,8 +472,8 @@ pub(super) async fn fleet_exec_valid_plan_without_worker_reports_dispatch_failed
         .unwrap();
     // No worker is installed, so the dispatch fails before the worker ran.
     match read_fleet_result(&mut rx).disposition {
-        EdgeExecDisposition::DispatchFailedBeforeWorker { reason } => {
-            assert!(reason.contains("worker unavailable"), "{reason}");
+        EdgeExecDisposition::DispatchFailedBeforeWorker { error } => {
+            assert!(error.message.contains("worker unavailable"), "{error:?}");
         }
         other => panic!("expected DispatchFailedBeforeWorker, got {other:?}"),
     }
@@ -676,10 +679,10 @@ pub(super) async fn agentic_owner_freeform_is_rejected_when_local_mode_tightens(
         .unwrap();
 
     match read_fleet_result(&mut rx).disposition {
-        EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
+        EdgeExecDisposition::RejectedBeforeDispatch { error } => {
             assert!(
-                reason.contains("owner_interactive_mode_disabled"),
-                "{reason}"
+                error.message.contains("owner_interactive_mode_disabled"),
+                "{error:?}"
             );
         }
         other => panic!("expected local-mode rejection, got {other:?}"),
@@ -836,8 +839,8 @@ pub(super) async fn edge_exec_untagged_plan_is_rejected() {
     );
     handle_edge_exec_request_inbound(&ctx, &bare).await.unwrap();
     match read_fleet_result(&mut rx).disposition {
-        EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
-            assert!(reason.contains("malformed_plan"), "{reason}");
+        EdgeExecDisposition::RejectedBeforeDispatch { error } => {
+            assert!(error.message.contains("malformed_plan"), "{error:?}");
         }
         other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
     }
@@ -867,8 +870,11 @@ pub(super) async fn edge_exec_generation_mismatch_is_rejected() {
         .await
         .unwrap();
     match read_fleet_result(&mut rx).disposition {
-        EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
-            assert!(reason.contains("execution_generation_mismatch"), "{reason}");
+        EdgeExecDisposition::RejectedBeforeDispatch { error } => {
+            assert!(
+                error.message.contains("execution_generation_mismatch"),
+                "{error:?}"
+            );
         }
         other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
     }
@@ -1063,8 +1069,11 @@ pub(super) async fn edge_exec_missing_task_id_is_rejected() {
         .await
         .unwrap();
     match read_fleet_result(&mut rx).disposition {
-        EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
-            assert!(reason.contains("missing_exec_request_id"), "{reason}");
+        EdgeExecDisposition::RejectedBeforeDispatch { error } => {
+            assert!(
+                error.message.contains("missing_exec_request_id"),
+                "{error:?}"
+            );
         }
         other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
     }
@@ -1180,8 +1189,8 @@ pub(super) async fn edge_exec_empty_approval_id_is_rejected() {
         .await
         .unwrap();
     match read_fleet_result(&mut rx).disposition {
-        EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
-            assert!(reason.contains("missing_approval_id"), "{reason}");
+        EdgeExecDisposition::RejectedBeforeDispatch { error } => {
+            assert!(error.message.contains("missing_approval_id"), "{error:?}");
         }
         other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
     }

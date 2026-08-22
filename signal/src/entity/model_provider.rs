@@ -39,6 +39,8 @@ pub struct Model {
     pub execution_mode: String,
     pub max_same_tool_calls_per_turn: i32,
     pub max_steps_per_turn: i32,
+    #[sea_orm(default_value = 120)]
+    pub exec_approval_timeout_secs: i32,
     pub updated_at: DateTimeUtc,
 }
 

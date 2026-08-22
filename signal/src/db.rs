@@ -56,7 +56,7 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 2;
+const SIGNAL_SCHEMA_VERSION: i32 = 3;
 const MIGRATION_LOCK_TABLE: &str = "signal_schema_migration_lock";
 const LEGACY_TABLES: [&str; 8] = [
     "agent_exec_task",
@@ -116,6 +116,7 @@ pub(crate) async fn initialize_schema(db: &DatabaseConnection) -> Result<(), DbE
             match migration_version {
                 0 => migrate_legacy_v0_to_v1(&txn, &tables).await?,
                 1 => migrate_v1_to_v2(&txn, &tables).await?,
+                2 => migrate_v2_to_v3(&txn, &tables).await?,
                 other => {
                     return Err(DbErr::Custom(format!(
                         "no signal database migration registered from version {other}"
@@ -171,6 +172,36 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
 }
 
 async fn create_latest_model_provider<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
+    db.execute_unprepared(
+        "CREATE TABLE model_provider (\
+           id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),\
+           wire_protocol TEXT NULL, model TEXT NULL,\
+           supports_image_input INTEGER NOT NULL DEFAULT 0,\
+           base_url TEXT NULL, api_key TEXT NULL,\
+           profile_schema_version INTEGER NOT NULL CHECK (profile_schema_version >= 1),\
+           request_options TEXT NOT NULL CHECK (json_valid(request_options) AND json_type(request_options) = 'object'),\
+           output_limit_field TEXT NOT NULL,\
+           probe_max_output_tokens INTEGER NOT NULL CHECK (probe_max_output_tokens > 0),\
+           runtime_max_output_tokens INTEGER NOT NULL CHECK (runtime_max_output_tokens > 0),\
+           max_context_bytes INTEGER NOT NULL CHECK (max_context_bytes BETWEEN 4096 AND 16777216),\
+           connection_revision INTEGER NOT NULL CHECK (connection_revision >= 1),\
+           profile_revision INTEGER NOT NULL CHECK (profile_revision >= 1),\
+           response_format TEXT NOT NULL, execution_mode TEXT NOT NULL,\
+           max_same_tool_calls_per_turn INTEGER NOT NULL,\
+           max_steps_per_turn INTEGER NOT NULL,\
+           exec_approval_timeout_secs INTEGER NOT NULL DEFAULT 120 \
+             CHECK (exec_approval_timeout_secs BETWEEN 30 AND 1800),\
+           updated_at TEXT NOT NULL\
+         )",
+    )
+    .await?;
+    Ok(())
+}
+
+/// Historical v1 model-provider shape used only by the legacy v0 migration.
+/// Later migrations add their columns in version order inside the same startup
+/// transaction.
+async fn create_v1_model_provider<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     db.execute_unprepared(
         "CREATE TABLE model_provider (\
            id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),\
@@ -264,7 +295,7 @@ async fn migrate_legacy_v0_to_v1<C: ConnectionTrait>(
 
     db.execute_unprepared("ALTER TABLE model_provider RENAME TO model_provider_v0")
         .await?;
-    create_latest_model_provider(db).await?;
+    create_v1_model_provider(db).await?;
     db.execute_unprepared(
         "INSERT INTO model_provider (\
            id, wire_protocol, model, supports_image_input, base_url, api_key,\
@@ -299,6 +330,19 @@ async fn migrate_v1_to_v2<C: ConnectionTrait>(
     create_latest_probe_observation(db).await
 }
 
+async fn migrate_v2_to_v3<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    validate_v2_schema(db, tables).await?;
+    db.execute_unprepared(
+        "ALTER TABLE model_provider ADD COLUMN exec_approval_timeout_secs INTEGER \
+         NOT NULL DEFAULT 120 CHECK (exec_approval_timeout_secs BETWEEN 30 AND 1800)",
+    )
+    .await?;
+    Ok(())
+}
+
 async fn validate_v1_schema<C: ConnectionTrait>(
     db: &C,
     tables: &HashSet<String>,
@@ -319,6 +363,21 @@ async fn validate_latest_schema<C: ConnectionTrait>(
     db: &C,
     tables: &HashSet<String>,
 ) -> Result<(), DbErr> {
+    validate_v2_schema(db, tables).await?;
+    let columns = table_columns(db, "model_provider").await?;
+    if !columns.contains("exec_approval_timeout_secs") {
+        return Err(DbErr::Custom(format!(
+            "signal schema v{SIGNAL_SCHEMA_VERSION} is missing \
+             model_provider.exec_approval_timeout_secs"
+        )));
+    }
+    Ok(())
+}
+
+async fn validate_v2_schema<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
     let mut expected: HashSet<String> = LEGACY_TABLES
         .iter()
         .map(|name| (*name).to_string())
@@ -326,10 +385,10 @@ async fn validate_latest_schema<C: ConnectionTrait>(
     expected.insert("model_probe_observation".to_string());
     if tables != &expected {
         return Err(DbErr::Custom(format!(
-            "signal database schema v1 has an unknown or partial table set: {tables:?}"
+            "signal database schema v2 has an unknown or partial table set: {tables:?}"
         )));
     }
-    validate_profile_columns(db, SIGNAL_SCHEMA_VERSION).await?;
+    validate_profile_columns(db, 2).await?;
     let observation_columns = table_columns(db, "model_probe_observation").await?;
     for required in [
         "model_provider_id",
@@ -343,7 +402,7 @@ async fn validate_latest_schema<C: ConnectionTrait>(
     ] {
         if !observation_columns.contains(required) {
             return Err(DbErr::Custom(format!(
-                "signal schema v{SIGNAL_SCHEMA_VERSION} is missing model_probe_observation.{required}"
+                "signal schema v2 is missing model_probe_observation.{required}"
             )));
         }
     }
@@ -539,12 +598,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v1_to_v2_runner_adds_probe_observation_then_reopens_cleanly() {
+    async fn v1_to_latest_runner_adds_probe_and_timeout_then_reopens_cleanly() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         create_latest_schema(&db).await.unwrap();
-        db.execute_unprepared("DROP TABLE model_probe_observation; PRAGMA user_version = 1")
-            .await
-            .unwrap();
+        db.execute_unprepared(
+            "DROP TABLE model_probe_observation; \
+             ALTER TABLE model_provider DROP COLUMN exec_approval_timeout_secs; \
+             PRAGMA user_version = 1",
+        )
+        .await
+        .unwrap();
 
         initialize_schema(&db).await.unwrap();
         assert_eq!(
@@ -557,7 +620,42 @@ mod tests {
                 .unwrap()
                 .contains("model_probe_observation")
         );
+        assert!(
+            table_columns(&db, "model_provider")
+                .await
+                .unwrap()
+                .contains("exec_approval_timeout_secs")
+        );
         initialize_schema(&db).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_to_v3_defaults_existing_provider_timeout() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        create_latest_schema(&db).await.unwrap();
+        db.execute_unprepared(
+            "ALTER TABLE model_provider DROP COLUMN exec_approval_timeout_secs; \
+             INSERT INTO model_provider (id, wire_protocol, model, supports_image_input, \
+               base_url, api_key, profile_schema_version, request_options, output_limit_field, \
+               probe_max_output_tokens, runtime_max_output_tokens, max_context_bytes, \
+               connection_revision, profile_revision, response_format, execution_mode, \
+               max_same_tool_calls_per_turn, max_steps_per_turn, updated_at) \
+             VALUES (1, 'open_ai_chat_completions', 'test', 0, 'https://example.test', \
+               'secret', 1, '{}', 'max_tokens', 512, 4096, 131072, 1, 1, 'json_object', \
+               'confirm_each_action', 20, 40, '2026-08-21T00:00:00Z'); \
+             PRAGMA user_version = 2",
+        )
+        .await
+        .unwrap();
+
+        initialize_schema(&db).await.unwrap();
+        let row = crate::entity::model_provider::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.exec_approval_timeout_secs, 120);
+        assert_eq!(query_user_version(&db).await.unwrap(), 3);
     }
 
     #[tokio::test]

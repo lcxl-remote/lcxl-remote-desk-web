@@ -609,6 +609,7 @@ describe("DiagnosePanel", () => {
                     shell: "powershell",
                     command: "Get-Service -Name Spooler",
                     cwd: null,
+                    approval_timeout_ms: 120000,
                     timeout_ms: 30000,
                     risk: "low",
                     requires_confirmation: true,
@@ -635,6 +636,7 @@ describe("DiagnosePanel", () => {
                     shell: "powershell",
                     command: "Restart-Service -Name Spooler -Force",
                     cwd: null,
+                    approval_timeout_ms: 120000,
                     timeout_ms: 30000,
                     risk: "critical",
                     requires_confirmation: true,
@@ -711,6 +713,7 @@ describe("DiagnosePanel", () => {
                         shell: "bash",
                         command: "systemctl restart nginx",
                         cwd: null,
+                        approval_timeout_ms: 45000,
                         timeout_ms: 30000,
                         risk: "critical",
                         requires_confirmation: true,
@@ -729,6 +732,8 @@ describe("DiagnosePanel", () => {
         expect(screen.getByText("The AI wants to run a command")).toBeInTheDocument();
         expect(screen.getByText("systemctl restart nginx")).toBeInTheDocument();
         expect(screen.getByText("Critical risk")).toBeInTheDocument();
+        expect(screen.getByText(/Approval window:\s*45s/)).toBeInTheDocument();
+        expect(screen.getByText(/Command runtime limit:\s*30s/)).toBeInTheDocument();
         expect(
             screen.getByText(
                 "Free-form command: only the blocklist was checked. Review every character before approving.",

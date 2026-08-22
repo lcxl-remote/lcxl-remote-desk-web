@@ -329,9 +329,15 @@ export function AgenticExecApproval({
                     {t("pages.desk.diagnose.exec.freeformWarning")}
                 </div>
             )}
-            <div className="text-[10px] text-white/50">
-                {t("pages.desk.diagnose.exec.timeout")}:{" "}
-                {Math.round(preview.timeout_ms / 1000)}s
+            <div className="grid grid-cols-2 gap-2 text-[10px] text-white/50">
+                <div>
+                    {t("pages.desk.diagnose.exec.approvalWindow")}:{" "}
+                    {Math.round(preview.approval_timeout_ms / 1000)}s
+                </div>
+                <div>
+                    {t("pages.desk.diagnose.exec.commandRuntimeLimit")}:{" "}
+                    {Math.round(preview.timeout_ms / 1000)}s
+                </div>
             </div>
             <div className="mt-1 flex gap-2">
                 <Button

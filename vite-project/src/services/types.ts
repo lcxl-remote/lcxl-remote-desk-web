@@ -2078,6 +2078,12 @@ export type ModelProviderPublic = {
     */
     connection_revision: number;
     /**
+     * @minLength 30
+     * @maxLength 1800
+     * @type integer, int32
+    */
+    exec_approval_timeout_secs: number;
+    /**
      * @type string
     */
     execution_mode: ExecutionMode;
@@ -2157,6 +2163,13 @@ export type ModelProviderUpdate = {
      * @type string,null
     */
     base_url?: string | null;
+    /**
+     * @description Owner-confirmed command approval window. Valid range: 30..=1800 seconds.
+     * @minLength 30
+     * @maxLength 1800
+     * @type integer,null, int32
+    */
+    exec_approval_timeout_secs?: number | null;
     execution_mode?: (null | ExecutionMode);
     /**
      * @description Optimistic-lock revision from the last GET. Required by the update API;\nit is not itself persisted as a client-selected value.
@@ -3449,6 +3462,12 @@ export type RestResponseModelProviderPublic = {
          * @type integer, int64
         */
         connection_revision: number;
+        /**
+         * @minLength 30
+         * @maxLength 1800
+         * @type integer, int32
+        */
+        exec_approval_timeout_secs: number;
         /**
          * @type string
         */

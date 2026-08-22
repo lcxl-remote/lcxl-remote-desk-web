@@ -21,7 +21,12 @@ pub(super) async fn handle_edge_exec_request_inbound(
             &ctx.outbound_tx,
             &request_id,
             EdgeExecDisposition::RejectedBeforeDispatch {
-                reason: "pep_rejected:missing_authorization".to_string(),
+                error: agent_error(
+                    AgentErrorKind::PermissionDenied,
+                    "pep_rejected:missing_authorization",
+                    false,
+                    true,
+                ),
             },
         );
         return Ok(());
@@ -38,7 +43,12 @@ pub(super) async fn handle_edge_exec_request_inbound(
                 &ctx.outbound_tx,
                 &request_id,
                 EdgeExecDisposition::RejectedBeforeDispatch {
-                    reason: format!("pep_rejected:malformed_plan:{e}"),
+                    error: agent_error(
+                        AgentErrorKind::InvalidInput,
+                        &format!("pep_rejected:malformed_plan:{e}"),
+                        false,
+                        true,
+                    ),
                 },
             );
             return Ok(());
@@ -66,7 +76,12 @@ pub(super) async fn handle_edge_exec_request_inbound(
                 &ctx.outbound_tx,
                 &request_id,
                 EdgeExecDisposition::RejectedBeforeDispatch {
-                    reason: "pep_rejected:execution_generation_mismatch".to_string(),
+                    error: agent_error(
+                        AgentErrorKind::InvalidInput,
+                        "pep_rejected:execution_generation_mismatch",
+                        false,
+                        true,
+                    ),
                 },
             );
             return Ok(());
@@ -76,7 +91,12 @@ pub(super) async fn handle_edge_exec_request_inbound(
                 &ctx.outbound_tx,
                 &request_id,
                 EdgeExecDisposition::RejectedBeforeDispatch {
-                    reason: "pep_rejected:missing_exec_request_id".to_string(),
+                    error: agent_error(
+                        AgentErrorKind::InvalidInput,
+                        "pep_rejected:missing_exec_request_id",
+                        false,
+                        true,
+                    ),
                 },
             );
             return Ok(());
@@ -86,7 +106,12 @@ pub(super) async fn handle_edge_exec_request_inbound(
                 &ctx.outbound_tx,
                 &request_id,
                 EdgeExecDisposition::RejectedBeforeDispatch {
-                    reason: "pep_rejected:missing_approval_id".to_string(),
+                    error: agent_error(
+                        AgentErrorKind::ApprovalRequired,
+                        "pep_rejected:missing_approval_id",
+                        false,
+                        true,
+                    ),
                 },
             );
             return Ok(());
@@ -101,7 +126,12 @@ pub(super) async fn handle_edge_exec_request_inbound(
             &ctx.outbound_tx,
             &request_id,
             EdgeExecDisposition::RejectedBeforeDispatch {
-                reason: "pep_rejected:exec_unsupported_in_mode".to_string(),
+                error: agent_error(
+                    AgentErrorKind::UnsupportedPlatform,
+                    "pep_rejected:exec_unsupported_in_mode",
+                    false,
+                    true,
+                ),
             },
         );
         return Ok(());
@@ -124,7 +154,12 @@ pub(super) async fn handle_edge_exec_request_inbound(
             &ctx.outbound_tx,
             &request_id,
             EdgeExecDisposition::RejectedBeforeDispatch {
-                reason: "pep_rejected:owner_interactive_mode_disabled".to_string(),
+                error: agent_error(
+                    AgentErrorKind::PermissionDenied,
+                    "pep_rejected:owner_interactive_mode_disabled",
+                    false,
+                    true,
+                ),
             },
         );
         return Ok(());
@@ -162,7 +197,9 @@ pub(super) async fn handle_edge_exec_request_inbound(
         send_edge_execution_completed(
             &ctx.outbound_tx,
             &request_id,
-            EdgeExecDisposition::RejectedBeforeDispatch { reason },
+            EdgeExecDisposition::RejectedBeforeDispatch {
+                error: agent_error(AgentErrorKind::RiskBlocked, &reason, false, true),
+            },
         );
         return Ok(());
     }
@@ -216,7 +253,9 @@ pub(super) async fn dispatch_fleet_exec_plan(
             send_edge_execution_completed(
                 &ctx.outbound_tx,
                 request_id,
-                EdgeExecDisposition::RejectedBeforeDispatch { reason },
+                EdgeExecDisposition::RejectedBeforeDispatch {
+                    error: agent_error(AgentErrorKind::PermissionDenied, &reason, false, true),
+                },
             );
             return;
         }
@@ -224,7 +263,9 @@ pub(super) async fn dispatch_fleet_exec_plan(
             send_edge_execution_completed(
                 &ctx.outbound_tx,
                 request_id,
-                EdgeExecDisposition::HostAtCapacity { reason },
+                EdgeExecDisposition::HostAtCapacity {
+                    error: agent_error(AgentErrorKind::HostAtCapacity, &reason, true, true),
+                },
             );
             return;
         }
@@ -257,7 +298,12 @@ pub(super) async fn dispatch_fleet_exec_plan(
             &ctx.outbound_tx,
             request_id,
             EdgeExecDisposition::DispatchFailedBeforeWorker {
-                reason: format!("worker unavailable: {e}"),
+                error: agent_error(
+                    AgentErrorKind::SessionUnavailable,
+                    &format!("worker unavailable: {e}"),
+                    true,
+                    true,
+                ),
             },
         );
     }

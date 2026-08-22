@@ -58,6 +58,7 @@ beforeEach(() => {
         execution_mode: "read_only",
         max_steps_per_turn: 20,
         max_same_tool_calls_per_turn: 10,
+        exec_approval_timeout_secs: 300,
         api_key_set: true,
     }
 })
@@ -81,6 +82,7 @@ describe("AiModelSettings", () => {
         expect(payload.execution_mode).toBe("read_only")
         expect(payload.max_steps_per_turn).toBe(20)
         expect(payload.max_same_tool_calls_per_turn).toBe(10)
+        expect(payload.exec_approval_timeout_secs).toBe(300)
         // The provider form no longer carries the collection policy.
         expect(payload.allow_logs).toBeUndefined()
         expect(payload.allow_screen).toBeUndefined()
@@ -117,6 +119,31 @@ describe("AiModelSettings", () => {
 
         expect(lastProviderPayload().max_steps_per_turn).toBe(40)
         expect(lastProviderPayload().max_same_tool_calls_per_turn).toBe(20)
+    })
+
+    it("uses the 120-second approval default when the field is absent", async () => {
+        delete h.providerData.exec_approval_timeout_secs
+        render(<AiModelSettings />)
+        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+
+        fireEvent.click(screen.getAllByText("Save Settings")[0])
+        await waitFor(() => expect(h.providerMutateAsync).toHaveBeenCalled())
+
+        expect(lastProviderPayload().exec_approval_timeout_secs).toBe(120)
+    })
+
+    it("rejects an out-of-range command approval window", async () => {
+        render(<AiModelSettings />)
+        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+
+        const timeoutInput = screen.getByLabelText("Command approval window (seconds)")
+        fireEvent.change(timeoutInput, {
+            target: { value: "29" },
+        })
+        fireEvent.click(screen.getAllByText("Save Settings")[0])
+
+        expect(timeoutInput).toBeInvalid()
+        expect(h.providerMutateAsync).not.toHaveBeenCalled()
     })
 
     it("defaults a missing execution grant to confirm each action", async () => {

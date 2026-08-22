@@ -163,6 +163,9 @@ pub struct ExecPreview {
     /// receives it).
     pub command: String,
     pub cwd: Option<String>,
+    /// How long this approval remains resolvable. This is independent of
+    /// `timeout_ms`, which limits the command after it starts running.
+    pub approval_timeout_ms: u64,
     pub timeout_ms: u32,
     pub risk: RiskLevel,
     /// The server-authoritative basis used to classify this preview.
@@ -622,6 +625,7 @@ mod tests {
             shell: "powershell".into(),
             command: "Get-Service -Name Spooler".into(),
             cwd: None,
+            approval_timeout_ms: 120_000,
             timeout_ms: 10_000,
             risk: RiskLevel::Low,
             execution_basis: ExecExecutionBasis::Template,

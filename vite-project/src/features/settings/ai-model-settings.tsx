@@ -37,6 +37,9 @@ const MAX_STEPS_DEFAULT = 40
 const SAME_TOOL_LIMIT_MIN = 1
 const SAME_TOOL_LIMIT_MAX = 50
 const SAME_TOOL_LIMIT_DEFAULT = 20
+const EXEC_APPROVAL_TIMEOUT_MIN_SECS = 30
+const EXEC_APPROVAL_TIMEOUT_MAX_SECS = 1800
+const EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS = 120
 
 const providerSchema = z.object({
     wire_protocol: z.string().refine(value => PROVIDERS.includes(value as (typeof PROVIDERS)[number])),
@@ -69,6 +72,11 @@ const providerSchema = z.object({
         .int()
         .min(SAME_TOOL_LIMIT_MIN)
         .max(SAME_TOOL_LIMIT_MAX),
+    exec_approval_timeout_secs: z
+        .number()
+        .int()
+        .min(EXEC_APPROVAL_TIMEOUT_MIN_SECS)
+        .max(EXEC_APPROVAL_TIMEOUT_MAX_SECS),
 })
 
 type ProviderFormValues = z.infer<typeof providerSchema>
@@ -175,6 +183,7 @@ export function AiModelSettings() {
             execution_mode: "confirm_each_action",
             max_steps_per_turn: MAX_STEPS_DEFAULT,
             max_same_tool_calls_per_turn: SAME_TOOL_LIMIT_DEFAULT,
+            exec_approval_timeout_secs: EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS,
         },
     })
 
@@ -205,6 +214,8 @@ export function AiModelSettings() {
                 max_steps_per_turn: data.max_steps_per_turn ?? MAX_STEPS_DEFAULT,
                 max_same_tool_calls_per_turn:
                     data.max_same_tool_calls_per_turn ?? SAME_TOOL_LIMIT_DEFAULT,
+                exec_approval_timeout_secs:
+                    data.exec_approval_timeout_secs ?? EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS,
             })
         }
     }, [providerResponse?.data, isLoading, form])
@@ -236,6 +247,7 @@ export function AiModelSettings() {
             execution_mode: values.execution_mode,
             max_steps_per_turn: values.max_steps_per_turn,
             max_same_tool_calls_per_turn: values.max_same_tool_calls_per_turn,
+            exec_approval_timeout_secs: values.exec_approval_timeout_secs,
             supports_image_input: values.supports_image_input,
             api_key,
         }
@@ -758,6 +770,42 @@ export function AiModelSettings() {
                                                     min: SAME_TOOL_LIMIT_MIN,
                                                     max: SAME_TOOL_LIMIT_MAX,
                                                     defaultValue: SAME_TOOL_LIMIT_DEFAULT,
+                                                },
+                                            )}
+                                        </FormDescription>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+
+                            <FormField
+                                control={form.control}
+                                name="exec_approval_timeout_secs"
+                                render={({ field }) => (
+                                    <FormItem>
+                                        <FormLabel>
+                                            {t("pages.aiModel.settings.execApprovalTimeout")}
+                                        </FormLabel>
+                                        <FormControl>
+                                            <Input
+                                                type="number"
+                                                min={EXEC_APPROVAL_TIMEOUT_MIN_SECS}
+                                                max={EXEC_APPROVAL_TIMEOUT_MAX_SECS}
+                                                step={1}
+                                                {...field}
+                                                value={field.value}
+                                                onChange={(event) =>
+                                                    field.onChange(Number(event.target.value))
+                                                }
+                                            />
+                                        </FormControl>
+                                        <FormDescription>
+                                            {t(
+                                                "pages.aiModel.settings.execApprovalTimeout.description",
+                                                {
+                                                    min: EXEC_APPROVAL_TIMEOUT_MIN_SECS,
+                                                    max: EXEC_APPROVAL_TIMEOUT_MAX_SECS,
+                                                    defaultValue: EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS,
                                                 },
                                             )}
                                         </FormDescription>
