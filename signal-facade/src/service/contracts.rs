@@ -512,6 +512,20 @@ pub trait RemoteToolObserver: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 }
 
+// ====== ForwardLifecycleObserver trait ======
+
+/// Observes a signaling frame only after it has been delivered to its target.
+/// Manager uses this narrow, wire-neutral seam for its best-effort user activity
+/// timeline; OSS Signal leaves it unset. Implementations must not fail or delay
+/// the primary forwarding result.
+pub trait ForwardLifecycleObserver: Send + Sync {
+    fn on_delivered<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
 // ====== SupportCodeMinter trait ======
 
 /// Central-brain lifecycle for temporary support codes: mint on an inbound

@@ -223,6 +223,8 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// `Some` only in the manager (which feeds them into its remote-tool pending
     /// store); `None` elsewhere, where they are ignored.
     pub remote_tool_observer: Option<Arc<dyn RemoteToolObserver>>,
+    /// Post-delivery lifecycle observer. Manager-only and wire-neutral.
+    pub forward_lifecycle_observer: Option<Arc<dyn ForwardLifecycleObserver>>,
     /// Support-code minter for inbound `RequestSupportCode` frames. `Some` only in
     /// the manager (which mints a code for the requesting host's device and pushes
     /// it back); `None` elsewhere, where the frame is ignored.
@@ -412,6 +414,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             edge_exec_observer: None,
             exec_state_reply_observer: None,
             remote_tool_observer: None,
+            forward_lifecycle_observer: None,
             support_code_minter: None,
             remote_access_admission_authorizer: None,
             host_remote_access_controller: None,
@@ -488,6 +491,14 @@ impl<U: SignalingUser> SignalingHandler<U> {
     /// frames are ignored there.
     pub fn with_remote_tool_observer(mut self, observer: Arc<dyn RemoteToolObserver>) -> Self {
         self.remote_tool_observer = Some(observer);
+        self
+    }
+
+    pub fn with_forward_lifecycle_observer(
+        mut self,
+        observer: Arc<dyn ForwardLifecycleObserver>,
+    ) -> Self {
+        self.forward_lifecycle_observer = Some(observer);
         self
     }
 
@@ -635,19 +646,30 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 )
                 .await?
                 {
+                    if let Some(observer) = &self.forward_lifecycle_observer {
+                        observer
+                            .on_delivered(&self.connection_state, signaling_model)
+                            .await;
+                    }
                     return Ok(());
                 }
 
                 // Not held locally: try the cross-instance relay, else honor the
                 // ignore flag / surface SESSION_NOT_FOUND.
-                relay_or_not_found(
+                let delivered = relay_or_not_found(
                     &self.peer_relay,
                     to,
                     &from_connection_id,
                     signaling_model,
                     ignore_not_found,
                 )
-                .await
+                .await?;
+                if delivered && let Some(observer) = &self.forward_lifecycle_observer {
+                    observer
+                        .on_delivered(&self.connection_state, signaling_model)
+                        .await;
+                }
+                Ok(())
             }
         }
     }

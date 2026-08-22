@@ -46,13 +46,13 @@ pub async fn relay_or_not_found(
     from_connection_id: &str,
     model: &SignalingModel,
     ignore_connection_not_found: bool,
-) -> Result<(), DeskSignalFacadeError> {
+) -> Result<bool, DeskSignalFacadeError> {
     if let Some(relay) = peer_relay {
         match relay
             .relay(to_connection_id, from_connection_id, model)
             .await?
         {
-            RelayOutcome::Delivered => return Ok(()),
+            RelayOutcome::Delivered => return Ok(true),
             // Held by no instance — fall through to the not-found handling.
             RelayOutcome::NotFound => {}
         }
@@ -69,7 +69,7 @@ pub async fn relay_or_not_found(
             to_connection_id,
             model
         );
-        return Ok(());
+        return Ok(false);
     }
     DeskSignalFacadeError::custom_error(
         DeskErrorCode::SESSION_NOT_FOUND,

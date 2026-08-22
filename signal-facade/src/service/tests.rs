@@ -198,9 +198,11 @@ async fn relay_or_not_found_delivered_is_ok() {
         called: called.clone(),
     }));
     let model = dummy_model();
-    relay_or_not_found(&relay, "to", "from", &model, false)
-        .await
-        .expect("a delivered relay resolves Ok");
+    assert!(
+        relay_or_not_found(&relay, "to", "from", &model, false)
+            .await
+            .expect("a delivered relay resolves Ok")
+    );
     assert!(called.load(std::sync::atomic::Ordering::SeqCst));
 }
 
@@ -220,9 +222,11 @@ async fn relay_or_not_found_not_found_falls_through() {
     assert!(is_session_not_found(&err));
     assert!(called.load(std::sync::atomic::Ordering::SeqCst));
 
-    relay_or_not_found(&relay, "to", "from", &model, true)
-        .await
-        .expect("relay NotFound with ignore is Ok");
+    assert!(
+        !relay_or_not_found(&relay, "to", "from", &model, true)
+            .await
+            .expect("relay NotFound with ignore is Ok")
+    );
 }
 
 /// Build a frame with the given target and response/request nature.
