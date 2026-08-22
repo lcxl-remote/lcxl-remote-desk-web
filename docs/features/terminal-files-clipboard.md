@@ -21,6 +21,10 @@ edge. Its conversation follows new streaming text only while the reader remains
 at the bottom; after the reader scrolls up, a down-arrow button returns to the
 latest content instead of forcibly moving the current view.
 
+Copilot renders both streaming and completed assistant prose as GitHub-flavored
+Markdown, including headings, lists, code, and tables. Raw HTML is ignored and
+model-supplied image URLs are not loaded.
+
 ## File Management
 
 Manage files on the remote device directly from the browser:

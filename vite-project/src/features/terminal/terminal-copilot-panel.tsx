@@ -15,6 +15,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { AiGeneratedMark } from '@/components/ai-generated-mark';
+import { MarkdownContent } from '@/components/markdown-content';
 import { agentErrorMessage, contentRetractionMessage } from '@/lib/agent-error-i18n';
 import type {
     CommandSuggestion,
@@ -332,9 +333,9 @@ export function TerminalCopilotPanel({
                                         present, not by provenance (fail-closed). */}
                                     <AiGeneratedMark provenance={turn.provenance} />
                                     {turn.answer.explanation_md && (
-                                        <p className="whitespace-pre-wrap text-sm text-foreground">
+                                        <MarkdownContent className="text-sm text-foreground">
                                             {turn.answer.explanation_md}
-                                        </p>
+                                        </MarkdownContent>
                                     )}
                                     {turn.answer.suggestions.map((s, rowIndex) => (
                                         <SuggestionRow
@@ -380,9 +381,9 @@ export function TerminalCopilotPanel({
                                                     the AI text being present (fail-closed); the
                                                     model is not yet known mid-stream. */}
                                                 <AiGeneratedMark />
-                                                <p className="whitespace-pre-wrap text-sm text-muted-foreground">
+                                                <MarkdownContent className="text-sm text-muted-foreground">
                                                     {streamedText}
-                                                </p>
+                                                </MarkdownContent>
                                             </div>
                                         )}
 

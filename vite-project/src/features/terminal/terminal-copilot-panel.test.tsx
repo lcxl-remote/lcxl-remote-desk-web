@@ -260,6 +260,50 @@ describe("TerminalCopilotPanel exec promotion", () => {
         expect(screen.getByText("AI-generated")).toBeInTheDocument();
     });
 
+    it("safely renders GitHub-flavored Markdown in a completed answer", () => {
+        const { container } = render(
+            <TerminalCopilotPanel
+                state={{
+                    ...baseState,
+                    turns: [
+                        {
+                            question: "check CPU",
+                            mode: "how_to",
+                            answer: {
+                                explanation_md: [
+                                    "## CPU report",
+                                    "",
+                                    "**Usage** is high.",
+                                    "",
+                                    "| Metric | Value |",
+                                    "| --- | --- |",
+                                    "| CPU | 99% |",
+                                    "",
+                                    "<script>alert('unsafe')</script>",
+                                    "",
+                                    "![remote pixel](https://example.invalid/pixel.png)",
+                                ].join("\n"),
+                                suggestions: [],
+                            },
+                            provenance: null,
+                        },
+                    ],
+                }}
+                onAsk={vi.fn()}
+                onReset={vi.fn()}
+                onClose={vi.fn()}
+                onFill={vi.fn()}
+            />,
+        );
+
+        expect(screen.getByRole("heading", { name: "CPU report" })).toBeInTheDocument();
+        expect(screen.getByText("Usage").tagName).toBe("STRONG");
+        expect(screen.getByRole("table")).toBeInTheDocument();
+        expect(container.querySelector("script")).toBeNull();
+        expect(container.querySelector("img")).toBeNull();
+        expect(screen.getByText("remote pixel")).toBeInTheDocument();
+    });
+
     it("marks the streaming answer as AI-generated on first exposure, before it settles (Art.50(2))", () => {
         // A turn still streaming (no committed answer yet) with partial text must
         // already carry the marking, so a dropped final frame never leaves the
@@ -287,6 +331,33 @@ describe("TerminalCopilotPanel exec promotion", () => {
         );
         expect(screen.getByText("checking the service status")).toBeInTheDocument();
         expect(screen.getByText("AI-generated")).toBeInTheDocument();
+    });
+
+    it("renders Markdown while the answer is streaming", () => {
+        render(
+            <TerminalCopilotPanel
+                state={{
+                    ...baseState,
+                    phase: "running",
+                    partialText: "### Next step\n\nRun **carefully**.",
+                    turns: [
+                        {
+                            question: "what next?",
+                            mode: "how_to",
+                            answer: null,
+                            provenance: null,
+                        },
+                    ],
+                }}
+                onAsk={vi.fn()}
+                onReset={vi.fn()}
+                onClose={vi.fn()}
+                onFill={vi.fn()}
+            />,
+        );
+
+        expect(screen.getByRole("heading", { name: "Next step" })).toBeInTheDocument();
+        expect(screen.getByText("carefully").tagName).toBe("STRONG");
     });
 
     it("discloses that the user is interacting with an AI (Art.50(1)), alongside the accuracy disclaimer", () => {
