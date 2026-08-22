@@ -12,7 +12,7 @@ pub mod prompt;
 pub mod refusal;
 pub mod seam;
 
-pub use parser::parse_safety_verdict;
+pub use parser::{SafetyVerdictInvalidReason, parse_safety_verdict, parse_safety_verdict_detailed};
 pub use policy::{aggregate_decision, category_decision};
 pub use prompt::{
     CONTENT_SAFETY_PROMPT_VERSION, SafetyPrompt, build_image_prompt, build_input_prompt,

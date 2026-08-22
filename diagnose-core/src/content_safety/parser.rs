@@ -15,24 +15,54 @@ fn invalid_verdict() -> AgentError {
     content_safety_unavailable()
 }
 
-/// Parse and validate one strict JSON verdict. Provider prose and parse details
-/// are deliberately omitted from the returned error.
-pub fn parse_safety_verdict(
+/// Closed, content-free reason for rejecting a provider verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafetyVerdictInvalidReason {
+    InvalidJson,
+    PolicyVersion,
+    DuplicateCategory,
+    DuplicateStage,
+    StageNotAllowed,
+    AllowNonempty,
+    BlockedEmpty,
+    DecisionMismatch,
+}
+
+impl SafetyVerdictInvalidReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidJson => "invalid_json",
+            Self::PolicyVersion => "policy_version",
+            Self::DuplicateCategory => "duplicate_category",
+            Self::DuplicateStage => "duplicate_stage",
+            Self::StageNotAllowed => "stage_not_allowed",
+            Self::AllowNonempty => "allow_nonempty",
+            Self::BlockedEmpty => "blocked_empty",
+            Self::DecisionMismatch => "decision_mismatch",
+        }
+    }
+}
+
+/// Parse a verdict while retaining only a closed diagnostic reason. Neither the
+/// raw model output nor serde's input-derived error string escapes this helper.
+pub fn parse_safety_verdict_detailed(
     raw: &str,
     allowed_stages: &[ContentSafetyStage],
-) -> Result<ContentSafetyVerdict, AgentError> {
-    let verdict: ContentSafetyVerdict = serde_json::from_str(raw).map_err(|_| invalid_verdict())?;
+) -> Result<ContentSafetyVerdict, SafetyVerdictInvalidReason> {
+    let verdict: ContentSafetyVerdict =
+        serde_json::from_str(raw).map_err(|_| SafetyVerdictInvalidReason::InvalidJson)?;
 
     if verdict.policy_version != CONTENT_SAFETY_PROMPT_VERSION {
-        return Err(invalid_verdict());
+        return Err(SafetyVerdictInvalidReason::PolicyVersion);
     }
 
     let unique_categories: HashSet<_> = verdict.categories.iter().copied().collect();
+    if unique_categories.len() != verdict.categories.len() {
+        return Err(SafetyVerdictInvalidReason::DuplicateCategory);
+    }
     let unique_stages: HashSet<_> = verdict.stages.iter().copied().collect();
-    if unique_categories.len() != verdict.categories.len()
-        || unique_stages.len() != verdict.stages.len()
-    {
-        return Err(invalid_verdict());
+    if unique_stages.len() != verdict.stages.len() {
+        return Err(SafetyVerdictInvalidReason::DuplicateStage);
     }
 
     if verdict
@@ -40,26 +70,35 @@ pub fn parse_safety_verdict(
         .iter()
         .any(|stage| !allowed_stages.contains(stage))
     {
-        return Err(invalid_verdict());
+        return Err(SafetyVerdictInvalidReason::StageNotAllowed);
     }
 
     match verdict.decision {
         ContentSafetyDecision::Allow => {
             if !verdict.categories.is_empty() || !verdict.stages.is_empty() {
-                return Err(invalid_verdict());
+                return Err(SafetyVerdictInvalidReason::AllowNonempty);
             }
         }
         ContentSafetyDecision::Block | ContentSafetyDecision::SafeRedirect => {
             if verdict.categories.is_empty() || verdict.stages.is_empty() {
-                return Err(invalid_verdict());
+                return Err(SafetyVerdictInvalidReason::BlockedEmpty);
             }
             if aggregate_decision(verdict.categories.iter().copied()) != verdict.decision {
-                return Err(invalid_verdict());
+                return Err(SafetyVerdictInvalidReason::DecisionMismatch);
             }
         }
     }
 
     Ok(verdict)
+}
+
+/// Parse and validate one strict JSON verdict. Provider prose and parse details
+/// are deliberately omitted from the returned error.
+pub fn parse_safety_verdict(
+    raw: &str,
+    allowed_stages: &[ContentSafetyStage],
+) -> Result<ContentSafetyVerdict, AgentError> {
+    parse_safety_verdict_detailed(raw, allowed_stages).map_err(|_| invalid_verdict())
 }
 
 #[cfg(test)]
@@ -130,6 +169,47 @@ mod tests {
                 )
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn detailed_parser_returns_only_closed_reason_codes() {
+        let cases = [
+            ("not-json", SafetyVerdictInvalidReason::InvalidJson),
+            (
+                r#"{"decision":"allow","categories":[],"stages":[],"policy_version":"old"}"#,
+                SafetyVerdictInvalidReason::PolicyVersion,
+            ),
+            (
+                r#"{"decision":"block","categories":["politics","politics"],"stages":["input"],"policy_version":"content-safety-v1"}"#,
+                SafetyVerdictInvalidReason::DuplicateCategory,
+            ),
+            (
+                r#"{"decision":"block","categories":["politics"],"stages":["input","input"],"policy_version":"content-safety-v1"}"#,
+                SafetyVerdictInvalidReason::DuplicateStage,
+            ),
+            (
+                r#"{"decision":"block","categories":["politics"],"stages":["image"],"policy_version":"content-safety-v1"}"#,
+                SafetyVerdictInvalidReason::StageNotAllowed,
+            ),
+            (
+                r#"{"decision":"allow","categories":["politics"],"stages":["input"],"policy_version":"content-safety-v1"}"#,
+                SafetyVerdictInvalidReason::AllowNonempty,
+            ),
+            (
+                r#"{"decision":"block","categories":[],"stages":[],"policy_version":"content-safety-v1"}"#,
+                SafetyVerdictInvalidReason::BlockedEmpty,
+            ),
+            (
+                r#"{"decision":"safe_redirect","categories":["politics"],"stages":["input"],"policy_version":"content-safety-v1"}"#,
+                SafetyVerdictInvalidReason::DecisionMismatch,
+            ),
+        ];
+        for (raw, expected) in cases {
+            let reason =
+                parse_safety_verdict_detailed(raw, &[ContentSafetyStage::Input]).unwrap_err();
+            assert_eq!(reason, expected);
+            assert!(!reason.as_str().contains(raw));
         }
     }
 }

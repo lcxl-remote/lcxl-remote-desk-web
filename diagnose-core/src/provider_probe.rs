@@ -6,6 +6,14 @@ use crate::model_capability::ModelCapabilities;
 const VISION_MARKER: &str = "LCXL7F";
 const VISION_PROBE_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAASgAAABICAYAAABFhGj3AAAB8ElEQVR42u3dMY7DMAxFQd7/0vINZBcm8CnNA9LblDjbBNlakhRaGYEkQEkSoCQBSpIAJQlQkgQoSfoJqKrafsYP4OX9uj/p85/+/NPvR/f8458fUIACFKAA5QICClCAAhSgAAUoQAEKUIACFKAABShAAQpQgAIUoADlAgIKUIACFGADADl9/v5ANL8/oFxgQDlfQAEKUIACFKAABShAAQpQLrD5AwpQFgRQgAIUoFxgQDlfQAEKUIACFKAsyJr/RU/nc/f8AWUBzB9QgAIUoAAFKEBZEEA5H0ABygKYP6AAZUEA5XwABSgLYP6AAhSgAAUoQAHKggDK/NN/kA5QFgRQ5g8oF8T7mz+gAGVBAGX+gAKUBTF/QAHKggDK/AEFKAsCKPMHlAvi/c0fUICyIIAy3+P3F1CAMn9AAcoBAQpQng9QgAKU+wUoQFkg8wcUoCwIoMwXUIAClPkDClAOCFCA8nyAsiD+cSegAOUCAcr8AQUoCwIo9wtQgAIUoAAFKAcEKEC5/4CyIIACFKBcIECZP6AAZUEA5X4B6tMLjv9BrPDnn/5Fy9vvD6AABShAAQpQgAIUoAAFKEABClCAAhSgAAUoQAEKUIACFKAABShAAQpQgAIUoDKAkiRASRKgJAFKkgAlCVCSBChJApSk8B7YCriL5EqlXgAAAABJRU5ErkJggg==";
 
+/// Return the repository-owned benign PNG used by provider validation.
+///
+/// Safety probes reuse this fixture so testing image moderation never depends on
+/// user content, a network download, or a runtime file.
+pub fn benign_probe_image_data_url() -> String {
+    format!("data:image/png;base64,{VISION_PROBE_PNG_BASE64}")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeExpectation {
     pub message: ChatMessage,
@@ -30,9 +38,7 @@ pub fn provider_probe_request(capabilities: ModelCapabilities) -> ProbeExpectati
                 ChatRole::User,
                 "Read the exact six ASCII characters shown in the attached image and reply with those characters first. Do not guess from this instruction.",
             )
-            .with_image(format!(
-                "data:image/png;base64,{VISION_PROBE_PNG_BASE64}"
-            )),
+            .with_image(benign_probe_image_data_url()),
             required_marker: Some(VISION_MARKER),
         }
     } else {
