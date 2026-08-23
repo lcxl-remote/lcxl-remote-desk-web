@@ -114,6 +114,20 @@ mod tests {
     }
 
     #[test]
+    fn documentation_support_surface_uses_the_frozen_wire_token() {
+        let prompt = build_input_prompt(&SafetyInput {
+            surface: ContentSafetySurface::DocumentationSupport,
+            text: "How do I configure unattended access?".into(),
+            trusted_context: None,
+        });
+        assert!(
+            prompt
+                .user
+                .contains("\"surface\":\"documentation_support\"")
+        );
+    }
+
+    #[test]
     fn image_prompt_never_serializes_the_data_url() {
         let request = SafetyImage {
             surface: ContentSafetySurface::Diagnosis,

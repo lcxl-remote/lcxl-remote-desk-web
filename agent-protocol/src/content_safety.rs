@@ -30,6 +30,7 @@ pub enum ContentSafetySurface {
     FleetExecution,
     Automation,
     ProviderProbe,
+    DocumentationSupport,
 }
 
 /// Trust boundary at which a safety verdict applies.
@@ -154,6 +155,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&StreamRetractionReason::SafetyUnavailable).unwrap(),
             "\"safety_unavailable\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ContentSafetySurface::DocumentationSupport).unwrap(),
+            "\"documentation_support\""
         );
         assert!(
             serde_json::from_str::<ContentSafetyDecision>("\"review\"").is_err(),

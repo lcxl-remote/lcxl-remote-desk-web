@@ -67,18 +67,27 @@ const components: Components = {
     img: ({ alt }) => <span>{alt}</span>,
 }
 
+const componentsWithoutLinks: Components = {
+    ...components,
+    // Some model outputs contain source-like or configuration URLs. Keep their
+    // visible label/text, but never make a model-controlled destination clickable.
+    a: ({ children }) => <span>{children}</span>,
+}
+
 export function MarkdownContent({
     children,
     className = "",
+    disableLinks = false,
 }: {
     children: string
     className?: string
+    disableLinks?: boolean
 }) {
     return (
         <div className={`min-w-0 break-words ${className}`}>
             <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
-                components={components}
+                components={disableLinks ? componentsWithoutLinks : components}
                 skipHtml
             >
                 {children}
