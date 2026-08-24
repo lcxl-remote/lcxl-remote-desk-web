@@ -10,8 +10,13 @@ use crate::replay::{ReplayDisposition, SourceContextKey};
 use crate::trim::model_context_cost;
 use crate::{MAX_MODEL_CONTEXT_BYTES, MIN_MODEL_CONTEXT_BYTES};
 
-pub const MODEL_CONTEXT_STATE_SCHEMA_VERSION: u16 = 1;
+mod checkpoint;
+
+pub use checkpoint::*;
+
+pub const MODEL_CONTEXT_STATE_SCHEMA_VERSION: u16 = 2;
 pub const CONTEXT_STRATEGY_SCHEMA_VERSION: u16 = 1;
+pub const PLATFORM_CONTEXT_POLICY_SCHEMA_VERSION: u32 = 1;
 pub const MAX_CONTEXT_POLICY_ENTRIES: usize = 8;
 pub const MAX_CONTEXT_NOTICES: usize = 256;
 
@@ -19,12 +24,35 @@ pub const MAX_CONTEXT_NOTICES: usize = 256;
 #[serde(rename_all = "snake_case")]
 pub enum ContextManagementStrategy {
     Window,
+    CheckpointSummary,
 }
 
 impl ContextManagementStrategy {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Window => "window",
+            Self::CheckpointSummary => "checkpoint_summary",
+        }
+    }
+}
+
+/// Cluster-shared product policy selected by the manager control plane. The OSS
+/// signal does not persist this value and continues to construct a local Window
+/// policy directly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformContextPolicy {
+    pub schema_version: u32,
+    pub revision: u64,
+    pub strategy: ContextManagementStrategy,
+}
+
+impl Default for PlatformContextPolicy {
+    fn default() -> Self {
+        Self {
+            schema_version: PLATFORM_CONTEXT_POLICY_SCHEMA_VERSION,
+            revision: 0,
+            strategy: ContextManagementStrategy::Window,
         }
     }
 }
@@ -48,6 +76,15 @@ impl ContextPolicyKey {
             digest.update((component.len() as u64).to_be_bytes());
             digest.update(component.as_bytes());
         }
+        if policy.strategy == ContextManagementStrategy::CheckpointSummary {
+            for component in [
+                CONTEXT_SUMMARY_PROMPT_VERSION.to_string(),
+                CONTEXT_SUMMARY_SCHEMA_VERSION.to_string(),
+            ] {
+                digest.update((component.len() as u64).to_be_bytes());
+                digest.update(component.as_bytes());
+            }
+        }
         Self(format!("v1:{:x}", digest.finalize()))
     }
 
@@ -62,7 +99,7 @@ pub struct PinnedContextPolicy {
     pub profile_revision: i64,
     pub max_context_bytes: usize,
     pub strategy: ContextManagementStrategy,
-    pub platform_context_policy_revision: i64,
+    pub platform_context_policy_revision: u64,
     pub context_strategy_schema_version: u16,
 }
 
@@ -88,6 +125,18 @@ impl PinnedContextPolicy {
         })
     }
 
+    pub fn checkpoint_summary(
+        source_context_key: SourceContextKey,
+        profile_revision: i64,
+        max_context_bytes: usize,
+        platform_context_policy_revision: u64,
+    ) -> Result<Self, ModelContextError> {
+        let mut policy = Self::window(source_context_key, profile_revision, max_context_bytes)?;
+        policy.strategy = ContextManagementStrategy::CheckpointSummary;
+        policy.platform_context_policy_revision = platform_context_policy_revision;
+        Ok(policy)
+    }
+
     pub fn key(&self) -> ContextPolicyKey {
         ContextPolicyKey::derive(self)
     }
@@ -98,10 +147,37 @@ impl PinnedContextPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelContextState {
     pub schema_version: u16,
     #[serde(default)]
     pub entries: Vec<ModelContextEntry>,
+}
+
+impl ModelContextState {
+    /// Upgrade the only supported historical representation. Schema v1 reserved
+    /// `checkpoint` as null, so the migration is lossless and deliberately rejects
+    /// any non-null/unknown checkpoint before changing the version.
+    pub fn upgrade_from_v1(&mut self) -> Result<bool, ModelContextError> {
+        match self.schema_version {
+            MODEL_CONTEXT_STATE_SCHEMA_VERSION => {
+                validate_state(self)?;
+                Ok(false)
+            }
+            1 => {
+                if self.entries.iter().any(|entry| {
+                    entry.strategy != ContextManagementStrategy::Window
+                        || entry.checkpoint.is_some()
+                }) {
+                    return Err(ModelContextError::UnsupportedStrategy);
+                }
+                self.schema_version = MODEL_CONTEXT_STATE_SCHEMA_VERSION;
+                validate_state(self)?;
+                Ok(true)
+            }
+            version => Err(ModelContextError::UnsupportedStateSchema(version)),
+        }
+    }
 }
 
 impl Default for ModelContextState {
@@ -114,6 +190,7 @@ impl Default for ModelContextState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelContextEntry {
     pub policy_key: ContextPolicyKey,
     pub strategy: ContextManagementStrategy,
@@ -125,10 +202,8 @@ pub struct ModelContextEntry {
     /// and the next appended user turn would emit a duplicate trim notice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub floor_after_group_head_message_id: Option<String>,
-    /// Reserved for the separately planned checkpoint-summary strategy. Version
-    /// 1 rejects every non-null value instead of guessing a future schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint: Option<serde_json::Value>,
+    pub checkpoint: Option<ContextCheckpoint>,
     pub last_used_session_version: i64,
 }
 
@@ -136,6 +211,7 @@ pub struct ModelContextEntry {
 #[serde(rename_all = "snake_case")]
 pub enum ContextNoticeKind {
     Trimmed,
+    Compacted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +219,10 @@ pub struct ContextNotice {
     pub id: String,
     pub turn_id: String,
     pub kind: ContextNoticeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_generation: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covered_message_count: Option<u32>,
 }
 
 impl ContextNotice {
@@ -152,6 +232,23 @@ impl ContextNotice {
             id: format!("context-trimmed:{turn_id}"),
             turn_id,
             kind: ContextNoticeKind::Trimmed,
+            checkpoint_generation: None,
+            covered_message_count: None,
+        }
+    }
+
+    pub fn compacted(
+        turn_id: impl Into<String>,
+        generation: u32,
+        covered_message_count: u32,
+    ) -> Self {
+        let turn_id = turn_id.into();
+        Self {
+            id: format!("context-compacted:{turn_id}:{generation}"),
+            turn_id,
+            kind: ContextNoticeKind::Compacted,
+            checkpoint_generation: Some(generation),
+            covered_message_count: Some(covered_message_count),
         }
     }
 }
@@ -165,11 +262,13 @@ pub struct ModelContextView {
 }
 
 #[derive(Debug)]
-struct MessageGroup {
-    start: usize,
-    end: usize,
-    cost: usize,
-    replay_safe: bool,
+pub(crate) struct MessageGroup {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) cost: usize,
+    pub(crate) replay_safe: bool,
+    pub(crate) summary_eligible: bool,
+    pub(crate) discard_only: bool,
 }
 
 /// Build the sole model-facing history view and update the current policy entry.
@@ -196,6 +295,9 @@ pub fn build_model_context_view(
         .entries
         .iter()
         .find(|entry| entry.policy_key == policy_key);
+    if existing_entry.is_some_and(|entry| entry.strategy != policy.strategy) {
+        return Err(ModelContextError::UnsupportedStrategy);
+    }
     let existing_group_index = match existing_entry {
         Some(entry) if entry.floor_group_head_message_id.is_some() => {
             let id = entry
@@ -238,9 +340,7 @@ pub fn build_model_context_view(
         .unwrap_or(initial_group_index);
 
     let safe_groups = &groups[replay_floor.min(groups.len())..];
-    let total_cost = safe_groups
-        .iter()
-        .fold(0usize, |total, group| total.saturating_add(group.cost));
+    let total_cost = checked_cost_sum(safe_groups.iter().map(|group| group.cost))?;
     let mut selected_group_index = replay_floor.min(groups.len());
 
     if total_cost > policy.max_context_bytes {
@@ -270,10 +370,13 @@ pub fn build_model_context_view(
         selected_group_index = groups.len() - 1;
         for index in (replay_floor..groups.len()).rev() {
             let cost = groups[index].cost;
-            if index != groups.len() - 1 && used.saturating_add(cost) > low {
+            let next = used
+                .checked_add(cost)
+                .ok_or(ModelContextError::ContextCostOverflow)?;
+            if index != groups.len() - 1 && next > low {
                 break;
             }
-            used = used.saturating_add(cost);
+            used = next;
             selected_group_index = index;
         }
     }
@@ -339,7 +442,7 @@ fn finish_view(
     })
 }
 
-fn validate_state(state: &ModelContextState) -> Result<(), ModelContextError> {
+pub(crate) fn validate_state(state: &ModelContextState) -> Result<(), ModelContextError> {
     if state.schema_version != MODEL_CONTEXT_STATE_SCHEMA_VERSION {
         return Err(ModelContextError::UnsupportedStateSchema(
             state.schema_version,
@@ -350,8 +453,14 @@ fn validate_state(state: &ModelContextState) -> Result<(), ModelContextError> {
     }
     let mut keys = HashSet::new();
     for entry in &state.entries {
-        if entry.strategy != ContextManagementStrategy::Window || entry.checkpoint.is_some() {
-            return Err(ModelContextError::UnsupportedStrategy);
+        match entry.strategy {
+            ContextManagementStrategy::Window if entry.checkpoint.is_none() => {}
+            // A discard-only floor reconciliation can legitimately precede the
+            // first provider-backed checkpoint. The strategy/floor is still
+            // typed and versioned; a later planner either returns a raw Ready
+            // view or creates the first checkpoint.
+            ContextManagementStrategy::CheckpointSummary => {}
+            _ => return Err(ModelContextError::UnsupportedStrategy),
         }
         if entry.floor_group_head_message_id.is_some()
             && entry.floor_after_group_head_message_id.is_some()
@@ -365,7 +474,7 @@ fn validate_state(state: &ModelContextState) -> Result<(), ModelContextError> {
     Ok(())
 }
 
-fn upsert_entry(state: &mut ModelContextState, entry: ModelContextEntry) {
+pub(crate) fn upsert_entry(state: &mut ModelContextState, entry: ModelContextEntry) {
     if let Some(existing) = state
         .entries
         .iter_mut()
@@ -390,7 +499,7 @@ fn upsert_entry(state: &mut ModelContextState, entry: ModelContextEntry) {
     state.entries.push(entry);
 }
 
-fn group_messages(
+pub(crate) fn group_messages(
     conversation: &[ChatMessage],
     source: &SourceContextKey,
 ) -> Result<Vec<MessageGroup>, ModelContextError> {
@@ -423,16 +532,15 @@ fn group_messages(
                     conversation[start].message_id.clone(),
                 ));
             }
-            let replay_safe = replay_is_safe(&conversation[start], source);
+            let replay = classify_replay(&conversation[start], source);
+            let cost = checked_cost_sum(conversation[start..index].iter().map(model_context_cost))?;
             groups.push(MessageGroup {
                 start,
                 end: index,
-                cost: conversation[start..index]
-                    .iter()
-                    .fold(0usize, |total, item| {
-                        total.saturating_add(model_context_cost(item))
-                    }),
-                replay_safe,
+                cost,
+                replay_safe: replay.replay_safe,
+                summary_eligible: replay.summary_eligible,
+                discard_only: replay.discard_only,
             });
             continue;
         }
@@ -446,6 +554,8 @@ fn group_messages(
             end: index + 1,
             cost: model_context_cost(message),
             replay_safe: true,
+            summary_eligible: true,
+            discard_only: false,
         });
         index += 1;
     }
@@ -453,13 +563,46 @@ fn group_messages(
     Ok(groups)
 }
 
-fn replay_is_safe(message: &ChatMessage, source: &SourceContextKey) -> bool {
+pub(crate) fn checked_cost_sum(
+    costs: impl IntoIterator<Item = usize>,
+) -> Result<usize, ModelContextError> {
+    costs.into_iter().try_fold(0usize, |sum, cost| {
+        sum.checked_add(cost)
+            .ok_or(ModelContextError::ContextCostOverflow)
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReplayClassification {
+    replay_safe: bool,
+    summary_eligible: bool,
+    discard_only: bool,
+}
+
+fn classify_replay(message: &ChatMessage, source: &SourceContextKey) -> ReplayClassification {
     match message.replay_disposition.as_ref() {
-        Some(ReplayDisposition::NotRequired { source_context_key }) => source_context_key == source,
-        Some(ReplayDisposition::Present { envelope }) => {
-            &envelope.source_context_key == source && envelope.validate().is_ok()
+        Some(ReplayDisposition::NotRequired { source_context_key }) => ReplayClassification {
+            replay_safe: source_context_key == source,
+            summary_eligible: true,
+            discard_only: false,
+        },
+        Some(ReplayDisposition::Present { envelope }) if envelope.validate().is_err() => {
+            ReplayClassification {
+                replay_safe: false,
+                summary_eligible: false,
+                discard_only: true,
+            }
         }
-        Some(ReplayDisposition::Unavailable { .. }) | None => false,
+        Some(ReplayDisposition::Present { envelope }) => ReplayClassification {
+            replay_safe: &envelope.source_context_key == source,
+            summary_eligible: true,
+            discard_only: false,
+        },
+        Some(ReplayDisposition::Unavailable { .. }) | None => ReplayClassification {
+            replay_safe: false,
+            summary_eligible: true,
+            discard_only: false,
+        },
     }
 }
 
@@ -477,6 +620,18 @@ pub enum ModelContextError {
     OrphanToolResult(String),
     IncompleteToolGroup(String),
     UnexpectedReplayDisposition(String),
+    InvalidProtectionReference(String),
+    ProtectedStateTooLarge {
+        cost: usize,
+        high_watermark: usize,
+    },
+    ProtectedReplayUnsafe(String),
+    NoCompressiblePrefix,
+    CompressionInputTooLarge,
+    ContextCostOverflow,
+    SummaryTooLarge,
+    InvalidCheckpoint(String),
+    StaleCompressionPlan,
     ContextItemTooLarge {
         group_head_message_id: String,
         cost: usize,
@@ -513,6 +668,30 @@ impl std::fmt::Display for ModelContextError {
             Self::UnexpectedReplayDisposition(id) => {
                 write!(f, "non-tool-call message carries replay disposition: {id}")
             }
+            Self::InvalidProtectionReference(id) => {
+                write!(
+                    f,
+                    "context protection references missing message/tool id: {id}"
+                )
+            }
+            Self::ProtectedStateTooLarge {
+                cost,
+                high_watermark,
+            } => write!(
+                f,
+                "protected model context costs {cost} bytes, above {high_watermark}"
+            ),
+            Self::ProtectedReplayUnsafe(id) => {
+                write!(f, "protected model context group is not replay-safe: {id}")
+            }
+            Self::NoCompressiblePrefix => f.write_str("no safe model context prefix to compress"),
+            Self::CompressionInputTooLarge => {
+                f.write_str("model context compression input exceeds its hard limit")
+            }
+            Self::ContextCostOverflow => f.write_str("model context cost overflow"),
+            Self::SummaryTooLarge => f.write_str("context summary exceeds its hard limit"),
+            Self::InvalidCheckpoint(reason) => write!(f, "invalid context checkpoint: {reason}"),
+            Self::StaleCompressionPlan => f.write_str("context compression plan is stale"),
             Self::ContextItemTooLarge {
                 group_head_message_id,
                 cost,
@@ -683,16 +862,65 @@ mod tests {
     }
 
     #[test]
-    fn future_checkpoint_seam_can_prepend_a_fenced_summary_at_a_group_boundary() {
+    fn platform_policy_defaults_to_window_revision_zero_and_revision_is_keyed() {
+        let platform = PlatformContextPolicy::default();
+        assert_eq!(
+            platform.schema_version,
+            PLATFORM_CONTEXT_POLICY_SCHEMA_VERSION
+        );
+        assert_eq!(platform.revision, 0);
+        assert_eq!(platform.strategy, ContextManagementStrategy::Window);
+
+        let zero =
+            PinnedContextPolicy::checkpoint_summary(source("same"), 1, MIN_MODEL_CONTEXT_BYTES, 0)
+                .unwrap();
+        let one =
+            PinnedContextPolicy::checkpoint_summary(source("same"), 1, MIN_MODEL_CONTEXT_BYTES, 1)
+                .unwrap();
+        assert_ne!(zero.key(), one.key());
+    }
+
+    #[test]
+    fn context_cost_accumulation_fails_closed_on_overflow() {
+        assert_eq!(
+            checked_cost_sum([usize::MAX, 1]),
+            Err(ModelContextError::ContextCostOverflow)
+        );
+    }
+
+    #[test]
+    fn versioned_context_state_rejects_unknown_fields() {
+        assert!(
+            serde_json::from_value::<ModelContextState>(serde_json::json!({
+                "schema_version": MODEL_CONTEXT_STATE_SCHEMA_VERSION,
+                "entries": [],
+                "future_state": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ModelContextState>(serde_json::json!({
+                "schema_version": MODEL_CONTEXT_STATE_SCHEMA_VERSION,
+                "entries": [{
+                    "policy_key": "v1:test",
+                    "strategy": "window",
+                    "last_used_session_version": 1,
+                    "future_entry": true
+                }]
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn context_summary_is_grouped_and_window_rejects_a_strategy_mismatch() {
         let source = source("same");
         let mut conversation = vec![user("old", 10)];
         conversation.extend(tool_group(source.clone()));
         conversation.push(user("recent", 10));
 
-        // A future checkpoint may cover through the complete tool group, then
-        // prepend one synthetic summary to the untouched raw suffix. This test is
-        // deliberately construction-only: the v1 runtime state below still
-        // rejects any non-null checkpoint.
+        // A checkpoint may cover through the complete tool group, then prepend one
+        // synthetic summary to the untouched raw suffix.
         let raw_suffix = conversation[3..].to_vec();
         let mut future_view = vec![ChatMessage::context_summary(
             "checkpoint:future",
@@ -712,10 +940,11 @@ mod tests {
                 strategy: ContextManagementStrategy::Window,
                 floor_group_head_message_id: None,
                 floor_after_group_head_message_id: None,
-                checkpoint: Some(serde_json::json!({"future": true})),
+                checkpoint: None,
                 last_used_session_version: 1,
             }],
         };
+        state.entries[0].strategy = ContextManagementStrategy::CheckpointSummary;
         assert_eq!(
             build_model_context_view(&conversation, &mut state, &policy, 1),
             Err(ModelContextError::UnsupportedStrategy)

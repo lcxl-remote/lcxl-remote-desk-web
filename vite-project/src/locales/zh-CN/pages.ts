@@ -658,6 +658,7 @@ export default {
   'pages.desk.diagnose.statusRedacting': '正在脱敏敏感数据…',
   'pages.desk.diagnose.statusModeling': '正在调用模型分析…',
   'pages.desk.diagnose.contextTrimmed': '对话记录仍然保留，但本轮有部分较早历史未发送给模型。',
+  'pages.desk.diagnose.contextCompacted': '较早的模型上下文已压缩为非权威摘要，原始对话记录没有改变。',
   'pages.desk.diagnose.statusRunning': '处理中…',
   'pages.desk.diagnose.summary': '结论',
   'pages.desk.diagnose.findings': '证据',
@@ -965,6 +966,7 @@ export default {
   'pages.agentError.aiContextLimitExceeded':
     '本次请求携带的上下文超过免费套餐上限。请缩短对话或减少诊断证据后重试。',
   'pages.agentError.aiContextItemTooLarge': '最新问题及其协议消息组超过该模型配置的历史预算。模型配置管理员可以增大 max_context_bytes；否则请缩短本次请求后重试。',
+  'pages.agentError.aiContextCompressionFailed': '较早的模型上下文无法安全压缩，因此本轮已停止，且不会降级为信息更不完整的历史。请重试或联系管理员。',
   'pages.agentError.aiPlatformBusy': '免费 AI 队列当前已满，请稍后重试。',
   'pages.agentError.aiModelImageInputUnsupported':
     '当前选择的 AI 模型不支持截图输入。请选择已启用图片输入能力的模型，或关闭截图选项。',

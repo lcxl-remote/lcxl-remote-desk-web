@@ -59,6 +59,90 @@ struct ScriptModel {
     turns: RefCell<std::collections::VecDeque<ModelTurn>>,
     requests: Rc<RefCell<Vec<ModelRequest>>>,
 }
+
+/// A checkpoint-capable scripted model used to prove that compression is an
+/// inline provider call, not a model→tool step or a user-visible stream.
+struct CompressionScriptModel {
+    turns: RefCell<std::collections::VecDeque<Result<ModelTurn, AgentError>>>,
+    requests: Rc<RefCell<Vec<ModelRequest>>>,
+    audits: Rc<RefCell<Vec<crate::seam::ContextCompressionAuditOutcome>>>,
+    source: SourceContextKey,
+}
+
+struct NoopHeartbeatGuard;
+impl crate::seam::HeartbeatGuard for NoopHeartbeatGuard {}
+
+struct UnhealthyHeartbeat;
+impl crate::seam::LeaseHeartbeat for UnhealthyHeartbeat {
+    fn start(
+        &self,
+        _conversation_id: String,
+        _lease_token: u64,
+    ) -> Box<dyn crate::seam::HeartbeatGuard> {
+        Box::new(NoopHeartbeatGuard)
+    }
+
+    fn is_healthy(&self) -> bool {
+        false
+    }
+}
+
+#[async_trait(?Send)]
+impl ModelSeam for CompressionScriptModel {
+    async fn context_policy(
+        &self,
+        _requirements: crate::model_capability::ModelRequirements,
+    ) -> Result<crate::model_context::PinnedContextPolicy, AgentError> {
+        crate::model_context::PinnedContextPolicy::checkpoint_summary(
+            self.source.clone(),
+            1,
+            crate::MIN_MODEL_CONTEXT_BYTES * 4,
+            1,
+        )
+        .map_err(model_context_error)
+    }
+
+    fn context_compression_provenance(
+        &self,
+        turn_id: &str,
+        created_at: &str,
+    ) -> Result<crate::model_context::CompressorProvenanceV1, AgentError> {
+        Ok(crate::model_context::CompressorProvenanceV1 {
+            source_context_key: self.source.as_str().to_string(),
+            provider_identity_sha256: "a".repeat(64),
+            model_identity_sha256: "b".repeat(64),
+            connection_revision: 1,
+            model_profile_revision: 1,
+            prompt_version: crate::model_context::CONTEXT_SUMMARY_PROMPT_VERSION.into(),
+            schema_version: crate::model_context::CONTEXT_SUMMARY_SCHEMA_VERSION,
+            provider_call_key: "c".repeat(64),
+            created_at: created_at.into(),
+            created_turn_id: turn_id.into(),
+        })
+    }
+
+    async fn audit_context_compression(
+        &self,
+        outcome: crate::seam::ContextCompressionAuditOutcome,
+    ) {
+        self.audits.borrow_mut().push(outcome);
+    }
+
+    async fn call(
+        &self,
+        request: ModelRequest,
+        sink: &mut dyn TurnSink,
+    ) -> Result<ModelTurn, AgentError> {
+        self.requests.borrow_mut().push(request);
+        let turn = self
+            .turns
+            .borrow_mut()
+            .pop_front()
+            .expect("a scripted compression/main turn")?;
+        sink.on_text_delta(&turn.text);
+        Ok(turn)
+    }
+}
 #[async_trait(?Send)]
 impl ModelSeam for ScriptModel {
     async fn context_policy(
@@ -147,6 +231,67 @@ fn claim() -> ClaimTurnParams {
     }
 }
 
+#[test]
+fn compression_failure_errors_are_closed_and_provider_failures_are_classified() {
+    use crate::seam::ContextCompressionFailureKind as Kind;
+
+    let categories = [
+        Kind::InputTooLarge,
+        Kind::ProviderRejected,
+        Kind::ProviderTimeout,
+        Kind::Truncated,
+        Kind::InvalidSchema,
+        Kind::UnsafeOutput,
+        Kind::SummaryTooLarge,
+        Kind::ProtectedStateTooLarge,
+        Kind::ProtectedReplayUnsafe,
+        Kind::StaleContext,
+        Kind::UnsupportedEndpoint,
+        Kind::InvalidEffectiveBudget,
+        Kind::AttemptExhausted,
+    ];
+    let names = categories
+        .iter()
+        .map(|kind| kind.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(names.len(), categories.len());
+    let error = context_compression_error(Kind::InvalidSchema);
+    assert_eq!(
+        error.message,
+        "model context compression failed: invalid_schema"
+    );
+    assert!(!error.message.contains("provider-secret"));
+
+    let provider_error = |kind, message: &str| AgentError {
+        kind,
+        message: message.into(),
+        retryable: false,
+        safe_for_model: true,
+        error_code: None,
+    };
+    assert_eq!(
+        compression_failure_for_provider_error(&provider_error(
+            desk_agent_protocol::AgentErrorKind::TransportError,
+            "provider stream made no upstream progress"
+        )),
+        Kind::ProviderTimeout
+    );
+    assert_eq!(
+        compression_failure_for_provider_error(&provider_error(
+            desk_agent_protocol::AgentErrorKind::TransportError,
+            "invalid output limit: manual budget exceeds cap"
+        )),
+        Kind::InvalidEffectiveBudget
+    );
+    assert_eq!(
+        compression_failure_for_provider_error(&provider_error(
+            desk_agent_protocol::AgentErrorKind::TransportError,
+            "wire protocol is not implemented"
+        )),
+        Kind::UnsupportedEndpoint
+    );
+}
+
 fn answer(text: &str) -> ModelTurn {
     ModelTurn {
         text: text.into(),
@@ -192,7 +337,7 @@ impl TurnSink for Collector {
 
 fn deps<'a>(
     sess: &'a MemSession,
-    model: &'a ScriptModel,
+    model: &'a dyn ModelSeam,
     tools: &'a RecordingTools,
     registry: &'a [RegisteredTool],
     clock: &'a dyn Fn() -> String,
@@ -250,6 +395,559 @@ async fn answers_without_tools() {
     assert_eq!(s.conversation.len(), 2);
     // The model was offered the granted read tool.
     assert_eq!(model.requests.borrow()[0].tools.len(), 1);
+}
+
+#[tokio::test]
+async fn compression_precedes_main_call_and_counts_tokens_but_not_steps() {
+    let sess = MemSession::default();
+    let mut existing = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-19T00:00:00Z",
+    );
+    existing.conversation = vec![
+        ChatMessage::text("old-a", ChatRole::User, "a".repeat(5000)),
+        ChatMessage::text("old-b", ChatRole::User, "b".repeat(6000)),
+    ];
+    *sess.inner.borrow_mut() = Some(existing);
+
+    let source =
+        SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test");
+    let summary = serde_json::json!({
+        "goals": [{"text": "preserve the earlier goal", "source_message_ids": ["old-a"]}],
+        "historical_constraints": [], "reported_observations": [],
+        "completed_actions": [], "unresolved_questions": [], "next_steps": [],
+        "important_identifiers": [], "omitted_evidence": []
+    })
+    .to_string();
+    let compression_turn = ModelTurn {
+        text: summary,
+        stop_reason: StopReason::EndTurn,
+        usage: crate::chat::TokenUsage {
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            ..Default::default()
+        },
+        provider_meta: ProviderResponseMeta::without_reasoning(StopReason::EndTurn),
+        ..Default::default()
+    };
+    let mut main_turn = answer("done");
+    main_turn.usage = crate::chat::TokenUsage {
+        input_tokens: Some(3),
+        output_tokens: Some(2),
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let audits = Rc::new(RefCell::new(Vec::new()));
+    let model = CompressionScriptModel {
+        turns: RefCell::new([Ok(compression_turn), Ok(main_turn)].into()),
+        requests: requests.clone(),
+        audits: audits.clone(),
+        source,
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "unused".into(),
+    };
+    let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let safety = SafetyScript {
+        model_turn_results: RefCell::new(
+            [
+                Ok(safety_verdict(
+                    desk_agent_protocol::content_safety::ContentSafetyDecision::Allow,
+                    desk_agent_protocol::content_safety::ContentSafetyStage::Output,
+                )),
+                Ok(safety_verdict(
+                    desk_agent_protocol::content_safety::ContentSafetyDecision::Allow,
+                    desk_agent_protocol::content_safety::ContentSafetyStage::Output,
+                )),
+            ]
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let mut loop_deps = deps(&sess, &model, &tools, &reg, &clock);
+    loop_deps.content_safety = crate::content_safety::ContentSafetyMode::Enforced {
+        seam: &safety,
+        context: safety_context(),
+    };
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    let current = ChatMessage::text("current", ChatRole::User, "c".repeat(7000));
+    let outcome = run_agent_turn(&loop_deps, claim(), current, &mut sink)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("done".into()));
+    let requests = requests.borrow();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].use_case,
+        crate::model_profile::ModelUseCase::ContextCompression
+    );
+    assert!(requests[0].tools.is_empty());
+    assert_eq!(requests[0].tool_choice, crate::chat::ToolChoice::None);
+    assert_ne!(
+        requests[1].use_case,
+        crate::model_profile::ModelUseCase::ContextCompression
+    );
+    assert_eq!(requests[1].tools.len(), 1);
+    drop(requests);
+
+    let reviews = safety.model_turn_requests.borrow();
+    assert_eq!(
+        reviews.len(),
+        2,
+        "candidate summary and main answer are reviewed"
+    );
+    assert!(reviews[0].text.contains("preserve the earlier goal"));
+    assert!(!reviews[0].text.contains(&"a".repeat(100)));
+    assert!(!reviews[0].text.contains(&"b".repeat(100)));
+    assert!(reviews[0].tool_calls.is_empty());
+    assert_eq!(reviews[1].text, "done");
+    drop(reviews);
+
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(stored.current_turn_steps, 1);
+    assert_eq!(stored.current_turn_tokens.input_tokens, Some(13));
+    assert_eq!(stored.current_turn_tokens.output_tokens, Some(7));
+    assert!(stored.context_notices.iter().any(|notice| {
+        notice.kind == crate::model_context::ContextNoticeKind::Compacted
+            && notice.checkpoint_generation == Some(1)
+    }));
+    assert_eq!(sink.0.borrow().as_str(), "done");
+    let audits = audits.borrow();
+    assert_eq!(audits.len(), 1);
+    let crate::seam::ContextCompressionAuditOutcome::Committed {
+        context,
+        usage,
+        summary_context_cost,
+        final_context_cost,
+    } = &audits[0]
+    else {
+        panic!("successful compression must emit a committed audit outcome");
+    };
+    assert_eq!(context.generation, 1);
+    assert_eq!(context.covered_from_message_id, "old-a");
+    assert!(context.covered_message_count >= 1);
+    let safety_audit = context
+        .safety
+        .as_ref()
+        .expect("the independently frozen safety receiver must be correlated");
+    assert_eq!(safety_audit.provider_identity_sha256, "a".repeat(64));
+    assert_eq!(safety_audit.model_identity_sha256, "b".repeat(64));
+    assert_eq!(safety_audit.connection_revision, 3);
+    assert_eq!(usage.tokens.input_tokens, Some(10));
+    assert!(*summary_context_cost > 0);
+    assert!(*final_context_cost > 0);
+}
+
+#[tokio::test]
+async fn checkpoint_survives_main_call_failure_and_is_reused_by_the_next_turn() {
+    use desk_agent_protocol::AgentErrorKind;
+
+    let sess = MemSession::default();
+    let mut existing = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-19T00:00:00Z",
+    );
+    existing.conversation = vec![
+        ChatMessage::text("old-a", ChatRole::User, "a".repeat(5000)),
+        ChatMessage::text("old-b", ChatRole::User, "b".repeat(6000)),
+    ];
+    *sess.inner.borrow_mut() = Some(existing);
+
+    let source =
+        SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test");
+    let compression_turn = ModelTurn {
+        text: serde_json::json!({
+            "goals": [{"text": "preserve the earlier goal", "source_message_ids": ["old-a"]}],
+            "historical_constraints": [], "reported_observations": [],
+            "completed_actions": [], "unresolved_questions": [], "next_steps": [],
+            "important_identifiers": [], "omitted_evidence": []
+        })
+        .to_string(),
+        stop_reason: StopReason::EndTurn,
+        provider_meta: ProviderResponseMeta::without_reasoning(StopReason::EndTurn),
+        ..Default::default()
+    };
+    let failed_requests = Rc::new(RefCell::new(Vec::new()));
+    let first_model = CompressionScriptModel {
+        turns: RefCell::new(
+            [
+                Ok(compression_turn),
+                Err(AgentError {
+                    kind: AgentErrorKind::TransportError,
+                    message: "main provider unavailable".into(),
+                    retryable: true,
+                    safe_for_model: false,
+                    error_code: None,
+                }),
+            ]
+            .into(),
+        ),
+        requests: failed_requests.clone(),
+        audits: Rc::new(RefCell::new(Vec::new())),
+        source: source.clone(),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "unused".into(),
+    };
+    let registry = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+
+    let error = run_agent_turn(
+        &deps(&sess, &first_model, &tools, &registry, &clock),
+        claim(),
+        ChatMessage::text("current", ChatRole::User, "c".repeat(7000)),
+        &mut sink,
+    )
+    .await
+    .expect_err("the main provider call is scripted to fail");
+    assert_eq!(error.kind, AgentErrorKind::TransportError);
+    assert_eq!(failed_requests.borrow().len(), 2);
+
+    let checkpoint_generation = sess
+        .inner
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .model_context_state
+        .entries
+        .iter()
+        .find_map(|entry| {
+            entry
+                .checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.v1().generation)
+        });
+    assert_eq!(checkpoint_generation, Some(1));
+
+    let reused_requests = Rc::new(RefCell::new(Vec::new()));
+    let second_model = CompressionScriptModel {
+        turns: RefCell::new([Ok(answer("recovered"))].into()),
+        requests: reused_requests.clone(),
+        audits: Rc::new(RefCell::new(Vec::new())),
+        source,
+    };
+    let mut second_claim = claim();
+    second_claim.turn_id = "turn-2".into();
+    second_claim.request_id = Some("req-2".into());
+    let outcome = run_agent_turn(
+        &deps(&sess, &second_model, &tools, &registry, &clock),
+        second_claim,
+        ChatMessage::text("follow-up", ChatRole::User, "please continue"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("recovered".into()));
+    let requests = reused_requests.borrow();
+    assert_eq!(
+        requests.len(),
+        1,
+        "checkpoint reuse must avoid a second compression call"
+    );
+    assert_eq!(
+        requests[0].use_case,
+        crate::model_profile::ModelUseCase::Agent
+    );
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.message_id.starts_with("checkpoint:")),
+        "the retried turn must receive the committed checkpoint projection"
+    );
+}
+
+#[tokio::test]
+async fn a_second_compression_need_in_the_same_turn_fails_without_redial() {
+    let sess = MemSession::default();
+    let mut existing = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-19T00:00:00Z",
+    );
+    existing.conversation = vec![
+        ChatMessage::text("old-a", ChatRole::User, "a".repeat(9000)),
+        ChatMessage::text("middle", ChatRole::User, "m".repeat(6000)),
+    ];
+    *sess.inner.borrow_mut() = Some(existing);
+
+    let source =
+        SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test");
+    let compression_turn = ModelTurn {
+        text: serde_json::json!({
+            "goals": [{"text": "old goal", "source_message_ids": ["old-a"]}],
+            "historical_constraints": [], "reported_observations": [],
+            "completed_actions": [], "unresolved_questions": [], "next_steps": [],
+            "important_identifiers": [], "omitted_evidence": []
+        })
+        .to_string(),
+        stop_reason: StopReason::EndTurn,
+        provider_meta: ProviderResponseMeta::without_reasoning(StopReason::EndTurn),
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let audits = Rc::new(RefCell::new(Vec::new()));
+    let model = CompressionScriptModel {
+        turns: RefCell::new([Ok(compression_turn), Ok(tool_use("call-1", "sysinfo"))].into()),
+        requests: requests.clone(),
+        audits: audits.clone(),
+        source,
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "x".repeat(8000),
+    };
+    let registry = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    let error = run_agent_turn(
+        &deps(&sess, &model, &tools, &registry, &clock),
+        claim(),
+        ChatMessage::text("current", ChatRole::User, "c".repeat(3000)),
+        &mut sink,
+    )
+    .await
+    .expect_err("a second compression need must fail closed");
+
+    assert_eq!(
+        error.message,
+        "model context compression failed: attempt_exhausted"
+    );
+    assert_eq!(
+        requests.borrow().len(),
+        2,
+        "only the first compression and main tool call may reach the provider"
+    );
+    assert_eq!(tools.calls.borrow().as_slice(), ["sysinfo"]);
+    assert!(matches!(
+        audits.borrow().last(),
+        Some(crate::seam::ContextCompressionAuditOutcome::Failed {
+            kind: crate::seam::ContextCompressionFailureKind::AttemptExhausted,
+            usage: None,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn rejected_compression_summary_records_usage_but_no_checkpoint_or_notice() {
+    let sess = MemSession::default();
+    let mut existing = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-19T00:00:00Z",
+    );
+    existing.conversation = vec![
+        ChatMessage::text("old-a", ChatRole::User, "a".repeat(5000)),
+        ChatMessage::text("old-b", ChatRole::User, "b".repeat(6000)),
+    ];
+    *sess.inner.borrow_mut() = Some(existing);
+
+    let source =
+        SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test");
+    let summary = serde_json::json!({
+        "goals": [{"text": "preserve the earlier goal", "source_message_ids": ["old-a"]}],
+        "historical_constraints": [], "reported_observations": [],
+        "completed_actions": [], "unresolved_questions": [], "next_steps": [],
+        "important_identifiers": [], "omitted_evidence": []
+    })
+    .to_string();
+    let compression_turn = ModelTurn {
+        text: summary,
+        stop_reason: StopReason::EndTurn,
+        usage: crate::chat::TokenUsage {
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            ..Default::default()
+        },
+        provider_meta: ProviderResponseMeta::without_reasoning(StopReason::EndTurn),
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let audits = Rc::new(RefCell::new(Vec::new()));
+    let model = CompressionScriptModel {
+        turns: RefCell::new([Ok(compression_turn)].into()),
+        requests: requests.clone(),
+        audits: audits.clone(),
+        source,
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "unused".into(),
+    };
+    let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let safety = SafetyScript {
+        model_turn_results: RefCell::new(
+            [Ok(safety_verdict(
+                desk_agent_protocol::content_safety::ContentSafetyDecision::Block,
+                desk_agent_protocol::content_safety::ContentSafetyStage::Output,
+            ))]
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let mut loop_deps = deps(&sess, &model, &tools, &reg, &clock);
+    loop_deps.content_safety = crate::content_safety::ContentSafetyMode::Enforced {
+        seam: &safety,
+        context: safety_context(),
+    };
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    let error = run_agent_turn(
+        &loop_deps,
+        claim(),
+        ChatMessage::text("current", ChatRole::User, "c".repeat(7000)),
+        &mut sink,
+    )
+    .await
+    .expect_err("a rejected candidate summary must fail the turn");
+
+    assert_eq!(
+        error.error_code,
+        Some(desk_utils::error::DeskErrorCode::AI_CONTEXT_COMPRESSION_FAILED.code())
+    );
+    assert_eq!(requests.borrow().len(), 1, "the main model is never called");
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(stored.turn_state, TurnState::Failed);
+    assert_eq!(stored.current_turn_steps, 0);
+    assert_eq!(stored.current_turn_tokens.input_tokens, Some(10));
+    assert_eq!(stored.current_turn_tokens.output_tokens, Some(5));
+    assert!(
+        stored
+            .model_context_state
+            .entries
+            .iter()
+            .all(|entry| entry.checkpoint.is_none())
+    );
+    assert!(
+        stored
+            .context_notices
+            .iter()
+            .all(|notice| notice.kind != crate::model_context::ContextNoticeKind::Compacted)
+    );
+    assert!(
+        sink.0.borrow().is_empty(),
+        "compression output is never streamed"
+    );
+    let audits = audits.borrow();
+    assert_eq!(audits.len(), 1);
+    let crate::seam::ContextCompressionAuditOutcome::Failed {
+        context,
+        usage,
+        kind,
+    } = &audits[0]
+    else {
+        panic!("rejected compression must emit a failed audit outcome");
+    };
+    assert!(context.is_some());
+    assert_eq!(
+        usage.as_ref().and_then(|usage| usage.tokens.input_tokens),
+        Some(10)
+    );
+    assert_eq!(
+        *kind,
+        crate::seam::ContextCompressionFailureKind::UnsafeOutput
+    );
+    assert_eq!(
+        error.message,
+        "model context compression failed: unsafe_output"
+    );
+}
+
+#[tokio::test]
+async fn unhealthy_lease_prevents_compression_dial_and_checkpoint_commit() {
+    let sess = MemSession::default();
+    let mut existing = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-19T00:00:00Z",
+    );
+    existing.conversation = vec![
+        ChatMessage::text("old-a", ChatRole::User, "a".repeat(5000)),
+        ChatMessage::text("old-b", ChatRole::User, "b".repeat(6000)),
+    ];
+    *sess.inner.borrow_mut() = Some(existing);
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let audits = Rc::new(RefCell::new(Vec::new()));
+    let model = CompressionScriptModel {
+        turns: RefCell::new(std::collections::VecDeque::new()),
+        requests: requests.clone(),
+        audits: audits.clone(),
+        source: SourceContextKey::derive(
+            WireProtocol::OpenAiChatCompletions,
+            "test",
+            "test",
+            "test",
+        ),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "unused".into(),
+    };
+    let registry = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let heartbeat = UnhealthyHeartbeat;
+    let mut loop_deps = deps(&sess, &model, &tools, &registry, &clock);
+    loop_deps.heartbeat = Some(&heartbeat);
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+
+    let error = run_agent_turn(
+        &loop_deps,
+        claim(),
+        ChatMessage::text("current", ChatRole::User, "c".repeat(7000)),
+        &mut sink,
+    )
+    .await
+    .expect_err("an unhealthy lease must fail before provider I/O");
+
+    assert_eq!(
+        error.message,
+        "model context compression failed: stale_context"
+    );
+    assert!(requests.borrow().is_empty());
+    assert_eq!(audits.borrow().len(), 1);
+    assert!(matches!(
+        audits.borrow()[0],
+        crate::seam::ContextCompressionAuditOutcome::Failed {
+            context: None,
+            usage: None,
+            kind: crate::seam::ContextCompressionFailureKind::StaleContext,
+        }
+    ));
+    let stored = sess.inner.borrow();
+    assert!(
+        stored
+            .as_ref()
+            .unwrap()
+            .model_context_state
+            .entries
+            .is_empty()
+    );
 }
 
 /// A tool turn followed by an answer: the read tool runs, its result is
@@ -2014,6 +2712,10 @@ fn safety_context() -> crate::content_safety::SafetyContext {
         original_allowed_intent: "diagnose the device".into(),
         policy_revision: 7,
         safety_model_id: "safety-model".into(),
+        safety_provider_identity_sha256: "a".repeat(64),
+        safety_model_identity_sha256: "b".repeat(64),
+        safety_connection_revision: 3,
+        safety_model_profile_revision: 4,
         safety_prompt_version: crate::content_safety::CONTENT_SAFETY_PROMPT_VERSION.into(),
     }
 }

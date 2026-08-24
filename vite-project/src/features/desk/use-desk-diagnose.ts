@@ -476,16 +476,29 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
             setState((prev) => {
                 switch (event.kind) {
                     case 'status':
-                        if (event.status === 'context_trimmed') {
+                        if (
+                            event.status === 'context_trimmed' ||
+                            event.status === 'context_compacted'
+                        ) {
                             const turnId = event.turn_id ?? prev.turnId ?? '';
-                            const id = `context-trimmed:${turnId}`;
+                            const noticeKind =
+                                event.status === 'context_compacted' ? 'compacted' : 'trimmed';
+                            const id =
+                                noticeKind === 'compacted' && event.checkpoint_generation != null
+                                    ? `context-compacted:${turnId}:${event.checkpoint_generation}`
+                                    : `context-${noticeKind}:${turnId}`;
                             return prev.timeline.some(item => item.id === id)
                                 ? prev
                                 : {
                                       ...prev,
                                       timeline: [
                                           ...prev.timeline,
-                                          { kind: 'context_notice' as const, id, turnId },
+                                          {
+                                              kind: 'context_notice' as const,
+                                              id,
+                                              turnId,
+                                              noticeKind,
+                                          },
                                       ],
                                   };
                         }

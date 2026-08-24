@@ -467,6 +467,10 @@ desk_error_codes! {
     /// caller must shorten the current input or increase the explicit model
     /// profile budget.
     AI_CONTEXT_ITEM_TOO_LARGE = 101,
+    /// Portable checkpoint compression could not produce and persist a safe,
+    /// validated summary for the current turn. The turn fails closed and does
+    /// not silently fall back to destructive window trimming.
+    AI_CONTEXT_COMPRESSION_FAILED = 102,
 
     /// A connection-verify probe could not reach the target at all (DNS failure,
     /// connection refused, TLS handshake failure). Carried inside the

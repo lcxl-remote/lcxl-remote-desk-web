@@ -60,6 +60,12 @@ pub struct SafetyContext {
     pub original_allowed_intent: String,
     pub policy_revision: u64,
     pub safety_model_id: String,
+    /// Stable, credential-free identities used to correlate a protected
+    /// operation with the independently frozen safety receiver in audit data.
+    pub safety_provider_identity_sha256: String,
+    pub safety_model_identity_sha256: String,
+    pub safety_connection_revision: i64,
+    pub safety_model_profile_revision: i64,
     pub safety_prompt_version: String,
 }
 

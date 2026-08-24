@@ -660,6 +660,7 @@ export default {
   'pages.desk.diagnose.statusRedacting': 'Redacting sensitive data...',
   'pages.desk.diagnose.statusModeling': 'Analyzing with the model...',
   'pages.desk.diagnose.contextTrimmed': 'The conversation record is still available, but some earlier history was not sent to the model for this turn.',
+  'pages.desk.diagnose.contextCompacted': 'Earlier model context was compressed into a non-authoritative summary. The original conversation record is unchanged.',
   'pages.desk.diagnose.statusRunning': 'Working...',
   'pages.desk.diagnose.summary': 'Summary',
   'pages.desk.diagnose.findings': 'Evidence',
@@ -973,6 +974,7 @@ export default {
   'pages.agentError.aiContextLimitExceeded':
     'This request contains more context than the free plan allows. Shorten the conversation or include less diagnostic evidence, then try again.',
   'pages.agentError.aiContextItemTooLarge': 'The latest question and its protocol group are larger than this model’s configured history budget. A model administrator can increase max_context_bytes; otherwise shorten the request and retry.',
+  'pages.agentError.aiContextCompressionFailed': 'Earlier model context could not be compressed safely, so this turn stopped without falling back to a less complete history. Try again or contact an administrator.',
   'pages.agentError.aiPlatformBusy':
     'The free AI queue is full right now. Please try again later.',
   'pages.agentError.aiModelImageInputUnsupported':

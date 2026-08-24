@@ -257,7 +257,11 @@ export function ConversationTimeline({
                 if (item.kind === "context_notice") {
                     return (
                         <div key={item.id} role="note" className="rounded-md border border-amber-400/30 bg-amber-400/10 px-2.5 py-1.5 text-xs text-amber-100">
-                            {t("pages.desk.diagnose.contextTrimmed")}
+                            {t(
+                                item.noticeKind === "compacted"
+                                    ? "pages.desk.diagnose.contextCompacted"
+                                    : "pages.desk.diagnose.contextTrimmed",
+                            )}
                         </div>
                     )
                 }

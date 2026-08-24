@@ -55,6 +55,9 @@ enum Rewrite {
     /// Keep capture group 1 (a non-secret prefix) and replace the rest with
     /// `<redacted:kind>`.
     KeepPrefix,
+    /// Keep capture groups 1 and 3 around a quoted JSON value while replacing
+    /// group 2. This preserves valid JSON instead of dropping the closing quote.
+    KeepJsonEdges,
 }
 
 struct Pattern {
@@ -68,6 +71,9 @@ impl Pattern {
         match self.rewrite {
             Rewrite::Whole => format!("<redacted:{}>", self.kind),
             Rewrite::KeepPrefix => format!("${{1}}<redacted:{}>", self.kind),
+            Rewrite::KeepJsonEdges => {
+                format!("${{1}}<redacted:{}>${{3}}", self.kind)
+            }
         }
     }
 }
@@ -115,6 +121,29 @@ impl RegexRedactor {
                 r"(?i)((?:set-)?cookie:\s*)[^\r\n]+",
                 Rewrite::KeepPrefix,
             ),
+            // Valid JSON fields need their closing quote preserved. These run
+            // before the generic key/value patterns and also handle spaces and
+            // escaped characters inside a credential value.
+            (
+                "api_key",
+                r#"(?i)("api[-_]?key"\s*:\s*")((?:\\.|[^"\\])*)(")"#,
+                Rewrite::KeepJsonEdges,
+            ),
+            (
+                "token",
+                r#"(?i)("(?:access[-_]?|refresh[-_]?)?token"\s*:\s*")((?:\\.|[^"\\])*)(")"#,
+                Rewrite::KeepJsonEdges,
+            ),
+            (
+                "password",
+                r#"(?i)("(?:password|passwd|pwd)"\s*:\s*")((?:\\.|[^"\\])*)(")"#,
+                Rewrite::KeepJsonEdges,
+            ),
+            (
+                "authority_token",
+                r#"(?i)("(?:session|lease|approval|capability)[-_]?(?:token|id)"\s*:\s*")((?:\\.|[^"\\])*)(")"#,
+                Rewrite::KeepJsonEdges,
+            ),
             // Generic `key = value` / `key: value` shapes. `[^\s;"']+` stops at
             // a `;` so connection strings (`...;Password=secret;...`) redact
             // only the value.
@@ -131,6 +160,11 @@ impl RegexRedactor {
             (
                 "password",
                 r#"(?i)((?:password|passwd|pwd)\s*[=:]\s*["']?)[^\s;"']+"#,
+                Rewrite::KeepPrefix,
+            ),
+            (
+                "authority_token",
+                r#"(?i)((?:session|lease|approval|capability)[-_]?(?:token|id)\s*[=:]\s*["']?)[^\s;"']+"#,
                 Rewrite::KeepPrefix,
             ),
             // Windows user directory: keep `C:\Users\`, redact the account name
@@ -290,6 +324,21 @@ mod tests {
         assert!(!out.text.contains("BBB"));
         assert!(!out.text.contains("CCC"));
         assert_eq!(out.kinds.len(), 3);
+    }
+
+    #[test]
+    fn quoted_json_credentials_are_fully_redacted_and_remain_valid_json() {
+        let input = r#"{"api_key":"alpha beta","password":"hunter\"two","approval_id":"approval-secret","safe":"keep"}"#;
+        let output = RegexRedactor::new().redact(input).unwrap();
+        assert!(!output.text.contains("alpha beta"));
+        assert!(!output.text.contains("hunter"));
+        assert!(!output.text.contains("approval-secret"));
+        assert!(output.text.contains("keep"));
+        let parsed: serde_json::Value = serde_json::from_str(&output.text).unwrap();
+        assert_eq!(parsed["safe"], "keep");
+        assert_eq!(parsed["api_key"], "<redacted:api_key>");
+        assert_eq!(parsed["password"], "<redacted:password>");
+        assert_eq!(parsed["approval_id"], "<redacted:authority_token>");
     }
 
     /// The construction of the static pattern set never panics.

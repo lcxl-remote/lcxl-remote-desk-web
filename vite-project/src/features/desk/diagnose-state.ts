@@ -76,6 +76,10 @@ export type DiagnoseEvent = {
     error?: AgentError | null;
     /** `turn_started`: the id of the agentic turn that started. */
     turn_id?: string | null;
+    /** `context_compacted`: committed checkpoint generation. */
+    checkpoint_generation?: number | null;
+    /** `context_compacted`: original messages covered by the checkpoint. */
+    covered_message_count?: number | null;
     /** `tool_started`: the model-facing tool name. */
     tool_name?: string | null;
     /** `tool_started`: the raw JSON arguments produced by the model. */
@@ -115,6 +119,7 @@ export type DiagnoseTimelineItem =
           kind: 'context_notice';
           id: string;
           turnId: string;
+          noticeKind: 'trimmed' | 'compacted';
       }
     | {
           kind: 'assistant';
@@ -397,7 +402,13 @@ export type SessionSnapshot = {
     requestId?: string | null;
     activeExecutionGeneration?: string | null;
     messages: SnapshotMessage[];
-    contextNotices: { id: string; turnId: string; kind: string }[];
+    contextNotices: {
+        id: string;
+        turnId: string;
+        kind: 'trimmed' | 'compacted';
+        checkpointGeneration?: number | null;
+        coveredMessageCount?: number | null;
+    }[];
 };
 
 /** One authorized history-list row for the current target device. */
@@ -502,10 +513,15 @@ export function buildSnapshotTranscript(
     }
     if (current) turns.push(current);
     for (const notice of contextNotices) {
-        if (notice.kind !== 'trimmed') continue;
+        if (notice.kind !== 'trimmed' && notice.kind !== 'compacted') continue;
         const turn = turns.find(candidate => candidate.turnId === notice.turnId);
         if (!turn || turn.timeline.some(item => item.id === notice.id)) continue;
-        turn.timeline.unshift({ kind: 'context_notice', id: notice.id, turnId: notice.turnId });
+        turn.timeline.unshift({
+            kind: 'context_notice',
+            id: notice.id,
+            turnId: notice.turnId,
+            noticeKind: notice.kind,
+        });
     }
     return turns;
 }

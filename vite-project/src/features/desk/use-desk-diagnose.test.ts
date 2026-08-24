@@ -227,9 +227,48 @@ describe('useDeskDiagnose', () => {
         }));
 
         expect(result.current.state.timeline).toEqual([
-            { kind: 'context_notice', id: 'context-trimmed:turn-1', turnId: 'turn-1' },
+            {
+                kind: 'context_notice',
+                id: 'context-trimmed:turn-1',
+                turnId: 'turn-1',
+                noticeKind: 'trimmed',
+            },
         ]);
         expect(result.current.state.status).toBeNull();
+    });
+
+    it('adds one localized context-compacted notice without terminating the turn', () => {
+        const { result, feed } = renderDiagnose();
+        act(() => result.current.start('why?', {}));
+
+        feed(frame({
+            request_id: 'req-1',
+            seq: 0,
+            kind: 'status',
+            status: 'context_compacted',
+            turn_id: 'turn-1',
+            checkpoint_generation: 2,
+            covered_message_count: 7,
+        }));
+        feed(frame({
+            request_id: 'req-1',
+            seq: 1,
+            kind: 'status',
+            status: 'context_compacted',
+            turn_id: 'turn-1',
+            checkpoint_generation: 2,
+            covered_message_count: 7,
+        }));
+
+        expect(result.current.state.timeline).toEqual([
+            {
+                kind: 'context_notice',
+                id: 'context-compacted:turn-1:2',
+                turnId: 'turn-1',
+                noticeKind: 'compacted',
+            },
+        ]);
+        expect(result.current.state.phase).toBe('running');
     });
 
     it('ignores frames for a different request and stale seq numbers', () => {
@@ -993,7 +1032,7 @@ describe('buildSnapshotTranscript', () => {
         });
     });
 
-    it('restores and deduplicates durable trim notices in their matching turn', () => {
+    it('restores and deduplicates durable context notices in their matching turn', () => {
         const messages: SnapshotMessage[] = [
             { id: 'u1', turnId: 'turn-1', role: 'user', text: 'first' },
             { id: 'a1', turnId: 'turn-1', role: 'assistant', text: 'answer one' },
@@ -1003,6 +1042,7 @@ describe('buildSnapshotTranscript', () => {
         const notices = [
             { id: 'notice-1', turnId: 'turn-1', kind: 'trimmed' },
             { id: 'notice-1', turnId: 'turn-1', kind: 'trimmed' },
+            { id: 'notice-2', turnId: 'turn-2', kind: 'compacted' },
             { id: 'ignored', turnId: 'missing', kind: 'trimmed' },
         ];
 
@@ -1011,9 +1051,15 @@ describe('buildSnapshotTranscript', () => {
             kind: 'context_notice',
             id: 'notice-1',
             turnId: 'turn-1',
+            noticeKind: 'trimmed',
         });
         expect(turns[0].timeline.filter(item => item.kind === 'context_notice')).toHaveLength(1);
-        expect(turns[1].timeline.some(item => item.kind === 'context_notice')).toBe(false);
+        expect(turns[1].timeline[0]).toEqual({
+            kind: 'context_notice',
+            id: 'notice-2',
+            turnId: 'turn-2',
+            noticeKind: 'compacted',
+        });
     });
 
     it('appends background completion between the command result and automation follow-up', () => {

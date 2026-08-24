@@ -13,6 +13,10 @@ describe('agentErrorMessage', () => {
             deskErrorCodeEnum.AI_CONTEXT_LIMIT_EXCEEDED,
             'pages.agentError.aiContextLimitExceeded',
         ],
+        [
+            deskErrorCodeEnum.AI_CONTEXT_COMPRESSION_FAILED,
+            'pages.agentError.aiContextCompressionFailed',
+        ],
         [deskErrorCodeEnum.AI_PLATFORM_BUSY, 'pages.agentError.aiPlatformBusy'],
         [
             deskErrorCodeEnum.AI_MODEL_IMAGE_INPUT_UNSUPPORTED,

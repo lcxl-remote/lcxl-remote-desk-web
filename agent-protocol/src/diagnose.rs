@@ -341,6 +341,14 @@ pub struct DiagnoseEvent {
     /// `kind = TurnStarted`: the id of the agentic turn that started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    /// `kind = Status`, `status = context_compacted`: committed checkpoint
+    /// generation. Older control ends safely ignore this optional metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_generation: Option<u32>,
+    /// `kind = Status`, `status = context_compacted`: number of original
+    /// messages covered by the committed checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covered_message_count: Option<u32>,
     /// `kind = ToolStarted`: the model-facing name of the tool being run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
@@ -393,6 +401,8 @@ impl DiagnoseEvent {
             error: None,
             retraction_reason: None,
             turn_id: None,
+            checkpoint_generation: None,
+            covered_message_count: None,
             tool_name: None,
             tool_arguments_json: None,
             tool_call_id: None,
@@ -430,6 +440,21 @@ impl DiagnoseEvent {
     ) -> Self {
         let mut event = Self::status(request_id, seq, phase);
         event.turn_id = Some(turn_id.into());
+        event
+    }
+
+    /// A context-compaction status carrying only non-sensitive checkpoint
+    /// metadata; the summary and provider details never enter the stream.
+    pub fn context_compacted(
+        request_id: impl Into<String>,
+        seq: u32,
+        turn_id: impl Into<String>,
+        generation: u32,
+        covered_message_count: u32,
+    ) -> Self {
+        let mut event = Self::status_for_turn(request_id, seq, "context_compacted", turn_id);
+        event.checkpoint_generation = Some(generation);
+        event.covered_message_count = Some(covered_message_count);
         event
     }
 

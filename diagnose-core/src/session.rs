@@ -34,6 +34,7 @@ pub const MAX_SESSION_REPLAY_BYTES: usize = 2 * 1024 * 1024;
 pub enum SessionDecodeError {
     Json(serde_json::Error),
     UnsupportedVersion(u64),
+    InvalidModelContext(String),
     MissingReplayDisposition(String),
     PersistedContextSummary(String),
 }
@@ -44,6 +45,9 @@ impl std::fmt::Display for SessionDecodeError {
             Self::Json(error) => write!(f, "invalid agent session JSON: {error}"),
             Self::UnsupportedVersion(version) => {
                 write!(f, "unsupported conversation schema version {version}")
+            }
+            Self::InvalidModelContext(error) => {
+                write!(f, "invalid model context state: {error}")
             }
             Self::MissingReplayDisposition(message_id) => write!(
                 f,
@@ -467,6 +471,10 @@ impl PersistedAgentSession {
             }
             return Ok(session);
         }
+        session
+            .model_context_state
+            .upgrade_from_v1()
+            .map_err(|error| SessionDecodeError::InvalidModelContext(error.to_string()))?;
         for message in &session.conversation {
             if message.role == crate::chat::ChatRole::Assistant
                 && !message.tool_calls.is_empty()
@@ -620,6 +628,46 @@ impl PersistedAgentSession {
         self.lifetime_steps = self.lifetime_steps.saturating_add(1);
         add_usage(&mut self.current_turn_tokens, usage);
         add_usage(&mut self.lifetime_tokens, usage);
+    }
+
+    /// Record a provider-backed context-compression call without consuming one
+    /// model→tool iteration. Compression usage is still part of the authoritative
+    /// turn/lifetime token totals and billing surfaces.
+    pub fn record_compression_usage(&mut self, usage: TokenUsage) {
+        add_usage(&mut self.current_turn_tokens, usage);
+        add_usage(&mut self.lifetime_tokens, usage);
+    }
+
+    /// Build the authoritative raw-history protection snapshot used by context
+    /// planning. A checkpoint source id is never a substitute for one of these
+    /// live message/tool ids.
+    pub fn context_protection_set(&self) -> crate::model_context::ContextProtectionSet {
+        let mut protection = crate::model_context::ContextProtectionSet {
+            current_turn_id: self.current_turn_id.clone(),
+            ..crate::model_context::ContextProtectionSet::default()
+        };
+        for pending in &self.pending_auto_triggers {
+            protection.protect_message(pending.event_id.clone());
+            protection.protect_tool_call(pending.tool_call_id.clone());
+        }
+        if let ExecutionState::OutcomeUnknown {
+            placeholder_message_id,
+            ..
+        } = &self.execution_state
+        {
+            protection.protect_message(placeholder_message_id.clone());
+        }
+        if let Some((_, _, exec_request_id)) = self.execution_state.waitable_task() {
+            for message in &self.conversation {
+                if message.background_task_id.as_deref() == Some(exec_request_id) {
+                    protection.protect_message(message.message_id.clone());
+                    if let Some(tool_call_id) = &message.tool_call_id {
+                        protection.protect_tool_call(tool_call_id.clone());
+                    }
+                }
+            }
+        }
+        protection
     }
 
     /// Whether the per-turn step budget is exhausted (circuit breaker). The bound

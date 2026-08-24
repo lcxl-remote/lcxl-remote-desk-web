@@ -83,11 +83,29 @@ impl From<ChatMessage> for SnapshotMessageDto {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextNoticeKindDto {
+    Trimmed,
+    Compacted,
+}
+
+impl From<desk_diagnose_core::model_context::ContextNoticeKind> for ContextNoticeKindDto {
+    fn from(kind: desk_diagnose_core::model_context::ContextNoticeKind) -> Self {
+        match kind {
+            desk_diagnose_core::model_context::ContextNoticeKind::Trimmed => Self::Trimmed,
+            desk_diagnose_core::model_context::ContextNoticeKind::Compacted => Self::Compacted,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextNoticeDto {
     pub id: String,
     pub turn_id: String,
-    pub kind: String,
+    pub kind: ContextNoticeKindDto,
+    pub checkpoint_generation: Option<u32>,
+    pub covered_message_count: Option<u32>,
 }
 
 impl From<desk_diagnose_core::model_context::ContextNotice> for ContextNoticeDto {
@@ -95,7 +113,9 @@ impl From<desk_diagnose_core::model_context::ContextNotice> for ContextNoticeDto
         Self {
             id: notice.id,
             turn_id: notice.turn_id,
-            kind: "trimmed".to_string(),
+            kind: notice.kind.into(),
+            checkpoint_generation: notice.checkpoint_generation,
+            covered_message_count: notice.covered_message_count,
         }
     }
 }
@@ -295,5 +315,14 @@ mod tests {
         let value = serde_json::to_value(SnapshotMessageDto::from(completion)).unwrap();
         assert_eq!(value["backgroundTaskId"], "task-1");
         assert!(value.get("background_task_id").is_none());
+    }
+
+    #[test]
+    fn context_notice_uses_the_manager_compatible_compacted_shape() {
+        let notice = desk_diagnose_core::model_context::ContextNotice::compacted("turn-7", 3, 19);
+        let value = serde_json::to_value(ContextNoticeDto::from(notice)).unwrap();
+        assert_eq!(value["kind"], "compacted");
+        assert_eq!(value["checkpointGeneration"], 3);
+        assert_eq!(value["coveredMessageCount"], 19);
     }
 }

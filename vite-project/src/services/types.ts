@@ -619,7 +619,26 @@ export type ConnectionsFetchedData = {
     current_connection_id: string;
 };
 
+export const contextNoticeKindDtoEnum = {
+    trimmed: "trimmed",
+    compacted: "compacted"
+} as const;
+
+export type ContextNoticeKindDtoEnumKey = (typeof contextNoticeKindDtoEnum)[keyof typeof contextNoticeKindDtoEnum];
+
+export type ContextNoticeKindDto = ContextNoticeKindDtoEnumKey;
+
 export type ContextNoticeDto = {
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    checkpointGeneration?: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    coveredMessageCount?: number | null;
     /**
      * @type string
     */
@@ -627,7 +646,7 @@ export type ContextNoticeDto = {
     /**
      * @type string
     */
-    kind: string;
+    kind: ContextNoticeKindDto;
     /**
      * @type string
     */
@@ -806,6 +825,7 @@ export const deskErrorCodeEnum = {
     REMOTE_DESKTOP_CAPABILITIES_NOT_READY: 99,
     MEDIA_WORKER_RESTART_REQUIRED: 100,
     AI_CONTEXT_ITEM_TOO_LARGE: 101,
+    AI_CONTEXT_COMPRESSION_FAILED: 102,
     CONNECTION_UNREACHABLE: 64,
     CONNECTION_NOT_SIGNALING: 65,
     CONNECTION_AUTH_FAILED: 66,

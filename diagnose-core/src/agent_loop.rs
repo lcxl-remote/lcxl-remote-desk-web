@@ -76,6 +76,124 @@ fn model_context_error(error: crate::model_context::ModelContextError) -> AgentE
     }
 }
 
+fn context_compression_error(kind: crate::seam::ContextCompressionFailureKind) -> AgentError {
+    AgentError {
+        kind: AgentErrorKind::Internal,
+        message: format!("model context compression failed: {}", kind.as_str()),
+        retryable: false,
+        safe_for_model: true,
+        error_code: Some(desk_utils::error::DeskErrorCode::AI_CONTEXT_COMPRESSION_FAILED.code()),
+    }
+}
+
+fn compression_failure_for_context_error(
+    error: &crate::model_context::ModelContextError,
+) -> crate::seam::ContextCompressionFailureKind {
+    use crate::model_context::ModelContextError as Error;
+    use crate::seam::ContextCompressionFailureKind as Kind;
+
+    match error {
+        Error::ProtectedStateTooLarge { .. } | Error::NoCompressiblePrefix => {
+            Kind::ProtectedStateTooLarge
+        }
+        Error::ProtectedReplayUnsafe(_)
+        | Error::OrphanToolResult(_)
+        | Error::IncompleteToolGroup(_)
+        | Error::UnexpectedReplayDisposition(_) => Kind::ProtectedReplayUnsafe,
+        Error::CompressionInputTooLarge
+        | Error::ContextCostOverflow
+        | Error::ContextItemTooLarge { .. } => Kind::InputTooLarge,
+        Error::SummaryTooLarge => Kind::SummaryTooLarge,
+        Error::InvalidCheckpoint(_) => Kind::InvalidSchema,
+        Error::InvalidBudget(_) => Kind::InvalidEffectiveBudget,
+        Error::UnsupportedStateSchema(_)
+        | Error::TooManyPolicyEntries(_)
+        | Error::DuplicatePolicyEntry
+        | Error::AmbiguousPersistedFloor
+        | Error::UnsupportedStrategy
+        | Error::InvalidProfileRevision(_)
+        | Error::MissingPersistedFloor(_)
+        | Error::FloorRegression
+        | Error::InvalidProtectionReference(_)
+        | Error::StaleCompressionPlan => Kind::StaleContext,
+    }
+}
+
+fn compression_failure_for_provider_error(
+    error: &AgentError,
+) -> crate::seam::ContextCompressionFailureKind {
+    use crate::seam::ContextCompressionFailureKind as Kind;
+
+    let message = error.message.to_ascii_lowercase();
+    if message.contains("invalid output limit") || message.contains("invalid effective budget") {
+        return Kind::InvalidEffectiveBudget;
+    }
+    if message.contains("timeout")
+        || message.contains("timed out")
+        || message.contains("no upstream progress")
+    {
+        return Kind::ProviderTimeout;
+    }
+    match error.kind {
+        AgentErrorKind::Timeout => Kind::ProviderTimeout,
+        AgentErrorKind::OutputLimitExceeded => Kind::Truncated,
+        AgentErrorKind::UnsupportedCapability | AgentErrorKind::UnsupportedPlatform => {
+            Kind::UnsupportedEndpoint
+        }
+        AgentErrorKind::TransportError
+            if message.contains("not implemented") || message.contains("unsupported endpoint") =>
+        {
+            Kind::UnsupportedEndpoint
+        }
+        _ => Kind::ProviderRejected,
+    }
+}
+
+fn compression_audit_context(
+    plan: &crate::model_context::CompressionPlan,
+    content_safety: &ContentSafetyMode<'_>,
+) -> crate::seam::ContextCompressionAuditContext {
+    let safety = match content_safety {
+        ContentSafetyMode::Disabled => None,
+        ContentSafetyMode::Enforced { context, .. } => {
+            Some(crate::seam::ContextCompressionSafetyAuditContext {
+                provider_identity_sha256: context.safety_provider_identity_sha256.clone(),
+                model_identity_sha256: context.safety_model_identity_sha256.clone(),
+                connection_revision: context.safety_connection_revision,
+                model_profile_revision: context.safety_model_profile_revision,
+                policy_revision: context.policy_revision,
+                prompt_version: context.safety_prompt_version.clone(),
+            })
+        }
+    };
+    crate::seam::ContextCompressionAuditContext {
+        generation: plan.generation,
+        covered_message_count: plan.covered_message_count,
+        covered_from_message_id: plan.covered_from_message_id.clone(),
+        covered_through_message_id: plan.covered_through_message_id.clone(),
+        input_context_cost: plan.input_model_context_cost,
+        platform_context_policy_revision: plan.policy.platform_context_policy_revision,
+        safety,
+    }
+}
+
+async fn report_context_compression_failure(
+    model: &dyn ModelSeam,
+    kind: crate::seam::ContextCompressionFailureKind,
+    context: Option<crate::seam::ContextCompressionAuditContext>,
+    usage: Option<crate::seam::ContextCompressionProviderUsage>,
+) -> AgentError {
+    model.on_context_compression_failed(kind);
+    model
+        .audit_context_compression(crate::seam::ContextCompressionAuditOutcome::Failed {
+            context,
+            usage,
+            kind,
+        })
+        .await;
+    context_compression_error(kind)
+}
+
 fn retain_latest_session_image(
     session: &mut crate::session::PersistedAgentSession,
 ) -> Result<(), AgentError> {
@@ -279,6 +397,25 @@ async fn review_model_turn(
     }
 }
 
+async fn review_context_summary(
+    deps: &LoopDeps<'_>,
+    text: String,
+) -> Result<ContentSafetyDecision, AgentError> {
+    match &deps.content_safety {
+        ContentSafetyMode::Disabled => Ok(ContentSafetyDecision::Allow),
+        ContentSafetyMode::Enforced { seam, context } => seam
+            .check_model_turn(SafetyModelTurn {
+                surface: context.surface,
+                text,
+                tool_calls: Vec::new(),
+                original_allowed_intent: context.original_allowed_intent.clone(),
+            })
+            .await
+            .map(|verdict| verdict.decision)
+            .map_err(|error| normalize_safety_error(&error)),
+    }
+}
+
 async fn review_image(
     deps: &LoopDeps<'_>,
     image_data_url: &str,
@@ -422,6 +559,380 @@ async fn finish_tool_output_safety_failure<F: FnMut() -> String>(
     }
 }
 
+async fn prepare_model_context(
+    deps: &LoopDeps<'_>,
+    session: &mut crate::session::PersistedAgentSession,
+    turn_id: &str,
+    pinned_context: &crate::model_context::PinnedContextPolicy,
+    compression_attempted: &mut bool,
+    sink: &mut dyn TurnSink,
+) -> Result<crate::model_context::ModelContextView, AgentError> {
+    loop {
+        if pinned_context.strategy
+            == crate::model_context::ContextManagementStrategy::CheckpointSummary
+            && deps
+                .heartbeat
+                .is_some_and(|heartbeat| !heartbeat.is_healthy())
+        {
+            return Err(report_context_compression_failure(
+                deps.model,
+                crate::seam::ContextCompressionFailureKind::StaleContext,
+                None,
+                None,
+            )
+            .await);
+        }
+        let protection = session.context_protection_set();
+        let plan = match crate::model_context::plan_model_context(
+            &session.conversation,
+            &session.model_context_state,
+            pinned_context,
+            &protection,
+            session.version,
+        ) {
+            Ok(plan) => plan,
+            Err(error)
+                if pinned_context.strategy
+                    == crate::model_context::ContextManagementStrategy::CheckpointSummary
+                    && !matches!(
+                        error,
+                        crate::model_context::ModelContextError::ContextItemTooLarge { .. }
+                    ) =>
+            {
+                let kind = compression_failure_for_context_error(&error);
+                return Err(report_context_compression_failure(deps.model, kind, None, None).await);
+            }
+            Err(error) => return Err(model_context_error(error)),
+        };
+
+        match plan {
+            crate::model_context::ContextBuildPlan::Ready(ready) => {
+                let changed = session.model_context_state != ready.next_state;
+                let floor_advanced = ready.view.floor_advanced;
+                let previous_state = session.model_context_state.clone();
+                let previous_notices = session.context_notices.clone();
+                session.model_context_state = ready.next_state;
+                if floor_advanced {
+                    session
+                        .add_context_notice(crate::model_context::ContextNotice::trimmed(turn_id));
+                }
+                if changed || floor_advanced {
+                    if pinned_context.strategy
+                        == crate::model_context::ContextManagementStrategy::CheckpointSummary
+                        && deps
+                            .heartbeat
+                            .is_some_and(|heartbeat| !heartbeat.is_healthy())
+                    {
+                        session.model_context_state = previous_state;
+                        session.context_notices = previous_notices;
+                        return Err(report_context_compression_failure(
+                            deps.model,
+                            crate::seam::ContextCompressionFailureKind::StaleContext,
+                            None,
+                            None,
+                        )
+                        .await);
+                    }
+                    if let Err(error) = deps.session_seam.save(session).await {
+                        session.model_context_state = previous_state;
+                        session.context_notices = previous_notices;
+                        return Err(error);
+                    }
+                }
+                if floor_advanced {
+                    sink.on_context_trimmed(turn_id);
+                }
+                return Ok(ready.view);
+            }
+            crate::model_context::ContextBuildPlan::NeedsFloorReconciliation(plan) => {
+                let previous_state = session.model_context_state.clone();
+                let previous_notices = session.context_notices.clone();
+                session.model_context_state = match crate::model_context::apply_floor_reconciliation(
+                    &plan,
+                    &session.conversation,
+                    &session.model_context_state,
+                ) {
+                    Ok(state) => state,
+                    Err(error) => {
+                        let kind = compression_failure_for_context_error(&error);
+                        return Err(report_context_compression_failure(
+                            deps.model, kind, None, None,
+                        )
+                        .await);
+                    }
+                };
+                session.add_context_notice(crate::model_context::ContextNotice::trimmed(turn_id));
+                if deps
+                    .heartbeat
+                    .is_some_and(|heartbeat| !heartbeat.is_healthy())
+                {
+                    session.model_context_state = previous_state;
+                    session.context_notices = previous_notices;
+                    return Err(report_context_compression_failure(
+                        deps.model,
+                        crate::seam::ContextCompressionFailureKind::StaleContext,
+                        None,
+                        None,
+                    )
+                    .await);
+                }
+                if let Err(error) = deps.session_seam.save(session).await {
+                    session.model_context_state = previous_state;
+                    session.context_notices = previous_notices;
+                    let _ = error;
+                    return Err(report_context_compression_failure(
+                        deps.model,
+                        crate::seam::ContextCompressionFailureKind::StaleContext,
+                        None,
+                        None,
+                    )
+                    .await);
+                }
+                sink.on_context_trimmed(turn_id);
+                // Rebuild protection and re-plan against the new version/floor.
+            }
+            crate::model_context::ContextBuildPlan::NeedsCompression(plan) => {
+                use crate::seam::ContextCompressionFailureKind as FailureKind;
+
+                let audit_context = compression_audit_context(&plan, &deps.content_safety);
+                if *compression_attempted {
+                    return Err(report_context_compression_failure(
+                        deps.model,
+                        FailureKind::AttemptExhausted,
+                        Some(audit_context),
+                        None,
+                    )
+                    .await);
+                }
+                // The attempt is spent before the durable provider-call path. The
+                // manager seam's call fence is the cross-crash authority.
+                *compression_attempted = true;
+                deps.model.on_context_compression_started(
+                    plan.generation,
+                    plan.covered_message_count,
+                    plan.input_model_context_cost,
+                );
+                let request = ModelRequest {
+                    messages: crate::model_context::compression_request_messages(&plan),
+                    tools: Vec::new(),
+                    tool_requirements: crate::model_capability::ModelRequirements::TEXT_ONLY,
+                    tool_choice: crate::chat::ToolChoice::None,
+                    response_format: crate::prompt::ResponseFormatSpec::None,
+                    use_case: crate::model_profile::ModelUseCase::ContextCompression,
+                    caller_output_hard_cap: Some(
+                        crate::model_context::CONTEXT_SUMMARY_OUTPUT_HARD_CAP_TOKENS,
+                    ),
+                };
+                let mut compression_sink = crate::seam::NullTurnSink;
+                let turn = match deps.model.call(request, &mut compression_sink).await {
+                    Ok(turn) => turn,
+                    Err(error) => {
+                        let kind = compression_failure_for_provider_error(&error);
+                        return Err(report_context_compression_failure(
+                            deps.model,
+                            kind,
+                            Some(audit_context),
+                            None,
+                        )
+                        .await);
+                    }
+                };
+                let compression_usage = crate::seam::ContextCompressionProviderUsage {
+                    tokens: turn.usage,
+                    reasoning_tokens: turn.provider_meta.reasoning_tokens,
+                };
+                session.record_compression_usage(turn.usage);
+                let disposition = match classify_model_turn(&turn) {
+                    Ok(disposition) => disposition,
+                    Err(_) => {
+                        return Err(report_context_compression_failure(
+                            deps.model,
+                            FailureKind::InvalidSchema,
+                            Some(audit_context),
+                            Some(compression_usage),
+                        )
+                        .await);
+                    }
+                };
+                let disposition_failure = match disposition {
+                    TurnDisposition::Answer if turn.tool_calls.is_empty() => None,
+                    TurnDisposition::Discard => Some(FailureKind::Truncated),
+                    TurnDisposition::ContextWindowExceeded => Some(FailureKind::InputTooLarge),
+                    TurnDisposition::Answer | TurnDisposition::InvokeTools => {
+                        Some(FailureKind::InvalidSchema)
+                    }
+                };
+                if let Some(kind) = disposition_failure {
+                    return Err(report_context_compression_failure(
+                        deps.model,
+                        kind,
+                        Some(audit_context),
+                        Some(compression_usage),
+                    )
+                    .await);
+                }
+                let created_at = (deps.clock)();
+                let provenance = match deps
+                    .model
+                    .context_compression_provenance(turn_id, &created_at)
+                {
+                    Ok(provenance) => provenance,
+                    Err(_) => {
+                        return Err(report_context_compression_failure(
+                            deps.model,
+                            FailureKind::StaleContext,
+                            Some(audit_context),
+                            Some(compression_usage),
+                        )
+                        .await);
+                    }
+                };
+                let validated = match crate::model_context::parse_validated_context_summary(
+                    &turn.text, &plan, provenance,
+                ) {
+                    Ok(validated) => validated,
+                    Err(error) => {
+                        let kind = compression_failure_for_context_error(&error);
+                        return Err(report_context_compression_failure(
+                            deps.model,
+                            kind,
+                            Some(audit_context),
+                            Some(compression_usage),
+                        )
+                        .await);
+                    }
+                };
+                let summary_context_cost = validated.summary_model_context_cost;
+                let candidate = match serde_json::to_string(&validated.summary) {
+                    Ok(candidate) => candidate,
+                    Err(_) => {
+                        return Err(report_context_compression_failure(
+                            deps.model,
+                            FailureKind::InvalidSchema,
+                            Some(audit_context),
+                            Some(compression_usage),
+                        )
+                        .await);
+                    }
+                };
+                match review_context_summary(deps, candidate).await {
+                    Ok(ContentSafetyDecision::Allow) => {}
+                    Ok(_) | Err(_) => {
+                        return Err(report_context_compression_failure(
+                            deps.model,
+                            FailureKind::UnsafeOutput,
+                            Some(audit_context),
+                            Some(compression_usage),
+                        )
+                        .await);
+                    }
+                }
+                if deps
+                    .heartbeat
+                    .is_some_and(|heartbeat| !heartbeat.is_healthy())
+                {
+                    return Err(report_context_compression_failure(
+                        deps.model,
+                        FailureKind::StaleContext,
+                        Some(audit_context),
+                        Some(compression_usage),
+                    )
+                    .await);
+                }
+                let generation = plan.generation;
+                let covered_message_count = plan.covered_message_count;
+                let (next_state, view) = match crate::model_context::apply_validated_checkpoint(
+                    &plan,
+                    validated,
+                    &session.conversation,
+                    &session.model_context_state,
+                    session.version,
+                ) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        return Err(report_context_compression_failure(
+                            deps.model,
+                            FailureKind::StaleContext,
+                            Some(audit_context),
+                            Some(compression_usage),
+                        )
+                        .await);
+                    }
+                };
+                let final_context_cost: Result<u64, ()> =
+                    view.messages.iter().try_fold(0u64, |sum, message| {
+                        let cost = u64::try_from(crate::trim::model_context_cost(message))
+                            .map_err(|_| ())?;
+                        sum.checked_add(cost).ok_or(())
+                    });
+                let final_context_cost = match final_context_cost {
+                    Ok(cost) => cost,
+                    Err(()) => {
+                        return Err(report_context_compression_failure(
+                            deps.model,
+                            FailureKind::InputTooLarge,
+                            Some(audit_context),
+                            Some(compression_usage),
+                        )
+                        .await);
+                    }
+                };
+                let previous_state = session.model_context_state.clone();
+                let previous_notices = session.context_notices.clone();
+                session.model_context_state = next_state;
+                session.add_context_notice(crate::model_context::ContextNotice::compacted(
+                    turn_id,
+                    generation,
+                    covered_message_count,
+                ));
+                if deps
+                    .heartbeat
+                    .is_some_and(|heartbeat| !heartbeat.is_healthy())
+                {
+                    session.model_context_state = previous_state;
+                    session.context_notices = previous_notices;
+                    return Err(report_context_compression_failure(
+                        deps.model,
+                        FailureKind::StaleContext,
+                        Some(audit_context),
+                        Some(compression_usage),
+                    )
+                    .await);
+                }
+                if let Err(error) = deps.session_seam.save(session).await {
+                    session.model_context_state = previous_state;
+                    session.context_notices = previous_notices;
+                    let _ = error;
+                    return Err(report_context_compression_failure(
+                        deps.model,
+                        FailureKind::StaleContext,
+                        Some(audit_context),
+                        Some(compression_usage),
+                    )
+                    .await);
+                }
+                deps.model.on_context_compression_succeeded(
+                    generation,
+                    summary_context_cost,
+                    final_context_cost,
+                );
+                deps.model
+                    .audit_context_compression(
+                        crate::seam::ContextCompressionAuditOutcome::Committed {
+                            context: audit_context,
+                            usage: compression_usage,
+                            summary_context_cost,
+                            final_context_cost,
+                        },
+                    )
+                    .await;
+                sink.on_context_compacted(turn_id, generation, covered_message_count);
+                return Ok(view);
+            }
+        }
+    }
+}
+
 /// The loop body: model → validate → answer / discard / run read tools → repeat.
 async fn run_inner(
     deps: &LoopDeps<'_>,
@@ -436,6 +947,7 @@ async fn run_inner(
         id
     };
     let mut same_tool: HashMap<String, u32> = HashMap::new();
+    let mut compression_attempted = false;
 
     loop {
         if session.turn_step_budget_exhausted(deps.max_steps_per_turn) {
@@ -456,24 +968,15 @@ async fn run_inner(
             crate::model_capability::ModelRequirements::for_messages(&session.conversation),
         );
         let pinned_context = deps.model.context_policy(request_requirements).await?;
-        let previous_context_state = session.model_context_state.clone();
-        let context_view = crate::model_context::build_model_context_view(
-            &session.conversation,
-            &mut session.model_context_state,
+        let context_view = prepare_model_context(
+            deps,
+            session,
+            turn_id,
             &pinned_context,
-            session.version,
+            &mut compression_attempted,
+            sink,
         )
-        .map_err(model_context_error)?;
-        let floor_advanced = context_view.floor_advanced;
-        if floor_advanced {
-            session.add_context_notice(crate::model_context::ContextNotice::trimmed(turn_id));
-        }
-        if session.model_context_state != previous_context_state || floor_advanced {
-            deps.session_seam.save(session).await?;
-        }
-        if floor_advanced {
-            sink.on_context_trimmed(turn_id);
-        }
+        .await?;
         // Assemble the model request: a freshly built system prompt prepended to a
         // trailing, budget-trimmed window of the stored conversation. The system
         // prompt is never persisted, so it is added here on every call.

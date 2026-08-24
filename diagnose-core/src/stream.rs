@@ -50,6 +50,7 @@ pub struct StreamingTurnSink<S> {
     terminated: bool,
     uncommitted_partial: bool,
     context_trimmed_turn_id: Option<String>,
+    context_compacted_generation: Option<u32>,
     /// Machine-readable AI marking stamped onto the terminal `Answer` frame, when
     /// the upper layer (which knows the model and has a clock) injected one before
     /// running the turn. This crate has neither, so it carries the pre-built stamp
@@ -74,6 +75,7 @@ impl<S: DiagnoseFrameSink> StreamingTurnSink<S> {
             terminated: false,
             uncommitted_partial: false,
             context_trimmed_turn_id: None,
+            context_compacted_generation: None,
             provenance: None,
         }
     }
@@ -264,6 +266,21 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
             seq,
             "context_trimmed",
             turn_id,
+        ));
+    }
+
+    fn on_context_compacted(&mut self, turn_id: &str, generation: u32, covered_message_count: u32) {
+        if self.terminated || self.context_compacted_generation == Some(generation) {
+            return;
+        }
+        self.context_compacted_generation = Some(generation);
+        let seq = self.next_seq();
+        self.sink.emit(DiagnoseEvent::context_compacted(
+            &self.request_id,
+            seq,
+            turn_id,
+            generation,
+            covered_message_count,
         ));
     }
 
@@ -693,6 +710,25 @@ mod tests {
         assert_eq!(events[0].kind, DiagnoseEventKind::Status);
         assert_eq!(events[0].status.as_deref(), Some("context_trimmed"));
         assert_eq!(events[0].turn_id.as_deref(), Some("turn-7"));
+        assert!(!events[0].is_terminal());
+        assert_eq!(events[1].kind, DiagnoseEventKind::Answer);
+    }
+
+    #[test]
+    fn context_compacted_notice_is_non_terminal_and_deduped_by_generation() {
+        let (store, sink) = recorder();
+        let mut bridge = StreamingTurnSink::new(sink, "r");
+        bridge.on_context_compacted("turn-7", 2, 9);
+        bridge.on_context_compacted("turn-7", 2, 9);
+        bridge.on_answer_committed("done");
+
+        let events = store.borrow();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, DiagnoseEventKind::Status);
+        assert_eq!(events[0].status.as_deref(), Some("context_compacted"));
+        assert_eq!(events[0].turn_id.as_deref(), Some("turn-7"));
+        assert_eq!(events[0].checkpoint_generation, Some(2));
+        assert_eq!(events[0].covered_message_count, Some(9));
         assert!(!events[0].is_terminal());
         assert_eq!(events[1].kind, DiagnoseEventKind::Answer);
     }

@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use desk_agent_protocol::content_safety::StreamRetractionReason;
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope};
 
-use crate::chat::{ChatMessage, ModelTurn, ToolCall, ToolChoice, ToolSpec};
+use crate::chat::{ChatMessage, ModelTurn, TokenUsage, ToolCall, ToolChoice, ToolSpec};
 use crate::model_context::PinnedContextPolicy;
 use crate::model_profile::ModelUseCase;
 use crate::prompt::ResponseFormatSpec;
@@ -136,6 +136,11 @@ pub trait TurnSink {
         let _ = turn_id;
     }
 
+    /// A validated checkpoint and its new raw-history floor were committed.
+    fn on_context_compacted(&mut self, turn_id: &str, generation: u32, covered_message_count: u32) {
+        let _ = (turn_id, generation, covered_message_count);
+    }
+
     /// The turn was truncated (`MaxTokens` / `Other`) and discarded; any
     /// provisional text streamed for it must be dropped by the UI.
     fn on_turn_discarded(&mut self) {}
@@ -146,6 +151,97 @@ pub struct NullTurnSink;
 
 impl TurnSink for NullTurnSink {
     fn on_text_delta(&mut self, _delta: &str) {}
+}
+
+/// Closed, content-free failure categories for checkpoint-compression errors,
+/// metrics, and audit records. These tokens are part of the operational
+/// contract: never replace one with provider text or a serialized summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextCompressionFailureKind {
+    InputTooLarge,
+    ProviderRejected,
+    ProviderTimeout,
+    Truncated,
+    InvalidSchema,
+    UnsafeOutput,
+    SummaryTooLarge,
+    ProtectedStateTooLarge,
+    ProtectedReplayUnsafe,
+    StaleContext,
+    UnsupportedEndpoint,
+    InvalidEffectiveBudget,
+    AttemptExhausted,
+}
+
+impl ContextCompressionFailureKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InputTooLarge => "input_too_large",
+            Self::ProviderRejected => "provider_rejected",
+            Self::ProviderTimeout => "provider_timeout",
+            Self::Truncated => "truncated",
+            Self::InvalidSchema => "invalid_schema",
+            Self::UnsafeOutput => "unsafe_output",
+            Self::SummaryTooLarge => "summary_too_large",
+            Self::ProtectedStateTooLarge => "protected_state_too_large",
+            Self::ProtectedReplayUnsafe => "protected_replay_unsafe",
+            Self::StaleContext => "stale_context",
+            Self::UnsupportedEndpoint => "unsupported_endpoint",
+            Self::InvalidEffectiveBudget => "invalid_effective_budget",
+            Self::AttemptExhausted => "attempt_exhausted",
+        }
+    }
+}
+
+/// Content-free, stable context attached to a compression audit outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextCompressionAuditContext {
+    pub generation: u32,
+    pub covered_message_count: u32,
+    pub covered_from_message_id: String,
+    pub covered_through_message_id: String,
+    pub input_context_cost: u64,
+    pub platform_context_policy_revision: u64,
+    pub safety: Option<ContextCompressionSafetyAuditContext>,
+}
+
+/// Credential-free identity of the independently frozen content-safety
+/// receiver. This is absent when content safety is disabled for the turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextCompressionSafetyAuditContext {
+    pub provider_identity_sha256: String,
+    pub model_identity_sha256: String,
+    pub connection_revision: i64,
+    pub model_profile_revision: i64,
+    pub policy_revision: u64,
+    pub prompt_version: String,
+}
+
+/// Provider-reported usage for the compression call. `reasoning_tokens` is a
+/// diagnostic subset of output tokens on providers that expose it, so it is
+/// recorded separately but never added a second time to session/billing totals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextCompressionProviderUsage {
+    pub tokens: TokenUsage,
+    pub reasoning_tokens: Option<u64>,
+}
+
+/// Terminal checkpoint-compression audit outcome. The model seam owns provider
+/// identity/call-key attribution; the loop supplies only bounded metadata and
+/// token counters. Summary or prompt text is intentionally unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextCompressionAuditOutcome {
+    Committed {
+        context: ContextCompressionAuditContext,
+        usage: ContextCompressionProviderUsage,
+        summary_context_cost: u64,
+        final_context_cost: u64,
+    },
+    Failed {
+        context: Option<ContextCompressionAuditContext>,
+        usage: Option<ContextCompressionProviderUsage>,
+        kind: ContextCompressionFailureKind,
+    },
 }
 
 /// The model call, abstracted from the wire dialect. Implementations stream text
@@ -168,6 +264,51 @@ pub trait ModelSeam {
             error_code: None,
         })
     }
+
+    /// Return the frozen, non-secret provenance of the compression provider call
+    /// that just completed. Only seams that can return a checkpoint-summary
+    /// policy implement this; the default fails closed.
+    fn context_compression_provenance(
+        &self,
+        turn_id: &str,
+        created_at: &str,
+    ) -> Result<crate::model_context::CompressorProvenanceV1, AgentError> {
+        let _ = (turn_id, created_at);
+        Err(AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "model seam does not expose context compression provenance".into(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: Some(
+                desk_utils::error::DeskErrorCode::AI_CONTEXT_COMPRESSION_FAILED.code(),
+            ),
+        })
+    }
+
+    /// Low-cardinality observability callbacks. Implementations must never attach
+    /// prompt, summary, message, actor, request, or credential content to metrics.
+    fn on_context_compression_started(
+        &self,
+        _generation: u32,
+        _covered_message_count: u32,
+        _input_context_cost: u64,
+    ) {
+    }
+
+    fn on_context_compression_succeeded(
+        &self,
+        _generation: u32,
+        _summary_context_cost: u64,
+        _final_context_cost: u64,
+    ) {
+    }
+
+    fn on_context_compression_failed(&self, _kind: ContextCompressionFailureKind) {}
+
+    /// Persist a content-free terminal audit outcome. Implementations must be
+    /// fail-open: audit storage failure cannot alter a committed checkpoint or
+    /// replace the stable compression error selected by the loop.
+    async fn audit_context_compression(&self, _outcome: ContextCompressionAuditOutcome) {}
 
     async fn call(
         &self,
@@ -441,6 +582,13 @@ pub trait LeaseHeartbeat {
     /// Begin periodically calling [`SessionSeam::heartbeat`] for this turn until the
     /// returned guard is dropped.
     fn start(&self, conversation_id: String, lease_token: u64) -> Box<dyn HeartbeatGuard>;
+
+    /// Whether every attempted renewal for this turn has succeeded. A runtime
+    /// with a real lease flips this false at the first renewal error; checkpoint
+    /// commits then fail closed even when no competing owner has taken over yet.
+    fn is_healthy(&self) -> bool {
+        true
+    }
 }
 
 /// Opaque handle whose `Drop` stops the lease-renewal ticker started by

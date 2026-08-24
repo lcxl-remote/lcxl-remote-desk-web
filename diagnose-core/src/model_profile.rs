@@ -160,7 +160,7 @@ pub enum ModelUseCase {
     Agent,
     Completion,
     FleetNaturalLanguage,
-    /// Reserved seam for the separately planned inline checkpoint compressor.
+    /// Inline portable checkpoint-summary compressor.
     ContextCompression,
 }
 
@@ -690,6 +690,34 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("effective output limit (512)"));
+    }
+
+    #[test]
+    fn compression_cap_reuses_profile_options_and_rejects_an_incompatible_manual_budget() {
+        assert_eq!(
+            resolve_effective_output_limit(
+                ModelUseCase::ContextCompression,
+                8192,
+                8192,
+                Some(4096),
+            )
+            .unwrap()
+            .get(),
+            4096
+        );
+        let mut profile = profile(json!({
+            "thinking": {"type": "enabled", "budget_tokens": 5000}
+        }));
+        profile.probe_max_output_tokens = 8192;
+        profile.runtime_max_output_tokens = 8192;
+        let error = profile
+            .validate_for_use_case(
+                WireProtocol::AnthropicMessages,
+                ModelUseCase::ContextCompression,
+                Some(4096),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("effective output limit (4096)"));
     }
 
     #[test]
