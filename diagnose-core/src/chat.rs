@@ -189,6 +189,11 @@ pub struct ChatMessage {
     /// projected into public conversation DTOs or safety input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_disposition: Option<ReplayDisposition>,
+    /// Information-flow metadata for content that may enter an external sink.
+    /// Provider dialects never serialize this field directly; the pre-dial
+    /// projector authorizes it and then serializes only the message payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
 }
 
 impl ChatMessage {
@@ -204,6 +209,7 @@ impl ChatMessage {
             tool_call_id: None,
             background_task_id: None,
             replay_disposition: None,
+            data_envelope: None,
         }
     }
 
@@ -249,6 +255,7 @@ impl ChatMessage {
             tool_call_id: None,
             background_task_id: None,
             replay_disposition: Some(replay_disposition),
+            data_envelope: None,
         }
     }
 
@@ -285,6 +292,7 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.into()),
             background_task_id: Some(background_task_id.into()),
             replay_disposition: None,
+            data_envelope: None,
         }
     }
 
@@ -304,6 +312,7 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.into()),
             background_task_id: None,
             replay_disposition: None,
+            data_envelope: None,
         }
     }
 
@@ -327,6 +336,7 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.into()),
             background_task_id: Some(background_task_id),
             replay_disposition: None,
+            data_envelope: None,
         }
     }
 }

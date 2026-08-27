@@ -19,19 +19,26 @@ use crate::{
     },
 };
 use actix_web::web;
+use desk_agent_protocol::computer_use::{
+    ComputerActionCompleted, ComputerActionKind, ComputerActionPhase, ComputerActionResultClass,
+    ComputerActionStartDisposition, ComputerActionStarted, ComputerActionStateReport,
+    ComputerActionStepFact, FilePatchAction,
+};
 use desk_agent_protocol::{AgentOutcome, DeviceAgent};
 use desk_input_injection::display_watcher;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
-        AgentResponsePayload, DesktopChangedPayload, ExecCancelPayload, ExecHeartbeatPayload,
-        ExecResultIpcPayload, ExecSpawnReportPayload, FileTransferPayload, FilesListedPayload,
-        HeartbeatPayload, LocaleAppliedPayload, ManagerResponseRefPayload,
-        PrivateScreenStateChangedPayload, RemoteAccessStateAppliedPayload,
-        SecurityPolicyAppliedPayload, ServiceToWorker, SignalingErrorPayload, StopMediaPayload,
-        SystemInfoRetrievedPayload, TerminalClosedPayload, TerminalCommandsListedPayload,
-        TerminalOutputProducedPayload, TerminalStartedPayload, VirtualDisplayAttachOutcome,
-        VirtualDisplayAttachResultPayload, WorkerInitPayload, WorkerToService,
+        AgentResponsePayload, ComputerActionCompletedPayload, ComputerActionStartedPayload,
+        ComputerActionStateReportedPayload, ComputerUseReadinessPayload, DesktopChangedPayload,
+        ExecCancelPayload, ExecHeartbeatPayload, ExecResultIpcPayload, ExecSpawnReportPayload,
+        FileTransferPayload, FilesListedPayload, HeartbeatPayload, LocaleAppliedPayload,
+        ManagerResponseRefPayload, PrivateScreenStateChangedPayload,
+        RemoteAccessStateAppliedPayload, SecurityPolicyAppliedPayload, ServiceToWorker,
+        SignalingErrorPayload, StopMediaPayload, SystemInfoRetrievedPayload, TerminalClosedPayload,
+        TerminalCommandsListedPayload, TerminalOutputProducedPayload, TerminalStartedPayload,
+        VirtualDisplayAttachOutcome, VirtualDisplayAttachResultPayload, WorkerInitPayload,
+        WorkerToService,
     },
     transport::{read_message, write_message},
 };
@@ -82,7 +89,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},

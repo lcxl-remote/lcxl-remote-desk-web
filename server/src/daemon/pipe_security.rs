@@ -116,6 +116,38 @@ pub fn query_session_user_sid(session_id: u32) -> std::io::Result<Option<String>
     }
 }
 
+/// Resolve the account SID that may connect a session worker to its daemon.
+///
+/// `WTSQueryUserToken` is the authoritative path for a real SYSTEM service.
+/// An interactively launched ServiceDaemon does not necessarily hold the
+/// privileges required by that API, even when the terminal is elevated. When
+/// the daemon itself is running in the target Windows session, its process
+/// token still names exactly the account used to launch the worker, so that SID
+/// is a safe, narrow fallback. We deliberately do not use it across sessions:
+/// doing so would authorize the daemon's account instead of the target user.
+#[cfg(target_os = "windows")]
+pub fn query_worker_pipe_user_sid(session_id: u32) -> std::io::Result<Option<String>> {
+    let session_result = query_session_user_sid(session_id);
+    if matches!(session_result, Ok(Some(_))) {
+        return session_result;
+    }
+
+    use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+
+    let mut daemon_session_id = 0u32;
+    unsafe {
+        ProcessIdToSessionId(std::process::id(), &mut daemon_session_id).map_err(|error| {
+            std::io::Error::other(format!("ProcessIdToSessionId failed: {error}"))
+        })?;
+    }
+
+    if daemon_session_id == session_id {
+        return query_current_process_user_sid().map(Some);
+    }
+
+    session_result
+}
+
 /// Return the SID of the account running the daemon process.
 ///
 /// `WTSQueryUserToken` requires privileges normally held by a Windows service.
@@ -232,5 +264,18 @@ mod tests {
         let sddl = build_pipe_sddl(Some(&sid));
         assert!(sddl.contains(&format!("(A;;GA;;;{sid})")));
         assert!(!sddl.contains(";;;WD"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn worker_pipe_sid_resolves_for_current_interactive_session() {
+        use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+
+        let mut session_id = 0u32;
+        unsafe { ProcessIdToSessionId(std::process::id(), &mut session_id).unwrap() };
+
+        let sid = query_worker_pipe_user_sid(session_id).unwrap().unwrap();
+        assert!(sid.starts_with("S-1-"));
+        assert!(!build_pipe_sddl(Some(&sid)).contains(";;;WD"));
     }
 }

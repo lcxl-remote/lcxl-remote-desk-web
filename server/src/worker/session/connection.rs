@@ -122,6 +122,7 @@ impl WorkerSession {
             file_sender,
             file_receiver,
             None,
+            None,
         )
         .await
     }

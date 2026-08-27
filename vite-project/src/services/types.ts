@@ -326,6 +326,34 @@ export type BackendInfo = {
     resolved_input_control: string;
 };
 
+export type BackgroundCancelBody = {
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @type string,null
+    */
+    conversation?: string | null;
+    /**
+     * @type string
+    */
+    reason: string;
+    /**
+     * @description Stable client-generated id used to make a repeated submission idempotent.
+     * @type string
+    */
+    requestId: string;
+    /**
+     * @type string,null
+    */
+    session?: string | null;
+    /**
+     * @type string
+    */
+    taskId: string;
+};
+
 /**
  * @description Background auto-start (macOS LaunchAgent) state. macOS-specific; `None` on\nother platforms, which use the OS-service install path instead. This is\ndeliberately separate from `service_installed` (a Windows-service signal\nconsumed elsewhere in the console) so the two never alias.
 */
@@ -347,6 +375,84 @@ export type BackgroundStart = {
     path_valid: boolean;
 };
 
+export const capabilityEffectEnum = {
+    read_device: "read_device",
+    read_file: "read_file",
+    read_external: "read_external",
+    export_data: "export_data",
+    write_artifact: "write_artifact",
+    mutate_application: "mutate_application",
+    write_external_draft: "write_external_draft",
+    send_external: "send_external",
+    capture_screen: "capture_screen",
+    input_fallback: "input_fallback"
+} as const;
+
+export type CapabilityEffectEnumKey = (typeof capabilityEffectEnum)[keyof typeof capabilityEffectEnum];
+
+export type CapabilityEffect = CapabilityEffectEnumKey;
+
+export const backgroundTaskStateDtoEnum = {
+    running: "running",
+    cancel_requested: "cancel_requested",
+    succeeded: "succeeded",
+    failed: "failed",
+    cancelled: "cancelled",
+    outcome_unknown: "outcome_unknown"
+} as const;
+
+export type BackgroundTaskStateDtoEnumKey = (typeof backgroundTaskStateDtoEnum)[keyof typeof backgroundTaskStateDtoEnum];
+
+export type BackgroundTaskStateDto = BackgroundTaskStateDtoEnumKey;
+
+export type BackgroundTaskDto = {
+    /**
+     * @type string
+    */
+    callId: string;
+    /**
+     * @type string
+    */
+    capabilityId: string;
+    /**
+     * @type string
+    */
+    effect: CapabilityEffect;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    progressSequence: number;
+    /**
+     * @type string
+    */
+    providerId: string;
+    /**
+     * @type string
+    */
+    state: BackgroundTaskStateDto;
+    /**
+     * @type boolean
+    */
+    supportsCancel: boolean;
+    /**
+     * @type string
+    */
+    taskId: string;
+    /**
+     * @type string,null
+    */
+    terminalAt?: string | null;
+    /**
+     * @type string
+    */
+    toolName: string;
+    /**
+     * @type string
+    */
+    updatedAt: string;
+};
+
 export type CancelWaylandRequest = {
     /**
      * @minLength 0
@@ -357,6 +463,79 @@ export type CancelWaylandRequest = {
      * @type string
     */
     operation_id: string;
+};
+
+export type CapabilityGrantDto = {
+    /**
+     * @type string
+    */
+    capabilityId: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expiresAtUnixMs: number;
+    /**
+     * @type string
+    */
+    grantId: string;
+    /**
+     * @type array
+    */
+    operationScope: string[];
+    /**
+     * @type string
+    */
+    providerId: string;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    remainingUses: number;
+    /**
+     * @type array
+    */
+    resourceScope: string[];
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    revokedAtUnixMs?: number | null;
+    /**
+     * @type string,null
+    */
+    revokedReason?: string | null;
+    /**
+     * @type string
+    */
+    riskTier: string;
+    /**
+     * @type string
+    */
+    toolName: string;
+};
+
+export type CapabilityGrantRevokeBody = {
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @type string,null
+    */
+    conversation?: string | null;
+    /**
+     * @type string
+    */
+    grantId: string;
+    /**
+     * @type string
+    */
+    reason: string;
+    /**
+     * @type string,null
+    */
+    session?: string | null;
 };
 
 /**
@@ -617,6 +796,50 @@ export type ConnectionsFetchedData = {
      * @type string
     */
     current_connection_id: string;
+};
+
+/**
+ * @description Browser-safe attachment metadata. Opaque tokens, envelope digests and model\ndestination identities remain server-side; the selector only needs enough\ninformation to show provenance, expiry and whether a refresh is required.
+*/
+export type ContextAttachmentDto = {
+    /**
+     * @type string
+    */
+    capabilityId: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    createdAtUnixMs: number;
+    /**
+     * @type string
+    */
+    displaySummary: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expiresAtUnixMs: number;
+    /**
+     * @type string
+    */
+    id: string;
+    /**
+     * @type string
+    */
+    kind: string;
+    /**
+     * @type string
+    */
+    providerId: string;
+    /**
+     * @type string,null
+    */
+    staleReason?: string | null;
+    /**
+     * @type string
+    */
+    state: string;
 };
 
 export const contextNoticeKindDtoEnum = {
@@ -1104,6 +1327,96 @@ export type DeskSettings = {
     x264_encoder?: (null | X264EncoderSettings);
 };
 
+export const destinationIdentityKindEnum = {
+    model: "model"
+} as const;
+
+export type DestinationIdentityKindEnumKey = (typeof destinationIdentityKindEnum)[keyof typeof destinationIdentityKindEnum];
+
+export const destinationIdentityKindEnum2 = {
+    web_research: "web_research"
+} as const;
+
+export type DestinationIdentityKindEnum2Key = (typeof destinationIdentityKindEnum2)[keyof typeof destinationIdentityKindEnum2];
+
+export const destinationIdentityKindEnum3 = {
+    email_account: "email_account"
+} as const;
+
+export type DestinationIdentityKindEnum3Key = (typeof destinationIdentityKindEnum3)[keyof typeof destinationIdentityKindEnum3];
+
+export const destinationIdentityKindEnum4 = {
+    chat_account: "chat_account"
+} as const;
+
+export type DestinationIdentityKindEnum4Key = (typeof destinationIdentityKindEnum4)[keyof typeof destinationIdentityKindEnum4];
+
+export const destinationIdentityKindEnum5 = {
+    local_artifact: "local_artifact"
+} as const;
+
+export type DestinationIdentityKindEnum5Key = (typeof destinationIdentityKindEnum5)[keyof typeof destinationIdentityKindEnum5];
+
+export type DestinationIdentity = ({
+    /**
+     * @type string
+    */
+    connection_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    connection_revision: number;
+    /**
+     * @type string
+    */
+    kind: DestinationIdentityKindEnumKey;
+    /**
+     * @type string
+    */
+    model_id: string;
+    /**
+     * @type integer, int64
+    */
+    profile_revision: number;
+} | {
+    /**
+     * @type string
+    */
+    connector_id: string;
+    /**
+     * @type string
+    */
+    kind: DestinationIdentityKindEnum2Key;
+} | {
+    /**
+     * @type string
+    */
+    account_id: string;
+    /**
+     * @type string
+    */
+    kind: DestinationIdentityKindEnum3Key;
+} | {
+    /**
+     * @type string
+    */
+    account_id: string;
+    /**
+     * @type string
+    */
+    kind: DestinationIdentityKindEnum4Key;
+} | {
+    /**
+     * @type string
+    */
+    kind: DestinationIdentityKindEnum5Key;
+    /**
+     * @type string
+    */
+    workspace_id: string;
+});
+
 export type DeviceCodeBatchDeleteParams = {
     /**
      * @type array
@@ -1315,6 +1628,150 @@ export type SnapshotMessageDto = {
     turnId?: string | null;
 };
 
+export type GrantRequestItemDto = {
+    /**
+     * @type string
+    */
+    expectedEffect: CapabilityEffect;
+    /**
+     * @type array
+    */
+    exportDestinations: DestinationIdentity[];
+    /**
+     * @type string
+    */
+    itemId: string;
+    /**
+     * @type array
+    */
+    operationScope: string[];
+    /**
+     * @type string
+    */
+    providerId: string;
+    /**
+     * @type string
+    */
+    reason: string;
+    /**
+     * @type array
+    */
+    resourceScope: string[];
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    suggestedMaxUses: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    suggestedTtlSeconds: number;
+    /**
+     * @type string
+    */
+    toolName: string;
+};
+
+export const permissionRequestStateDtoEnum = {
+    pending: "pending",
+    needs_revalidation: "needs_revalidation",
+    approved: "approved",
+    partially_approved: "partially_approved",
+    denied: "denied",
+    replaced: "replaced",
+    withdrawn: "withdrawn"
+} as const;
+
+export type PermissionRequestStateDtoEnumKey = (typeof permissionRequestStateDtoEnum)[keyof typeof permissionRequestStateDtoEnum];
+
+export type PermissionRequestStateDto = PermissionRequestStateDtoEnumKey;
+
+export type PermissionRequestDto = {
+    /**
+     * @type string
+    */
+    createdAt: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    inputRevision: number;
+    /**
+     * @type array
+    */
+    items: GrantRequestItemDto[];
+    /**
+     * @type string
+    */
+    requestId: string;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    schemaVersion: number;
+    /**
+     * @type string
+    */
+    state: PermissionRequestStateDto;
+};
+
+export const taskStatusDtoEnum = {
+    todo: "todo",
+    in_progress: "in_progress",
+    blocked: "blocked",
+    done: "done",
+    skipped: "skipped"
+} as const;
+
+export type TaskStatusDtoEnumKey = (typeof taskStatusDtoEnum)[keyof typeof taskStatusDtoEnum];
+
+export type TaskStatusDto = TaskStatusDtoEnumKey;
+
+export type TaskStatusItemDto = {
+    /**
+     * @type string
+    */
+    description: string;
+    /**
+     * @type string
+    */
+    itemId: string;
+    /**
+     * @type string
+    */
+    lastUpdatedStepId: string;
+    /**
+     * @type string,null
+    */
+    note?: string | null;
+    /**
+     * @type string
+    */
+    status: TaskStatusDto;
+};
+
+export type TaskStatusProjectionDto = {
+    /**
+     * @type array
+    */
+    items: TaskStatusItemDto[];
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    schemaVersion: number;
+    /**
+     * @type string
+    */
+    updatedAt: string;
+};
+
 export type DiagnoseSessionSnapshotDto = {
     /**
      * @description Whether the persisted turn is still running or awaiting approval.
@@ -1327,14 +1784,50 @@ export type DiagnoseSessionSnapshotDto = {
     */
     activeExecutionGeneration?: string | null;
     /**
+     * @description Durable Provider executions that outlived their foreground wait.
+     * @type array
+    */
+    backgroundTasks: BackgroundTaskDto[];
+    /**
+     * @description Server-issued authority metadata. It never proves a call was dispatched.
+     * @type array
+    */
+    capabilityGrants: CapabilityGrantDto[];
+    /**
+     * @description Durable selection metadata only; no UI tree, cells, files or screenshots.
+     * @type array
+    */
+    contextAttachments: ContextAttachmentDto[];
+    /**
      * @description Durable transcript metadata for context-window changes. No omitted text is exposed.
      * @type array
     */
     contextNotices: ContextNoticeDto[];
     /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    handledInputSeq: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    inputRevision: number;
+    /**
+     * @description Latest durably accepted user input and the model-processing watermark.
+     * @minLength 0
+     * @type integer, int64
+    */
+    latestInputSeq: number;
+    /**
      * @type array
     */
     messages: SnapshotMessageDto[];
+    /**
+     * @description Model-proposed, server-normalized requests. Pending is approvable;\nNeedsRevalidation is display-only until the model replaces/reissues it.
+     * @type array
+    */
+    permissionRequests: PermissionRequestDto[];
     /**
      * @description Diagnose request currently represented by the persisted turn.
      * @type string,null
@@ -1344,6 +1837,7 @@ export type DiagnoseSessionSnapshotDto = {
      * @type integer, int64
     */
     seq: number;
+    taskStatusProjection?: (null | TaskStatusProjectionDto);
 };
 
 /**
@@ -2369,6 +2863,132 @@ export type MouseEventData = {
     y: number;
 };
 
+export const objectKindEnum = {
+    desktop_session: "desktop_session",
+    application: "application",
+    window: "window",
+    ui_element: "ui_element",
+    office_document: "office_document",
+    worksheet: "worksheet",
+    range: "range",
+    presentation: "presentation",
+    slide: "slide",
+    shape: "shape",
+    file: "file",
+    directory: "directory",
+    terminal_output: "terminal_output"
+} as const;
+
+export type ObjectKindEnumKey = (typeof objectKindEnum)[keyof typeof objectKindEnum];
+
+export type ObjectKind = ObjectKindEnumKey;
+
+/**
+ * @description Short-lived, device-issued reference to an observed object.\n\n`token` is opaque to the model and must bind the native locator,\ninteractive-session incarnation, adapter version, snapshot generation,\nfingerprint and expiry in the device-side reference store. Native handles,\nprocess ids, paths and coordinates are never authoritative wire inputs.
+*/
+export type ObjectRef = {
+    /**
+     * @description RFC3339 timestamp. Kept as a string to avoid imposing a clock library on\nthis pure protocol crate.
+     * @type string
+    */
+    expires_at: string;
+    /**
+     * @type string
+    */
+    object_kind: ObjectKind;
+    /**
+     * @type string
+    */
+    snapshot_id: string;
+    /**
+     * @type string
+    */
+    token: string;
+};
+
+export const permissionItemDecisionBodyDecisionEnum = {
+    approve: "approve"
+} as const;
+
+export type PermissionItemDecisionBodyDecisionEnumKey = (typeof permissionItemDecisionBodyDecisionEnum)[keyof typeof permissionItemDecisionBodyDecisionEnum];
+
+export const permissionItemDecisionBodyDecisionEnum2 = {
+    deny: "deny"
+} as const;
+
+export type PermissionItemDecisionBodyDecisionEnum2Key = (typeof permissionItemDecisionBodyDecisionEnum2)[keyof typeof permissionItemDecisionBodyDecisionEnum2];
+
+export type PermissionItemDecisionBody = ({
+    /**
+     * @type string
+    */
+    decision: PermissionItemDecisionBodyDecisionEnumKey;
+    /**
+     * @type array | undefined
+    */
+    export_destinations?: DestinationIdentity[];
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    max_uses: number;
+    /**
+     * @type array | undefined
+    */
+    operation_scope?: string[];
+    /**
+     * @type array | undefined
+    */
+    resource_scope?: string[];
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    ttl_seconds: number;
+} | {
+    /**
+     * @type string
+    */
+    decision: PermissionItemDecisionBodyDecisionEnum2Key;
+});
+
+export type PermissionDecisionItemBody = (PermissionItemDecisionBody & {
+    /**
+     * @type string
+    */
+    itemId: string;
+});
+
+export type PermissionDecisionBody = {
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @type string,null
+    */
+    conversation?: string | null;
+    /**
+     * @type array
+    */
+    items: PermissionDecisionItemBody[];
+    /**
+     * @type string
+    */
+    requestId: string;
+    /**
+     * @type string,null
+    */
+    session?: string | null;
+};
+
+export type PermissionDecisionResponse = {
+    /**
+     * @type string
+    */
+    state: PermissionRequestStateDto;
+};
+
 /**
  * @description Result of a successful provider connectivity test. The `api_key` stays\nserver-side; only latency and a bounded reply snippet are returned.
 */
@@ -2979,6 +3599,138 @@ export type RestResponseBackendInfo = {
     success: boolean;
 };
 
+export type RestResponseBackgroundTaskDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string
+        */
+        callId: string;
+        /**
+         * @type string
+        */
+        capabilityId: string;
+        /**
+         * @type string
+        */
+        effect: CapabilityEffect;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        progressSequence: number;
+        /**
+         * @type string
+        */
+        providerId: string;
+        /**
+         * @type string
+        */
+        state: BackgroundTaskStateDto;
+        /**
+         * @type boolean
+        */
+        supportsCancel: boolean;
+        /**
+         * @type string
+        */
+        taskId: string;
+        /**
+         * @type string,null
+        */
+        terminalAt?: string | null;
+        /**
+         * @type string
+        */
+        toolName: string;
+        /**
+         * @type string
+        */
+        updatedAt: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseCapabilityGrantDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string
+        */
+        capabilityId: string;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        expiresAtUnixMs: number;
+        /**
+         * @type string
+        */
+        grantId: string;
+        /**
+         * @type array
+        */
+        operationScope: string[];
+        /**
+         * @type string
+        */
+        providerId: string;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        remainingUses: number;
+        /**
+         * @type array
+        */
+        resourceScope: string[];
+        /**
+         * @minLength 0
+         * @type integer,null, int64
+        */
+        revokedAtUnixMs?: number | null;
+        /**
+         * @type string,null
+        */
+        revokedReason?: string | null;
+        /**
+         * @type string
+        */
+        riskTier: string;
+        /**
+         * @type string
+        */
+        toolName: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseCollectionPolicySettings = {
     /**
      * @type integer, int32
@@ -3191,14 +3943,50 @@ export type RestResponseDiagnoseSessionSnapshotDto = {
         */
         activeExecutionGeneration?: string | null;
         /**
+         * @description Durable Provider executions that outlived their foreground wait.
+         * @type array
+        */
+        backgroundTasks: BackgroundTaskDto[];
+        /**
+         * @description Server-issued authority metadata. It never proves a call was dispatched.
+         * @type array
+        */
+        capabilityGrants: CapabilityGrantDto[];
+        /**
+         * @description Durable selection metadata only; no UI tree, cells, files or screenshots.
+         * @type array
+        */
+        contextAttachments: ContextAttachmentDto[];
+        /**
          * @description Durable transcript metadata for context-window changes. No omitted text is exposed.
          * @type array
         */
         contextNotices: ContextNoticeDto[];
         /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        handledInputSeq: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        inputRevision: number;
+        /**
+         * @description Latest durably accepted user input and the model-processing watermark.
+         * @minLength 0
+         * @type integer, int64
+        */
+        latestInputSeq: number;
+        /**
          * @type array
         */
         messages: SnapshotMessageDto[];
+        /**
+         * @description Model-proposed, server-normalized requests. Pending is approvable;\nNeedsRevalidation is display-only until the model replaces/reissues it.
+         * @type array
+        */
+        permissionRequests: PermissionRequestDto[];
         /**
          * @description Diagnose request currently represented by the persisted turn.
          * @type string,null
@@ -3208,6 +3996,7 @@ export type RestResponseDiagnoseSessionSnapshotDto = {
          * @type integer, int64
         */
         seq: number;
+        taskStatusProjection?: (null | TaskStatusProjectionDto);
     };
     /**
      * @type string,null
@@ -3582,6 +4371,30 @@ export type RestResponseModelUsageResult = {
          * @type object
         */
         range: UsageRangeDto;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponsePermissionDecisionResponse = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string
+        */
+        state: PermissionRequestStateDto;
     };
     /**
      * @type string,null
@@ -5052,6 +5865,7 @@ export type TerminalList = {
 };
 
 export type TerminalOutputData = {
+    assistant_object_ref?: (null | ObjectRef);
     /**
      * @type string
     */
@@ -6251,6 +7065,51 @@ export type GetDiagnoseSessionQueryResponse = GetDiagnoseSession200;
 export type GetDiagnoseSessionQuery = {
     Response: GetDiagnoseSession200;
     QueryParams: GetDiagnoseSessionQueryParams;
+    Errors: any;
+};
+
+/**
+ * @description Durable cancellation intent; Provider delivery is asynchronous
+*/
+export type CancelDiagnoseBackgroundTask200 = RestResponseBackgroundTaskDto;
+
+export type CancelDiagnoseBackgroundTaskMutationRequest = BackgroundCancelBody;
+
+export type CancelDiagnoseBackgroundTaskMutationResponse = CancelDiagnoseBackgroundTask200;
+
+export type CancelDiagnoseBackgroundTaskMutation = {
+    Response: CancelDiagnoseBackgroundTask200;
+    Request: CancelDiagnoseBackgroundTaskMutationRequest;
+    Errors: any;
+};
+
+/**
+ * @description Revoked grant metadata; no work is dispatched
+*/
+export type RevokeDiagnoseCapabilityGrant200 = RestResponseCapabilityGrantDto;
+
+export type RevokeDiagnoseCapabilityGrantMutationRequest = CapabilityGrantRevokeBody;
+
+export type RevokeDiagnoseCapabilityGrantMutationResponse = RevokeDiagnoseCapabilityGrant200;
+
+export type RevokeDiagnoseCapabilityGrantMutation = {
+    Response: RevokeDiagnoseCapabilityGrant200;
+    Request: RevokeDiagnoseCapabilityGrantMutationRequest;
+    Errors: any;
+};
+
+/**
+ * @description Durable decision projection; no tool is dispatched
+*/
+export type DecideDiagnosePermission200 = RestResponsePermissionDecisionResponse;
+
+export type DecideDiagnosePermissionMutationRequest = PermissionDecisionBody;
+
+export type DecideDiagnosePermissionMutationResponse = DecideDiagnosePermission200;
+
+export type DecideDiagnosePermissionMutation = {
+    Response: DecideDiagnosePermission200;
+    Request: DecideDiagnosePermissionMutationRequest;
     Errors: any;
 };
 

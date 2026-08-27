@@ -47,7 +47,14 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::InvokeRemoteTool
         | SignalingType::AskTerminalCopilot
         | SignalingType::GenerateTerminalCompletions
-        | SignalingType::ControlExecution => Request,
+        | SignalingType::ControlExecution
+        | SignalingType::DispatchComputerAction
+        | SignalingType::CancelComputerAction
+        | SignalingType::QueryComputerActionState
+        | SignalingType::AskDeviceAssistant
+        | SignalingType::GetDeviceAssistantCapabilities
+        | SignalingType::UpdateDeviceAssistantContext
+        | SignalingType::UpdateDeviceAssistantObjectContext => Request,
 
         SignalingType::HeartbeatAcknowledged
         | SignalingType::ConnectionsFetched
@@ -76,7 +83,14 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::RemoteToolOutputUpdated
         | SignalingType::TerminalCopilotUpdated
         | SignalingType::TerminalCompletionsGenerated
-        | SignalingType::ExecutionStateReported => Response,
+        | SignalingType::ExecutionStateReported
+        | SignalingType::ComputerActionStarted
+        | SignalingType::ComputerActionCompleted
+        | SignalingType::ComputerActionStateReported
+        | SignalingType::DeviceAssistantUpdated
+        | SignalingType::DeviceAssistantCapabilitiesUpdated
+        | SignalingType::DeviceAssistantContextUpdated
+        | SignalingType::DeviceAssistantObjectContextUpdated => Response,
 
         SignalingType::RevokeSupportCode
         | SignalingType::RevokeAccessGrant
@@ -89,7 +103,8 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::ReportAiAuditEvent
         | SignalingType::SyncCommandTemplates
         | SignalingType::CancelTerminalCopilot
-        | SignalingType::SyncCommandBlocklist => Command,
+        | SignalingType::SyncCommandBlocklist
+        | SignalingType::CancelDeviceAssistant => Command,
 
         SignalingType::ConnectionRemoved
         | SignalingType::PrivateScreenStateChanged
@@ -100,7 +115,8 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::TerminalClosed
         | SignalingType::DesktopSwitching
         | SignalingType::DesktopReady
-        | SignalingType::ExecutionProgressUpdated => Notification,
+        | SignalingType::ExecutionProgressUpdated
+        | SignalingType::ComputerUseReadinessUpdated => Notification,
 
         SignalingType::Offer | SignalingType::Answer | SignalingType::IceCandidate => WebRtc,
         SignalingType::Error | SignalingType::Unknown => Meta,
@@ -140,6 +156,18 @@ pub fn response_type_for_request(t: SignalingType) -> Option<SignalingType> {
         SignalingType::AskTerminalCopilot => SignalingType::TerminalCopilotUpdated,
         SignalingType::GenerateTerminalCompletions => SignalingType::TerminalCompletionsGenerated,
         SignalingType::ControlExecution => SignalingType::ExecutionStateReported,
+        SignalingType::DispatchComputerAction => SignalingType::ComputerActionCompleted,
+        SignalingType::CancelComputerAction | SignalingType::QueryComputerActionState => {
+            SignalingType::ComputerActionStateReported
+        }
+        SignalingType::AskDeviceAssistant => SignalingType::DeviceAssistantUpdated,
+        SignalingType::GetDeviceAssistantCapabilities => {
+            SignalingType::DeviceAssistantCapabilitiesUpdated
+        }
+        SignalingType::UpdateDeviceAssistantContext => SignalingType::DeviceAssistantContextUpdated,
+        SignalingType::UpdateDeviceAssistantObjectContext => {
+            SignalingType::DeviceAssistantObjectContextUpdated
+        }
         _ => return None,
     })
 }
@@ -177,6 +205,12 @@ pub fn response_types_for_request(t: SignalingType) -> &'static [SignalingType] 
         AskTerminalCopilot => &[TerminalCopilotUpdated],
         GenerateTerminalCompletions => &[TerminalCompletionsGenerated],
         ControlExecution => &[ExecutionStateReported],
+        DispatchComputerAction => &[ComputerActionStarted, ComputerActionCompleted],
+        CancelComputerAction | QueryComputerActionState => &[ComputerActionStateReported],
+        AskDeviceAssistant => &[DeviceAssistantUpdated],
+        GetDeviceAssistantCapabilities => &[DeviceAssistantCapabilitiesUpdated],
+        UpdateDeviceAssistantContext => &[DeviceAssistantContextUpdated],
+        UpdateDeviceAssistantObjectContext => &[DeviceAssistantObjectContextUpdated],
         _ => &[],
     }
 }
@@ -506,6 +540,32 @@ pub trait ExecStateReplyObserver: Send + Sync {
 /// token-authenticated desk server).
 pub trait RemoteToolObserver: Send + Sync {
     fn on_remote_tool_response<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
+// ====== ComputerActionObserver trait ======
+
+/// Consumes centrally-owned Computer Use lifecycle frames. The observer binds
+/// each frame to the authenticated reporting connection and the exact pending
+/// execution generation before resolving a mutation waiter.
+pub trait ComputerActionObserver: Send + Sync {
+    fn on_computer_action_lifecycle<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
+// ====== ComputerUseReadinessObserver trait ======
+
+/// Consumes bounded dynamic Computer Use readiness from an authenticated host.
+/// Implementations derive device/connection ownership from `source`; payload
+/// fields never self-assert a manager node or presence owner.
+pub trait ComputerUseReadinessObserver: Send + Sync {
+    fn on_computer_use_readiness<'a>(
         &'a self,
         source: &'a ConnectionState,
         model: &'a SignalingModel,

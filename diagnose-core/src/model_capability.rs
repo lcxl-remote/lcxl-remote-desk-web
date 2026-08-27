@@ -2,8 +2,10 @@
 
 use desk_agent_protocol::Capability;
 
+use crate::capability_availability::CapabilityAvailability;
 use crate::chat::ChatMessage;
 use crate::registry::RegisteredTool;
+use desk_agent_protocol::capability_provider::CapabilityBlockedReason;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ModelCapabilities {
@@ -61,6 +63,25 @@ pub fn filter_model_compatible_tools(
         .filter(|tool| capabilities.image_input || !tool_requires_image_input(tool))
         .cloned()
         .collect()
+}
+
+/// Apply model-input requirements to an already projected Provider inventory.
+/// Edge readiness cannot know which model the control plane selected, so this
+/// central projection is the authoritative discoverable/callable image gate.
+pub fn apply_model_compatibility(
+    inventory: &mut [CapabilityAvailability],
+    capabilities: ModelCapabilities,
+) {
+    if capabilities.image_input {
+        return;
+    }
+    for item in inventory
+        .iter_mut()
+        .filter(|item| item.capability_id == crate::device_assistant::CURRENT_SCREEN_CAPABILITY_ID)
+    {
+        item.ready = false;
+        item.reason = Some(CapabilityBlockedReason::ModelIncompatible);
+    }
 }
 
 fn tool_requires_image_input(tool: &RegisteredTool) -> bool {
@@ -126,5 +147,31 @@ mod tests {
             ModelRequirements::for_registered_tools([&screen]),
             ModelRequirements::IMAGE_INPUT
         );
+    }
+
+    #[test]
+    fn text_model_marks_current_screen_unavailable_in_inventory() {
+        let mut inventory = vec![CapabilityAvailability {
+            provider_id: crate::device_assistant::CURRENT_SCREEN_PROVIDER_ID.into(),
+            capability_id: crate::device_assistant::CURRENT_SCREEN_CAPABILITY_ID.into(),
+            tool_name: "read_current_screen".into(),
+            compiled: true,
+            enabled: true,
+            connected: true,
+            ready: true,
+            reason: None,
+        }];
+        apply_model_compatibility(&mut inventory, ModelCapabilities::default());
+        assert!(!inventory[0].ready);
+        assert_eq!(
+            inventory[0].reason,
+            Some(CapabilityBlockedReason::ModelIncompatible)
+        );
+
+        inventory[0].ready = true;
+        inventory[0].reason = None;
+        apply_model_compatibility(&mut inventory, ModelCapabilities { image_input: true });
+        assert!(inventory[0].ready);
+        assert_eq!(inventory[0].reason, None);
     }
 }

@@ -6,7 +6,7 @@ use opentelemetry_sdk::{
     propagation::TraceContextPropagator,
     trace::SdkTracerProvider,
 };
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 use sysinfo::System;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{
@@ -55,12 +55,33 @@ pub async fn init_telemetry(
     shared_settings: Arc<SharedSettings>,
     startup_mode: &StartupMode,
 ) -> Result<Option<TelemetryGuards>> {
+    init_telemetry_inner(shared_settings, startup_mode, None).await
+}
+
+/// Initialize telemetry for a settings snapshot that deliberately has no
+/// writable [`crate::model::settings::SettingsStore`], as is the case for a
+/// SessionWorker receiving serialized settings from its daemon.
+pub async fn init_telemetry_with_log_dir(
+    shared_settings: Arc<SharedSettings>,
+    startup_mode: &StartupMode,
+    log_dir: PathBuf,
+) -> Result<Option<TelemetryGuards>> {
+    init_telemetry_inner(shared_settings, startup_mode, Some(log_dir)).await
+}
+
+async fn init_telemetry_inner(
+    shared_settings: Arc<SharedSettings>,
+    startup_mode: &StartupMode,
+    log_dir_override: Option<PathBuf>,
+) -> Result<Option<TelemetryGuards>> {
     let (mut system_settings, log_settings, log_dir) = {
         let settings_guard = shared_settings.read().await;
+        let log_dir =
+            log_dir_override.unwrap_or_else(|| settings_guard.paths().log_dir().to_path_buf());
         (
             settings_guard.system.clone(),
             settings_guard.log.clone(),
-            settings_guard.paths().log_dir().to_path_buf(),
+            log_dir,
         )
     };
 

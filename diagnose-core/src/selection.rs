@@ -75,8 +75,32 @@ fn is_allowed(cap: Capability, request: &DiagnoseRequestData, policy: &Collectio
         | Capability::NetworkPorts
         | Capability::ServiceStatus
         | Capability::ContainerList => true,
-        // Exec capabilities are never collected by diagnose.
-        Capability::ShellExecReadonly | Capability::ShellExecConfirmed => false,
+        // DeviceAssistant observations and every mutation capability are never
+        // collected by the diagnose surface.
+        Capability::DesktopSessionInspect
+        | Capability::DesktopUiInspect
+        | Capability::OfficeDocumentInspect
+        | Capability::FileMetadataRead
+        | Capability::FileContentRead
+        | Capability::SpreadsheetFileInspect
+        | Capability::SpreadsheetMergePreview
+        | Capability::SpreadsheetWorkbookCreateConfirmed
+        | Capability::SpreadsheetFormulaWorkbookCreateConfirmed
+        | Capability::WordDocumentCreateConfirmed
+        | Capability::WebResearchFetch
+        | Capability::WebResearchSearch
+        | Capability::TerminalOutputRead
+        | Capability::AssistantActionPreview
+        | Capability::ShellExecReadonly
+        | Capability::ShellExecConfirmed
+        | Capability::DesktopUiActionConfirmed
+        | Capability::DesktopInputFallbackConfirmed
+        | Capability::OfficeExcelPatchConfirmed
+        | Capability::OfficePowerPointPatchConfirmed
+        | Capability::FilePatchConfirmed
+        | Capability::FileCopyConfirmed
+        | Capability::FileArtifactCreateConfirmed
+        | Capability::FileDeleteConfirmed => false,
     }
 }
 
@@ -124,7 +148,30 @@ pub fn capability_name(cap: Capability) -> Option<&'static str> {
         Capability::ContainerInspect => "container.inspect",
         Capability::ContainerLogs => "container.logs",
         Capability::ScreenCaptureCurrent => "screen.capture.current",
-        Capability::ShellExecReadonly | Capability::ShellExecConfirmed => return None,
+        Capability::DesktopSessionInspect
+        | Capability::DesktopUiInspect
+        | Capability::OfficeDocumentInspect
+        | Capability::FileMetadataRead
+        | Capability::FileContentRead
+        | Capability::SpreadsheetFileInspect
+        | Capability::SpreadsheetMergePreview
+        | Capability::SpreadsheetWorkbookCreateConfirmed
+        | Capability::SpreadsheetFormulaWorkbookCreateConfirmed
+        | Capability::WordDocumentCreateConfirmed
+        | Capability::WebResearchFetch
+        | Capability::WebResearchSearch
+        | Capability::TerminalOutputRead
+        | Capability::AssistantActionPreview
+        | Capability::ShellExecReadonly
+        | Capability::ShellExecConfirmed
+        | Capability::DesktopUiActionConfirmed
+        | Capability::DesktopInputFallbackConfirmed
+        | Capability::OfficeExcelPatchConfirmed
+        | Capability::OfficePowerPointPatchConfirmed
+        | Capability::FilePatchConfirmed
+        | Capability::FileCopyConfirmed
+        | Capability::FileArtifactCreateConfirmed
+        | Capability::FileDeleteConfirmed => return None,
     })
 }
 
@@ -191,7 +238,30 @@ pub fn context_input_for(cap: Capability) -> Option<ReadContextInput> {
         // Need a container id; not auto-collectable from a question alone.
         Capability::ContainerInspect | Capability::ContainerLogs => return None,
         // Not reads.
-        Capability::ShellExecReadonly | Capability::ShellExecConfirmed => return None,
+        Capability::DesktopSessionInspect
+        | Capability::DesktopUiInspect
+        | Capability::OfficeDocumentInspect
+        | Capability::FileMetadataRead
+        | Capability::FileContentRead
+        | Capability::SpreadsheetFileInspect
+        | Capability::SpreadsheetMergePreview
+        | Capability::SpreadsheetWorkbookCreateConfirmed
+        | Capability::SpreadsheetFormulaWorkbookCreateConfirmed
+        | Capability::WordDocumentCreateConfirmed
+        | Capability::WebResearchFetch
+        | Capability::WebResearchSearch
+        | Capability::TerminalOutputRead
+        | Capability::AssistantActionPreview
+        | Capability::ShellExecReadonly
+        | Capability::ShellExecConfirmed
+        | Capability::DesktopUiActionConfirmed
+        | Capability::DesktopInputFallbackConfirmed
+        | Capability::OfficeExcelPatchConfirmed
+        | Capability::OfficePowerPointPatchConfirmed
+        | Capability::FilePatchConfirmed
+        | Capability::FileCopyConfirmed
+        | Capability::FileArtifactCreateConfirmed
+        | Capability::FileDeleteConfirmed => return None,
     };
     Some(ReadContextInput { kind })
 }

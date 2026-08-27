@@ -1,0 +1,1 @@
+{"type":"string","enum":["running","cancel_requested","succeeded","failed","cancelled","outcome_unknown"],"x-readme-ref-name":"BackgroundTaskStateDto"}

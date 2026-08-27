@@ -204,6 +204,7 @@ pub async fn handle_manager_terminal_start(
     let mut reader = pair.master.try_clone_reader()?;
     let session_sender = desk_session.session.clone();
     let terminal_connection_id = from_connection_id.to_owned();
+    crate::worker::agent::terminal_reference_store::reset_terminal(&terminal_connection_id);
 
     // Monitor task for process exit (using tokio::spawn for coroutine)
     let monitor_sender = desk_session.session.clone();
@@ -262,7 +263,16 @@ pub async fn handle_manager_terminal_start(
                         break;
                     }
                     let content = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let data = TerminalOutputData { content };
+                    let assistant_object_ref =
+                        crate::worker::agent::terminal_reference_store::append_and_issue(
+                            &terminal_connection_id,
+                            &content,
+                        )
+                        .ok();
+                    let data = TerminalOutputData {
+                        content,
+                        assistant_object_ref,
+                    };
                     let model = SignalingModel::new_request(
                         SignalingType::TerminalOutputProduced,
                         Some(terminal_connection_id.to_owned()),
@@ -289,6 +299,7 @@ pub async fn handle_manager_terminal_start(
         // Send close message
         let data = TerminalOutputData {
             content: "\r\n\x1b[33m[Process exited]\x1b[0m\r\n".to_string(),
+            assistant_object_ref: None,
         };
 
         let model = SignalingModel::new_request(
@@ -304,6 +315,7 @@ pub async fn handle_manager_terminal_start(
                 .sender
                 .send(DeskSessionMessage::Text(ByteString::from(text)));
         }
+        crate::worker::agent::terminal_reference_store::close_terminal(&terminal_connection_id);
     });
 
     let writer = pair.master.take_writer()?;

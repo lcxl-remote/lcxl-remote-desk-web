@@ -126,6 +126,13 @@ pub trait TurnSink {
         let _ = (call_id, ok, output, background_task_id);
     }
 
+    /// The planning turn durably created a permission request and paused before
+    /// any requested tool dispatch. The UI fetches full details from session
+    /// state and performs a separate trusted decision action.
+    fn on_permission_requested(&mut self, request_id: &str, item_count: usize) {
+        let _ = (request_id, item_count);
+    }
+
     /// The turn committed a final natural-language answer.
     fn on_answer_committed(&mut self, text: &str) {
         let _ = text;
@@ -333,12 +340,7 @@ pub struct ToolRunOutput {
 /// result and to record the unknown-outcome execution state. The manager fills it
 /// from the durable work item; a runtime without durable work (Direct) uses a
 /// process-local `work_id` sentinel and synthetic ids.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExecIdentity {
-    pub work_id: i64,
-    pub execution_id: String,
-    pub exec_request_id: String,
-}
+pub type ExecIdentity = crate::session::ActionIdentity;
 
 /// The terminal outcome of a mutating tool call's approval + execution. The seam
 /// owns the whole approval → dispatch → result wait (Direct: a local oneshot
@@ -443,6 +445,19 @@ pub trait ToolSeam {
     /// already validated that the call names an exposed read tool.
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError>;
 
+    /// Produce source metadata for one successful read result before it is
+    /// persisted or considered for model export. Default `None` keeps existing
+    /// non-Assistant surfaces unchanged; an information-flow-enforced surface
+    /// must return a validated envelope with no implicit external destination.
+    fn read_data_envelope(
+        &self,
+        call: &ToolCall,
+        output: &ToolRunOutput,
+    ) -> Result<Option<desk_agent_protocol::data_lineage::DataEnvelope>, AgentError> {
+        let _ = (call, output);
+        Ok(None)
+    }
+
     /// Approve and execute a mutating tool call, returning its terminal
     /// [`ExecOutcome`]. The loop has already validated the call names an exposed
     /// mutating tool and that no prior execution outcome is still unknown. A
@@ -458,6 +473,19 @@ pub trait ToolSeam {
         Ok(ExecOutcome::Rejected {
             reason: Some("mutating execution is not supported by this runtime".into()),
         })
+    }
+
+    /// Label a successful mutating result before it is persisted or projected
+    /// into the next model request. Mutation authorization governs the effect;
+    /// it does not implicitly authorize exporting the result bytes. Enforced
+    /// runtimes therefore return a validated envelope with no implicit sink.
+    fn mutating_data_envelope(
+        &self,
+        call: &ToolCall,
+        output: &ToolRunOutput,
+    ) -> Result<Option<desk_agent_protocol::data_lineage::DataEnvelope>, AgentError> {
+        let _ = (call, output);
+        Ok(None)
     }
 
     /// Acknowledge that the foreground path has durably saved the result of a
@@ -481,10 +509,10 @@ pub trait ToolSeam {
     /// so nothing is ever left running to wait on).
     async fn wait_for_task(
         &self,
-        exec_request_id: &str,
+        action_request_id: &str,
         execution_id: &str,
     ) -> Result<WaitOutcome, AgentError> {
-        let _ = (exec_request_id, execution_id);
+        let _ = (action_request_id, execution_id);
         Err(AgentError {
             kind: AgentErrorKind::UnsupportedCapability,
             message: "waiting for background tasks is not supported by this runtime".into(),
@@ -556,6 +584,54 @@ pub trait SessionSeam {
     /// (the lease was taken over by another owner) or a version conflict fails the
     /// save — the loop ends the turn rather than overwriting the new owner's work.
     async fn save(&self, session: &mut PersistedAgentSession) -> Result<(), AgentError>;
+
+    /// Persist a task-status projection and its append-only run event. Durable
+    /// runtimes override this to commit both atomically; simple in-memory seams
+    /// may use the default session-only persistence.
+    async fn save_task_status_update(
+        &self,
+        session: &mut PersistedAgentSession,
+        event: &crate::dynamic_run::TaskStatusUpdatedEvent,
+    ) -> Result<(), AgentError> {
+        let _ = event;
+        self.save(session).await
+    }
+
+    /// Persist a normalized permission request and its append-only event in one
+    /// transaction. The default is suitable only for in-memory test seams;
+    /// durable runtimes override it so UI visibility cannot diverge from audit.
+    async fn save_permission_request(
+        &self,
+        session: &mut PersistedAgentSession,
+        event: &crate::dynamic_run::PermissionRequestedEvent,
+    ) -> Result<(), AgentError> {
+        let _ = event;
+        self.save(session).await
+    }
+
+    /// Return the latest durable user-input revision for the run. Runtimes that
+    /// do not support concurrent durable follow-ups return `None`.
+    async fn latest_input_revision(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<u64>, AgentError> {
+        let _ = conversation_id;
+        Ok(None)
+    }
+
+    /// Settle an active read-only turn that was superseded by newer durable
+    /// input. Durable runtimes merge any completed read results, close unstarted
+    /// calls, preserve the newer user messages, and append a Superseded event in
+    /// one fenced transaction. Returns false if the revision did not advance or
+    /// the stale owner no longer owns the lease.
+    async fn settle_superseded(
+        &self,
+        stale_session: &PersistedAgentSession,
+        now: &str,
+    ) -> Result<bool, AgentError> {
+        let _ = (stale_session, now);
+        Ok(false)
+    }
 
     /// Renew the lease for an active turn: extend its deadline if `lease_token` is
     /// still the current owner's and the turn is still active. It **never** bumps

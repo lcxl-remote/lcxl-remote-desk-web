@@ -241,6 +241,21 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
         self.sink.emit(event);
     }
 
+    fn on_permission_requested(&mut self, request_id: &str, item_count: usize) {
+        if self.terminated {
+            return;
+        }
+        let seq = self.next_seq();
+        self.sink.emit(DiagnoseEvent::permission_required(
+            &self.request_id,
+            seq,
+            request_id,
+            u32::try_from(item_count).unwrap_or(u32::MAX),
+        ));
+        self.uncommitted_partial = false;
+        self.terminated = true;
+    }
+
     fn on_answer_committed(&mut self, text: &str) {
         if self.terminated {
             return;
@@ -296,7 +311,9 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
 /// details that could be fed back to a model.
 pub fn terminal_error_for(outcome: &LoopOutcome) -> Option<AgentError> {
     let err = match outcome {
-        LoopOutcome::Answered(_) => return None,
+        LoopOutcome::Answered(_)
+        | LoopOutcome::Superseded { .. }
+        | LoopOutcome::PermissionRequested { .. } => return None,
         LoopOutcome::ContentRejected(_) => crate::content_safety::content_blocked_error(),
         LoopOutcome::ContentSafetyUnavailable(error) => error.clone(),
         LoopOutcome::Truncated => AgentError {

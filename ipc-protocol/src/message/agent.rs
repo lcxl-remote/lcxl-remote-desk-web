@@ -18,7 +18,56 @@ use super::{ServiceToWorker, WorkerToService};
 pub struct AgentRequestPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
-    pub envelope: desk_agent_protocol::AgentEnvelope,
+    pub envelope: desk_agent_protocol::ReadonlyAgentEnvelope,
+}
+
+/// A sealed Computer Use mutation. It is deliberately separate from
+/// [`AgentRequestPayload`], whose envelope can only represent read operations.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ComputerActionPlanPayload {
+    pub request_id: String,
+    pub connection_id: Option<String>,
+    pub plan: desk_agent_protocol::computer_use::SealedComputerActionPlan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ComputerActionCancelPayload {
+    pub request_id: String,
+    pub connection_id: Option<String>,
+    pub cancel: desk_agent_protocol::computer_use::ComputerActionCancel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ComputerActionStateQueryPayload {
+    pub request_id: String,
+    pub connection_id: Option<String>,
+    pub query: desk_agent_protocol::computer_use::ComputerActionStateQuery,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ComputerActionStartedPayload {
+    pub request_id: String,
+    pub connection_id: Option<String>,
+    pub started: desk_agent_protocol::computer_use::ComputerActionStarted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ComputerActionCompletedPayload {
+    pub request_id: String,
+    pub connection_id: Option<String>,
+    pub completed: desk_agent_protocol::computer_use::ComputerActionCompleted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ComputerActionStateReportedPayload {
+    pub request_id: String,
+    pub connection_id: Option<String>,
+    pub state: desk_agent_protocol::computer_use::ComputerActionStateReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ComputerUseReadinessPayload {
+    pub readiness: desk_agent_protocol::computer_use::ComputerUseReadiness,
 }
 
 /// Payload for [`WorkerToService::AgentCapabilityCompleted`]. Reuses

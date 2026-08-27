@@ -48,6 +48,7 @@ export type DiagnoseEventKind =
     | 'turn_started'
     | 'tool_started'
     | 'tool_finished'
+    | 'permission_required'
     | 'answer';
 
 export type AgentError = {
@@ -94,6 +95,10 @@ export type DiagnoseEvent = {
     tool_output?: string | null;
     /** `tool_finished`: stable id when execution continues in the background. */
     background_task_id?: string | null;
+    /** `permission_required`: durable request awaiting the owner's decision. */
+    permission_request_id?: string | null;
+    /** `permission_required`: number of normalized items in the request. */
+    permission_request_item_count?: number | null;
     /** `answer`: the agentic turn's final natural-language answer. */
     answer?: string | null;
     /** `final` / `answer`: machine-readable AI marking for the content frame. */

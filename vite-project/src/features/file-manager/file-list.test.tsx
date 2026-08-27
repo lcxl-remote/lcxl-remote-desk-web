@@ -12,6 +12,27 @@ const h = vi.hoisted(() => ({
     querySystemInfo: vi.fn().mockResolvedValue(null),
     closeConnection: vi.fn(),
     prepareTransfers: vi.fn(),
+    assistantHook: vi.fn(),
+}))
+vi.mock("@/services/hooks/connectionController/useListConnections", () => ({
+    useListConnections: () => ({
+        data: [{
+            connection_id: "connection-1",
+            version_info: { client_id: "stable-device-1" },
+        }],
+    }),
+}))
+vi.mock("./use-device-assistant-file-context", () => ({
+    useDeviceAssistantFileContext: (...args: unknown[]) => {
+        h.assistantHook(...args)
+        return {
+            isConnected: true,
+            pendingPath: null,
+            lastAddedPath: null,
+            error: null,
+            attach: vi.fn(),
+        }
+    },
 }))
 vi.mock("./use-file-transfer", async (importOriginal) => ({
     // The real module is kept for the error helpers the page imports alongside
@@ -68,6 +89,7 @@ describe("FileList manual refresh", () => {
         act(() => initial.resolve({ file_info_list: [], total_count: 0 }))
         const refreshButton = await screen.findByRole("button", { name: "Refresh" })
         await waitFor(() => expect(refreshButton).toBeEnabled())
+        expect(h.assistantHook).toHaveBeenCalledWith("connection-1", "stable-device-1")
 
         fireEvent.click(refreshButton)
         fireEvent.click(refreshButton)

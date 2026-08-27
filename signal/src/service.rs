@@ -89,6 +89,9 @@ impl Drop for ConnectionDeviceGuard {
 struct CentralPendingConnectionGuard {
     pending: Arc<crate::agent_exec::SignalAgentExecPending>,
     collect_pending: Arc<crate::collect_pending::CollectPendingStore>,
+    computer_use_readiness: Arc<crate::computer_use_readiness::ComputerUseReadinessCache>,
+    remote_tool_pending: Arc<crate::remote_tool_edge::SignalRemoteToolPendingStore>,
+    computer_action_pending: Arc<crate::remote_tool_edge::SignalComputerActionPendingStore>,
     connection_map: web::Data<SharedConnectionMap>,
     connection_id: String,
 }
@@ -96,6 +99,12 @@ struct CentralPendingConnectionGuard {
 impl Drop for CentralPendingConnectionGuard {
     fn drop(&mut self) {
         self.pending.drain_for_connection(&self.connection_id);
+        self.computer_use_readiness
+            .remove_connection(&self.connection_id);
+        self.remote_tool_pending
+            .drain_for_connection(&self.connection_id);
+        self.computer_action_pending
+            .drain_for_connection(&self.connection_id);
         let affected = self
             .collect_pending
             .drain_for_connection(&self.connection_id);
@@ -224,9 +233,14 @@ pub async fn handle_signaling(
     // observer that feeds inbound evidence responses back into the diagnosis. Both
     // share the process-global pending store (the portable signal is single-node).
     let collect_pending = crate::diagnose_orchestrator::global_pending_store();
+    let computer_use_readiness =
+        crate::computer_use_readiness::global_computer_use_readiness_cache();
     let _central_pending_guard = CentralPendingConnectionGuard {
         pending: crate::agent_exec::global_agent_exec_pending(),
         collect_pending: collect_pending.clone(),
+        computer_use_readiness: computer_use_readiness.clone(),
+        remote_tool_pending: crate::remote_tool_edge::global_remote_tool_pending(),
+        computer_action_pending: crate::remote_tool_edge::global_computer_action_pending(),
         connection_map: connection_map.clone(),
         connection_id: connection_id.clone(),
     };
@@ -246,6 +260,14 @@ pub async fn handle_signaling(
     let exec_state_reply_observer =
         std::sync::Arc::new(crate::agent_exec::SignalExecStateReplyObserver::new(
             crate::agent_exec::global_agent_exec_pending(),
+        ));
+    let remote_tool_observer =
+        std::sync::Arc::new(crate::remote_tool_edge::SignalRemoteToolObserver::new(
+            crate::remote_tool_edge::global_remote_tool_pending(),
+        ));
+    let computer_action_observer =
+        std::sync::Arc::new(crate::remote_tool_edge::SignalComputerActionObserver::new(
+            crate::remote_tool_edge::global_computer_action_pending(),
         ));
     // The single-account owner is stamped with full control; a code-session
     // (anonymous redeemer) is stamped with the redeemed code's ceiling via the
@@ -284,8 +306,15 @@ pub async fn handle_signaling(
     .with_control_authorizer(control_authorizer)
     .with_request_remote_authorizer(request_remote_authorizer)
     .with_collect_observer(collect_observer)
+    .with_computer_use_readiness_observer(std::sync::Arc::new(
+        crate::computer_use_readiness::SignalComputerUseReadinessObserver::new(
+            computer_use_readiness,
+        ),
+    ))
     .with_edge_exec_observer(edge_exec_observer)
     .with_exec_state_reply_observer(exec_state_reply_observer)
+    .with_remote_tool_observer(remote_tool_observer)
+    .with_computer_action_observer(computer_action_observer)
     .with_remote_access_admission_authorizer(remote_access_control.clone())
     .with_host_remote_access_controller(remote_access_control);
 

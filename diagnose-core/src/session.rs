@@ -22,6 +22,11 @@ use desk_agent_protocol::AgentScope;
 use serde::{Deserialize, Serialize};
 
 use crate::chat::{ChatRole, TokenUsage};
+use crate::context_attachment::{
+    AttachmentRuntimeBinding, AttachmentStaleReason, AttachmentState, ContextAttachment,
+    ContextAttachmentError, ContextAttachmentEvent, revalidate_attachments,
+    validate_attachment_set, validate_attachment_subject,
+};
 use crate::model_context::{ContextNotice, MAX_CONTEXT_NOTICES, ModelContextState};
 use crate::replay::{ReplayDisposition, ReplayUnavailableReason};
 
@@ -30,6 +35,143 @@ pub const CONVERSATION_SCHEMA_VERSION: u16 = 1;
 pub const MAX_REPLAY_ENVELOPE_BYTES: usize = 256 * 1024;
 pub const MAX_SESSION_REPLAY_BYTES: usize = 2 * 1024 * 1024;
 
+/// Durable mutation families sharing the same approval, dispatch-generation and
+/// completion semantics. This discriminator is persisted with every action
+/// identity so a completion can never be routed through an exec-only field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkKind {
+    #[default]
+    AgentExec,
+    ComputerAction,
+    OfficePatch,
+    FilePatch,
+    CapabilityProvider,
+}
+
+impl WorkKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AgentExec => "agent_exec",
+            Self::ComputerAction => "computer_action",
+            Self::OfficePatch => "office_patch",
+            Self::FilePatch => "file_patch",
+            Self::CapabilityProvider => "capability_provider",
+        }
+    }
+
+    pub fn from_persisted(value: &str) -> Option<Self> {
+        match value {
+            "agent_exec" => Some(Self::AgentExec),
+            "computer_action" => Some(Self::ComputerAction),
+            "office_patch" => Some(Self::OfficePatch),
+            "file_patch" => Some(Self::FilePatch),
+            "capability_provider" => Some(Self::CapabilityProvider),
+            _ => None,
+        }
+    }
+}
+
+/// Generic identity of one dispatched durable action.
+///
+/// New JSON always carries `action_request_id` and `work_kind`. For `agent_exec`
+/// it additionally writes the legacy `exec_request_id`, allowing an older manager
+/// to read a session written during a rolling deployment. New readers accept the
+/// old exec-only shape and upgrade it in memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionIdentity {
+    pub work_id: i64,
+    pub action_request_id: String,
+    pub execution_id: String,
+    pub kind: WorkKind,
+}
+
+impl ActionIdentity {
+    pub fn new(
+        work_id: i64,
+        action_request_id: impl Into<String>,
+        execution_id: impl Into<String>,
+        kind: WorkKind,
+    ) -> Self {
+        Self {
+            work_id,
+            action_request_id: action_request_id.into(),
+            execution_id: execution_id.into(),
+            kind,
+        }
+    }
+
+    pub fn agent_exec(
+        work_id: i64,
+        exec_request_id: impl Into<String>,
+        execution_id: impl Into<String>,
+    ) -> Self {
+        Self::new(work_id, exec_request_id, execution_id, WorkKind::AgentExec)
+    }
+}
+
+#[derive(Serialize)]
+struct ActionIdentityRef<'a> {
+    work_id: i64,
+    action_request_id: &'a str,
+    execution_id: &'a str,
+    work_kind: WorkKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exec_request_id: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct ActionIdentityOwned {
+    work_id: i64,
+    #[serde(default)]
+    action_request_id: Option<String>,
+    execution_id: String,
+    #[serde(default)]
+    work_kind: WorkKind,
+    #[serde(default)]
+    exec_request_id: Option<String>,
+}
+
+impl Serialize for ActionIdentity {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ActionIdentityRef {
+            work_id: self.work_id,
+            action_request_id: &self.action_request_id,
+            execution_id: &self.execution_id,
+            work_kind: self.kind,
+            exec_request_id: (self.kind == WorkKind::AgentExec)
+                .then_some(self.action_request_id.as_str()),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ActionIdentity {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = ActionIdentityOwned::deserialize(deserializer)?;
+        let action_request_id = match (wire.action_request_id, wire.exec_request_id) {
+            (Some(action), Some(exec))
+                if wire.work_kind == WorkKind::AgentExec && action != exec =>
+            {
+                return Err(serde::de::Error::custom(
+                    "agent_exec action_request_id does not match exec_request_id",
+                ));
+            }
+            (Some(action), _) => action,
+            (None, Some(exec)) => exec,
+            (None, None) => {
+                return Err(serde::de::Error::missing_field("action_request_id"));
+            }
+        };
+        Ok(Self {
+            work_id: wire.work_id,
+            action_request_id,
+            execution_id: wire.execution_id,
+            kind: wire.work_kind,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub enum SessionDecodeError {
     Json(serde_json::Error),
@@ -37,6 +179,9 @@ pub enum SessionDecodeError {
     InvalidModelContext(String),
     MissingReplayDisposition(String),
     PersistedContextSummary(String),
+    InvalidContextAttachment(String),
+    InvalidDataEnvelope { message_id: String, error: String },
+    InvalidDynamicRun(String),
 }
 
 impl std::fmt::Display for SessionDecodeError {
@@ -57,6 +202,15 @@ impl std::fmt::Display for SessionDecodeError {
                 f,
                 "synthetic context summary {message_id} must not be persisted in conversation"
             ),
+            Self::InvalidContextAttachment(error) => {
+                write!(f, "invalid context attachment: {error}")
+            }
+            Self::InvalidDataEnvelope { message_id, error } => {
+                write!(f, "invalid DataEnvelope on message {message_id}: {error}")
+            }
+            Self::InvalidDynamicRun(error) => {
+                write!(f, "invalid dynamic run state: {error}")
+            }
         }
     }
 }
@@ -127,8 +281,8 @@ impl TurnState {
 ///
 /// Only the mutating path drives the non-`None` variants; a read-only turn leaves
 /// this at [`ExecutionState::None`]. The `work_id` / `execution_id` /
-/// `exec_request_id` fields identify the durable work item and the immutable
-/// dispatch generation used for late-result fencing.
+/// [`ActionIdentity`] identifies the durable work item, its typed correlation and
+/// the immutable dispatch generation used for late-result fencing.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ExecutionState {
@@ -137,18 +291,16 @@ pub enum ExecutionState {
     None,
     /// A mutating tool was dispatched and its real result is awaited.
     Executing {
-        work_id: i64,
-        execution_id: String,
-        exec_request_id: String,
+        #[serde(flatten)]
+        action: ActionIdentity,
     },
     /// The execution may have run but its outcome is unknown (cancel / timeout /
     /// crash after dispatch). `placeholder_message_id` anchors the placeholder
     /// tool result that keeps the conversation well-formed; a late real result
     /// replaces it in place (CAS by id) rather than appending.
     OutcomeUnknown {
-        work_id: i64,
-        execution_id: String,
-        exec_request_id: String,
+        #[serde(flatten)]
+        action: ActionIdentity,
         placeholder_message_id: String,
         since: String,
     },
@@ -184,19 +336,10 @@ impl ExecutionState {
     /// [`OutcomeUnknown`]: ExecutionState::OutcomeUnknown
     /// [`Interrupted`]: ExecutionState::Interrupted
     /// [`None`]: ExecutionState::None
-    pub fn waitable_task(&self) -> Option<(i64, &str, &str)> {
+    pub fn waitable_task(&self) -> Option<&ActionIdentity> {
         match self {
-            ExecutionState::Executing {
-                work_id,
-                execution_id,
-                exec_request_id,
-            }
-            | ExecutionState::OutcomeUnknown {
-                work_id,
-                execution_id,
-                exec_request_id,
-                ..
-            } => Some((*work_id, execution_id, exec_request_id)),
+            ExecutionState::Executing { action }
+            | ExecutionState::OutcomeUnknown { action, .. } => Some(action),
             _ => None,
         }
     }
@@ -222,7 +365,10 @@ pub enum TriggerOrigin {
     #[default]
     User,
     /// A manager-fired automation turn reacting to a completed background command.
+    /// Retained only to deserialize sessions written before generic work origins.
     ExecCompletion,
+    /// A manager-fired automation turn reacting to a completed durable action.
+    WorkCompletion { kind: WorkKind },
 }
 
 /// User-facing surface that owns an agent session.
@@ -237,6 +383,7 @@ pub enum AgentSessionSurface {
     Unknown,
     Diagnose,
     TerminalCopilot,
+    DeviceAssistant,
 }
 
 impl TriggerOrigin {
@@ -263,8 +410,10 @@ impl TriggerOrigin {
 /// entry is stale. `resolution_org_id` pins the org context for re-evaluating
 /// authorization off-connection when the executor claims the turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingAutoTrigger {
+pub struct PendingWorkTrigger {
     pub work_id: i64,
+    #[serde(default)]
+    pub kind: WorkKind,
     pub execution_id: String,
     pub tool_call_id: String,
     pub event_id: String,
@@ -276,6 +425,10 @@ pub struct PendingAutoTrigger {
     /// with pending work without scanning every session's JSON.
     pub since: String,
 }
+
+/// Source compatibility for callers while the persisted concept migrates from an
+/// exec-only automatic trigger to a generic work-completion trigger.
+pub type PendingAutoTrigger = PendingWorkTrigger;
 
 /// One agent conversation + session, in the shape the manager persists (and the
 /// Direct runtime keeps in memory).
@@ -300,6 +453,10 @@ pub struct PersistedAgentSession {
     pub model_context_state: ModelContextState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_notices: Vec<ContextNotice>,
+    /// User-selected context metadata and opaque ContentRefs. Raw file,
+    /// terminal, Office, UI and screen bytes never enter session JSON.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_attachments: Vec<ContextAttachment>,
 
     // ---- Persistent security subject (validated each follow-up; never rebinds) ----
     pub actor_id: String,
@@ -351,6 +508,30 @@ pub struct PersistedAgentSession {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_auto_triggers: Vec<PendingAutoTrigger>,
 
+    // ---- Dynamic run input ledger projection (Stage 2) ----
+    /// Latest durably accepted user-input sequence for this run.
+    #[serde(default)]
+    pub latest_input_seq: u64,
+    /// Revision fence advanced whenever a user follow-up is durably committed.
+    #[serde(default)]
+    pub input_revision: u64,
+    /// Highest user-input sequence included in a successfully persisted model
+    /// result. It may never exceed `latest_input_seq`.
+    #[serde(default)]
+    pub handled_input_seq: u64,
+    /// Highest append-only run event sequence allocated for this run.
+    #[serde(default)]
+    pub last_event_seq: u64,
+    /// Model-maintained, user-correctable UX projection. This is intentionally
+    /// absent from authorization and execution-state decisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_status_projection: Option<crate::dynamic_run::TaskStatusProjection>,
+    /// Bounded user-facing permission requests proposed by the model. These are
+    /// not grants and are never consulted by tool dispatch. A newer user input
+    /// moves unresolved requests to NeedsRevalidation before it is committed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_requests: Vec<crate::dynamic_run::PermissionRequest>,
+
     /// Lease fencing token. Rotated on every claim (and on lease takeover during
     /// recovery), it identifies the *current* turn owner. A [`SessionSeam::save`]
     /// CAS matches on this token **and** the `version`: the version blocks a stale
@@ -386,6 +567,10 @@ pub enum TurnClaimError {
 pub enum SubjectMismatch {
     Actor,
     Device,
+    Surface,
+    /// A surface restricted to the personal device owner was claimed from an
+    /// organization context or by a non-owner actor.
+    PersonalContext,
 }
 
 impl PersistedAgentSession {
@@ -430,10 +615,14 @@ impl PersistedAgentSession {
         }
     }
 
-    /// Apply storage-only replay bounds before encoding durable state.
-    pub fn encode_json_for_storage(&mut self) -> Result<String, serde_json::Error> {
-        self.enforce_replay_storage_limits();
-        serde_json::to_string(self)
+    /// Build a non-destructive durable projection. Provider image data is kept
+    /// in the live in-memory turn for the next model call, but never enters the
+    /// database/SQLite JSON at an intermediate save or crash boundary.
+    pub fn encode_json_for_storage(&self) -> Result<String, serde_json::Error> {
+        let mut projection = self.clone();
+        projection.enforce_replay_storage_limits();
+        crate::image_input::strip_session_images(&mut projection.conversation);
+        serde_json::to_string(&projection)
     }
 
     /// Decode the persisted envelope with an explicit legacy-v0 upgrade. Unknown
@@ -448,6 +637,17 @@ impl PersistedAgentSession {
             return Err(SessionDecodeError::UnsupportedVersion(version));
         }
         let mut session: Self = serde_json::from_value(value)?;
+        validate_attachment_set(&session.context_attachments)
+            .map_err(|error| SessionDecodeError::InvalidContextAttachment(error.to_string()))?;
+        for attachment in &session.context_attachments {
+            validate_attachment_subject(
+                attachment,
+                &session.actor_id,
+                &session.device_id,
+                session.surface,
+            )
+            .map_err(|error| SessionDecodeError::InvalidContextAttachment(error.to_string()))?;
+        }
         if let Some(message) = session
             .conversation
             .iter()
@@ -456,6 +656,52 @@ impl PersistedAgentSession {
             return Err(SessionDecodeError::PersistedContextSummary(
                 message.message_id.clone(),
             ));
+        }
+        for message in &session.conversation {
+            if let Some(envelope) = &message.data_envelope {
+                envelope
+                    .validate()
+                    .map_err(|error| SessionDecodeError::InvalidDataEnvelope {
+                        message_id: message.message_id.clone(),
+                        error: error.to_string(),
+                    })?;
+            }
+        }
+        if session.handled_input_seq > session.latest_input_seq {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "handled_input_seq exceeds latest_input_seq".into(),
+            ));
+        }
+        if session.input_revision < session.latest_input_seq {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "input_revision is behind latest_input_seq".into(),
+            ));
+        }
+        if let Some(projection) = &session.task_status_projection {
+            projection
+                .validate()
+                .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.to_string()))?;
+        }
+        if session.permission_requests.len() > crate::dynamic_run::MAX_PERMISSION_REQUESTS {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "too many permission requests".into(),
+            ));
+        }
+        let mut permission_ids = std::collections::BTreeSet::new();
+        for request in &session.permission_requests {
+            request
+                .validate()
+                .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.to_string()))?;
+            if request.input_revision > session.input_revision {
+                return Err(SessionDecodeError::InvalidDynamicRun(
+                    "permission request is ahead of input revision".into(),
+                ));
+            }
+            if !permission_ids.insert(request.request_id.as_str()) {
+                return Err(SessionDecodeError::InvalidDynamicRun(
+                    "duplicate permission request id".into(),
+                ));
+            }
         }
         if version == 0 {
             session.conversation_schema_version = CONVERSATION_SCHEMA_VERSION;
@@ -505,6 +751,7 @@ impl PersistedAgentSession {
             conversation: Vec::new(),
             model_context_state: ModelContextState::default(),
             context_notices: Vec::new(),
+            context_attachments: Vec::new(),
             actor_id: actor_id.into(),
             device_id: device_id.into(),
             policy_revision,
@@ -519,6 +766,12 @@ impl PersistedAgentSession {
             turn_state: TurnState::Idle,
             execution_state: ExecutionState::None,
             pending_auto_triggers: Vec::new(),
+            latest_input_seq: 0,
+            input_revision: 0,
+            handled_input_seq: 0,
+            last_event_seq: 0,
+            task_status_projection: None,
+            permission_requests: Vec::new(),
             lease_token: 0,
             current_turn_steps: 0,
             current_turn_tokens: TokenUsage::default(),
@@ -545,6 +798,39 @@ impl PersistedAgentSession {
         }
     }
 
+    /// Fence unresolved permission UI against a newly accepted user revision.
+    /// This mutates only request state; it never creates, revokes, or matches a
+    /// grant. The durable append transaction persists it together with the new
+    /// user message so a stale panel can never remain approvable after ACK.
+    pub fn require_permission_revalidation(&mut self, next_input_revision: u64) -> usize {
+        self.permission_requests
+            .iter_mut()
+            .map(|request| usize::from(request.require_revalidation(next_input_revision)))
+            .sum()
+    }
+
+    pub fn add_permission_request(
+        &mut self,
+        request: crate::dynamic_run::PermissionRequest,
+    ) -> Result<(), crate::dynamic_run::DynamicRunContractError> {
+        request.validate()?;
+        if request.input_revision != self.input_revision {
+            return Err(crate::dynamic_run::DynamicRunContractError::InvalidRevision);
+        }
+        if self
+            .permission_requests
+            .iter()
+            .any(|existing| existing.request_id == request.request_id)
+        {
+            return Err(crate::dynamic_run::DynamicRunContractError::PermissionEventMismatch);
+        }
+        if self.permission_requests.len() >= crate::dynamic_run::MAX_PERMISSION_REQUESTS {
+            return Err(crate::dynamic_run::DynamicRunContractError::InvalidPermissionItemCount);
+        }
+        self.permission_requests.push(request);
+        Ok(())
+    }
+
     /// Add a deterministic per-turn context notice without exposing omitted
     /// content. The bounded list is transcript metadata, not model history.
     pub fn add_context_notice(&mut self, notice: ContextNotice) -> bool {
@@ -559,6 +845,130 @@ impl PersistedAgentSession {
         true
     }
 
+    /// Idempotently attach immutable context metadata. Reusing a client request
+    /// id with different bytes is rejected; refreshing must use a new request and
+    /// attachment identity.
+    pub fn attach_context(
+        &mut self,
+        attachment: ContextAttachment,
+    ) -> Result<bool, ContextAttachmentError> {
+        validate_attachment_subject(&attachment, &self.actor_id, &self.device_id, self.surface)?;
+        if let Some(existing) = self
+            .context_attachments
+            .iter()
+            .find(|existing| existing.client_request_id == attachment.client_request_id)
+        {
+            if existing == &attachment {
+                return Ok(false);
+            }
+            return Err(ContextAttachmentError::DuplicateClientRequestId);
+        }
+        let mut projected = self.context_attachments.clone();
+        projected.push(attachment.clone());
+        validate_attachment_set(&projected)?;
+        self.context_attachments.push(attachment);
+        Ok(true)
+    }
+
+    pub fn detach_context(&mut self, attachment_id: &str) -> bool {
+        let Some(attachment) = self
+            .context_attachments
+            .iter_mut()
+            .find(|attachment| attachment.attachment_id == attachment_id)
+        else {
+            return false;
+        };
+        if matches!(
+            attachment.state,
+            AttachmentState::Stale {
+                reason: AttachmentStaleReason::Detached
+            }
+        ) {
+            return false;
+        }
+        attachment.mark_stale(AttachmentStaleReason::Detached);
+        true
+    }
+
+    /// Atomically stale one immutable live ref and attach its replacement. A
+    /// refresh never mutates/rebinds the old opaque token in place.
+    pub fn refresh_context(
+        &mut self,
+        stale_attachment_id: &str,
+        reason: AttachmentStaleReason,
+        replacement: ContextAttachment,
+    ) -> Result<bool, ContextAttachmentError> {
+        validate_attachment_subject(&replacement, &self.actor_id, &self.device_id, self.surface)?;
+        let Some(stale_index) = self
+            .context_attachments
+            .iter()
+            .position(|attachment| attachment.attachment_id == stale_attachment_id)
+        else {
+            return Err(ContextAttachmentError::AttachmentNotFound);
+        };
+        let stale = &self.context_attachments[stale_index];
+        if replacement.attachment_id == stale.attachment_id
+            || replacement.client_request_id == stale.client_request_id
+        {
+            return Err(ContextAttachmentError::RefreshIdentityReused);
+        }
+        if let Some(existing) = self
+            .context_attachments
+            .iter()
+            .find(|attachment| attachment.client_request_id == replacement.client_request_id)
+        {
+            if existing == &replacement
+                && matches!(
+                    self.context_attachments[stale_index].state,
+                    crate::context_attachment::AttachmentState::Stale { .. }
+                )
+            {
+                return Ok(false);
+            }
+            return Err(ContextAttachmentError::DuplicateClientRequestId);
+        }
+        if self
+            .context_attachments
+            .iter()
+            .any(|attachment| attachment.attachment_id == replacement.attachment_id)
+        {
+            return Err(ContextAttachmentError::DuplicateAttachmentId);
+        }
+
+        let mut projected = self.context_attachments.clone();
+        projected[stale_index].mark_stale(reason);
+        projected.push(replacement);
+        validate_attachment_set(&projected)?;
+        self.context_attachments = projected;
+        Ok(true)
+    }
+
+    pub fn active_context(&self, now_unix_ms: u64) -> Vec<&ContextAttachment> {
+        self.context_attachments
+            .iter()
+            .filter(|attachment| attachment.is_active_at(now_unix_ms))
+            .collect()
+    }
+
+    pub fn revalidate_context(
+        &mut self,
+        now_unix_ms: u64,
+        bindings: &[AttachmentRuntimeBinding],
+    ) -> Vec<ContextAttachmentEvent> {
+        revalidate_attachments(&mut self.context_attachments, now_unix_ms, bindings)
+    }
+
+    pub fn mark_context_stale(&mut self, reason: AttachmentStaleReason) {
+        for attachment in &mut self.context_attachments {
+            if matches!(
+                attachment.state,
+                crate::context_attachment::AttachmentState::Active
+            ) {
+                attachment.mark_stale(reason);
+            }
+        }
+    }
+
     /// Validate that a follow-up turn comes from the same subject. The connection
     /// id is **not** part of the subject (a reconnect must be able to continue).
     pub fn check_subject(&self, actor_id: &str, device_id: &str) -> Result<(), SubjectMismatch> {
@@ -567,6 +977,24 @@ impl PersistedAgentSession {
         }
         if self.device_id != device_id {
             return Err(SubjectMismatch::Device);
+        }
+        Ok(())
+    }
+
+    /// Enforce conversation-domain separation before legacy metadata adoption.
+    /// A legacy `Unknown` row may remain visible/adoptable from the historical
+    /// Diagnose/TerminalCopilot surfaces, but it can never be upgraded into a
+    /// mutation-capable DeviceAssistant conversation.
+    pub fn check_surface(&self, requested: AgentSessionSurface) -> Result<(), SubjectMismatch> {
+        if self.surface == AgentSessionSurface::Unknown {
+            return if requested == AgentSessionSurface::DeviceAssistant {
+                Err(SubjectMismatch::Surface)
+            } else {
+                Ok(())
+            };
+        }
+        if self.surface != requested {
+            return Err(SubjectMismatch::Surface);
         }
         Ok(())
     }
@@ -657,9 +1085,10 @@ impl PersistedAgentSession {
         {
             protection.protect_message(placeholder_message_id.clone());
         }
-        if let Some((_, _, exec_request_id)) = self.execution_state.waitable_task() {
+        if let Some(action) = self.execution_state.waitable_task() {
             for message in &self.conversation {
-                if message.background_task_id.as_deref() == Some(exec_request_id) {
+                if message.background_task_id.as_deref() == Some(action.action_request_id.as_str())
+                {
                     protection.protect_message(message.message_id.clone());
                     if let Some(tool_call_id) = &message.tool_call_id {
                         protection.protect_tool_call(tool_call_id.clone());
@@ -711,7 +1140,7 @@ impl PersistedAgentSession {
                 self.chain_id = turn_id.to_string();
                 self.automation_turns_used = 0;
             }
-            TriggerOrigin::ExecCompletion => {
+            TriggerOrigin::ExecCompletion | TriggerOrigin::WorkCompletion { .. } => {
                 self.automation_turns_used = self.automation_turns_used.saturating_add(1);
             }
         }
@@ -786,10 +1215,10 @@ impl PersistedAgentSession {
     ) -> bool {
         let placeholder_id = match &self.execution_state {
             ExecutionState::OutcomeUnknown {
-                execution_id: current,
+                action,
                 placeholder_message_id,
                 ..
-            } if current == execution_id => placeholder_message_id.clone(),
+            } if action.execution_id == execution_id => placeholder_message_id.clone(),
             _ => return false,
         };
         if let Some(msg) = self
@@ -827,12 +1256,10 @@ impl PersistedAgentSession {
         tool_call_id: &str,
         now: impl Into<String>,
     ) -> bool {
-        let (work_id, exec_request_id) = match &self.execution_state {
-            ExecutionState::Executing {
-                work_id,
-                execution_id: current,
-                exec_request_id,
-            } if current == execution_id => (*work_id, exec_request_id.clone()),
+        let action = match &self.execution_state {
+            ExecutionState::Executing { action } if action.execution_id == execution_id => {
+                action.clone()
+            }
             _ => return false,
         };
         // Anchor on the running-task tool result closing this call. Absent it there
@@ -850,9 +1277,7 @@ impl PersistedAgentSession {
         };
         let now = now.into();
         self.execution_state = ExecutionState::OutcomeUnknown {
-            work_id,
-            execution_id: execution_id.to_string(),
-            exec_request_id,
+            action,
             placeholder_message_id: placeholder_id,
             since: now.clone(),
         };
@@ -919,6 +1344,31 @@ impl PersistedAgentSession {
         result_text: impl Into<String>,
         now: impl Into<String>,
     ) -> bool {
+        self.apply_completion_with_envelope(
+            event_id,
+            execution_id,
+            tool_call_id,
+            background_task_id,
+            result_text,
+            None,
+            now,
+        )
+    }
+
+    /// Envelope-aware form used by generic Provider completions. The exact
+    /// persisted bytes and their lineage remain attached when the completion is
+    /// replayed into a later model turn.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_completion_with_envelope(
+        &mut self,
+        event_id: &str,
+        execution_id: &str,
+        tool_call_id: &str,
+        background_task_id: &str,
+        result_text: impl Into<String>,
+        result_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
+        now: impl Into<String>,
+    ) -> bool {
         // Idempotent: a message keyed by this event is already in the conversation.
         if self.conversation.iter().any(|m| m.message_id == event_id) {
             return false;
@@ -929,11 +1379,11 @@ impl PersistedAgentSession {
         // A recovered unknown outcome for this execution: replace the placeholder in
         // place and re-key it to the event id so a redelivery dedups on it above.
         if let ExecutionState::OutcomeUnknown {
-            execution_id: current,
+            action,
             placeholder_message_id,
             ..
         } = &self.execution_state
-            && current == execution_id
+            && action.execution_id == execution_id
         {
             let placeholder_id = placeholder_message_id.clone();
             if let Some(msg) = self
@@ -944,6 +1394,7 @@ impl PersistedAgentSession {
                 msg.text = result_text;
                 msg.message_id = event_id.to_string();
                 msg.background_task_id = Some(background_task_id.to_string());
+                msg.data_envelope = result_envelope;
             }
             self.execution_state = ExecutionState::None;
             self.updated_at = now;
@@ -960,19 +1411,21 @@ impl PersistedAgentSession {
             let mut message =
                 crate::chat::ChatMessage::tool_result(event_id, tool_call_id, result_text);
             message.background_task_id = Some(background_task_id.to_string());
+            message.data_envelope = result_envelope;
             self.conversation.push(message);
         } else {
-            self.conversation
-                .push(crate::chat::ChatMessage::untrusted_output(
-                    event_id,
-                    tool_call_id,
-                    background_task_id,
-                    result_text,
-                ));
+            let mut message = crate::chat::ChatMessage::untrusted_output(
+                event_id,
+                tool_call_id,
+                background_task_id,
+                result_text,
+            );
+            message.data_envelope = result_envelope;
+            self.conversation.push(message);
         }
         if matches!(
             &self.execution_state,
-            ExecutionState::Executing { execution_id: current, .. } if current == execution_id
+            ExecutionState::Executing { action } if action.execution_id == execution_id
         ) {
             self.execution_state = ExecutionState::None;
         }
@@ -1038,9 +1491,7 @@ impl PersistedAgentSession {
             }
             RecoveryVerdict::OutcomeUnknown {
                 tool_call_id,
-                work_id,
-                execution_id,
-                exec_request_id,
+                action,
             } => {
                 // At most one mutating call is in flight at a time. Bind the
                 // placeholder to the exact call correlated by the runtime's
@@ -1054,9 +1505,7 @@ impl PersistedAgentSession {
                             RECOVER_OUTCOME_UNKNOWN,
                         ));
                     self.execution_state = ExecutionState::OutcomeUnknown {
-                        work_id,
-                        execution_id,
-                        exec_request_id,
+                        action,
                         placeholder_message_id: placeholder_id,
                         since: now.clone(),
                     };
@@ -1147,9 +1596,7 @@ pub enum RecoveryVerdict {
         /// provider may return several tool calls in one assistant message, so it
         /// is not necessarily the first still-unclosed call after a crash.
         tool_call_id: String,
-        work_id: i64,
-        execution_id: String,
-        exec_request_id: String,
+        action: ActionIdentity,
     },
     /// No recoverable identity is known; close conservatively and bar further
     /// mutation without fabricating an unreconcilable identity.
@@ -1216,6 +1663,14 @@ pub fn narrow_scope(start: &AgentScope, latest: &AgentScope) -> AgentScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context_attachment::{
+        AttachmentBounds, AttachmentObjectRef, AttachmentState, CONTEXT_ATTACHMENT_SCHEMA_VERSION,
+        ContextAttachmentKind,
+    };
+    use desk_agent_protocol::data_lineage::{
+        ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance, RetentionBoundary,
+        Sensitivity,
+    };
     use desk_agent_protocol::{Capability, ExecutionMode};
 
     fn scope(granted: &[Capability], mode: ExecutionMode) -> AgentScope {
@@ -1236,6 +1691,92 @@ mod tests {
             scope(&[Capability::SystemInfo], ExecutionMode::ReadOnly),
             "2026-06-20T00:00:00Z",
         )
+    }
+
+    fn context_attachment(id: &str, client_request_id: &str) -> ContextAttachment {
+        let digest = "a".repeat(64);
+        ContextAttachment {
+            schema_version: CONTEXT_ATTACHMENT_SCHEMA_VERSION,
+            attachment_id: id.into(),
+            client_request_id: client_request_id.into(),
+            actor_id: "actor-1".into(),
+            device_id: "device-1".into(),
+            surface: AgentSessionSurface::DeviceAssistant,
+            kind: ContextAttachmentKind::Range,
+            object_ref: AttachmentObjectRef {
+                opaque_token: format!("token-{id}"),
+                object_incarnation: format!("document-{id}"),
+                source_provider_id: "office.document".into(),
+                source_capability_id: "office.document.inspect".into(),
+            },
+            bounds: AttachmentBounds {
+                max_bytes: 1024,
+                max_objects: 16,
+            },
+            display_summary: format!("Book.xlsx / {id}"),
+            created_at_unix_ms: 100,
+            expires_at_unix_ms: 200,
+            envelope: DataEnvelope {
+                schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+                envelope_id: format!("envelope-{id}"),
+                content: ContentRef::ImmutableBlob {
+                    blob_id: format!("blob-{id}"),
+                    sha256: digest.clone(),
+                    size_bytes: 4,
+                    media_type: "application/json".into(),
+                },
+                provenance: DataProvenance {
+                    source_provider_id: "office.document".into(),
+                    source_tool_name: "inspect_office_document".into(),
+                    source_object_id: Some(id.into()),
+                    source_envelope_ids: Vec::new(),
+                },
+                digest_sha256: digest,
+                sensitivity: Sensitivity::Sensitive,
+                allowed_destinations: Vec::new(),
+                retention: RetentionBoundary {
+                    expires_at_unix_ms: Some(200),
+                    delete_with_run: true,
+                },
+            },
+            state: AttachmentState::Active,
+        }
+    }
+
+    #[test]
+    fn refresh_context_is_atomic_immutable_and_idempotent() {
+        let mut value = session();
+        value.surface = AgentSessionSurface::DeviceAssistant;
+        let old = context_attachment("old", "attach-old");
+        let replacement = context_attachment("new", "refresh-new");
+        assert!(value.attach_context(old).unwrap());
+        assert!(
+            value
+                .refresh_context(
+                    "old",
+                    AttachmentStaleReason::DocumentChanged,
+                    replacement.clone(),
+                )
+                .unwrap()
+        );
+        assert!(matches!(
+            value.context_attachments[0].state,
+            AttachmentState::Stale {
+                reason: AttachmentStaleReason::DocumentChanged
+            }
+        ));
+        assert_eq!(value.active_context(150), vec![&replacement]);
+        assert!(
+            !value
+                .refresh_context("old", AttachmentStaleReason::DocumentChanged, replacement,)
+                .unwrap()
+        );
+
+        let reused = context_attachment("old", "refresh-reused");
+        assert_eq!(
+            value.refresh_context("old", AttachmentStaleReason::ObjectChanged, reused),
+            Err(ContextAttachmentError::RefreshIdentityReused)
+        );
     }
 
     /// A turn can be claimed from a settled state; a second claim while Running is
@@ -1362,9 +1903,7 @@ mod tests {
     fn finish_turn_leaves_execution_state() {
         let mut s = session();
         s.execution_state = ExecutionState::OutcomeUnknown {
-            work_id: 1,
-            execution_id: "e".into(),
-            exec_request_id: "x".into(),
+            action: ActionIdentity::agent_exec(1, "x", "e"),
             placeholder_message_id: "p".into(),
             since: "t".into(),
         };
@@ -1391,6 +1930,24 @@ mod tests {
         assert_eq!(
             s.check_subject("actor-1", "device-9"),
             Err(SubjectMismatch::Device)
+        );
+    }
+
+    #[test]
+    fn surface_check_never_upgrades_legacy_history_into_device_assistant() {
+        let mut legacy = session();
+        assert_eq!(legacy.surface, AgentSessionSurface::Unknown);
+        assert!(legacy.check_surface(AgentSessionSurface::Diagnose).is_ok());
+        assert_eq!(
+            legacy.check_surface(AgentSessionSurface::DeviceAssistant),
+            Err(SubjectMismatch::Surface)
+        );
+
+        legacy.adopt_client_metadata(None, AgentSessionSurface::Diagnose);
+        assert!(legacy.check_surface(AgentSessionSurface::Diagnose).is_ok());
+        assert_eq!(
+            legacy.check_surface(AgentSessionSurface::TerminalCopilot),
+            Err(SubjectMismatch::Surface)
         );
     }
 
@@ -1463,9 +2020,7 @@ mod tests {
             "execution outcome unknown; the command may have executed; do not assume success",
         ));
         s.execution_state = ExecutionState::OutcomeUnknown {
-            work_id: 7,
-            execution_id: "exec-1".into(),
-            exec_request_id: "req-1".into(),
+            action: ActionIdentity::agent_exec(7, "req-1", "exec-1"),
             placeholder_message_id: "ph-1".into(),
             since: "2026-06-20T00:00:00Z".into(),
         };
@@ -1551,9 +2106,7 @@ mod tests {
             "dispatched; still running",
         ));
         s.execution_state = ExecutionState::Executing {
-            work_id: 8,
-            execution_id: "e9".into(),
-            exec_request_id: "exec_t9".into(),
+            action: ActionIdentity::agent_exec(8, "exec_t9", "e9"),
         };
         let base = s.conversation.len();
 
@@ -1626,9 +2179,7 @@ mod tests {
             "execution outcome unknown; the command may have executed",
         ));
         s.execution_state = ExecutionState::OutcomeUnknown {
-            work_id: 8,
-            execution_id: "e9".into(),
-            exec_request_id: "exec_t9".into(),
+            action: ActionIdentity::agent_exec(8, "exec_t9", "e9"),
             placeholder_message_id: "ph-1".into(),
             since: "2026-06-20T00:00:00Z".into(),
         };
@@ -1678,9 +2229,7 @@ mod tests {
                 "run-1", "call-1", "exec_t9",
             ));
         s.execution_state = ExecutionState::Executing {
-            work_id: 8,
-            execution_id: "e9".into(),
-            exec_request_id: "exec_t9".into(),
+            action: ActionIdentity::agent_exec(8, "exec_t9", "e9"),
         };
         let base = s.conversation.len();
 
@@ -1688,15 +2237,13 @@ mod tests {
         assert_eq!(s.conversation.len(), base, "no message appended");
         match &s.execution_state {
             ExecutionState::OutcomeUnknown {
-                work_id,
-                execution_id,
-                exec_request_id,
+                action,
                 placeholder_message_id,
                 ..
             } => {
-                assert_eq!(*work_id, 8);
-                assert_eq!(execution_id, "e9");
-                assert_eq!(exec_request_id, "exec_t9");
+                assert_eq!(action.work_id, 8);
+                assert_eq!(action.execution_id, "e9");
+                assert_eq!(action.action_request_id, "exec_t9");
                 assert_eq!(placeholder_message_id, "run-1");
             }
             other => panic!("expected OutcomeUnknown, got {other:?}"),
@@ -1731,9 +2278,7 @@ mod tests {
             "still running",
         ));
         s.execution_state = ExecutionState::Executing {
-            work_id: 8,
-            execution_id: "e9".into(),
-            exec_request_id: "exec_t9".into(),
+            action: ActionIdentity::agent_exec(8, "exec_t9", "e9"),
         };
         assert!(!s.mark_execution_unknown("e-other", "call-1", "2026-06-20T00:00:00Z"));
         assert!(
@@ -1763,9 +2308,7 @@ mod tests {
     fn mark_execution_unknown_requires_the_closing_result() {
         let mut s = session();
         s.execution_state = ExecutionState::Executing {
-            work_id: 8,
-            execution_id: "e9".into(),
-            exec_request_id: "exec_t9".into(),
+            action: ActionIdentity::agent_exec(8, "exec_t9", "e9"),
         };
         assert!(!s.mark_execution_unknown("e9", "call-1", "2026-06-20T00:00:00Z"));
         assert!(matches!(
@@ -1919,9 +2462,7 @@ mod tests {
         s.recover_session(
             RecoveryVerdict::OutcomeUnknown {
                 tool_call_id: "call-z".into(),
-                work_id: 9,
-                execution_id: "exec-9".into(),
-                exec_request_id: "rq-9".into(),
+                action: ActionIdentity::agent_exec(9, "rq-9", "exec-9"),
             },
             "t2",
         );
@@ -1964,6 +2505,56 @@ mod tests {
         old.as_object_mut().unwrap().remove("pending_auto_triggers");
         let back: PersistedAgentSession = serde_json::from_value(old).unwrap();
         assert!(back.pending_auto_triggers.is_empty());
+    }
+
+    #[test]
+    fn execution_state_upgrades_legacy_exec_identity_and_dual_writes_it() {
+        let old = serde_json::json!({
+            "kind": "executing",
+            "work_id": 7,
+            "execution_id": "generation-1",
+            "exec_request_id": "exec_7"
+        });
+        let state: ExecutionState = serde_json::from_value(old).unwrap();
+        let ExecutionState::Executing { action } = &state else {
+            panic!("expected executing state");
+        };
+        assert_eq!(action.kind, WorkKind::AgentExec);
+        assert_eq!(action.action_request_id, "exec_7");
+
+        let encoded = serde_json::to_value(state).unwrap();
+        assert_eq!(encoded["action_request_id"], "exec_7");
+        assert_eq!(encoded["exec_request_id"], "exec_7");
+        assert_eq!(encoded["work_kind"], "agent_exec");
+    }
+
+    #[test]
+    fn computer_action_identity_never_serializes_an_exec_correlation() {
+        let state = ExecutionState::Executing {
+            action: ActionIdentity::new(
+                8,
+                "action_windows_1",
+                "generation-2",
+                WorkKind::ComputerAction,
+            ),
+        };
+        let encoded = serde_json::to_value(state).unwrap();
+        assert_eq!(encoded["action_request_id"], "action_windows_1");
+        assert_eq!(encoded["work_kind"], "computer_action");
+        assert!(encoded.get("exec_request_id").is_none());
+    }
+
+    #[test]
+    fn mismatched_exec_compatibility_correlations_fail_closed() {
+        let value = serde_json::json!({
+            "kind": "executing",
+            "work_id": 7,
+            "execution_id": "generation-1",
+            "work_kind": "agent_exec",
+            "action_request_id": "exec_new",
+            "exec_request_id": "exec_old"
+        });
+        assert!(serde_json::from_value::<ExecutionState>(value).is_err());
     }
 
     #[test]
@@ -2053,18 +2644,44 @@ mod tests {
 
         let encoded = value.encode_json_for_storage().unwrap();
         assert!(encoded.contains("visible"));
+        let stored = PersistedAgentSession::decode_json(&encoded).unwrap();
         assert!(matches!(
-            value.conversation[0].replay_disposition,
+            stored.conversation[0].replay_disposition,
             Some(ReplayDisposition::Unavailable {
                 source_context_key: Some(ref key),
                 reason: ReplayUnavailableReason::EvictedByStorageLimit,
             }) if key == &source
         ));
+        assert!(matches!(
+            value.conversation[0].replay_disposition,
+            Some(ReplayDisposition::Present { .. })
+        ));
+    }
+
+    #[test]
+    fn storage_projection_strips_images_without_mutating_live_session() {
+        let mut value = session();
+        value.conversation.push(
+            crate::chat::ChatMessage::text("screen", crate::chat::ChatRole::Tool, "captured")
+                .with_image("data:image/jpeg;base64,AQID"),
+        );
+
+        let encoded = value.encode_json_for_storage().unwrap();
+        assert!(!encoded.contains("data:image/jpeg;base64,AQID"));
+        assert!(value.conversation[0].image_data_url.is_some());
+        let stored = PersistedAgentSession::decode_json(&encoded).unwrap();
+        assert!(stored.conversation[0].image_data_url.is_none());
+        assert!(
+            stored.conversation[0]
+                .text
+                .contains(crate::image_input::IMAGE_NOT_RETAINED_PLACEHOLDER)
+        );
     }
 
     fn pending(event_id: &str, since: &str) -> PendingAutoTrigger {
         PendingAutoTrigger {
             work_id: 7,
+            kind: WorkKind::AgentExec,
             execution_id: "e".into(),
             tool_call_id: "call-1".into(),
             event_id: event_id.into(),

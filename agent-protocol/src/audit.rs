@@ -721,6 +721,43 @@ pub fn summarize_output(output: &OperationOutput) -> String {
                     o.image.len()
                 )
             }
+            R::DesktopSessionInspect(o) => format!(
+                "desktop.session.inspect: active_application={}",
+                o.active_application.is_some()
+            ),
+            R::DesktopUiInspect(o) => format!(
+                "desktop.ui.inspect: {} nodes{}",
+                o.nodes.len(),
+                if o.truncated { " (truncated)" } else { "" }
+            ),
+            R::OfficeDocumentInspect(o) => format!(
+                "office.document.inspect: snapshot {}{}",
+                o.snapshot_id,
+                if o.truncated { " (truncated)" } else { "" }
+            ),
+            R::FileMetadataInspect(o) => format!(
+                "file.metadata.read: {} selected, {} directory entries{}",
+                o.entries.len(),
+                o.directory_entries.len(),
+                if o.truncated { " (truncated)" } else { "" }
+            ),
+            R::FileContentRead(o) => format!("file.content.read: {} UTF-8 bytes", o.byte_len,),
+            R::SpreadsheetFileInspect(o) => format!(
+                "spreadsheet.file.inspect: {} workbooks{}",
+                o.workbooks.len(),
+                if o.truncated { " (truncated)" } else { "" }
+            ),
+            R::SpreadsheetMergePreview(o) => format!(
+                "spreadsheet.merge.preview: {} rows, {} statistics{}",
+                o.rows.len(),
+                o.statistics.len(),
+                if o.truncated { " (truncated)" } else { "" }
+            ),
+            R::TerminalOutputInspect(o) => format!(
+                "terminal.output.read: {} entries{}",
+                o.entries.len(),
+                if o.truncated { " (truncated)" } else { "" }
+            ),
         },
         OperationOutput::Exec(o) => format!("exec: exit {}", o.exit_code),
     }
@@ -762,8 +799,34 @@ impl Capability {
             Capability::ContainerInspect => "container.inspect",
             Capability::ContainerLogs => "container.logs",
             Capability::ScreenCaptureCurrent => "screen.capture.current",
+            Capability::DesktopSessionInspect => "desktop.session.inspect",
+            Capability::DesktopUiInspect => "desktop.ui.inspect",
+            Capability::OfficeDocumentInspect => "office.document.inspect",
+            Capability::FileMetadataRead => "file.metadata.read",
+            Capability::FileContentRead => "file.content.read",
+            Capability::SpreadsheetFileInspect => "spreadsheet.file.inspect",
+            Capability::SpreadsheetMergePreview => "spreadsheet.merge.preview",
+            Capability::SpreadsheetWorkbookCreateConfirmed => {
+                "spreadsheet.workbook.create.confirmed"
+            }
+            Capability::SpreadsheetFormulaWorkbookCreateConfirmed => {
+                "spreadsheet.formula_workbook.create.confirmed"
+            }
+            Capability::WordDocumentCreateConfirmed => "word.document.create.confirmed",
+            Capability::WebResearchFetch => "web.research.fetch",
+            Capability::WebResearchSearch => "web.research.search",
+            Capability::TerminalOutputRead => "terminal.output.read",
+            Capability::AssistantActionPreview => "assistant.action.preview",
             Capability::ShellExecReadonly => "shell.exec.readonly",
             Capability::ShellExecConfirmed => "shell.exec.confirmed",
+            Capability::DesktopUiActionConfirmed => "desktop.ui.action.confirmed",
+            Capability::DesktopInputFallbackConfirmed => "desktop.input.fallback.confirmed",
+            Capability::OfficeExcelPatchConfirmed => "office.excel.patch.confirmed",
+            Capability::OfficePowerPointPatchConfirmed => "office.powerpoint.patch.confirmed",
+            Capability::FilePatchConfirmed => "file.patch.confirmed",
+            Capability::FileCopyConfirmed => "file.copy.confirmed",
+            Capability::FileArtifactCreateConfirmed => "file.artifact.create.confirmed",
+            Capability::FileDeleteConfirmed => "file.delete.confirmed",
         }
     }
 }

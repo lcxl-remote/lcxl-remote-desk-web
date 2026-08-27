@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Lcxl Excel Assistant</title>
+    <link rel="stylesheet" href="/taskpane.css">
+    <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+    <script type="module" src="/taskpane.js"></script>
+</head>
+<body>
+    <main>
+        <h1>Lcxl Excel Assistant</h1>
+        <p class="notice">This connection is read-only. It can inspect at most 16 currently selected cells, including formulas, scalar values, and number formats.</p>
+        <p class="permission">Excel requires the broad ReadWriteDocument host permission for its application-specific API. This add-in and its local bridge define no write action.</p>
+        <label for="pairing-code">Pairing code</label>
+        <input id="pairing-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}">
+        <div class="actions">
+            <button id="pair" type="button">Pair this document</button>
+            <button id="stop" type="button" disabled>Stop and revoke</button>
+        </div>
+        <pre id="status" aria-live="polite">Waiting for Office.js…</pre>
+    </main>
+</body>
+</html>

@@ -459,6 +459,22 @@ pub(super) async fn handle_invoke_agent_capability_inbound(
         request_data.reason,
         scope,
     );
+    let envelope = match envelope.try_into() {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            emit_agent_error(
+                ctx,
+                model,
+                agent_error(
+                    AgentErrorKind::InvalidInput,
+                    "mutation cannot enter the read-only agent capability lane",
+                    false,
+                    false,
+                ),
+            );
+            return Ok(());
+        }
+    };
     let payload = AgentRequestPayload {
         request_id: model.request_id.clone(),
         connection_id: model.from_connection_id.clone(),
@@ -478,6 +494,91 @@ pub(super) async fn handle_invoke_agent_capability_inbound(
                 true,
                 true,
             ),
+        );
+    }
+    Ok(())
+}
+
+/// Dispatch one immutable Computer Use mutation after re-validating the
+/// trusted-central authorization wrapper. This lane is deliberately separate
+/// from `InvokeAgentCapability`, whose wire type cannot represent mutation.
+pub(super) async fn handle_computer_action_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    use desk_agent_protocol::computer_use::SealedComputerActionPlan;
+    use desk_ipc_protocol::message::ComputerActionPlanPayload;
+
+    let reject = |ctx: &RouterContext, model: &SignalingModel, message: String| {
+        emit_standard_error_response(ctx, model, DeskErrorCode::PERMISSION_ERROR, &message);
+    };
+    let Some(authz) = ctx.inbound_authz.as_ref() else {
+        reject(
+            ctx,
+            model,
+            "Computer Action authorization is missing".into(),
+        );
+        return Ok(());
+    };
+    let plan = match model.get_data::<SealedComputerActionPlan>() {
+        Ok(plan) => plan,
+        Err(error) => {
+            reject(
+                ctx,
+                model,
+                format!("invalid sealed Computer Action plan: {error}"),
+            );
+            return Ok(());
+        }
+    };
+    if let Err(error) = plan.validate() {
+        reject(
+            ctx,
+            model,
+            format!("invalid sealed Computer Action plan: {error}"),
+        );
+        return Ok(());
+    }
+    let actor_matches = authz
+        .actor
+        .user_id
+        .is_some_and(|actor| actor.to_string() == plan.approved_actor_id);
+    let capabilities_match = plan.actions.iter().all(|step| {
+        authz
+            .scope
+            .granted
+            .contains(&step.action.required_capability())
+    });
+    let expiry_valid = chrono::DateTime::parse_from_rfc3339(&plan.expires_at)
+        .is_ok_and(|expiry| expiry > chrono::Utc::now());
+    if model.request_id != plan.execution_generation
+        || plan.device_id != authz.audience
+        || !actor_matches
+        || !capabilities_match
+        || !expiry_valid
+    {
+        reject(
+            ctx,
+            model,
+            "sealed Computer Action binding or expiry check failed".into(),
+        );
+        return Ok(());
+    }
+    let payload = ComputerActionPlanPayload {
+        request_id: model.request_id.clone(),
+        connection_id: model.from_connection_id.clone(),
+        plan,
+    };
+    if let Err(error) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::ComputerActionPlan(payload))
+        .await
+    {
+        emit_standard_error_response(
+            ctx,
+            model,
+            DeskErrorCode::FEATURE_UNAVAILABLE,
+            &format!("Computer Action worker unavailable: {error}"),
         );
     }
     Ok(())

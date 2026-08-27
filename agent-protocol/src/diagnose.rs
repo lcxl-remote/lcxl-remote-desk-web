@@ -303,6 +303,9 @@ pub enum DiagnoseEventKind {
     /// `tool_ok` + `tool_output`, plus `background_task_id` when execution
     /// continues in the background.
     ToolFinished,
+    /// Terminal for the current planning turn: a normalized permission batch was
+    /// durably recorded and is waiting for a separate trusted user decision.
+    PermissionRequired,
     /// Terminal: the agentic turn committed a final natural-language answer
     /// (carries `answer`). Distinct from [`Final`], which carries a structured
     /// [`Diagnosis`] for the single-turn path.
@@ -376,6 +379,13 @@ pub struct DiagnoseEvent {
     /// result reports a command continuing as a background task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_task_id: Option<String>,
+    /// `kind = PermissionRequired`: stable id of the durable request projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_request_id: Option<String>,
+    /// `kind = PermissionRequired`: bounded number of independently decidable
+    /// items. Full request details come from the durable session projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_item_count: Option<u32>,
     /// `kind = Answer`: the agentic turn's final natural-language answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
@@ -410,6 +420,8 @@ impl DiagnoseEvent {
             tool_ok: None,
             tool_output: None,
             background_task_id: None,
+            permission_request_id: None,
+            permission_item_count: None,
             answer: None,
             provenance: None,
         }
@@ -572,6 +584,19 @@ impl DiagnoseEvent {
         self
     }
 
+    pub fn permission_required(
+        request_id: impl Into<String>,
+        seq: u32,
+        permission_request_id: impl Into<String>,
+        item_count: u32,
+    ) -> Self {
+        Self {
+            permission_request_id: Some(permission_request_id.into()),
+            permission_item_count: Some(item_count),
+            ..Self::base(request_id, seq, DiagnoseEventKind::PermissionRequired)
+        }
+    }
+
     /// A terminal `Answer` frame carrying the agentic turn's final answer text.
     pub fn answer(request_id: impl Into<String>, seq: u32, answer: impl Into<String>) -> Self {
         Self {
@@ -589,6 +614,7 @@ impl DiagnoseEvent {
                 | DiagnoseEventKind::Answer
                 | DiagnoseEventKind::Error
                 | DiagnoseEventKind::Retracted
+                | DiagnoseEventKind::PermissionRequired
         )
     }
 }

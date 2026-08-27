@@ -1,6 +1,6 @@
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Monitor, Terminal as TerminalIcon, Folder, ArrowLeft, Globe, Server, Lock } from "lucide-react"
+import { Monitor, Terminal as TerminalIcon, Folder, ArrowLeft, Globe, Server, Lock, Bot } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card"
@@ -9,7 +9,11 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Badge } from "@/components/ui/badge"
 import { useRestrictedSession } from "@/features/desk/restricted-session"
 
-export default function DeskDashboard() {
+const OSS_DEVICE_ASSISTANT_ENABLED = import.meta.env.BASE_URL !== '/console/';
+
+export default function DeskDashboard({
+    showAssistant = OSS_DEVICE_ASSISTANT_ENABLED,
+}: { showAssistant?: boolean }) {
     const { id: deskId } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const { t } = useTranslation()
@@ -103,7 +107,7 @@ export default function DeskDashboard() {
             {/* Quick Actions */}
             <div>
                 <h3 className="text-xl font-semibold mb-4">{t('pages.deskDashboard.features')}</h3>
-                <div className="grid gap-6 md:grid-cols-3">
+                <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
                     <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(`/desk/${deskId}/control`)}>
                         <CardHeader>
                             <CardTitle className="flex items-center gap-2">
@@ -164,6 +168,28 @@ export default function DeskDashboard() {
                         </CardContent>
                         <CardFooter>
                             <Button className="w-full" variant="secondary">{t('pages.deskDashboard.browseFiles')}</Button>
+                        </CardFooter>
+                    </Card>
+                    )}
+
+                    {showAssistant && restricted.ownerPlaneVisible && (
+                    <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(`/desk/${deskId}/assistant`)}>
+                        <CardHeader>
+                            <CardTitle className="flex items-center gap-2">
+                                <Bot className="h-5 w-5 text-violet-500" />
+                                {t('pages.deskDashboard.deviceAssistant')}
+                            </CardTitle>
+                            <CardDescription>{t('pages.deskDashboard.deviceAssistantDesc')}</CardDescription>
+                        </CardHeader>
+                        <CardContent className="flex-1">
+                            <ul className="text-sm text-muted-foreground space-y-2">
+                                <li>• {t('pages.deskDashboard.deviceAssistantFeature1')}</li>
+                                <li>• {t('pages.deskDashboard.deviceAssistantFeature2')}</li>
+                                <li>• {t('pages.deskDashboard.deviceAssistantFeature3')}</li>
+                            </ul>
+                        </CardContent>
+                        <CardFooter>
+                            <Button className="w-full" variant="secondary">{t('pages.deskDashboard.openAssistant')}</Button>
                         </CardFooter>
                     </Card>
                     )}

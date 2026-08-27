@@ -1,0 +1,12 @@
+{
+  "name": "@lcxl/office-read-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "broker": "node broker.mjs",
+    "check": "node --check broker.mjs && node --check src/bridge-core.mjs && node --check public/taskpane.js",
+    "test": "node --test test/*.test.mjs",
+    "build": "npm run check && npm test"
+  }
+}

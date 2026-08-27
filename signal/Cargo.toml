@@ -30,7 +30,9 @@ uuid = { workspace = true }
 futures = { workspace = true }
 sea-orm = { workspace = true }
 chrono = { workspace = true }
+sha2 = { workspace = true }
 rand = { workspace = true }
+url = { workspace = true }
 
 turn = { workspace = true }
 
@@ -42,6 +44,9 @@ async-trait = { workspace = true }
 # Custom connect-time DNS resolver for the model-provider SSRF guard.
 actix-tls = { version = "3.5", default-features = false, features = ["connect"] }
 
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
 [dev-dependencies]
 # Exercise the WebSocket frame codec directly so the signaling endpoint's
 # raised `max_frame_size` is regression-tested against the diagnose chunk size.
@@ -49,3 +54,4 @@ actix-http = { workspace = true }
 tokio-util = { workspace = true }
 # Build a realistic VersionInfo query string for the signaling probe test.
 serde_urlencoded = { workspace = true }
+tempfile = { workspace = true }

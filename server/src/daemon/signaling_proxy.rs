@@ -46,6 +46,38 @@ fn take_edge_exec_correlation(
         .unwrap_or(false)
 }
 
+fn emit_typed_signaling<T: serde::Serialize>(
+    outbound_tx: &broadcast::Sender<String>,
+    request_id: &str,
+    signaling_type: SignalingType,
+    to_connection_id: Option<String>,
+    payload: &T,
+) {
+    let value = match serde_json::to_value(payload) {
+        Ok(value) => value,
+        Err(error) => {
+            warn!("[SignalingProxy] Failed to serialise {signaling_type:?} payload: {error}");
+            return;
+        }
+    };
+    let frame = SignalingModel::new(
+        request_id,
+        signaling_type,
+        None,
+        to_connection_id,
+        Some(value),
+        None,
+    );
+    match serde_json::to_string(&frame) {
+        Ok(text) => {
+            let _ = outbound_tx.send(text);
+        }
+        Err(error) => {
+            warn!("[SignalingProxy] Failed to serialise {signaling_type:?} frame: {error}");
+        }
+    }
+}
+
 fn audio_phase_is_authorized(
     expected_terminal: Option<desk_ipc_protocol::message::AudioPipelinePhase>,
     desired_active: bool,
@@ -151,6 +183,9 @@ pub async fn run_signaling_proxy(
     // (host UI disabling the manager connection) tears the current manager /
     // support upstream down and puts the fleet audit sink back to purely-local.
     manager_link_gate: Arc<ManagerLinkGate>,
+    inprocess_computer_use_broker: Option<
+        Arc<crate::worker::agent::computer_use_broker::ComputerUseBroker>,
+    >,
     // This host's durable exec ledger. Opened by the daemon entry point, which is
     // common to all three host forms, so every dispatch path has one.
     exec_ledger: Arc<crate::daemon::exec_ledger::ExecLedger>,
@@ -181,9 +216,16 @@ pub async fn run_signaling_proxy(
         StartupMode::ServiceDaemon => (None, None),
         _ => {
             let audit: Arc<dyn AuditSink> = Arc::new(LogAuditSink);
-            let agent = Arc::new(
-                LocalDeviceAgent::with_settings(settings.clone().into_inner()).with_audit(audit),
-            );
+            let agent = Arc::new(match inprocess_computer_use_broker.clone() {
+                Some(broker) => LocalDeviceAgent::with_settings_and_broker(
+                    settings.clone().into_inner(),
+                    broker,
+                )
+                .with_audit(audit),
+                None => {
+                    LocalDeviceAgent::with_settings(settings.clone().into_inner()).with_audit(audit)
+                }
+            });
             let collector = Arc::new(AgentContextCollector::new(
                 agent.clone(),
                 settings.clone().into_inner(),
@@ -1415,6 +1457,48 @@ pub async fn run_signaling_proxy(
                         payload.connection_id, payload.request_id,
                     ),
                 }
+            }
+            WorkerToService::ComputerActionStarted(payload) => {
+                emit_typed_signaling(
+                    &outbound_tx,
+                    &payload.request_id,
+                    SignalingType::ComputerActionStarted,
+                    payload.connection_id,
+                    &payload.started,
+                );
+            }
+            WorkerToService::ComputerActionCompleted(payload) => {
+                emit_typed_signaling(
+                    &outbound_tx,
+                    &payload.request_id,
+                    SignalingType::ComputerActionCompleted,
+                    payload.connection_id,
+                    &payload.completed,
+                );
+            }
+            WorkerToService::ComputerActionStateReported(payload) => {
+                emit_typed_signaling(
+                    &outbound_tx,
+                    &payload.request_id,
+                    SignalingType::ComputerActionStateReported,
+                    payload.connection_id,
+                    &payload.state,
+                );
+            }
+            WorkerToService::ComputerUseReadinessUpdated(payload) => {
+                let request_id = format!(
+                    "computer-use-readiness:{}:{}:{}",
+                    payload.readiness.interactive_session_incarnation,
+                    payload.readiness.revision,
+                    payload.readiness.observed_at,
+                );
+                emit_typed_signaling(
+                    &outbound_tx,
+                    &request_id,
+                    SignalingType::ComputerUseReadinessUpdated,
+                    None,
+                    &payload.readiness,
+                );
             }
             WorkerToService::RemoteAccessStateApplied(payload) => {
                 worker_mgr.complete_remote_access_ack(payload.clone());

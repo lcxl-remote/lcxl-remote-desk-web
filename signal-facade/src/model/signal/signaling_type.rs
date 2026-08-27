@@ -432,6 +432,80 @@ pub enum SignalingType {
     #[wincode(tag = 625)]
     ExecutionProgressUpdated = 625,
 
+    /// Upstream → host: dispatch one immutable, exact-owner-approved Computer
+    /// Use plan. Carries `SealedComputerActionPlan` (normally inside the same
+    /// transport-authenticated authorization wrapper used for central control).
+    #[wincode(tag = 626)]
+    DispatchComputerAction = 626,
+
+    /// Upstream → host: cancel one generation-fenced Computer Use action.
+    #[wincode(tag = 627)]
+    CancelComputerAction = 627,
+
+    /// Upstream → host: reconcile one Computer Use action generation.
+    #[wincode(tag = 628)]
+    QueryComputerActionState = 628,
+
+    /// Host → upstream: conservative first-side-effect boundary report.
+    #[wincode(tag = 629)]
+    ComputerActionStarted = 629,
+
+    /// Host → upstream: terminal action facts and read-back verification.
+    #[wincode(tag = 630)]
+    ComputerActionCompleted = 630,
+
+    /// Host → upstream: response to a generation-fenced state query/cancel.
+    #[wincode(tag = 631)]
+    ComputerActionStateReported = 631,
+
+    /// Host → central: bounded dynamic Computer Use readiness. This is not an
+    /// authorization grant; dispatch re-checks every local gate.
+    #[wincode(tag = 632)]
+    ComputerUseReadinessUpdated = 632,
+
+    /// Owner browser to central brain: start one read-only Device Assistant turn.
+    /// Carries `desk_agent_protocol::device_assistant::DeviceAssistantAsk`.
+    #[wincode(tag = 633)]
+    AskDeviceAssistant = 633,
+
+    /// Central brain to owner browser: streamed Device Assistant agent-loop
+    /// events. Notification-style (`response_state = None`).
+    #[wincode(tag = 634)]
+    DeviceAssistantUpdated = 634,
+
+    /// Owner browser to central brain: best-effort cancellation of one assistant
+    /// turn, correlated by the outer `request_id`.
+    #[wincode(tag = 635)]
+    CancelDeviceAssistant = 635,
+
+    /// Owner browser to central brain: request the secret-free current
+    /// Capability Provider inventory for one live target connection.
+    #[wincode(tag = 636)]
+    GetDeviceAssistantCapabilities = 636,
+
+    /// Central brain to owner browser: capability descriptors plus
+    /// compiled/enabled/connected/ready status. Never relayed to the host.
+    #[wincode(tag = 637)]
+    DeviceAssistantCapabilitiesUpdated = 637,
+
+    /// Owner browser to central brain: independently reconcile the durable
+    /// context selection for one Device Assistant conversation.
+    #[wincode(tag = 638)]
+    UpdateDeviceAssistantContext = 638,
+
+    /// Central brain acknowledgement for a durable context reconciliation.
+    #[wincode(tag = 639)]
+    DeviceAssistantContextUpdated = 639,
+
+    /// Owner browser to central brain: attach, detach, or refresh one exact
+    /// edge-issued object reference.
+    #[wincode(tag = 640)]
+    UpdateDeviceAssistantObjectContext = 640,
+
+    /// Central brain acknowledgement for an object-level context mutation.
+    #[wincode(tag = 641)]
+    DeviceAssistantObjectContextUpdated = 641,
+
     /// Error
     #[wincode(tag = -1)]
     Error = -1,

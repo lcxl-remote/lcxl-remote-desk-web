@@ -190,6 +190,11 @@ pub struct ProviderResponseMeta {
     pub stop_reason: StopReason,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<ReplayDisposition>,
+    /// Server-only lineage for the normalized model output. Provider scanners
+    /// leave this empty; an information-flow-enforcing seam fills it only after
+    /// the request passed the model sink gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
 }
 
 impl Default for ProviderResponseMeta {
@@ -199,6 +204,7 @@ impl Default for ProviderResponseMeta {
             reasoning_tokens: None,
             stop_reason: StopReason::Other,
             replay: None,
+            data_envelope: None,
         }
     }
 }

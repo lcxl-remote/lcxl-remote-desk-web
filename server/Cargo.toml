@@ -83,6 +83,7 @@ uuid = { workspace = true }
 portable-pty = { workspace = true }
 
 url = { workspace = true }
+ureq = { workspace = true }
 rust-i18n = { workspace = true }
 
 toml = { workspace = true }
@@ -121,6 +122,8 @@ trash = { workspace = true }
 auto-launch = { workspace = true }
 once_cell = { workspace = true }
 image = { workspace = true }
+quick-xml = { workspace = true }
+zip = { workspace = true }
 rand = { workspace = true }
 
 

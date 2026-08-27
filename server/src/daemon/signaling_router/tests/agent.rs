@@ -35,6 +35,28 @@ fn two_phase_parse_accepts_known_read_kind() {
     assert!(validate_invoke_agent_capability_kinds(&raw).is_ok());
 }
 
+#[test]
+fn two_phase_parse_accepts_read_only_computer_use_kinds() {
+    for kind in [
+        "desktop_session_inspect",
+        "desktop_ui_inspect",
+        "office_document_inspect",
+    ] {
+        let raw = serde_json::json!({
+            "operation": {
+                "input": {
+                    "kind": "read_context",
+                    "params": { "kind": { "kind": kind, "params": {} } }
+                }
+            }
+        });
+        assert!(
+            validate_invoke_agent_capability_kinds(&raw).is_ok(),
+            "{kind} must reach the typed read-only gate"
+        );
+    }
+}
+
 /// An unknown *outer* kind (newer control end) degrades to
 /// `UnsupportedCapability`, never a serde parse error.
 #[test]
@@ -77,6 +99,22 @@ fn authorize_respects_granted_set() {
     assert!(!authorize(
         Capability::ScreenCaptureCurrent,
         &[Capability::SystemInfo]
+    ));
+    assert!(authorize(
+        Capability::DesktopSessionInspect,
+        &default_read_scope().granted
+    ));
+    assert!(authorize(
+        Capability::DesktopUiInspect,
+        &default_read_scope().granted
+    ));
+    assert!(authorize(
+        Capability::OfficeDocumentInspect,
+        &default_read_scope().granted
+    ));
+    assert!(!authorize(
+        Capability::DesktopUiActionConfirmed,
+        &default_read_scope().granted
     ));
 }
 

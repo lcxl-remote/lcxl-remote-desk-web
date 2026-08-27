@@ -3,7 +3,7 @@ use crate::chat::{ChatRole, ModelTurn, StopReason, ToolCall, ToolSpec};
 use crate::model_profile::WireProtocol;
 use crate::prompt::ResponseFormatSpec;
 use crate::replay::{ProviderResponseMeta, ReplayDisposition, SourceContextKey};
-use crate::seam::{ToolRunOutput, TurnSink, WaitOutcome};
+use crate::seam::{NullTurnSink, ToolRunOutput, TurnSink, WaitOutcome};
 use crate::session::PersistedAgentSession;
 use async_trait::async_trait;
 use desk_agent_protocol::{AgentScope, Capability, ExecutionMode};
@@ -14,6 +14,8 @@ use std::rc::Rc;
 #[derive(Default)]
 struct MemSession {
     inner: RefCell<Option<PersistedAgentSession>>,
+    latest_revision: Rc<RefCell<Option<u64>>>,
+    superseded_settles: Rc<RefCell<u32>>,
 }
 #[async_trait(?Send)]
 impl SessionSeam for MemSession {
@@ -51,6 +53,23 @@ impl SessionSeam for MemSession {
     async fn save(&self, session: &mut PersistedAgentSession) -> Result<(), AgentError> {
         *self.inner.borrow_mut() = Some(session.clone());
         Ok(())
+    }
+
+    async fn latest_input_revision(
+        &self,
+        _conversation_id: &str,
+    ) -> Result<Option<u64>, AgentError> {
+        Ok(*self.latest_revision.borrow())
+    }
+
+    async fn settle_superseded(
+        &self,
+        stale_session: &PersistedAgentSession,
+        _now: &str,
+    ) -> Result<bool, AgentError> {
+        *self.superseded_settles.borrow_mut() += 1;
+        *self.inner.borrow_mut() = Some(stale_session.clone());
+        Ok(true)
     }
 }
 
@@ -174,6 +193,36 @@ impl ModelSeam for ScriptModel {
             .borrow_mut()
             .pop_front()
             .expect("a scripted turn");
+        sink.on_text_delta(&turn.text);
+        Ok(turn)
+    }
+}
+
+struct SupersedingModel {
+    latest_revision: Rc<RefCell<Option<u64>>>,
+}
+
+#[async_trait(?Send)]
+impl ModelSeam for SupersedingModel {
+    async fn context_policy(
+        &self,
+        _requirements: crate::model_capability::ModelRequirements,
+    ) -> Result<crate::model_context::PinnedContextPolicy, AgentError> {
+        crate::model_context::PinnedContextPolicy::window(
+            SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test"),
+            1,
+            crate::MIN_MODEL_CONTEXT_BYTES,
+        )
+        .map_err(model_context_error)
+    }
+
+    async fn call(
+        &self,
+        _request: ModelRequest,
+        sink: &mut dyn TurnSink,
+    ) -> Result<ModelTurn, AgentError> {
+        *self.latest_revision.borrow_mut() = Some(1);
+        let turn = answer("stale answer must be discarded");
         sink.on_text_delta(&turn.text);
         Ok(turn)
     }
@@ -338,7 +387,7 @@ impl TurnSink for Collector {
 fn deps<'a>(
     sess: &'a MemSession,
     model: &'a dyn ModelSeam,
-    tools: &'a RecordingTools,
+    tools: &'a dyn ToolSeam,
     registry: &'a [RegisteredTool],
     clock: &'a dyn Fn() -> String,
 ) -> LoopDeps<'a> {
@@ -348,6 +397,8 @@ fn deps<'a>(
         tools,
         content_safety: crate::content_safety::ContentSafetyMode::Disabled,
         registry,
+        provider_registry: None,
+        capability_inventory: None,
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
@@ -395,6 +446,369 @@ async fn answers_without_tools() {
     assert_eq!(s.conversation.len(), 2);
     // The model was offered the granted read tool.
     assert_eq!(model.requests.borrow()[0].tools.len(), 1);
+}
+
+#[tokio::test]
+async fn device_assistant_request_ends_with_server_input_watermark() {
+    let mut seeded = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-20T00:00:00Z",
+    );
+    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.input_revision = 3;
+    seeded.latest_input_seq = 3;
+    let sess = MemSession {
+        inner: RefCell::new(Some(seeded)),
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new([answer("done")].into()),
+        requests: requests.clone(),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "unused".into(),
+    };
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    run_agent_turn(
+        &deps(&sess, &model, &tools, &[], &clock),
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "latest request"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    let requests = requests.borrow();
+    let marker = requests[0].messages.last().unwrap();
+    assert_eq!(marker.role, ChatRole::SystemEvent);
+    assert!(marker.text.contains("input_revision=3"));
+    assert!(marker.text.contains("newest user message"));
+}
+
+#[tokio::test]
+async fn device_assistant_followup_batch_repeats_exact_latest_input_at_recency_edge() {
+    let mut seeded = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-20T00:00:00Z",
+    );
+    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    let mut latest = ChatMessage::text("u2", ChatRole::User, "latest correction");
+    let digest = format!("{:x}", Sha256::digest(latest.text.as_bytes()));
+    latest.data_envelope = Some(DataEnvelope {
+        schema_version: desk_agent_protocol::data_lineage::DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: "latest-user-envelope".into(),
+        content: ContentRef::ImmutableBlob {
+            blob_id: "latest-user-content".into(),
+            sha256: digest.clone(),
+            size_bytes: latest.text.len() as u64,
+            media_type: "text/plain".into(),
+        },
+        provenance: DataProvenance {
+            source_provider_id: "test-user".into(),
+            source_tool_name: "send-message".into(),
+            source_object_id: Some("u2".into()),
+            source_envelope_ids: Vec::new(),
+        },
+        digest_sha256: digest,
+        sensitivity: desk_agent_protocol::data_lineage::Sensitivity::UserContent,
+        allowed_destinations: Vec::new(),
+        retention: desk_agent_protocol::data_lineage::RetentionBoundary {
+            expires_at_unix_ms: None,
+            delete_with_run: false,
+        },
+    });
+    seeded.conversation = vec![
+        ChatMessage::text("u1", ChatRole::User, "old request"),
+        latest.clone(),
+    ];
+    seeded.input_revision = 2;
+    seeded.latest_input_seq = 2;
+    let sess = MemSession {
+        inner: RefCell::new(Some(seeded)),
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new([answer("done")].into()),
+        requests: requests.clone(),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "unused".into(),
+    };
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    run_agent_turn(
+        &deps(&sess, &model, &tools, &[], &clock),
+        claim(),
+        latest.clone(),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    let requests = requests.borrow();
+    let messages = &requests[0].messages;
+    assert_eq!(messages[messages.len() - 2].role, ChatRole::SystemEvent);
+    assert_eq!(messages.last().unwrap().role, ChatRole::User);
+    assert_eq!(messages.last().unwrap().text, "latest correction");
+    assert!(
+        messages
+            .last()
+            .unwrap()
+            .message_id
+            .starts_with("runtime-latest-input-")
+    );
+    let projected = messages.last().unwrap().data_envelope.as_ref().unwrap();
+    assert_ne!(projected.envelope_id, "latest-user-envelope");
+    assert_eq!(
+        projected.digest_sha256,
+        latest.data_envelope.unwrap().digest_sha256
+    );
+    assert_eq!(
+        projected.provenance.source_envelope_ids,
+        vec!["latest-user-envelope"]
+    );
+}
+
+#[tokio::test]
+async fn newer_input_after_model_call_discards_stale_answer_and_settles_once() {
+    let sess = MemSession::default();
+    let model = SupersedingModel {
+        latest_revision: sess.latest_revision.clone(),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "unused".into(),
+    };
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &[], &clock),
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "first request"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        LoopOutcome::Superseded {
+            previous_input_revision: 0,
+            current_input_revision: 1,
+        }
+    );
+    assert_eq!(*sess.superseded_settles.borrow(), 1);
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert!(
+        stored
+            .conversation
+            .iter()
+            .all(|message| message.text != "stale answer must be discarded")
+    );
+}
+
+#[tokio::test]
+async fn older_request_that_loses_preclaim_race_never_calls_model_or_handles_newer_input() {
+    let first = ChatMessage::text("u1", ChatRole::User, "first request");
+    let second = ChatMessage::text("u2", ChatRole::User, "newer request");
+    let mut seeded = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-20T00:00:00Z",
+    );
+    seeded.conversation = vec![first.clone(), second];
+    seeded.latest_input_seq = 2;
+    seeded.input_revision = 2;
+    let sess = MemSession {
+        inner: RefCell::new(Some(seeded)),
+        ..Default::default()
+    };
+    let model = ScriptModel {
+        turns: RefCell::new(std::collections::VecDeque::new()),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "unused".into(),
+    };
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &[], &clock),
+        claim(),
+        first,
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        LoopOutcome::Superseded {
+            previous_input_revision: 1,
+            current_input_revision: 2,
+        }
+    );
+    assert!(model.requests.borrow().is_empty());
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(stored.handled_input_seq, 0);
+    assert_eq!(stored.turn_state, TurnState::Idle);
+}
+
+/// The internal projection tool updates only advisory session UX state. It does
+/// not cross the ToolSeam and the model can continue to a normal final answer.
+#[tokio::test]
+async fn task_status_tool_updates_projection_without_dispatch() {
+    let sess = MemSession::default();
+    let mut initial = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-20T00:00:00Z",
+    );
+    initial.latest_input_seq = 1;
+    initial.input_revision = 1;
+    *sess.inner.borrow_mut() = Some(initial);
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use_args(
+                    "status-call",
+                    crate::task_status_tools::UPDATE_TASK_STATUS_TOOL_NAME,
+                    r#"{"items":[{"item_id":"inspect","description":"Inspect workbook","status":"in_progress"}]}"#,
+                ),
+                answer("working"),
+            ]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "must not run".into(),
+    };
+    let registry = crate::task_status_tools::task_status_tool_registry();
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &registry, &clock),
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "inspect and summarize"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("working".into()));
+    assert!(tools.calls.borrow().is_empty());
+    let stored = sess.inner.borrow();
+    let projection = stored
+        .as_ref()
+        .unwrap()
+        .task_status_projection
+        .as_ref()
+        .unwrap();
+    assert_eq!(projection.revision, 1);
+    assert_eq!(projection.items[0].item_id, "inspect");
+    assert_eq!(stored.as_ref().unwrap().last_event_seq, 1);
+}
+
+/// Permission planning persists a request and pauses. It never calls ToolSeam,
+/// and the persisted object is not a grant or dispatch instruction.
+#[tokio::test]
+async fn permission_planning_records_request_without_dispatch_or_grant() {
+    let sess = MemSession::default();
+    let mut initial = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-20T00:00:00Z",
+    );
+    initial.latest_input_seq = 1;
+    initial.input_revision = 1;
+    *sess.inner.borrow_mut() = Some(initial);
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [tool_use_args(
+                "permission-call",
+                crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+                r#"{"items":[{"item_id":"inspect","provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"read_device","resource_scope":["target:device"],"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Inspect the target requested by the user"}]}"#,
+            )]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "must not run".into(),
+    };
+    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let mut registry = vec![
+        providers
+            .capability(crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
+            .unwrap()
+            .registered_tool(),
+    ];
+    registry.extend(crate::permission_tools::permission_planning_tool_registry());
+    let inventory = vec![crate::capability_availability::CapabilityAvailability {
+        provider_id: "desktop.session".into(),
+        capability_id: crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID.into(),
+        tool_name: "inspect_desktop_session".into(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let mut loop_deps = deps(&sess, &model, &tools, &registry, &clock);
+    loop_deps.provider_registry = Some(&providers);
+    loop_deps.capability_inventory = Some(&inventory);
+
+    let outcome = run_agent_turn(
+        &loop_deps,
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "inspect it"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    let LoopOutcome::PermissionRequested { request_id } = outcome else {
+        panic!("permission planning must pause the turn");
+    };
+    assert!(request_id.starts_with("permission-request-"));
+    assert!(tools.calls.borrow().is_empty());
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(stored.permission_requests.len(), 1);
+    assert_eq!(
+        stored.permission_requests[0].state,
+        crate::dynamic_run::PermissionRequestState::Pending
+    );
+    assert_eq!(stored.last_event_seq, 1);
+    assert_eq!(stored.handled_input_seq, 1);
+    let encoded = serde_json::to_string(&stored.permission_requests[0]).unwrap();
+    assert!(!encoded.contains("grant_id"));
+    assert!(!encoded.contains("dispatch"));
 }
 
 #[tokio::test]
@@ -988,6 +1402,75 @@ async fn runs_read_tool_then_answers() {
     assert_eq!(s.current_turn_steps, 2);
 }
 
+/// A failed selected read still produces model-visible data. The information-
+/// flow seam must therefore label its error text before the next model call.
+#[tokio::test]
+async fn failed_read_tool_result_is_offered_for_data_envelope_labeling() {
+    struct FailingRead {
+        envelope_inputs: Rc<RefCell<Vec<String>>>,
+    }
+
+    #[async_trait(?Send)]
+    impl ToolSeam for FailingRead {
+        async fn run_read(&self, _call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
+            Err(AgentError {
+                kind: desk_agent_protocol::AgentErrorKind::TransportError,
+                message: "display is not selected".into(),
+                retryable: false,
+                safe_for_model: true,
+                error_code: None,
+            })
+        }
+
+        fn read_data_envelope(
+            &self,
+            _call: &ToolCall,
+            output: &ToolRunOutput,
+        ) -> Result<Option<desk_agent_protocol::data_lineage::DataEnvelope>, AgentError> {
+            self.envelope_inputs
+                .borrow_mut()
+                .push(output.content.clone());
+            Ok(None)
+        }
+    }
+
+    let sess = MemSession::default();
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new([tool_use("c1", "sysinfo"), answer("done")].into()),
+        requests: Rc::clone(&requests),
+    };
+    let envelope_inputs = Rc::new(RefCell::new(vec![]));
+    let tools = FailingRead {
+        envelope_inputs: Rc::clone(&envelope_inputs),
+    };
+    let registry = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "t".to_string();
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &registry, &clock),
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "q"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("done".into()));
+    assert_eq!(
+        envelope_inputs.borrow().as_slice(),
+        ["tool error: display is not selected"]
+    );
+    assert!(
+        requests.borrow()[1]
+            .messages
+            .iter()
+            .any(|message| message.role == ChatRole::Tool
+                && message.text == "tool error: display is not selected")
+    );
+}
+
 /// A model that names a tool it was never shown gets an error tool-result (the
 /// conversation stays well-formed) rather than the call being executed.
 #[tokio::test]
@@ -1422,8 +1905,6 @@ async fn trims_history_to_budget() {
 
 // ---------------------------- Mutating path ----------------------------
 
-use crate::seam::ExecIdentity;
-
 /// A tool seam that scripts mutating outcomes and records read + exec calls.
 struct ScriptedTools {
     reads: Rc<RefCell<Vec<String>>>,
@@ -1432,6 +1913,7 @@ struct ScriptedTools {
     acks: Rc<RefCell<Vec<String>>>,
     waits: RefCell<std::collections::VecDeque<WaitOutcome>>,
     wait_calls: Rc<RefCell<Vec<String>>>,
+    mutation_envelope_inputs: Rc<RefCell<Vec<String>>>,
 }
 #[async_trait(?Send)]
 impl ToolSeam for ScriptedTools {
@@ -1453,6 +1935,16 @@ impl ToolSeam for ScriptedTools {
             .borrow_mut()
             .pop_front()
             .expect("a scripted exec outcome"))
+    }
+    fn mutating_data_envelope(
+        &self,
+        _call: &ToolCall,
+        output: &ToolRunOutput,
+    ) -> Result<Option<desk_agent_protocol::data_lineage::DataEnvelope>, AgentError> {
+        self.mutation_envelope_inputs
+            .borrow_mut()
+            .push(output.content.clone());
+        Ok(None)
     }
     async fn ack_delivery(&self, event_id: &str) -> Result<(), AgentError> {
         self.acks.borrow_mut().push(event_id.to_string());
@@ -1515,6 +2007,7 @@ fn tools_with_waits(execs: Vec<ExecOutcome>, waits: Vec<WaitOutcome>) -> Scripte
         acks: Rc::new(RefCell::new(vec![])),
         waits: RefCell::new(waits.into()),
         wait_calls: Rc::new(RefCell::new(vec![])),
+        mutation_envelope_inputs: Rc::new(RefCell::new(vec![])),
     }
 }
 
@@ -1531,6 +2024,8 @@ fn exec_deps<'a>(
         tools: scripted,
         content_safety: crate::content_safety::ContentSafetyMode::Disabled,
         registry,
+        provider_registry: None,
+        capability_inventory: None,
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
@@ -1574,6 +2069,10 @@ async fn mutating_executes_then_answers() {
 
     assert_eq!(outcome, LoopOutcome::Answered("done".into()));
     assert_eq!(*scripted.exec_calls.borrow(), vec!["c1"]);
+    assert_eq!(
+        scripted.mutation_envelope_inputs.borrow().as_slice(),
+        ["exit_code=0"]
+    );
     let s = sess.inner.borrow();
     let s = s.as_ref().unwrap();
     // user, assistant(tool_calls), tool result, assistant(answer).
@@ -1679,6 +2178,7 @@ async fn reacting_to_a_completion_clears_its_pending_trigger() {
     ));
     seeded.add_pending_auto_trigger(PendingAutoTrigger {
         work_id: 1,
+        kind: crate::session::WorkKind::AgentExec,
         execution_id: "e1".into(),
         tool_call_id: "c1".into(),
         event_id: "done-1".into(),
@@ -1688,6 +2188,7 @@ async fn reacting_to_a_completion_clears_its_pending_trigger() {
     });
     seeded.add_pending_auto_trigger(PendingAutoTrigger {
         work_id: 2,
+        kind: crate::session::WorkKind::AgentExec,
         execution_id: "e2".into(),
         tool_call_id: "c2".into(),
         event_id: "done-absent".into(),
@@ -1720,8 +2221,8 @@ async fn reacting_to_a_completion_clears_its_pending_trigger() {
 /// already at the tail of the conversation, the model sees it in the request,
 /// and reacting drains its pending entry.
 #[tokio::test]
-async fn resume_runs_against_the_existing_tail_without_appending() {
-    use crate::session::{PendingAutoTrigger, TriggerOrigin};
+async fn generic_work_completion_resume_runs_against_the_existing_tail_without_appending() {
+    use crate::session::{PendingAutoTrigger, TriggerOrigin, WorkKind};
     let sess = MemSession::default();
     let model = ScriptModel {
         turns: RefCell::new([answer("looked at it")].into()),
@@ -1741,6 +2242,7 @@ async fn resume_runs_against_the_existing_tail_without_appending() {
     ));
     seeded.add_pending_auto_trigger(PendingAutoTrigger {
         work_id: 1,
+        kind: WorkKind::OfficePatch,
         execution_id: "e1".into(),
         tool_call_id: "c1".into(),
         event_id: "done-1".into(),
@@ -1752,7 +2254,9 @@ async fn resume_runs_against_the_existing_tail_without_appending() {
     *sess.inner.borrow_mut() = Some(seeded);
 
     let mut claim = claim();
-    claim.trigger_origin = TriggerOrigin::ExecCompletion;
+    claim.trigger_origin = TriggerOrigin::WorkCompletion {
+        kind: WorkKind::OfficePatch,
+    };
     let outcome = resume_agent_turn(
         &exec_deps(&sess, &model, &scripted, &reg, &clock),
         claim,
@@ -1795,11 +2299,9 @@ async fn mutating_unknown_closes_with_placeholder_and_hides_mutating() {
         ),
         requests: Rc::new(RefCell::new(vec![])),
     };
-    let scripted = tools(vec![ExecOutcome::Unknown(ExecIdentity {
-        work_id: 5,
-        execution_id: "e1".into(),
-        exec_request_id: "r1".into(),
-    })]);
+    let scripted = tools(vec![ExecOutcome::Unknown(
+        crate::session::ActionIdentity::agent_exec(5, "r1", "e1"),
+    )]);
     let reg = vec![
         mutating_tool("exec_command", Capability::ShellExecConfirmed),
         read_tool("read_sys", Capability::SystemInfo),
@@ -1822,11 +2324,11 @@ async fn mutating_unknown_closes_with_placeholder_and_hides_mutating() {
     // The placeholder is recorded with the unknown outcome.
     match &s.execution_state {
         ExecutionState::OutcomeUnknown {
-            execution_id,
+            action,
             placeholder_message_id,
             ..
         } => {
-            assert_eq!(execution_id, "e1");
+            assert_eq!(action.execution_id, "e1");
             let ph = s
                 .conversation
                 .iter()
@@ -1865,11 +2367,9 @@ async fn mutating_dispatched_closes_with_task_id_and_hides_mutating() {
         ),
         requests: Rc::new(RefCell::new(vec![])),
     };
-    let scripted = tools(vec![ExecOutcome::Dispatched(ExecIdentity {
-        work_id: 8,
-        execution_id: "e9".into(),
-        exec_request_id: "exec_task9".into(),
-    })]);
+    let scripted = tools(vec![ExecOutcome::Dispatched(
+        crate::session::ActionIdentity::agent_exec(8, "exec_task9", "e9"),
+    )]);
     let reg = vec![
         mutating_tool("exec_command", Capability::ShellExecConfirmed),
         read_tool("read_sys", Capability::SystemInfo),
@@ -1891,14 +2391,10 @@ async fn mutating_dispatched_closes_with_task_id_and_hides_mutating() {
     let s = s.as_ref().unwrap();
     // The dispatch is recorded as an outstanding execution, not an unknown one.
     match &s.execution_state {
-        ExecutionState::Executing {
-            work_id,
-            execution_id,
-            exec_request_id,
-        } => {
-            assert_eq!(*work_id, 8);
-            assert_eq!(execution_id, "e9");
-            assert_eq!(exec_request_id, "exec_task9");
+        ExecutionState::Executing { action } => {
+            assert_eq!(action.work_id, 8);
+            assert_eq!(action.execution_id, "e9");
+            assert_eq!(action.action_request_id, "exec_task9");
         }
         other => panic!("expected Executing, got {other:?}"),
     }
@@ -1946,12 +2442,11 @@ fn seeded_executing() -> MemSession {
         "2026-06-20T00:00:00Z",
     );
     s.execution_state = ExecutionState::Executing {
-        work_id: 8,
-        execution_id: "e9".into(),
-        exec_request_id: "exec_task9".into(),
+        action: crate::session::ActionIdentity::agent_exec(8, "exec_task9", "e9"),
     };
     MemSession {
         inner: RefCell::new(Some(s)),
+        ..Default::default()
     }
 }
 
@@ -2106,11 +2601,11 @@ async fn wait_for_task_unknown_degrades_to_outcome_unknown() {
     let s = s.as_ref().unwrap();
     match &s.execution_state {
         ExecutionState::OutcomeUnknown {
-            execution_id,
+            action,
             placeholder_message_id,
             ..
         } => {
-            assert_eq!(execution_id, "e9");
+            assert_eq!(action.execution_id, "e9");
             // The placeholder anchors on this wait call's own result message.
             let anchor = s
                 .conversation
@@ -2318,6 +2813,8 @@ async fn mutating_backend_error_fails_turn() {
         tools: &failing,
         content_safety: crate::content_safety::ContentSafetyMode::Disabled,
         registry: &reg,
+        provider_registry: None,
+        capability_inventory: None,
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
@@ -2416,6 +2913,8 @@ async fn retryable_mutating_error_returns_to_model_for_correction() {
         tools: &tools,
         content_safety: crate::content_safety::ContentSafetyMode::Disabled,
         registry: &reg,
+        provider_registry: None,
+        capability_inventory: None,
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
@@ -3120,6 +3619,8 @@ async fn rejected_tool_image_is_not_persisted_and_remaining_calls_are_paired() {
             context: safety_context(),
         },
         registry: &registry,
+        provider_registry: None,
+        capability_inventory: None,
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,

@@ -20,6 +20,7 @@ use crate::{
         data_channel::{MouseEventData, MouseEventHandler},
         geometry::SharedMonitorGeometry,
     },
+    windows_event::mark_browser_input,
 };
 
 pub struct WindowsMouseEventHandler {
@@ -77,6 +78,7 @@ impl WindowsMouseEventHandler {
         input.Anonymous.mi.dy = ny;
         input.Anonymous.mi.dwFlags =
             MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+        mark_browser_input(&mut input);
         input
     }
 }
@@ -169,6 +171,7 @@ impl MouseEventHandler for WindowsMouseEventHandler {
         let mut button_input = INPUT::default();
         button_input.r#type = INPUT_MOUSE;
         button_input.Anonymous.mi.dwFlags = mouse_event_flags;
+        mark_browser_input(&mut button_input);
         let inputs = [move_input, button_input];
         unsafe {
             let result = SendInput(&inputs, size_of::<INPUT>() as i32);
@@ -202,6 +205,7 @@ impl MouseEventHandler for WindowsMouseEventHandler {
         let mut button_input = INPUT::default();
         button_input.r#type = INPUT_MOUSE;
         button_input.Anonymous.mi.dwFlags = mouse_event_flags;
+        mark_browser_input(&mut button_input);
         let inputs = [move_input, button_input];
         unsafe {
             let result = SendInput(&inputs, size_of::<INPUT>() as i32);
@@ -228,6 +232,7 @@ impl MouseEventHandler for WindowsMouseEventHandler {
             input.r#type = INPUT_MOUSE;
             input.Anonymous.mi.dwFlags = MOUSEEVENTF_WHEEL;
             input.Anonymous.mi.mouseData = (-event.delta_y) as i32 as u32;
+            mark_browser_input(&mut input);
             inputs.push(input);
         }
 
@@ -239,6 +244,7 @@ impl MouseEventHandler for WindowsMouseEventHandler {
             input.r#type = INPUT_MOUSE;
             input.Anonymous.mi.dwFlags = MOUSEEVENTF_HWHEEL;
             input.Anonymous.mi.mouseData = event.delta_x as i32 as u32;
+            mark_browser_input(&mut input);
             inputs.push(input);
         }
 

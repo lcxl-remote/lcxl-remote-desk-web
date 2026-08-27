@@ -18,6 +18,7 @@
 use std::fmt;
 
 use desk_agent_protocol::ExecutionMode;
+use desk_agent_protocol::data_lineage::DestinationIdentity;
 use desk_diagnose_core::model_profile::{
     MODEL_PROFILE_SCHEMA_VERSION, ModelRequestProfile, OutputLimitField, ProfileError, WireProtocol,
 };
@@ -180,6 +181,32 @@ impl Default for ModelProviderConfig {
 }
 
 impl ModelProviderConfig {
+    /// Resolve the exact model egress destination from the existing OSS AI
+    /// gateway row. This projection carries stable identity/revisions only and
+    /// can never copy the base URL or credential into a DataEnvelope.
+    pub fn destination_identity(&self) -> Result<DestinationIdentity, ModelDestinationError> {
+        if !self.is_configured() {
+            return Err(ModelDestinationError::NotConfigured);
+        }
+        let model_id = self
+            .model
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(ModelDestinationError::NotConfigured)?;
+        let connection_revision = u64::try_from(self.connection_revision)
+            .map_err(|_| ModelDestinationError::InvalidRevision)?;
+        let profile_revision = self.profile_revision;
+        if connection_revision == 0 || profile_revision < 1 {
+            return Err(ModelDestinationError::InvalidRevision);
+        }
+        Ok(DestinationIdentity::Model {
+            connection_id: format!("oss-ai-gateway:{SINGLETON_ID}"),
+            connection_revision,
+            model_id: model_id.to_string(),
+            profile_revision,
+        })
+    }
+
     pub fn request_profile(&self) -> Result<ModelRequestProfile, ProfileError> {
         let max_context_bytes = self
             .max_context_bytes
@@ -441,6 +468,23 @@ impl ModelProviderConfig {
         })
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelDestinationError {
+    NotConfigured,
+    InvalidRevision,
+}
+
+impl fmt::Display for ModelDestinationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotConfigured => f.write_str("OSS AI gateway is not fully configured"),
+            Self::InvalidRevision => f.write_str("OSS AI gateway revision is invalid"),
+        }
+    }
+}
+
+impl std::error::Error for ModelDestinationError {}
 
 impl fmt::Debug for ModelProviderConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -785,6 +829,27 @@ mod tests {
         let json = serde_json::to_string(&public).expect("serialize public");
         assert!(!json.contains("sk-secret-value"), "leaked key: {json}");
         assert!(!json.contains("api_key\""), "carries api_key: {json}");
+    }
+
+    #[test]
+    fn destination_identity_reuses_gateway_revisions_without_secrets_or_url() {
+        let destination = configured().destination_identity().unwrap();
+        assert_eq!(
+            destination,
+            DestinationIdentity::Model {
+                connection_id: format!("oss-ai-gateway:{SINGLETON_ID}"),
+                connection_revision: 1,
+                model_id: "example-model".into(),
+                profile_revision: 1,
+            }
+        );
+        let json = serde_json::to_string(&destination).unwrap();
+        assert!(!json.contains("sk-secret-value"));
+        assert!(!json.contains("api.example"));
+        assert_eq!(
+            ModelProviderConfig::default().destination_identity(),
+            Err(ModelDestinationError::NotConfigured)
+        );
     }
 
     #[test]

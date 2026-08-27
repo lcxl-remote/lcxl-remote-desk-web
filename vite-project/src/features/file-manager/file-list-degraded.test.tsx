@@ -37,6 +37,10 @@ const FAILURE = {
     },
 }
 
+vi.mock("@/services/hooks/connectionController/useListConnections", () => ({
+    useListConnections: () => ({ data: [] }),
+}))
+
 vi.mock("./use-file-transfer", async (importOriginal) => ({
     ...(await importOriginal<typeof import("./use-file-transfer")>()),
     useFileTransfer: () => ({

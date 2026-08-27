@@ -487,6 +487,7 @@ impl TurnSink for DiscardTurnSink {
 pub async fn resume_completion_turn(
     db: DatabaseConnection,
     session: PersistedAgentSession,
+    work_kind: desk_diagnose_core::session::WorkKind,
 ) -> Result<LoopOutcome, AgentError> {
     let config = model_provider::load(&db)
         .await
@@ -514,7 +515,7 @@ pub async fn resume_completion_turn(
         // replace the earlier placeholder answer with this follow-up transcript.
         request_id: session.current_request_id,
         connection_id: None,
-        trigger_origin: TriggerOrigin::ExecCompletion,
+        trigger_origin: TriggerOrigin::WorkCompletion { kind: work_kind },
         now: clock(),
     };
     let tools = CompletionOnlyTools;
@@ -525,6 +526,8 @@ pub async fn resume_completion_turn(
         tools: &tools,
         content_safety: desk_diagnose_core::content_safety::ContentSafetyMode::Disabled,
         registry: &registry,
+        provider_registry: None,
+        capability_inventory: None,
         response_format: ResponseFormatSpec::None,
         system_prompt: build_agentic_system_message(None),
         max_steps_per_turn: config.max_steps_per_turn.min(AUTO_FOLLOW_UP_MAX_STEPS),
@@ -694,6 +697,8 @@ pub async fn run_model_phase(
         tools: &tools,
         content_safety: desk_diagnose_core::content_safety::ContentSafetyMode::Disabled,
         registry: &registry,
+        provider_registry: None,
+        capability_inventory: None,
         response_format: ResponseFormatSpec::None,
         system_prompt: build_agentic_system_message(ctx.request.locale.as_deref()),
         max_steps_per_turn: config.max_steps_per_turn,

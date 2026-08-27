@@ -35,6 +35,11 @@ pub struct WorkerInitPayload {
     pub desktop_name: Option<String>,
     /// Configuration JSON (DeskSettings serialized)
     pub config_json: String,
+    /// Absolute directory for this worker's file telemetry. Runtime-only path
+    /// state is intentionally skipped when `Settings` is serialized, so the
+    /// daemon must pass this separately to an out-of-process worker.
+    #[serde(default)]
+    pub log_dir: Option<String>,
     /// Signaling server URL to connect to (or proxy through service)
     pub signaling_url: Option<String>,
     /// Authentication token. In daemon-spawned workers this is the

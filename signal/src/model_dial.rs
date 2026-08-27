@@ -109,10 +109,23 @@ fn enforce_public_tls_from_env_value(raw: Option<&str>) -> bool {
 /// decision needs no second lookup. The original host / SNI is preserved, so TLS
 /// certificate validation is unaffected.
 #[derive(Clone, Copy)]
-struct SsrfResolver {
+pub(crate) struct SsrfResolver {
     mode: desk_utils::ssrf::ProviderSsrfMode,
     scheme_is_tls: bool,
     enforce_public_tls: bool,
+}
+
+impl SsrfResolver {
+    /// Fixed transport posture for untrusted Web Research targets. Unlike the
+    /// operator-configured model gateway, this can never opt into private/LAN
+    /// reachability or plaintext transport.
+    pub(crate) const fn strict_public_https() -> Self {
+        Self {
+            mode: desk_utils::ssrf::ProviderSsrfMode::Strict,
+            scheme_is_tls: true,
+            enforce_public_tls: true,
+        }
+    }
 }
 
 impl actix_tls::connect::Resolve for SsrfResolver {
@@ -888,6 +901,7 @@ impl OpenAiStreamState {
                 reasoning_tokens,
                 stop_reason,
                 replay,
+                data_envelope: None,
             },
         }
     }
@@ -1248,6 +1262,7 @@ impl AnthropicStreamState {
                 reasoning_tokens: None,
                 stop_reason,
                 replay,
+                data_envelope: None,
             },
         }
     }

@@ -19,10 +19,13 @@ export type { DeleteDeviceCodeMutationKey } from "./deviceCodeController/useDele
 export type { ListDeviceCodesQueryKey } from "./deviceCodeController/useListDeviceCodes.ts";
 export type { ListDeviceCodesSuspenseQueryKey } from "./deviceCodeController/useListDeviceCodesSuspense.ts";
 export type { UpdateDeviceCodeMutationKey } from "./deviceCodeController/useUpdateDeviceCode.ts";
+export type { CancelDiagnoseBackgroundTaskMutationKey } from "./diagnoseSessionController/useCancelDiagnoseBackgroundTask.ts";
+export type { DecideDiagnosePermissionMutationKey } from "./diagnoseSessionController/useDecideDiagnosePermission.ts";
 export type { GetDiagnoseSessionQueryKey } from "./diagnoseSessionController/useGetDiagnoseSession.ts";
 export type { GetDiagnoseSessionSuspenseQueryKey } from "./diagnoseSessionController/useGetDiagnoseSessionSuspense.ts";
 export type { ListDiagnoseSessionsQueryKey } from "./diagnoseSessionController/useListDiagnoseSessions.ts";
 export type { ListDiagnoseSessionsSuspenseQueryKey } from "./diagnoseSessionController/useListDiagnoseSessionsSuspense.ts";
+export type { RevokeDiagnoseCapabilityGrantMutationKey } from "./diagnoseSessionController/useRevokeDiagnoseCapabilityGrant.ts";
 export type { AuthorizeWaylandMutationKey } from "./hostReadinessController/useAuthorizeWayland.ts";
 export type { CancelWaylandMutationKey } from "./hostReadinessController/useCancelWayland.ts";
 export type { RequestMacosPermissionsMutationKey } from "./hostReadinessController/useRequestMacosPermissions.ts";
@@ -162,6 +165,12 @@ export { useListDeviceCodesSuspense } from "./deviceCodeController/useListDevice
 export { updateDeviceCodeMutationKey } from "./deviceCodeController/useUpdateDeviceCode.ts";
 export { updateDeviceCodeMutationOptions } from "./deviceCodeController/useUpdateDeviceCode.ts";
 export { useUpdateDeviceCode } from "./deviceCodeController/useUpdateDeviceCode.ts";
+export { cancelDiagnoseBackgroundTaskMutationKey } from "./diagnoseSessionController/useCancelDiagnoseBackgroundTask.ts";
+export { cancelDiagnoseBackgroundTaskMutationOptions } from "./diagnoseSessionController/useCancelDiagnoseBackgroundTask.ts";
+export { useCancelDiagnoseBackgroundTask } from "./diagnoseSessionController/useCancelDiagnoseBackgroundTask.ts";
+export { decideDiagnosePermissionMutationKey } from "./diagnoseSessionController/useDecideDiagnosePermission.ts";
+export { decideDiagnosePermissionMutationOptions } from "./diagnoseSessionController/useDecideDiagnosePermission.ts";
+export { useDecideDiagnosePermission } from "./diagnoseSessionController/useDecideDiagnosePermission.ts";
 export { getDiagnoseSessionQueryKey } from "./diagnoseSessionController/useGetDiagnoseSession.ts";
 export { getDiagnoseSessionQueryOptions } from "./diagnoseSessionController/useGetDiagnoseSession.ts";
 export { useGetDiagnoseSession } from "./diagnoseSessionController/useGetDiagnoseSession.ts";
@@ -174,6 +183,9 @@ export { useListDiagnoseSessions } from "./diagnoseSessionController/useListDiag
 export { listDiagnoseSessionsSuspenseQueryKey } from "./diagnoseSessionController/useListDiagnoseSessionsSuspense.ts";
 export { listDiagnoseSessionsSuspenseQueryOptions } from "./diagnoseSessionController/useListDiagnoseSessionsSuspense.ts";
 export { useListDiagnoseSessionsSuspense } from "./diagnoseSessionController/useListDiagnoseSessionsSuspense.ts";
+export { revokeDiagnoseCapabilityGrantMutationKey } from "./diagnoseSessionController/useRevokeDiagnoseCapabilityGrant.ts";
+export { revokeDiagnoseCapabilityGrantMutationOptions } from "./diagnoseSessionController/useRevokeDiagnoseCapabilityGrant.ts";
+export { useRevokeDiagnoseCapabilityGrant } from "./diagnoseSessionController/useRevokeDiagnoseCapabilityGrant.ts";
 export { authorizeWaylandMutationKey } from "./hostReadinessController/useAuthorizeWayland.ts";
 export { authorizeWaylandMutationOptions } from "./hostReadinessController/useAuthorizeWayland.ts";
 export { useAuthorizeWayland } from "./hostReadinessController/useAuthorizeWayland.ts";

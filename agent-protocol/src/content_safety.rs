@@ -25,6 +25,7 @@ use wincode::{SchemaRead, SchemaWrite};
 pub enum ContentSafetySurface {
     Diagnosis,
     TerminalCopilot,
+    DeviceAssistant,
     TerminalCompletion,
     FleetDiagnosis,
     FleetExecution,

@@ -8,6 +8,7 @@ use windows::Win32::{
 use crate::{
     error::InputError,
     model::data_channel::{KeyboardEventData, KeyboardEventHandler},
+    windows_event::mark_browser_input,
 };
 
 pub struct WindowsKeyboardEventHandler {}
@@ -18,6 +19,7 @@ impl KeyboardEventHandler for WindowsKeyboardEventHandler {
         input.r#type = INPUT_KEYBOARD;
         input.Anonymous.ki.wVk = VIRTUAL_KEY(event.key_code as u16);
         input.Anonymous.ki.dwFlags = KEYBD_EVENT_FLAGS(0);
+        mark_browser_input(&mut input);
         let inputs = [input];
         unsafe {
             let result = SendInput(&inputs, size_of::<[INPUT; 1]>() as i32);
@@ -39,6 +41,7 @@ impl KeyboardEventHandler for WindowsKeyboardEventHandler {
         // see https://learn.microsoft.com/zh-cn/windows/win32/inputdev/virtual-key-codes
         input.Anonymous.ki.wVk = VIRTUAL_KEY(event.key_code as u16);
         input.Anonymous.ki.dwFlags = KEYEVENTF_KEYUP;
+        mark_browser_input(&mut input);
         let inputs = [input];
         unsafe {
             let result = SendInput(&inputs, size_of::<[INPUT; 1]>() as i32);

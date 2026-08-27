@@ -35,6 +35,9 @@ pub(super) fn is_ai_control_frame(t: SignalingType) -> bool {
         SignalingType::InvokeAgentCapability
             | SignalingType::DiagnoseDevice
             | SignalingType::PreviewExecution
+            | SignalingType::DispatchComputerAction
+            | SignalingType::CancelComputerAction
+            | SignalingType::QueryComputerActionState
     )
 }
 

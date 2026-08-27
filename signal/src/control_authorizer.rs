@@ -29,6 +29,9 @@ use desk_agent_protocol::authz::{
     AUTHORIZATION_BLOCK_VERSION, AuthorizationBlock, AuthorizedControlPayload, AuthzActor,
     AuthzDevice, ExecAdmissionPolicy,
 };
+use desk_agent_protocol::device_assistant::{
+    DeviceAssistantAsk, DeviceAssistantContextUpdate, DeviceAssistantObjectContextUpdate,
+};
 use desk_agent_protocol::diagnose::DiagnoseRequestData;
 use desk_agent_protocol::exec::ResolveExecData;
 use desk_agent_protocol::{AgentScope, Capability, ExecutionMode, RiskLevel};
@@ -76,6 +79,19 @@ fn evidence_capabilities() -> [Capability; 9] {
     ]
 }
 
+/// Read-only Computer Use capabilities available to the single-account owner.
+///
+/// These grants only let an authorized request reach the edge PEP. The worker's
+/// dynamic Computer Use readiness and fail-closed local settings still decide
+/// whether the requested observation is supported and ready for this session.
+fn computer_use_observation_capabilities() -> [Capability; 3] {
+    [
+        Capability::DesktopSessionInspect,
+        Capability::DesktopUiInspect,
+        Capability::OfficeDocumentInspect,
+    ]
+}
+
 /// The broad decision the single account is granted over any device it reaches.
 /// Read evidence and confirmed/read-only exec are granted; the `mode` is the
 /// central grant (the provider config's `execution_mode`), which the edge then
@@ -84,6 +100,7 @@ fn evidence_capabilities() -> [Capability; 9] {
 /// the edge's confirm-exec gate is the real bound.
 fn single_account_decision(mode: ExecutionMode) -> (AgentScope, Vec<String>, RiskLevel) {
     let mut granted: Vec<Capability> = evidence_capabilities().to_vec();
+    granted.extend(computer_use_observation_capabilities());
     granted.push(Capability::ShellExecReadonly);
     granted.push(Capability::ShellExecConfirmed);
     let scope = AgentScope {
@@ -284,6 +301,13 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
             if model.signaling_type == SignalingType::CancelTerminalCopilot {
                 return ControlFrameOutcome::Handled;
             }
+            // Device Assistant turns run centrally and expose no approval or
+            // mutation waiter. Cancellation is best-effort and never relayed to
+            // the host; a late event remains request-correlated and is discarded
+            // by a client that already moved on.
+            if model.signaling_type == SignalingType::CancelDeviceAssistant {
+                return ControlFrameOutcome::Handled;
+            }
             // A signal-owned agentic exec parks its approval here. Consume only
             // when the request id and browser connection both match; otherwise
             // this is the ordinary browser-initiated ConfirmExec flow and still
@@ -468,6 +492,144 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                         actor.model.connection_id.clone(),
                         ask,
                     ));
+                    ControlFrameOutcome::Handled
+                }
+                SignalingType::AskDeviceAssistant => {
+                    let ask = match model.get_data::<DeviceAssistantAsk>() {
+                        Ok(ask) => ask,
+                        Err(e) => {
+                            return ControlFrameOutcome::Reject {
+                                code: DeskErrorCode::INVALID_PARAMS,
+                                message: format!("invalid DeviceAssistantAsk payload: {e}"),
+                            };
+                        }
+                    };
+                    if let Err(message) = ask.validate() {
+                        return ControlFrameOutcome::Reject {
+                            code: DeskErrorCode::INVALID_PARAMS,
+                            message: message.into(),
+                        };
+                    }
+                    if desk_diagnose_core::device_assistant::selected_context_capabilities(
+                        &ask.selected_capability_ids,
+                    )
+                    .is_err()
+                    {
+                        return ControlFrameOutcome::Reject {
+                            code: DeskErrorCode::INVALID_PARAMS,
+                            message: "unknown or non-context Device Assistant capability".into(),
+                        };
+                    }
+                    actix_web::rt::spawn(crate::device_assistant_orchestrator::run_turn(
+                        self.connection_map.clone(),
+                        self.db.clone(),
+                        model.request_id.clone(),
+                        actor.model.connection_id.clone(),
+                        to_id,
+                        actor_user_id,
+                        audience,
+                        ask,
+                    ));
+                    ControlFrameOutcome::Handled
+                }
+                SignalingType::GetDeviceAssistantCapabilities => {
+                    actix_web::rt::spawn(
+                        crate::device_assistant_orchestrator::send_capability_inventory(
+                            self.connection_map.clone(),
+                            self.db.clone(),
+                            model.request_id.clone(),
+                            actor.model.connection_id.clone(),
+                            to_id,
+                        ),
+                    );
+                    ControlFrameOutcome::Handled
+                }
+                SignalingType::UpdateDeviceAssistantContext => {
+                    let update = match model.get_data::<DeviceAssistantContextUpdate>() {
+                        Ok(update) => update,
+                        Err(error) => {
+                            return ControlFrameOutcome::Reject {
+                                code: DeskErrorCode::INVALID_PARAMS,
+                                message: format!(
+                                    "invalid DeviceAssistantContextUpdate payload: {error}"
+                                ),
+                            };
+                        }
+                    };
+                    if let Err(message) = update.validate() {
+                        return ControlFrameOutcome::Reject {
+                            code: DeskErrorCode::INVALID_PARAMS,
+                            message: message.into(),
+                        };
+                    }
+                    if !desk_diagnose_core::conversation_key::is_valid_client_conversation_id(
+                        &update.conversation_id,
+                    ) {
+                        return ControlFrameOutcome::Reject {
+                            code: DeskErrorCode::INVALID_PARAMS,
+                            message: "invalid Device Assistant conversation id".into(),
+                        };
+                    }
+                    if desk_diagnose_core::device_assistant::selected_context_capabilities(
+                        &update.selected_capability_ids,
+                    )
+                    .is_err()
+                    {
+                        return ControlFrameOutcome::Reject {
+                            code: DeskErrorCode::INVALID_PARAMS,
+                            message: "unknown or non-context Device Assistant capability".into(),
+                        };
+                    }
+                    actix_web::rt::spawn(crate::device_assistant_orchestrator::update_context(
+                        self.connection_map.clone(),
+                        self.db.clone(),
+                        model.request_id.clone(),
+                        actor.model.connection_id.clone(),
+                        to_id,
+                        actor_user_id,
+                        audience,
+                        update,
+                    ));
+                    ControlFrameOutcome::Handled
+                }
+                SignalingType::UpdateDeviceAssistantObjectContext => {
+                    let update = match model.get_data::<DeviceAssistantObjectContextUpdate>() {
+                        Ok(update) => update,
+                        Err(error) => {
+                            return ControlFrameOutcome::Reject {
+                                code: DeskErrorCode::INVALID_PARAMS,
+                                message: format!(
+                                    "invalid DeviceAssistantObjectContextUpdate payload: {error}"
+                                ),
+                            };
+                        }
+                    };
+                    if let Err(message) = update.validate() {
+                        return ControlFrameOutcome::Reject {
+                            code: DeskErrorCode::INVALID_PARAMS,
+                            message: message.into(),
+                        };
+                    }
+                    if !desk_diagnose_core::conversation_key::is_valid_client_conversation_id(
+                        &update.conversation_id,
+                    ) {
+                        return ControlFrameOutcome::Reject {
+                            code: DeskErrorCode::INVALID_PARAMS,
+                            message: "invalid Device Assistant conversation id".into(),
+                        };
+                    }
+                    actix_web::rt::spawn(
+                        crate::device_assistant_orchestrator::update_object_context(
+                            self.connection_map.clone(),
+                            self.db.clone(),
+                            model.request_id.clone(),
+                            actor.model.connection_id.clone(),
+                            to_id,
+                            actor_user_id,
+                            audience,
+                            update,
+                        ),
+                    );
                     ControlFrameOutcome::Handled
                 }
                 // The relay branch only routes the frame types above through the
@@ -738,5 +900,23 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn single_account_owner_can_only_observe_with_computer_use() {
+        let (scope, _, _) = single_account_decision(ExecutionMode::ReadOnly);
+        assert!(scope.granted.contains(&Capability::DesktopSessionInspect));
+        assert!(scope.granted.contains(&Capability::DesktopUiInspect));
+        assert!(scope.granted.contains(&Capability::OfficeDocumentInspect));
+        assert!(
+            !scope
+                .granted
+                .contains(&Capability::DesktopUiActionConfirmed)
+        );
+        assert!(
+            !scope
+                .granted
+                .contains(&Capability::DesktopInputFallbackConfirmed)
+        );
     }
 }

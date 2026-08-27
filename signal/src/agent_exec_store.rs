@@ -308,7 +308,13 @@ impl SignalAgentExecStore {
             ));
         }
 
-        match crate::diagnose_orchestrator::resume_completion_turn(self.db.clone(), session).await {
+        match crate::diagnose_orchestrator::resume_completion_turn(
+            self.db.clone(),
+            session,
+            desk_diagnose_core::session::WorkKind::AgentExec,
+        )
+        .await
+        {
             Ok(desk_diagnose_core::agent_loop::LoopOutcome::TurnBusy) => Ok(false),
             Ok(outcome) => {
                 log::info!(
@@ -514,9 +520,11 @@ mod tests {
             .await
             .unwrap();
         session.execution_state = ExecutionState::Executing {
-            work_id: 1,
-            execution_id: "generation-expired".into(),
-            exec_request_id: "task-expired".into(),
+            action: desk_diagnose_core::session::ActionIdentity::agent_exec(
+                1,
+                "task-expired",
+                "generation-expired",
+            ),
         };
         session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
         sessions.save(&mut session).await.unwrap();

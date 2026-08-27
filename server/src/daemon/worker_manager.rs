@@ -262,6 +262,7 @@ struct WorkerHandle {
 struct InprocessRestart {
     args: Args,
     host_control_hub: Arc<HostControlHub>,
+    computer_use_broker: Arc<crate::worker::agent::computer_use_broker::ComputerUseBroker>,
 }
 
 enum ProcessHandle {
@@ -481,12 +482,13 @@ impl WorkerManager {
 
         let (ipc_cmd_tx, ipc_cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
 
-        let (config_json, ipc_token) = {
+        let (config_json, ipc_token, log_dir) = {
             let settings = self.settings.read().await;
             let json = serde_json::to_string(&*settings)
                 .map_err(|e| format!("Failed to serialize settings: {e}"))?;
             let token = settings.system.tauri_ipc_token.clone();
-            (json, token)
+            let log_dir = settings.paths().log_dir().to_string_lossy().into_owned();
+            (json, token, log_dir)
         };
 
         // Daemon-side host-upstream endpoint that the worker's Forwarder hub
@@ -501,6 +503,7 @@ impl WorkerManager {
         let pipe_name_c = pipe_name.clone();
         let desktop_c = desktop_name.clone();
         let config_c = config_json.clone();
+        let log_dir_c = log_dir.clone();
         let host_upstream_url_c = host_upstream_url.clone();
         let ipc_token_c = ipc_token.clone();
         let mgr_c = self.clone();
@@ -519,6 +522,7 @@ impl WorkerManager {
                 session_id,
                 desktop_c,
                 config_c,
+                log_dir_c,
                 ipc_cmd_rx,
                 worker_msg_tx,
                 mgr_c,
@@ -574,6 +578,7 @@ impl WorkerManager {
         session_id: u32,
         desktop_name: Option<String>,
         host_control_hub: Arc<HostControlHub>,
+        computer_use_broker: Arc<crate::worker::agent::computer_use_broker::ComputerUseBroker>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if self.media_worker_restart_required() {
             return Err(
@@ -605,14 +610,18 @@ impl WorkerManager {
             info!("Shutting down existing in-process worker before starting a new one");
             let _ = worker.ipc_tx.send(ServiceToWorker::Shutdown);
             self.retire_worker(&mut worker);
+            computer_use_broker.reset_worker_incarnation();
         }
 
         let pipe_name = format!("inprocess-{session_id}-{}", uuid::Uuid::new_v4());
         let (ipc_cmd_tx, mut ipc_cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
 
-        let config_json = {
+        let (config_json, log_dir) = {
             let s = self.settings.read().await;
-            serde_json::to_string(&*s).map_err(|e| format!("Failed to serialize settings: {e}"))?
+            let json = serde_json::to_string(&*s)
+                .map_err(|e| format!("Failed to serialize settings: {e}"))?;
+            let log_dir = s.paths().log_dir().to_string_lossy().into_owned();
+            (json, log_dir)
         };
 
         let remote_access_state = self.remote_access_state();
@@ -621,6 +630,7 @@ impl WorkerManager {
             os_session_id: session_id,
             desktop_name: desktop_name.clone(),
             config_json,
+            log_dir: Some(log_dir),
             signaling_url: None,
             // No upstream WS — the worker shares the daemon's hub via
             // the `shared_hub` parameter to `run_with_transports`.
@@ -715,6 +725,7 @@ impl WorkerManager {
         let restart = InprocessRestart {
             args: args.clone(),
             host_control_hub: host_control_hub.clone(),
+            computer_use_broker: computer_use_broker.clone(),
         };
         let init_for_worker = init_payload;
         let hub = host_control_hub;
@@ -729,6 +740,7 @@ impl WorkerManager {
                     file_w2d_tx,
                     file_d2w_rx,
                     Some(hub),
+                    Some(computer_use_broker),
                 )
                 .await
             {
@@ -1014,6 +1026,7 @@ impl WorkerManager {
                 session_id,
                 desktop_name,
                 restart.host_control_hub,
+                restart.computer_use_broker,
             )
             .await
             .map_err(|error| error.to_string())

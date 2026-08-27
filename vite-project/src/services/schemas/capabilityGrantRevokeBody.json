@@ -1,0 +1,1 @@
+{"type":"object","required":["connection","grantId","reason"],"properties":{"connection":{"type":"string"},"conversation":{"type":["string","null"]},"grantId":{"type":"string"},"reason":{"type":"string"},"session":{"type":["string","null"]}},"x-readme-ref-name":"CapabilityGrantRevokeBody"}

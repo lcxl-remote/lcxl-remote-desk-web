@@ -1,0 +1,1 @@
+{"type":"object","required":["state"],"properties":{"state":{"type":"string","enum":["pending","needs_revalidation","approved","partially_approved","denied","replaced","withdrawn"],"x-readme-ref-name":"PermissionRequestStateDto"}},"x-readme-ref-name":"PermissionDecisionResponse"}

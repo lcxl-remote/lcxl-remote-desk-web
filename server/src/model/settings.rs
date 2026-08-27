@@ -16,6 +16,7 @@ use crate::error::DeskError;
 
 mod ai_policy;
 mod collection_policy;
+mod computer_use;
 mod log_config;
 mod system;
 mod turn_client;
@@ -24,6 +25,7 @@ mod virtual_display;
 
 pub use ai_policy::*;
 pub use collection_policy::*;
+pub use computer_use::*;
 pub use log_config::*;
 pub use system::*;
 pub use turn_client::*;
@@ -93,6 +95,11 @@ pub struct Settings {
     /// locally on every collection. Default fail-closed (both `false`).
     #[serde(default)]
     pub collection_policy: CollectionPolicySettings,
+
+    /// Device-local Computer Use ceiling. This is loaded from the trusted local
+    /// settings store and is never widened by a signaling request.
+    #[serde(default)]
+    pub computer_use: ComputerUseSettings,
 
     /// Command line arguments, come from clap and do not load from or save to config file
     #[serde(skip)]

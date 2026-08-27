@@ -45,8 +45,8 @@ use crate::prompt::ResponseFormatSpec;
 use crate::registry::{RegisteredTool, ToolEffect};
 use crate::replay::{ProviderResponseMeta, ReplayDisposition, SourceContextKey};
 use crate::seam::{
-    ClaimError, ClaimTurnParams, ExecContext, ExecIdentity, ExecOutcome, ModelRequest, ModelSeam,
-    NullTurnSink, SessionSeam, ToolRunOutput, ToolSeam, TurnSink,
+    ClaimError, ClaimTurnParams, ExecContext, ExecOutcome, ModelRequest, ModelSeam, NullTurnSink,
+    SessionSeam, ToolRunOutput, ToolSeam, TurnSink,
 };
 use crate::session::{ExecutionState, PersistedAgentSession};
 
@@ -293,6 +293,8 @@ fn deps<'a>(
         tools,
         content_safety: crate::content_safety::ContentSafetyMode::Disabled,
         registry,
+        provider_registry: None,
+        capability_inventory: None,
         response_format: ResponseFormatSpec::None,
         system_prompt: build_agentic_system_message(None),
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
@@ -490,11 +492,9 @@ async fn acceptance_unknown_outcome_withdraws_mutating_tool() {
     ]);
     let tools = GatedTools::new(
         "logs ok",
-        vec![ExecOutcome::Unknown(ExecIdentity {
-            work_id: 7,
-            execution_id: "exec-7".into(),
-            exec_request_id: "erid-7".into(),
-        })],
+        vec![ExecOutcome::Unknown(
+            crate::session::ActionIdentity::agent_exec(7, "erid-7", "exec-7"),
+        )],
     );
     let reg = vec![
         read_tool("read_log", Capability::LogRecent),
@@ -565,5 +565,190 @@ async fn acceptance_circuit_breaker_bounds_tool_loop() {
     assert_eq!(
         tools.reads.borrow().len() as u32,
         crate::MAX_SAME_TOOL_PER_TURN
+    );
+}
+
+/// Stage-2 rehearsal seam: each result unlocks the model's next choice, without
+/// any predeclared workflow/DAG in the runtime.
+struct ScriptedReadTools {
+    replies: RefCell<VecDeque<(String, String)>>,
+    calls: Rc<RefCell<Vec<String>>>,
+}
+
+#[async_trait(?Send)]
+impl ToolSeam for ScriptedReadTools {
+    async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
+        let (expected, content) = self
+            .replies
+            .borrow_mut()
+            .pop_front()
+            .expect("a scripted read result");
+        assert_eq!(
+            call.name, expected,
+            "the model selected the next Provider tool"
+        );
+        self.calls.borrow_mut().push(call.name.clone());
+        Ok(ToolRunOutput {
+            content,
+            image_data_url: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn durable_user_input_is_not_duplicated_and_advances_handled_watermark() {
+    let scope = read_only_scope();
+    let params = claim(scope.clone());
+    let mut durable = PersistedAgentSession::new(
+        params.conversation_id.clone(),
+        params.actor_id.clone(),
+        params.device_id.clone(),
+        params.policy_revision,
+        scope,
+        params.now.clone(),
+    );
+    durable.latest_input_seq = 1;
+    durable.input_revision = 1;
+    durable.last_event_seq = 1;
+    let user = ChatMessage::text("durable-user-1", ChatRole::User, "continue safely");
+    durable.conversation.push(user.clone());
+    let sess = MemSession {
+        inner: RefCell::new(Some(durable)),
+    };
+    let model = model(vec![answer("done")]);
+    let tools = GatedTools::new("", vec![]);
+    let clock = || "2026-08-25T00:00:01Z".to_string();
+    let registry = Vec::new();
+    let deps = deps(&sess, &model, &tools, &registry, &clock);
+
+    let outcome = run_agent_turn(&deps, params, user, &mut NullTurnSink)
+        .await
+        .unwrap();
+    assert_eq!(outcome, LoopOutcome::Answered("done".into()));
+    let saved = sess.inner.borrow();
+    let saved = saved.as_ref().unwrap();
+    assert_eq!(
+        saved
+            .conversation
+            .iter()
+            .filter(|message| message.role == ChatRole::User)
+            .count(),
+        1
+    );
+    assert_eq!(saved.handled_input_seq, 1);
+}
+
+/// S2-PR5 — the model can choose a new read-only Provider after seeing each
+/// result; the runtime does not require a fixed workflow. The fixture exercises
+/// directory discovery, two-workbook projection/statistics, external research,
+/// and a report preview while a mutating tool remains unreachable.
+#[tokio::test]
+async fn stage2_dynamic_readonly_rehearsal_has_no_fixed_workflow_or_mutation_path() {
+    let sess = MemSession::default();
+    let model = model(vec![
+        tool_use("c-directory", "enumerate_workbooks"),
+        tool_use("c-project", "project_workbooks"),
+        tool_use("c-research", "research_exchange_rate"),
+        tool_use("c-preview", "preview_report"),
+        answer("预览已生成；确认后可进入后续写入阶段。"),
+    ]);
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let tools = ScriptedReadTools {
+        replies: RefCell::new(
+            vec![
+                (
+                    "enumerate_workbooks".into(),
+                    r#"{"files":["north.xlsx","south.xlsx"]}"#.into(),
+                ),
+                (
+                    "project_workbooks".into(),
+                    r#"{"rows":6,"revenue_total_cny":300}"#.into(),
+                ),
+                (
+                    "research_exchange_rate".into(),
+                    r#"{"usd_cny":7.2,"source":"fake-research"}"#.into(),
+                ),
+                (
+                    "preview_report".into(),
+                    r#"{"title":"Workbook summary","revenue_total_cny":300,"revenue_total_usd":41.67}"#.into(),
+                ),
+            ]
+            .into(),
+        ),
+        calls: calls.clone(),
+    };
+    let registry = vec![
+        read_tool("enumerate_workbooks", Capability::LogRecent),
+        read_tool("project_workbooks", Capability::LogRecent),
+        read_tool("research_exchange_rate", Capability::LogRecent),
+        read_tool("preview_report", Capability::LogRecent),
+        mutating_tool("write_report", Capability::ShellExecConfirmed),
+    ];
+    let clock = || "2026-08-26T00:00:00Z".to_string();
+    let deps = LoopDeps {
+        session_seam: &sess,
+        model: &model,
+        tools: &tools,
+        content_safety: crate::content_safety::ContentSafetyMode::Disabled,
+        registry: &registry,
+        provider_registry: None,
+        capability_inventory: None,
+        response_format: ResponseFormatSpec::None,
+        system_prompt: build_agentic_system_message(None),
+        max_steps_per_turn: 8,
+        max_same_tool_per_turn: 2,
+        clock: &clock,
+        heartbeat: None,
+    };
+    let outcome = run_agent_turn(
+        &deps,
+        claim(read_only_scope()),
+        ChatMessage::text(
+            "u-dynamic",
+            ChatRole::User,
+            "整理两个工作簿，研究汇率并生成报告预览",
+        ),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        LoopOutcome::Answered("预览已生成；确认后可进入后续写入阶段。".into())
+    );
+    assert_eq!(
+        *calls.borrow(),
+        vec![
+            "enumerate_workbooks",
+            "project_workbooks",
+            "research_exchange_rate",
+            "preview_report"
+        ]
+    );
+    let requests = model.requests.borrow();
+    assert_eq!(requests.len(), 5);
+    for (index, evidence) in [
+        "north.xlsx",
+        "revenue_total_cny",
+        "fake-research",
+        "revenue_total_usd",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(
+            requests[index + 1]
+                .messages
+                .iter()
+                .any(|message| message.role == ChatRole::Tool && message.text.contains(evidence)),
+            "each later planning step sees the newly produced evidence"
+        );
+    }
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.tools.iter().any(|tool| tool.name == "write_report")),
+        "Stage 2 keeps every mutation path unreachable"
     );
 }

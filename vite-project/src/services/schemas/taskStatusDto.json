@@ -1,0 +1,1 @@
+{"type":"string","enum":["todo","in_progress","blocked","done","skipped"],"x-readme-ref-name":"TaskStatusDto"}

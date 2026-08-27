@@ -25,6 +25,8 @@
 //! [`MAX_SAME_TOOL_PER_TURN`]: crate::MAX_SAME_TOOL_PER_TURN
 
 use desk_agent_protocol::content_safety::{ContentSafetyDecision, StreamRetractionReason};
+use desk_agent_protocol::data_lineage::{ContentRef, DataEnvelope, DataProvenance};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 use crate::content_safety::{
@@ -33,13 +35,13 @@ use crate::content_safety::{
 };
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 
-use crate::chat::{ChatMessage, ModelTurnError, TurnDisposition, classify_model_turn};
+use crate::chat::{ChatMessage, ChatRole, ModelTurnError, TurnDisposition, classify_model_turn};
 use crate::registry::{RegisteredTool, ToolEffect, exposed_tools, lookup_exposed};
 use crate::seam::{
     ClaimError, ClaimTurnParams, ExecContext, ExecOutcome, ModelRequest, ModelSeam, SessionSeam,
     ToolSeam, TurnSink, WaitOutcome,
 };
-use crate::session::{ExecutionState, SubjectMismatch, TurnState};
+use crate::session::{AgentSessionSurface, ExecutionState, SubjectMismatch, TurnState};
 
 /// The placeholder tool-result text written when a mutating execution's outcome is
 /// unknown (§6): it keeps the conversation well-formed and tells the model not to
@@ -232,6 +234,15 @@ pub enum LoopOutcome {
     TurnBusy,
     /// The follow-up came from a different subject than the session.
     SubjectRejected(SubjectMismatch),
+    /// New durable user input superseded this planning revision. No stale model
+    /// answer, permission request, or new tool dispatch was committed.
+    Superseded {
+        previous_input_revision: u64,
+        current_input_revision: u64,
+    },
+    /// A normalized permission batch was durably recorded for user decision.
+    /// No grant was minted and no requested tool was dispatched.
+    PermissionRequested { request_id: String },
 }
 
 /// The seams + config the loop runs over, borrowed for one turn.
@@ -244,6 +255,13 @@ pub struct LoopDeps<'a> {
     pub content_safety: ContentSafetyMode<'a>,
 
     pub registry: &'a [RegisteredTool],
+    /// Complete compiled Provider catalog used only to validate discoverable
+    /// permission requests. `registry` above remains the callable tool set.
+    pub provider_registry: Option<&'a crate::provider_registry::ProviderRegistry>,
+    /// Fresh target-scoped readiness used by both the discoverable catalog and
+    /// permission-request validation. Static compilation alone is insufficient
+    /// for edge capabilities such as the paired Office add-in.
+    pub capability_inventory: Option<&'a [crate::capability_availability::CapabilityAvailability]>,
     pub response_format: crate::prompt::ResponseFormatSpec,
     /// The system message prepended to the (trimmed) conversation on every model
     /// call. The caller builds it (with the control-end locale) via
@@ -318,15 +336,81 @@ async fn run_or_resume(
 
     // Append the control-end message (if any) and persist before the first model
     // call. An automation resume appends nothing — it reacts to the existing tail.
+    let mut newer_user_inputs_after_request = 0_u64;
     if let Some(message) = to_append {
-        session
+        let message = message.with_turn_id(turn_id.clone());
+        if let Some(position) = session
             .conversation
-            .push(message.with_turn_id(turn_id.clone()));
+            .iter()
+            .position(|existing| existing.message_id == message.message_id)
+        {
+            newer_user_inputs_after_request = session.conversation[position + 1..]
+                .iter()
+                .filter(|message| message.role == ChatRole::User)
+                .count() as u64;
+        }
+        if let Some(existing) = session
+            .conversation
+            .iter_mut()
+            .find(|existing| existing.message_id == message.message_id)
+        {
+            // Stage 2 can durably append a user follow-up before claiming its
+            // model turn. Adopt the turn id without duplicating the message.
+            let mut expected = message.clone();
+            expected.turn_id = existing.turn_id.clone();
+            if *existing != expected {
+                return Err(AgentError {
+                    kind: AgentErrorKind::Internal,
+                    message: "durable user message id collision".into(),
+                    retryable: false,
+                    safe_for_model: false,
+                    error_code: None,
+                });
+            }
+            existing.turn_id = Some(turn_id.clone());
+        } else {
+            session.conversation.push(message);
+        }
     }
     deps.session_seam.save(&mut session).await?;
 
-    // Run the loop; whatever happens, settle the turn machine and persist once.
-    let result = run_inner(deps, &mut session, &turn_id, sink).await;
+    // Run the loop. A concurrently appended user follow-up advances the durable
+    // input revision and fences this owner even if cancellation of the provider
+    // request is best-effort.
+    let result = if newer_user_inputs_after_request > 0 {
+        // This request lost the pre-claim race: its durable message is already
+        // followed by newer user input. Settle this claim without invoking the
+        // model or advancing the handled watermark; the newest request waiter
+        // will claim the merged batch next.
+        Ok(LoopOutcome::Superseded {
+            previous_input_revision: session
+                .input_revision
+                .saturating_sub(newer_user_inputs_after_request),
+            current_input_revision: session.input_revision,
+        })
+    } else {
+        run_inner(deps, &mut session, &turn_id, sink).await
+    };
+    if let Some(current_input_revision) = input_revision_advanced(deps, &session).await? {
+        sink.on_turn_retracted(StreamRetractionReason::Incomplete, None);
+        if !deps
+            .session_seam
+            .settle_superseded(&session, &(deps.clock)())
+            .await?
+        {
+            return Err(AgentError {
+                kind: AgentErrorKind::Internal,
+                message: "superseded turn could not be fenced and settled".into(),
+                retryable: true,
+                safe_for_model: false,
+                error_code: None,
+            });
+        }
+        return Ok(LoopOutcome::Superseded {
+            previous_input_revision: session.input_revision,
+            current_input_revision,
+        });
+    }
     if result.is_err() && deps.content_safety.is_enforced() {
         // The provider/session error is intentionally not copied into a retraction
         // frame. The closed `Incomplete` reason selects local UI text without
@@ -342,6 +426,9 @@ async fn run_or_resume(
         _ => TurnState::Idle,
     };
     session.finish_turn(terminal, (deps.clock)());
+    if terminal == TurnState::Idle && !matches!(&result, Ok(LoopOutcome::Superseded { .. })) {
+        session.handled_input_seq = session.latest_input_seq;
+    }
     crate::image_input::strip_session_images(&mut session.conversation);
     // Surface a save failure only if the loop itself otherwise succeeded.
     let save = deps.session_seam.save(&mut session).await;
@@ -451,6 +538,7 @@ async fn append_reviewed_tool_result(
     message_id: String,
     call_id: &str,
     output: crate::seam::ToolRunOutput,
+    data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
 ) -> Result<Option<ToolOutputSafetyFailure>, AgentError> {
     let crate::seam::ToolRunOutput {
         content,
@@ -459,9 +547,9 @@ async fn append_reviewed_tool_result(
     let Some(image_data_url) = image_data_url else {
         // With no new image there is nothing to rotate: any previously retained
         // session image already satisfies the one-image invariant.
-        session
-            .conversation
-            .push(ChatMessage::tool_result(message_id, call_id, content));
+        let mut message = ChatMessage::tool_result(message_id, call_id, content);
+        message.data_envelope = data_envelope;
+        session.conversation.push(message);
         return Ok(None);
     };
 
@@ -471,6 +559,7 @@ async fn append_reviewed_tool_result(
         Ok(ContentSafetyDecision::Allow) => {
             let mut message = ChatMessage::tool_result(message_id, call_id, content);
             message.image_data_url = Some(image_data_url);
+            message.data_envelope = data_envelope;
             session.conversation.push(message);
             retain_latest_session_image(session)?;
             Ok(None)
@@ -953,6 +1042,12 @@ async fn run_inner(
         if session.turn_step_budget_exhausted(deps.max_steps_per_turn) {
             return Ok(LoopOutcome::CircuitBreak(CircuitBreakReason::StepBudget));
         }
+        if let Some(current_input_revision) = input_revision_advanced(deps, session).await? {
+            return Ok(LoopOutcome::Superseded {
+                previous_input_revision: session.input_revision,
+                current_input_revision,
+            });
+        }
 
         let exposed = exposed_tools(
             deps.registry,
@@ -980,9 +1075,73 @@ async fn run_inner(
         // Assemble the model request: a freshly built system prompt prepended to a
         // trailing, budget-trimmed window of the stored conversation. The system
         // prompt is never persisted, so it is added here on every call.
-        let mut messages = Vec::with_capacity(session.conversation.len() + 1);
+        let mut messages = Vec::with_capacity(session.conversation.len() + 3);
         messages.push(deps.system_prompt.clone());
         messages.extend(context_view.messages);
+        if session.surface == AgentSessionSurface::DeviceAssistant {
+            // Put the server-owned input watermark at the recency edge of the
+            // request. Some OpenAI-compatible models underweight a system prompt
+            // when several durable user follow-ups are batched; this marker makes
+            // the latest-input rule explicit without copying any user content.
+            let marker_id = format!(
+                "runtime-input-watermark-{turn_id}-{}",
+                session.input_revision
+            );
+            let marker_text = format!(
+                "RUNTIME INPUT WATERMARK (server authoritative): input_revision={} latest_input_seq={}. The newest user message in the transcript is the active requirement and overrides conflicting earlier requests. Do not continue a superseded plan. If update_task_status already succeeded for this requirement, do not call it again unless actual task progress materially changed; continue the work or answer.",
+                session.input_revision, session.latest_input_seq
+            );
+            let latest_user = session
+                .conversation
+                .iter()
+                .rev()
+                .find(|message| message.role == ChatRole::User)
+                .cloned();
+            let parent = latest_user
+                .as_ref()
+                .and_then(|message| message.data_envelope.as_ref());
+            let mut marker = ChatMessage::system_event(&marker_id, &marker_text);
+            marker.data_envelope = derive_internal_tool_result_envelope(
+                parent,
+                &marker_id,
+                &marker_text,
+                "input_watermark",
+            )?;
+            messages.push(marker);
+            let consecutive_user_inputs = session
+                .conversation
+                .iter()
+                .rposition(|message| message.role == ChatRole::User)
+                .map(|position| {
+                    session.conversation[..=position]
+                        .iter()
+                        .rev()
+                        .take_while(|message| message.role == ChatRole::User)
+                        .count()
+                })
+                .unwrap_or_default();
+            if consecutive_user_inputs > 1
+                && let Some(mut latest_user) = latest_user
+            {
+                // Repeat the exact latest bytes at the recency edge only for a
+                // batched follow-up. The repeated bytes need their own derived
+                // DataEnvelope: a sink projection intentionally rejects duplicate
+                // envelope ids, even when the bytes are identical. Inheriting the
+                // parent's sensitivity/destination while recording lineage keeps
+                // that fail-closed invariant intact. Older messages remain in
+                // context for additive requirements, but cannot outweigh recency.
+                let projection_id =
+                    format!("runtime-latest-input-{turn_id}-{}", session.input_revision);
+                latest_user.data_envelope = derive_internal_tool_result_envelope(
+                    latest_user.data_envelope.as_ref(),
+                    &projection_id,
+                    &latest_user.text,
+                    "latest_input_projection",
+                )?;
+                latest_user.message_id = projection_id;
+                messages.push(latest_user);
+            }
+        }
         // The ids the model is about to see. A pending auto-trigger whose completion
         // message is in this request is cleared once the model reacts to it (the
         // assistant answer / tool-call save below), so it never fires an automation
@@ -999,7 +1158,19 @@ async fn run_inner(
             caller_output_hard_cap: None,
         };
 
+        if let Some(current_input_revision) = input_revision_advanced(deps, session).await? {
+            return Ok(LoopOutcome::Superseded {
+                previous_input_revision: session.input_revision,
+                current_input_revision,
+            });
+        }
         let turn = deps.model.call(request, sink).await?;
+        if let Some(current_input_revision) = input_revision_advanced(deps, session).await? {
+            return Ok(LoopOutcome::Superseded {
+                previous_input_revision: session.input_revision,
+                current_input_revision,
+            });
+        }
         session.record_step(turn.usage);
 
         let disposition = match classify_model_turn(&turn) {
@@ -1050,10 +1221,11 @@ async fn run_inner(
 
         match disposition {
             TurnDisposition::Answer => {
-                session.conversation.push(
+                let mut message =
                     ChatMessage::text(mint(), crate::chat::ChatRole::Assistant, turn.text.clone())
-                        .with_turn_id(session.current_turn_id.clone().unwrap_or_default()),
-                );
+                        .with_turn_id(session.current_turn_id.clone().unwrap_or_default());
+                message.data_envelope = turn.provider_meta.data_envelope.clone();
+                session.conversation.push(message);
                 // The model reacted to this request; drop any pending auto-trigger
                 // whose completion it saw here so it does not also fire a turn.
                 session.clear_reacted_auto_triggers(&request_message_ids);
@@ -1074,15 +1246,15 @@ async fn run_inner(
                     .replay
                     .clone()
                     .expect("classify_model_turn requires tool-call replay disposition");
-                session.conversation.push(
-                    ChatMessage::assistant_tool_calls_with_replay(
-                        mint(),
-                        turn.text.clone(),
-                        refs,
-                        replay,
-                    )
-                    .with_turn_id(session.current_turn_id.clone().unwrap_or_default()),
-                );
+                let mut message = ChatMessage::assistant_tool_calls_with_replay(
+                    mint(),
+                    turn.text.clone(),
+                    refs,
+                    replay,
+                )
+                .with_turn_id(session.current_turn_id.clone().unwrap_or_default());
+                message.data_envelope = turn.provider_meta.data_envelope.clone();
+                session.conversation.push(message);
                 // The model reacted to this request (with tool calls); drop any
                 // pending auto-trigger whose completion it saw here. Persisted with
                 // the tool results at the save below.
@@ -1106,6 +1278,21 @@ async fn run_inner(
                             note.clone(),
                         ));
                         continue;
+                    }
+
+                    if let Some(current_input_revision) =
+                        input_revision_advanced(deps, session).await?
+                    {
+                        append_superseded_tool_results(
+                            session,
+                            &turn.tool_calls[call_index..],
+                            turn.provider_meta.data_envelope.as_ref(),
+                            &mut mint,
+                        )?;
+                        return Ok(LoopOutcome::Superseded {
+                            previous_input_revision: session.input_revision,
+                            current_input_revision,
+                        });
                     }
 
                     // Same-tool repeat circuit breaker.
@@ -1165,9 +1352,20 @@ async fn run_inner(
                                     false,
                                 ),
                             };
-                            let failure =
-                                append_reviewed_tool_result(deps, session, mint(), &call.id, out)
-                                    .await?;
+                            // A model-visible tool error is still data produced by
+                            // the selected source. Information-flow-enforced
+                            // surfaces must label it before the next model call in
+                            // exactly the same way as a successful read result.
+                            let data_envelope = deps.tools.read_data_envelope(call, &out)?;
+                            let failure = append_reviewed_tool_result(
+                                deps,
+                                session,
+                                mint(),
+                                &call.id,
+                                out,
+                                data_envelope,
+                            )
+                            .await?;
                             if let Some(failure) = failure {
                                 return finish_tool_output_safety_failure(
                                     deps,
@@ -1179,6 +1377,20 @@ async fn run_inner(
                                     failure,
                                 )
                                 .await;
+                            }
+                            if let Some(current_input_revision) =
+                                input_revision_advanced(deps, session).await?
+                            {
+                                append_superseded_tool_results(
+                                    session,
+                                    &turn.tool_calls[call_index + 1..],
+                                    turn.provider_meta.data_envelope.as_ref(),
+                                    &mut mint,
+                                )?;
+                                return Ok(LoopOutcome::Superseded {
+                                    previous_input_revision: session.input_revision,
+                                    current_input_revision,
+                                });
                             }
                             finish_tool(session, &call.id, ok, sink);
                             // Persist each read-only result before advancing to the
@@ -1219,6 +1431,267 @@ async fn run_inner(
                                 return Ok(outcome);
                             }
                         }
+                        ToolEffect::RunProjection => {
+                            sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
+                            let updated_at = (deps.clock)();
+                            let step_id = stable_lineage_id("status-step", &call.id);
+                            let current_revision = session
+                                .task_status_projection
+                                .as_ref()
+                                .map_or(0, |projection| projection.revision);
+                            match crate::task_status_tools::build_task_status_projection(
+                                call,
+                                current_revision,
+                                updated_at.clone(),
+                                step_id,
+                            ) {
+                                Ok(projection) => {
+                                    let content = serde_json::json!({
+                                        "status": "updated",
+                                        "revision": projection.revision,
+                                        "item_count": projection.items.len(),
+                                    })
+                                    .to_string();
+                                    let result_envelope = derive_internal_tool_result_envelope(
+                                        turn.provider_meta.data_envelope.as_ref(),
+                                        &call.id,
+                                        &content,
+                                        crate::task_status_tools::UPDATE_TASK_STATUS_TOOL_NAME,
+                                    )?;
+                                    let event_seq = session
+                                        .last_event_seq
+                                        .checked_add(1)
+                                        .ok_or_else(|| AgentError {
+                                            kind: AgentErrorKind::Internal,
+                                            message: "agent run event sequence exhausted".into(),
+                                            retryable: false,
+                                            safe_for_model: false,
+                                            error_code: None,
+                                        })?;
+                                    let event = crate::dynamic_run::TaskStatusUpdatedEvent {
+                                        event: crate::dynamic_run::AgentRunEvent {
+                                            schema_version: crate::dynamic_run::AGENT_RUN_EVENT_SCHEMA_VERSION,
+                                            event_id: stable_lineage_id(
+                                                "status-event",
+                                                &format!(
+                                                    "{}:{event_seq}:{}",
+                                                    session.conversation_id, call.id
+                                                ),
+                                            ),
+                                            run_id: session.conversation_id.clone(),
+                                            event_seq,
+                                            input_revision: session.input_revision,
+                                            kind: crate::dynamic_run::AgentRunEventKind::TaskStatusUpdated,
+                                            correlation_id: Some(call.id.clone()),
+                                            source_envelope_ids: turn
+                                                .provider_meta
+                                                .data_envelope
+                                                .as_ref()
+                                                .map(|envelope| vec![envelope.envelope_id.clone()])
+                                                .unwrap_or_default(),
+                                            result_envelope_ids: result_envelope
+                                                .as_ref()
+                                                .map(|envelope| vec![envelope.envelope_id.clone()])
+                                                .unwrap_or_default(),
+                                            created_at: updated_at,
+                                        },
+                                        projection: projection.clone(),
+                                    };
+                                    event.validate().map_err(|error| AgentError {
+                                        kind: AgentErrorKind::Internal,
+                                        message: format!(
+                                            "invalid task-status update event: {error}"
+                                        ),
+                                        retryable: false,
+                                        safe_for_model: false,
+                                        error_code: None,
+                                    })?;
+                                    session.task_status_projection = Some(projection);
+                                    session.last_event_seq = event_seq;
+                                    let mut message =
+                                        ChatMessage::tool_result(mint(), &call.id, content);
+                                    message.data_envelope = result_envelope;
+                                    session.conversation.push(message);
+                                    deps.session_seam
+                                        .save_task_status_update(session, &event)
+                                        .await?;
+                                    finish_tool(session, &call.id, true, sink);
+                                }
+                                Err(error) => {
+                                    let content = format!("tool error: {}", error.message);
+                                    let envelope = derive_internal_tool_result_envelope(
+                                        turn.provider_meta.data_envelope.as_ref(),
+                                        &call.id,
+                                        &content,
+                                        crate::task_status_tools::UPDATE_TASK_STATUS_TOOL_NAME,
+                                    )?;
+                                    let mut message =
+                                        ChatMessage::tool_result(mint(), &call.id, content);
+                                    message.data_envelope = envelope;
+                                    session.conversation.push(message);
+                                    deps.session_seam.save(session).await?;
+                                    finish_tool(session, &call.id, false, sink);
+                                }
+                            }
+                        }
+                        ToolEffect::PermissionPlanning => {
+                            sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
+                            let created_at = (deps.clock)();
+                            let request_id = stable_lineage_id(
+                                "permission-request",
+                                &format!(
+                                    "{}:{}:{}:{}",
+                                    session.conversation_id,
+                                    session.input_revision,
+                                    session.last_event_seq.saturating_add(1),
+                                    call.id
+                                ),
+                            );
+                            let request = deps.provider_registry.ok_or_else(|| AgentError {
+                                kind: AgentErrorKind::Internal,
+                                message: "permission planning has no Provider catalog".into(),
+                                retryable: false,
+                                safe_for_model: false,
+                                error_code: None,
+                            }).and_then(|registry| {
+                                crate::permission_tools::build_permission_request(
+                                    call,
+                                    registry,
+                                    request_id.clone(),
+                                    session.input_revision,
+                                    created_at.clone(),
+                                )
+                            }).and_then(|request| {
+                                let inventory = deps.capability_inventory.ok_or_else(|| AgentError {
+                                    kind: AgentErrorKind::Internal,
+                                    message: "permission planning has no live capability inventory".into(),
+                                    retryable: false,
+                                    safe_for_model: false,
+                                    error_code: None,
+                                })?;
+                                crate::permission_tools::validate_request_availability(
+                                    &request,
+                                    inventory,
+                                    deps.registry,
+                                )?;
+                                Ok(request)
+                            });
+                            match request {
+                                Ok(request) => {
+                                    let content = serde_json::json!({
+                                        "status": "pending_user_decision",
+                                        "request_id": request.request_id,
+                                        "item_count": request.items.len(),
+                                        "authority": "none"
+                                    })
+                                    .to_string();
+                                    let result_envelope = derive_internal_tool_result_envelope(
+                                        turn.provider_meta.data_envelope.as_ref(),
+                                        &call.id,
+                                        &content,
+                                        crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+                                    )?;
+                                    let event_seq = session
+                                        .last_event_seq
+                                        .checked_add(1)
+                                        .ok_or_else(|| AgentError {
+                                            kind: AgentErrorKind::Internal,
+                                            message: "agent run event sequence exhausted".into(),
+                                            retryable: false,
+                                            safe_for_model: false,
+                                            error_code: None,
+                                        })?;
+                                    let event = crate::dynamic_run::PermissionRequestedEvent {
+                                        event: crate::dynamic_run::AgentRunEvent {
+                                            schema_version: crate::dynamic_run::AGENT_RUN_EVENT_SCHEMA_VERSION,
+                                            event_id: stable_lineage_id(
+                                                "permission-event",
+                                                &format!(
+                                                    "{}:{event_seq}:{}",
+                                                    session.conversation_id, request.request_id
+                                                ),
+                                            ),
+                                            run_id: session.conversation_id.clone(),
+                                            event_seq,
+                                            input_revision: session.input_revision,
+                                            kind: crate::dynamic_run::AgentRunEventKind::PermissionRequested,
+                                            correlation_id: Some(request.request_id.clone()),
+                                            source_envelope_ids: turn
+                                                .provider_meta
+                                                .data_envelope
+                                                .as_ref()
+                                                .map(|envelope| vec![envelope.envelope_id.clone()])
+                                                .unwrap_or_default(),
+                                            result_envelope_ids: result_envelope
+                                                .as_ref()
+                                                .map(|envelope| vec![envelope.envelope_id.clone()])
+                                                .unwrap_or_default(),
+                                            created_at,
+                                        },
+                                        request: request.clone(),
+                                    };
+                                    event.validate().map_err(|error| AgentError {
+                                        kind: AgentErrorKind::Internal,
+                                        message: format!(
+                                            "invalid permission request event: {error}"
+                                        ),
+                                        retryable: false,
+                                        safe_for_model: false,
+                                        error_code: None,
+                                    })?;
+                                    let mut message =
+                                        ChatMessage::tool_result(mint(), &call.id, content);
+                                    message.data_envelope = result_envelope;
+                                    session.conversation.push(message);
+                                    append_unstarted_tool_results(
+                                        session,
+                                        &turn.tool_calls[call_index + 1..],
+                                        turn.provider_meta.data_envelope.as_ref(),
+                                        &mut mint,
+                                        "not executed: waiting for user permission decision",
+                                        "permission_pause_tool_call",
+                                    )?;
+                                    session.add_permission_request(request.clone()).map_err(
+                                        |error| AgentError {
+                                            kind: AgentErrorKind::Internal,
+                                            message: format!(
+                                                "invalid persisted permission request: {error}"
+                                            ),
+                                            retryable: false,
+                                            safe_for_model: false,
+                                            error_code: None,
+                                        },
+                                    )?;
+                                    session.last_event_seq = event_seq;
+                                    deps.session_seam
+                                        .save_permission_request(session, &event)
+                                        .await?;
+                                    finish_tool(session, &call.id, true, sink);
+                                    sink.on_permission_requested(
+                                        &request.request_id,
+                                        request.items.len(),
+                                    );
+                                    return Ok(LoopOutcome::PermissionRequested {
+                                        request_id: request.request_id,
+                                    });
+                                }
+                                Err(error) => {
+                                    let content = format!("tool error: {}", error.message);
+                                    let envelope = derive_internal_tool_result_envelope(
+                                        turn.provider_meta.data_envelope.as_ref(),
+                                        &call.id,
+                                        &content,
+                                        crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+                                    )?;
+                                    let mut message =
+                                        ChatMessage::tool_result(mint(), &call.id, content);
+                                    message.data_envelope = envelope;
+                                    session.conversation.push(message);
+                                    deps.session_seam.save(session).await?;
+                                    finish_tool(session, &call.id, false, sink);
+                                }
+                            }
+                        }
                     }
                 }
                 deps.session_seam.save(session).await?;
@@ -1226,6 +1699,106 @@ async fn run_inner(
             }
         }
     }
+}
+
+async fn input_revision_advanced(
+    deps: &LoopDeps<'_>,
+    session: &crate::session::PersistedAgentSession,
+) -> Result<Option<u64>, AgentError> {
+    Ok(deps
+        .session_seam
+        .latest_input_revision(&session.conversation_id)
+        .await?
+        .filter(|revision| *revision > session.input_revision))
+}
+
+fn append_superseded_tool_results<F: FnMut() -> String>(
+    session: &mut crate::session::PersistedAgentSession,
+    calls: &[crate::chat::ToolCall],
+    parent: Option<&DataEnvelope>,
+    mint: &mut F,
+) -> Result<(), AgentError> {
+    append_unstarted_tool_results(
+        session,
+        calls,
+        parent,
+        mint,
+        "not executed: superseded by newer user input",
+        "supersede_tool_call",
+    )
+}
+
+fn append_unstarted_tool_results<F: FnMut() -> String>(
+    session: &mut crate::session::PersistedAgentSession,
+    calls: &[crate::chat::ToolCall],
+    parent: Option<&DataEnvelope>,
+    mint: &mut F,
+    content: &str,
+    source_tool_name: &str,
+) -> Result<(), AgentError> {
+    for call in calls {
+        let mut message = ChatMessage::tool_result(mint(), &call.id, content.to_string());
+        message.data_envelope =
+            derive_internal_tool_result_envelope(parent, &call.id, content, source_tool_name)?;
+        session.conversation.push(message);
+    }
+    Ok(())
+}
+
+fn stable_lineage_id(prefix: &str, value: &str) -> String {
+    format!("{prefix}-{:x}", Sha256::digest(value.as_bytes()))
+}
+
+/// Derive the exact model-visible acknowledgement envelope from the model turn
+/// that requested the projection update. Non-egress test/runtime seams may omit
+/// the parent envelope; information-flow-enforced surfaces always provide it.
+fn derive_internal_tool_result_envelope(
+    parent: Option<&DataEnvelope>,
+    call_id: &str,
+    content: &str,
+    source_tool_name: &str,
+) -> Result<Option<DataEnvelope>, AgentError> {
+    let Some(parent) = parent else {
+        return Ok(None);
+    };
+    let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
+    let envelope = DataEnvelope {
+        schema_version: desk_agent_protocol::data_lineage::DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: stable_lineage_id(
+            "status-result",
+            &format!("{}:{call_id}:{digest}", parent.envelope_id),
+        ),
+        content: ContentRef::ImmutableBlob {
+            blob_id: stable_lineage_id("status-content", &digest),
+            sha256: digest.clone(),
+            size_bytes: u64::try_from(content.len()).map_err(|_| AgentError {
+                kind: AgentErrorKind::Internal,
+                message: "internal tool result size overflow".into(),
+                retryable: false,
+                safe_for_model: false,
+                error_code: None,
+            })?,
+            media_type: "text/plain".into(),
+        },
+        provenance: DataProvenance {
+            source_provider_id: crate::dynamic_run::RUN_CONTROL_PROVIDER_ID.into(),
+            source_tool_name: source_tool_name.into(),
+            source_object_id: None,
+            source_envelope_ids: vec![parent.envelope_id.clone()],
+        },
+        digest_sha256: digest,
+        sensitivity: parent.sensitivity,
+        allowed_destinations: parent.allowed_destinations.clone(),
+        retention: parent.retention,
+    };
+    envelope.validate().map_err(|error| AgentError {
+        kind: AgentErrorKind::Internal,
+        message: format!("invalid internal tool result envelope: {error}"),
+        retryable: false,
+        safe_for_model: false,
+        error_code: None,
+    })?;
+    Ok(Some(envelope))
 }
 
 /// Emit a tool's terminal UI event from the authoritative result that was just
@@ -1247,6 +1820,21 @@ fn finish_tool(
         .unwrap_or_default();
     let background_task_id = result.and_then(|message| message.background_task_id.as_deref());
     sink.on_tool_finished(call_id, ok, output, background_task_id);
+}
+
+fn append_mutating_result(
+    deps: &LoopDeps<'_>,
+    session: &mut crate::session::PersistedAgentSession,
+    call: &crate::chat::ToolCall,
+    mut message: ChatMessage,
+) -> Result<(), AgentError> {
+    let output = crate::seam::ToolRunOutput {
+        content: message.text.clone(),
+        image_data_url: message.image_data_url.clone(),
+    };
+    message.data_envelope = deps.tools.mutating_data_envelope(call, &output)?;
+    session.conversation.push(message);
+    Ok(())
 }
 
 /// Run one validated mutating tool call: approval + execution via the seam, then
@@ -1272,11 +1860,16 @@ async fn run_mutating<F: FnMut() -> String>(
     // it), but should one still reach here it is refused before any work is
     // created, so a completion can never self-trigger a new command.
     if !session.trigger_origin.allows_new_mutation() {
-        session.conversation.push(ChatMessage::tool_result(
-            mint(),
-            &call.id,
-            "not executed: an automation turn cannot start a new command",
-        ));
+        append_mutating_result(
+            deps,
+            session,
+            call,
+            ChatMessage::tool_result(
+                mint(),
+                &call.id,
+                "not executed: an automation turn cannot start a new command",
+            ),
+        )?;
         finish_tool(session, &call.id, false, sink);
         *halted = Some("not executed: an automation turn cannot start a new command".to_string());
         return Ok(None);
@@ -1318,8 +1911,16 @@ async fn run_mutating<F: FnMut() -> String>(
                 None => mint(),
             };
             ack_event_id = event_id;
-            let failure =
-                append_reviewed_tool_result(deps, session, message_id, &call.id, output).await?;
+            let data_envelope = deps.tools.mutating_data_envelope(call, &output)?;
+            let failure = append_reviewed_tool_result(
+                deps,
+                session,
+                message_id,
+                &call.id,
+                output,
+                data_envelope,
+            )
+            .await?;
             if let Some(failure) = failure {
                 terminal_outcome = Some(
                     finish_tool_output_safety_failure(
@@ -1342,9 +1943,12 @@ async fn run_mutating<F: FnMut() -> String>(
                 Some(r) => format!("the operator rejected this command: {r}"),
                 None => "the operator rejected this command".to_string(),
             };
-            session
-                .conversation
-                .push(ChatMessage::tool_result(mint(), &call.id, text));
+            append_mutating_result(
+                deps,
+                session,
+                call,
+                ChatMessage::tool_result(mint(), &call.id, text),
+            )?;
             finish_tool(session, &call.id, false, sink);
             *halted = Some("not executed: a prior command in this turn was not run".to_string());
         }
@@ -1353,18 +1957,26 @@ async fn run_mutating<F: FnMut() -> String>(
                 Some(r) => format!("the command was cancelled before it ran: {r}"),
                 None => "the command was cancelled before it ran".to_string(),
             };
-            session
-                .conversation
-                .push(ChatMessage::tool_result(mint(), &call.id, text));
+            append_mutating_result(
+                deps,
+                session,
+                call,
+                ChatMessage::tool_result(mint(), &call.id, text),
+            )?;
             finish_tool(session, &call.id, false, sink);
             *halted = Some("not executed: a prior command in this turn was cancelled".to_string());
         }
         Ok(ExecOutcome::ApprovalTimeout) => {
-            session.conversation.push(ChatMessage::tool_result(
-                mint(),
-                &call.id,
-                "approval timed out; the command was not executed",
-            ));
+            append_mutating_result(
+                deps,
+                session,
+                call,
+                ChatMessage::tool_result(
+                    mint(),
+                    &call.id,
+                    "approval timed out; the command was not executed",
+                ),
+            )?;
             finish_tool(session, &call.id, false, sink);
             *halted = Some("not executed: a prior command in this turn was not run".to_string());
         }
@@ -1373,15 +1985,18 @@ async fn run_mutating<F: FnMut() -> String>(
             // model history stays well-formed) and record the unknown outcome; a
             // late real result replaces the placeholder in place.
             let placeholder_id = mint();
-            session.conversation.push(ChatMessage::tool_result(
-                placeholder_id.clone(),
-                &call.id,
-                OUTCOME_UNKNOWN_PLACEHOLDER,
-            ));
+            append_mutating_result(
+                deps,
+                session,
+                call,
+                ChatMessage::tool_result(
+                    placeholder_id.clone(),
+                    &call.id,
+                    OUTCOME_UNKNOWN_PLACEHOLDER,
+                ),
+            )?;
             session.execution_state = ExecutionState::OutcomeUnknown {
-                work_id: id.work_id,
-                execution_id: id.execution_id,
-                exec_request_id: id.exec_request_id,
+                action: id,
                 placeholder_message_id: placeholder_id,
                 since: (deps.clock)(),
             };
@@ -1395,18 +2010,13 @@ async fn run_mutating<F: FnMut() -> String>(
             // notification. The conversation stays usable — a result is coming — but
             // no second mutation starts until this one finishes (`Executing` blocks
             // `allows_new_mutation`).
-            session
-                .conversation
-                .push(ChatMessage::background_task_running(
-                    mint(),
-                    &call.id,
-                    &id.exec_request_id,
-                ));
-            session.execution_state = ExecutionState::Executing {
-                work_id: id.work_id,
-                execution_id: id.execution_id,
-                exec_request_id: id.exec_request_id,
-            };
+            append_mutating_result(
+                deps,
+                session,
+                call,
+                ChatMessage::background_task_running(mint(), &call.id, &id.action_request_id),
+            )?;
+            session.execution_state = ExecutionState::Executing { action: id };
             finish_tool(session, &call.id, true, sink);
             *halted = Some(
                 "a prior command in this turn is still running as a background task".to_string(),
@@ -1419,11 +2029,16 @@ async fn run_mutating<F: FnMut() -> String>(
         // alternative in the next step. Non-retryable failures retain the
         // conservative stop-the-batch behavior.
         Err(e) if e.safe_for_model => {
-            session.conversation.push(ChatMessage::tool_result(
-                mint(),
-                &call.id,
-                format!("execution error: {}", e.message),
-            ));
+            append_mutating_result(
+                deps,
+                session,
+                call,
+                ChatMessage::tool_result(
+                    mint(),
+                    &call.id,
+                    format!("execution error: {}", e.message),
+                ),
+            )?;
             finish_tool(session, &call.id, false, sink);
             if !e.retryable {
                 *halted = Some("not executed: a prior command failed".to_string());
@@ -1486,11 +2101,7 @@ async fn run_wait<F: FnMut() -> String>(
     };
     // Only the session's own in-flight task may be waited on, matched by its stable
     // id. No task, or a mismatched id, is a well-formed error result.
-    let Some((work_id, execution_id, exec_request_id)) = session
-        .execution_state
-        .waitable_task()
-        .map(|(w, e, r)| (w, e.to_string(), r.to_string()))
-    else {
+    let Some(action) = session.execution_state.waitable_task().cloned() else {
         session.conversation.push(ChatMessage::tool_result(
             mint(),
             &call.id,
@@ -1498,7 +2109,7 @@ async fn run_wait<F: FnMut() -> String>(
         ));
         return Ok(None);
     };
-    if task_id != exec_request_id {
+    if task_id != action.action_request_id {
         session.conversation.push(ChatMessage::tool_result(
             mint(),
             &call.id,
@@ -1510,7 +2121,7 @@ async fn run_wait<F: FnMut() -> String>(
     sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
     let outcome = deps
         .tools
-        .wait_for_task(&exec_request_id, &execution_id)
+        .wait_for_task(&action.action_request_id, &action.execution_id)
         .await;
     let mut ack_event_id: Option<String> = None;
     let mut terminal_outcome: Option<LoopOutcome> = None;
@@ -1526,7 +2137,8 @@ async fn run_wait<F: FnMut() -> String>(
             // The awaited task settled: a follow-up may mutate again.
             session.execution_state = ExecutionState::None;
             let failure =
-                append_reviewed_tool_result(deps, session, message_id, &call.id, output).await?;
+                append_reviewed_tool_result(deps, session, message_id, &call.id, output, None)
+                    .await?;
             if let Some(failure) = failure {
                 terminal_outcome = Some(
                     finish_tool_output_safety_failure(
@@ -1550,7 +2162,7 @@ async fn run_wait<F: FnMut() -> String>(
                 .push(ChatMessage::background_task_running(
                     mint(),
                     &call.id,
-                    &exec_request_id,
+                    &action.action_request_id,
                 ));
             finish_tool(session, &call.id, true, sink);
         }
@@ -1565,9 +2177,7 @@ async fn run_wait<F: FnMut() -> String>(
                 OUTCOME_UNKNOWN_PLACEHOLDER,
             ));
             session.execution_state = ExecutionState::OutcomeUnknown {
-                work_id,
-                execution_id,
-                exec_request_id,
+                action,
                 placeholder_message_id: placeholder_id,
                 since: (deps.clock)(),
             };

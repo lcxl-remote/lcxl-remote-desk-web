@@ -223,6 +223,12 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// `Some` only in the manager (which feeds them into its remote-tool pending
     /// store); `None` elsewhere, where they are ignored.
     pub remote_tool_observer: Option<Arc<dyn RemoteToolObserver>>,
+    /// Centrally-owned sealed Computer Use lifecycle consumer.
+    pub computer_action_observer: Option<Arc<dyn ComputerActionObserver>>,
+    /// Dynamic Computer Use readiness consumer. Manager persists a
+    /// presence-fenced Redis snapshot; OSS Signal keeps a connection-scoped
+    /// in-process snapshot.
+    pub computer_use_readiness_observer: Option<Arc<dyn ComputerUseReadinessObserver>>,
     /// Post-delivery lifecycle observer. Manager-only and wire-neutral.
     pub forward_lifecycle_observer: Option<Arc<dyn ForwardLifecycleObserver>>,
     /// Support-code minter for inbound `RequestSupportCode` frames. `Some` only in
@@ -414,6 +420,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
             edge_exec_observer: None,
             exec_state_reply_observer: None,
             remote_tool_observer: None,
+            computer_action_observer: None,
+            computer_use_readiness_observer: None,
             forward_lifecycle_observer: None,
             support_code_minter: None,
             remote_access_admission_authorizer: None,
@@ -491,6 +499,22 @@ impl<U: SignalingUser> SignalingHandler<U> {
     /// frames are ignored there.
     pub fn with_remote_tool_observer(mut self, observer: Arc<dyn RemoteToolObserver>) -> Self {
         self.remote_tool_observer = Some(observer);
+        self
+    }
+
+    pub fn with_computer_action_observer(
+        mut self,
+        observer: Arc<dyn ComputerActionObserver>,
+    ) -> Self {
+        self.computer_action_observer = Some(observer);
+        self
+    }
+
+    pub fn with_computer_use_readiness_observer(
+        mut self,
+        observer: Arc<dyn ComputerUseReadinessObserver>,
+    ) -> Self {
+        self.computer_use_readiness_observer = Some(observer);
         self
     }
 
@@ -1082,6 +1106,10 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // authorization injection on the reply path).
             | SignalingType::AgentCapabilityCompleted
             | SignalingType::DiagnosisUpdated
+            | SignalingType::DeviceAssistantUpdated
+            | SignalingType::DeviceAssistantCapabilitiesUpdated
+            | SignalingType::DeviceAssistantContextUpdated
+            | SignalingType::DeviceAssistantObjectContextUpdated
             | SignalingType::TerminalCopilotUpdated
             | SignalingType::TerminalCompletionsGenerated
             | SignalingType::ExecutionPreviewGenerated
@@ -1118,6 +1146,37 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 } else if let Some(observer) = self.exec_state_reply_observer.clone() {
                     observer
                         .on_exec_state_reply(&self.connection_state, &signaling_model)
+                        .await;
+                }
+            }
+
+            SignalingType::ComputerActionStarted
+            | SignalingType::ComputerActionCompleted
+            | SignalingType::ComputerActionStateReported => {
+                if signaling_model.to_connection_id.is_some() {
+                    self.forward_to_peer(&signaling_model, false).await?;
+                } else if let Some(observer) = self.computer_action_observer.clone() {
+                    observer
+                        .on_computer_action_lifecycle(
+                            &self.connection_state,
+                            &signaling_model,
+                        )
+                        .await;
+                } else {
+                    log::trace!(
+                        "Received centrally-owned Computer Use lifecycle frame {}, no peer relay registered yet",
+                        signaling_model.request_id
+                    );
+                }
+            }
+
+            SignalingType::ComputerUseReadinessUpdated => {
+                if let Some(observer) = self.computer_use_readiness_observer.clone() {
+                    observer
+                        .on_computer_use_readiness(
+                            &self.connection_state,
+                            &signaling_model,
+                        )
                         .await;
                 }
             }
@@ -1160,7 +1219,15 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // through the authorizer rather than relaying: stopping someone else's
             // execution is a decision, and one that has to be recorded.
             | SignalingType::ControlExecution
-            | SignalingType::ResolveExecution => {
+            | SignalingType::ResolveExecution
+            | SignalingType::DispatchComputerAction
+            | SignalingType::CancelComputerAction
+            | SignalingType::QueryComputerActionState
+            | SignalingType::AskDeviceAssistant
+            | SignalingType::CancelDeviceAssistant
+            | SignalingType::GetDeviceAssistantCapabilities
+            | SignalingType::UpdateDeviceAssistantContext
+            | SignalingType::UpdateDeviceAssistantObjectContext => {
                 let to_forward = if let Some(authorizer) = self.control_authorizer.clone() {
                     match authorizer
                         .authorize(&self.connection_state, &self.connection_map, &signaling_model)

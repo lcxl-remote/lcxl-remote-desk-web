@@ -23,3 +23,6 @@ pub mod linux_display;
 
 #[cfg(target_os = "macos")]
 pub mod macos_event;
+
+#[cfg(target_os = "windows")]
+pub mod windows_event;

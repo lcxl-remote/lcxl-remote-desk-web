@@ -1,0 +1,55 @@
+:root {
+    color-scheme: light dark;
+    font-family: system-ui, sans-serif;
+}
+
+body {
+    margin: 0;
+}
+
+main {
+    padding: 16px;
+}
+
+h1 {
+    font-size: 1.25rem;
+}
+
+.notice,
+.permission {
+    line-height: 1.45;
+}
+
+.permission {
+    font-size: 0.85rem;
+    opacity: 0.8;
+}
+
+label,
+input,
+button {
+    display: block;
+    margin-top: 10px;
+}
+
+input {
+    box-sizing: border-box;
+    font-size: 1.2rem;
+    letter-spacing: 0.2em;
+    padding: 8px;
+    width: 100%;
+}
+
+.actions {
+    display: flex;
+    gap: 8px;
+}
+
+button {
+    padding: 8px 12px;
+}
+
+pre {
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}

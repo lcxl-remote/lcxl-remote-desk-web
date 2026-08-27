@@ -163,6 +163,8 @@ lru = "0.18.2"
 prometheus = "0.14"
 png = "0.17"
 image = "0.25"
+quick-xml = "0.38.4"
+zip = { version = "6.0.0", default-features = false, features = ["deflate"] }
 
 sysinfo = "0.37"
 
@@ -190,6 +192,8 @@ tempfile = "3"
 
 # for windows
 windows = { version = "0.61", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
     "Win32_Devices_FunctionDiscovery",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Animation",
@@ -197,6 +201,7 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Accessibility",
     "Win32_Globalization",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Direct2D_Common",

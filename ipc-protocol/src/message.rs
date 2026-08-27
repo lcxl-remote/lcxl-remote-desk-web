@@ -216,6 +216,16 @@ pub enum ServiceToWorker {
     /// (target / actor / scope / caller / request_id) before forwarding.
     InvokeAgentCapability(AgentRequestPayload),
 
+    /// Daemon → worker: an immutable, exact-owner-approved Computer Use plan.
+    /// This variant is the only IPC lane that can carry Computer Use mutation.
+    ComputerActionPlan(ComputerActionPlanPayload),
+
+    /// Daemon → worker: fence and cancel one Computer Use generation.
+    ComputerActionCancel(ComputerActionCancelPayload),
+
+    /// Daemon → worker: reconcile one durable Computer Use generation.
+    ComputerActionStateQuery(ComputerActionStateQueryPayload),
+
     /// Daemon → worker: a sealed, user-approved execution plan. The worker
     /// executes `plan.program` + `plan.argv` **verbatim** (no shell re-parse,
     /// no elevation, no stdin) inside the user session and replies via
@@ -428,6 +438,18 @@ pub enum WorkerToService {
     /// transport-level response state — so the control-end UI receives
     /// the full structured [`desk_agent_protocol::AgentError`].
     AgentCapabilityCompleted(AgentResponsePayload),
+
+    /// Worker → daemon: reports the conservative first-side-effect boundary.
+    ComputerActionStarted(ComputerActionStartedPayload),
+
+    /// Worker → daemon: terminal Computer Use facts and read-back verification.
+    ComputerActionCompleted(ComputerActionCompletedPayload),
+
+    /// Worker → daemon: response to a generation-fenced state query.
+    ComputerActionStateReported(ComputerActionStateReportedPayload),
+
+    /// Worker → daemon: bounded, dynamic Computer Use capability readiness.
+    ComputerUseReadinessUpdated(ComputerUseReadinessPayload),
 
     /// Worker → daemon reply to [`ServiceToWorker::ExecPlan`]. The daemon
     /// rebuilds the outbound `SignalingType::ExecutionCompleted` model for the control

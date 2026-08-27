@@ -309,6 +309,7 @@ pub async fn run_service_daemon_inner(
                 manager_link_state,
                 support_link_state,
                 manager_link_gate,
+                None,
                 exec_ledger,
             )
             .await
@@ -499,6 +500,8 @@ pub async fn start_inprocess_daemon(
 
     let session_id = get_current_session_id();
     let initial_desktop = get_initial_desktop_name();
+    let computer_use_broker =
+        Arc::new(crate::worker::agent::computer_use_broker::ComputerUseBroker::new());
 
     // Spawn the in-process worker: same WorkerSession::run_with_transports
     // entry point as the ServiceDaemon path; only difference is the
@@ -509,6 +512,7 @@ pub async fn start_inprocess_daemon(
             session_id,
             initial_desktop,
             Arc::clone(&host_control_hub),
+            Arc::clone(&computer_use_broker),
         )
         .await?;
 
@@ -533,6 +537,7 @@ pub async fn start_inprocess_daemon(
             manager_link_state,
             support_link_state,
             manager_link_gate,
+            Some(computer_use_broker),
             exec_ledger,
         )
         .await

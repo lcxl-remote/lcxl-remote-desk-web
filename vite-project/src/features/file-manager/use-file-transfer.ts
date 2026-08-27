@@ -1,6 +1,7 @@
 import { useRef, useState, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import {
+    SIGNALING_API_VERSION,
     SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS,
     SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED,
     SIGNALING_TYPE_CODE_OFFER,
@@ -678,7 +679,7 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const host = window.location.host;
         const url = new URL(`${protocol}//${host}/api/desk/signaling`);
-        url.searchParams.append('api_version', '1');
+        url.searchParams.append('api_version', String(SIGNALING_API_VERSION));
         url.searchParams.append('build_number', '1');
         url.searchParams.append('commit_hash', '1');
         url.searchParams.append('operation_system', 'wasm');

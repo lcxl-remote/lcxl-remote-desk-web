@@ -1,8 +1,14 @@
+pub mod agent_action_item;
+pub mod agent_capability_dispatch_outbox;
+pub mod agent_capability_grant;
 pub mod agent_exec_task;
+pub mod agent_grant_reservation;
+pub mod agent_run_event;
 pub mod agent_session;
 pub mod ai_usage;
 pub mod device_code;
 pub mod host_remote_access_state;
+pub mod model_egress_receipt;
 pub mod model_probe_observation;
 pub mod model_provider;
 pub mod turn_usage;

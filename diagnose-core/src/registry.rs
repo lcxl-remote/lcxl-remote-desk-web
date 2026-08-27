@@ -30,6 +30,12 @@ pub enum ToolEffect {
     /// its outcome is still recoverable), so the model can actively await a result
     /// instead of ending the turn and being notified passively.
     WaitTask,
+    /// Updates only the model-maintained, user-visible task projection stored in
+    /// the current run. It grants no device authority and dispatches no work.
+    RunProjection,
+    /// Creates a bounded user-facing permission request. It cannot mint grants,
+    /// reserve uses, or dispatch tools; approval is a separate trusted action.
+    PermissionPlanning,
 }
 
 /// A tool registered with the agent loop: its model-facing spec, the capability
@@ -54,7 +60,10 @@ impl RegisteredTool {
 fn mode_allows_effect(mode: ExecutionMode, effect: ToolEffect) -> bool {
     match effect {
         // Reads and waiting on one's own task are allowed in every mode.
-        ToolEffect::ReadOnly | ToolEffect::WaitTask => true,
+        ToolEffect::ReadOnly
+        | ToolEffect::WaitTask
+        | ToolEffect::RunProjection
+        | ToolEffect::PermissionPlanning => true,
         ToolEffect::Mutating => matches!(
             mode,
             ExecutionMode::ConfirmEachAction
@@ -79,6 +88,12 @@ pub fn is_exposed(
     // capability grant and is offered only while there is a task to wait on.
     if tool.effect == ToolEffect::WaitTask {
         return execution_state.waitable_task().is_some();
+    }
+    if tool.effect == ToolEffect::RunProjection {
+        return true;
+    }
+    if tool.effect == ToolEffect::PermissionPlanning {
+        return true;
     }
     if !scope.granted.contains(&tool.required_capability) {
         return false;
@@ -218,9 +233,7 @@ mod tests {
             ExecutionMode::ConfirmEachAction,
         );
         let unknown = ExecutionState::OutcomeUnknown {
-            work_id: 1,
-            execution_id: "e".into(),
-            exec_request_id: "x".into(),
+            action: crate::session::ActionIdentity::agent_exec(1, "x", "e"),
             placeholder_message_id: "p".into(),
             since: "t".into(),
         };
@@ -252,9 +265,7 @@ mod tests {
 
         // A dispatched background task: exposed despite the empty scope.
         let executing = ExecutionState::Executing {
-            work_id: 1,
-            execution_id: "e".into(),
-            exec_request_id: "exec_x".into(),
+            action: crate::session::ActionIdentity::agent_exec(1, "exec_x", "e"),
         };
         let names: Vec<_> = exposed_tools(&reg, &s, &executing, TriggerOrigin::User)
             .iter()

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xsi:type="TaskPaneApp">
+  <Id>5b9aacbe-444d-4775-81b2-e4a20731db57</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>lcxl</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+  <DisplayName DefaultValue="Lcxl Excel Assistant"/>
+  <Description DefaultValue="Pair the current Excel document for bounded, read-only semantic inspection."/>
+  <IconUrl DefaultValue="https://localhost:32123/icon.png"/>
+  <SupportUrl DefaultValue="https://github.com/lcxl/lcxl-remote-desk"/>
+  <AppDomains>
+    <AppDomain>https://localhost:32123</AppDomain>
+  </AppDomains>
+  <Hosts>
+    <Host Name="Workbook"/>
+  </Hosts>
+  <Requirements>
+    <Sets DefaultMinVersion="1.1">
+      <Set Name="ExcelApi" MinVersion="1.1"/>
+    </Sets>
+  </Requirements>
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://localhost:32123/taskpane.html"/>
+  </DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+</OfficeApp>

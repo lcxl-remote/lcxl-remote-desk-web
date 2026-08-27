@@ -33,6 +33,9 @@ impl WorkerSession {
         file_sender: Arc<dyn EventSender<FileTransferPayload>>,
         mut file_receiver: Box<dyn EventReceiver<FileTransferPayload>>,
         shared_hub: Option<Arc<HostControlHub>>,
+        shared_computer_use_broker: Option<
+            Arc<crate::worker::agent::computer_use_broker::ComputerUseBroker>,
+        >,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let settings = match serde_json::from_str::<Settings>(&init_payload.config_json) {
             Ok(mut s) => {
@@ -55,6 +58,10 @@ impl WorkerSession {
                 return Err(Box::new(e));
             }
         };
+        let worker_log_dir = init_payload
+            .log_dir
+            .as_deref()
+            .map(std::path::PathBuf::from);
 
         let worker_locale = settings
             .system
@@ -68,15 +75,37 @@ impl WorkerSession {
             );
             let _ = crate::locale::set_global_locale(crate::locale::DEFAULT_LOCALE);
         }
-        // The worker's copy of the host security policy. The daemon publishes to
-        // it; nothing here writes the policy back. The settings this worker also
-        // holds are a startup copy and are never consulted for permissions —
-        // they do not receive the daemon's updates.
+        // The worker's copy of the remote-access security policy. The daemon
+        // publishes to it; nothing here writes the policy back. The separate
+        // Computer Use settings below are a startup copy of a device-local
+        // fail-closed ceiling and are consulted only to narrow observation;
+        // signaling cannot widen or persist them.
         let policy_mirror = Arc::new(PolicyMirror::new(PolicySnapshot::new(
             settings.security.clone(),
         )));
         let shared_settings = Arc::new(SharedSettings::from(settings));
         let shared_settings_data = web::Data::from(shared_settings.clone());
+        // One broker per worker lifetime: its incarnation and ObjectRef store
+        // must survive individual read requests and reset on worker respawn.
+        let computer_use_broker = shared_computer_use_broker.unwrap_or_else(|| {
+            Arc::new(crate::worker::agent::computer_use_broker::ComputerUseBroker::new())
+        });
+        crate::worker::agent::file_reference_store::reset_worker_incarnation();
+        crate::worker::agent::terminal_reference_store::reset_worker_incarnation();
+        #[cfg(windows)]
+        let computer_use_input_monitor = if shared_settings.read().await.computer_use.enabled {
+            match crate::worker::agent::windows_input_ownership::WindowsInputOwnershipMonitor::start(
+                &computer_use_broker,
+            ) {
+                Ok(monitor) => Some(monitor),
+                Err(error) => {
+                    warn!("Computer Use input ownership monitor is unavailable: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         #[cfg(target_os = "linux")]
         let (portal_broker, portal_unavailable_snapshot) = if detect_linux_display_environment()
@@ -128,8 +157,15 @@ impl WorkerSession {
         // `shared_hub.is_some()` is the canonical in-process indicator (see
         // the host-control hub branch immediately below), so we reuse it.
         let _guard = if should_init_worker_telemetry(shared_hub.is_some()) {
-            crate::telemetry::init_telemetry(shared_settings.clone(), &StartupMode::SessionWorker)
-                .await?
+            let log_dir = worker_log_dir.ok_or(
+                "WorkerInit lacked log_dir in out-of-process mode; daemon must provide it",
+            )?;
+            crate::telemetry::init_telemetry_with_log_dir(
+                shared_settings.clone(),
+                &StartupMode::SessionWorker,
+                log_dir,
+            )
+            .await?
         } else {
             info!(
                 "In-process worker: skipping telemetry init (host process already installed global subscriber)"
@@ -186,6 +222,59 @@ impl WorkerSession {
         // fully drained before the test/runtime moves on.
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WorkerToService>();
         let writer_task = spawn_event_forwarder_task(writer_rx, Arc::clone(&event_tx));
+        let computer_use_readiness_task = {
+            let readiness_writer = writer_tx.clone();
+            let readiness_broker = computer_use_broker.clone();
+            let readiness_settings = shared_settings.clone();
+            tokio::spawn(async move {
+                let mut first_report = true;
+                loop {
+                    let settings = readiness_settings.read().await;
+                    let ceiling = settings.computer_use.clone();
+                    let allow_screen = settings.collection_policy.allow_screen;
+                    let display_selected = !settings.desk.video_device_name.trim().is_empty();
+                    drop(settings);
+                    let broker = readiness_broker.clone();
+                    let readiness = match tokio::task::spawn_blocking(move || {
+                        broker.readiness(&ceiling, allow_screen, display_selected)
+                    })
+                    .await
+                    {
+                        Ok(readiness) => readiness,
+                        Err(error) => {
+                            warn!("Computer Use readiness probe failed to join: {error}");
+                            tokio::time::sleep(Duration::from_secs(10)).await;
+                            continue;
+                        }
+                    };
+                    if first_report {
+                        let ready_capabilities = readiness
+                            .capabilities
+                            .iter()
+                            .filter(|entry| entry.ready)
+                            .count();
+                        info!(
+                            "Computer Use readiness initialized: incarnation={}, revision={}, local_ceiling_revision={}, ready_capabilities={}/{}",
+                            readiness.interactive_session_incarnation,
+                            readiness.revision,
+                            readiness.local_ceiling_revision,
+                            ready_capabilities,
+                            readiness.capabilities.len(),
+                        );
+                        first_report = false;
+                    }
+                    if readiness_writer
+                        .send(WorkerToService::ComputerUseReadinessUpdated(
+                            ComputerUseReadinessPayload { readiness },
+                        ))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
+            })
+        };
 
         #[cfg(target_os = "linux")]
         let portal_status_task = if let Some(broker) = portal_broker.as_ref() {
@@ -784,12 +873,15 @@ impl WorkerSession {
                                 // `accept_clipboard_sync` before sending,
                                 // so the worker injects unconditionally.
                                 ServiceToWorker::MouseInput(payload) => {
+                                    computer_use_broker.note_browser_input();
                                     input_dispatcher.dispatch_mouse(&payload);
                                 }
                                 ServiceToWorker::MouseMoveInput(payload) => {
+                                    computer_use_broker.note_browser_input();
                                     input_dispatcher.dispatch_mouse_move(&payload);
                                 }
                                 ServiceToWorker::KeyboardInput(payload) => {
+                                    computer_use_broker.note_browser_input();
                                     input_dispatcher.dispatch_keyboard(&payload);
                                 }
                                 // Clipboard handlers route to
@@ -1341,13 +1433,16 @@ impl WorkerSession {
                                     // `AgentOutcome`, not the transport state.
                                     let writer_tx = writer_tx.clone();
                                     let agent_settings = shared_settings.clone();
+                                    let computer_use_broker = computer_use_broker.clone();
                                     tokio::spawn(async move {
-                                        let agent =
-                                            LocalDeviceAgent::with_settings(agent_settings)
-                                                .with_audit(std::sync::Arc::new(
-                                                    crate::worker::agent::audit_sink::LogAuditSink,
-                                                ));
-                                        let outcome = match agent.invoke(payload.envelope).await {
+                                        let agent = LocalDeviceAgent::with_settings_and_broker(
+                                            agent_settings,
+                                            computer_use_broker,
+                                        )
+                                        .with_audit(std::sync::Arc::new(
+                                            crate::worker::agent::audit_sink::LogAuditSink,
+                                        ));
+                                        let outcome = match agent.invoke(payload.envelope.into()).await {
                                             Ok(output) => AgentOutcome::Ok(output),
                                             Err(error) => AgentOutcome::Err(error),
                                         };
@@ -1366,6 +1461,338 @@ impl WorkerSession {
                                             );
                                         }
                                     });
+                                }
+                                ServiceToWorker::ComputerActionPlan(payload) => {
+                                    let plan = payload.plan;
+                                    let reject_reason = plan
+                                        .validate()
+                                        .err()
+                                        .map(|error| format!("invalid Computer Use plan: {error}"))
+                                        .or_else(|| {
+                                            (plan.actions.len() != 1).then(|| {
+                                                "the Stage 3 artifact Provider accepts exactly one action"
+                                                    .to_string()
+                                            })
+                                        });
+                                    if let Some(reason) = reject_reason {
+                                        let _ = writer_tx.send(
+                                            WorkerToService::ComputerActionStarted(
+                                                ComputerActionStartedPayload {
+                                                    request_id: payload.request_id.clone(),
+                                                    connection_id: payload.connection_id.clone(),
+                                                    started: ComputerActionStarted {
+                                                        work_id: plan.work_id.clone(),
+                                                        action_request_id: plan.action_request_id.clone(),
+                                                        execution_generation: plan.execution_generation.clone(),
+                                                        disposition: ComputerActionStartDisposition::DefinitelyNotStarted,
+                                                        reason: Some(reason.clone()),
+                                                    },
+                                                },
+                                            ),
+                                        );
+                                        let _ = writer_tx.send(
+                                            WorkerToService::ComputerActionCompleted(
+                                                ComputerActionCompletedPayload {
+                                                    request_id: payload.request_id,
+                                                    connection_id: payload.connection_id,
+                                                    completed: ComputerActionCompleted {
+                                                        work_id: plan.work_id,
+                                                        action_request_id: plan.action_request_id,
+                                                        execution_generation: plan.execution_generation,
+                                                        result: ComputerActionResultClass::DefinitelyNotStarted,
+                                                        facts: vec![],
+                                                        message: Some(reason),
+                                                    },
+                                                },
+                                            ),
+                                        );
+                                        continue;
+                                    }
+
+                                    let ceiling = shared_settings.read().await.computer_use.clone();
+                                    let lease = crate::worker::agent::computer_use_writer::WriterLeaseRequest {
+                                        work_id: plan.work_id.clone(),
+                                        action_request_id: plan.action_request_id.clone(),
+                                        execution_generation: plan.execution_generation.clone(),
+                                        interactive_session_incarnation: plan.interactive_session_incarnation.clone(),
+                                        expires_at: chrono::DateTime::parse_from_rfc3339(&plan.expires_at)
+                                            .map(|value| value.with_timezone(&chrono::Utc))
+                                            .unwrap_or_else(|_| chrono::Utc::now() - chrono::Duration::seconds(1)),
+                                    };
+                                    let preflight = if !ceiling.file_artifact_create_enabled() {
+                                        Err("artifact creation is disabled by the host-local ceiling".to_string())
+                                    } else {
+                                        computer_use_broker
+                                            .acquire_writer_lease(lease)
+                                            .map(|_| ())
+                                            .map_err(|error| error.message)
+                                    };
+                                    if let Err(reason) = preflight {
+                                        let _ = writer_tx.send(
+                                            WorkerToService::ComputerActionStarted(
+                                                ComputerActionStartedPayload {
+                                                    request_id: payload.request_id.clone(),
+                                                    connection_id: payload.connection_id.clone(),
+                                                    started: ComputerActionStarted {
+                                                        work_id: plan.work_id.clone(),
+                                                        action_request_id: plan.action_request_id.clone(),
+                                                        execution_generation: plan.execution_generation.clone(),
+                                                        disposition: ComputerActionStartDisposition::DefinitelyNotStarted,
+                                                        reason: Some(reason.clone()),
+                                                    },
+                                                },
+                                            ),
+                                        );
+                                        let _ = writer_tx.send(
+                                            WorkerToService::ComputerActionCompleted(
+                                                ComputerActionCompletedPayload {
+                                                    request_id: payload.request_id,
+                                                    connection_id: payload.connection_id,
+                                                    completed: ComputerActionCompleted {
+                                                        work_id: plan.work_id,
+                                                        action_request_id: plan.action_request_id,
+                                                        execution_generation: plan.execution_generation,
+                                                        result: ComputerActionResultClass::DefinitelyNotStarted,
+                                                        facts: vec![],
+                                                        message: Some(reason),
+                                                    },
+                                                },
+                                            ),
+                                        );
+                                        continue;
+                                    }
+
+                                    let _ = writer_tx.send(
+                                        WorkerToService::ComputerActionStarted(
+                                            ComputerActionStartedPayload {
+                                                request_id: payload.request_id.clone(),
+                                                connection_id: payload.connection_id.clone(),
+                                                started: ComputerActionStarted {
+                                                    work_id: plan.work_id.clone(),
+                                                    action_request_id: plan.action_request_id.clone(),
+                                                    execution_generation: plan.execution_generation.clone(),
+                                                    disposition: ComputerActionStartDisposition::MayHaveStarted,
+                                                    reason: None,
+                                                },
+                                            },
+                                        ),
+                                    );
+                                    let action_writer = writer_tx.clone();
+                                    let action_broker = computer_use_broker.clone();
+                                    tokio::spawn(async move {
+                                        let generation = plan.execution_generation.clone();
+                                        let step = plan.actions.into_iter().next().expect("preflight checked one action");
+                                        let result = match step.action {
+                                            ComputerActionKind::File(FilePatchAction::CreateTextArtifact {
+                                                file_name,
+                                                content_utf8,
+                                            }) => {
+                                                let allowed_roots = ceiling.allowed_file_roots.clone();
+                                                let target = step.target;
+                                                let broker = action_broker.clone();
+                                                let generation_for_call = generation.clone();
+                                                tokio::task::spawn_blocking(move || {
+                                                    broker.require_writer_lease(&generation_for_call)?;
+                                                    crate::worker::agent::file_reference_store::create_text_artifact(
+                                                        &target,
+                                                        &allowed_roots,
+                                                        &file_name,
+                                                        &content_utf8,
+                                                    )
+                                                })
+                                                .await
+                                                .map_err(|error| format!("artifact worker failed to join: {error}"))
+                                                .and_then(|result| result.map_err(|error| error.message))
+                                            }
+                                            ComputerActionKind::File(
+                                                FilePatchAction::CreateSpreadsheetArtifact {
+                                                    preview_id,
+                                                    file_name,
+                                                },
+                                            ) => {
+                                                let allowed_roots = ceiling.allowed_file_roots.clone();
+                                                let target = step.target;
+                                                let broker = action_broker.clone();
+                                                let generation_for_call = generation.clone();
+                                                tokio::task::spawn_blocking(move || {
+                                                    broker.require_writer_lease(&generation_for_call)?;
+                                                    if !file_name.to_ascii_lowercase().ends_with(".xlsx") {
+                                                        return Err(desk_agent_protocol::AgentError {
+                                                            kind: desk_agent_protocol::AgentErrorKind::InvalidInput,
+                                                            message: "spreadsheet artifact name must end in .xlsx".into(),
+                                                            retryable: false,
+                                                            safe_for_model: true,
+                                                            error_code: None,
+                                                        });
+                                                    }
+                                                    let bytes = crate::worker::agent::spreadsheet_file::materialize_preview_xlsx(&preview_id)?;
+                                                    crate::worker::agent::file_reference_store::create_binary_artifact(
+                                                        &target,
+                                                        &allowed_roots,
+                                                        &file_name,
+                                                        &bytes,
+                                                    )
+                                                })
+                                                .await
+                                                .map_err(|error| format!("spreadsheet artifact worker failed to join: {error}"))
+                                                .and_then(|result| result.map_err(|error| error.message))
+                                            }
+                                            ComputerActionKind::File(
+                                                FilePatchAction::CreateSpreadsheetFormulaArtifact {
+                                                    preview_id,
+                                                    file_name,
+                                                    target_cell,
+                                                    formula,
+                                                    locale,
+                                                    formula_policy_digest_sha256,
+                                                },
+                                            ) => {
+                                                let allowed_roots = ceiling.allowed_file_roots.clone();
+                                                let target = step.target;
+                                                let broker = action_broker.clone();
+                                                let generation_for_call = generation.clone();
+                                                tokio::task::spawn_blocking(move || {
+                                                    broker.require_writer_lease(&generation_for_call)?;
+                                                    if !file_name.to_ascii_lowercase().ends_with(".xlsx") {
+                                                        return Err(desk_agent_protocol::AgentError {
+                                                            kind: desk_agent_protocol::AgentErrorKind::InvalidInput,
+                                                            message: "spreadsheet formula artifact name must end in .xlsx".into(),
+                                                            retryable: false,
+                                                            safe_for_model: true,
+                                                            error_code: None,
+                                                        });
+                                                    }
+                                                    let bytes = crate::worker::agent::spreadsheet_file::materialize_preview_formula_xlsx(
+                                                        &preview_id,
+                                                        &target_cell,
+                                                        &formula,
+                                                        &locale,
+                                                        &formula_policy_digest_sha256,
+                                                    )?;
+                                                    crate::worker::agent::file_reference_store::create_binary_artifact(
+                                                        &target,
+                                                        &allowed_roots,
+                                                        &file_name,
+                                                        &bytes,
+                                                    )
+                                                })
+                                                .await
+                                                .map_err(|error| format!("spreadsheet formula artifact worker failed to join: {error}"))
+                                                .and_then(|result| result.map_err(|error| error.message))
+                                            }
+                                            ComputerActionKind::File(
+                                                FilePatchAction::CreateWordReportArtifact {
+                                                    preview_id,
+                                                    file_name,
+                                                    title,
+                                                },
+                                            ) => {
+                                                let allowed_roots = ceiling.allowed_file_roots.clone();
+                                                let target = step.target;
+                                                let broker = action_broker.clone();
+                                                let generation_for_call = generation.clone();
+                                                tokio::task::spawn_blocking(move || {
+                                                    broker.require_writer_lease(&generation_for_call)?;
+                                                    if !file_name.to_ascii_lowercase().ends_with(".docx") {
+                                                        return Err(desk_agent_protocol::AgentError {
+                                                            kind: desk_agent_protocol::AgentErrorKind::InvalidInput,
+                                                            message: "Word report artifact name must end in .docx".into(),
+                                                            retryable: false,
+                                                            safe_for_model: true,
+                                                            error_code: None,
+                                                        });
+                                                    }
+                                                    let bytes = crate::worker::agent::spreadsheet_file::materialize_preview_docx(
+                                                        &preview_id,
+                                                        &title,
+                                                    )?;
+                                                    crate::worker::agent::file_reference_store::create_binary_artifact(
+                                                        &target,
+                                                        &allowed_roots,
+                                                        &file_name,
+                                                        &bytes,
+                                                    )
+                                                })
+                                                .await
+                                                .map_err(|error| format!("Word report artifact worker failed to join: {error}"))
+                                                .and_then(|result| result.map_err(|error| error.message))
+                                            }
+                                            _ => Err("only create-new text, retained-preview XLSX/formula-XLSX, and retained-preview DOCX artifacts are enabled in this slice".to_string()),
+                                        };
+                                        action_broker.release_writer_lease(&generation);
+                                        let (class, facts, message) = match result {
+                                            Ok(artifact) => (
+                                                ComputerActionResultClass::Verified,
+                                                vec![ComputerActionStepFact {
+                                                    index: 0,
+                                                    changed: true,
+                                                    verified: true,
+                                                    summary: format!(
+                                                        "created {} ({} bytes, sha256={})",
+                                                        artifact.file_name, artifact.byte_len, artifact.sha256
+                                                    ),
+                                                }],
+                                                Some("artifact created with create-new semantics and verified by independent handle read-back".to_string()),
+                                            ),
+                                            Err(reason) => (
+                                                ComputerActionResultClass::Failed,
+                                                vec![],
+                                                Some(reason),
+                                            ),
+                                        };
+                                        let _ = action_writer.send(
+                                            WorkerToService::ComputerActionCompleted(
+                                                ComputerActionCompletedPayload {
+                                                    request_id: payload.request_id,
+                                                    connection_id: payload.connection_id,
+                                                    completed: ComputerActionCompleted {
+                                                        work_id: plan.work_id,
+                                                        action_request_id: plan.action_request_id,
+                                                        execution_generation: generation,
+                                                        result: class,
+                                                        facts,
+                                                        message,
+                                                    },
+                                                },
+                                            ),
+                                        );
+                                    });
+                                }
+                                ServiceToWorker::ComputerActionCancel(payload) => {
+                                    let state = ComputerActionStateReport {
+                                        work_id: payload.cancel.work_id,
+                                        action_request_id: payload.cancel.action_request_id,
+                                        execution_generation: payload.cancel.execution_generation,
+                                        phase: ComputerActionPhase::OutcomeUnknown,
+                                        result: Some(ComputerActionResultClass::OutcomeUnknown),
+                                    };
+                                    let _ = writer_tx.send(
+                                        WorkerToService::ComputerActionStateReported(
+                                            ComputerActionStateReportedPayload {
+                                                request_id: payload.request_id,
+                                                connection_id: payload.connection_id,
+                                                state,
+                                            },
+                                        ),
+                                    );
+                                }
+                                ServiceToWorker::ComputerActionStateQuery(payload) => {
+                                    let state = ComputerActionStateReport {
+                                        work_id: payload.query.work_id,
+                                        action_request_id: payload.query.action_request_id,
+                                        execution_generation: payload.query.execution_generation,
+                                        phase: ComputerActionPhase::OutcomeUnknown,
+                                        result: Some(ComputerActionResultClass::OutcomeUnknown),
+                                    };
+                                    let _ = writer_tx.send(
+                                        WorkerToService::ComputerActionStateReported(
+                                            ComputerActionStateReportedPayload {
+                                                request_id: payload.request_id,
+                                                connection_id: payload.connection_id,
+                                                state,
+                                            },
+                                        ),
+                                    );
                                 }
                                 ServiceToWorker::ExecPlan(payload) => {
                                     info!(
@@ -1667,6 +2094,9 @@ impl WorkerSession {
         // own writer_tx so the event-pipe writer task observes "all
         // senders gone" and exits cleanly.
         heartbeat_task.abort();
+        computer_use_readiness_task.abort();
+        #[cfg(windows)]
+        drop(computer_use_input_monitor);
         #[cfg(target_os = "linux")]
         if let Some(task) = portal_status_task {
             task.abort();

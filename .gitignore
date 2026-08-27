@@ -37,5 +37,12 @@ logs/
 .idea/
 .DS_Store
 
+# Local development/runtime state
+/desk_signal.db*
+/desk_exec_ledger.db*
+/remote-access-state.toml
+/server-run*.log
+/vite-run*.log
+
 # Compose env file: holds LRD_BOOTSTRAP_TOKEN
 /.env

@@ -5,7 +5,7 @@ import { FitAddon } from "@xterm/addon-fit"
 import { WebLinksAddon } from "@xterm/addon-web-links"
 import "@xterm/xterm/css/xterm.css"
 import { useTranslation } from "react-i18next"
-import { Loader2, TerminalSquare } from "lucide-react"
+import { Bot, Loader2, TerminalSquare } from "lucide-react"
 import { Sparkles, WandSparkles } from "lucide-react"
 import { readSessionGrant } from "@/features/desk/session-grant"
 import { Button } from "@/components/ui/button"
@@ -28,6 +28,10 @@ import { terminalWelcomeBanner } from "./terminal-welcome"
 import { useTerminalSessionGuard } from "./use-terminal-session-guard"
 import type { OperationSystemEnum } from "@/services/types"
 import { terminalOs, terminalShell } from "./terminal-environment"
+import {
+    type AssistantTerminalObjectRef,
+    useDeviceAssistantTerminalContext,
+} from './use-device-assistant-terminal-context'
 
 // Max bytes of recent terminal scrollback kept as a non-authoritative copilot
 // prompt hint (the server re-redacts and re-caps it). Bounded so the ring buffer
@@ -60,6 +64,11 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
     // I/O WS above) plus a bounded ring buffer of recent output and the last
     // submitted command line, all fed to the copilot as non-authoritative hints.
     const { subscribe, sendMessage } = useDeskSignaling()
+    const assistantContext = useDeviceAssistantTerminalContext({
+        deskId: connectionId,
+        subscribe,
+        sendMessage,
+    })
     const copilot = useTerminalCopilot({ connectionId, subscribe, sendMessage })
     // Confirmed execution of an operator-promoted copilot suggestion: ConfirmExec
     // -> ExecPreview -> ResolveExec -> ExecResult, keyed by suggestion index. The
@@ -78,6 +87,8 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
     })
     const [showCopilot, setShowCopilot] = useState(false)
     const recentOutputRef = useRef<string>("")
+    const [assistantObjectRef, setAssistantObjectRef] =
+        useState<AssistantTerminalObjectRef | null>(null)
     const lastCommandRef = useRef<string>("")
     const inputLineRef = useRef<string>("")
 
@@ -321,6 +332,15 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
                                         recentOutputRef.current = (recentOutputRef.current + content)
                                             .slice(-COPILOT_RECENT_OUTPUT_LIMIT)
                                     }
+                                    const assistantRef = msg.signaling_data.assistant_object_ref
+                                    if (
+                                        assistantRef?.object_kind === 'terminal_output'
+                                        && typeof assistantRef.token === 'string'
+                                        && typeof assistantRef.snapshot_id === 'string'
+                                        && typeof assistantRef.expires_at === 'string'
+                                    ) {
+                                        setAssistantObjectRef(assistantRef)
+                                    }
                                 } else if (msg.signaling_type === SIGNALING_TYPE_CODE_TERMINAL_STARTED) {
                                     console.log("terminal started")
                                     admissionRetry.reset()
@@ -491,6 +511,23 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
         <div className="h-full w-full flex bg-[#1e1e1e] overflow-hidden">
             <div className="relative flex-1 flex flex-col overflow-hidden">
                 <div className="absolute top-2 right-4 z-10 flex gap-2">
+                    <Button
+                        variant="secondary"
+                        size="sm"
+                        className="opacity-50 hover:opacity-100 transition-opacity"
+                        disabled={!assistantObjectRef || assistantContext.pending}
+                        title={assistantContext.error
+                            ? t('pages.deskTerminal.assistant.addFailed')
+                            : t('pages.deskTerminal.assistant.addHint')}
+                        onClick={() => assistantObjectRef && assistantContext.attach(assistantObjectRef)}
+                    >
+                        {assistantContext.pending
+                            ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                            : <Bot className="h-4 w-4 mr-2" />}
+                        {assistantContext.added
+                            ? t('pages.deskTerminal.assistant.added')
+                            : t('pages.deskTerminal.assistant.add')}
+                    </Button>
                     <Button
                         variant="secondary"
                         size="sm"

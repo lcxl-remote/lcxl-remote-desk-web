@@ -1,6 +1,7 @@
 use std::{fs::Metadata, path::PathBuf};
 
 use chrono::{DateTime, Local, TimeZone};
+use desk_agent_protocol::computer_use::ObjectRef;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -63,6 +64,10 @@ pub struct FileInfo {
     #[wincode(with = "DateTimeLocalWincode")]
     pub modified: DateTime<Local>,
     pub err_msg: Option<String>,
+    /// Short-lived edge-issued reference for an explicit Device Assistant
+    /// selection. Native paths remain non-authoritative model inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_object_ref: Option<ObjectRef>,
 }
 
 impl FileInfo {
@@ -115,6 +120,7 @@ impl FileInfo {
             created: Local.timestamp_opt(0, 0).unwrap(),
             modified: Local.timestamp_opt(0, 0).unwrap(),
             err_msg: None,
+            assistant_object_ref: None,
         };
         match metadata {
             Ok(metadata) => {
@@ -263,6 +269,7 @@ mod wincode_tests {
                 .single()
                 .expect("valid local time"),
             err_msg: None,
+            assistant_object_ref: None,
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
@@ -298,6 +305,7 @@ mod wincode_tests {
                 .single()
                 .expect("valid local time"),
             err_msg: None,
+            assistant_object_ref: None,
         };
         let original = FileListResponse {
             file_info_list: vec![make_info("a.txt", 100), make_info("b.txt", 200)],

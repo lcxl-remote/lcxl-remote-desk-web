@@ -435,4 +435,7 @@ pub(super) const SUPPORTED_READ_KINDS: &[&str] = &[
     "container_inspect",
     "container_logs",
     "screen_capture_current",
+    "desktop_session_inspect",
+    "desktop_ui_inspect",
+    "office_document_inspect",
 ];

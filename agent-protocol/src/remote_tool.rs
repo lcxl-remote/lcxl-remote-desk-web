@@ -21,7 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentEnvelope, AgentError, AgentOutcome};
+use crate::{AgentError, AgentOutcome, ReadonlyAgentEnvelope};
 
 /// Hard upper bound on the total (pre-base64) byte length of a reassembled remote
 /// tool result. The reassembler rejects a first chunk whose declared `total_len`
@@ -59,7 +59,7 @@ pub struct RemoteToolRequest {
     /// The model tool-call id this result answers (loop-level correlation).
     pub tool_call_id: String,
     /// The server-stamped capability call the edge should invoke.
-    pub envelope: AgentEnvelope,
+    pub envelope: ReadonlyAgentEnvelope,
 }
 
 /// Sanitized output of one remote read call.
@@ -156,8 +156,8 @@ mod tests {
         RequestId, RiskLevel, SystemInfoParams, TargetRef,
     };
 
-    fn sample_envelope() -> AgentEnvelope {
-        AgentEnvelope {
+    fn sample_envelope() -> ReadonlyAgentEnvelope {
+        crate::AgentEnvelope {
             protocol_version: ProtocolVersion::default(),
             request_id: RequestId("req-1".into()),
             parent_task_id: None,
@@ -193,6 +193,8 @@ mod tests {
                 reason: None,
             },
         }
+        .try_into()
+        .expect("read-only envelope")
     }
 
     #[test]
@@ -205,6 +207,27 @@ mod tests {
         let json = serde_json::to_string(&req).expect("encode");
         let back: RemoteToolRequest = serde_json::from_str(&json).expect("decode");
         assert_eq!(req, back);
+    }
+
+    #[test]
+    fn remote_tool_request_cannot_decode_exec() {
+        let mut value = serde_json::to_value(RemoteToolRequest {
+            request_id: "rt-1".into(),
+            tool_call_id: "call-1".into(),
+            envelope: sample_envelope(),
+        })
+        .expect("encode");
+        value["envelope"]["operation"]["input"] = serde_json::json!({
+            "kind": "exec",
+            "params": {
+                "target": { "kind": "shell", "shell": "powershell" },
+                "command": "Get-Service",
+                "timeout_ms": 10000,
+                "max_stdout_bytes": 65536,
+                "max_stderr_bytes": 65536
+            }
+        });
+        assert!(serde_json::from_value::<RemoteToolRequest>(value).is_err());
     }
 
     #[test]

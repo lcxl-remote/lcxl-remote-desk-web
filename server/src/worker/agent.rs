@@ -14,7 +14,18 @@
 
 pub mod audit_sink;
 pub mod collectors;
+pub mod computer_use_broker;
+pub mod computer_use_writer;
 pub mod eval;
+pub mod file_reference_store;
+#[cfg(windows)]
+pub mod office_bridge_observer;
+pub mod spreadsheet_file;
+pub mod terminal_reference_store;
+#[cfg(windows)]
+pub mod windows_input_ownership;
+#[cfg(windows)]
+pub mod windows_uia_observer;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -36,6 +47,7 @@ use crate::model::settings::SharedSettings;
 /// sink (defaults to no-op) where auditing is not wired.
 pub struct LocalDeviceAgent {
     settings: Option<Arc<SharedSettings>>,
+    computer_use_broker: Arc<computer_use_broker::ComputerUseBroker>,
     audit: Arc<dyn AuditSink>,
 }
 
@@ -43,6 +55,7 @@ impl Default for LocalDeviceAgent {
     fn default() -> Self {
         Self {
             settings: None,
+            computer_use_broker: Arc::new(computer_use_broker::ComputerUseBroker::new()),
             audit: Arc::new(NoopAuditSink),
         }
     }
@@ -57,8 +70,22 @@ impl LocalDeviceAgent {
     /// Build an agent bound to the worker session settings, enabling screen
     /// capture.
     pub fn with_settings(settings: Arc<SharedSettings>) -> Self {
+        Self::with_settings_and_broker(
+            settings,
+            Arc::new(computer_use_broker::ComputerUseBroker::new()),
+        )
+    }
+
+    /// Build an agent around the worker-lifetime Computer Use broker. A
+    /// SessionWorker creates one broker per incarnation and shares it across all
+    /// requests; rebuilding it per call would make every ObjectRef stale at once.
+    pub fn with_settings_and_broker(
+        settings: Arc<SharedSettings>,
+        computer_use_broker: Arc<computer_use_broker::ComputerUseBroker>,
+    ) -> Self {
         Self {
             settings: Some(settings),
+            computer_use_broker,
             audit: Arc::new(NoopAuditSink),
         }
     }
@@ -92,7 +119,12 @@ impl DeviceAgent for LocalDeviceAgent {
         // available for the post-dispatch audit events.
         let result = match envelope.operation.input.clone() {
             OperationInput::ReadContext(rc) => {
-                dispatch_read_context(rc.kind, self.settings.as_ref()).await
+                dispatch_read_context(
+                    rc.kind,
+                    self.settings.as_ref(),
+                    Arc::clone(&self.computer_use_broker),
+                )
+                .await
             }
             OperationInput::Exec(_) => Err(unsupported("exec is not available until M2")),
         };
@@ -153,6 +185,7 @@ fn now_rfc3339() -> String {
 async fn dispatch_read_context(
     kind: ContextKind,
     settings: Option<&Arc<SharedSettings>>,
+    computer_use_broker: Arc<computer_use_broker::ComputerUseBroker>,
 ) -> Result<OperationOutput, AgentError> {
     match kind {
         ContextKind::SystemInfo(params) => {
@@ -217,6 +250,95 @@ async fn dispatch_read_context(
                 ReadContextOutput::ScreenCaptureCurrent(output),
             ))
         }
+        ContextKind::DesktopSessionInspect(params) => {
+            let Some(settings) = settings else {
+                return Err(unsupported(
+                    "desktop observation requires a session context",
+                ));
+            };
+            let ceiling = settings.read().await.computer_use.clone();
+            let output = run_blocking(move || {
+                computer_use_broker.inspect_desktop_session(&params, &ceiling)
+            })
+            .await??;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::DesktopSessionInspect(output),
+            ))
+        }
+        ContextKind::DesktopUiInspect(params) => {
+            let Some(settings) = settings else {
+                return Err(unsupported(
+                    "desktop UI observation requires a session context",
+                ));
+            };
+            let ceiling = settings.read().await.computer_use.clone();
+            let output =
+                run_blocking(move || computer_use_broker.inspect_desktop_ui(&params, &ceiling))
+                    .await??;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::DesktopUiInspect(output),
+            ))
+        }
+        ContextKind::OfficeDocumentInspect(params) => {
+            let Some(settings) = settings else {
+                return Err(unsupported("Office observation requires a session context"));
+            };
+            let ceiling = settings.read().await.computer_use.clone();
+            #[cfg(not(windows))]
+            {
+                let _ = (params, ceiling, computer_use_broker);
+                Err(unsupported(
+                    "the Office.js bridge is currently enabled only on Windows",
+                ))
+            }
+            #[cfg(windows)]
+            {
+                let output = run_blocking(move || {
+                    let expected_document =
+                        computer_use_broker.office_document_filter(&params, &ceiling)?;
+                    let observed = office_bridge_observer::inspect_excel_selection(
+                        expected_document.as_deref(),
+                        params.max_objects,
+                        params.max_bytes,
+                    )?;
+                    computer_use_broker.project_excel_selection(&params, &ceiling, observed)
+                })
+                .await??;
+                Ok(OperationOutput::ReadContext(
+                    ReadContextOutput::OfficeDocumentInspect(output),
+                ))
+            }
+        }
+        ContextKind::FileMetadataInspect(params) => {
+            let output = run_blocking(move || file_reference_store::inspect(&params)).await??;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::FileMetadataInspect(output),
+            ))
+        }
+        ContextKind::TerminalOutputInspect(params) => {
+            let output = run_blocking(move || terminal_reference_store::inspect(&params)).await??;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::TerminalOutputInspect(output),
+            ))
+        }
+        ContextKind::FileContentRead(params) => {
+            let output = run_blocking(move || file_reference_store::read_text(&params)).await??;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::FileContentRead(output),
+            ))
+        }
+        ContextKind::SpreadsheetFileInspect(params) => {
+            let output = run_blocking(move || spreadsheet_file::inspect(&params)).await??;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::SpreadsheetFileInspect(output),
+            ))
+        }
+        ContextKind::SpreadsheetMergePreview(params) => {
+            let output = run_blocking(move || spreadsheet_file::preview_merge(&params)).await??;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::SpreadsheetMergePreview(output),
+            ))
+        }
     }
 }
 
@@ -252,11 +374,14 @@ fn unsupported(message: &str) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use desk_agent_protocol::computer_use::DesktopSessionInspectParams;
     use desk_agent_protocol::{
         ActorRef, ActorType, AgentOperation, AgentScope, AuditMeta, CallerRef, CallerType,
         Capability, ExecInput, ExecTarget, ExecutionMode, ProtocolVersion, ReadContextInput,
         RequestId, ScreenCaptureParams, SystemInfoParams, TargetRef,
     };
+
+    use crate::model::settings::{Settings, SharedSettings};
 
     fn envelope_for(input: OperationInput) -> AgentEnvelope {
         AgentEnvelope {
@@ -322,6 +447,90 @@ mod tests {
             .await
             .expect_err("must reject without settings");
         assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
+    }
+
+    #[tokio::test]
+    async fn desktop_observation_is_denied_by_default_local_ceiling() {
+        let settings = Arc::new(SharedSettings::from(Settings::default()));
+        let agent = LocalDeviceAgent::with_settings(settings);
+        let env = envelope_for(OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::DesktopSessionInspect(DesktopSessionInspectParams {
+                include_active_application: false,
+            }),
+        }));
+        let error = agent
+            .invoke(env)
+            .await
+            .expect_err("default local ceiling must deny desktop observation");
+        assert_eq!(error.kind, AgentErrorKind::PermissionDenied);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn enabled_desktop_observation_fails_closed_outside_an_interactive_desktop() {
+        let mut settings = Settings::default();
+        settings.computer_use.enabled = true;
+        settings.computer_use.observe = true;
+        let agent = LocalDeviceAgent::with_settings(Arc::new(SharedSettings::from(settings)));
+        let env = envelope_for(OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::DesktopSessionInspect(DesktopSessionInspectParams {
+                include_active_application: true,
+            }),
+        }));
+        match agent.invoke(env).await {
+            Ok(OperationOutput::ReadContext(ReadContextOutput::DesktopSessionInspect(output))) => {
+                assert_eq!(output.os, "windows");
+                assert_eq!(
+                    output.session.object_kind,
+                    desk_agent_protocol::computer_use::ObjectKind::DesktopSession
+                );
+                assert!(!output.interactive_session_incarnation.is_empty());
+                assert!(
+                    output.active_application.is_none(),
+                    "empty local allowlist must hide the foreground application"
+                );
+            }
+            Err(error) => assert_eq!(
+                error.kind,
+                AgentErrorKind::SessionUnavailable,
+                "a non-interactive runner must fail closed"
+            ),
+            other => panic!("unexpected desktop observation outcome: {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires an active interactive Windows desktop"]
+    async fn interactive_desktop_observation_succeeds() {
+        let mut settings = Settings::default();
+        settings.computer_use.enabled = true;
+        settings.computer_use.observe = true;
+        let agent = LocalDeviceAgent::with_settings(Arc::new(SharedSettings::from(settings)));
+        let env = envelope_for(OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::DesktopSessionInspect(DesktopSessionInspectParams {
+                include_active_application: true,
+            }),
+        }));
+
+        let output = agent
+            .invoke(env)
+            .await
+            .expect("an active Default input desktop must be observable");
+        let OperationOutput::ReadContext(ReadContextOutput::DesktopSessionInspect(output)) = output
+        else {
+            panic!("unexpected desktop observation output: {output:?}");
+        };
+        assert_eq!(output.os, "windows");
+        assert_eq!(
+            output.session.object_kind,
+            desk_agent_protocol::computer_use::ObjectKind::DesktopSession
+        );
+        assert!(!output.interactive_session_incarnation.is_empty());
+        assert!(
+            output.active_application.is_none(),
+            "empty local allowlist must hide the foreground application"
+        );
     }
 
     /// Raw `exec` is rejected in the worker too; the daemon already blocks it

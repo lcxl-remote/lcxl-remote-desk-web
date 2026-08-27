@@ -5,14 +5,18 @@ use sea_orm::{
 };
 use std::collections::HashSet;
 use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::OnceCell;
 
 use crate::entity::{
-    agent_exec_task, agent_session, ai_usage, device_code, host_remote_access_state, turn_usage,
-    usage_retention,
+    agent_action_item, agent_capability_dispatch_outbox, agent_capability_grant, agent_exec_task,
+    agent_grant_reservation, agent_run_event, agent_session, ai_usage, device_code,
+    host_remote_access_state, model_egress_receipt, turn_usage, usage_retention,
 };
 use crate::error::DeskSignalError;
+use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
 
 static DB_CONN: OnceCell<DatabaseConnection> = OnceCell::const_new();
 
@@ -29,11 +33,106 @@ fn path_to_sqlite_url(path: &Path) -> String {
     format!("sqlite://{}?mode=rwc", normalized_path)
 }
 
+/// Stage 3 grant reservation/dispatch facts require a local filesystem whose
+/// lock and flush semantics are under this host's control. SQLite WAL on UNC,
+/// mapped network drives or removable media is not an OSS durability boundary.
+fn validate_signal_db_location(path: &Path) -> Result<(), DbErr> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| DbErr::Custom(format!("resolve signal database directory: {error}")))?
+            .join(path)
+    };
+    validate_signal_db_location_platform(&absolute)
+}
+
+#[cfg(windows)]
+fn validate_signal_db_location_platform(path: &Path) -> Result<(), DbErr> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Component, Prefix};
+    use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumeInformationW};
+    use windows::core::PCWSTR;
+
+    const DRIVE_FIXED: u32 = 3;
+    let prefix = path
+        .components()
+        .next()
+        .ok_or_else(|| DbErr::Custom("signal database path has no Windows volume prefix".into()))?;
+    let root = match prefix {
+        Component::Prefix(prefix) => match prefix.kind() {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                PathBuf::from(format!("{}:\\", char::from(letter)))
+            }
+            Prefix::UNC(..)
+            | Prefix::VerbatimUNC(..)
+            | Prefix::DeviceNS(..)
+            | Prefix::Verbatim(..) => {
+                return Err(DbErr::Custom(
+                    "signal database must not use a UNC, network-share or device path".into(),
+                ));
+            }
+        },
+        _ => {
+            return Err(DbErr::Custom(
+                "signal database path is not rooted on a local Windows volume".into(),
+            ));
+        }
+    };
+    let mut wide = root.as_os_str().encode_wide().collect::<Vec<_>>();
+    wide.push(0);
+    // SAFETY: `wide` is a live, NUL-terminated UTF-16 root path for the duration
+    // of the call. GetDriveTypeW neither retains nor mutates the buffer.
+    let drive_type = unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) };
+    if drive_type != DRIVE_FIXED {
+        return Err(DbErr::Custom(format!(
+            "signal database requires a fixed local Windows volume; drive type {drive_type} is unsupported"
+        )));
+    }
+    let mut filesystem_name = [0_u16; 64];
+    // SAFETY: both buffers remain live for the call, and the root is the same
+    // NUL-terminated local volume root already validated by GetDriveTypeW.
+    unsafe {
+        GetVolumeInformationW(
+            PCWSTR(wide.as_ptr()),
+            None,
+            None,
+            None,
+            None,
+            Some(&mut filesystem_name),
+        )
+        .map_err(|error| DbErr::Custom(format!("query signal database volume: {error}")))?;
+    }
+    let filesystem_name = String::from_utf16_lossy(
+        &filesystem_name[..filesystem_name
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(filesystem_name.len())],
+    );
+    if !supported_windows_signal_db_filesystem(&filesystem_name) {
+        return Err(DbErr::Custom(format!(
+            "signal database requires an explicitly supported local filesystem (NTFS or ReFS); {filesystem_name:?} is unsupported"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn supported_windows_signal_db_filesystem(name: &str) -> bool {
+    name.eq_ignore_ascii_case("NTFS") || name.eq_ignore_ascii_case("ReFS")
+}
+
+#[cfg(not(windows))]
+fn validate_signal_db_location_platform(_path: &Path) -> Result<(), DbErr> {
+    Ok(())
+}
+
 /// Initialize database connection and return it.
 pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, DeskSignalError> {
     DB_CONN
         .get_or_try_init(|| async {
             let db_path = Path::new(config_dir).join("desk_signal.db");
+            validate_signal_db_location(&db_path)?;
 
             let db_url = path_to_sqlite_url(&db_path);
             log::info!("Connecting to SQLite database at {}", db_url);
@@ -45,18 +144,39 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
                 .idle_timeout(Duration::from_secs(8))
                 .max_lifetime(Duration::from_secs(8))
                 .sqlx_logging(false); // Optional: enable/disable query logging
+            opt.map_sqlx_sqlite_opts(|options| {
+                options
+                    .journal_mode(SqliteJournalMode::Wal)
+                    .synchronous(SqliteSynchronous::Full)
+                    .foreign_keys(true)
+                    .busy_timeout(Duration::from_secs(5))
+            });
 
             let db = Database::connect(opt).await?;
+            verify_sqlite_durability(&db).await?;
 
             initialize_schema(&db).await?;
+            let recovery_now = u64::try_from(chrono::Utc::now().timestamp_millis())
+                .map_err(|_| DbErr::Custom("system clock is before Unix epoch".into()))?;
+            let uncertain = crate::capability_grant_store::SignalCapabilityGrantStore::new(
+                db.clone(),
+            )
+            .recover_unfinished_dispatches_after_restart(recovery_now)
+            .await?;
+            if uncertain > 0 {
+                log::warn!(
+                    "recovered {uncertain} capability dispatch intent(s) as outcome unknown; automatic retry is forbidden"
+                );
+            }
             crate::agent_exec_store::start_completion_publisher(db.clone());
+            crate::agent_background_task_store::start_completion_publisher(db.clone());
 
             Ok(db)
         })
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 3;
+const SIGNAL_SCHEMA_VERSION: i32 = 7;
 const MIGRATION_LOCK_TABLE: &str = "signal_schema_migration_lock";
 const LEGACY_TABLES: [&str; 8] = [
     "agent_exec_task",
@@ -117,6 +237,10 @@ pub(crate) async fn initialize_schema(db: &DatabaseConnection) -> Result<(), DbE
                 0 => migrate_legacy_v0_to_v1(&txn, &tables).await?,
                 1 => migrate_v1_to_v2(&txn, &tables).await?,
                 2 => migrate_v2_to_v3(&txn, &tables).await?,
+                3 => migrate_v3_to_v4(&txn, &tables).await?,
+                4 => migrate_v4_to_v5(&txn, &tables).await?,
+                5 => migrate_v5_to_v6(&txn, &tables).await?,
+                6 => migrate_v6_to_v7(&txn, &tables).await?,
                 other => {
                     return Err(DbErr::Custom(format!(
                         "no signal database migration registered from version {other}"
@@ -144,6 +268,12 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     create_entity(db, &schema, host_remote_access_state::Entity).await?;
     create_entity(db, &schema, agent_session::Entity).await?;
     create_entity(db, &schema, agent_exec_task::Entity).await?;
+    create_entity(db, &schema, agent_action_item::Entity).await?;
+    create_entity(db, &schema, agent_capability_grant::Entity).await?;
+    create_entity(db, &schema, agent_grant_reservation::Entity).await?;
+    create_entity(db, &schema, agent_capability_dispatch_outbox::Entity).await?;
+    create_entity(db, &schema, model_egress_receipt::Entity).await?;
+    create_entity(db, &schema, agent_run_event::Entity).await?;
 
     for index in [
         Index::create()
@@ -164,6 +294,30 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
             .table(agent_exec_task::Entity)
             .col(agent_exec_task::Column::DeliveryState)
             .col(agent_exec_task::Column::Status)
+            .to_owned(),
+        Index::create()
+            .if_not_exists()
+            .unique()
+            .name("idx-model-egress-export-call")
+            .table(model_egress_receipt::Entity)
+            .col(model_egress_receipt::Column::ExportAuthorizationId)
+            .col(model_egress_receipt::Column::ModelCallOrdinal)
+            .to_owned(),
+        Index::create()
+            .if_not_exists()
+            .unique()
+            .name("idx-agent-run-event-sequence")
+            .table(agent_run_event::Entity)
+            .col(agent_run_event::Column::RunId)
+            .col(agent_run_event::Column::EventSeq)
+            .to_owned(),
+        Index::create()
+            .if_not_exists()
+            .name("idx-agent-run-event-input")
+            .table(agent_run_event::Entity)
+            .col(agent_run_event::Column::RunId)
+            .col(agent_run_event::Column::Kind)
+            .col(agent_run_event::Column::InputSeq)
             .to_owned(),
     ] {
         db.execute(&index).await?;
@@ -343,6 +497,127 @@ async fn migrate_v2_to_v3<C: ConnectionTrait>(
     Ok(())
 }
 
+async fn migrate_v3_to_v4<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    validate_v3_schema(db, tables).await?;
+    let schema = Schema::new(db.get_database_backend());
+    create_entity(db, &schema, agent_action_item::Entity).await
+}
+
+async fn verify_sqlite_durability(db: &DatabaseConnection) -> Result<(), DbErr> {
+    let backend = db.get_database_backend();
+    let pragma = |name: &str| Statement::from_string(backend, format!("PRAGMA {name}"));
+    let journal: String = db
+        .query_one_raw(pragma("journal_mode"))
+        .await?
+        .ok_or_else(|| DbErr::Custom("SQLite did not report journal_mode".into()))?
+        .try_get("", "journal_mode")?;
+    let synchronous: i64 = db
+        .query_one_raw(pragma("synchronous"))
+        .await?
+        .ok_or_else(|| DbErr::Custom("SQLite did not report synchronous".into()))?
+        .try_get("", "synchronous")?;
+    let foreign_keys: i64 = db
+        .query_one_raw(pragma("foreign_keys"))
+        .await?
+        .ok_or_else(|| DbErr::Custom("SQLite did not report foreign_keys".into()))?
+        .try_get("", "foreign_keys")?;
+    let busy_timeout: i64 = db
+        .query_one_raw(pragma("busy_timeout"))
+        .await?
+        .ok_or_else(|| DbErr::Custom("SQLite did not report busy_timeout".into()))?
+        .try_get("", "timeout")?;
+    let quick_check = db.query_all_raw(pragma("quick_check")).await?;
+    let quick_check = quick_check
+        .iter()
+        .map(|row| row.try_get::<String>("", "quick_check"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !journal.eq_ignore_ascii_case("wal")
+        || synchronous != 2
+        || foreign_keys != 1
+        || busy_timeout < 5_000
+    {
+        return Err(DbErr::Custom(format!(
+            "unsafe SQLite durability settings: journal_mode={}, synchronous={}, foreign_keys={}, busy_timeout={}",
+            journal, synchronous, foreign_keys, busy_timeout
+        )));
+    }
+    if quick_check.as_slice() != ["ok"] {
+        return Err(DbErr::Custom(format!(
+            "SQLite quick_check failed: {}",
+            quick_check.join("; ")
+        )));
+    }
+    Ok(())
+}
+
+async fn migrate_v4_to_v5<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    validate_v4_schema(db, tables).await?;
+    let schema = Schema::new(db.get_database_backend());
+    create_entity(db, &schema, model_egress_receipt::Entity).await?;
+    db.execute(
+        &Index::create()
+            .if_not_exists()
+            .unique()
+            .name("idx-model-egress-export-call")
+            .table(model_egress_receipt::Entity)
+            .col(model_egress_receipt::Column::ExportAuthorizationId)
+            .col(model_egress_receipt::Column::ModelCallOrdinal)
+            .to_owned(),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn migrate_v5_to_v6<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    validate_v5_schema(db, tables).await?;
+    let schema = Schema::new(db.get_database_backend());
+    create_entity(db, &schema, agent_run_event::Entity).await?;
+    db.execute(
+        &Index::create()
+            .if_not_exists()
+            .unique()
+            .name("idx-agent-run-event-sequence")
+            .table(agent_run_event::Entity)
+            .col(agent_run_event::Column::RunId)
+            .col(agent_run_event::Column::EventSeq)
+            .to_owned(),
+    )
+    .await?;
+    db.execute(
+        &Index::create()
+            .if_not_exists()
+            .name("idx-agent-run-event-input")
+            .table(agent_run_event::Entity)
+            .col(agent_run_event::Column::RunId)
+            .col(agent_run_event::Column::Kind)
+            .col(agent_run_event::Column::InputSeq)
+            .to_owned(),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn migrate_v6_to_v7<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    validate_v6_schema(db, tables).await?;
+    let schema = Schema::new(db.get_database_backend());
+    create_entity(db, &schema, agent_capability_grant::Entity).await?;
+    create_entity(db, &schema, agent_grant_reservation::Entity).await?;
+    create_entity(db, &schema, agent_capability_dispatch_outbox::Entity).await?;
+    Ok(())
+}
+
 async fn validate_v1_schema<C: ConnectionTrait>(
     db: &C,
     tables: &HashSet<String>,
@@ -360,6 +635,171 @@ async fn validate_v1_schema<C: ConnectionTrait>(
 }
 
 async fn validate_latest_schema<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    let mut v6_tables = tables.clone();
+    for table in [
+        "agent_capability_grant",
+        "agent_grant_reservation",
+        "agent_capability_dispatch_outbox",
+    ] {
+        if !v6_tables.remove(table) {
+            return Err(DbErr::Custom(format!(
+                "signal schema v{SIGNAL_SCHEMA_VERSION} is missing {table}"
+            )));
+        }
+    }
+    validate_v6_schema(db, &v6_tables).await?;
+    let grant_columns = table_columns(db, "agent_capability_grant").await?;
+    for required in [
+        "grant_id",
+        "actor_id",
+        "run_id",
+        "remaining_uses",
+        "payload_json",
+        "version",
+    ] {
+        if !grant_columns.contains(required) {
+            return Err(DbErr::Custom(format!(
+                "signal schema v{SIGNAL_SCHEMA_VERSION} is missing agent_capability_grant.{required}"
+            )));
+        }
+    }
+    let reservation_columns = table_columns(db, "agent_grant_reservation").await?;
+    for required in [
+        "reservation_id",
+        "grant_id",
+        "run_id",
+        "call_id",
+        "work_id",
+        "canonical_input_digest_sha256",
+        "state",
+        "generation",
+    ] {
+        if !reservation_columns.contains(required) {
+            return Err(DbErr::Custom(format!(
+                "signal schema v{SIGNAL_SCHEMA_VERSION} is missing agent_grant_reservation.{required}"
+            )));
+        }
+    }
+    let outbox_columns = table_columns(db, "agent_capability_dispatch_outbox").await?;
+    for required in [
+        "dispatch_id",
+        "call_id",
+        "work_id",
+        "reservation_id",
+        "generation",
+        "state",
+        "payload_json",
+    ] {
+        if !outbox_columns.contains(required) {
+            return Err(DbErr::Custom(format!(
+                "signal schema v{SIGNAL_SCHEMA_VERSION} is missing agent_capability_dispatch_outbox.{required}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_v6_schema<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    let mut v5_tables = tables.clone();
+    if !v5_tables.remove("agent_run_event") {
+        return Err(DbErr::Custom(format!(
+            "signal schema v{SIGNAL_SCHEMA_VERSION} is missing agent_run_event"
+        )));
+    }
+    validate_v5_schema(db, &v5_tables).await?;
+    let columns = table_columns(db, "agent_run_event").await?;
+    for required in [
+        "event_id",
+        "run_id",
+        "event_seq",
+        "input_revision",
+        "kind",
+        "input_seq",
+        "source_envelope_ids_json",
+        "result_envelope_ids_json",
+        "payload_json",
+        "payload_schema_version",
+    ] {
+        if !columns.contains(required) {
+            return Err(DbErr::Custom(format!(
+                "signal schema v{SIGNAL_SCHEMA_VERSION} is missing agent_run_event.{required}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_v5_schema<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    let mut v4_tables = tables.clone();
+    if !v4_tables.remove("model_egress_receipt") {
+        return Err(DbErr::Custom(format!(
+            "signal schema v{SIGNAL_SCHEMA_VERSION} is missing model_egress_receipt"
+        )));
+    }
+    validate_v4_schema(db, &v4_tables).await?;
+    let columns = table_columns(db, "model_egress_receipt").await?;
+    for required in [
+        "receipt_id",
+        "export_authorization_id",
+        "model_call_ordinal",
+        "destination_json",
+        "envelope_ids_json",
+        "digests_sha256_json",
+        "projection_digest_sha256",
+        "total_bytes",
+        "state",
+        "model_output_envelope_id",
+        "authorized_at",
+        "completed_at",
+    ] {
+        if !columns.contains(required) {
+            return Err(DbErr::Custom(format!(
+                "signal schema v{SIGNAL_SCHEMA_VERSION} is missing model_egress_receipt.{required}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_v4_schema<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    let mut v3_tables = tables.clone();
+    if !v3_tables.remove("agent_action_item") {
+        return Err(DbErr::Custom(format!(
+            "signal schema v{SIGNAL_SCHEMA_VERSION} is missing agent_action_item"
+        )));
+    }
+    validate_v3_schema(db, &v3_tables).await?;
+    let columns = table_columns(db, "agent_action_item").await?;
+    for required in [
+        "kind",
+        "action_request_id",
+        "execution_id",
+        "payload_schema_version",
+        "result_schema_version",
+        "cancel_generation",
+    ] {
+        if !columns.contains(required) {
+            return Err(DbErr::Custom(format!(
+                "signal schema v{SIGNAL_SCHEMA_VERSION} is missing agent_action_item.{required}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_v3_schema<C: ConnectionTrait>(
     db: &C,
     tables: &HashSet<String>,
 ) -> Result<(), DbErr> {
@@ -510,6 +950,32 @@ mod tests {
 
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn signal_db_rejects_unc_network_share() {
+        let error =
+            validate_signal_db_location(Path::new(r"\\server\share\assistant\desk_signal.db"))
+                .unwrap_err();
+        assert!(error.to_string().contains("must not use a UNC"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn signal_db_accepts_the_current_fixed_volume() {
+        let path = std::env::current_dir().unwrap().join("desk_signal.db");
+        validate_signal_db_location(&path).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn signal_db_filesystem_support_is_an_explicit_allowlist() {
+        assert!(supported_windows_signal_db_filesystem("NTFS"));
+        assert!(supported_windows_signal_db_filesystem("refs"));
+        assert!(!supported_windows_signal_db_filesystem("exFAT"));
+        assert!(!supported_windows_signal_db_filesystem("FAT32"));
+        assert!(!supported_windows_signal_db_filesystem("unknown"));
+    }
+
     #[derive(FromQueryResult)]
     struct SchemaObject {
         name: String,
@@ -581,9 +1047,18 @@ mod tests {
             "host_remote_access_state",
             "agent_session",
             "agent_exec_task",
+            "agent_action_item",
+            "agent_capability_grant",
+            "agent_grant_reservation",
+            "agent_capability_dispatch_outbox",
+            "model_egress_receipt",
+            "agent_run_event",
             "idx_turn_usage_hour",
             "idx_ai_usage_hour",
             "idx-agent-exec-task-delivery",
+            "idx-model-egress-export-call",
+            "idx-agent-run-event-sequence",
+            "idx-agent-run-event-input",
         ] {
             assert!(
                 objects.contains(required),
@@ -602,7 +1077,13 @@ mod tests {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         create_latest_schema(&db).await.unwrap();
         db.execute_unprepared(
-            "DROP TABLE model_probe_observation; \
+            "DROP TABLE agent_capability_dispatch_outbox; \
+             DROP TABLE agent_grant_reservation; \
+             DROP TABLE agent_capability_grant; \
+             DROP TABLE agent_run_event; \
+             DROP TABLE model_egress_receipt; \
+             DROP TABLE agent_action_item; \
+             DROP TABLE model_probe_observation; \
              ALTER TABLE model_provider DROP COLUMN exec_approval_timeout_secs; \
              PRAGMA user_version = 1",
         )
@@ -630,11 +1111,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v2_to_v3_defaults_existing_provider_timeout() {
+    async fn v2_to_latest_defaults_existing_provider_timeout() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         create_latest_schema(&db).await.unwrap();
         db.execute_unprepared(
-            "ALTER TABLE model_provider DROP COLUMN exec_approval_timeout_secs; \
+            "DROP TABLE agent_capability_dispatch_outbox; \
+             DROP TABLE agent_grant_reservation; \
+             DROP TABLE agent_capability_grant; \
+             DROP TABLE agent_run_event; \
+             DROP TABLE model_egress_receipt; \
+             DROP TABLE agent_action_item; \
+             ALTER TABLE model_provider DROP COLUMN exec_approval_timeout_secs; \
              INSERT INTO model_provider (id, wire_protocol, model, supports_image_input, \
                base_url, api_key, profile_schema_version, request_options, output_limit_field, \
                probe_max_output_tokens, runtime_max_output_tokens, max_context_bytes, \
@@ -655,7 +1142,92 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.exec_approval_timeout_secs, 120);
-        assert_eq!(query_user_version(&db).await.unwrap(), 3);
+        assert_eq!(
+            query_user_version(&db).await.unwrap(),
+            SIGNAL_SCHEMA_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn v4_to_latest_adds_model_egress_receipts_then_reopens_cleanly() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        create_latest_schema(&db).await.unwrap();
+        db.execute_unprepared(
+            "DROP TABLE agent_capability_dispatch_outbox; \
+             DROP TABLE agent_grant_reservation; \
+             DROP TABLE agent_capability_grant; \
+             DROP TABLE agent_run_event; \
+             DROP TABLE model_egress_receipt; \
+             PRAGMA user_version = 4",
+        )
+        .await
+        .unwrap();
+
+        initialize_schema(&db).await.unwrap();
+        assert!(
+            application_tables(&db)
+                .await
+                .unwrap()
+                .contains("model_egress_receipt")
+        );
+        assert_eq!(
+            query_user_version(&db).await.unwrap(),
+            SIGNAL_SCHEMA_VERSION
+        );
+        initialize_schema(&db).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v5_to_latest_adds_ordered_agent_run_events_then_reopens_cleanly() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        create_latest_schema(&db).await.unwrap();
+        db.execute_unprepared(
+            "DROP TABLE agent_capability_dispatch_outbox; \
+             DROP TABLE agent_grant_reservation; \
+             DROP TABLE agent_capability_grant; \
+             DROP TABLE agent_run_event; \
+             PRAGMA user_version = 5",
+        )
+        .await
+        .unwrap();
+
+        initialize_schema(&db).await.unwrap();
+        assert!(
+            application_tables(&db)
+                .await
+                .unwrap()
+                .contains("agent_run_event")
+        );
+        assert_eq!(
+            query_user_version(&db).await.unwrap(),
+            SIGNAL_SCHEMA_VERSION
+        );
+        initialize_schema(&db).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v6_to_latest_adds_capability_grants_reservations_and_outbox_then_reopens_cleanly() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        create_latest_schema(&db).await.unwrap();
+        db.execute_unprepared(
+            "DROP TABLE agent_capability_dispatch_outbox; \
+             DROP TABLE agent_grant_reservation; \
+             DROP TABLE agent_capability_grant; \
+             PRAGMA user_version = 6",
+        )
+        .await
+        .unwrap();
+
+        initialize_schema(&db).await.unwrap();
+        let tables = application_tables(&db).await.unwrap();
+        assert!(tables.contains("agent_capability_grant"));
+        assert!(tables.contains("agent_grant_reservation"));
+        assert!(tables.contains("agent_capability_dispatch_outbox"));
+        assert_eq!(
+            query_user_version(&db).await.unwrap(),
+            SIGNAL_SCHEMA_VERSION
+        );
+        initialize_schema(&db).await.unwrap();
     }
 
     #[tokio::test]
@@ -757,7 +1329,7 @@ mod tests {
         let url = format!("sqlite://{}?mode=rwc", path.display());
         let seed = Database::connect(&url).await.unwrap();
         install_legacy_v0(&seed, 1, "openai-compatible", Some(131_072)).await;
-        drop(seed);
+        seed.close().await.unwrap();
 
         let first = Database::connect(&url).await.unwrap();
         let second = Database::connect(&url).await.unwrap();
@@ -778,8 +1350,8 @@ mod tests {
             1
         );
 
-        drop(first);
-        drop(second);
+        first.close().await.unwrap();
+        second.close().await.unwrap();
         std::fs::remove_file(path).unwrap();
     }
 

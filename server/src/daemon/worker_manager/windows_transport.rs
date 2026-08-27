@@ -9,6 +9,7 @@ pub(super) async fn run_pipe_server(
     session_id: u32,
     desktop_name: Option<String>,
     config_json: String,
+    log_dir: String,
     mut cmd_rx: mpsc::UnboundedReceiver<ServiceToWorker>,
     msg_tx: WorkerMessageSink,
     worker_mgr: WorkerManager,
@@ -22,19 +23,22 @@ pub(super) async fn run_pipe_server(
     info!("Creating Named Pipe server for worker {incarnation}: {pipe_path}");
 
     // Look up the SID owning the target session so the pipe ACL grants
-    // access only to SYSTEM + Administrators + that user. A failure to
-    // resolve falls back to SY+BA only (never to "Everyone") — see
-    // `pipe_security::query_session_user_sid` for the contract.
-    let allowed_user_sid = match crate::daemon::pipe_security::query_session_user_sid(session_id) {
-        Ok(sid) => sid,
-        Err(e) => {
-            warn!(
-                "Failed to query user SID for session {session_id}: {e}; \
+    // access only to SYSTEM + Administrators + that user. Interactive
+    // ServiceDaemon runs may lack WTSQueryUserToken privileges, so the
+    // resolver can use the daemon account only when it is in this exact
+    // Windows session. A failure still falls back to SY+BA only (never to
+    // "Everyone") — see `pipe_security::query_worker_pipe_user_sid`.
+    let allowed_user_sid =
+        match crate::daemon::pipe_security::query_worker_pipe_user_sid(session_id) {
+            Ok(sid) => sid,
+            Err(e) => {
+                warn!(
+                    "Failed to query user SID for session {session_id}: {e}; \
                  falling back to SY+BA-only pipe ACL"
-            );
-            None
-        }
-    };
+                );
+                None
+            }
+        };
     let sddl_str = crate::daemon::pipe_security::build_pipe_sddl(allowed_user_sid.as_deref());
     info!("Pipe ACL SDDL = '{sddl_str}'");
 
@@ -90,6 +94,7 @@ pub(super) async fn run_pipe_server(
             os_session_id: session_id,
             desktop_name,
             config_json,
+            log_dir: Some(log_dir),
             signaling_url: None,
             auth_token: ipc_token,
             host_upstream_url: Some(host_upstream_url),

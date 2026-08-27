@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { ListDiagnoseSessionsQueryResponse, ListDiagnoseSessionsQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import { listDiagnoseSessions } from "../../clients.ts";
+import type { ListDiagnoseSessionsQueryResponse, ListDiagnoseSessionsQueryParams } from "../../types.ts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
+import { listDiagnoseSessions } from "../../clients.ts";
 
 export const listDiagnoseSessionsQueryKey = (params: ListDiagnoseSessionsQueryParams) => [{ url: '/api/my/diagnose-sessions' }, ...(params ? [params] : [])] as const
 

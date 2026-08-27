@@ -95,6 +95,31 @@ fn terminal_complete_signaling_discriminants_are_stable() {
     ));
 }
 
+#[test]
+fn computer_use_signaling_discriminants_are_stable_and_distinct() {
+    use SignalingType::*;
+    let cases = [
+        (DispatchComputerAction, 626),
+        (CancelComputerAction, 627),
+        (QueryComputerActionState, 628),
+        (ComputerActionStarted, 629),
+        (ComputerActionCompleted, 630),
+        (ComputerActionStateReported, 631),
+        (ComputerUseReadinessUpdated, 632),
+    ];
+    for (signaling_type, tag) in cases {
+        assert_eq!(signaling_type as i32, tag);
+        assert_eq!(
+            serde_json::to_string(&signaling_type).unwrap(),
+            tag.to_string()
+        );
+        assert_eq!(
+            serde_json::from_str::<SignalingType>(&tag.to_string()).unwrap(),
+            signaling_type
+        );
+    }
+}
+
 /// Empty map (no `Server`-type peers around) must skip the
 /// broadcast cleanly. This covers the early-exit path that keeps
 /// the helper safe to call from a `Drop` background task — even

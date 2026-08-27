@@ -54,6 +54,7 @@ fn worker_init_payload_round_trip_with_host_upstream_fields() {
         os_session_id: 7,
         desktop_name: Some("Default".to_string()),
         config_json: "{}".to_string(),
+        log_dir: Some(r"C:\ProgramData\LCXL Remote Desktop\logs".to_string()),
         signaling_url: None,
         auth_token: Some("ipc-token".to_string()),
         host_upstream_url: Some("ws://127.0.0.1:8082/ws/host_upstream".to_string()),
@@ -936,6 +937,12 @@ fn terminal_output_produced_round_trips_wincode_with_large_chunk() {
         connection_id: "conn-term".to_string(),
         data: TerminalOutputData {
             content: body.clone(),
+            assistant_object_ref: Some(desk_agent_protocol::computer_use::ObjectRef {
+                token: "opaque-terminal-token".into(),
+                snapshot_id: "worker-1:4".into(),
+                object_kind: desk_agent_protocol::computer_use::ObjectKind::TerminalOutput,
+                expires_at: "2026-08-25T20:00:00Z".into(),
+            }),
         },
     });
     match wincode_round_trip(&msg) {
@@ -943,6 +950,10 @@ fn terminal_output_produced_round_trips_wincode_with_large_chunk() {
             assert_eq!(p.connection_id, "conn-term");
             assert_eq!(p.data.content.len(), body.len());
             assert_eq!(p.data.content, body);
+            assert_eq!(
+                p.data.assistant_object_ref.unwrap().object_kind,
+                desk_agent_protocol::computer_use::ObjectKind::TerminalOutput
+            );
         }
         other => panic!("unexpected: {other:?}"),
     }
@@ -1081,6 +1092,7 @@ fn service_to_worker_all_variants_round_trip() {
             os_session_id: 1,
             desktop_name: Some("Default".to_string()),
             config_json: "{}".to_string(),
+            log_dir: None,
             signaling_url: None,
             auth_token: None,
             host_upstream_url: None,
@@ -1235,7 +1247,31 @@ fn service_to_worker_all_variants_round_trip() {
         ServiceToWorker::InvokeAgentCapability(AgentRequestPayload {
             request_id: "r-ai".to_string(),
             connection_id: Some("c".to_string()),
-            envelope: sample_agent_envelope(),
+            envelope: sample_readonly_agent_envelope(),
+        }),
+        ServiceToWorker::ComputerActionPlan(ComputerActionPlanPayload {
+            request_id: "r-computer".to_string(),
+            connection_id: Some("c".to_string()),
+            plan: sample_computer_action_plan(),
+        }),
+        ServiceToWorker::ComputerActionCancel(ComputerActionCancelPayload {
+            request_id: "r-computer-cancel".to_string(),
+            connection_id: Some("c".to_string()),
+            cancel: desk_agent_protocol::computer_use::ComputerActionCancel {
+                work_id: "work-1".to_string(),
+                action_request_id: "action-1".to_string(),
+                execution_generation: "generation-1".to_string(),
+                reason: "owner stopped".to_string(),
+            },
+        }),
+        ServiceToWorker::ComputerActionStateQuery(ComputerActionStateQueryPayload {
+            request_id: "r-computer-query".to_string(),
+            connection_id: Some("c".to_string()),
+            query: desk_agent_protocol::computer_use::ComputerActionStateQuery {
+                work_id: "work-1".to_string(),
+                action_request_id: "action-1".to_string(),
+                execution_generation: "generation-1".to_string(),
+            },
         }),
         ServiceToWorker::ExecPlan(ExecPlanPayload {
             request_id: "r-exec".to_string(),
@@ -1538,6 +1574,7 @@ fn worker_to_service_all_variants_round_trip() {
             connection_id: "c".to_string(),
             data: TerminalOutputData {
                 content: "hi".to_string(),
+                assistant_object_ref: None,
             },
         }),
         WorkerToService::TerminalCommandsListed(TerminalCommandsListedPayload {
@@ -1572,6 +1609,46 @@ fn worker_to_service_all_variants_round_trip() {
                 safe_for_model: true,
                 error_code: None,
             }),
+        }),
+        WorkerToService::ComputerActionStarted(ComputerActionStartedPayload {
+            request_id: "r-computer".to_string(),
+            connection_id: Some("c".to_string()),
+            started: desk_agent_protocol::computer_use::ComputerActionStarted {
+                work_id: "work-1".to_string(),
+                action_request_id: "action-1".to_string(),
+                execution_generation: "generation-1".to_string(),
+                disposition:
+                    desk_agent_protocol::computer_use::ComputerActionStartDisposition::MayHaveStarted,
+                reason: None,
+            },
+        }),
+        WorkerToService::ComputerActionCompleted(ComputerActionCompletedPayload {
+            request_id: "r-computer".to_string(),
+            connection_id: Some("c".to_string()),
+            completed: desk_agent_protocol::computer_use::ComputerActionCompleted {
+                work_id: "work-1".to_string(),
+                action_request_id: "action-1".to_string(),
+                execution_generation: "generation-1".to_string(),
+                result: desk_agent_protocol::computer_use::ComputerActionResultClass::Verified,
+                facts: vec![],
+                message: None,
+            },
+        }),
+        WorkerToService::ComputerActionStateReported(ComputerActionStateReportedPayload {
+            request_id: "r-computer-query".to_string(),
+            connection_id: Some("c".to_string()),
+            state: desk_agent_protocol::computer_use::ComputerActionStateReport {
+                work_id: "work-1".to_string(),
+                action_request_id: "action-1".to_string(),
+                execution_generation: "generation-1".to_string(),
+                phase: desk_agent_protocol::computer_use::ComputerActionPhase::Completed,
+                result: Some(
+                    desk_agent_protocol::computer_use::ComputerActionResultClass::Verified,
+                ),
+            },
+        }),
+        WorkerToService::ComputerUseReadinessUpdated(ComputerUseReadinessPayload {
+            readiness: sample_computer_use_readiness(),
         }),
         WorkerToService::ExecutionCompleted(ExecResultIpcPayload {
             request_id: "r-exec".to_string(),
@@ -2096,6 +2173,75 @@ fn sample_agent_envelope() -> desk_agent_protocol::AgentEnvelope {
     }
 }
 
+fn sample_readonly_agent_envelope() -> desk_agent_protocol::ReadonlyAgentEnvelope {
+    sample_agent_envelope()
+        .try_into()
+        .expect("sample envelope is read-only")
+}
+
+fn sample_object_ref() -> desk_agent_protocol::computer_use::ObjectRef {
+    use desk_agent_protocol::computer_use::{ObjectKind, ObjectRef};
+    ObjectRef {
+        token: "opaque-token".to_string(),
+        snapshot_id: "snapshot-1".to_string(),
+        object_kind: ObjectKind::UiElement,
+        expires_at: "2026-08-23T12:00:00Z".to_string(),
+    }
+}
+
+fn sample_computer_action_plan() -> desk_agent_protocol::computer_use::SealedComputerActionPlan {
+    use desk_agent_protocol::computer_use::*;
+    SealedComputerActionPlan {
+        schema_version: COMPUTER_USE_SCHEMA_VERSION,
+        work_id: "work-1".to_string(),
+        action_request_id: "action-1".to_string(),
+        execution_generation: "generation-1".to_string(),
+        device_id: "dev-1".to_string(),
+        interactive_session_incarnation: "session-1".to_string(),
+        adapter: ComputerUseAdapterRef {
+            kind: ComputerUseAdapterKind::WindowsUia,
+            version: "1".to_string(),
+        },
+        approval_id: "approval-1".to_string(),
+        approved_actor_id: "user-1".to_string(),
+        draft_hash: "sha256:draft".to_string(),
+        expires_at: "2026-08-23T12:00:00Z".to_string(),
+        timeout_ms: 10_000,
+        actions: vec![ComputerActionStep {
+            target: sample_object_ref(),
+            action: ComputerActionKind::Ui(UiSemanticAction::Invoke),
+            before_summary: "idle".to_string(),
+            after_intent: "invoke".to_string(),
+            verification: "state changed".to_string(),
+        }],
+    }
+}
+
+fn sample_computer_use_readiness() -> desk_agent_protocol::computer_use::ComputerUseReadiness {
+    use desk_agent_protocol::computer_use::*;
+    ComputerUseReadiness {
+        schema_version: COMPUTER_USE_SCHEMA_VERSION,
+        revision: 1,
+        observed_at: "2026-08-23T11:00:00Z".to_string(),
+        expires_at: "2026-08-23T11:01:00Z".to_string(),
+        server_api_version: 2,
+        os: "windows".to_string(),
+        interactive_session_incarnation: "session-1".to_string(),
+        local_ceiling_revision: 1,
+        capabilities: vec![ComputerUseCapabilityReadiness {
+            capability: desk_agent_protocol::Capability::DesktopUiInspect,
+            adapter: ComputerUseAdapterRef {
+                kind: ComputerUseAdapterKind::WindowsUia,
+                version: "1".to_string(),
+            },
+            supported: true,
+            ready: true,
+            reason: None,
+        }],
+        context_references: Vec::new(),
+    }
+}
+
 fn sample_exec_plan() -> desk_agent_protocol::exec::ExecPlan {
     use desk_agent_protocol::RiskLevel;
     use desk_agent_protocol::exec::{
@@ -2180,16 +2326,61 @@ fn invoke_agent_capability_round_trips_wincode() {
     let msg = ServiceToWorker::InvokeAgentCapability(AgentRequestPayload {
         request_id: "req-ai-1".to_string(),
         connection_id: Some("conn-1".to_string()),
-        envelope: sample_agent_envelope(),
+        envelope: sample_readonly_agent_envelope(),
     });
     match wincode_round_trip(&msg) {
         ServiceToWorker::InvokeAgentCapability(p) => {
             assert_eq!(p.request_id, "req-ai-1");
             assert_eq!(p.connection_id.as_deref(), Some("conn-1"));
-            assert_eq!(p.envelope, sample_agent_envelope());
+            assert_eq!(p.envelope, sample_readonly_agent_envelope());
         }
         other => panic!("unexpected: {other:?}"),
     }
+}
+
+#[test]
+fn invoke_agent_capability_cannot_decode_an_exec_envelope() {
+    use desk_agent_protocol::{ExecInput, ExecTarget, OperationInput};
+    let mut mutation = sample_agent_envelope();
+    mutation.operation.input = OperationInput::Exec(ExecInput {
+        target: ExecTarget::Shell {
+            shell: "powershell".to_string(),
+        },
+        command: "Get-Service".to_string(),
+        cwd: None,
+        timeout_ms: 10_000,
+        max_stdout_bytes: 65_536,
+        max_stderr_bytes: 65_536,
+    });
+    let config: WincodeUnbounded = Configuration::new();
+    let bytes = wincode::config::serialize(&mutation, config).expect("encode legacy envelope");
+    let decoded: Result<desk_agent_protocol::ReadonlyAgentEnvelope, _> =
+        wincode::config::deserialize(&bytes, config);
+    assert!(
+        decoded.is_err(),
+        "exec bytes must not decode as a read-only envelope"
+    );
+}
+
+#[test]
+fn computer_action_ipc_family_round_trips_independently() {
+    let plan = ServiceToWorker::ComputerActionPlan(ComputerActionPlanPayload {
+        request_id: "r-computer".to_string(),
+        connection_id: Some("conn-1".to_string()),
+        plan: sample_computer_action_plan(),
+    });
+    assert!(matches!(
+        wincode_round_trip(&plan),
+        ServiceToWorker::ComputerActionPlan(_)
+    ));
+
+    let readiness = WorkerToService::ComputerUseReadinessUpdated(ComputerUseReadinessPayload {
+        readiness: sample_computer_use_readiness(),
+    });
+    assert!(matches!(
+        wincode_round_trip(&readiness),
+        WorkerToService::ComputerUseReadinessUpdated(_)
+    ));
 }
 
 /// `WorkerToService::AgentCapabilityCompleted` reuses `AgentOutcome` verbatim;

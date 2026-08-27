@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import { updateSecuritySettings } from "../../clients.ts";
+import type { UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
+import { updateSecuritySettings } from "../../clients.ts";
 
 export const updateSecuritySettingsMutationKey = () => [{ url: '/api/desk/security-settings' }] as const
 

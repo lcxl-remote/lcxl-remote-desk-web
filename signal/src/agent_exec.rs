@@ -30,9 +30,7 @@ use desk_diagnose_core::exec_tools::{
     sanitize_available_exec_shells, unsupported_exec_shell_error,
 };
 use desk_diagnose_core::read_tools::build_read_operation;
-use desk_diagnose_core::seam::{
-    ExecContext, ExecIdentity, ExecOutcome, ToolRunOutput, ToolSeam, WaitOutcome,
-};
+use desk_diagnose_core::seam::{ExecContext, ExecOutcome, ToolRunOutput, ToolSeam, WaitOutcome};
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use desk_signal_facade::service::{EdgeExecObserver, ExecStateReplyObserver};
@@ -790,16 +788,20 @@ impl ToolSeam for SignalAgentTools {
                 task,
                 disposition: EdgeExecDisposition::ExecutionStateUnknown { .. },
             }
-            | SignalDispatch::Unknown(task) => Ok(ExecOutcome::Unknown(ExecIdentity {
-                work_id: task.id,
-                execution_id: task.execution_generation,
-                exec_request_id: task.exec_request_id,
-            })),
-            SignalDispatch::Dispatched(task) => Ok(ExecOutcome::Dispatched(ExecIdentity {
-                work_id: task.id,
-                execution_id: task.execution_generation,
-                exec_request_id: task.exec_request_id,
-            })),
+            | SignalDispatch::Unknown(task) => Ok(ExecOutcome::Unknown(
+                desk_diagnose_core::session::ActionIdentity::agent_exec(
+                    task.id,
+                    task.exec_request_id,
+                    task.execution_generation,
+                ),
+            )),
+            SignalDispatch::Dispatched(task) => Ok(ExecOutcome::Dispatched(
+                desk_diagnose_core::session::ActionIdentity::agent_exec(
+                    task.id,
+                    task.exec_request_id,
+                    task.execution_generation,
+                ),
+            )),
         }
     }
 

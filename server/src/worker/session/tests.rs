@@ -11,6 +11,7 @@ fn payload_with(
         os_session_id: 1,
         desktop_name: None,
         config_json: "{}".into(),
+        log_dir: None,
         signaling_url: None,
         auth_token,
         host_upstream_url,
@@ -343,6 +344,7 @@ fn outbound_dispatch_routes_terminal_closed_to_typed_variant() {
 fn outbound_dispatch_routes_terminal_output_produced_to_typed_variant() {
     let body = TerminalOutputData {
         content: "hello\r\nworld\r\n".to_string(),
+        assistant_object_ref: None,
     };
     let model = SignalingModel::new_request(
         SignalingType::TerminalOutputProduced,

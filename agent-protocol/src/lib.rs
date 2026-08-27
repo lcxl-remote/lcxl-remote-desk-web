@@ -30,9 +30,14 @@ use wincode::{SchemaRead, SchemaWrite};
 
 pub mod audit;
 pub mod authz;
+pub mod capability_grant;
+pub mod capability_provider;
 pub mod command_blocklist;
 pub mod command_template;
+pub mod computer_use;
 pub mod content_safety;
+pub mod data_lineage;
+pub mod device_assistant;
 pub mod diagnose;
 pub mod edge_exec;
 pub mod evidence;
@@ -76,6 +81,82 @@ pub struct AgentEnvelope {
     pub scope: AgentScope,
     pub operation: AgentOperation,
     pub audit: AuditMeta,
+}
+
+/// Structurally read-only form used by the remote-tool and daemon→worker
+/// capability lanes. Unlike [`AgentEnvelope`], it cannot represent
+/// [`OperationInput::Exec`] or any sealed Computer Use mutation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]
+pub struct ReadonlyAgentEnvelope {
+    pub protocol_version: ProtocolVersion,
+    pub request_id: RequestId,
+    pub parent_task_id: Option<TaskId>,
+    pub target: TargetRef,
+    pub actor: ActorRef,
+    pub caller: CallerRef,
+    pub scope: AgentScope,
+    pub operation: ReadonlyAgentOperation,
+    pub audit: AuditMeta,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]
+pub struct ReadonlyAgentOperation {
+    pub risk_hint: Option<RiskLevel>,
+    pub input: ReadContextInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MutationInReadonlyLane;
+
+impl std::fmt::Display for MutationInReadonlyLane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("mutation cannot enter the read-only agent capability lane")
+    }
+}
+
+impl std::error::Error for MutationInReadonlyLane {}
+
+impl TryFrom<AgentEnvelope> for ReadonlyAgentEnvelope {
+    type Error = MutationInReadonlyLane;
+
+    fn try_from(envelope: AgentEnvelope) -> Result<Self, Self::Error> {
+        let OperationInput::ReadContext(input) = envelope.operation.input else {
+            return Err(MutationInReadonlyLane);
+        };
+        Ok(Self {
+            protocol_version: envelope.protocol_version,
+            request_id: envelope.request_id,
+            parent_task_id: envelope.parent_task_id,
+            target: envelope.target,
+            actor: envelope.actor,
+            caller: envelope.caller,
+            scope: envelope.scope,
+            operation: ReadonlyAgentOperation {
+                risk_hint: envelope.operation.risk_hint,
+                input,
+            },
+            audit: envelope.audit,
+        })
+    }
+}
+
+impl From<ReadonlyAgentEnvelope> for AgentEnvelope {
+    fn from(envelope: ReadonlyAgentEnvelope) -> Self {
+        Self {
+            protocol_version: envelope.protocol_version,
+            request_id: envelope.request_id,
+            parent_task_id: envelope.parent_task_id,
+            target: envelope.target,
+            actor: envelope.actor,
+            caller: envelope.caller,
+            scope: envelope.scope,
+            operation: AgentOperation {
+                risk_hint: envelope.operation.risk_hint,
+                input: OperationInput::ReadContext(envelope.operation.input),
+            },
+            audit: envelope.audit,
+        }
+    }
 }
 
 /// `"0.2"`-style protocol tag. Newtype so negotiation logic has a type to
@@ -338,11 +419,66 @@ pub enum Capability {
     ContainerLogs,
     #[serde(rename = "screen.capture.current")]
     ScreenCaptureCurrent,
+    #[serde(rename = "desktop.session.inspect")]
+    DesktopSessionInspect,
+    #[serde(rename = "desktop.ui.inspect")]
+    DesktopUiInspect,
+    #[serde(rename = "office.document.inspect")]
+    OfficeDocumentInspect,
+    #[serde(rename = "file.metadata.read")]
+    FileMetadataRead,
+    #[serde(rename = "file.content.read")]
+    FileContentRead,
+    #[serde(rename = "spreadsheet.file.inspect")]
+    SpreadsheetFileInspect,
+    #[serde(rename = "spreadsheet.merge.preview")]
+    SpreadsheetMergePreview,
+    #[serde(rename = "spreadsheet.workbook.create.confirmed")]
+    SpreadsheetWorkbookCreateConfirmed,
+    /// Create a new XLSX copy from a retained merge preview with one formula
+    /// cell accepted by the frozen formula AST policy. This is batch file
+    /// generation, not Excel Live mutation.
+    #[serde(rename = "spreadsheet.formula_workbook.create.confirmed")]
+    SpreadsheetFormulaWorkbookCreateConfirmed,
+    #[serde(rename = "word.document.create.confirmed")]
+    WordDocumentCreateConfirmed,
+    /// Fetch one exact public HTTPS URL supplied verbatim by the owner. The
+    /// central provider applies strict connect-time SSRF checks and bounded
+    /// content extraction; this capability never reaches the device edge.
+    #[serde(rename = "web.research.fetch")]
+    WebResearchFetch,
+    /// Search public Web metadata through one server-owned, bounded connector.
+    /// The query is an external data egress and therefore needs an explicit
+    /// exact-input ExportData grant before the central provider can run.
+    #[serde(rename = "web.research.search")]
+    WebResearchSearch,
+    #[serde(rename = "terminal.output.read")]
+    TerminalOutputRead,
+    /// Central-only validation/display of an inert typed action proposal. This
+    /// capability never authorizes a device read or mutation transport.
+    #[serde(rename = "assistant.action.preview")]
+    AssistantActionPreview,
     // Execute capabilities are reserved; their wire shape is frozen.
     #[serde(rename = "shell.exec.readonly")]
     ShellExecReadonly,
     #[serde(rename = "shell.exec.confirmed")]
     ShellExecConfirmed,
+    #[serde(rename = "desktop.ui.action.confirmed")]
+    DesktopUiActionConfirmed,
+    #[serde(rename = "desktop.input.fallback.confirmed")]
+    DesktopInputFallbackConfirmed,
+    #[serde(rename = "office.excel.patch.confirmed")]
+    OfficeExcelPatchConfirmed,
+    #[serde(rename = "office.powerpoint.patch.confirmed")]
+    OfficePowerPointPatchConfirmed,
+    #[serde(rename = "file.patch.confirmed")]
+    FilePatchConfirmed,
+    #[serde(rename = "file.copy.confirmed")]
+    FileCopyConfirmed,
+    #[serde(rename = "file.artifact.create.confirmed")]
+    FileArtifactCreateConfirmed,
+    #[serde(rename = "file.delete.confirmed")]
+    FileDeleteConfirmed,
 }
 
 // ============================ Operation ============================
@@ -396,6 +532,14 @@ impl OperationInput {
                 ContextKind::ContainerInspect(_) => Capability::ContainerInspect,
                 ContextKind::ContainerLogs(_) => Capability::ContainerLogs,
                 ContextKind::ScreenCaptureCurrent(_) => Capability::ScreenCaptureCurrent,
+                ContextKind::DesktopSessionInspect(_) => Capability::DesktopSessionInspect,
+                ContextKind::DesktopUiInspect(_) => Capability::DesktopUiInspect,
+                ContextKind::OfficeDocumentInspect(_) => Capability::OfficeDocumentInspect,
+                ContextKind::FileMetadataInspect(_) => Capability::FileMetadataRead,
+                ContextKind::FileContentRead(_) => Capability::FileContentRead,
+                ContextKind::SpreadsheetFileInspect(_) => Capability::SpreadsheetFileInspect,
+                ContextKind::SpreadsheetMergePreview(_) => Capability::SpreadsheetMergePreview,
+                ContextKind::TerminalOutputInspect(_) => Capability::TerminalOutputRead,
             }),
             OperationInput::Exec(_) => None,
         }
@@ -445,6 +589,14 @@ pub enum ContextKind {
     ContainerInspect(ContainerInspectParams),
     ContainerLogs(ContainerLogsParams),
     ScreenCaptureCurrent(ScreenCaptureParams),
+    DesktopSessionInspect(computer_use::DesktopSessionInspectParams),
+    DesktopUiInspect(computer_use::UiInspectParams),
+    OfficeDocumentInspect(computer_use::OfficeInspectParams),
+    FileMetadataInspect(computer_use::FileMetadataInspectParams),
+    FileContentRead(computer_use::FileContentReadParams),
+    SpreadsheetFileInspect(computer_use::SpreadsheetFileInspectParams),
+    SpreadsheetMergePreview(computer_use::SpreadsheetMergePreviewParams),
+    TerminalOutputInspect(computer_use::TerminalOutputInspectParams),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]
@@ -458,6 +610,14 @@ pub enum ReadContextOutput {
     ContainerInspect(ContainerInspectOutput),
     ContainerLogs(ContainerLogsOutput),
     ScreenCaptureCurrent(ScreenCaptureOutput),
+    DesktopSessionInspect(computer_use::DesktopSessionInspectOutput),
+    DesktopUiInspect(computer_use::UiInspectOutput),
+    OfficeDocumentInspect(computer_use::OfficeInspectOutput),
+    FileMetadataInspect(computer_use::FileMetadataInspectOutput),
+    FileContentRead(computer_use::FileContentReadOutput),
+    SpreadsheetFileInspect(computer_use::SpreadsheetFileInspectOutput),
+    SpreadsheetMergePreview(computer_use::SpreadsheetMergePreviewOutput),
+    TerminalOutputInspect(computer_use::TerminalOutputInspectOutput),
 }
 
 // -------- read params (fields are additive) --------
@@ -1178,6 +1338,63 @@ mod tests {
             (
                 ContextKind::ScreenCaptureCurrent(ScreenCaptureParams::default()),
                 Capability::ScreenCaptureCurrent,
+            ),
+            (
+                ContextKind::DesktopSessionInspect(computer_use::DesktopSessionInspectParams {
+                    include_active_application: true,
+                }),
+                Capability::DesktopSessionInspect,
+            ),
+            (
+                ContextKind::DesktopUiInspect(computer_use::UiInspectParams {
+                    root: None,
+                    max_depth: 8,
+                    max_nodes: 256,
+                    max_bytes: 65_536,
+                }),
+                Capability::DesktopUiInspect,
+            ),
+            (
+                ContextKind::OfficeDocumentInspect(computer_use::OfficeInspectParams {
+                    document: None,
+                    selection_only: true,
+                    max_objects: 256,
+                    max_bytes: 65_536,
+                }),
+                Capability::OfficeDocumentInspect,
+            ),
+            (
+                ContextKind::FileMetadataInspect(computer_use::FileMetadataInspectParams {
+                    roots: vec![],
+                    max_entries: 128,
+                    max_bytes: 65_536,
+                    enumerate_directories: false,
+                    file_extensions: vec![],
+                    min_file_bytes: None,
+                    max_file_bytes: None,
+                    modified_after: None,
+                    modified_before: None,
+                }),
+                Capability::FileMetadataRead,
+            ),
+            (
+                ContextKind::FileContentRead(computer_use::FileContentReadParams {
+                    file: computer_use::ObjectRef {
+                        token: "opaque".to_string(),
+                        snapshot_id: "snapshot".to_string(),
+                        object_kind: computer_use::ObjectKind::File,
+                        expires_at: "2026-08-23T12:00:00Z".to_string(),
+                    },
+                    max_bytes: 65_536,
+                }),
+                Capability::FileContentRead,
+            ),
+            (
+                ContextKind::TerminalOutputInspect(computer_use::TerminalOutputInspectParams {
+                    roots: vec![],
+                    max_bytes: 32_768,
+                }),
+                Capability::TerminalOutputRead,
             ),
         ];
         for (kind, expected) in cases {

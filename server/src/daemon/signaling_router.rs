@@ -214,7 +214,11 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::ExecutionPreviewGenerated
         | SignalingType::ExecutionCompleted
         | SignalingType::ExecutionProgressUpdated
-        | SignalingType::ExecutionStateReported => RouteOwnership::Daemon,
+        | SignalingType::ExecutionStateReported
+        | SignalingType::ComputerActionStarted
+        | SignalingType::ComputerActionCompleted
+        | SignalingType::ComputerActionStateReported
+        | SignalingType::ComputerUseReadinessUpdated => RouteOwnership::Daemon,
 
         // Browser → daemon media control. This is a local bounded restart of
         // the already-negotiated pipeline and never enters the worker's generic
@@ -260,6 +264,14 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // handle, both of which are the daemon's. The worker is told to stop a
         // command, but never asked what it knows — the ledger outlives it.
         SignalingType::ControlExecution => RouteOwnership::Daemon,
+
+        // Computer Use owns a dedicated daemon broker/lifecycle. A1 registers
+        // the wire and keeps it fail-closed; A2/A3 attach the durable ledger and
+        // adapter dispatch without ever bridging these frames through the
+        // generic worker signaling path.
+        SignalingType::DispatchComputerAction
+        | SignalingType::CancelComputerAction
+        | SignalingType::QueryComputerActionState => RouteOwnership::Daemon,
 
         // Daemon-emitted notifications. Browsers don't send these
         // back at us, but if they did the daemon should swallow them
@@ -323,6 +335,19 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         SignalingType::InvokeRemoteTool | SignalingType::RemoteToolOutputUpdated => {
             RouteOwnership::Daemon
         }
+
+        // Device Assistant orchestration belongs to the central brain. These
+        // frames must never reach a host in the normal path; classify them as
+        // daemon-owned so a legacy/plain relay cannot forward them to a worker.
+        SignalingType::AskDeviceAssistant
+        | SignalingType::DeviceAssistantUpdated
+        | SignalingType::CancelDeviceAssistant
+        | SignalingType::GetDeviceAssistantCapabilities
+        | SignalingType::DeviceAssistantCapabilitiesUpdated
+        | SignalingType::UpdateDeviceAssistantContext
+        | SignalingType::UpdateDeviceAssistantObjectContext
+        | SignalingType::DeviceAssistantContextUpdated
+        | SignalingType::DeviceAssistantObjectContextUpdated => RouteOwnership::Daemon,
 
         // Connection-list bookkeeping is daemon state too — the
         // daemon knows about every active PC, the worker only knows
@@ -1110,6 +1135,21 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // `ExecutionCompleted` land with the worker executor in a later step.
         SignalingType::ResolveExecution => handle_resolve_exec_inbound(ctx, model).await,
         SignalingType::ControlExecution => handle_exec_control_inbound(ctx, model).await,
+        SignalingType::DispatchComputerAction => handle_computer_action_inbound(ctx, model).await,
+        SignalingType::CancelComputerAction
+        | SignalingType::QueryComputerActionState => {
+            emit_standard_error_response(
+                ctx,
+                model,
+                DeskErrorCode::FEATURE_UNAVAILABLE,
+                "Computer Use broker is not enabled in this build",
+            );
+            Ok(())
+        }
+        SignalingType::ComputerActionStarted
+        | SignalingType::ComputerActionCompleted
+        | SignalingType::ComputerActionStateReported
+        | SignalingType::ComputerUseReadinessUpdated => Ok(()),
         // AI audit events are emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never persists audit itself).
         SignalingType::ReportAiAuditEvent => Ok(()),
@@ -1160,6 +1200,20 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // RemoteToolResponse is emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never consumes its own stream).
         SignalingType::RemoteToolOutputUpdated => Ok(()),
+        // Central-orchestrator-only Device Assistant frames are never executed
+        // by the edge. Swallow a stray/legacy-relayed copy fail closed.
+        SignalingType::AskDeviceAssistant
+        | SignalingType::DeviceAssistantUpdated
+        | SignalingType::CancelDeviceAssistant
+        | SignalingType::GetDeviceAssistantCapabilities
+        | SignalingType::DeviceAssistantCapabilitiesUpdated
+        | SignalingType::UpdateDeviceAssistantContext
+        | SignalingType::UpdateDeviceAssistantObjectContext
+        | SignalingType::DeviceAssistantContextUpdated
+        | SignalingType::DeviceAssistantObjectContextUpdated => {
+            log::warn!("[router] dropped central-only Device Assistant frame at edge");
+            Ok(())
+        }
     }
 }
 
