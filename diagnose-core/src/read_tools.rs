@@ -11,10 +11,10 @@
 //! capability gate, and the audit can never disagree.
 
 use desk_agent_protocol::computer_use::{
-    DesktopSessionInspectParams, FileContentReadParams, FileMetadataInspectParams, ObjectRef,
-    OfficeInspectParams, SpreadsheetFileInspectParams, SpreadsheetMergeColumnRule,
-    SpreadsheetMergePreviewParams, SpreadsheetStatisticRequest, TerminalOutputInspectParams,
-    UiInspectParams,
+    DesktopSessionInspectParams, FileContentReadParams, FileMetadataInspectParams,
+    LiveDocumentInspectParams, ObjectRef, OfficeInspectParams, SpreadsheetFileInspectParams,
+    SpreadsheetMergeColumnRule, SpreadsheetMergePreviewParams, SpreadsheetStatisticRequest,
+    TerminalOutputInspectParams, UiInspectParams,
 };
 use desk_agent_protocol::{
     AgentError, AgentErrorKind, Capability, ContainerListParams, ContextKind, LogRecentParams,
@@ -390,6 +390,39 @@ struct OfficeSelectionToolArgs {
     max_bytes: u32,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveDocumentToolArgs {
+    #[serde(default)]
+    target: Option<ObjectRef>,
+    #[serde(default = "default_office_bytes")]
+    max_bytes: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchDocumentToolArgs {
+    #[serde(default = "default_office_bytes")]
+    max_bytes: u32,
+}
+
+impl Default for BatchDocumentToolArgs {
+    fn default() -> Self {
+        Self {
+            max_bytes: default_office_bytes(),
+        }
+    }
+}
+
+impl Default for LiveDocumentToolArgs {
+    fn default() -> Self {
+        Self {
+            target: None,
+            max_bytes: default_office_bytes(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NoToolArgs {}
@@ -531,6 +564,54 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 document: args.document,
                 selection_only: args.selection_only,
                 max_objects: args.max_objects,
+                max_bytes: args.max_bytes,
+            })
+        }
+        "inspect_live_spreadsheet" => {
+            let args = parse_params::<LiveDocumentToolArgs>(&call.arguments_json)?;
+            ContextKind::SpreadsheetLiveInspect(LiveDocumentInspectParams {
+                target: args.target,
+                batch_file: None,
+                max_bytes: args.max_bytes,
+            })
+        }
+        "inspect_selected_numbers_with_iwork" => {
+            let args = parse_params::<BatchDocumentToolArgs>(&call.arguments_json)?;
+            ContextKind::SpreadsheetLiveInspect(LiveDocumentInspectParams {
+                target: None,
+                batch_file: None,
+                max_bytes: args.max_bytes,
+            })
+        }
+        "inspect_live_document" => {
+            let args = parse_params::<LiveDocumentToolArgs>(&call.arguments_json)?;
+            ContextKind::DocumentLiveInspect(LiveDocumentInspectParams {
+                target: args.target,
+                batch_file: None,
+                max_bytes: args.max_bytes,
+            })
+        }
+        "inspect_selected_pages_with_iwork" => {
+            let args = parse_params::<BatchDocumentToolArgs>(&call.arguments_json)?;
+            ContextKind::DocumentLiveInspect(LiveDocumentInspectParams {
+                target: None,
+                batch_file: None,
+                max_bytes: args.max_bytes,
+            })
+        }
+        "inspect_live_presentation" => {
+            let args = parse_params::<LiveDocumentToolArgs>(&call.arguments_json)?;
+            ContextKind::PresentationLiveInspect(LiveDocumentInspectParams {
+                target: args.target,
+                batch_file: None,
+                max_bytes: args.max_bytes,
+            })
+        }
+        "inspect_selected_keynote_with_iwork" => {
+            let args = parse_params::<BatchDocumentToolArgs>(&call.arguments_json)?;
+            ContextKind::PresentationLiveInspect(LiveDocumentInspectParams {
+                target: None,
+                batch_file: None,
                 max_bytes: args.max_bytes,
             })
         }
@@ -797,5 +878,51 @@ mod tests {
             .is_err(),
             "the model-facing terminal tool must not accept terminal identifiers or references",
         );
+    }
+
+    #[test]
+    fn batch_iwork_inspection_has_only_a_server_injected_source() {
+        for (name, expected) in [
+            (
+                "inspect_selected_numbers_with_iwork",
+                Capability::SpreadsheetLiveInspect,
+            ),
+            (
+                "inspect_selected_pages_with_iwork",
+                Capability::DocumentLiveInspect,
+            ),
+            (
+                "inspect_selected_keynote_with_iwork",
+                Capability::PresentationLiveInspect,
+            ),
+        ] {
+            let (capability, input) = build_read_operation(&ToolCall {
+                id: format!("call-{name}"),
+                name: name.into(),
+                arguments_json: "{}".into(),
+            })
+            .unwrap();
+            assert_eq!(capability, expected);
+            let OperationInput::ReadContext(ReadContextInput { kind }) = input else {
+                panic!("BatchDocument inspection must map to a read context")
+            };
+            let params = match kind {
+                ContextKind::SpreadsheetLiveInspect(params)
+                | ContextKind::DocumentLiveInspect(params)
+                | ContextKind::PresentationLiveInspect(params) => params,
+                _ => panic!("unexpected BatchDocument read context"),
+            };
+            assert!(params.target.is_none());
+            assert!(params.batch_file.is_none());
+
+            assert!(
+                build_read_operation(&ToolCall {
+                    id: format!("bad-{name}"),
+                    name: name.into(),
+                    arguments_json: r#"{"path":"/tmp/secret","batch_file":{}}"#.into(),
+                })
+                .is_err()
+            );
+        }
     }
 }

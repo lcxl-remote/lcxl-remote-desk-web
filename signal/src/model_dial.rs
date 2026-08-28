@@ -1900,6 +1900,37 @@ mod tests {
         assert_eq!(blocks[2]["type"], "tool_use");
     }
 
+    #[actix_web::test]
+    #[ignore = "requires LRD_LIVE_DEEPSEEK_API_KEY and public network access"]
+    async fn live_deepseek_disabled_thinking_uses_the_oss_streaming_seam() {
+        let api_key = std::env::var("LRD_LIVE_DEEPSEEK_API_KEY")
+            .expect("set LRD_LIVE_DEEPSEEK_API_KEY for the explicit live test");
+        let config = ModelProviderConfig {
+            wire_protocol: Some(WireProtocol::OpenAiChatCompletions),
+            model: Some("deepseek-v4-flash".into()),
+            base_url: Some("https://api.deepseek.com".into()),
+            api_key: Some(api_key),
+            request_options: json!({"thinking": {"type": "disabled"}}),
+            max_context_bytes: Some(128 * 1024),
+            ..Default::default()
+        };
+        let seam = SignalModelSeam::from_config(&config).unwrap();
+        let request = ModelRequest::text_only(
+            vec![ChatMessage::text(
+                "live-user",
+                ChatRole::User,
+                "Reply with exactly OK.",
+            )],
+            ResponseFormatSpec::None,
+        );
+        let mut sink = desk_diagnose_core::seam::NullTurnSink;
+        let turn = seam.call(request, &mut sink).await.unwrap();
+        assert_eq!(turn.stop_reason, StopReason::EndTurn);
+        assert!(!turn.text.trim().is_empty());
+        assert!(!turn.provider_meta.reasoning_observed);
+        assert!(turn.usage.output_tokens.is_some_and(|tokens| tokens > 0));
+    }
+
     /// A mid-stream Anthropic `error` event is surfaced.
     #[test]
     fn anthropic_stream_surfaces_error_event() {

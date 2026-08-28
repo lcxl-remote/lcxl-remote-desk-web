@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse } from "../../types.ts";
-import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { ackSecurityApproval } from "../../clients.ts";
+import { mutationOptions, useMutation } from "@tanstack/react-query";
 
 export const ackSecurityApprovalMutationKey = () => [{ url: '/api/desk/security-settings/approval/ack' }] as const
 

@@ -69,14 +69,25 @@ pub struct BackgroundStart {
 }
 
 /// macOS TCC permission grants. macOS-specific; `None` on other platforms.
-/// Two independent fields because screen capture and input injection each need
-/// their own grant — they cannot be folded into a single privilege bool.
+/// Screen capture, Accessibility automation, passive input observation, and
+/// Apple Events automation for each iWork target use separate TCC decisions and
+/// cannot be folded into one privilege bit.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, ToSchema)]
 pub struct MacosPermissions {
     /// Screen Recording grant (`CGPreflightScreenCaptureAccess`).
     pub screen_recording: bool,
     /// Accessibility / synthetic input grant (`AXIsProcessTrusted`).
     pub accessibility: bool,
+    /// Passive keyboard/pointer event observation grant
+    /// (`CGPreflightListenEventAccess`).
+    pub input_monitoring: bool,
+    /// Apple Events Automation grant for Numbers. `false` also covers an app
+    /// that is not currently running, because macOS cannot preflight that target.
+    pub numbers_automation: bool,
+    /// Apple Events Automation grant for Pages.
+    pub pages_automation: bool,
+    /// Apple Events Automation grant for Keynote.
+    pub keynote_automation: bool,
 }
 
 /// Local Wayland Portal authorization target.

@@ -19,7 +19,12 @@ pub mod computer_use_broker;
 pub mod computer_use_writer;
 pub mod eval;
 pub mod file_reference_store;
-#[cfg(windows)]
+#[cfg(target_os = "macos")]
+pub mod macos_accessibility_observer;
+#[cfg(target_os = "macos")]
+pub mod macos_input_ownership;
+#[cfg(target_os = "macos")]
+pub mod macos_iwork_adapter;
 pub mod office_bridge_observer;
 pub mod outlook_new_handoff;
 pub mod spreadsheet_file;
@@ -286,28 +291,105 @@ async fn dispatch_read_context(
                 return Err(unsupported("Office observation requires a session context"));
             };
             let ceiling = settings.read().await.computer_use.clone();
-            #[cfg(not(windows))]
+            let output = run_blocking(move || {
+                let expected_document =
+                    computer_use_broker.office_document_filter(&params, &ceiling)?;
+                let observed = office_bridge_observer::inspect_excel_selection(
+                    expected_document.as_deref(),
+                    params.max_objects,
+                    params.max_bytes,
+                )?;
+                computer_use_broker.project_excel_selection(&params, &ceiling, observed)
+            })
+            .await??;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::OfficeDocumentInspect(output),
+            ))
+        }
+        ContextKind::SpreadsheetLiveInspect(params) => {
+            #[cfg(target_os = "macos")]
             {
-                let _ = (params, ceiling, computer_use_broker);
-                Err(unsupported(
-                    "the Office.js bridge is currently enabled only on Windows",
-                ))
-            }
-            #[cfg(windows)]
-            {
+                let Some(settings) = settings else {
+                    return Err(unsupported(
+                        "live spreadsheet observation requires a session context",
+                    ));
+                };
+                let ceiling = settings.read().await.computer_use.clone();
                 let output = run_blocking(move || {
-                    let expected_document =
-                        computer_use_broker.office_document_filter(&params, &ceiling)?;
-                    let observed = office_bridge_observer::inspect_excel_selection(
-                        expected_document.as_deref(),
-                        params.max_objects,
-                        params.max_bytes,
-                    )?;
-                    computer_use_broker.project_excel_selection(&params, &ceiling, observed)
+                    computer_use_broker.inspect_iwork(
+                        macos_iwork_adapter::IworkApplication::Numbers,
+                        &params,
+                        &ceiling,
+                    )
                 })
                 .await??;
                 Ok(OperationOutput::ReadContext(
-                    ReadContextOutput::OfficeDocumentInspect(output),
+                    ReadContextOutput::SpreadsheetLiveInspect(output),
+                ))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = params;
+                Err(unsupported(
+                    "live spreadsheet adapter is unavailable on this platform",
+                ))
+            }
+        }
+        ContextKind::DocumentLiveInspect(params) => {
+            #[cfg(target_os = "macos")]
+            {
+                let Some(settings) = settings else {
+                    return Err(unsupported(
+                        "live document observation requires a session context",
+                    ));
+                };
+                let ceiling = settings.read().await.computer_use.clone();
+                let output = run_blocking(move || {
+                    computer_use_broker.inspect_iwork(
+                        macos_iwork_adapter::IworkApplication::Pages,
+                        &params,
+                        &ceiling,
+                    )
+                })
+                .await??;
+                Ok(OperationOutput::ReadContext(
+                    ReadContextOutput::DocumentLiveInspect(output),
+                ))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = params;
+                Err(unsupported(
+                    "live document adapter is unavailable on this platform",
+                ))
+            }
+        }
+        ContextKind::PresentationLiveInspect(params) => {
+            #[cfg(target_os = "macos")]
+            {
+                let Some(settings) = settings else {
+                    return Err(unsupported(
+                        "live presentation observation requires a session context",
+                    ));
+                };
+                let ceiling = settings.read().await.computer_use.clone();
+                let output = run_blocking(move || {
+                    computer_use_broker.inspect_iwork(
+                        macos_iwork_adapter::IworkApplication::Keynote,
+                        &params,
+                        &ceiling,
+                    )
+                })
+                .await??;
+                Ok(OperationOutput::ReadContext(
+                    ReadContextOutput::PresentationLiveInspect(output),
+                ))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = params;
+                Err(unsupported(
+                    "live presentation adapter is unavailable on this platform",
                 ))
             }
         }
@@ -467,7 +549,7 @@ mod tests {
         assert_eq!(error.kind, AgentErrorKind::PermissionDenied);
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[tokio::test]
     async fn enabled_desktop_observation_fails_closed_outside_an_interactive_desktop() {
         let mut settings = Settings::default();
@@ -481,7 +563,7 @@ mod tests {
         }));
         match agent.invoke(env).await {
             Ok(OperationOutput::ReadContext(ReadContextOutput::DesktopSessionInspect(output))) => {
-                assert_eq!(output.os, "windows");
+                assert_eq!(output.os, std::env::consts::OS);
                 assert_eq!(
                     output.session.object_kind,
                     desk_agent_protocol::computer_use::ObjectKind::DesktopSession
@@ -501,9 +583,9 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[tokio::test]
-    #[ignore = "requires an active interactive Windows desktop"]
+    #[ignore = "requires an active interactive Windows or macOS desktop"]
     async fn interactive_desktop_observation_succeeds() {
         let mut settings = Settings::default();
         settings.computer_use.enabled = true;
@@ -523,7 +605,7 @@ mod tests {
         else {
             panic!("unexpected desktop observation output: {output:?}");
         };
-        assert_eq!(output.os, "windows");
+        assert_eq!(output.os, std::env::consts::OS);
         assert_eq!(
             output.session.object_kind,
             desk_agent_protocol::computer_use::ObjectKind::DesktopSession

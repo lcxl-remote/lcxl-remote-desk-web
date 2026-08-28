@@ -88,6 +88,20 @@ export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH"
 
 此外，`capture-engine` 的 macOS 采集后端使用 `screencapturekit` 8.x，它通过 swift-bridge 在 `build.rs` 中调用 `swift build` 编译一个 Swift 静态库，因此构建机需要可用的 `swift`（SwiftPM）+ `xcrun` + **macOS 13+ SDK**。`swift` 也随 Xcode Command Line Tools 分发（足够新且 SDK ≥ 13 即可），CI / 开发机推荐安装完整 Xcode。构建时显式设置 `MACOSX_DEPLOYMENT_TARGET=13.0`，运行底线为 **macOS 13.0**（屏幕录制还要求应用 `Info.plist` 含 `NSScreenCaptureUsageDescription`，否则触发录屏授权时系统会直接终止 app）。
 
+Xcode 26 改变了 Swift 对 `IOSurface` 的导入形式，`apple-cf` 0.9.3 原版因此无法
+编译；仓库暂时通过 `vendor/apple-cf` 固定一行显式 `IOSurfaceRef` 兼容补丁。上游发布
+等价修复后应删除本地 Cargo patch。Tauri CLI 已精确钉死在
+`tauri-app/package-lock.json`，本地无签名 bundle 验证命令为：
+
+```bash
+cd tauri-app
+npm ci
+npm run tauri build -- --bundles app --no-sign
+```
+
+分发构建必须去掉 `--no-sign`，使用可信 Developer ID 身份，并用系统 `codesign` 验证
+最终主程序确实携带 Automation entitlement。
+
 ### Windows 系统
 
 - 无需额外依赖，项目通过 Cargo 自动管理

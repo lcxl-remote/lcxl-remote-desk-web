@@ -428,6 +428,12 @@ pub enum Capability {
     DesktopUiInspect,
     #[serde(rename = "office.document.inspect")]
     OfficeDocumentInspect,
+    #[serde(rename = "spreadsheet.live.inspect")]
+    SpreadsheetLiveInspect,
+    #[serde(rename = "document.live.inspect")]
+    DocumentLiveInspect,
+    #[serde(rename = "presentation.live.inspect")]
+    PresentationLiveInspect,
     #[serde(rename = "file.metadata.read")]
     FileMetadataRead,
     #[serde(rename = "file.content.read")]
@@ -474,6 +480,12 @@ pub enum Capability {
     OfficeExcelPatchConfirmed,
     #[serde(rename = "office.powerpoint.patch.confirmed")]
     OfficePowerPointPatchConfirmed,
+    #[serde(rename = "spreadsheet.live.patch.confirmed")]
+    SpreadsheetLivePatchConfirmed,
+    #[serde(rename = "document.live.patch.confirmed")]
+    DocumentLivePatchConfirmed,
+    #[serde(rename = "presentation.live.patch.confirmed")]
+    PresentationLivePatchConfirmed,
     #[serde(rename = "file.patch.confirmed")]
     FilePatchConfirmed,
     #[serde(rename = "file.copy.confirmed")]
@@ -563,6 +575,9 @@ impl OperationInput {
                 ContextKind::DesktopSessionInspect(_) => Capability::DesktopSessionInspect,
                 ContextKind::DesktopUiInspect(_) => Capability::DesktopUiInspect,
                 ContextKind::OfficeDocumentInspect(_) => Capability::OfficeDocumentInspect,
+                ContextKind::SpreadsheetLiveInspect(_) => Capability::SpreadsheetLiveInspect,
+                ContextKind::DocumentLiveInspect(_) => Capability::DocumentLiveInspect,
+                ContextKind::PresentationLiveInspect(_) => Capability::PresentationLiveInspect,
                 ContextKind::FileMetadataInspect(_) => Capability::FileMetadataRead,
                 ContextKind::FileContentRead(_) => Capability::FileContentRead,
                 ContextKind::SpreadsheetFileInspect(_) => Capability::SpreadsheetFileInspect,
@@ -620,6 +635,9 @@ pub enum ContextKind {
     DesktopSessionInspect(computer_use::DesktopSessionInspectParams),
     DesktopUiInspect(computer_use::UiInspectParams),
     OfficeDocumentInspect(computer_use::OfficeInspectParams),
+    SpreadsheetLiveInspect(computer_use::LiveDocumentInspectParams),
+    DocumentLiveInspect(computer_use::LiveDocumentInspectParams),
+    PresentationLiveInspect(computer_use::LiveDocumentInspectParams),
     FileMetadataInspect(computer_use::FileMetadataInspectParams),
     FileContentRead(computer_use::FileContentReadParams),
     SpreadsheetFileInspect(computer_use::SpreadsheetFileInspectParams),
@@ -641,6 +659,9 @@ pub enum ReadContextOutput {
     DesktopSessionInspect(computer_use::DesktopSessionInspectOutput),
     DesktopUiInspect(computer_use::UiInspectOutput),
     OfficeDocumentInspect(computer_use::OfficeInspectOutput),
+    SpreadsheetLiveInspect(computer_use::LiveDocumentInspectOutput),
+    DocumentLiveInspect(computer_use::LiveDocumentInspectOutput),
+    PresentationLiveInspect(computer_use::LiveDocumentInspectOutput),
     FileMetadataInspect(computer_use::FileMetadataInspectOutput),
     FileContentRead(computer_use::FileContentReadOutput),
     SpreadsheetFileInspect(computer_use::SpreadsheetFileInspectOutput),

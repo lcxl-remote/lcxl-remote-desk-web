@@ -1,11 +1,8 @@
-//! Single-node OSS Signal remote read-tool transport.
+//! Single-node OSS Signal remote Provider transport.
 //!
-//! The Device Assistant loop runs in Signal while the Windows observer runs in
-//! the host worker. This module sends one server-stamped, read-only
-//! `RemoteToolRequest` to the exact host connection, source-binds and strictly
-//! reassembles its chunked response, and returns the already-redacted result to
-//! the shared agent loop. There is intentionally no mutation method or action
-//! transport in this seam.
+//! The Device Assistant loop runs in Signal while the host worker performs
+//! local reads and confirmed mutations. Reads use server-stamped remote-tool
+//! frames; writes use exact durable grants and sealed Computer Action plans.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -37,11 +34,14 @@ use desk_agent_protocol::communication::{
     OutlookNewComposeHandoffRequest, OutlookNewDraftHandoffInput, SlackWebDraftHandoffInput,
 };
 use desk_agent_protocol::computer_use::{
-    COMPUTER_USE_SCHEMA_VERSION, ComputerActionCompleted, ComputerActionKind, ComputerActionOutput,
-    ComputerActionResultClass, ComputerActionStarted, ComputerActionStep, ComputerUseAdapterKind,
-    ComputerUseAdapterRef, FileContentReadParams, FileMetadataInspectParams, FilePatchAction,
-    ObjectKind, ObjectRef, OfficeInspectParams, SealedComputerActionPlan,
-    SpreadsheetFileInspectParams, SpreadsheetMergePreviewParams, TerminalOutputInspectParams,
+    BatchDocumentOutput, COMPUTER_USE_SCHEMA_VERSION, ComputerActionCompleted, ComputerActionKind,
+    ComputerActionOutput, ComputerActionResultClass, ComputerActionStarted, ComputerActionStep,
+    ComputerUseAdapterKind, ComputerUseAdapterRef, DocumentLiveBatchPatchAction,
+    DocumentLivePatchAction, FileContentReadParams, FileMetadataInspectParams, FilePatchAction,
+    LiveDocumentInspectParams, ObjectKind, ObjectRef, OfficeInspectParams,
+    PresentationLiveBatchPatchAction, PresentationLivePatchAction, SealedComputerActionPlan,
+    SpreadsheetFileInspectParams, SpreadsheetLiveBatchPatchAction, SpreadsheetLivePatchAction,
+    SpreadsheetMergePreviewParams, TerminalOutputInspectParams, UiSemanticAction,
 };
 use desk_agent_protocol::data_lineage::{
     ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance, DestinationIdentity,
@@ -65,7 +65,9 @@ use desk_diagnose_core::capability_grant::{
 use desk_diagnose_core::capability_risk::{CapabilityRiskSignals, classify_capability_risk};
 use desk_diagnose_core::chat::ToolCall;
 use desk_diagnose_core::chunk::ByteReassembler;
-use desk_diagnose_core::device_assistant::{PREVIEW_COMPUTER_ACTION_TOOL, validate_preview_call};
+use desk_diagnose_core::device_assistant::{
+    EXECUTE_CONFIRMED_UI_ACTION_TOOL, PREVIEW_COMPUTER_ACTION_TOOL, validate_preview_call,
+};
 use desk_diagnose_core::permission_tools::canonical_permission_input_json;
 use desk_diagnose_core::provider_registry::ProviderRegistry;
 use desk_diagnose_core::read_tools::build_read_operation;
@@ -535,7 +537,7 @@ impl RemoteToolObserver for SignalRemoteToolObserver {
     }
 }
 
-/// Per-turn read-only tool seam for the OSS Device Assistant.
+/// Per-turn Provider seam for the OSS Device Assistant.
 pub struct SignalDeviceAssistantTools {
     db: DatabaseConnection,
     provider_registry: ProviderRegistry,
@@ -548,6 +550,9 @@ pub struct SignalDeviceAssistantTools {
     model_name: Option<String>,
     timeout: Duration,
     selected_office_document: Option<ObjectRef>,
+    selected_live_spreadsheet: Option<ObjectRef>,
+    selected_live_document: Option<ObjectRef>,
+    selected_live_presentation: Option<ObjectRef>,
     selected_file_roots: Vec<ObjectRef>,
     selected_spreadsheet_roots: Vec<ObjectRef>,
     selected_terminal_roots: Vec<ObjectRef>,
@@ -560,6 +565,52 @@ pub struct SignalDeviceAssistantTools {
     readiness_revision: u64,
     max_command_runtime_ms: u32,
     exec_tools: crate::agent_exec::SignalAgentTools,
+}
+
+fn exact_selected_batch_file(roots: &[ObjectRef]) -> Result<ObjectRef, AgentError> {
+    let mut files = roots
+        .iter()
+        .filter(|object_ref| object_ref.object_kind == ObjectKind::File);
+    let file = files.next().cloned().ok_or_else(|| {
+        error(
+            AgentErrorKind::PermissionDenied,
+            "select exactly one native iWork file before BatchDocument inspection",
+            false,
+            true,
+        )
+    })?;
+    if files.next().is_some() {
+        return Err(error(
+            AgentErrorKind::PermissionDenied,
+            "select exactly one native iWork file before BatchDocument inspection",
+            false,
+            true,
+        ));
+    }
+    Ok(file)
+}
+
+fn validate_selected_batch_destination(
+    roots: &[ObjectRef],
+    destination: &ObjectRef,
+) -> Result<(), AgentError> {
+    if destination.object_kind != ObjectKind::Directory {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "BatchDocument output requires an exact directory reference",
+            false,
+            true,
+        ));
+    }
+    if !roots.contains(destination) {
+        return Err(error(
+            AgentErrorKind::PermissionDenied,
+            "BatchDocument output directory was not selected by the owner for this turn",
+            false,
+            true,
+        ));
+    }
+    Ok(())
 }
 
 impl SignalDeviceAssistantTools {
@@ -575,6 +626,9 @@ impl SignalDeviceAssistantTools {
         model_provider: Option<String>,
         model_name: Option<String>,
         selected_office_document: Option<ObjectRef>,
+        selected_live_spreadsheet: Option<ObjectRef>,
+        selected_live_document: Option<ObjectRef>,
+        selected_live_presentation: Option<ObjectRef>,
         selected_file_roots: Vec<ObjectRef>,
         selected_spreadsheet_roots: Vec<ObjectRef>,
         selected_terminal_roots: Vec<ObjectRef>,
@@ -617,6 +671,9 @@ impl SignalDeviceAssistantTools {
             model_name,
             timeout: Duration::from_secs(REMOTE_TOOL_TIMEOUT_SECS),
             selected_office_document,
+            selected_live_spreadsheet,
+            selected_live_document,
+            selected_live_presentation,
             selected_file_roots,
             selected_spreadsheet_roots,
             selected_terminal_roots,
@@ -653,6 +710,10 @@ impl SignalDeviceAssistantTools {
         Ok((canonical, digest))
     }
 
+    fn validate_batch_destination(&self, destination: &ObjectRef) -> Result<(), AgentError> {
+        validate_selected_batch_destination(&self.selected_file_roots, destination)
+    }
+
     fn preflight_selected_context(
         &self,
         call: &ToolCall,
@@ -671,6 +732,14 @@ impl SignalDeviceAssistantTools {
             return Ok(());
         }
         build_read_operation(call)?;
+        if matches!(
+            call.name.as_str(),
+            "inspect_selected_numbers_with_iwork"
+                | "inspect_selected_pages_with_iwork"
+                | "inspect_selected_keynote_with_iwork"
+        ) {
+            exact_selected_batch_file(&self.selected_file_roots)?;
+        }
         match capability {
             desk_agent_protocol::Capability::OfficeDocumentInspect
                 if self.selected_office_document.is_none() =>
@@ -678,6 +747,39 @@ impl SignalDeviceAssistantTools {
                 Err(error(
                     AgentErrorKind::PermissionDenied,
                     "no exact paired Excel document was selected for this turn",
+                    false,
+                    true,
+                ))
+            }
+            desk_agent_protocol::Capability::SpreadsheetLiveInspect
+                if call.name != "inspect_selected_numbers_with_iwork"
+                    && self.selected_live_spreadsheet.is_none() =>
+            {
+                Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "no fresh Numbers selection was paired with this turn",
+                    false,
+                    true,
+                ))
+            }
+            desk_agent_protocol::Capability::DocumentLiveInspect
+                if call.name != "inspect_selected_pages_with_iwork"
+                    && self.selected_live_document.is_none() =>
+            {
+                Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "no fresh Pages document was paired with this turn",
+                    false,
+                    true,
+                ))
+            }
+            desk_agent_protocol::Capability::PresentationLiveInspect
+                if call.name != "inspect_selected_keynote_with_iwork"
+                    && self.selected_live_presentation.is_none() =>
+            {
+                Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "no fresh Keynote slide was paired with this turn",
                     false,
                     true,
                 ))
@@ -816,6 +918,7 @@ impl SignalDeviceAssistantTools {
                     | CapabilityDataCategory::CommandOutput
                     | CapabilityDataCategory::ExternalContent
                     | CapabilityDataCategory::CommunicationContent
+                    | CapabilityDataCategory::LiveDocumentContent
             ) || (*category == CapabilityDataCategory::ProcessMetadata
                 && process_command_line_requested)
         });
@@ -1552,6 +1655,746 @@ impl SignalDeviceAssistantTools {
         }
     }
 
+    async fn authorize_and_execute_semantic_action(
+        &self,
+        call: &ToolCall,
+    ) -> Result<ExecOutcome, AgentError> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct UiActionArgs {
+            target: ObjectRef,
+            action: UiSemanticAction,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SpreadsheetActionArgs {
+            target: ObjectRef,
+            action: SpreadsheetLivePatchAction,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct DocumentActionArgs {
+            target: ObjectRef,
+            text: String,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PresentationActionArgs {
+            target: ObjectRef,
+            action: PresentationLivePatchAction,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SpreadsheetBatchActionArgs {
+            target: ObjectRef,
+            output: BatchDocumentOutput,
+            action: SpreadsheetLivePatchAction,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct DocumentBatchActionArgs {
+            target: ObjectRef,
+            output: BatchDocumentOutput,
+            text: String,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PresentationBatchActionArgs {
+            target: ObjectRef,
+            output: BatchDocumentOutput,
+            action: PresentationLivePatchAction,
+        }
+
+        let decode = |decode_error| {
+            error(
+                AgentErrorKind::InvalidInput,
+                format!("invalid bounded semantic action input: {decode_error}"),
+                false,
+                true,
+            )
+        };
+        let (
+            target_ref,
+            authority_refs,
+            computer_action,
+            required_capability,
+            adapter_kind,
+            action_name,
+        ) = match call.name.as_str() {
+            EXECUTE_CONFIRMED_UI_ACTION_TOOL => {
+                let args: UiActionArgs =
+                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
+                if args.target.object_kind != ObjectKind::UiElement {
+                    return Err(error(
+                        AgentErrorKind::InvalidInput,
+                        "semantic UI action requires a fresh UI element reference",
+                        false,
+                        true,
+                    ));
+                }
+                match &args.action {
+                    UiSemanticAction::Invoke
+                    | UiSemanticAction::Toggle { .. }
+                    | UiSemanticAction::Select
+                    | UiSemanticAction::Focus => {}
+                    UiSemanticAction::SetValue { value } if value.len() <= 16 * 1024 => {}
+                    UiSemanticAction::SetValue { .. } => {
+                        return Err(error(
+                            AgentErrorKind::InvalidInput,
+                            "semantic UI value exceeds the 16 KiB limit",
+                            false,
+                            true,
+                        ));
+                    }
+                    UiSemanticAction::Scroll { .. } => {
+                        return Err(error(
+                            AgentErrorKind::UnsupportedCapability,
+                            "this semantic UI action is not enabled by the macOS adapter",
+                            false,
+                            true,
+                        ));
+                    }
+                }
+                let action_name = match &args.action {
+                    UiSemanticAction::Invoke => "invoke",
+                    UiSemanticAction::Select => "select",
+                    UiSemanticAction::Focus => "focus",
+                    UiSemanticAction::SetValue { .. } => "set value",
+                    UiSemanticAction::Toggle { .. } => "toggle",
+                    UiSemanticAction::Scroll { .. } => unreachable!(),
+                };
+                (
+                    args.target.clone(),
+                    vec![args.target],
+                    ComputerActionKind::Ui(args.action),
+                    desk_agent_protocol::Capability::DesktopUiActionConfirmed,
+                    ComputerUseAdapterKind::MacosAccessibility,
+                    action_name,
+                )
+            }
+            "patch_live_spreadsheet_cell" => {
+                let args: SpreadsheetActionArgs =
+                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
+                if self.selected_live_spreadsheet.as_ref() != Some(&args.target) {
+                    return Err(error(
+                        AgentErrorKind::PermissionDenied,
+                        "spreadsheet patch requires the exact current Numbers cell reference",
+                        false,
+                        true,
+                    ));
+                }
+                (
+                    args.target.clone(),
+                    vec![args.target],
+                    ComputerActionKind::SpreadsheetLive(args.action),
+                    desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed,
+                    ComputerUseAdapterKind::IworkNumbers,
+                    "spreadsheet cell patch",
+                )
+            }
+            "replace_live_document_body" => {
+                let args: DocumentActionArgs =
+                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
+                if self.selected_live_document.as_ref() != Some(&args.target) {
+                    return Err(error(
+                        AgentErrorKind::PermissionDenied,
+                        "document patch requires the exact current Pages document reference",
+                        false,
+                        true,
+                    ));
+                }
+                (
+                    args.target.clone(),
+                    vec![args.target],
+                    ComputerActionKind::DocumentLive(DocumentLivePatchAction::ReplaceBodyText {
+                        text: args.text,
+                    }),
+                    desk_agent_protocol::Capability::DocumentLivePatchConfirmed,
+                    ComputerUseAdapterKind::IworkPages,
+                    "document body replacement",
+                )
+            }
+            "patch_live_presentation_slide" => {
+                let args: PresentationActionArgs =
+                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
+                if self.selected_live_presentation.as_ref() != Some(&args.target) {
+                    return Err(error(
+                        AgentErrorKind::PermissionDenied,
+                        "presentation patch requires the exact current Keynote slide reference",
+                        false,
+                        true,
+                    ));
+                }
+                (
+                    args.target.clone(),
+                    vec![args.target],
+                    ComputerActionKind::PresentationLive(args.action),
+                    desk_agent_protocol::Capability::PresentationLivePatchConfirmed,
+                    ComputerUseAdapterKind::IworkKeynote,
+                    "presentation slide patch",
+                )
+            }
+            "patch_selected_numbers_copy" => {
+                let args: SpreadsheetBatchActionArgs =
+                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
+                self.validate_batch_destination(&args.output.destination_parent)?;
+                let authority_refs =
+                    vec![args.target.clone(), args.output.destination_parent.clone()];
+                (
+                    args.target,
+                    authority_refs,
+                    ComputerActionKind::SpreadsheetLiveBatch(SpreadsheetLiveBatchPatchAction {
+                        output: args.output,
+                        action: args.action,
+                    }),
+                    desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed,
+                    ComputerUseAdapterKind::IworkNumbers,
+                    "selected Numbers copy patch",
+                )
+            }
+            "replace_selected_pages_copy_body" => {
+                let args: DocumentBatchActionArgs =
+                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
+                self.validate_batch_destination(&args.output.destination_parent)?;
+                let authority_refs =
+                    vec![args.target.clone(), args.output.destination_parent.clone()];
+                (
+                    args.target,
+                    authority_refs,
+                    ComputerActionKind::DocumentLiveBatch(DocumentLiveBatchPatchAction {
+                        output: args.output,
+                        action: DocumentLivePatchAction::ReplaceBodyText { text: args.text },
+                    }),
+                    desk_agent_protocol::Capability::DocumentLivePatchConfirmed,
+                    ComputerUseAdapterKind::IworkPages,
+                    "selected Pages copy body replacement",
+                )
+            }
+            "patch_selected_keynote_copy" => {
+                let args: PresentationBatchActionArgs =
+                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
+                self.validate_batch_destination(&args.output.destination_parent)?;
+                let authority_refs =
+                    vec![args.target.clone(), args.output.destination_parent.clone()];
+                (
+                    args.target,
+                    authority_refs,
+                    ComputerActionKind::PresentationLiveBatch(PresentationLiveBatchPatchAction {
+                        output: args.output,
+                        action: args.action,
+                    }),
+                    desk_agent_protocol::Capability::PresentationLivePatchConfirmed,
+                    ComputerUseAdapterKind::IworkKeynote,
+                    "selected Keynote copy patch",
+                )
+            }
+            _ => {
+                return Err(error(
+                    AgentErrorKind::UnsupportedCapability,
+                    "bounded semantic action Provider is not registered",
+                    false,
+                    true,
+                ));
+            }
+        };
+        if target_ref.object_kind
+            != match required_capability {
+                desk_agent_protocol::Capability::DesktopUiActionConfirmed => ObjectKind::UiElement,
+                desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed => ObjectKind::Range,
+                desk_agent_protocol::Capability::DocumentLivePatchConfirmed => ObjectKind::Document,
+                desk_agent_protocol::Capability::PresentationLivePatchConfirmed => {
+                    ObjectKind::Slide
+                }
+                _ => unreachable!(),
+            }
+        {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "semantic action target kind does not match the selected Provider",
+                false,
+                true,
+            ));
+        }
+
+        let capability = self
+            .provider_registry
+            .capability_for_tool(&call.name)
+            .filter(|capability| capability.required_capability == required_capability)
+            .ok_or_else(|| {
+                error(
+                    AgentErrorKind::UnsupportedCapability,
+                    "bounded semantic action Provider is not registered",
+                    false,
+                    true,
+                )
+            })?;
+        let provider = self
+            .provider_registry
+            .provider_for_capability(&capability.wire.capability_id)
+            .expect("registered semantic UI action capability has a Provider");
+        self.verify_current_readiness(capability).await?;
+        let session = self.authoritative_session().await?;
+        let (canonical_input_json, canonical_input_digest_sha256) =
+            Self::canonical_call_input(call)?;
+        let resource_scope = fresh_object_resource_scope(&authority_refs);
+        let operation_scope = vec!["use_selected_object".to_string()];
+        let risk_tier = Self::capability_risk(capability, call)?;
+        let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
+            error(
+                AgentErrorKind::Internal,
+                "system clock predates the Unix epoch",
+                false,
+                false,
+            )
+        })?;
+        let server_call_id = format!(
+            "capability-call-{:x}",
+            Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
+        );
+        let call_authority = CapabilityGrantCall {
+            actor_id: &self.actor_id,
+            run_id: &self.run_id,
+            surface: ProductSurface::OssPersonalOwner,
+            target_device_id: &self.target_device_id,
+            target_session_id: None,
+            provider_id: &provider.wire.provider_id,
+            capability_id: &capability.wire.capability_id,
+            tool_name: &call.name,
+            tool_schema_version: capability.wire.input_schema_version,
+            effect: capability.wire.effect,
+            risk_tier,
+            resource_scope: &resource_scope,
+            operation_scope: &operation_scope,
+            export_destinations: &[],
+            envelope_ids: &[],
+            content_digests_sha256: &[],
+            canonical_input_digest_sha256: &canonical_input_digest_sha256,
+            byte_count: canonical_input_json.len() as u64,
+            item_count: 1,
+            policy_revision: self.policy_revision,
+            readiness_revision: self.readiness_revision,
+            now_unix_ms,
+        };
+        let store = SignalCapabilityGrantStore::new(self.db.clone());
+        let grant_id = if let Some(existing) = store
+            .prepared_grant_id(&server_call_id)
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to load prepared semantic UI authority: {db_error}"),
+                    false,
+                    false,
+                )
+            })? {
+            existing
+        } else {
+            store
+                .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to load semantic UI grants: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?
+                .into_iter()
+                .find(|grant| match_capability_grant(grant, &call_authority).is_ok())
+                .map(|grant| grant.grant_id)
+                .ok_or_else(|| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        "semantic UI action requires an active exact approved grant",
+                        false,
+                        true,
+                    )
+                })?
+        };
+        let prepare = || PrepareCapabilityCall {
+            grant_id: &grant_id,
+            call_id: &server_call_id,
+            turn_id: &self.turn_id,
+            input_revision: session.input_revision,
+            input_watermark: session.latest_input_seq,
+            generation: 1,
+            canonical_input_json: &canonical_input_json,
+            call: call_authority.clone(),
+        };
+        let prepared = store.prepare(prepare()).await.map_err(|db_error| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                format!("semantic UI call authorization failed: {db_error}"),
+                false,
+                true,
+            )
+        })?;
+        let dispatch_id =
+            match store
+                .record_dispatch_intent(prepare())
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        format!("semantic UI dispatch authorization failed: {db_error}"),
+                        false,
+                        true,
+                    )
+                })? {
+                DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
+                DispatchIntentResult::SupersededBeforeIntent { .. } => {
+                    return Err(error(
+                        AgentErrorKind::PermissionDenied,
+                        "semantic UI action was superseded by newer user input",
+                        false,
+                        true,
+                    ));
+                }
+                DispatchIntentResult::RevokedBeforeIntent { .. } => {
+                    return Err(error(
+                        AgentErrorKind::PermissionDenied,
+                        "semantic UI grant was revoked before dispatch",
+                        false,
+                        true,
+                    ));
+                }
+            };
+        let claimed = match store
+            .claim_dispatch(&dispatch_id, now_unix_ms)
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to claim semantic UI dispatch: {db_error}"),
+                    false,
+                    false,
+                )
+            })? {
+            DispatchClaimResult::Claimed(payload) => payload,
+            DispatchClaimResult::OutcomeUnknown { .. } => {
+                return Ok(ExecOutcome::Unknown(
+                    desk_diagnose_core::session::ActionIdentity::new(
+                        prepared.work_id,
+                        server_call_id,
+                        dispatch_id,
+                        desk_diagnose_core::session::WorkKind::ComputerAction,
+                    ),
+                ));
+            }
+        };
+
+        let dispatch_material = async {
+            let readiness = crate::computer_use_readiness::global_computer_use_readiness_cache()
+                .get_fresh(&self.target_connection_id, chrono::Utc::now())
+                .ok_or_else(|| {
+                    error(
+                        AgentErrorKind::TargetOffline,
+                        "semantic UI readiness expired before dispatch",
+                        false,
+                        true,
+                    )
+                })?;
+            let adapter = readiness
+                .readiness
+                .capabilities
+                .iter()
+                .find(|item| item.capability == required_capability && item.supported && item.ready)
+                .map(|item| item.adapter.clone())
+                .ok_or_else(|| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        "semantic UI adapter is no longer ready",
+                        false,
+                        true,
+                    )
+                })?;
+            if adapter.kind != adapter_kind {
+                return Err(error(
+                    AgentErrorKind::UnsupportedCapability,
+                    "the ready adapter does not match the selected semantic Provider",
+                    false,
+                    true,
+                ));
+            }
+            let generation = dispatch_id.clone();
+            let plan = SealedComputerActionPlan {
+                schema_version: COMPUTER_USE_SCHEMA_VERSION,
+                work_id: claimed.work_id.to_string(),
+                action_request_id: server_call_id.clone(),
+                execution_generation: generation.clone(),
+                device_id: self.target_device_id.clone(),
+                interactive_session_incarnation: readiness
+                    .readiness
+                    .interactive_session_incarnation,
+                adapter,
+                approval_id: grant_id.clone(),
+                approved_actor_id: self.actor_id.clone(),
+                draft_hash: canonical_input_digest_sha256,
+                expires_at: (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
+                timeout_ms: 30_000,
+                actions: vec![ComputerActionStep {
+                    target: target_ref,
+                    action: computer_action,
+                    before_summary: "fresh exact object resolved from the inspected snapshot"
+                        .into(),
+                    after_intent: format!("perform one bounded semantic {action_name} action"),
+                    verification:
+                        "re-locate the exact object and independently read back semantic state"
+                            .into(),
+                }],
+            };
+            plan.validate().map_err(|validation_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to seal semantic UI plan: {validation_error}"),
+                    false,
+                    false,
+                )
+            })?;
+            let target = {
+                let map = self.connections.read().await;
+                map.get(&self.target_connection_id).cloned()
+            }
+            .ok_or_else(|| {
+                error(
+                    AgentErrorKind::TargetOffline,
+                    "target host is not connected",
+                    false,
+                    true,
+                )
+            })?;
+            let audience = target.model.version_info.client_id.clone().ok_or_else(|| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    "target host has no bound client id",
+                    false,
+                    false,
+                )
+            })?;
+            if audience != self.target_device_id {
+                return Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "target device binding changed before semantic UI dispatch",
+                    false,
+                    false,
+                ));
+            }
+            let authz = AuthorizationBlock {
+                version: AUTHORIZATION_BLOCK_VERSION,
+                exec_admission_policy: ExecAdmissionPolicy::OwnerInteractive,
+                scope: AgentScope {
+                    granted: vec![required_capability],
+                    mode: ExecutionMode::ConfirmEachAction,
+                    expires_at: None,
+                    policy_name: Some("oss-device-assistant-semantic-action".into()),
+                },
+                orchestrator_grants: vec![capability.wire.capability_id.clone()],
+                max_risk: desk_agent_protocol::RiskLevel::Medium,
+                actor: AuthzActor {
+                    user_id: self.actor_id.parse().ok(),
+                },
+                device: AuthzDevice { device_id: None },
+                request_id: generation.clone(),
+                session_id: None,
+                expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339()),
+                issuer: "signal".into(),
+                audience,
+                signature: None,
+            };
+            let wrapper = AuthorizedControlPayload {
+                inner: serde_json::to_value(&plan).map_err(|encode_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to encode semantic UI plan: {encode_error}"),
+                        false,
+                        false,
+                    )
+                })?,
+                authz,
+            };
+            let mut frame = SignalingModel::new_request(
+                SignalingType::DispatchComputerAction,
+                None,
+                Some(&wrapper),
+            )
+            .map_err(|frame_error| {
+                error(
+                    AgentErrorKind::TransportError,
+                    format!("failed to build semantic UI frame: {frame_error}"),
+                    false,
+                    false,
+                )
+            })?;
+            frame.request_id = generation.clone();
+            let text = serde_json::to_string(&frame).map_err(|encode_error| {
+                error(
+                    AgentErrorKind::TransportError,
+                    format!("failed to encode semantic UI frame: {encode_error}"),
+                    false,
+                    false,
+                )
+            })?;
+            Ok::<_, AgentError>((target, generation, text))
+        }
+        .await;
+        let (target, generation, text) = match dispatch_material {
+            Ok(material) => material,
+            Err(dispatch_error) => {
+                record_computer_action_pre_send_failure(
+                    &store,
+                    &dispatch_id,
+                    &server_call_id,
+                    now_unix_ms,
+                    &dispatch_error,
+                )
+                .await?;
+                return Err(dispatch_error);
+            }
+        };
+        let (completion_tx, completion_rx) = oneshot::channel();
+        if !global_computer_action_pending().register(
+            generation.clone(),
+            self.target_connection_id.clone(),
+            completion_tx,
+        ) {
+            let dispatch_error = error(
+                AgentErrorKind::Internal,
+                "duplicate semantic UI execution generation",
+                false,
+                false,
+            );
+            record_computer_action_pre_send_failure(
+                &store,
+                &dispatch_id,
+                &server_call_id,
+                now_unix_ms,
+                &dispatch_error,
+            )
+            .await?;
+            return Err(dispatch_error);
+        }
+        if target.session.write().await.text(text).await.is_err() {
+            global_computer_action_pending().cancel(&generation);
+            store
+                .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to persist semantic UI unknown outcome: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?;
+            return Ok(ExecOutcome::Unknown(
+                desk_diagnose_core::session::ActionIdentity::new(
+                    prepared.work_id,
+                    server_call_id,
+                    generation,
+                    desk_diagnose_core::session::WorkKind::ComputerAction,
+                ),
+            ));
+        }
+        let completion = match tokio::time::timeout(self.timeout, completion_rx).await {
+            Ok(Ok(Ok(completion))) => completion,
+            _ => {
+                global_computer_action_pending().cancel(&generation);
+                store
+                    .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
+                    .await
+                    .map_err(|db_error| {
+                        error(
+                            AgentErrorKind::Internal,
+                            format!("failed to persist semantic UI unknown outcome: {db_error}"),
+                            false,
+                            false,
+                        )
+                    })?;
+                return Ok(ExecOutcome::Unknown(
+                    desk_diagnose_core::session::ActionIdentity::new(
+                        prepared.work_id,
+                        server_call_id,
+                        generation,
+                        desk_diagnose_core::session::WorkKind::ComputerAction,
+                    ),
+                ));
+            }
+        };
+        if semantic_ui_completion_is_unknown(completion.result) {
+            store
+                .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to persist semantic UI unknown outcome: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?;
+            return Ok(ExecOutcome::Unknown(
+                desk_diagnose_core::session::ActionIdentity::new(
+                    prepared.work_id,
+                    server_call_id,
+                    generation,
+                    desk_diagnose_core::session::WorkKind::ComputerAction,
+                ),
+            ));
+        }
+        let verified = semantic_ui_completion_is_verified(&completion);
+        let output = serde_json::to_string(&completion).map_err(|encode_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to encode semantic UI result: {encode_error}"),
+                false,
+                false,
+            )
+        })?;
+        store
+            .record_dispatch_completion(
+                &CapabilityDispatchCompletion {
+                    dispatch_id: dispatch_id.clone(),
+                    call_id: server_call_id.clone(),
+                    generation: 1,
+                    outcome: if verified {
+                        CapabilityDispatchOutcome::Succeeded
+                    } else {
+                        CapabilityDispatchOutcome::Failed
+                    },
+                    result_digest_sha256: format!("{:x}", Sha256::digest(output.as_bytes())),
+                },
+                now_unix_ms,
+            )
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to persist semantic UI completion: {db_error}"),
+                    false,
+                    false,
+                )
+            })?;
+        if verified {
+            Ok(ExecOutcome::Executed {
+                output: ToolRunOutput {
+                    content: output,
+                    image_data_url: None,
+                },
+                event_id: None,
+            })
+        } else {
+            Err(error(
+                AgentErrorKind::InvalidInput,
+                completion
+                    .message
+                    .unwrap_or_else(|| "semantic UI action was not independently verified".into()),
+                false,
+                true,
+            ))
+        }
+    }
+
     async fn authorize_and_execute_artifact(
         &self,
         call: &ToolCall,
@@ -1911,16 +2754,37 @@ impl SignalDeviceAssistantTools {
             }
         };
 
-        let readiness = crate::computer_use_readiness::global_computer_use_readiness_cache()
-            .get_fresh(&self.target_connection_id, chrono::Utc::now())
-            .ok_or_else(|| {
-                error(
-                    AgentErrorKind::TargetOffline,
-                    "artifact readiness expired before dispatch",
-                    false,
-                    true,
-                )
-            })?;
+        macro_rules! artifact_pre_send {
+            ($result:expr) => {
+                match $result {
+                    Ok(value) => value,
+                    Err(dispatch_error) => {
+                        record_computer_action_pre_send_failure(
+                            &store,
+                            &dispatch_id,
+                            &server_call_id,
+                            now_unix_ms,
+                            &dispatch_error,
+                        )
+                        .await?;
+                        return Err(dispatch_error);
+                    }
+                }
+            };
+        }
+
+        let readiness = artifact_pre_send!(
+            crate::computer_use_readiness::global_computer_use_readiness_cache()
+                .get_fresh(&self.target_connection_id, chrono::Utc::now())
+                .ok_or_else(|| {
+                    error(
+                        AgentErrorKind::TargetOffline,
+                        "artifact readiness expired before dispatch",
+                        false,
+                        true,
+                    )
+                })
+        );
         let generation = dispatch_id.clone();
         let (action, before_summary, after_intent, verification) = match args {
             ArtifactRequest::Text(args) => (
@@ -2004,41 +2868,50 @@ impl SignalDeviceAssistantTools {
                 verification,
             }],
         };
-        plan.validate().map_err(|validation_error| {
+        artifact_pre_send!(plan.validate().map_err(|validation_error| {
             error(
                 AgentErrorKind::Internal,
                 format!("failed to seal artifact plan: {validation_error}"),
                 false,
                 false,
             )
-        })?;
-        let target = {
+        }));
+        let target = artifact_pre_send!({
             let map = self.connections.read().await;
-            map.get(&self.target_connection_id).cloned()
-        }
-        .ok_or_else(|| {
-            error(
-                AgentErrorKind::TargetOffline,
-                "target host is not connected",
-                false,
-                true,
-            )
-        })?;
-        let audience = target.model.version_info.client_id.clone().ok_or_else(|| {
-            error(
-                AgentErrorKind::PermissionDenied,
-                "target host has no bound client id",
-                false,
-                false,
-            )
-        })?;
+            map.get(&self.target_connection_id).cloned().ok_or_else(|| {
+                error(
+                    AgentErrorKind::TargetOffline,
+                    "target host is not connected",
+                    false,
+                    true,
+                )
+            })
+        });
+        let audience =
+            artifact_pre_send!(target.model.version_info.client_id.clone().ok_or_else(|| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    "target host has no bound client id",
+                    false,
+                    false,
+                )
+            }));
         if audience != self.target_device_id {
-            return Err(error(
+            let dispatch_error = error(
                 AgentErrorKind::PermissionDenied,
                 "target device binding changed before artifact dispatch",
                 false,
                 false,
-            ));
+            );
+            record_computer_action_pre_send_failure(
+                &store,
+                &dispatch_id,
+                &server_call_id,
+                now_unix_ms,
+                &dispatch_error,
+            )
+            .await?;
+            return Err(dispatch_error);
         }
         let authz = AuthorizationBlock {
             version: AUTHORIZATION_BLOCK_VERSION,
@@ -2063,51 +2936,62 @@ impl SignalDeviceAssistantTools {
             signature: None,
         };
         let wrapper = AuthorizedControlPayload {
-            inner: serde_json::to_value(&plan).map_err(|encode_error| {
+            inner: artifact_pre_send!(serde_json::to_value(&plan).map_err(|encode_error| {
                 error(
                     AgentErrorKind::Internal,
                     format!("failed to encode artifact plan: {encode_error}"),
                     false,
                     false,
                 )
-            })?,
+            })),
             authz,
         };
-        let frame = SignalingModel::new_request(
-            SignalingType::DispatchComputerAction,
-            None,
-            Some(&wrapper),
-        )
-        .map_err(|frame_error| {
-            error(
-                AgentErrorKind::TransportError,
-                format!("failed to build artifact frame: {frame_error}"),
-                false,
-                false,
+        let frame = artifact_pre_send!(
+            SignalingModel::new_request(
+                SignalingType::DispatchComputerAction,
+                None,
+                Some(&wrapper),
             )
-        })?;
+            .map_err(|frame_error| {
+                error(
+                    AgentErrorKind::TransportError,
+                    format!("failed to build artifact frame: {frame_error}"),
+                    false,
+                    false,
+                )
+            })
+        );
         let mut frame = frame;
         frame.request_id = generation.clone();
-        let text = serde_json::to_string(&frame).map_err(|encode_error| {
+        let text = artifact_pre_send!(serde_json::to_string(&frame).map_err(|encode_error| {
             error(
                 AgentErrorKind::TransportError,
                 format!("failed to encode artifact frame: {encode_error}"),
                 false,
                 false,
             )
-        })?;
+        }));
         let (completion_tx, completion_rx) = oneshot::channel();
         if !global_computer_action_pending().register(
             generation.clone(),
             self.target_connection_id.clone(),
             completion_tx,
         ) {
-            return Err(error(
+            let dispatch_error = error(
                 AgentErrorKind::Internal,
                 "duplicate artifact execution generation",
                 false,
                 false,
-            ));
+            );
+            record_computer_action_pre_send_failure(
+                &store,
+                &dispatch_id,
+                &server_call_id,
+                now_unix_ms,
+                &dispatch_error,
+            )
+            .await?;
+            return Err(dispatch_error);
         }
         if target.session.write().await.text(text).await.is_err() {
             global_computer_action_pending().cancel(&generation);
@@ -2760,16 +3644,38 @@ impl SignalDeviceAssistantTools {
                 ));
             }
         };
-        let readiness = crate::computer_use_readiness::global_computer_use_readiness_cache()
-            .get_fresh(&self.target_connection_id, chrono::Utc::now())
-            .ok_or_else(|| {
-                error(
-                    AgentErrorKind::TargetOffline,
-                    "browser readiness expired before dispatch",
-                    false,
-                    true,
-                )
-            })?;
+
+        macro_rules! browser_pre_send {
+            ($result:expr) => {
+                match $result {
+                    Ok(value) => value,
+                    Err(dispatch_error) => {
+                        record_computer_action_pre_send_failure(
+                            &store,
+                            &dispatch_id,
+                            &server_call_id,
+                            now_unix_ms,
+                            &dispatch_error,
+                        )
+                        .await?;
+                        return Err(dispatch_error);
+                    }
+                }
+            };
+        }
+
+        let readiness = browser_pre_send!(
+            crate::computer_use_readiness::global_computer_use_readiness_cache()
+                .get_fresh(&self.target_connection_id, chrono::Utc::now())
+                .ok_or_else(|| {
+                    error(
+                        AgentErrorKind::TargetOffline,
+                        "browser readiness expired before dispatch",
+                        false,
+                        true,
+                    )
+                })
+        );
         let generation = dispatch_id.clone();
         let plan = SealedComputerActionPlan {
             schema_version: COMPUTER_USE_SCHEMA_VERSION,
@@ -2810,41 +3716,50 @@ impl SignalDeviceAssistantTools {
                 },
             }],
         };
-        plan.validate().map_err(|validation_error| {
+        browser_pre_send!(plan.validate().map_err(|validation_error| {
             error(
                 AgentErrorKind::Internal,
                 format!("failed to seal browser plan: {validation_error}"),
                 false,
                 false,
             )
-        })?;
-        let target = {
+        }));
+        let target = browser_pre_send!({
             let map = self.connections.read().await;
-            map.get(&self.target_connection_id).cloned()
-        }
-        .ok_or_else(|| {
-            error(
-                AgentErrorKind::TargetOffline,
-                "target host is not connected",
-                false,
-                true,
-            )
-        })?;
-        let audience = target.model.version_info.client_id.clone().ok_or_else(|| {
-            error(
-                AgentErrorKind::PermissionDenied,
-                "target host has no bound client id",
-                false,
-                false,
-            )
-        })?;
+            map.get(&self.target_connection_id).cloned().ok_or_else(|| {
+                error(
+                    AgentErrorKind::TargetOffline,
+                    "target host is not connected",
+                    false,
+                    true,
+                )
+            })
+        });
+        let audience =
+            browser_pre_send!(target.model.version_info.client_id.clone().ok_or_else(|| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    "target host has no bound client id",
+                    false,
+                    false,
+                )
+            }));
         if audience != self.target_device_id {
-            return Err(error(
+            let dispatch_error = error(
                 AgentErrorKind::PermissionDenied,
                 "target device binding changed before browser dispatch",
                 false,
                 false,
-            ));
+            );
+            record_computer_action_pre_send_failure(
+                &store,
+                &dispatch_id,
+                &server_call_id,
+                now_unix_ms,
+                &dispatch_error,
+            )
+            .await?;
+            return Err(dispatch_error);
         }
         let max_risk = match risk_tier {
             CapabilityRiskTier::R0 | CapabilityRiskTier::R1 => desk_agent_protocol::RiskLevel::Low,
@@ -2874,50 +3789,61 @@ impl SignalDeviceAssistantTools {
             signature: None,
         };
         let wrapper = AuthorizedControlPayload {
-            inner: serde_json::to_value(&plan).map_err(|encode_error| {
+            inner: browser_pre_send!(serde_json::to_value(&plan).map_err(|encode_error| {
                 error(
                     AgentErrorKind::Internal,
                     format!("failed to encode browser plan: {encode_error}"),
                     false,
                     false,
                 )
-            })?,
+            })),
             authz,
         };
-        let mut frame = SignalingModel::new_request(
-            SignalingType::DispatchComputerAction,
-            None,
-            Some(&wrapper),
-        )
-        .map_err(|frame_error| {
-            error(
-                AgentErrorKind::TransportError,
-                format!("failed to build browser frame: {frame_error}"),
-                false,
-                false,
+        let mut frame = browser_pre_send!(
+            SignalingModel::new_request(
+                SignalingType::DispatchComputerAction,
+                None,
+                Some(&wrapper),
             )
-        })?;
+            .map_err(|frame_error| {
+                error(
+                    AgentErrorKind::TransportError,
+                    format!("failed to build browser frame: {frame_error}"),
+                    false,
+                    false,
+                )
+            })
+        );
         frame.request_id = generation.clone();
-        let text = serde_json::to_string(&frame).map_err(|encode_error| {
+        let text = browser_pre_send!(serde_json::to_string(&frame).map_err(|encode_error| {
             error(
                 AgentErrorKind::TransportError,
                 format!("failed to encode browser frame: {encode_error}"),
                 false,
                 false,
             )
-        })?;
+        }));
         let (completion_tx, completion_rx) = oneshot::channel();
         if !global_computer_action_pending().register(
             generation.clone(),
             self.target_connection_id.clone(),
             completion_tx,
         ) {
-            return Err(error(
+            let dispatch_error = error(
                 AgentErrorKind::Internal,
                 "duplicate browser execution generation",
                 false,
                 false,
-            ));
+            );
+            record_computer_action_pre_send_failure(
+                &store,
+                &dispatch_id,
+                &server_call_id,
+                now_unix_ms,
+                &dispatch_error,
+            )
+            .await?;
+            return Err(dispatch_error);
         }
         if target.session.write().await.text(text).await.is_err() {
             global_computer_action_pending().cancel(&generation);
@@ -3939,6 +4865,102 @@ impl SignalDeviceAssistantTools {
                 }),
             });
         }
+        let is_iwork_batch_inspect = matches!(
+            call.name.as_str(),
+            "inspect_selected_numbers_with_iwork"
+                | "inspect_selected_pages_with_iwork"
+                | "inspect_selected_keynote_with_iwork"
+        );
+        if is_iwork_batch_inspect {
+            let file = exact_selected_batch_file(&self.selected_file_roots)?;
+            let requested_max_bytes = match &input {
+                OperationInput::ReadContext(ReadContextInput {
+                    kind:
+                        ContextKind::SpreadsheetLiveInspect(params)
+                        | ContextKind::DocumentLiveInspect(params)
+                        | ContextKind::PresentationLiveInspect(params),
+                }) => params.max_bytes,
+                _ => {
+                    return Err(error(
+                        AgentErrorKind::InvalidInput,
+                        "BatchDocument inspection received the wrong operation input",
+                        false,
+                        true,
+                    ));
+                }
+            };
+            let params = LiveDocumentInspectParams {
+                target: None,
+                batch_file: Some(file),
+                max_bytes: requested_max_bytes,
+            };
+            input = OperationInput::ReadContext(ReadContextInput {
+                kind: match call.name.as_str() {
+                    "inspect_selected_numbers_with_iwork" => {
+                        ContextKind::SpreadsheetLiveInspect(params)
+                    }
+                    "inspect_selected_pages_with_iwork" => ContextKind::DocumentLiveInspect(params),
+                    "inspect_selected_keynote_with_iwork" => {
+                        ContextKind::PresentationLiveInspect(params)
+                    }
+                    _ => unreachable!(),
+                },
+            });
+        }
+        let live_target = match capability {
+            desk_agent_protocol::Capability::SpreadsheetLiveInspect => {
+                self.selected_live_spreadsheet.clone()
+            }
+            desk_agent_protocol::Capability::DocumentLiveInspect => {
+                self.selected_live_document.clone()
+            }
+            desk_agent_protocol::Capability::PresentationLiveInspect => {
+                self.selected_live_presentation.clone()
+            }
+            _ => None,
+        };
+        if matches!(
+            capability,
+            desk_agent_protocol::Capability::SpreadsheetLiveInspect
+                | desk_agent_protocol::Capability::DocumentLiveInspect
+                | desk_agent_protocol::Capability::PresentationLiveInspect
+        ) && !is_iwork_batch_inspect
+        {
+            let target = live_target.ok_or_else(|| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    "the selected iWork object is no longer available; refresh context",
+                    false,
+                    true,
+                )
+            })?;
+            input = OperationInput::ReadContext(ReadContextInput {
+                kind: match capability {
+                    desk_agent_protocol::Capability::SpreadsheetLiveInspect => {
+                        ContextKind::SpreadsheetLiveInspect(LiveDocumentInspectParams {
+                            target: Some(target),
+                            batch_file: None,
+                            max_bytes: 256 * 1024,
+                        })
+                    }
+                    desk_agent_protocol::Capability::DocumentLiveInspect => {
+                        ContextKind::DocumentLiveInspect(LiveDocumentInspectParams {
+                            target: Some(target),
+                            batch_file: None,
+                            max_bytes: 256 * 1024,
+                        })
+                    }
+                    desk_agent_protocol::Capability::PresentationLiveInspect => {
+                        ContextKind::PresentationLiveInspect(LiveDocumentInspectParams {
+                            target: Some(target),
+                            batch_file: None,
+                            max_bytes: 256 * 1024,
+                        })
+                    }
+                    _ => unreachable!(),
+                },
+            });
+        }
         if capability == desk_agent_protocol::Capability::FileMetadataRead {
             if self.selected_file_roots.is_empty() {
                 return Err(error(
@@ -4259,6 +5281,18 @@ impl ToolSeam for SignalDeviceAssistantTools {
         }
         if matches!(
             call.name.as_str(),
+            EXECUTE_CONFIRMED_UI_ACTION_TOOL
+                | "patch_live_spreadsheet_cell"
+                | "replace_live_document_body"
+                | "patch_live_presentation_slide"
+                | "patch_selected_numbers_copy"
+                | "replace_selected_pages_copy_body"
+                | "patch_selected_keynote_copy"
+        ) {
+            return self.authorize_and_execute_semantic_action(call).await;
+        }
+        if matches!(
+            call.name.as_str(),
             "browser_open_page"
                 | "browser_navigate_page"
                 | "browser_take_snapshot"
@@ -4516,9 +5550,120 @@ impl ToolSeam for SignalDeviceAssistantTools {
     }
 }
 
+async fn record_computer_action_pre_send_failure(
+    store: &SignalCapabilityGrantStore,
+    dispatch_id: &str,
+    call_id: &str,
+    now_unix_ms: u64,
+    dispatch_error: &AgentError,
+) -> Result<(), AgentError> {
+    store
+        .record_dispatch_completion(
+            &CapabilityDispatchCompletion {
+                dispatch_id: dispatch_id.to_string(),
+                call_id: call_id.to_string(),
+                generation: 1,
+                outcome: CapabilityDispatchOutcome::Failed,
+                result_digest_sha256: format!(
+                    "{:x}",
+                    Sha256::digest(dispatch_error.message.as_bytes())
+                ),
+            },
+            now_unix_ms,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to persist Computer Action pre-send failure: {db_error}"),
+                false,
+                false,
+            )
+        })
+}
+
+fn semantic_ui_completion_is_unknown(result: ComputerActionResultClass) -> bool {
+    matches!(
+        result,
+        ComputerActionResultClass::OutcomeUnknown | ComputerActionResultClass::ChangedButUnverified
+    )
+}
+
+fn semantic_ui_completion_is_verified(completion: &ComputerActionCompleted) -> bool {
+    completion.result == ComputerActionResultClass::Verified
+        && completion.facts.len() == 1
+        && completion.facts[0].verified
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn object_ref(token: &str, object_kind: ObjectKind) -> ObjectRef {
+        ObjectRef {
+            token: token.into(),
+            snapshot_id: format!("snapshot-{token}"),
+            object_kind,
+            expires_at: "2099-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn batch_document_selection_is_exact_and_destination_is_owner_selected() {
+        let source = object_ref("source", ObjectKind::File);
+        let destination = object_ref("destination", ObjectKind::Directory);
+        let roots = vec![source.clone(), destination.clone()];
+        assert_eq!(exact_selected_batch_file(&roots).unwrap(), source);
+        validate_selected_batch_destination(&roots, &destination).unwrap();
+
+        let second_source = object_ref("second-source", ObjectKind::File);
+        assert!(exact_selected_batch_file(&[roots.clone(), vec![second_source]].concat()).is_err());
+        assert!(
+            validate_selected_batch_destination(
+                &roots,
+                &object_ref("unselected", ObjectKind::Directory)
+            )
+            .is_err()
+        );
+        assert!(validate_selected_batch_destination(&roots, &source).is_err());
+    }
+
+    #[test]
+    fn unverified_semantic_ui_change_is_unknown_not_failed() {
+        assert!(semantic_ui_completion_is_unknown(
+            ComputerActionResultClass::OutcomeUnknown
+        ));
+        assert!(semantic_ui_completion_is_unknown(
+            ComputerActionResultClass::ChangedButUnverified
+        ));
+        assert!(!semantic_ui_completion_is_unknown(
+            ComputerActionResultClass::Verified
+        ));
+        assert!(!semantic_ui_completion_is_unknown(
+            ComputerActionResultClass::Failed
+        ));
+    }
+
+    #[test]
+    fn idempotent_semantic_ui_readback_is_verified_without_claiming_a_change() {
+        let completion = ComputerActionCompleted {
+            work_id: "work-1".into(),
+            action_request_id: "action-1".into(),
+            execution_generation: "generation-1".into(),
+            result: ComputerActionResultClass::Verified,
+            facts: vec![desk_agent_protocol::computer_use::ComputerActionStepFact {
+                index: 0,
+                changed: false,
+                verified: true,
+                summary: "target already had the requested state".into(),
+            }],
+            message: None,
+            output: None,
+        };
+
+        assert!(semantic_ui_completion_is_verified(&completion));
+    }
 
     #[test]
     fn capability_input_canonicalization_sorts_nested_objects() {

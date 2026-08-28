@@ -1361,6 +1361,33 @@ async fn run_turn_inner(
             })
             .map(|reference| reference.object_ref.clone())
     });
+    let selected_live_spreadsheet = readiness.as_ref().and_then(|readiness| {
+        readiness
+            .context_references
+            .iter()
+            .find(|reference| {
+                reference.capability == desk_agent_protocol::Capability::SpreadsheetLiveInspect
+            })
+            .map(|reference| reference.object_ref.clone())
+    });
+    let selected_live_document = readiness.as_ref().and_then(|readiness| {
+        readiness
+            .context_references
+            .iter()
+            .find(|reference| {
+                reference.capability == desk_agent_protocol::Capability::DocumentLiveInspect
+            })
+            .map(|reference| reference.object_ref.clone())
+    });
+    let selected_live_presentation = readiness.as_ref().and_then(|readiness| {
+        readiness
+            .context_references
+            .iter()
+            .find(|reference| {
+                reference.capability == desk_agent_protocol::Capability::PresentationLiveInspect
+            })
+            .map(|reference| reference.object_ref.clone())
+    });
     let selected_browser_surface = readiness.as_ref().and_then(|readiness| {
         readiness
             .context_references
@@ -1403,14 +1430,41 @@ async fn run_turn_inner(
         .collect::<std::collections::BTreeSet<_>>();
     if !selected_file_roots.is_empty() {
         selected_source_tools.insert("inspect_selected_file_metadata".into());
-        if selected_file_roots.iter().any(|object_ref| {
-            object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::File
-        }) {
+        let selected_file_count = selected_file_roots
+            .iter()
+            .filter(|object_ref| {
+                object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::File
+            })
+            .count();
+        let has_output_directory = selected_file_roots.iter().any(|object_ref| {
+            object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::Directory
+        });
+        if selected_file_count > 0 {
             selected_source_tools.insert("read_selected_text_file".into());
         }
-        if selected_file_roots.iter().any(|object_ref| {
-            object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::Directory
-        }) {
+        if selected_file_count == 1 {
+            selected_source_tools.extend(
+                [
+                    "inspect_selected_numbers_with_iwork",
+                    "inspect_selected_pages_with_iwork",
+                    "inspect_selected_keynote_with_iwork",
+                ]
+                .into_iter()
+                .map(str::to_string),
+            );
+            if has_output_directory {
+                selected_source_tools.extend(
+                    [
+                        "patch_selected_numbers_copy",
+                        "replace_selected_pages_copy_body",
+                        "patch_selected_keynote_copy",
+                    ]
+                    .into_iter()
+                    .map(str::to_string),
+                );
+            }
+        }
+        if has_output_directory {
             selected_source_tools.insert("create_text_artifact_in_selected_directory".into());
             selected_source_tools.insert("create_local_communication_draft".into());
         }
@@ -1447,6 +1501,18 @@ async fn run_turn_inner(
     }
     if selected_outlook_surface.is_some() {
         selected_source_tools.insert("prepare_outlook_new_draft_handoff".into());
+    }
+    if selected_live_spreadsheet.is_some() {
+        selected_source_tools.insert("inspect_live_spreadsheet".into());
+        selected_source_tools.insert("patch_live_spreadsheet_cell".into());
+    }
+    if selected_live_document.is_some() {
+        selected_source_tools.insert("inspect_live_document".into());
+        selected_source_tools.insert("replace_live_document_body".into());
+    }
+    if selected_live_presentation.is_some() {
+        selected_source_tools.insert("inspect_live_presentation".into());
+        selected_source_tools.insert("patch_live_presentation_slide".into());
     }
     selected_source_tools
         .insert(desk_diagnose_core::device_assistant::PREVIEW_COMPUTER_ACTION_TOOL.to_string());
@@ -1492,15 +1558,42 @@ async fn run_turn_inner(
     if !selected_file_roots.is_empty() {
         selected_tool_capability_ids
             .push(desk_diagnose_core::device_assistant::FILE_METADATA_CAPABILITY_ID.into());
-        if selected_file_roots.iter().any(|object_ref| {
-            object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::File
-        }) {
+        let selected_file_count = selected_file_roots
+            .iter()
+            .filter(|object_ref| {
+                object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::File
+            })
+            .count();
+        let has_output_directory = selected_file_roots.iter().any(|object_ref| {
+            object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::Directory
+        });
+        if selected_file_count > 0 {
             selected_tool_capability_ids
                 .push(desk_diagnose_core::device_assistant::FILE_CONTENT_CAPABILITY_ID.into());
         }
-        if selected_file_roots.iter().any(|object_ref| {
-            object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::Directory
-        }) {
+        if selected_file_count == 1 {
+            selected_tool_capability_ids.extend(
+                [
+                    desk_diagnose_core::device_assistant::SPREADSHEET_BATCH_INSPECT_CAPABILITY_ID,
+                    desk_diagnose_core::device_assistant::DOCUMENT_BATCH_INSPECT_CAPABILITY_ID,
+                    desk_diagnose_core::device_assistant::PRESENTATION_BATCH_INSPECT_CAPABILITY_ID,
+                ]
+                .into_iter()
+                .map(str::to_string),
+            );
+            if has_output_directory {
+                selected_tool_capability_ids.extend(
+                    [
+                        desk_diagnose_core::device_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID,
+                        desk_diagnose_core::device_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID,
+                        desk_diagnose_core::device_assistant::PRESENTATION_BATCH_PATCH_CAPABILITY_ID,
+                    ]
+                    .into_iter()
+                    .map(str::to_string),
+                );
+            }
+        }
+        if has_output_directory {
             selected_tool_capability_ids.push(
                 desk_diagnose_core::device_assistant::FILE_ARTIFACT_CREATE_CAPABILITY_ID.into(),
             );
@@ -1554,6 +1647,36 @@ async fn run_turn_inner(
     if selected_outlook_surface.is_some() {
         selected_tool_capability_ids
             .push(desk_diagnose_core::device_assistant::OUTLOOK_NEW_HANDOFF_CAPABILITY_ID.into());
+    }
+    if selected_live_spreadsheet.is_some() {
+        selected_tool_capability_ids.extend(
+            [
+                desk_diagnose_core::device_assistant::SPREADSHEET_LIVE_INSPECT_CAPABILITY_ID,
+                desk_diagnose_core::device_assistant::SPREADSHEET_LIVE_PATCH_CAPABILITY_ID,
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+    }
+    if selected_live_document.is_some() {
+        selected_tool_capability_ids.extend(
+            [
+                desk_diagnose_core::device_assistant::DOCUMENT_LIVE_INSPECT_CAPABILITY_ID,
+                desk_diagnose_core::device_assistant::DOCUMENT_LIVE_PATCH_CAPABILITY_ID,
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+    }
+    if selected_live_presentation.is_some() {
+        selected_tool_capability_ids.extend(
+            [
+                desk_diagnose_core::device_assistant::PRESENTATION_LIVE_INSPECT_CAPABILITY_ID,
+                desk_diagnose_core::device_assistant::PRESENTATION_LIVE_PATCH_CAPABILITY_ID,
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
     }
     desk_diagnose_core::device_assistant::retain_selected_context_tools(
         &provider_registry,
@@ -1684,6 +1807,24 @@ async fn run_turn_inner(
     if selected_outlook_surface.is_some() {
         granted.push(desk_agent_protocol::Capability::CommunicationOutlookNewHandoffConfirmed);
     }
+    if selected_live_spreadsheet.is_some() {
+        granted.extend([
+            desk_agent_protocol::Capability::SpreadsheetLiveInspect,
+            desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed,
+        ]);
+    }
+    if selected_live_document.is_some() {
+        granted.extend([
+            desk_agent_protocol::Capability::DocumentLiveInspect,
+            desk_agent_protocol::Capability::DocumentLivePatchConfirmed,
+        ]);
+    }
+    if selected_live_presentation.is_some() {
+        granted.extend([
+            desk_agent_protocol::Capability::PresentationLiveInspect,
+            desk_agent_protocol::Capability::PresentationLivePatchConfirmed,
+        ]);
+    }
     let mutation_enabled = granted.iter().any(|capability| {
         matches!(
             capability,
@@ -1697,6 +1838,9 @@ async fn run_turn_inner(
                 | desk_agent_protocol::Capability::BrowserInputFallbackConfirmed
                 | desk_agent_protocol::Capability::BrowserExternalDraftWriteConfirmed
                 | desk_agent_protocol::Capability::CommunicationOutlookNewHandoffConfirmed
+                | desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed
+                | desk_agent_protocol::Capability::DocumentLivePatchConfirmed
+                | desk_agent_protocol::Capability::PresentationLivePatchConfirmed
         )
     });
     let scope = AgentScope {
@@ -1741,6 +1885,9 @@ async fn run_turn_inner(
         config.wire_protocol.map(|value| format!("{value:?}")),
         Some(model_name.clone()),
         selected_office_document,
+        selected_live_spreadsheet,
+        selected_live_document,
+        selected_live_presentation,
         selected_file_roots,
         selected_spreadsheet_roots,
         selected_terminal_roots,

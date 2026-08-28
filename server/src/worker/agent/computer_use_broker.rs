@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use chrono::{DateTime, Duration, Utc};
 use desk_agent_protocol::browser_control::{
@@ -16,20 +16,31 @@ use desk_agent_protocol::browser_control::{
 use desk_agent_protocol::communication::{
     CommunicationDraftHandoff, OutlookNewComposeHandoffRequest,
 };
+#[cfg(target_os = "macos")]
+use desk_agent_protocol::computer_use::{
+    BatchDocumentArtifact, BatchDocumentSourceProjection, ComputerActionKind, ComputerActionOutput,
+    LiveDocumentInspectOutput, LiveDocumentInspectParams, LiveDocumentProjection,
+};
 use desk_agent_protocol::computer_use::{
     COMPUTER_USE_SCHEMA_VERSION, ComputerUseAdapterKind, ComputerUseAdapterRef,
     ComputerUseCapabilityReadiness, ComputerUseContextReference, ComputerUseReadiness,
     ComputerUseReadinessReason, DesktopSessionInspectOutput, DesktopSessionInspectParams,
     MAX_COMPUTER_USE_INSPECT_BYTES, MAX_COMPUTER_USE_INSPECT_NODES, ObjectKind, ObjectRef,
-    OfficeInspectOutput, OfficeInspectParams, OfficeSelectionProjection, UiInspectOutput,
-    UiInspectParams, UiNodeProjection,
+    OfficeInspectParams, UiInspectOutput, UiInspectParams, UiNodeProjection, UiSemanticAction,
 };
+#[cfg(any(windows, target_os = "macos"))]
+use desk_agent_protocol::computer_use::{OfficeInspectOutput, OfficeSelectionProjection};
 use desk_agent_protocol::{AgentError, AgentErrorKind, Capability};
+#[cfg(target_os = "macos")]
+use desk_diagnose_core::device_assistant::MACOS_ACCESSIBILITY_ADAPTER_ID;
+#[cfg(not(target_os = "macos"))]
+use desk_diagnose_core::device_assistant::WINDOWS_UIA_ADAPTER_ID;
 use desk_diagnose_core::device_assistant::{
     CURRENT_SCREEN_ADAPTER_ID, DESKTOP_SESSION_ADAPTER_ID, FILE_ARTIFACT_ADAPTER_ID,
-    FILE_WORKSPACE_ADAPTER_ID, OFFICE_EXCEL_ADAPTER_ID, OUTLOOK_NEW_MAILTO_ADAPTER_VERSION,
-    SPREADSHEET_FILE_ADAPTER_ID, SYSTEM_COMMAND_ADAPTER_ID, SYSTEM_DIAGNOSTICS_ADAPTER_ID,
-    TERMINAL_OUTPUT_ADAPTER_ID, WINDOWS_UIA_ADAPTER_ID, device_assistant_edge_adapter_registry,
+    FILE_WORKSPACE_ADAPTER_ID, IWORK_ADAPTER_VERSION, OFFICE_EXCEL_ADAPTER_ID,
+    OUTLOOK_NEW_MAILTO_ADAPTER_VERSION, SPREADSHEET_FILE_ADAPTER_ID, SYSTEM_COMMAND_ADAPTER_ID,
+    SYSTEM_DIAGNOSTICS_ADAPTER_ID, TERMINAL_OUTPUT_ADAPTER_ID,
+    device_assistant_edge_adapter_registry,
 };
 
 use crate::model::settings::ComputerUseSettings;
@@ -96,6 +107,49 @@ pub(crate) enum ResolvedObject {
         document_url_hash: String,
         address: String,
     },
+    IworkNumbersCell {
+        document_identity_sha256: String,
+        sheet_name: String,
+        table_name: String,
+        cell_address: String,
+        before_sha256: String,
+    },
+    IworkPagesDocument {
+        document_identity_sha256: String,
+        before_sha256: String,
+    },
+    IworkKeynoteSlide {
+        document_identity_sha256: String,
+        slide_number: i64,
+        title_before_sha256: String,
+        notes_before_sha256: String,
+    },
+    IworkNumbersBatch {
+        source_file: ObjectRef,
+        source_sha256: String,
+        source_byte_len: u64,
+        document_identity_sha256: String,
+        sheet_name: String,
+        table_name: String,
+        cell_address: String,
+        before_sha256: String,
+    },
+    IworkPagesBatch {
+        source_file: ObjectRef,
+        source_sha256: String,
+        source_byte_len: u64,
+        document_identity_sha256: String,
+        before_sha256: String,
+    },
+    IworkKeynoteBatch {
+        source_file: ObjectRef,
+        source_sha256: String,
+        source_byte_len: u64,
+        document_identity_sha256: String,
+        slide_number: i64,
+        title_before_sha256: String,
+        notes_before_sha256: String,
+    },
 }
 
 #[derive(Clone)]
@@ -131,9 +185,17 @@ pub struct ComputerUseBroker {
     readiness_revision: AtomicU64,
     readiness_revision_state: Mutex<Option<ReadinessRevisionState>>,
     human_input_epoch: AtomicU64,
+    input_ownership_ready: AtomicBool,
     objects: Mutex<HashMap<String, StoredObject>>,
     writer_lease: WriterLeaseCoordinator,
     browser: BrowserDevtoolsBroker,
+}
+
+pub(crate) struct SemanticActionResult {
+    pub(crate) changed: bool,
+    pub(crate) verified: bool,
+    pub(crate) summary: String,
+    pub(crate) output: Option<ComputerActionOutput>,
 }
 
 impl Default for ComputerUseBroker {
@@ -152,6 +214,7 @@ impl ComputerUseBroker {
             readiness_revision: AtomicU64::new(0),
             readiness_revision_state: Mutex::new(None),
             human_input_epoch: AtomicU64::new(0),
+            input_ownership_ready: AtomicBool::new(false),
             objects: Mutex::new(HashMap::new()),
             writer_lease: WriterLeaseCoordinator::new(),
             browser: BrowserDevtoolsBroker::default(),
@@ -175,6 +238,10 @@ impl ComputerUseBroker {
             .await;
     }
 
+    pub(crate) fn set_input_ownership_ready(&self, ready: bool) {
+        self.input_ownership_ready.store(ready, Ordering::SeqCst);
+    }
+
     pub fn preflight_browser_action(
         &self,
         surface: &ObjectRef,
@@ -189,6 +256,91 @@ impl ComputerUseBroker {
         request: &BrowserActionRequest,
     ) -> Result<BrowserActionResult, ChromeDevtoolsMcpError> {
         self.browser.execute(surface, request).await
+    }
+
+    pub(crate) fn preflight_ui_action(
+        &self,
+        target: &ObjectRef,
+        action: &UiSemanticAction,
+        ceiling: &ComputerUseSettings,
+    ) -> Result<(), AgentError> {
+        if !ceiling.enabled || !ceiling.generic_semantic_ui {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "semantic desktop UI actions are disabled by the device-local ceiling",
+                false,
+            ));
+        }
+        let ResolvedObject::UiElement {
+            process_id,
+            image_path,
+            fingerprint,
+        } = self.resolve_ref(target)?
+        else {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "semantic desktop UI action requires a UI element reference",
+                false,
+            ));
+        };
+        if !ceiling.application_allowed(&image_path) {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "the target application is not in the device-local Computer Use allowlist",
+                false,
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        return super::macos_accessibility_observer::preflight_action(
+            process_id,
+            &image_path,
+            &fingerprint,
+            action,
+        );
+        #[cfg(not(target_os = "macos"))]
+        Err(error(
+            AgentErrorKind::UnsupportedCapability,
+            "semantic desktop UI actions are not enabled for this platform adapter",
+            false,
+        ))
+    }
+
+    pub(crate) fn execute_ui_action(
+        &self,
+        target: &ObjectRef,
+        action: &UiSemanticAction,
+        ceiling: &ComputerUseSettings,
+    ) -> Result<SemanticActionResult, AgentError> {
+        self.preflight_ui_action(target, action, ceiling)?;
+        let ResolvedObject::UiElement {
+            process_id,
+            image_path,
+            fingerprint,
+        } = self.resolve_ref(target)?
+        else {
+            unreachable!("preflight accepted only a UI element reference")
+        };
+        #[cfg(target_os = "macos")]
+        {
+            let result = super::macos_accessibility_observer::apply_action(
+                process_id,
+                &image_path,
+                &fingerprint,
+                action,
+            )?;
+            return Ok(SemanticActionResult {
+                changed: result.changed,
+                verified: result.verified,
+                summary: result.summary,
+                output: None,
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err(error(
+            AgentErrorKind::UnsupportedCapability,
+            "semantic desktop UI actions are not enabled for this platform adapter",
+            false,
+        ))
     }
 
     pub fn preflight_outlook_new_handoff(
@@ -284,11 +436,19 @@ impl ComputerUseBroker {
             .expect("compiled desktop session adapter is registered")
             .adapter_version
             .clone();
-        let ui_adapter_version = edge_registry
+        #[cfg(windows)]
+        let ui_adapter = edge_registry
             .adapter(WINDOWS_UIA_ADAPTER_ID)
-            .expect("compiled Windows UIA adapter is registered")
-            .adapter_version
-            .clone();
+            .expect("compiled Windows UIA adapter is registered");
+        #[cfg(target_os = "macos")]
+        let ui_adapter = edge_registry
+            .adapter(MACOS_ACCESSIBILITY_ADAPTER_ID)
+            .expect("compiled macOS Accessibility adapter is registered");
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let ui_adapter = edge_registry
+            .adapter(WINDOWS_UIA_ADAPTER_ID)
+            .expect("compiled fallback UI adapter is registered");
+        let ui_adapter_version = ui_adapter.adapter_version.clone();
         let office_adapter_version = edge_registry
             .adapter(OFFICE_EXCEL_ADAPTER_ID)
             .expect("compiled Office Excel adapter is registered")
@@ -347,7 +507,25 @@ impl ComputerUseBroker {
                 )
             })
             .unwrap_or_else(|| format!("unavailable:{}", self.current_incarnation_nonce()));
-        let platform_supported = cfg!(windows);
+        let platform_supported = cfg!(any(windows, target_os = "macos"));
+        let file_provider_supported = cfg!(any(windows, target_os = "macos"));
+        let office_provider_supported = cfg!(windows);
+        let iwork_provider_supported = cfg!(target_os = "macos");
+        let outlook_provider_supported = cfg!(windows);
+        let browser_provider_supported = cfg!(any(windows, target_os = "macos"));
+        let semantic_action_supported = cfg!(target_os = "macos");
+        #[cfg(target_os = "macos")]
+        let macos_permissions = crate::macos_permissions::probe();
+        #[cfg(not(target_os = "macos"))]
+        let macos_accessibility_ready = true;
+        #[cfg(target_os = "macos")]
+        let macos_accessibility_ready = macos_permissions.accessibility;
+        #[cfg(target_os = "macos")]
+        let macos_input_permission_ready = macos_permissions.input_monitoring;
+        #[cfg(not(target_os = "macos"))]
+        let macos_input_permission_ready = false;
+        let macos_input_ownership_ready =
+            macos_input_permission_ready && self.input_ownership_ready.load(Ordering::SeqCst);
         let (session_ready, session_reason) = if !ceiling.observation_enabled() {
             (
                 false,
@@ -363,12 +541,10 @@ impl ComputerUseBroker {
                 Some(ComputerUseReadinessReason::NoInteractiveSession),
             )
         };
-        let ui_ready = session_ready && !ceiling.allowed_application_paths.is_empty();
-        #[cfg(windows)]
+        let ui_ready = session_ready
+            && macos_accessibility_ready
+            && !ceiling.allowed_application_paths.is_empty();
         let office_configured = super::office_bridge_observer::configured();
-        #[cfg(not(windows))]
-        let office_configured = false;
-        #[cfg(windows)]
         let office_document_ref = (session_ready && ceiling.office_semantic && office_configured)
             .then(super::office_bridge_observer::current_excel_document_hash)
             .flatten()
@@ -382,10 +558,84 @@ impl ComputerUseBroker {
                 )
                 .ok()
             });
-        #[cfg(not(windows))]
-        let office_document_ref: Option<ObjectRef> = None;
         let office_ready = office_document_ref.is_some();
-        let (screen_ready, screen_reason) = screen_capture_readiness(
+        #[cfg(target_os = "macos")]
+        let issue_iwork_ref = |application, object_kind| {
+            if !session_ready || !ceiling.iwork_semantic {
+                return Ok(None);
+            }
+            let observed = super::macos_iwork_adapter::observe(application)?;
+            let snapshot_id = self.next_snapshot_id();
+            self.issue_ref(
+                &snapshot_id,
+                &interactive_session_incarnation,
+                object_kind,
+                iwork_resolved_object(&observed),
+            )
+            .map(Some)
+        };
+        #[cfg(target_os = "macos")]
+        let numbers_result = issue_iwork_ref(
+            super::macos_iwork_adapter::IworkApplication::Numbers,
+            ObjectKind::Range,
+        );
+        #[cfg(target_os = "macos")]
+        let pages_result = issue_iwork_ref(
+            super::macos_iwork_adapter::IworkApplication::Pages,
+            ObjectKind::Document,
+        );
+        #[cfg(target_os = "macos")]
+        let keynote_result = issue_iwork_ref(
+            super::macos_iwork_adapter::IworkApplication::Keynote,
+            ObjectKind::Slide,
+        );
+        #[cfg(target_os = "macos")]
+        let (numbers_ref, numbers_error) = split_iwork_readiness(numbers_result);
+        #[cfg(target_os = "macos")]
+        let (pages_ref, pages_error) = split_iwork_readiness(pages_result);
+        #[cfg(target_os = "macos")]
+        let (keynote_ref, keynote_error) = split_iwork_readiness(keynote_result);
+        #[cfg(not(target_os = "macos"))]
+        let (numbers_ref, pages_ref, keynote_ref): (
+            Option<ObjectRef>,
+            Option<ObjectRef>,
+            Option<ObjectRef>,
+        ) = (None, None, None);
+        #[cfg(not(target_os = "macos"))]
+        let (numbers_error, pages_error, keynote_error): (
+            Option<AgentErrorKind>,
+            Option<AgentErrorKind>,
+            Option<AgentErrorKind>,
+        ) = (None, None, None);
+        let iwork_reason = |ready: bool, failure: Option<AgentErrorKind>| {
+            (!ready).then_some(
+                if !ceiling.observation_enabled() || !ceiling.iwork_semantic {
+                    ComputerUseReadinessReason::DisabledByLocalCeiling
+                } else if !iwork_provider_supported {
+                    ComputerUseReadinessReason::UnsupportedPlatform
+                } else if !session_ready {
+                    session_reason.unwrap_or(ComputerUseReadinessReason::NoInteractiveSession)
+                } else {
+                    match failure {
+                        Some(AgentErrorKind::PermissionDenied) => {
+                            ComputerUseReadinessReason::PermissionMissing
+                        }
+                        Some(AgentErrorKind::SessionUnavailable) => {
+                            ComputerUseReadinessReason::NoActiveDocument
+                        }
+                        Some(AgentErrorKind::TargetOffline)
+                        | Some(AgentErrorKind::UnsupportedCapability)
+                        | Some(AgentErrorKind::TransportError)
+                        | Some(AgentErrorKind::Timeout)
+                        | Some(AgentErrorKind::Internal) => {
+                            ComputerUseReadinessReason::AdapterUnavailable
+                        }
+                        _ => ComputerUseReadinessReason::NoActiveDocument,
+                    }
+                },
+            )
+        };
+        let (mut screen_ready, mut screen_reason) = screen_capture_readiness(
             ceiling.observation_enabled(),
             platform_supported,
             session_ready,
@@ -393,9 +643,14 @@ impl ComputerUseBroker {
             allow_screen,
             display_selected,
         );
+        #[cfg(target_os = "macos")]
+        if screen_ready && !macos_permissions.screen_recording {
+            screen_ready = false;
+            screen_reason = Some(ComputerUseReadinessReason::PermissionMissing);
+        }
         let browser_readiness = self.browser.readiness();
         let browser_surface = self.browser.surface_ref();
-        let browser_ready = platform_supported
+        let browser_ready = browser_provider_supported
             && session_ready
             && ceiling.browser_semantic
             && browser_readiness
@@ -404,7 +659,7 @@ impl ComputerUseBroker {
             && browser_surface.is_some();
         let browser_reason = (!browser_ready).then_some(if !ceiling.browser_semantic {
             ComputerUseReadinessReason::DisabledByLocalCeiling
-        } else if !platform_supported {
+        } else if !browser_provider_supported {
             ComputerUseReadinessReason::UnsupportedPlatform
         } else if !session_ready {
             session_reason.unwrap_or(ComputerUseReadinessReason::NoInteractiveSession)
@@ -431,12 +686,14 @@ impl ComputerUseBroker {
             kind: ComputerUseAdapterKind::BrowserDevtoolsMcp,
             version: super::browser_devtools_mcp::CHROME_DEVTOOLS_MCP_VERSION.into(),
         };
-        let outlook_handler =
-            if platform_supported && session_ready && ceiling.communication_handoff_enabled() {
-                super::outlook_new_handoff::probe_handler().ok()
-            } else {
-                None
-            };
+        let outlook_handler = if outlook_provider_supported
+            && session_ready
+            && ceiling.communication_handoff_enabled()
+        {
+            super::outlook_new_handoff::probe_handler().ok()
+        } else {
+            None
+        };
         let outlook_application_ref = outlook_handler.as_ref().and_then(|handler| {
             let snapshot_id = self.next_snapshot_id();
             self.issue_ref(
@@ -454,7 +711,7 @@ impl ComputerUseBroker {
         let outlook_reason =
             (!outlook_ready).then_some(if !ceiling.communication_handoff_enabled() {
                 ComputerUseReadinessReason::DisabledByLocalCeiling
-            } else if !platform_supported {
+            } else if !outlook_provider_supported {
                 ComputerUseReadinessReason::UnsupportedPlatform
             } else if !session_ready {
                 session_reason.unwrap_or(ComputerUseReadinessReason::NoInteractiveSession)
@@ -466,6 +723,11 @@ impl ComputerUseBroker {
             version: OUTLOOK_NEW_MAILTO_ADAPTER_VERSION.into(),
         };
         let adapter = ComputerUseAdapterRef {
+            #[cfg(windows)]
+            kind: ComputerUseAdapterKind::WindowsUia,
+            #[cfg(target_os = "macos")]
+            kind: ComputerUseAdapterKind::MacosAccessibility,
+            #[cfg(not(any(windows, target_os = "macos")))]
             kind: ComputerUseAdapterKind::WindowsUia,
             version: session_adapter_version,
         };
@@ -554,8 +816,8 @@ impl ComputerUseBroker {
                 ComputerUseCapabilityReadiness {
                     capability: Capability::DesktopUiInspect,
                     adapter: ComputerUseAdapterRef {
-                        kind: ComputerUseAdapterKind::WindowsUia,
-                        version: ui_adapter_version,
+                        kind: adapter.kind,
+                        version: ui_adapter_version.clone(),
                     },
                     supported: platform_supported,
                     ready: ui_ready,
@@ -564,10 +826,39 @@ impl ComputerUseBroker {
                             || ceiling.allowed_application_paths.is_empty()
                         {
                             ComputerUseReadinessReason::DisabledByLocalCeiling
+                        } else if !macos_accessibility_ready {
+                            ComputerUseReadinessReason::PermissionMissing
                         } else {
                             session_reason.unwrap_or(ComputerUseReadinessReason::AdapterUnavailable)
                         },
                     ),
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::DesktopUiActionConfirmed,
+                    adapter: ComputerUseAdapterRef {
+                        kind: adapter.kind,
+                        version: ui_adapter_version,
+                    },
+                    supported: semantic_action_supported,
+                    ready: semantic_action_supported
+                        && ui_ready
+                        && macos_input_ownership_ready
+                        && ceiling.generic_semantic_ui,
+                    reason: (!(semantic_action_supported
+                        && ui_ready
+                        && macos_input_ownership_ready
+                        && ceiling.generic_semantic_ui))
+                        .then_some(if !semantic_action_supported {
+                            ComputerUseReadinessReason::UnsupportedPlatform
+                        } else if !ceiling.generic_semantic_ui {
+                            ComputerUseReadinessReason::DisabledByLocalCeiling
+                        } else if !macos_accessibility_ready
+                            || semantic_action_supported && !macos_input_permission_ready
+                        {
+                            ComputerUseReadinessReason::PermissionMissing
+                        } else {
+                            session_reason.unwrap_or(ComputerUseReadinessReason::AdapterUnavailable)
+                        }),
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::OfficeDocumentInspect,
@@ -575,12 +866,12 @@ impl ComputerUseBroker {
                         kind: ComputerUseAdapterKind::OfficeExcel,
                         version: office_adapter_version,
                     },
-                    supported: platform_supported,
+                    supported: office_provider_supported,
                     ready: office_ready,
                     reason: (!office_ready).then_some(
                         if !ceiling.observation_enabled() || !ceiling.office_semantic {
                             ComputerUseReadinessReason::DisabledByLocalCeiling
-                        } else if !platform_supported {
+                        } else if !office_provider_supported {
                             ComputerUseReadinessReason::UnsupportedPlatform
                         } else if !session_ready {
                             session_reason
@@ -593,14 +884,74 @@ impl ComputerUseBroker {
                     ),
                 },
                 ComputerUseCapabilityReadiness {
+                    capability: Capability::SpreadsheetLiveInspect,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::IworkNumbers,
+                        version: IWORK_ADAPTER_VERSION.into(),
+                    },
+                    supported: iwork_provider_supported,
+                    ready: numbers_ref.is_some(),
+                    reason: iwork_reason(numbers_ref.is_some(), numbers_error),
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::SpreadsheetLivePatchConfirmed,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::IworkNumbers,
+                        version: IWORK_ADAPTER_VERSION.into(),
+                    },
+                    supported: iwork_provider_supported,
+                    ready: numbers_ref.is_some(),
+                    reason: iwork_reason(numbers_ref.is_some(), numbers_error),
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::DocumentLiveInspect,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::IworkPages,
+                        version: IWORK_ADAPTER_VERSION.into(),
+                    },
+                    supported: iwork_provider_supported,
+                    ready: pages_ref.is_some(),
+                    reason: iwork_reason(pages_ref.is_some(), pages_error),
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::DocumentLivePatchConfirmed,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::IworkPages,
+                        version: IWORK_ADAPTER_VERSION.into(),
+                    },
+                    supported: iwork_provider_supported,
+                    ready: pages_ref.is_some(),
+                    reason: iwork_reason(pages_ref.is_some(), pages_error),
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::PresentationLiveInspect,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::IworkKeynote,
+                        version: IWORK_ADAPTER_VERSION.into(),
+                    },
+                    supported: iwork_provider_supported,
+                    ready: keynote_ref.is_some(),
+                    reason: iwork_reason(keynote_ref.is_some(), keynote_error),
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::PresentationLivePatchConfirmed,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::IworkKeynote,
+                        version: IWORK_ADAPTER_VERSION.into(),
+                    },
+                    supported: iwork_provider_supported,
+                    ready: keynote_ref.is_some(),
+                    reason: iwork_reason(keynote_ref.is_some(), keynote_error),
+                },
+                ComputerUseCapabilityReadiness {
                     capability: Capability::FileMetadataRead,
                     adapter: ComputerUseAdapterRef {
                         kind: ComputerUseAdapterKind::FileSystem,
                         version: file_adapter_version.clone(),
                     },
-                    supported: platform_supported,
-                    ready: platform_supported,
-                    reason: (!platform_supported)
+                    supported: file_provider_supported,
+                    ready: file_provider_supported,
+                    reason: (!file_provider_supported)
                         .then_some(ComputerUseReadinessReason::UnsupportedPlatform),
                 },
                 ComputerUseCapabilityReadiness {
@@ -609,9 +960,9 @@ impl ComputerUseBroker {
                         kind: ComputerUseAdapterKind::FileSystem,
                         version: file_adapter_version,
                     },
-                    supported: platform_supported,
-                    ready: platform_supported,
-                    reason: (!platform_supported)
+                    supported: file_provider_supported,
+                    ready: file_provider_supported,
+                    reason: (!file_provider_supported)
                         .then_some(ComputerUseReadinessReason::UnsupportedPlatform),
                 },
                 ComputerUseCapabilityReadiness {
@@ -620,9 +971,9 @@ impl ComputerUseBroker {
                         kind: ComputerUseAdapterKind::FileSystem,
                         version: spreadsheet_file_adapter_version.clone(),
                     },
-                    supported: platform_supported,
-                    ready: platform_supported,
-                    reason: (!platform_supported)
+                    supported: file_provider_supported,
+                    ready: file_provider_supported,
+                    reason: (!file_provider_supported)
                         .then_some(ComputerUseReadinessReason::UnsupportedPlatform),
                 },
                 ComputerUseCapabilityReadiness {
@@ -631,9 +982,9 @@ impl ComputerUseBroker {
                         kind: ComputerUseAdapterKind::FileSystem,
                         version: spreadsheet_file_adapter_version.clone(),
                     },
-                    supported: platform_supported,
-                    ready: platform_supported,
-                    reason: (!platform_supported)
+                    supported: file_provider_supported,
+                    ready: file_provider_supported,
+                    reason: (!file_provider_supported)
                         .then_some(ComputerUseReadinessReason::UnsupportedPlatform),
                 },
                 ComputerUseCapabilityReadiness {
@@ -642,10 +993,10 @@ impl ComputerUseBroker {
                         kind: ComputerUseAdapterKind::FileSystem,
                         version: spreadsheet_file_adapter_version.clone(),
                     },
-                    supported: platform_supported,
-                    ready: platform_supported && ceiling.file_artifact_create_enabled(),
-                    reason: (!(platform_supported && ceiling.file_artifact_create_enabled()))
-                        .then_some(if !platform_supported {
+                    supported: file_provider_supported,
+                    ready: file_provider_supported && ceiling.file_artifact_create_enabled(),
+                    reason: (!(file_provider_supported && ceiling.file_artifact_create_enabled()))
+                        .then_some(if !file_provider_supported {
                             ComputerUseReadinessReason::UnsupportedPlatform
                         } else {
                             ComputerUseReadinessReason::DisabledByLocalCeiling
@@ -657,10 +1008,10 @@ impl ComputerUseBroker {
                         kind: ComputerUseAdapterKind::FileSystem,
                         version: spreadsheet_file_adapter_version.clone(),
                     },
-                    supported: platform_supported,
-                    ready: platform_supported && ceiling.file_artifact_create_enabled(),
-                    reason: (!(platform_supported && ceiling.file_artifact_create_enabled()))
-                        .then_some(if !platform_supported {
+                    supported: file_provider_supported,
+                    ready: file_provider_supported && ceiling.file_artifact_create_enabled(),
+                    reason: (!(file_provider_supported && ceiling.file_artifact_create_enabled()))
+                        .then_some(if !file_provider_supported {
                             ComputerUseReadinessReason::UnsupportedPlatform
                         } else {
                             ComputerUseReadinessReason::DisabledByLocalCeiling
@@ -672,10 +1023,10 @@ impl ComputerUseBroker {
                         kind: ComputerUseAdapterKind::FileSystem,
                         version: spreadsheet_file_adapter_version,
                     },
-                    supported: platform_supported,
-                    ready: platform_supported && ceiling.file_artifact_create_enabled(),
-                    reason: (!(platform_supported && ceiling.file_artifact_create_enabled()))
-                        .then_some(if !platform_supported {
+                    supported: file_provider_supported,
+                    ready: file_provider_supported && ceiling.file_artifact_create_enabled(),
+                    reason: (!(file_provider_supported && ceiling.file_artifact_create_enabled()))
+                        .then_some(if !file_provider_supported {
                             ComputerUseReadinessReason::UnsupportedPlatform
                         } else {
                             ComputerUseReadinessReason::DisabledByLocalCeiling
@@ -687,10 +1038,10 @@ impl ComputerUseBroker {
                         kind: ComputerUseAdapterKind::FileSystem,
                         version: file_artifact_adapter_version.clone(),
                     },
-                    supported: platform_supported,
-                    ready: platform_supported && ceiling.file_artifact_create_enabled(),
-                    reason: (!(platform_supported && ceiling.file_artifact_create_enabled()))
-                        .then_some(if !platform_supported {
+                    supported: file_provider_supported,
+                    ready: file_provider_supported && ceiling.file_artifact_create_enabled(),
+                    reason: (!(file_provider_supported && ceiling.file_artifact_create_enabled()))
+                        .then_some(if !file_provider_supported {
                             ComputerUseReadinessReason::UnsupportedPlatform
                         } else {
                             ComputerUseReadinessReason::DisabledByLocalCeiling
@@ -702,10 +1053,10 @@ impl ComputerUseBroker {
                         kind: ComputerUseAdapterKind::FileSystem,
                         version: file_artifact_adapter_version,
                     },
-                    supported: platform_supported,
-                    ready: platform_supported && ceiling.file_artifact_create_enabled(),
-                    reason: (!(platform_supported && ceiling.file_artifact_create_enabled()))
-                        .then_some(if !platform_supported {
+                    supported: file_provider_supported,
+                    ready: file_provider_supported && ceiling.file_artifact_create_enabled(),
+                    reason: (!(file_provider_supported && ceiling.file_artifact_create_enabled()))
+                        .then_some(if !file_provider_supported {
                             ComputerUseReadinessReason::UnsupportedPlatform
                         } else {
                             ComputerUseReadinessReason::DisabledByLocalCeiling
@@ -714,7 +1065,7 @@ impl ComputerUseBroker {
                 ComputerUseCapabilityReadiness {
                     capability: Capability::CommunicationOutlookNewHandoffConfirmed,
                     adapter: outlook_adapter,
-                    supported: platform_supported,
+                    supported: outlook_provider_supported,
                     ready: outlook_ready,
                     reason: outlook_reason,
                 },
@@ -742,21 +1093,21 @@ impl ComputerUseBroker {
                 ComputerUseCapabilityReadiness {
                     capability: Capability::BrowserPageObserve,
                     adapter: browser_adapter.clone(),
-                    supported: platform_supported,
+                    supported: browser_provider_supported,
                     ready: browser_ready,
                     reason: browser_reason,
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::BrowserPageNavigateConfirmed,
                     adapter: browser_adapter.clone(),
-                    supported: platform_supported,
+                    supported: browser_provider_supported,
                     ready: browser_ready,
                     reason: browser_reason,
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::BrowserInputFallbackConfirmed,
                     adapter: browser_adapter,
-                    supported: platform_supported,
+                    supported: browser_provider_supported,
                     ready: browser_ready,
                     reason: browser_reason,
                 },
@@ -766,7 +1117,7 @@ impl ComputerUseBroker {
                         kind: ComputerUseAdapterKind::BrowserDevtoolsMcp,
                         version: super::browser_devtools_mcp::CHROME_DEVTOOLS_MCP_VERSION.into(),
                     },
-                    supported: platform_supported,
+                    supported: browser_provider_supported,
                     ready: slack_ready,
                     reason: slack_reason,
                 },
@@ -777,6 +1128,39 @@ impl ComputerUseBroker {
                     capability: Capability::OfficeDocumentInspect,
                     object_ref,
                 })
+                .chain(numbers_ref.into_iter().flat_map(|object_ref| {
+                    [
+                        Capability::SpreadsheetLiveInspect,
+                        Capability::SpreadsheetLivePatchConfirmed,
+                    ]
+                    .into_iter()
+                    .map(move |capability| ComputerUseContextReference {
+                        capability,
+                        object_ref: object_ref.clone(),
+                    })
+                }))
+                .chain(pages_ref.into_iter().flat_map(|object_ref| {
+                    [
+                        Capability::DocumentLiveInspect,
+                        Capability::DocumentLivePatchConfirmed,
+                    ]
+                    .into_iter()
+                    .map(move |capability| ComputerUseContextReference {
+                        capability,
+                        object_ref: object_ref.clone(),
+                    })
+                }))
+                .chain(keynote_ref.into_iter().flat_map(|object_ref| {
+                    [
+                        Capability::PresentationLiveInspect,
+                        Capability::PresentationLivePatchConfirmed,
+                    ]
+                    .into_iter()
+                    .map(move |capability| ComputerUseContextReference {
+                        capability,
+                        object_ref: object_ref.clone(),
+                    })
+                }))
                 .chain(browser_surface.into_iter().flat_map(|object_ref| {
                     [
                         Capability::BrowserPageObserve,
@@ -843,6 +1227,616 @@ impl ComputerUseBroker {
         revision
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn inspect_iwork(
+        &self,
+        application: super::macos_iwork_adapter::IworkApplication,
+        params: &LiveDocumentInspectParams,
+        ceiling: &ComputerUseSettings,
+    ) -> Result<LiveDocumentInspectOutput, AgentError> {
+        ensure_observation_enabled(ceiling)?;
+        if !ceiling.iwork_semantic {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "iWork semantic observation is disabled in device-local settings",
+                false,
+            ));
+        }
+        if params.max_bytes < 1_024 || params.max_bytes > MAX_COMPUTER_USE_INSPECT_BYTES {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "iWork inspection byte bounds exceed the device ceiling",
+                false,
+            ));
+        }
+        if params.target.is_some() && params.batch_file.is_some() {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "interactive and batch iWork targets are mutually exclusive",
+                false,
+            ));
+        }
+        let (observed, resolved, batch_source) = if let Some(file) = &params.batch_file {
+            let verified = super::file_reference_store::resolve_verified_native_file(
+                file,
+                iwork_native_extensions(application),
+                128 * 1024 * 1024,
+            )?;
+            let observed = super::macos_iwork_adapter::observe_batch(application, &verified.path)?;
+            super::file_reference_store::revalidate_verified_native_file(
+                file,
+                &verified,
+                128 * 1024 * 1024,
+            )?;
+            let resolved = iwork_batch_resolved(file, &verified, &observed);
+            let source = BatchDocumentSourceProjection {
+                file: file.clone(),
+                display_name: verified.display_name,
+                byte_len: verified.byte_len,
+                sha256: verified.sha256,
+            };
+            (observed, resolved, Some(source))
+        } else {
+            let observed = super::macos_iwork_adapter::observe(application)?;
+            let resolved = iwork_resolved_object(&observed);
+            (observed, resolved, None)
+        };
+        if let Some(expected) = &params.target
+            && self.resolve_ref(expected)? != resolved
+        {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "the iWork target changed during semantic observation",
+                false,
+            ));
+        }
+        let desktop = observe_interactive_desktop()?;
+        let snapshot_id = self.next_snapshot_id();
+        let incarnation = format!(
+            "{}:{}",
+            desktop.session_id,
+            self.current_incarnation_nonce()
+        );
+        let (adapter_kind, projection) = match observed {
+            super::macos_iwork_adapter::IworkObservation::Numbers {
+                locator,
+                value,
+                formula,
+                formatted_value,
+            } => {
+                let document = self.issue_ref(
+                    &snapshot_id,
+                    &incarnation,
+                    ObjectKind::Document,
+                    resolved.clone(),
+                )?;
+                let worksheet = self.issue_ref(
+                    &snapshot_id,
+                    &incarnation,
+                    ObjectKind::Worksheet,
+                    resolved.clone(),
+                )?;
+                let range =
+                    self.issue_ref(&snapshot_id, &incarnation, ObjectKind::Range, resolved)?;
+                (
+                    ComputerUseAdapterKind::IworkNumbers,
+                    LiveDocumentProjection::Spreadsheet {
+                        document,
+                        worksheet,
+                        range,
+                        sheet_name: locator.sheet_name,
+                        table_name: locator.table_name,
+                        address: locator.cell_address,
+                        value,
+                        formula,
+                        formatted_value,
+                    },
+                )
+            }
+            super::macos_iwork_adapter::IworkObservation::Pages { locator, body_text } => {
+                let document = self.issue_ref(
+                    &snapshot_id,
+                    &incarnation,
+                    ObjectKind::Document,
+                    resolved.clone(),
+                )?;
+                (
+                    ComputerUseAdapterKind::IworkPages,
+                    LiveDocumentProjection::Document {
+                        document,
+                        body_sha256: locator.before_sha256,
+                        body_text,
+                    },
+                )
+            }
+            super::macos_iwork_adapter::IworkObservation::Keynote {
+                locator,
+                title,
+                presenter_notes,
+            } => {
+                let presentation = self.issue_ref(
+                    &snapshot_id,
+                    &incarnation,
+                    ObjectKind::Presentation,
+                    resolved.clone(),
+                )?;
+                let slide =
+                    self.issue_ref(&snapshot_id, &incarnation, ObjectKind::Slide, resolved)?;
+                (
+                    ComputerUseAdapterKind::IworkKeynote,
+                    LiveDocumentProjection::Presentation {
+                        presentation,
+                        slide,
+                        slide_number: locator.slide_number,
+                        title,
+                        presenter_notes,
+                    },
+                )
+            }
+        };
+        let output = LiveDocumentInspectOutput {
+            snapshot_id,
+            adapter: ComputerUseAdapterRef {
+                kind: adapter_kind,
+                version: super::macos_iwork_adapter::IWORK_ADAPTER_VERSION.into(),
+            },
+            projection,
+            batch_source,
+        };
+        let encoded_bytes = serde_json::to_vec(&output)
+            .map_err(|_| {
+                error(
+                    AgentErrorKind::Internal,
+                    "cannot encode iWork projection",
+                    true,
+                )
+            })?
+            .len();
+        if encoded_bytes > params.max_bytes as usize {
+            return Err(error(
+                AgentErrorKind::OutputLimitExceeded,
+                "the iWork semantic projection exceeds the requested byte budget",
+                false,
+            ));
+        }
+        Ok(output)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn preflight_iwork_action(
+        &self,
+        target: &ObjectRef,
+        action: &ComputerActionKind,
+        ceiling: &ComputerUseSettings,
+    ) -> Result<(), AgentError> {
+        if !ceiling.enabled || !ceiling.iwork_semantic {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "iWork semantic mutation is disabled by the host-local ceiling",
+                false,
+            ));
+        }
+        let resolved = self.resolve_ref(target)?;
+        let compatible = matches!(
+            (&resolved, action),
+            (
+                ResolvedObject::IworkNumbersCell { .. },
+                ComputerActionKind::SpreadsheetLive(_)
+            ) | (
+                ResolvedObject::IworkPagesDocument { .. },
+                ComputerActionKind::DocumentLive(_)
+            ) | (
+                ResolvedObject::IworkKeynoteSlide { .. },
+                ComputerActionKind::PresentationLive(_)
+            ) | (
+                ResolvedObject::IworkNumbersBatch { .. },
+                ComputerActionKind::SpreadsheetLiveBatch(_)
+            ) | (
+                ResolvedObject::IworkPagesBatch { .. },
+                ComputerActionKind::DocumentLiveBatch(_)
+            ) | (
+                ResolvedObject::IworkKeynoteBatch { .. },
+                ComputerActionKind::PresentationLiveBatch(_)
+            )
+        );
+        if !compatible {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "the iWork action does not match its typed object reference",
+                false,
+            ));
+        }
+        let formula_context = match (&resolved, action) {
+            (
+                ResolvedObject::IworkNumbersCell {
+                    sheet_name,
+                    cell_address,
+                    ..
+                },
+                ComputerActionKind::SpreadsheetLive(
+                    desk_agent_protocol::computer_use::SpreadsheetLivePatchAction::SetCellFormula {
+                        formula,
+                    },
+                ),
+            ) => Some((sheet_name, cell_address, formula)),
+            (
+                ResolvedObject::IworkNumbersBatch {
+                    sheet_name,
+                    cell_address,
+                    ..
+                },
+                ComputerActionKind::SpreadsheetLiveBatch(batch),
+            ) => match &batch.action {
+                desk_agent_protocol::computer_use::SpreadsheetLivePatchAction::SetCellFormula {
+                    formula,
+                } => Some((sheet_name, cell_address, formula)),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((sheet_name, cell_address, formula)) = formula_context {
+            desk_diagnose_core::spreadsheet_formula::validate_formula_patch(
+                formula,
+                cell_address,
+                desk_diagnose_core::spreadsheet_formula::FORMULA_LOCALE_V1,
+                std::slice::from_ref(sheet_name),
+            )
+            .map_err(|validation_error| {
+                error(
+                    AgentErrorKind::InvalidInput,
+                    &validation_error.to_string(),
+                    false,
+                )
+            })?;
+        }
+        let batch_output = match action {
+            ComputerActionKind::SpreadsheetLiveBatch(action) => Some(&action.output),
+            ComputerActionKind::DocumentLiveBatch(action) => Some(&action.output),
+            ComputerActionKind::PresentationLiveBatch(action) => Some(&action.output),
+            _ => None,
+        };
+        if let Some(output) = batch_output {
+            if !ceiling.file_artifact_create_enabled() {
+                return Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "iWork batch output requires the host-local artifact creation ceiling",
+                    false,
+                ));
+            }
+            if output.destination_parent.object_kind != ObjectKind::Directory
+                || output.native_file_name.is_empty()
+                || output.native_file_name.len() > 200
+            {
+                return Err(error(
+                    AgentErrorKind::InvalidInput,
+                    "iWork batch output requires a fresh directory and bounded native file name",
+                    false,
+                ));
+            }
+        }
+        match (&resolved, action) {
+            (
+                ResolvedObject::IworkNumbersBatch {
+                    source_file,
+                    source_sha256,
+                    source_byte_len,
+                    ..
+                },
+                ComputerActionKind::SpreadsheetLiveBatch(batch),
+            ) => {
+                verify_batch_source(source_file, &[".numbers"], source_sha256, *source_byte_len)?;
+                super::file_reference_store::validate_native_artifact_destination(
+                    &batch.output.destination_parent,
+                    &ceiling.allowed_file_roots,
+                    &batch.output.native_file_name,
+                    ".numbers",
+                )?;
+            }
+            (
+                ResolvedObject::IworkPagesBatch {
+                    source_file,
+                    source_sha256,
+                    source_byte_len,
+                    ..
+                },
+                ComputerActionKind::DocumentLiveBatch(batch),
+            ) => {
+                verify_batch_source(source_file, &[".pages"], source_sha256, *source_byte_len)?;
+                super::file_reference_store::validate_native_artifact_destination(
+                    &batch.output.destination_parent,
+                    &ceiling.allowed_file_roots,
+                    &batch.output.native_file_name,
+                    ".pages",
+                )?;
+            }
+            (
+                ResolvedObject::IworkKeynoteBatch {
+                    source_file,
+                    source_sha256,
+                    source_byte_len,
+                    ..
+                },
+                ComputerActionKind::PresentationLiveBatch(batch),
+            ) => {
+                verify_batch_source(source_file, &[".key"], source_sha256, *source_byte_len)?;
+                super::file_reference_store::validate_native_artifact_destination(
+                    &batch.output.destination_parent,
+                    &ceiling.allowed_file_roots,
+                    &batch.output.native_file_name,
+                    ".key",
+                )?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn execute_iwork_action(
+        &self,
+        target: &ObjectRef,
+        action: &ComputerActionKind,
+        ceiling: &ComputerUseSettings,
+    ) -> Result<SemanticActionResult, AgentError> {
+        self.preflight_iwork_action(target, action, ceiling)?;
+        let resolved = self.resolve_ref(target)?;
+        if matches!(
+            action,
+            ComputerActionKind::SpreadsheetLiveBatch(_)
+                | ComputerActionKind::DocumentLiveBatch(_)
+                | ComputerActionKind::PresentationLiveBatch(_)
+        ) {
+            return self.execute_iwork_batch_action(resolved, action, ceiling);
+        }
+        let result = match (resolved, action) {
+            (
+                ResolvedObject::IworkNumbersCell {
+                    document_identity_sha256,
+                    sheet_name,
+                    table_name,
+                    cell_address,
+                    before_sha256,
+                },
+                ComputerActionKind::SpreadsheetLive(action),
+            ) => super::macos_iwork_adapter::apply_numbers(
+                &super::macos_iwork_adapter::NumbersCellLocator {
+                    document_identity_sha256,
+                    sheet_name,
+                    table_name,
+                    cell_address,
+                    before_sha256,
+                },
+                action,
+            )?,
+            (
+                ResolvedObject::IworkPagesDocument {
+                    document_identity_sha256,
+                    before_sha256,
+                },
+                ComputerActionKind::DocumentLive(action),
+            ) => super::macos_iwork_adapter::apply_pages(
+                &super::macos_iwork_adapter::PagesDocumentLocator {
+                    document_identity_sha256,
+                    before_sha256,
+                },
+                action,
+            )?,
+            (
+                ResolvedObject::IworkKeynoteSlide {
+                    document_identity_sha256,
+                    slide_number,
+                    title_before_sha256,
+                    notes_before_sha256,
+                },
+                ComputerActionKind::PresentationLive(action),
+            ) => super::macos_iwork_adapter::apply_keynote(
+                &super::macos_iwork_adapter::KeynoteSlideLocator {
+                    document_identity_sha256,
+                    slide_number,
+                    title_before_sha256,
+                    notes_before_sha256,
+                },
+                action,
+            )?,
+            _ => {
+                return Err(error(
+                    AgentErrorKind::InvalidInput,
+                    "the iWork action target became incompatible",
+                    false,
+                ));
+            }
+        };
+        Ok(SemanticActionResult {
+            changed: result.changed,
+            verified: result.verified,
+            summary: result.summary,
+            output: None,
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn execute_iwork_batch_action(
+        &self,
+        resolved: ResolvedObject,
+        action: &ComputerActionKind,
+        ceiling: &ComputerUseSettings,
+    ) -> Result<SemanticActionResult, AgentError> {
+        use super::macos_iwork_adapter::{IworkBatchExportFormat, IworkBatchOutput};
+
+        let (result, published) = match (resolved, action) {
+            (
+                ResolvedObject::IworkNumbersBatch {
+                    source_file,
+                    source_sha256,
+                    source_byte_len,
+                    document_identity_sha256,
+                    sheet_name,
+                    table_name,
+                    cell_address,
+                    before_sha256,
+                },
+                ComputerActionKind::SpreadsheetLiveBatch(batch),
+            ) => {
+                let verified = verify_batch_source(
+                    &source_file,
+                    &[".numbers"],
+                    &source_sha256,
+                    source_byte_len,
+                )?;
+                let stage = super::file_reference_store::prepare_native_artifact_stage(
+                    &batch.output.destination_parent,
+                    &ceiling.allowed_file_roots,
+                    &batch.output.native_file_name,
+                    ".numbers",
+                    ".xlsx",
+                )?;
+                let result = super::macos_iwork_adapter::apply_numbers_batch(
+                    &verified.path,
+                    &IworkBatchOutput {
+                        native_path: &stage.native_path,
+                        export: Some((
+                            IworkBatchExportFormat::MicrosoftOffice,
+                            &stage.validation_path,
+                        )),
+                    },
+                    &super::macos_iwork_adapter::NumbersCellLocator {
+                        document_identity_sha256,
+                        sheet_name,
+                        table_name,
+                        cell_address,
+                        before_sha256,
+                    },
+                    &batch.action,
+                )?;
+                super::file_reference_store::revalidate_verified_native_file(
+                    &source_file,
+                    &verified,
+                    128 * 1024 * 1024,
+                )?;
+                let published = result
+                    .verified
+                    .then(|| stage.publish(b"PK\x03\x04", b"PK\x03\x04"))
+                    .transpose()?;
+                (result, published)
+            }
+            (
+                ResolvedObject::IworkPagesBatch {
+                    source_file,
+                    source_sha256,
+                    source_byte_len,
+                    document_identity_sha256,
+                    before_sha256,
+                },
+                ComputerActionKind::DocumentLiveBatch(batch),
+            ) => {
+                let verified = verify_batch_source(
+                    &source_file,
+                    &[".pages"],
+                    &source_sha256,
+                    source_byte_len,
+                )?;
+                let stage = super::file_reference_store::prepare_native_artifact_stage(
+                    &batch.output.destination_parent,
+                    &ceiling.allowed_file_roots,
+                    &batch.output.native_file_name,
+                    ".pages",
+                    ".pdf",
+                )?;
+                let result = super::macos_iwork_adapter::apply_pages_batch(
+                    &verified.path,
+                    &IworkBatchOutput {
+                        native_path: &stage.native_path,
+                        export: Some((IworkBatchExportFormat::Pdf, &stage.validation_path)),
+                    },
+                    &super::macos_iwork_adapter::PagesDocumentLocator {
+                        document_identity_sha256,
+                        before_sha256,
+                    },
+                    &batch.action,
+                )?;
+                super::file_reference_store::revalidate_verified_native_file(
+                    &source_file,
+                    &verified,
+                    128 * 1024 * 1024,
+                )?;
+                let published = result
+                    .verified
+                    .then(|| stage.publish(b"PK\x03\x04", b"%PDF"))
+                    .transpose()?;
+                (result, published)
+            }
+            (
+                ResolvedObject::IworkKeynoteBatch {
+                    source_file,
+                    source_sha256,
+                    source_byte_len,
+                    document_identity_sha256,
+                    slide_number,
+                    title_before_sha256,
+                    notes_before_sha256,
+                },
+                ComputerActionKind::PresentationLiveBatch(batch),
+            ) => {
+                let verified =
+                    verify_batch_source(&source_file, &[".key"], &source_sha256, source_byte_len)?;
+                let stage = super::file_reference_store::prepare_native_artifact_stage(
+                    &batch.output.destination_parent,
+                    &ceiling.allowed_file_roots,
+                    &batch.output.native_file_name,
+                    ".key",
+                    ".pdf",
+                )?;
+                let result = super::macos_iwork_adapter::apply_keynote_batch(
+                    &verified.path,
+                    &IworkBatchOutput {
+                        native_path: &stage.native_path,
+                        export: Some((IworkBatchExportFormat::Pdf, &stage.validation_path)),
+                    },
+                    &super::macos_iwork_adapter::KeynoteSlideLocator {
+                        document_identity_sha256,
+                        slide_number,
+                        title_before_sha256,
+                        notes_before_sha256,
+                    },
+                    &batch.action,
+                )?;
+                super::file_reference_store::revalidate_verified_native_file(
+                    &source_file,
+                    &verified,
+                    128 * 1024 * 1024,
+                )?;
+                let published = result
+                    .verified
+                    .then(|| stage.publish(b"PK\x03\x04", b"%PDF"))
+                    .transpose()?;
+                (result, published)
+            }
+            _ => {
+                return Err(error(
+                    AgentErrorKind::InvalidInput,
+                    "the iWork batch action target became incompatible",
+                    false,
+                ));
+            }
+        };
+        let output = published.map(|published| {
+            ComputerActionOutput::BatchDocumentArtifact(BatchDocumentArtifact {
+                file: published.object_ref,
+                file_name: published.file_name,
+                byte_len: published.byte_len,
+                sha256: published.sha256,
+                validation_byte_len: published.validation_byte_len,
+                validation_sha256: published.validation_sha256,
+            })
+        });
+        Ok(SemanticActionResult {
+            changed: result.changed,
+            verified: result.verified,
+            summary: result.summary,
+            output,
+        })
+    }
+
     pub(crate) fn office_document_filter(
         &self,
         params: &OfficeInspectParams,
@@ -890,7 +1884,6 @@ impl ComputerUseBroker {
         }
     }
 
-    #[cfg(windows)]
     pub(crate) fn project_excel_selection(
         &self,
         params: &OfficeInspectParams,
@@ -1067,101 +2060,116 @@ impl ComputerUseBroker {
             }
         }
 
-        #[cfg(not(windows))]
-        {
-            return Err(error(
-                AgentErrorKind::UnsupportedPlatform,
-                "Windows UI Automation is unavailable on this platform",
-                false,
-            ));
-        }
         #[cfg(windows)]
-        {
-            let collected = super::windows_uia_observer::collect_foreground(
+        let (collected, adapter_kind, adapter_version, adapter_name) = (
+            super::windows_uia_observer::collect_foreground(
                 application.process_id,
                 &application.image_path,
                 params.max_depth,
                 params.max_nodes,
                 params.max_bytes,
+            )?,
+            ComputerUseAdapterKind::WindowsUia,
+            "a4-windows-uia-read/v1",
+            "Windows UI Automation",
+        );
+        #[cfg(target_os = "macos")]
+        let (collected, adapter_kind, adapter_version, adapter_name) = (
+            super::macos_accessibility_observer::collect_foreground(
+                application.process_id,
+                &application.image_path,
+                params.max_depth,
+                params.max_nodes,
+                params.max_bytes,
+            )?,
+            ComputerUseAdapterKind::MacosAccessibility,
+            "macos-accessibility-read/v1",
+            "macOS Accessibility",
+        );
+        #[cfg(not(any(windows, target_os = "macos")))]
+        return Err(error(
+            AgentErrorKind::UnsupportedPlatform,
+            "semantic desktop UI inspection is unavailable on this platform",
+            false,
+        ));
+
+        let snapshot_id = self.next_snapshot_id();
+        let incarnation = format!(
+            "{}:{}",
+            observed.session_id,
+            self.current_incarnation_nonce()
+        );
+        let mut nodes = Vec::with_capacity(collected.nodes.len());
+        // Reserve a conservative envelope budget for snapshot/adapter JSON;
+        // each projection is measured exactly before insertion.
+        let mut encoded_bytes = 512usize;
+        let mut truncated = collected.truncated;
+        for node in collected.nodes {
+            let object_ref = self.issue_ref(
+                &snapshot_id,
+                &incarnation,
+                ObjectKind::UiElement,
+                ResolvedObject::UiElement {
+                    process_id: application.process_id,
+                    image_path: application.image_path.clone(),
+                    fingerprint: node.fingerprint,
+                },
             )?;
-            let snapshot_id = self.next_snapshot_id();
-            let incarnation = format!(
-                "{}:{}",
-                observed.session_id,
-                self.current_incarnation_nonce()
-            );
-            let mut nodes = Vec::with_capacity(collected.nodes.len());
-            // Reserve a conservative envelope budget for snapshot/adapter JSON;
-            // each projection is measured exactly before insertion.
-            let mut encoded_bytes = 512usize;
-            let mut truncated = collected.truncated;
-            for node in collected.nodes {
-                let object_ref = self.issue_ref(
-                    &snapshot_id,
-                    &incarnation,
-                    ObjectKind::UiElement,
-                    ResolvedObject::UiElement {
-                        process_id: application.process_id,
-                        image_path: application.image_path.clone(),
-                        fingerprint: node.fingerprint,
-                    },
-                )?;
-                let projection = UiNodeProjection {
-                    object_ref,
-                    parent_index: node.parent_index,
-                    role: node.role,
-                    name: node.name,
-                    value: node.value,
-                    is_protected: node.is_protected,
-                    enabled: node.enabled,
-                    supported_actions: node.supported_actions,
-                };
-                let projection_bytes = serde_json::to_vec(&projection).map_err(|_| {
+            let projection = UiNodeProjection {
+                object_ref,
+                parent_index: node.parent_index,
+                role: node.role,
+                name: node.name,
+                value: node.value,
+                is_protected: node.is_protected,
+                enabled: node.enabled,
+                supported_actions: node.supported_actions,
+            };
+            let projection_bytes = serde_json::to_vec(&projection).map_err(|_| {
+                error(
+                    AgentErrorKind::Internal,
+                    &format!("cannot encode a {adapter_name} projection"),
+                    true,
+                )
+            })?;
+            let additional = projection_bytes.len() + usize::from(!nodes.is_empty());
+            if encoded_bytes.saturating_add(additional) > params.max_bytes as usize {
+                truncated = true;
+                break;
+            }
+            encoded_bytes += additional;
+            nodes.push(projection);
+        }
+        let mut output = UiInspectOutput {
+            snapshot_id,
+            adapter: ComputerUseAdapterRef {
+                kind: adapter_kind,
+                version: adapter_version.into(),
+            },
+            nodes,
+            truncated,
+        };
+        loop {
+            let encoded_len = serde_json::to_vec(&output)
+                .map_err(|_| {
                     error(
                         AgentErrorKind::Internal,
-                        "cannot encode a Windows UI Automation projection",
+                        &format!("cannot encode the {adapter_name} result"),
                         true,
                     )
-                })?;
-                let additional = projection_bytes.len() + usize::from(!nodes.is_empty());
-                if encoded_bytes.saturating_add(additional) > params.max_bytes as usize {
-                    truncated = true;
-                    break;
-                }
-                encoded_bytes += additional;
-                nodes.push(projection);
+                })?
+                .len();
+            if encoded_len <= params.max_bytes as usize {
+                return Ok(output);
             }
-            let mut output = UiInspectOutput {
-                snapshot_id,
-                adapter: ComputerUseAdapterRef {
-                    kind: ComputerUseAdapterKind::WindowsUia,
-                    version: "a4-windows-uia-read/v1".into(),
-                },
-                nodes,
-                truncated,
-            };
-            loop {
-                let encoded_len = serde_json::to_vec(&output)
-                    .map_err(|_| {
-                        error(
-                            AgentErrorKind::Internal,
-                            "cannot encode the Windows UI Automation result",
-                            true,
-                        )
-                    })?
-                    .len();
-                if encoded_len <= params.max_bytes as usize {
-                    return Ok(output);
-                }
-                if output.nodes.pop().is_none() {
-                    return Err(error(
-                        AgentErrorKind::OutputLimitExceeded,
-                        "the desktop UI inspection byte budget is too small for its response envelope",
-                        false,
-                    ));
-                }
-                output.truncated = true;
+            if output.nodes.pop().is_none() {
+                return Err(error(
+                    AgentErrorKind::OutputLimitExceeded,
+                    "the desktop UI inspection byte budget is too small for its response envelope",
+                    false,
+                ));
             }
+            output.truncated = true;
         }
     }
 
@@ -1346,6 +2354,144 @@ impl ComputerUseBroker {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn iwork_resolved_object(
+    observed: &super::macos_iwork_adapter::IworkObservation,
+) -> ResolvedObject {
+    match observed {
+        super::macos_iwork_adapter::IworkObservation::Numbers { locator, .. } => {
+            iwork_numbers_resolved(locator)
+        }
+        super::macos_iwork_adapter::IworkObservation::Pages { locator, .. } => {
+            iwork_pages_resolved(locator)
+        }
+        super::macos_iwork_adapter::IworkObservation::Keynote { locator, .. } => {
+            iwork_keynote_resolved(locator)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn iwork_native_extensions(
+    application: super::macos_iwork_adapter::IworkApplication,
+) -> &'static [&'static str] {
+    match application {
+        super::macos_iwork_adapter::IworkApplication::Numbers => &[".numbers"],
+        super::macos_iwork_adapter::IworkApplication::Pages => &[".pages"],
+        super::macos_iwork_adapter::IworkApplication::Keynote => &[".key"],
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn verify_batch_source(
+    source_file: &ObjectRef,
+    extensions: &[&str],
+    expected_sha256: &str,
+    expected_byte_len: u64,
+) -> Result<super::file_reference_store::VerifiedNativeFile, AgentError> {
+    let verified = super::file_reference_store::resolve_verified_native_file(
+        source_file,
+        extensions,
+        128 * 1024 * 1024,
+    )?;
+    if verified.sha256 != expected_sha256 || verified.byte_len != expected_byte_len {
+        Err(error(
+            AgentErrorKind::InvalidInput,
+            "selected iWork batch source changed after preview",
+            false,
+        ))
+    } else {
+        Ok(verified)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn iwork_batch_resolved(
+    source_file: &ObjectRef,
+    source: &super::file_reference_store::VerifiedNativeFile,
+    observed: &super::macos_iwork_adapter::IworkObservation,
+) -> ResolvedObject {
+    match observed {
+        super::macos_iwork_adapter::IworkObservation::Numbers { locator, .. } => {
+            ResolvedObject::IworkNumbersBatch {
+                source_file: source_file.clone(),
+                source_sha256: source.sha256.clone(),
+                source_byte_len: source.byte_len,
+                document_identity_sha256: locator.document_identity_sha256.clone(),
+                sheet_name: locator.sheet_name.clone(),
+                table_name: locator.table_name.clone(),
+                cell_address: locator.cell_address.clone(),
+                before_sha256: locator.before_sha256.clone(),
+            }
+        }
+        super::macos_iwork_adapter::IworkObservation::Pages { locator, .. } => {
+            ResolvedObject::IworkPagesBatch {
+                source_file: source_file.clone(),
+                source_sha256: source.sha256.clone(),
+                source_byte_len: source.byte_len,
+                document_identity_sha256: locator.document_identity_sha256.clone(),
+                before_sha256: locator.before_sha256.clone(),
+            }
+        }
+        super::macos_iwork_adapter::IworkObservation::Keynote { locator, .. } => {
+            ResolvedObject::IworkKeynoteBatch {
+                source_file: source_file.clone(),
+                source_sha256: source.sha256.clone(),
+                source_byte_len: source.byte_len,
+                document_identity_sha256: locator.document_identity_sha256.clone(),
+                slide_number: locator.slide_number,
+                title_before_sha256: locator.title_before_sha256.clone(),
+                notes_before_sha256: locator.notes_before_sha256.clone(),
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn split_iwork_readiness(
+    result: Result<Option<ObjectRef>, AgentError>,
+) -> (Option<ObjectRef>, Option<AgentErrorKind>) {
+    match result {
+        Ok(object_ref) => (object_ref, None),
+        Err(error) => (None, Some(error.kind)),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn iwork_numbers_resolved(
+    locator: &super::macos_iwork_adapter::NumbersCellLocator,
+) -> ResolvedObject {
+    ResolvedObject::IworkNumbersCell {
+        document_identity_sha256: locator.document_identity_sha256.clone(),
+        sheet_name: locator.sheet_name.clone(),
+        table_name: locator.table_name.clone(),
+        cell_address: locator.cell_address.clone(),
+        before_sha256: locator.before_sha256.clone(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn iwork_pages_resolved(
+    locator: &super::macos_iwork_adapter::PagesDocumentLocator,
+) -> ResolvedObject {
+    ResolvedObject::IworkPagesDocument {
+        document_identity_sha256: locator.document_identity_sha256.clone(),
+        before_sha256: locator.before_sha256.clone(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn iwork_keynote_resolved(
+    locator: &super::macos_iwork_adapter::KeynoteSlideLocator,
+) -> ResolvedObject {
+    ResolvedObject::IworkKeynoteSlide {
+        document_identity_sha256: locator.document_identity_sha256.clone(),
+        slide_number: locator.slide_number,
+        title_before_sha256: locator.title_before_sha256.clone(),
+        notes_before_sha256: locator.notes_before_sha256.clone(),
+    }
+}
+
 fn ensure_observation_enabled(ceiling: &ComputerUseSettings) -> Result<(), AgentError> {
     if ceiling.observation_enabled() {
         Ok(())
@@ -1358,14 +2504,31 @@ fn ensure_observation_enabled(ceiling: &ComputerUseSettings) -> Result<(), Agent
     }
 }
 
-struct ObservedDesktop {
-    session_id: u32,
-    foreground_application: Option<ObservedApplication>,
+pub(super) struct ObservedDesktop {
+    pub(super) session_id: u32,
+    pub(super) foreground_application: Option<ObservedApplication>,
 }
 
-struct ObservedApplication {
-    process_id: u32,
-    image_path: String,
+pub(super) struct ObservedApplication {
+    pub(super) process_id: u32,
+    pub(super) image_path: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(super) struct CollectedUiNode {
+    pub(super) parent_index: Option<u32>,
+    pub(super) role: String,
+    pub(super) name: Option<String>,
+    pub(super) value: Option<String>,
+    pub(super) is_protected: bool,
+    pub(super) enabled: bool,
+    pub(super) supported_actions: Vec<desk_agent_protocol::computer_use::UiSemanticActionKind>,
+    pub(super) fingerprint: String,
+}
+
+pub(super) struct CollectedUiTree {
+    pub(super) nodes: Vec<CollectedUiNode>,
+    pub(super) truncated: bool,
 }
 
 #[cfg(windows)]
@@ -1480,7 +2643,12 @@ fn observe_interactive_desktop() -> Result<ObservedDesktop, AgentError> {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn observe_interactive_desktop() -> Result<ObservedDesktop, AgentError> {
+    super::macos_accessibility_observer::observe_interactive_desktop()
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn observe_interactive_desktop() -> Result<ObservedDesktop, AgentError> {
     Err(error(
         AgentErrorKind::UnsupportedPlatform,
@@ -1503,6 +2671,11 @@ fn error(kind: AgentErrorKind, message: &str, retryable: bool) -> AgentError {
 fn path_eq(left: &str, right: &str) -> bool {
     left.replace('/', "\\")
         .eq_ignore_ascii_case(&right.replace('/', "\\"))
+}
+
+#[cfg(not(windows))]
+fn path_eq(left: &str, right: &str) -> bool {
+    left == right
 }
 
 #[cfg(test)]
@@ -1546,6 +2719,19 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.kind, AgentErrorKind::InvalidInput);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn application_paths_use_exact_platform_comparison() {
+        assert!(path_eq(
+            "/Applications/Calculator.app",
+            "/Applications/Calculator.app"
+        ));
+        assert!(!path_eq(
+            "/Applications/Calculator.app",
+            "/applications/calculator.app"
+        ));
     }
 
     #[test]
@@ -1642,6 +2828,166 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn numbers_live_formula_uses_the_frozen_ast_allowlist() {
+        let broker = ComputerUseBroker::new();
+        let target = broker
+            .issue_ref(
+                &broker.next_snapshot_id(),
+                "test-incarnation",
+                ObjectKind::Range,
+                ResolvedObject::IworkNumbersCell {
+                    document_identity_sha256: "document".into(),
+                    sheet_name: "Sheet 1".into(),
+                    table_name: "Table 1".into(),
+                    cell_address: "A3".into(),
+                    before_sha256: "before".into(),
+                },
+            )
+            .unwrap();
+        let mut ceiling = enabled();
+        ceiling.iwork_semantic = true;
+        let valid = ComputerActionKind::SpreadsheetLive(
+            desk_agent_protocol::computer_use::SpreadsheetLivePatchAction::SetCellFormula {
+                formula: "=SUM(A1:A2)".into(),
+            },
+        );
+        broker
+            .preflight_iwork_action(&target, &valid, &ceiling)
+            .unwrap();
+        let rejected = ComputerActionKind::SpreadsheetLive(
+            desk_agent_protocol::computer_use::SpreadsheetLivePatchAction::SetCellFormula {
+                formula: "=WEBSERVICE(A1)".into(),
+            },
+        );
+        assert_eq!(
+            broker
+                .preflight_iwork_action(&target, &rejected, &ceiling)
+                .unwrap_err()
+                .kind,
+            AgentErrorKind::InvalidInput
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn batch_preflight_rejects_source_drift_before_may_have_started() {
+        let root =
+            std::env::temp_dir().join(format!("lrd-iwork-preflight-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let source_path = root.join("source.numbers");
+        std::fs::write(&source_path, b"PK\x03\x04AAAA").unwrap();
+        let source_file = super::super::file_reference_store::issue(&source_path).unwrap();
+        let destination = super::super::file_reference_store::issue(&root).unwrap();
+        let verified = super::super::file_reference_store::resolve_verified_native_file(
+            &source_file,
+            &[".numbers"],
+            128 * 1024 * 1024,
+        )
+        .unwrap();
+        let broker = ComputerUseBroker::new();
+        let target = broker
+            .issue_ref(
+                &broker.next_snapshot_id(),
+                "batch-incarnation",
+                ObjectKind::Range,
+                ResolvedObject::IworkNumbersBatch {
+                    source_file,
+                    source_sha256: verified.sha256,
+                    source_byte_len: verified.byte_len,
+                    document_identity_sha256: "document".into(),
+                    sheet_name: "Sheet 1".into(),
+                    table_name: "Table 1".into(),
+                    cell_address: "A1".into(),
+                    before_sha256: "before".into(),
+                },
+            )
+            .unwrap();
+        let action = ComputerActionKind::SpreadsheetLiveBatch(
+            desk_agent_protocol::computer_use::SpreadsheetLiveBatchPatchAction {
+                output: desk_agent_protocol::computer_use::BatchDocumentOutput {
+                    destination_parent: destination,
+                    native_file_name: "copy.numbers".into(),
+                },
+                action:
+                    desk_agent_protocol::computer_use::SpreadsheetLivePatchAction::SetCellValue {
+                        value: "42".into(),
+                    },
+            },
+        );
+        let mut ceiling = enabled();
+        ceiling.iwork_semantic = true;
+        ceiling.file_artifact_create = true;
+        ceiling.allowed_file_roots = vec![root.to_string_lossy().into_owned()];
+        broker
+            .preflight_iwork_action(&target, &action, &ceiling)
+            .unwrap();
+
+        std::fs::write(&source_path, b"PK\x03\x04BBBB").unwrap();
+        let error = broker
+            .preflight_iwork_action(&target, &action, &ceiling)
+            .unwrap_err();
+        assert_eq!(error.kind, AgentErrorKind::InvalidInput);
+        assert!(!error.retryable);
+
+        std::fs::remove_file(source_path).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires a logged-in macOS session and open documents in all three iWork apps"]
+    fn iwork_readiness_issues_exact_refs_for_all_live_providers() {
+        let broker = ComputerUseBroker::new();
+        let mut ceiling = enabled();
+        ceiling.iwork_semantic = true;
+        let readiness = broker.readiness(&ceiling, false, false);
+        for capability in [
+            Capability::SpreadsheetLiveInspect,
+            Capability::SpreadsheetLivePatchConfirmed,
+            Capability::DocumentLiveInspect,
+            Capability::DocumentLivePatchConfirmed,
+            Capability::PresentationLiveInspect,
+            Capability::PresentationLivePatchConfirmed,
+        ] {
+            let item = readiness
+                .capabilities
+                .iter()
+                .find(|item| item.capability == capability)
+                .unwrap();
+            assert!(item.supported && item.ready, "{capability:?}: {item:?}");
+        }
+        assert_eq!(
+            readiness
+                .context_references
+                .iter()
+                .filter(|reference| {
+                    matches!(
+                        reference.capability,
+                        Capability::SpreadsheetLiveInspect
+                            | Capability::DocumentLiveInspect
+                            | Capability::PresentationLiveInspect
+                    )
+                })
+                .count(),
+            3
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn semantic_action_monitor_state_starts_fail_closed_and_is_explicit() {
+        let broker = ComputerUseBroker::new();
+        assert!(!broker.input_ownership_ready.load(Ordering::SeqCst));
+
+        broker.set_input_ownership_ready(true);
+        assert!(broker.input_ownership_ready.load(Ordering::SeqCst));
+
+        broker.set_input_ownership_ready(false);
+        assert!(!broker.input_ownership_ready.load(Ordering::SeqCst));
+    }
+
     #[test]
     fn reference_ttl_covers_readiness_cache_and_model_request_windows() {
         const READINESS_VALIDITY_SECS: i64 = 25;
@@ -1658,7 +3004,7 @@ mod tests {
         let broker = ComputerUseBroker::new();
         let readiness = broker.readiness(&ComputerUseSettings::default(), false, false);
         readiness.validate().unwrap();
-        assert_eq!(readiness.capabilities.len(), 26);
+        assert_eq!(readiness.capabilities.len(), 33);
         assert!(readiness.capabilities.iter().all(|entry| {
             if matches!(
                 entry.capability,
@@ -1674,10 +3020,11 @@ mod tests {
                     | Capability::SpreadsheetMergePreview
                     | Capability::TerminalOutputRead
             ) {
-                entry.ready == cfg!(windows)
+                entry.ready == cfg!(any(windows, target_os = "macos"))
             } else if entry.capability == Capability::ShellExecConfirmed {
                 entry.ready
-                    == (cfg!(windows) && !crate::exec_shells::available_exec_shells().is_empty())
+                    == (cfg!(any(windows, target_os = "macos"))
+                        && !crate::exec_shells::available_exec_shells().is_empty())
             } else {
                 !entry.ready
             }
@@ -1693,7 +3040,14 @@ mod tests {
                     | Capability::ContainerList
                     | Capability::DesktopSessionInspect
                     | Capability::DesktopUiInspect
+                    | Capability::DesktopUiActionConfirmed
                     | Capability::OfficeDocumentInspect
+                    | Capability::SpreadsheetLiveInspect
+                    | Capability::SpreadsheetLivePatchConfirmed
+                    | Capability::DocumentLiveInspect
+                    | Capability::DocumentLivePatchConfirmed
+                    | Capability::PresentationLiveInspect
+                    | Capability::PresentationLivePatchConfirmed
                     | Capability::FileMetadataRead
                     | Capability::FileContentRead
                     | Capability::SpreadsheetFileInspect

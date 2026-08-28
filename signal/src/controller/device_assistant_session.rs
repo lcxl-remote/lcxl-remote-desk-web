@@ -845,6 +845,9 @@ pub async fn decide_device_assistant_permission(
                 reference.object_ref.object_kind,
                 desk_agent_protocol::computer_use::ObjectKind::BrowserSurface
                     | desk_agent_protocol::computer_use::ObjectKind::Application
+                    | desk_agent_protocol::computer_use::ObjectKind::Range
+                    | desk_agent_protocol::computer_use::ObjectKind::Document
+                    | desk_agent_protocol::computer_use::ObjectKind::Slide
             )
         })
         .map(|reference| reference.object_ref.clone())

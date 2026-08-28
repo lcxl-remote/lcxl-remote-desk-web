@@ -27,6 +27,9 @@ pub const MAX_COMPUTER_USE_READINESS_ENTRIES: usize = 64;
 pub const MAX_COMPUTER_USE_READINESS_BYTES: usize = 64 * 1024;
 pub const MAX_COMPUTER_USE_INSPECT_BYTES: u32 = 1024 * 1024;
 pub const MAX_COMPUTER_USE_INSPECT_NODES: u32 = 4096;
+pub const MAX_LIVE_DOCUMENT_TEXT_BYTES: usize = 64 * 1024;
+pub const MAX_LIVE_SPREADSHEET_CELL_BYTES: usize = 16 * 1024;
+pub const MAX_LIVE_SPREADSHEET_FORMULA_BYTES: usize = 4 * 1024;
 
 #[derive(
     Debug,
@@ -48,6 +51,7 @@ pub enum ObjectKind {
     Window,
     UiElement,
     OfficeDocument,
+    Document,
     Worksheet,
     Range,
     Presentation,
@@ -105,6 +109,9 @@ pub enum ComputerUseAdapterKind {
     MacosAccessibility,
     OfficeExcel,
     OfficePowerPoint,
+    IworkNumbers,
+    IworkPages,
+    IworkKeynote,
     FileSystem,
     Terminal,
     ScreenCapture,
@@ -245,6 +252,73 @@ pub struct OfficeInspectOutput {
     pub adapter: ComputerUseAdapterRef,
     pub selection: OfficeSelectionProjection,
     pub truncated: bool,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct LiveDocumentInspectParams {
+    /// Optional fresh edge-issued target. `None` requests the current object;
+    /// native locators and paths are never accepted from the caller.
+    pub target: Option<ObjectRef>,
+    /// Explicit owner-selected native file for BatchDocument inspection. This
+    /// is mutually exclusive with `target`; the worker resolves it through the
+    /// file-reference store and never accepts a native path from the caller.
+    #[serde(default)]
+    pub batch_file: Option<ObjectRef>,
+    pub max_bytes: u32,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum LiveDocumentProjection {
+    Spreadsheet {
+        document: ObjectRef,
+        worksheet: ObjectRef,
+        range: ObjectRef,
+        sheet_name: String,
+        table_name: String,
+        address: String,
+        value: String,
+        formula: Option<String>,
+        formatted_value: String,
+    },
+    Document {
+        document: ObjectRef,
+        body_text: String,
+        body_sha256: String,
+    },
+    Presentation {
+        presentation: ObjectRef,
+        slide: ObjectRef,
+        slide_number: i64,
+        title: String,
+        presenter_notes: String,
+    },
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct LiveDocumentInspectOutput {
+    pub snapshot_id: String,
+    pub adapter: ComputerUseAdapterRef,
+    pub projection: LiveDocumentProjection,
+    /// Present only when the provider opened an explicit owner-selected native
+    /// file instead of the interactive front document.
+    pub batch_source: Option<BatchDocumentSourceProjection>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct BatchDocumentSourceProjection {
+    pub file: ObjectRef,
+    pub display_name: String,
+    pub byte_len: u64,
+    pub sha256: String,
 }
 
 #[derive(
@@ -579,6 +653,71 @@ pub enum PowerPointPatchAction {
     DeleteShape,
 }
 
+/// Provider-neutral bounded mutation surface for a live spreadsheet host.
+/// Native selectors, Apple Event codes and scripts are deliberately absent.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(tag = "kind", content = "params", rename_all = "snake_case")]
+pub enum SpreadsheetLivePatchAction {
+    SetCellValue { value: String },
+    SetCellFormula { formula: String },
+}
+
+/// Provider-neutral bounded mutation surface for a live document host.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(tag = "kind", content = "params", rename_all = "snake_case")]
+pub enum DocumentLivePatchAction {
+    ReplaceBodyText { text: String },
+}
+
+/// Provider-neutral bounded mutation surface for a live presentation host.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(tag = "kind", content = "params", rename_all = "snake_case")]
+pub enum PresentationLivePatchAction {
+    ReplaceSlideTitle { text: String },
+    SetPresenterNotes { text: String },
+}
+
+/// Create-new destination for a BatchDocument mutation. The source is bound by
+/// the action target returned from batch inspection; the output directory is a
+/// second fresh file-store reference and the leaf cannot contain a path.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct BatchDocumentOutput {
+    pub destination_parent: ObjectRef,
+    pub native_file_name: String,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct SpreadsheetLiveBatchPatchAction {
+    pub output: BatchDocumentOutput,
+    pub action: SpreadsheetLivePatchAction,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct DocumentLiveBatchPatchAction {
+    pub output: BatchDocumentOutput,
+    pub action: DocumentLivePatchAction,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct PresentationLiveBatchPatchAction {
+    pub output: BatchDocumentOutput,
+    pub action: PresentationLivePatchAction,
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
@@ -640,6 +779,12 @@ pub enum ComputerActionKind {
     Ui(UiSemanticAction),
     Excel(ExcelPatchAction),
     PowerPoint(PowerPointPatchAction),
+    SpreadsheetLive(SpreadsheetLivePatchAction),
+    DocumentLive(DocumentLivePatchAction),
+    PresentationLive(PresentationLivePatchAction),
+    SpreadsheetLiveBatch(SpreadsheetLiveBatchPatchAction),
+    DocumentLiveBatch(DocumentLiveBatchPatchAction),
+    PresentationLiveBatch(PresentationLiveBatchPatchAction),
     File(FilePatchAction),
     Browser(BrowserActionRequest),
     Communication(OutlookNewComposeHandoffRequest),
@@ -652,6 +797,12 @@ impl ComputerActionKind {
             Self::Ui(_) => Capability::DesktopUiActionConfirmed,
             Self::Excel(_) => Capability::OfficeExcelPatchConfirmed,
             Self::PowerPoint(_) => Capability::OfficePowerPointPatchConfirmed,
+            Self::SpreadsheetLive(_) => Capability::SpreadsheetLivePatchConfirmed,
+            Self::DocumentLive(_) => Capability::DocumentLivePatchConfirmed,
+            Self::PresentationLive(_) => Capability::PresentationLivePatchConfirmed,
+            Self::SpreadsheetLiveBatch(_) => Capability::SpreadsheetLivePatchConfirmed,
+            Self::DocumentLiveBatch(_) => Capability::DocumentLivePatchConfirmed,
+            Self::PresentationLiveBatch(_) => Capability::PresentationLivePatchConfirmed,
             Self::File(FilePatchAction::Copy { .. }) => Capability::FileCopyConfirmed,
             Self::File(FilePatchAction::CreateTextArtifact { .. }) => {
                 Capability::FileArtifactCreateConfirmed
@@ -908,6 +1059,17 @@ fn validate_actions(
                 ComputerUseAdapterKind::OfficePowerPoint,
                 ComputerActionKind::PowerPoint(_)
             ) | (
+                ComputerUseAdapterKind::IworkNumbers,
+                ComputerActionKind::SpreadsheetLive(_)
+                    | ComputerActionKind::SpreadsheetLiveBatch(_)
+            ) | (
+                ComputerUseAdapterKind::IworkPages,
+                ComputerActionKind::DocumentLive(_) | ComputerActionKind::DocumentLiveBatch(_)
+            ) | (
+                ComputerUseAdapterKind::IworkKeynote,
+                ComputerActionKind::PresentationLive(_)
+                    | ComputerActionKind::PresentationLiveBatch(_)
+            ) | (
                 ComputerUseAdapterKind::FileSystem,
                 ComputerActionKind::File(_)
             ) | (
@@ -926,6 +1088,21 @@ fn validate_actions(
             (ComputerActionKind::Ui(_), ObjectKind::UiElement)
                 | (ComputerActionKind::Excel(_), ObjectKind::Range)
                 | (ComputerActionKind::PowerPoint(_), ObjectKind::Shape)
+                | (ComputerActionKind::SpreadsheetLive(_), ObjectKind::Range)
+                | (ComputerActionKind::DocumentLive(_), ObjectKind::Document)
+                | (ComputerActionKind::PresentationLive(_), ObjectKind::Slide)
+                | (
+                    ComputerActionKind::SpreadsheetLiveBatch(_),
+                    ObjectKind::Range
+                )
+                | (
+                    ComputerActionKind::DocumentLiveBatch(_),
+                    ObjectKind::Document
+                )
+                | (
+                    ComputerActionKind::PresentationLiveBatch(_),
+                    ObjectKind::Slide
+                )
                 | (
                     ComputerActionKind::File(
                         FilePatchAction::CreateTextArtifact { .. }
@@ -967,6 +1144,55 @@ fn validate_actions(
                 )
             })?;
         }
+        validate_live_document_action(&step.action)?;
+        if let Some(output) = batch_document_output(&step.action) {
+            if output.destination_parent.object_kind != ObjectKind::Directory {
+                return Err(ComputerUseValidationError::InvalidContextReference(
+                    "batch document output requires a directory reference",
+                ));
+            }
+            for (field, value) in [
+                (
+                    "batch_document.destination_parent.token",
+                    output.destination_parent.token.as_str(),
+                ),
+                (
+                    "batch_document.destination_parent.snapshot_id",
+                    output.destination_parent.snapshot_id.as_str(),
+                ),
+                (
+                    "batch_document.destination_parent.expires_at",
+                    output.destination_parent.expires_at.as_str(),
+                ),
+                (
+                    "batch_document.native_file_name",
+                    output.native_file_name.as_str(),
+                ),
+            ] {
+                require_non_empty(field, value)?;
+            }
+            let expected_extension = match &step.action {
+                ComputerActionKind::SpreadsheetLiveBatch(_) => ".numbers",
+                ComputerActionKind::DocumentLiveBatch(_) => ".pages",
+                ComputerActionKind::PresentationLiveBatch(_) => ".key",
+                _ => unreachable!(),
+            };
+            if output.native_file_name.len() > 255 {
+                return Err(ComputerUseValidationError::OversizedPayload {
+                    actual: output.native_file_name.len(),
+                    max: 255,
+                });
+            }
+            if matches!(output.native_file_name.as_str(), "." | "..")
+                || output.native_file_name.contains(['/', '\\'])
+                || !output.native_file_name.ends_with(expected_extension)
+                || output.native_file_name.len() == expected_extension.len()
+            {
+                return Err(ComputerUseValidationError::InvalidContextReference(
+                    "batch document output must be a safe native iWork leaf name",
+                ));
+            }
+        }
         for (field, value) in [
             ("object_ref.token", step.target.token.as_str()),
             ("object_ref.expires_at", step.target.expires_at.as_str()),
@@ -981,6 +1207,71 @@ fn validate_actions(
         }
     }
     Ok(())
+}
+
+fn validate_live_document_action(
+    action: &ComputerActionKind,
+) -> Result<(), ComputerUseValidationError> {
+    let (actual, max) = match action {
+        ComputerActionKind::SpreadsheetLive(SpreadsheetLivePatchAction::SetCellValue { value }) => {
+            (value.len(), MAX_LIVE_SPREADSHEET_CELL_BYTES)
+        }
+        ComputerActionKind::SpreadsheetLiveBatch(SpreadsheetLiveBatchPatchAction {
+            action: SpreadsheetLivePatchAction::SetCellValue { value },
+            ..
+        }) => (value.len(), MAX_LIVE_SPREADSHEET_CELL_BYTES),
+        ComputerActionKind::SpreadsheetLive(SpreadsheetLivePatchAction::SetCellFormula {
+            formula,
+        }) => {
+            if formula.trim().is_empty() {
+                return Err(ComputerUseValidationError::EmptyField(
+                    "spreadsheet_live.formula",
+                ));
+            }
+            (formula.len(), MAX_LIVE_SPREADSHEET_FORMULA_BYTES)
+        }
+        ComputerActionKind::SpreadsheetLiveBatch(SpreadsheetLiveBatchPatchAction {
+            action: SpreadsheetLivePatchAction::SetCellFormula { formula },
+            ..
+        }) => {
+            if formula.trim().is_empty() {
+                return Err(ComputerUseValidationError::EmptyField(
+                    "spreadsheet_live_batch.formula",
+                ));
+            }
+            (formula.len(), MAX_LIVE_SPREADSHEET_FORMULA_BYTES)
+        }
+        ComputerActionKind::DocumentLive(DocumentLivePatchAction::ReplaceBodyText { text })
+        | ComputerActionKind::PresentationLive(
+            PresentationLivePatchAction::ReplaceSlideTitle { text }
+            | PresentationLivePatchAction::SetPresenterNotes { text },
+        )
+        | ComputerActionKind::DocumentLiveBatch(DocumentLiveBatchPatchAction {
+            action: DocumentLivePatchAction::ReplaceBodyText { text },
+            ..
+        })
+        | ComputerActionKind::PresentationLiveBatch(PresentationLiveBatchPatchAction {
+            action:
+                PresentationLivePatchAction::ReplaceSlideTitle { text }
+                | PresentationLivePatchAction::SetPresenterNotes { text },
+            ..
+        }) => (text.len(), MAX_LIVE_DOCUMENT_TEXT_BYTES),
+        _ => return Ok(()),
+    };
+    if actual > max {
+        Err(ComputerUseValidationError::OversizedPayload { actual, max })
+    } else {
+        Ok(())
+    }
+}
+
+fn batch_document_output(action: &ComputerActionKind) -> Option<&BatchDocumentOutput> {
+    match action {
+        ComputerActionKind::SpreadsheetLiveBatch(action) => Some(&action.output),
+        ComputerActionKind::DocumentLiveBatch(action) => Some(&action.output),
+        ComputerActionKind::PresentationLiveBatch(action) => Some(&action.output),
+        _ => None,
+    }
 }
 
 fn require_non_empty(field: &'static str, value: &str) -> Result<(), ComputerUseValidationError> {
@@ -1119,6 +1410,22 @@ pub struct ComputerActionCompleted {
 pub enum ComputerActionOutput {
     Browser(BrowserActionResult),
     CommunicationHandoff(CommunicationDraftHandoff),
+    BatchDocumentArtifact(BatchDocumentArtifact),
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct BatchDocumentArtifact {
+    pub file: ObjectRef,
+    pub file_name: String,
+    pub byte_len: u64,
+    pub sha256: String,
+    /// Digest of the host-generated PDF or Microsoft Office validation export.
+    /// The validation artifact itself remains private and is deleted before the
+    /// native copy is published.
+    pub validation_byte_len: u64,
+    pub validation_sha256: String,
 }
 
 #[derive(
@@ -1302,6 +1609,24 @@ impl ComputerUseReadiness {
                     "Office capability requires an Office document object",
                 ));
             }
+            let live_target_matches = match reference.capability {
+                Capability::SpreadsheetLiveInspect | Capability::SpreadsheetLivePatchConfirmed => {
+                    reference.object_ref.object_kind == ObjectKind::Range
+                }
+                Capability::DocumentLiveInspect | Capability::DocumentLivePatchConfirmed => {
+                    reference.object_ref.object_kind == ObjectKind::Document
+                }
+                Capability::PresentationLiveInspect
+                | Capability::PresentationLivePatchConfirmed => {
+                    reference.object_ref.object_kind == ObjectKind::Slide
+                }
+                _ => true,
+            };
+            if !live_target_matches {
+                return Err(ComputerUseValidationError::InvalidContextReference(
+                    "live document capability requires its typed current object",
+                ));
+            }
             if matches!(
                 reference.capability,
                 Capability::BrowserPageObserve
@@ -1456,6 +1781,174 @@ mod tests {
         );
         draft.actions[0].target.object_kind = ObjectKind::Range;
         draft.validate().unwrap();
+    }
+
+    #[test]
+    fn iwork_adapters_accept_only_their_provider_neutral_actions_and_targets() {
+        let cases = [
+            (
+                ComputerUseAdapterKind::IworkNumbers,
+                ObjectKind::Range,
+                ComputerActionKind::SpreadsheetLive(SpreadsheetLivePatchAction::SetCellValue {
+                    value: "42".into(),
+                }),
+                Capability::SpreadsheetLivePatchConfirmed,
+            ),
+            (
+                ComputerUseAdapterKind::IworkPages,
+                ObjectKind::Document,
+                ComputerActionKind::DocumentLive(DocumentLivePatchAction::ReplaceBodyText {
+                    text: "body".into(),
+                }),
+                Capability::DocumentLivePatchConfirmed,
+            ),
+            (
+                ComputerUseAdapterKind::IworkKeynote,
+                ObjectKind::Slide,
+                ComputerActionKind::PresentationLive(
+                    PresentationLivePatchAction::SetPresenterNotes {
+                        text: "notes".into(),
+                    },
+                ),
+                Capability::PresentationLivePatchConfirmed,
+            ),
+        ];
+        for (adapter_kind, object_kind, action, capability) in cases {
+            let mut draft = ComputerActionDraft {
+                schema_version: COMPUTER_USE_SCHEMA_VERSION,
+                adapter: ComputerUseAdapterRef {
+                    kind: adapter_kind,
+                    version: "iwork-scripting-bridge/v1".into(),
+                },
+                risk: RiskLevel::Medium,
+                reversible: true,
+                data_egress: false,
+                actions: vec![ComputerActionStep {
+                    target: ObjectRef {
+                        object_kind,
+                        ..object("iwork-target")
+                    },
+                    action,
+                    before_summary: "exact prior value digest".into(),
+                    after_intent: "apply bounded typed patch".into(),
+                    verification: "exact semantic read-back".into(),
+                }],
+            };
+            assert_eq!(draft.actions[0].action.required_capability(), capability);
+            draft.validate().unwrap();
+            draft.adapter.kind = ComputerUseAdapterKind::MacosAccessibility;
+            assert_eq!(
+                draft.validate(),
+                Err(ComputerUseValidationError::IncompatibleActionAdapter)
+            );
+        }
+    }
+
+    #[test]
+    fn live_document_actions_are_bounded_and_formula_must_be_non_empty() {
+        let mut draft = ComputerActionDraft {
+            schema_version: COMPUTER_USE_SCHEMA_VERSION,
+            adapter: ComputerUseAdapterRef {
+                kind: ComputerUseAdapterKind::IworkNumbers,
+                version: "iwork-scripting-bridge/v1".into(),
+            },
+            risk: RiskLevel::Medium,
+            reversible: true,
+            data_egress: false,
+            actions: vec![ComputerActionStep {
+                target: ObjectRef {
+                    object_kind: ObjectKind::Range,
+                    ..object("numbers-cell")
+                },
+                action: ComputerActionKind::SpreadsheetLive(
+                    SpreadsheetLivePatchAction::SetCellFormula {
+                        formula: "   ".into(),
+                    },
+                ),
+                before_summary: "prior cell digest".into(),
+                after_intent: "set formula".into(),
+                verification: "formula and formatted value read-back".into(),
+            }],
+        };
+        assert_eq!(
+            draft.validate(),
+            Err(ComputerUseValidationError::EmptyField(
+                "spreadsheet_live.formula"
+            ))
+        );
+        draft.actions[0].action =
+            ComputerActionKind::SpreadsheetLive(SpreadsheetLivePatchAction::SetCellValue {
+                value: "x".repeat(MAX_LIVE_SPREADSHEET_CELL_BYTES + 1),
+            });
+        assert_eq!(
+            draft.validate(),
+            Err(ComputerUseValidationError::OversizedPayload {
+                actual: MAX_LIVE_SPREADSHEET_CELL_BYTES + 1,
+                max: MAX_LIVE_SPREADSHEET_CELL_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn batch_document_plan_requires_a_safe_native_leaf_and_directory_output() {
+        let destination = ObjectRef {
+            object_kind: ObjectKind::Directory,
+            ..object("output-directory")
+        };
+        let mut draft = ComputerActionDraft {
+            schema_version: COMPUTER_USE_SCHEMA_VERSION,
+            adapter: ComputerUseAdapterRef {
+                kind: ComputerUseAdapterKind::IworkNumbers,
+                version: "iwork-scripting-bridge/v1".into(),
+            },
+            risk: RiskLevel::Medium,
+            reversible: true,
+            data_egress: false,
+            actions: vec![ComputerActionStep {
+                target: ObjectRef {
+                    object_kind: ObjectKind::Range,
+                    ..object("numbers-cell")
+                },
+                action: ComputerActionKind::SpreadsheetLiveBatch(SpreadsheetLiveBatchPatchAction {
+                    output: BatchDocumentOutput {
+                        destination_parent: destination,
+                        native_file_name: "reviewed-copy.numbers".into(),
+                    },
+                    action: SpreadsheetLivePatchAction::SetCellValue { value: "42".into() },
+                }),
+                before_summary: "selected source digest and prior cell value".into(),
+                after_intent: "create a new native Numbers copy".into(),
+                verification: "native reopen plus private XLSX export".into(),
+            }],
+        };
+        draft.validate().unwrap();
+
+        if let ComputerActionKind::SpreadsheetLiveBatch(action) = &mut draft.actions[0].action {
+            action.output.destination_parent.object_kind = ObjectKind::File;
+        }
+        assert_eq!(
+            draft.validate(),
+            Err(ComputerUseValidationError::InvalidContextReference(
+                "batch document output requires a directory reference"
+            ))
+        );
+        if let ComputerActionKind::SpreadsheetLiveBatch(action) = &mut draft.actions[0].action {
+            action.output.destination_parent.object_kind = ObjectKind::Directory;
+            action.output.native_file_name = "../overwrite.numbers".into();
+        }
+        assert_eq!(
+            draft.validate(),
+            Err(ComputerUseValidationError::InvalidContextReference(
+                "batch document output must be a safe native iWork leaf name"
+            ))
+        );
+        if let ComputerActionKind::SpreadsheetLiveBatch(action) = &mut draft.actions[0].action {
+            action.output.native_file_name = format!("{}.numbers", "x".repeat(248));
+        }
+        assert!(matches!(
+            draft.validate(),
+            Err(ComputerUseValidationError::OversizedPayload { max: 255, .. })
+        ));
     }
 
     #[test]

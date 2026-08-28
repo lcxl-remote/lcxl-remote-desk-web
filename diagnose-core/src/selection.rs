@@ -80,6 +80,9 @@ fn is_allowed(cap: Capability, request: &DiagnoseRequestData, policy: &Collectio
         Capability::DesktopSessionInspect
         | Capability::DesktopUiInspect
         | Capability::OfficeDocumentInspect
+        | Capability::SpreadsheetLiveInspect
+        | Capability::DocumentLiveInspect
+        | Capability::PresentationLiveInspect
         | Capability::FileMetadataRead
         | Capability::FileContentRead
         | Capability::SpreadsheetFileInspect
@@ -97,6 +100,9 @@ fn is_allowed(cap: Capability, request: &DiagnoseRequestData, policy: &Collectio
         | Capability::DesktopInputFallbackConfirmed
         | Capability::OfficeExcelPatchConfirmed
         | Capability::OfficePowerPointPatchConfirmed
+        | Capability::SpreadsheetLivePatchConfirmed
+        | Capability::DocumentLivePatchConfirmed
+        | Capability::PresentationLivePatchConfirmed
         | Capability::FilePatchConfirmed
         | Capability::FileCopyConfirmed
         | Capability::FileArtifactCreateConfirmed
@@ -158,6 +164,9 @@ pub fn capability_name(cap: Capability) -> Option<&'static str> {
         Capability::DesktopSessionInspect
         | Capability::DesktopUiInspect
         | Capability::OfficeDocumentInspect
+        | Capability::SpreadsheetLiveInspect
+        | Capability::DocumentLiveInspect
+        | Capability::PresentationLiveInspect
         | Capability::FileMetadataRead
         | Capability::FileContentRead
         | Capability::SpreadsheetFileInspect
@@ -175,6 +184,9 @@ pub fn capability_name(cap: Capability) -> Option<&'static str> {
         | Capability::DesktopInputFallbackConfirmed
         | Capability::OfficeExcelPatchConfirmed
         | Capability::OfficePowerPointPatchConfirmed
+        | Capability::SpreadsheetLivePatchConfirmed
+        | Capability::DocumentLivePatchConfirmed
+        | Capability::PresentationLivePatchConfirmed
         | Capability::FilePatchConfirmed
         | Capability::FileCopyConfirmed
         | Capability::FileArtifactCreateConfirmed
@@ -255,6 +267,9 @@ pub fn context_input_for(cap: Capability) -> Option<ReadContextInput> {
         Capability::DesktopSessionInspect
         | Capability::DesktopUiInspect
         | Capability::OfficeDocumentInspect
+        | Capability::SpreadsheetLiveInspect
+        | Capability::DocumentLiveInspect
+        | Capability::PresentationLiveInspect
         | Capability::FileMetadataRead
         | Capability::FileContentRead
         | Capability::SpreadsheetFileInspect
@@ -272,6 +287,9 @@ pub fn context_input_for(cap: Capability) -> Option<ReadContextInput> {
         | Capability::DesktopInputFallbackConfirmed
         | Capability::OfficeExcelPatchConfirmed
         | Capability::OfficePowerPointPatchConfirmed
+        | Capability::SpreadsheetLivePatchConfirmed
+        | Capability::DocumentLivePatchConfirmed
+        | Capability::PresentationLivePatchConfirmed
         | Capability::FilePatchConfirmed
         | Capability::FileCopyConfirmed
         | Capability::FileArtifactCreateConfirmed

@@ -6,5 +6,7 @@
     <string>Screen capture for remote desktop sessions.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Audio capture for remote desktop sessions.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Control selected Pages, Numbers, and Keynote documents after you approve each operation.</string>
 </dict>
 </plist>

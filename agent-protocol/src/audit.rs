@@ -735,6 +735,15 @@ pub fn summarize_output(output: &OperationOutput) -> String {
                 o.snapshot_id,
                 if o.truncated { " (truncated)" } else { "" }
             ),
+            R::SpreadsheetLiveInspect(o) => {
+                format!("spreadsheet.live.inspect: snapshot {}", o.snapshot_id)
+            }
+            R::DocumentLiveInspect(o) => {
+                format!("document.live.inspect: snapshot {}", o.snapshot_id)
+            }
+            R::PresentationLiveInspect(o) => {
+                format!("presentation.live.inspect: snapshot {}", o.snapshot_id)
+            }
             R::FileMetadataInspect(o) => format!(
                 "file.metadata.read: {} selected, {} directory entries{}",
                 o.entries.len(),
@@ -802,6 +811,9 @@ impl Capability {
             Capability::DesktopSessionInspect => "desktop.session.inspect",
             Capability::DesktopUiInspect => "desktop.ui.inspect",
             Capability::OfficeDocumentInspect => "office.document.inspect",
+            Capability::SpreadsheetLiveInspect => "spreadsheet.live.inspect",
+            Capability::DocumentLiveInspect => "document.live.inspect",
+            Capability::PresentationLiveInspect => "presentation.live.inspect",
             Capability::FileMetadataRead => "file.metadata.read",
             Capability::FileContentRead => "file.content.read",
             Capability::SpreadsheetFileInspect => "spreadsheet.file.inspect",
@@ -823,6 +835,9 @@ impl Capability {
             Capability::DesktopInputFallbackConfirmed => "desktop.input.fallback.confirmed",
             Capability::OfficeExcelPatchConfirmed => "office.excel.patch.confirmed",
             Capability::OfficePowerPointPatchConfirmed => "office.powerpoint.patch.confirmed",
+            Capability::SpreadsheetLivePatchConfirmed => "spreadsheet.live.patch.confirmed",
+            Capability::DocumentLivePatchConfirmed => "document.live.patch.confirmed",
+            Capability::PresentationLivePatchConfirmed => "presentation.live.patch.confirmed",
             Capability::FilePatchConfirmed => "file.patch.confirmed",
             Capability::FileCopyConfirmed => "file.copy.confirmed",
             Capability::FileArtifactCreateConfirmed => "file.artifact.create.confirmed",

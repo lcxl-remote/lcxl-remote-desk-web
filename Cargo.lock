@@ -481,8 +481,6 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 [[package]]
 name = "apple-cf"
 version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7fd680cd0f3f02ee717b2014b26d18985c57b784384ba47213fcf8791e8c250"
 dependencies = [
  "doom-fish-utils",
 ]
@@ -4923,6 +4921,7 @@ dependencies = [
  "config",
  "console-subscriber",
  "core-audio-types",
+ "core-foundation 0.9.4",
  "core-graphics 0.23.2",
  "cpal",
  "desk-agent-protocol",
@@ -5901,6 +5900,9 @@ name = "objc-sys"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdb91bdd390c7ce1a8607f35f3ca7151b65afc0ff5ff3b34fa350f7d7c7e4310"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "objc2"

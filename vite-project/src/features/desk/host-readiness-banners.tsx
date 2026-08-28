@@ -162,7 +162,8 @@ export function HostReadinessBanners() {
 
             {info.macos_permissions
                 && (!info.macos_permissions.screen_recording
-                    || !info.macos_permissions.accessibility) && (
+                    || !info.macos_permissions.accessibility
+                    || !info.macos_permissions.input_monitoring) && (
                 <Alert className="flex items-center justify-between gap-4">
                     <div>
                         <AlertTitle>{t("pages.hostReadiness.macos.title")}</AlertTitle>
@@ -175,6 +176,9 @@ export function HostReadinessBanners() {
                                             : null,
                                         !info.macos_permissions.accessibility
                                             ? t("pages.system.settings.macos.permissions.accessibility")
+                                            : null,
+                                        !info.macos_permissions.input_monitoring
+                                            ? t("pages.system.settings.macos.permissions.inputMonitoring")
                                             : null,
                                     ].filter(Boolean).join(", "),
                                 })}

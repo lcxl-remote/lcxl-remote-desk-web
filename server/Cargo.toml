@@ -150,9 +150,10 @@ zbus = { workspace = true }
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = { workspace = true }
+objc2 = { workspace = true, features = ["exception"] }
 objc2-foundation = { workspace = true }
 core-graphics = { workspace = true }
+core-foundation = "0.9"
 core-audio-types = { workspace = true }
 # macOS network.ports backend: per-process socket enumeration via libproc
 # (proc_pidfdinfo / PROC_PIDFDSOCKETINFO), the same data source as lsof.

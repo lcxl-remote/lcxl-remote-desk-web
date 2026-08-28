@@ -254,10 +254,15 @@ mod tests {
         assert!(encode_png(&frame).is_err());
     }
 
-    /// Live capture on Windows: must not panic and, when it succeeds, returns a
-    /// real PNG with non-zero dimensions. Tolerates failure on headless hosts.
-    #[cfg(windows)]
+    /// Live capture on desktop targets: must not panic and, when it succeeds,
+    /// returns a real PNG with non-zero dimensions. Tolerates failure on
+    /// headless or permission-denied hosts.
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "requires an Aqua session and Screen Recording permission"
+    )]
     fn live_capture_is_ok_or_errors_gracefully() {
         match collect(&ScreenCaptureParams::default(), &DeskSettings::default()) {
             Ok(out) => {
@@ -267,5 +272,22 @@ mod tests {
             }
             Err(e) => assert_eq!(e.kind, AgentErrorKind::Internal),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires an Aqua session with Screen Recording permission"]
+    fn live_macos_capture_requires_a_real_png() {
+        let display_id = core_graphics::display::CGDisplay::main().id;
+        assert_ne!(display_id, 0, "macOS must expose a main display");
+        let settings = DeskSettings {
+            video_device_name: display_id.to_string(),
+            ..Default::default()
+        };
+        let out =
+            collect(&ScreenCaptureParams::default(), &settings).expect("macOS screen capture");
+        assert_eq!(out.format, ImageFormat::Png);
+        assert!(out.width > 0 && out.height > 0);
+        assert_eq!(&out.image[..4], &[0x89, b'P', b'N', b'G']);
     }
 }

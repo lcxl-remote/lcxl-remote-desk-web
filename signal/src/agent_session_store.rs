@@ -1079,7 +1079,40 @@ fn build_permission_grants(
         });
         let exact_external_query = capability.wire.authorization_hint.resources
             == [AuthorizationResourceKind::ExternalQuery];
-        let resource_scope = if capability.wire.authorization_hint.resources
+        let exact_ui_action = capability.required_capability
+            == desk_agent_protocol::Capability::DesktopUiActionConfirmed;
+        let resource_scope = if exact_ui_action {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct UiActionInput {
+                target: ObjectRef,
+                action: desk_agent_protocol::computer_use::UiSemanticAction,
+            }
+            let canonical = requested
+                .canonical_input_json
+                .as_deref()
+                .ok_or_else(|| internal("approved semantic UI action has no exact input"))?;
+            let input: UiActionInput = serde_json::from_str(canonical)
+                .map_err(|_| internal("approved semantic UI action input is invalid"))?;
+            if input.target.object_kind != ObjectKind::UiElement {
+                return Err(internal(
+                    "approved semantic UI action target is not a UI element",
+                ));
+            }
+            match input.action {
+                desk_agent_protocol::computer_use::UiSemanticAction::Invoke
+                | desk_agent_protocol::computer_use::UiSemanticAction::Select
+                | desk_agent_protocol::computer_use::UiSemanticAction::Focus => {}
+                desk_agent_protocol::computer_use::UiSemanticAction::SetValue { value }
+                    if value.len() <= 16 * 1024 => {}
+                _ => {
+                    return Err(internal(
+                        "approved semantic UI action is outside the bounded allowlist",
+                    ));
+                }
+            }
+            desk_diagnose_core::capability_grant::fresh_object_resource_scope(&[input.target])
+        } else if capability.wire.authorization_hint.resources
             == [AuthorizationResourceKind::FreshObjectReference]
         {
             let object_refs = session
@@ -1133,6 +1166,7 @@ fn build_permission_grants(
         let operation_scope = if capability.wire.authorization_hint.resources
             == [AuthorizationResourceKind::ExternalUrl]
             || exact_external_query
+            || exact_ui_action
         {
             requested.operation_scope.clone()
         } else {
@@ -1147,23 +1181,25 @@ fn build_permission_grants(
                 unpredictable_input: false,
             },
         );
-        let (use_policy, canonical_input_digest_sha256) =
-            if risk_tier == desk_agent_protocol::capability_grant::CapabilityRiskTier::R3 {
-                if *max_uses != 1 || requested.canonical_input_json.is_none() {
-                    return Err(internal(
-                        "R3 permission requires one use and an exact canonical input contract",
-                    ));
-                }
-                (
-                    CapabilityGrantUsePolicy::OneShotExact,
-                    requested.canonical_input_digest_sha256.clone(),
-                )
-            } else {
-                (
-                    CapabilityGrantUsePolicy::Reusable,
-                    requested.canonical_input_digest_sha256.clone(),
-                )
-            };
+        let (use_policy, canonical_input_digest_sha256) = if risk_tier
+            == desk_agent_protocol::capability_grant::CapabilityRiskTier::R3
+            || exact_ui_action
+        {
+            if *max_uses != 1 || requested.canonical_input_json.is_none() {
+                return Err(internal(
+                    "exact permission requires one use and an exact canonical input contract",
+                ));
+            }
+            (
+                CapabilityGrantUsePolicy::OneShotExact,
+                requested.canonical_input_digest_sha256.clone(),
+            )
+        } else {
+            (
+                CapabilityGrantUsePolicy::Reusable,
+                requested.canonical_input_digest_sha256.clone(),
+            )
+        };
         let expires_at_unix_ms = context
             .now_unix_ms
             .checked_add(u64::from(*ttl_seconds).saturating_mul(1_000))
@@ -1186,6 +1222,8 @@ fn build_permission_grants(
                 connector_id: desk_diagnose_core::device_assistant::DUCKDUCKGO_HTML_CONNECTOR_ID
                     .into(),
             }]
+        } else if exact_ui_action {
+            requested.export_destinations.clone()
         } else {
             export_destinations.clone()
         };
@@ -1281,6 +1319,21 @@ fn object_ref_matches_fresh_object_capability(
     ) && object_ref.object_kind == ObjectKind::BrowserSurface)
         || (capability == desk_agent_protocol::Capability::CommunicationOutlookNewHandoffConfirmed
             && object_ref.object_kind == ObjectKind::Application)
+        || (matches!(
+            capability,
+            desk_agent_protocol::Capability::SpreadsheetLiveInspect
+                | desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed
+        ) && object_ref.object_kind == ObjectKind::Range)
+        || (matches!(
+            capability,
+            desk_agent_protocol::Capability::DocumentLiveInspect
+                | desk_agent_protocol::Capability::DocumentLivePatchConfirmed
+        ) && object_ref.object_kind == ObjectKind::Document)
+        || (matches!(
+            capability,
+            desk_agent_protocol::Capability::PresentationLiveInspect
+                | desk_agent_protocol::Capability::PresentationLivePatchConfirmed
+        ) && object_ref.object_kind == ObjectKind::Slide)
 }
 
 #[derive(Debug, Clone)]
@@ -2527,6 +2580,103 @@ mod tests {
         assert_eq!(
             grant.risk_tier,
             desk_agent_protocol::capability_grant::CapabilityRiskTier::R0
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_ui_grant_is_one_shot_and_server_binds_exact_authority() {
+        let store = store().await;
+        let session = store.claim_turn(claim("ui-action-turn")).await.unwrap();
+        let target = ObjectRef {
+            token: "signed-ui-element-token".into(),
+            snapshot_id: "snapshot-1".into(),
+            object_kind: ObjectKind::UiElement,
+            expires_at: "2026-08-26T00:05:00Z".into(),
+        };
+        let canonical_input_json = serde_json::json!({
+            "target": target,
+            "action": {"kind": "focus"},
+        })
+        .to_string();
+        let canonical_input_digest_sha256 =
+            format!("{:x}", Sha256::digest(canonical_input_json.as_bytes()));
+        let exact_resource_scope =
+            desk_diagnose_core::capability_grant::fresh_object_resource_scope(&[target]);
+        let request = PermissionRequest {
+            schema_version: PERMISSION_REQUEST_SCHEMA_VERSION,
+            request_id: "permission-ui-action".into(),
+            input_revision: 1,
+            state: PermissionRequestState::Pending,
+            items: vec![GrantRequestItem {
+                item_id: "ui-action".into(),
+                provider_id: desk_diagnose_core::device_assistant::DESKTOP_UI_ACTION_PROVIDER_ID
+                    .into(),
+                tool_name: desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
+                    .into(),
+                expected_effect: CapabilityEffect::MutateApplication,
+                resource_scope: exact_resource_scope.clone(),
+                operation_scope: vec!["use_selected_object".into()],
+                export_destinations: Vec::new(),
+                canonical_input_json: Some(canonical_input_json),
+                canonical_input_digest_sha256: Some(canonical_input_digest_sha256.clone()),
+                suggested_ttl_seconds: 120,
+                suggested_max_uses: 1,
+                reason: "Focus the selected UI element".into(),
+            }],
+            created_at: "2026-08-26T00:00:00Z".into(),
+        };
+        let decisions = vec![PermissionDecisionItem {
+            item_id: "ui-action".into(),
+            decision: PermissionItemDecision::Approve {
+                resource_scope: vec!["display-label-cannot-authorize".into()],
+                operation_scope: vec!["widened-operation".into()],
+                export_destinations: vec![DestinationIdentity::EmailAccount {
+                    account_id: "must-not-survive".into(),
+                }],
+                ttl_seconds: 120,
+                max_uses: 1,
+            },
+        }];
+        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        let inventory = vec![CapabilityAvailability {
+            provider_id: desk_diagnose_core::device_assistant::DESKTOP_UI_ACTION_PROVIDER_ID.into(),
+            capability_id: desk_diagnose_core::device_assistant::DESKTOP_UI_ACTION_CAPABILITY_ID
+                .into(),
+            tool_name: desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
+                .into(),
+            compiled: true,
+            enabled: true,
+            connected: true,
+            ready: true,
+            reason: None,
+        }];
+
+        let grants = build_permission_grants(
+            &session,
+            &request,
+            &decisions,
+            &PermissionGrantIssuanceContext {
+                surface: ProductSurface::OssPersonalOwner,
+                registry: &registry,
+                inventory: &inventory,
+                readiness_revision: 7,
+                now_unix_ms: 1_000,
+                implicit_fresh_object_refs: &[],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(grants.len(), 1);
+        let grant = &grants[0];
+        assert_eq!(grant.resource_scope, exact_resource_scope);
+        assert_eq!(grant.operation_scope, vec!["use_selected_object"]);
+        assert!(grant.export_destinations.is_empty());
+        assert_eq!(grant.remaining_uses, 1);
+        assert_eq!(grant.limits.max_calls, 1);
+        assert_eq!(grant.use_policy, CapabilityGrantUsePolicy::OneShotExact);
+        assert_eq!(
+            grant.canonical_input_digest_sha256.as_deref(),
+            Some(canonical_input_digest_sha256.as_str())
         );
     }
 

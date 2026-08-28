@@ -8,6 +8,7 @@ import { Check, Copy, Loader2, Save } from "lucide-react"
 import { useQuerySettings } from "@/services/hooks/settingsController/useQuerySettings"
 import { useUpdateSettings } from "@/services/hooks/settingsController/useUpdateSettings"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
+import { useRequestMacosPermissions } from "@/services/hooks/hostReadinessController/useRequestMacosPermissions"
 import { useQueryBackendInfo } from "@/services/hooks/systemController/useQueryBackendInfo"
 import { useQueryMacosAutologin } from "@/services/hooks/systemController/useQueryMacosAutologin"
 import { useQueryTelemetryStatus } from "@/services/hooks/telemetryController/useQueryTelemetryStatus"
@@ -45,7 +46,8 @@ export function SystemSettings() {
 
     const { data: settingsResponse, isLoading, refetch: refetchSettings } = useQuerySettings()
     const { mutateAsync: updateSettings, isPending: isUpdating } = useUpdateSettings()
-    const { data: serverInfoResp } = useQueryServerInfo()
+    const { data: serverInfoResp, refetch: refetchServerInfo } = useQueryServerInfo()
+    const requestMacosPermissions = useRequestMacosPermissions()
     const { data: backendInfoResp } = useQueryBackendInfo()
     const [installDialogOpen, setInstallDialogOpen] = useState(false)
     const [uninstallDialogOpen, setUninstallDialogOpen] = useState(false)
@@ -327,7 +329,33 @@ export function SystemSettings() {
                         </div>
 
                         <div className="space-y-3">
-                            <h4 className="text-sm font-medium">{t("pages.system.settings.macos.permissions.label")}</h4>
+                            <div className="flex items-start justify-between gap-4">
+                                <div className="space-y-1">
+                                    <h4 className="text-sm font-medium">{t("pages.system.settings.macos.permissions.label")}</h4>
+                                    <p className="text-xs text-muted-foreground">
+                                        {t("pages.system.settings.macos.permissions.localOnly")}
+                                    </p>
+                                </div>
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    disabled={requestMacosPermissions.isPending}
+                                    onClick={async () => {
+                                        try {
+                                            await requestMacosPermissions.mutateAsync()
+                                            await refetchServerInfo()
+                                        } catch {
+                                            toast({
+                                                variant: "destructive",
+                                                title: t("pages.system.settings.macos.permissions.requestFailed"),
+                                            })
+                                        }
+                                    }}
+                                >
+                                    {requestMacosPermissions.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                                    {t("pages.system.settings.macos.permissions.request")}
+                                </Button>
+                            </div>
                             <div className="flex items-center justify-between">
                                 <div className="space-y-0.5">
                                     <p className="text-sm font-medium">{t("pages.system.settings.macos.permissions.screenRecording")}</p>
@@ -354,6 +382,45 @@ export function SystemSettings() {
                                     <Badge variant="destructive">{t("pages.system.settings.macos.permissions.notGranted")}</Badge>
                                 )}
                             </div>
+                            <div className="flex items-center justify-between">
+                                <div className="space-y-0.5">
+                                    <p className="text-sm font-medium">{t("pages.system.settings.macos.permissions.inputMonitoring")}</p>
+                                    {!serverInfo.macos_permissions?.input_monitoring && (
+                                        <p className="text-xs text-muted-foreground">{t("pages.system.settings.macos.permissions.grant")}</p>
+                                    )}
+                                </div>
+                                {serverInfo.macos_permissions?.input_monitoring ? (
+                                    <Badge variant="default">{t("pages.system.settings.macos.permissions.granted")}</Badge>
+                                ) : (
+                                    <Badge variant="destructive">{t("pages.system.settings.macos.permissions.notGranted")}</Badge>
+                                )}
+                            </div>
+                            <div className="border-t pt-3 text-xs text-muted-foreground">
+                                {t("pages.system.settings.macos.permissions.iworkHint")}
+                            </div>
+                            {([
+                                ["numbers", serverInfo.macos_permissions?.numbers_automation],
+                                ["pages", serverInfo.macos_permissions?.pages_automation],
+                                ["keynote", serverInfo.macos_permissions?.keynote_automation],
+                            ] as const).map(([application, granted]) => (
+                                <div key={application} className="flex items-center justify-between">
+                                    <div className="space-y-0.5">
+                                        <p className="text-sm font-medium">
+                                            {t(`pages.system.settings.macos.permissions.${application}Automation`)}
+                                        </p>
+                                        {!granted && (
+                                            <p className="text-xs text-muted-foreground">
+                                                {t("pages.system.settings.macos.permissions.iworkGrant")}
+                                            </p>
+                                        )}
+                                    </div>
+                                    {granted ? (
+                                        <Badge variant="default">{t("pages.system.settings.macos.permissions.granted")}</Badge>
+                                    ) : (
+                                        <Badge variant="destructive">{t("pages.system.settings.macos.permissions.notGranted")}</Badge>
+                                    )}
+                                </div>
+                            ))}
                         </div>
 
                         <MacosAutologinStatus enabled={isMac} />

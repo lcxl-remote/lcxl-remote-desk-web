@@ -106,6 +106,20 @@ impl WorkerSession {
         } else {
             None
         };
+        #[cfg(target_os = "macos")]
+        let computer_use_input_monitor = if shared_settings.read().await.computer_use.enabled {
+            match crate::worker::agent::macos_input_ownership::MacosInputOwnershipMonitor::start(
+                &computer_use_broker,
+            ) {
+                Ok(monitor) => Some(monitor),
+                Err(error) => {
+                    warn!("Computer Use input ownership monitor is unavailable: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         #[cfg(target_os = "linux")]
         let (portal_broker, portal_unavailable_snapshot) = if detect_linux_display_environment()
@@ -1568,6 +1582,13 @@ impl WorkerSession {
                                             .unwrap_or_else(|_| chrono::Utc::now() - chrono::Duration::seconds(1)),
                                     };
                                     let action_preflight = match &plan.actions[0].action {
+                                        ComputerActionKind::Ui(action) => computer_use_broker
+                                            .preflight_ui_action(
+                                                &plan.actions[0].target,
+                                                action,
+                                                &ceiling,
+                                            )
+                                            .map_err(|error| error.message),
                                         ComputerActionKind::File(_) => ceiling
                                             .file_artifact_create_enabled()
                                             .then_some(())
@@ -1602,7 +1623,28 @@ impl WorkerSession {
                                                         &plan.actions[0].target,
                                                         request,
                                                     )
+                                                .map_err(|error| error.message)
+                                            }
+                                        }
+                                        ComputerActionKind::SpreadsheetLive(_)
+                                        | ComputerActionKind::DocumentLive(_)
+                                        | ComputerActionKind::PresentationLive(_)
+                                        | ComputerActionKind::SpreadsheetLiveBatch(_)
+                                        | ComputerActionKind::DocumentLiveBatch(_)
+                                        | ComputerActionKind::PresentationLiveBatch(_) => {
+                                            #[cfg(target_os = "macos")]
+                                            {
+                                                computer_use_broker
+                                                    .preflight_iwork_action(
+                                                        &plan.actions[0].target,
+                                                        &plan.actions[0].action,
+                                                        &ceiling,
+                                                    )
                                                     .map_err(|error| error.message)
+                                            }
+                                            #[cfg(not(target_os = "macos"))]
+                                            {
+                                                Err("the live document adapter is unavailable on this platform".to_string())
                                             }
                                         }
                                         _ => Err("this Computer Action adapter is not enabled".to_string()),
@@ -1669,6 +1711,155 @@ impl WorkerSession {
                                     tokio::spawn(async move {
                                         let generation = plan.execution_generation.clone();
                                         let step = plan.actions.into_iter().next().expect("preflight checked one action");
+                                        if let ComputerActionKind::Ui(action) = &step.action {
+                                            let target = step.target.clone();
+                                            let action = action.clone();
+                                            let broker = action_broker.clone();
+                                            let generation_for_call = generation.clone();
+                                            let ceiling = ceiling.clone();
+                                            let result = tokio::task::spawn_blocking(move || -> Result<_, desk_agent_protocol::AgentError> {
+                                                broker.require_writer_lease(&generation_for_call)?;
+                                                let result = broker.execute_ui_action(
+                                                    &target,
+                                                    &action,
+                                                    &ceiling,
+                                                )?;
+                                                // Human/browser input may arrive while the AX call is
+                                                // in flight. Never bless a read-back gathered after
+                                                // the writer lease was preempted.
+                                                broker.require_writer_lease(&generation_for_call)?;
+                                                Ok(result)
+                                            })
+                                            .await
+                                            .map_err(|error| format!("semantic UI action worker failed to join: {error}"))
+                                            .and_then(|result| result.map_err(|error| error.message));
+                                            action_broker.release_writer_lease(&generation);
+                                            let (class, facts, message) = match result {
+                                                Ok(result) => (
+                                                    if result.verified {
+                                                        ComputerActionResultClass::Verified
+                                                    } else {
+                                                        ComputerActionResultClass::ChangedButUnverified
+                                                    },
+                                                    vec![ComputerActionStepFact {
+                                                        index: 0,
+                                                        changed: result.changed,
+                                                        verified: result.verified,
+                                                        summary: result.summary,
+                                                    }],
+                                                    Some(if result.verified {
+                                                        "semantic UI action completed with Accessibility read-back"
+                                                            .to_string()
+                                                    } else {
+                                                        "semantic UI action may have changed the application without a generic verifier"
+                                                            .to_string()
+                                                    }),
+                                                ),
+                                                Err(reason) => (
+                                                    ComputerActionResultClass::OutcomeUnknown,
+                                                    vec![],
+                                                    Some(reason),
+                                                ),
+                                            };
+                                            let _ = action_writer.send(
+                                                WorkerToService::ComputerActionCompleted(
+                                                    ComputerActionCompletedPayload {
+                                                        request_id: payload.request_id,
+                                                        connection_id: payload.connection_id,
+                                                        completed: ComputerActionCompleted {
+                                                            work_id: plan.work_id,
+                                                            action_request_id: plan.action_request_id,
+                                                            execution_generation: generation,
+                                                            result: class,
+                                                            facts,
+                                                            message,
+                                                            output: None,
+                                                        },
+                                                    },
+                                                ),
+                                            );
+                                            return;
+                                        }
+                                        if matches!(
+                                            &step.action,
+                                            ComputerActionKind::SpreadsheetLive(_)
+                                                | ComputerActionKind::DocumentLive(_)
+                                                | ComputerActionKind::PresentationLive(_)
+                                                | ComputerActionKind::SpreadsheetLiveBatch(_)
+                                                | ComputerActionKind::DocumentLiveBatch(_)
+                                                | ComputerActionKind::PresentationLiveBatch(_)
+                                        ) {
+                                            #[cfg(target_os = "macos")]
+                                            let result = {
+                                                let target = step.target.clone();
+                                                let action = step.action.clone();
+                                                let broker = action_broker.clone();
+                                                let generation_for_call = generation.clone();
+                                                let ceiling = ceiling.clone();
+                                                tokio::task::spawn_blocking(move || -> Result<_, desk_agent_protocol::AgentError> {
+                                                    broker.require_writer_lease(&generation_for_call)?;
+                                                    let result = broker.execute_iwork_action(
+                                                        &target,
+                                                        &action,
+                                                        &ceiling,
+                                                    )?;
+                                                    broker.require_writer_lease(&generation_for_call)?;
+                                                    Ok(result)
+                                                })
+                                                .await
+                                                .map_err(|error| format!("iWork semantic action worker failed to join: {error}"))
+                                                .and_then(|result| result.map_err(|error| error.message))
+                                            };
+                                            #[cfg(not(target_os = "macos"))]
+                                            let result: Result<crate::worker::agent::computer_use_broker::SemanticActionResult, String> =
+                                                Err("the live document adapter is unavailable on this platform".into());
+                                            action_broker.release_writer_lease(&generation);
+                                            let (class, facts, message, output) = match result {
+                                                Ok(result) => (
+                                                    if result.verified {
+                                                        ComputerActionResultClass::Verified
+                                                    } else {
+                                                        ComputerActionResultClass::ChangedButUnverified
+                                                    },
+                                                    vec![ComputerActionStepFact {
+                                                        index: 0,
+                                                        changed: result.changed,
+                                                        verified: result.verified,
+                                                        summary: result.summary,
+                                                    }],
+                                                    Some(if result.verified {
+                                                        "iWork action completed with exact semantic read-back".to_string()
+                                                    } else {
+                                                        "iWork changed the document but exact semantic read-back was unavailable".to_string()
+                                                    }),
+                                                    result.output,
+                                                ),
+                                                Err(reason) => (
+                                                    ComputerActionResultClass::OutcomeUnknown,
+                                                    vec![],
+                                                    Some(reason),
+                                                    None,
+                                                ),
+                                            };
+                                            let _ = action_writer.send(
+                                                WorkerToService::ComputerActionCompleted(
+                                                    ComputerActionCompletedPayload {
+                                                        request_id: payload.request_id,
+                                                        connection_id: payload.connection_id,
+                                                        completed: ComputerActionCompleted {
+                                                            work_id: plan.work_id,
+                                                            action_request_id: plan.action_request_id,
+                                                            execution_generation: generation,
+                                                            result: class,
+                                                            facts,
+                                                            message,
+                                                            output,
+                                                        },
+                                                    },
+                                                ),
+                                            );
+                                            return;
+                                        }
                                         if let ComputerActionKind::Browser(request) = &step.action {
                                             let mutation_may_have_started = matches!(
                                                 &request.action,
@@ -1682,13 +1873,19 @@ impl WorkerSession {
                                                 .require_writer_lease(&generation)
                                                 .map_err(|error| error.message);
                                             let result = match lease_valid {
-                                                Ok(_) => action_broker
+                                                Ok(_) => match action_broker
                                                     .execute_browser_action(&step.target, request)
                                                     .await
                                                     .map_err(|_| {
                                                         "browser action did not return a verified semantic result"
                                                             .to_string()
-                                                    }),
+                                                    }) {
+                                                    Ok(result) => action_broker
+                                                        .require_writer_lease(&generation)
+                                                        .map(|_| result)
+                                                        .map_err(|error| error.message),
+                                                    Err(reason) => Err(reason),
+                                                },
                                                 Err(reason) => Err(reason),
                                             };
                                             action_broker.release_writer_lease(&generation);
@@ -2352,7 +2549,7 @@ impl WorkerSession {
         // senders gone" and exits cleanly.
         heartbeat_task.abort();
         computer_use_readiness_task.abort();
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         drop(computer_use_input_monitor);
         #[cfg(target_os = "linux")]
         if let Some(task) = portal_status_task {

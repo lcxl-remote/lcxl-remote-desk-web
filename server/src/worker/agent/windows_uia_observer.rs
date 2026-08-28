@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use desk_agent_protocol::computer_use::UiSemanticActionKind;
 use desk_agent_protocol::{AgentError, AgentErrorKind};
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 use windows::Win32::Foundation::{CloseHandle, FILETIME};
 use windows::Win32::System::Com::{
@@ -31,22 +30,7 @@ const HARD_DEADLINE: Duration = Duration::from_secs(2);
 const MAX_STRING_BYTES: usize = 16 * 1024;
 const OBJECT_REF_BUDGET: usize = 320;
 
-#[derive(Clone, Debug, Serialize)]
-pub struct CollectedNode {
-    pub parent_index: Option<u32>,
-    pub role: String,
-    pub name: Option<String>,
-    pub value: Option<String>,
-    pub is_protected: bool,
-    pub enabled: bool,
-    pub supported_actions: Vec<UiSemanticActionKind>,
-    pub fingerprint: String,
-}
-
-pub struct CollectedTree {
-    pub nodes: Vec<CollectedNode>,
-    pub truncated: bool,
-}
+use super::computer_use_broker::{CollectedUiNode, CollectedUiTree};
 
 struct ComGuard;
 
@@ -86,7 +70,7 @@ pub fn collect_foreground(
     max_depth: u16,
     max_nodes: u32,
     max_bytes: u32,
-) -> Result<CollectedTree, AgentError> {
+) -> Result<CollectedUiTree, AgentError> {
     let _com = ComGuard::initialize()?;
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() {
@@ -130,7 +114,7 @@ pub fn collect_foreground(
     let mut state = WalkState::default();
     let mut nodes = Vec::new();
     walk(root, None, 0, 0, &config, &mut state, &mut nodes);
-    Ok(CollectedTree {
+    Ok(CollectedUiTree {
         nodes,
         truncated: state.truncated,
     })
@@ -143,7 +127,7 @@ fn walk(
     sibling_ordinal: usize,
     config: &WalkConfig<'_>,
     state: &mut WalkState,
-    output: &mut Vec<CollectedNode>,
+    output: &mut Vec<CollectedUiNode>,
 ) {
     if output.len() >= config.max_nodes || Instant::now() >= config.deadline {
         state.truncated = true;
@@ -212,7 +196,7 @@ fn read_node(
     parent_fingerprint: Option<&str>,
     parent_index: Option<u32>,
     sibling_ordinal: usize,
-) -> (CollectedNode, bool) {
+) -> (CollectedUiNode, bool) {
     unsafe {
         let process_id = element.CurrentProcessId().unwrap_or_default();
         let started = process_start(process_id.max(0) as u32);
@@ -307,7 +291,7 @@ fn read_node(
             &automation_id,
         );
         (
-            CollectedNode {
+            CollectedUiNode {
                 parent_index,
                 role,
                 name,

@@ -86,6 +86,7 @@ mod tests {
     /// exercised, so the test reports why it did nothing instead of asserting
     /// on an event it could not create.
     #[test]
+    #[ignore = "requires a responsive WindowServer session"]
     fn marking_an_event_makes_it_recognizable() {
         let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
             eprintln!("skipped: no WindowServer connection for CGEventSource");

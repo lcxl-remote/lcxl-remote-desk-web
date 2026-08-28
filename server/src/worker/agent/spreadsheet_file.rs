@@ -1683,7 +1683,7 @@ fn internal(message: impl Into<String>) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     use std::io::Write;
 
     #[test]
@@ -1717,7 +1717,7 @@ mod tests {
         assert!(normalize_sheet_target("externalLinks/externalLink1.xml").is_err());
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn selected_csv_projects_text_and_never_executes_formula_candidates() {
         let _guard = super::super::file_reference_store::file_store_test_lock();
@@ -1746,7 +1746,7 @@ mod tests {
         assert!(candidate.formula_injection_candidate);
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn selected_directory_expands_only_bounded_direct_spreadsheet_children() {
         let _guard = super::super::file_reference_store::file_store_test_lock();
@@ -1795,7 +1795,7 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn selected_xlsx_projects_shared_values_and_formula_without_calculation() {
         let _guard = super::super::file_reference_store::file_store_test_lock();
@@ -1866,7 +1866,7 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn merge_preview_uses_typed_columns_dedupe_statistics_and_lineage() {
         let _guard = super::super::file_reference_store::file_store_test_lock();

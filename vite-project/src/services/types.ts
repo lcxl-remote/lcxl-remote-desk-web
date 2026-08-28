@@ -2447,7 +2447,7 @@ export type MacosAutologin = {
 };
 
 /**
- * @description macOS TCC permission grants. macOS-specific; `None` on other platforms.\nTwo independent fields because screen capture and input injection each need\ntheir own grant — they cannot be folded into a single privilege bool.
+ * @description macOS TCC permission grants. macOS-specific; `None` on other platforms.\nScreen capture, Accessibility automation, passive input observation, and\nApple Events automation for each iWork target use separate TCC decisions and\ncannot be folded into one privilege bit.
 */
 export type MacosPermissions = {
     /**
@@ -2455,6 +2455,26 @@ export type MacosPermissions = {
      * @type boolean
     */
     accessibility: boolean;
+    /**
+     * @description Passive keyboard/pointer event observation grant\n(`CGPreflightListenEventAccess`).
+     * @type boolean
+    */
+    input_monitoring: boolean;
+    /**
+     * @description Apple Events Automation grant for Keynote.
+     * @type boolean
+    */
+    keynote_automation: boolean;
+    /**
+     * @description Apple Events Automation grant for Numbers. `false` also covers an app\nthat is not currently running, because macOS cannot preflight that target.
+     * @type boolean
+    */
+    numbers_automation: boolean;
+    /**
+     * @description Apple Events Automation grant for Pages.
+     * @type boolean
+    */
+    pages_automation: boolean;
     /**
      * @description Screen Recording grant (`CGPreflightScreenCaptureAccess`).
      * @type boolean
@@ -2870,6 +2890,7 @@ export const objectKindEnum = {
     window: "window",
     ui_element: "ui_element",
     office_document: "office_document",
+    document: "document",
     worksheet: "worksheet",
     range: "range",
     presentation: "presentation",
@@ -2877,7 +2898,8 @@ export const objectKindEnum = {
     shape: "shape",
     file: "file",
     directory: "directory",
-    terminal_output: "terminal_output"
+    terminal_output: "terminal_output",
+    browser_surface: "browser_surface"
 } as const;
 
 export type ObjectKindEnumKey = (typeof objectKindEnum)[keyof typeof objectKindEnum];

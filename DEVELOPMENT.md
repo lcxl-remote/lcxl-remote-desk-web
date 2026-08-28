@@ -82,6 +82,24 @@ On Apple Silicon, make sure `pkg-config` can locate the Homebrew `.pc` files:
 export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH"
 ```
 
+The ScreenCaptureKit backend builds a Swift bridge and therefore requires
+SwiftPM, `xcrun`, and a macOS 13+ SDK (full Xcode is recommended). Set
+`MACOSX_DEPLOYMENT_TARGET=13.0` for complete builds. `apple-cf` 0.9.3 is
+temporarily patched under `vendor/apple-cf` because Xcode 26 imports
+`IOSurface` differently; remove that Cargo patch once upstream ships the
+equivalent compatibility fix.
+
+The Tauri build CLI is pinned in `tauri-app/package-lock.json`:
+
+```bash
+cd tauri-app
+npm ci
+npm run tauri build -- --bundles app --no-sign
+```
+
+Distribution builds must omit `--no-sign`, use a trusted Developer ID identity,
+and verify the final executable's Automation entitlement with native `codesign`.
+
 ### Windows System Dependencies
 
 No extra dependencies; everything is managed automatically through Cargo.

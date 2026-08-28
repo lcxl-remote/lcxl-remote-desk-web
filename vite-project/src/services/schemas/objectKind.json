@@ -1,1 +1,1 @@
-{"type":"string","enum":["desktop_session","application","window","ui_element","office_document","worksheet","range","presentation","slide","shape","file","directory","terminal_output"],"x-readme-ref-name":"ObjectKind"}
+{"type":"string","enum":["desktop_session","application","window","ui_element","office_document","document","worksheet","range","presentation","slide","shape","file","directory","terminal_output","browser_surface"],"x-readme-ref-name":"ObjectKind"}

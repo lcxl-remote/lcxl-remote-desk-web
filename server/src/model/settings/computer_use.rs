@@ -20,6 +20,8 @@ pub struct ComputerUseSettings {
     pub observe: bool,
     /// Allow semantic Office adapters after their independent production gate.
     pub office_semantic: bool,
+    /// Allow the closed-surface macOS iWork adapters after their independent gate.
+    pub iwork_semantic: bool,
     /// Allow the built-in, closed-surface browser semantic adapter after the
     /// user has enabled Chrome remote debugging and approved the connection.
     pub browser_semantic: bool,
@@ -88,6 +90,7 @@ mod tests {
         assert!(!settings.observation_enabled());
         assert_eq!(settings.revision, 0);
         assert!(!settings.office_semantic);
+        assert!(!settings.iwork_semantic);
         assert!(!settings.browser_semantic);
         assert!(!settings.communication_handoff);
         assert!(!settings.generic_semantic_ui);

@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { ListConnectionsQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { ListConnectionsQueryResponse } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { listConnections } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const listConnectionsQueryKey = () => [{ url: '/api/desk/connections' }] as const
 

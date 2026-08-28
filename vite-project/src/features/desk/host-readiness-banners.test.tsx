@@ -21,7 +21,11 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock('react-i18next', () => ({
-    useTranslation: () => ({ t: (key: string) => key }),
+    useTranslation: () => ({
+        t: (key: string, options?: { permissions?: string }) => options?.permissions
+            ? `${key}:${options.permissions}`
+            : key,
+    }),
 }));
 
 vi.mock('@/hooks/use-toast', () => ({
@@ -208,5 +212,26 @@ describe('HostReadinessBanners', () => {
         expect(interval({
             state: { data: { data: baseInfo({ platform: 'windows' }) } },
         })).toBe(30_000);
+    });
+
+    it('reports Input Monitoring independently and requests it only locally', async () => {
+        harness.info = baseInfo({
+            platform: 'macos',
+            macos_permissions: {
+                screen_recording: true,
+                accessibility: true,
+                input_monitoring: false,
+            },
+        });
+
+        render(<HostReadinessBanners />);
+
+        expect(screen.getByText(
+            'pages.hostReadiness.macos.description:pages.system.settings.macos.permissions.inputMonitoring',
+        )).toBeInTheDocument();
+        fireEvent.click(screen.getByText('pages.hostReadiness.macos.action'));
+
+        await waitFor(() => expect(harness.requestMacos).toHaveBeenCalledTimes(1));
+        expect(harness.refetch).toHaveBeenCalledTimes(1);
     });
 });

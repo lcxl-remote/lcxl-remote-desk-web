@@ -273,3 +273,8 @@ objc2 = "0.5"
 objc2-foundation = "0.2"
 core-graphics = { version = "0.23", features = ["highsierra"] }
 core-audio-types = "0.2"
+
+[patch.crates-io]
+# apple-cf 0.9.3 does not compile with Xcode 26's IOSurface Swift import. Keep
+# the reviewed one-line bridge patch local until upstream ships the fix.
+apple-cf = { path = "vendor/apple-cf" }

@@ -4,7 +4,7 @@
     "identifier": "com.lcxl.remote-desk",
     "version": "0.1.0",
     "build": {
-        "frontendDist": ""
+        "frontendDist": "../src"
     },
     "app": {
         "windows": [],
@@ -21,6 +21,7 @@
             "icons/icon.ico"
         ],
         "macOS": {
+            "entitlements": "Entitlements.plist",
             "minimumSystemVersion": "13.0"
         }
     }

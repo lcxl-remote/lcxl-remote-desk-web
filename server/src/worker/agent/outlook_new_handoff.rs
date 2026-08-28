@@ -343,6 +343,7 @@ mod tests {
         assert!(input.validate().is_err());
     }
 
+    #[cfg(windows)]
     #[test]
     fn only_reviewed_windowsapps_outlook_binary_matches() {
         assert!(is_outlook_new_executable(

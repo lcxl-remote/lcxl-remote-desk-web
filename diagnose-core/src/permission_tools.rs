@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use crate::capability_availability::CapabilityAvailability;
 use crate::capability_grant::{
     canonical_compiled_scope, exact_command_resource_scope, exact_external_query_resource_scope,
-    exact_external_url_resource_scope,
+    exact_external_url_resource_scope, fresh_object_resource_scope,
 };
 use crate::chat::{ToolCall, ToolSpec};
 use crate::device_assistant::DUCKDUCKGO_HTML_CONNECTOR_ID;
@@ -423,6 +423,106 @@ pub fn build_permission_request(
                 invalid(format!("validate Outlook (new) handoff input: {error}"))
             })?;
         }
+        let exact_semantic_action = matches!(
+            capability.wire.capability_id.as_str(),
+            crate::device_assistant::DESKTOP_UI_ACTION_CAPABILITY_ID
+                | crate::device_assistant::SPREADSHEET_LIVE_PATCH_CAPABILITY_ID
+                | crate::device_assistant::DOCUMENT_LIVE_PATCH_CAPABILITY_ID
+                | crate::device_assistant::PRESENTATION_LIVE_PATCH_CAPABILITY_ID
+                | crate::device_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID
+                | crate::device_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID
+                | crate::device_assistant::PRESENTATION_BATCH_PATCH_CAPABILITY_ID
+        );
+        let exact_semantic_refs = if exact_semantic_action {
+            #[derive(Deserialize)]
+            struct SemanticActionInput {
+                target: desk_agent_protocol::computer_use::ObjectRef,
+                #[serde(default)]
+                output: Option<desk_agent_protocol::computer_use::BatchDocumentOutput>,
+            }
+            let canonical = canonical_input_json
+                .as_deref()
+                .ok_or_else(|| invalid("semantic actions require exact_input"))?;
+            let input: SemanticActionInput = serde_json::from_str(canonical)
+                .map_err(|error| invalid(format!("decode semantic action input: {error}")))?;
+            let expected_kind = match capability.required_capability {
+                Capability::DesktopUiActionConfirmed => {
+                    desk_agent_protocol::computer_use::ObjectKind::UiElement
+                }
+                Capability::SpreadsheetLivePatchConfirmed => {
+                    desk_agent_protocol::computer_use::ObjectKind::Range
+                }
+                Capability::DocumentLivePatchConfirmed => {
+                    desk_agent_protocol::computer_use::ObjectKind::Document
+                }
+                Capability::PresentationLivePatchConfirmed => {
+                    desk_agent_protocol::computer_use::ObjectKind::Slide
+                }
+                _ => unreachable!(),
+            };
+            if input.target.object_kind != expected_kind
+                || input.target.token.is_empty()
+                || input.target.snapshot_id.is_empty()
+                || input.target.expires_at.is_empty()
+            {
+                return Err(invalid(
+                    "semantic action requires one complete target reference of the expected kind",
+                ));
+            }
+            if capability.required_capability == Capability::DesktopUiActionConfirmed {
+                #[derive(Deserialize)]
+                struct UiActionOnly {
+                    action: desk_agent_protocol::computer_use::UiSemanticAction,
+                }
+                let action: UiActionOnly = serde_json::from_str(canonical).map_err(|error| {
+                    invalid(format!("decode semantic UI action input: {error}"))
+                })?;
+                match action.action {
+                    desk_agent_protocol::computer_use::UiSemanticAction::Invoke
+                    | desk_agent_protocol::computer_use::UiSemanticAction::Toggle { .. }
+                    | desk_agent_protocol::computer_use::UiSemanticAction::Select
+                    | desk_agent_protocol::computer_use::UiSemanticAction::Focus => {}
+                    desk_agent_protocol::computer_use::UiSemanticAction::SetValue { value }
+                        if value.len() <= 16 * 1024 => {}
+                    _ => {
+                        return Err(invalid(
+                            "semantic UI action is not in the bounded macOS action allowlist",
+                        ));
+                    }
+                }
+            }
+            let is_batch = matches!(
+                capability.wire.capability_id.as_str(),
+                crate::device_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID
+                    | crate::device_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID
+                    | crate::device_assistant::PRESENTATION_BATCH_PATCH_CAPABILITY_ID
+            );
+            let mut refs = vec![input.target];
+            if is_batch {
+                let output = input
+                    .output
+                    .ok_or_else(|| invalid("BatchDocument semantic action requires output"))?;
+                if output.destination_parent.object_kind
+                    != desk_agent_protocol::computer_use::ObjectKind::Directory
+                    || output.destination_parent.token.is_empty()
+                    || output.destination_parent.snapshot_id.is_empty()
+                    || output.destination_parent.expires_at.is_empty()
+                    || output.native_file_name.is_empty()
+                {
+                    return Err(invalid(
+                        "BatchDocument semantic action requires a complete output directory and native leaf",
+                    ));
+                }
+                refs.push(output.destination_parent);
+            } else if input.output.is_some() {
+                return Err(invalid(
+                    "interactive semantic action cannot include a BatchDocument output",
+                ));
+            }
+            Some(refs)
+        } else {
+            None
+        };
         if exact_gmail_handoff {
             let canonical = canonical_input_json
                 .as_deref()
@@ -489,7 +589,9 @@ pub fn build_permission_request(
             &capability.wire.authorization_hint.resources,
             capability.wire.effect,
         );
-        let resource_scope = if exact_external_url {
+        let resource_scope = if let Some(targets) = exact_semantic_refs.as_ref() {
+            fresh_object_resource_scope(targets)
+        } else if exact_external_url {
             exact_external_url_resource_scope(
                 canonical_input_digest_sha256
                     .as_deref()
@@ -561,6 +663,7 @@ pub fn build_permission_request(
                 || exact_outlook_handoff
                 || exact_gmail_handoff
                 || exact_slack_handoff
+                || exact_semantic_action
             {
                 1
             } else {
@@ -841,6 +944,110 @@ mod tests {
 
         assert_eq!(request.items[0].suggested_max_uses, 1);
         assert!(request.items[0].canonical_input_digest_sha256.is_some());
+    }
+
+    #[test]
+    fn semantic_ui_permission_binds_one_fresh_target_and_exact_action() {
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let missing = r#"{"items":[{"item_id":"ui","provider_id":"desktop.ui.action","tool_name":"execute_confirmed_ui_action","expected_effect":"mutate_application","suggested_ttl_seconds":60,"suggested_max_uses":4,"reason":"Update the selected control"}]}"#;
+        let error = build_permission_request(
+            &call(missing),
+            &registry,
+            "permission-ui-missing".into(),
+            1,
+            "2026-08-28T00:00:00Z".into(),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("require exact_input"));
+
+        let exact = r#"{"items":[{"item_id":"ui","provider_id":"desktop.ui.action","tool_name":"execute_confirmed_ui_action","expected_effect":"mutate_application","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"target":{"token":"opaque-token","snapshot_id":"snapshot-1","object_kind":"ui_element","expires_at":"2026-08-28T00:01:00Z"},"action":{"kind":"set_value","params":{"value":"Ready"}}},"suggested_ttl_seconds":60,"suggested_max_uses":4,"reason":"Update the selected control"}]}"#;
+        let request = build_permission_request(
+            &call(exact),
+            &registry,
+            "permission-ui".into(),
+            1,
+            "2026-08-28T00:00:00Z".into(),
+        )
+        .unwrap();
+        let item = &request.items[0];
+        assert_eq!(item.suggested_max_uses, 1);
+        assert_eq!(item.operation_scope, vec!["use_selected_object"]);
+        assert_eq!(item.resource_scope.len(), 1);
+        assert!(item.resource_scope[0].starts_with("selected:sha256:"));
+        assert!(item.canonical_input_digest_sha256.is_some());
+        assert!(
+            !item
+                .resource_scope
+                .iter()
+                .any(|scope| scope == "model:chosen")
+        );
+
+        let toggle = exact.replace(
+            r#"{"kind":"set_value","params":{"value":"Ready"}}"#,
+            r#"{"kind":"toggle","params":{"desired":true}}"#,
+        );
+        let toggle_request = build_permission_request(
+            &call(&toggle),
+            &registry,
+            "permission-ui-toggle".into(),
+            1,
+            "2026-08-28T00:00:00Z".into(),
+        )
+        .unwrap();
+        assert_eq!(toggle_request.items[0].suggested_max_uses, 1);
+        assert_eq!(toggle_request.items[0].resource_scope, item.resource_scope);
+
+        let unsupported = exact.replace(
+            r#"{"kind":"set_value","params":{"value":"Ready"}}"#,
+            r#"{"kind":"scroll","params":{"horizontal":0,"vertical":1}}"#,
+        );
+        let error = build_permission_request(
+            &call(&unsupported),
+            &registry,
+            "permission-ui-scroll".into(),
+            1,
+            "2026-08-28T00:00:00Z".into(),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("bounded macOS action allowlist"));
+    }
+
+    #[test]
+    fn batch_iwork_permission_binds_target_and_selected_output_directory() {
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let missing = r#"{"items":[{"item_id":"numbers-batch","provider_id":"spreadsheet.live","tool_name":"patch_selected_numbers_copy","expected_effect":"mutate_application","suggested_ttl_seconds":60,"suggested_max_uses":3,"reason":"Create the requested Numbers copy"}]}"#;
+        assert!(
+            build_permission_request(
+                &call(missing),
+                &registry,
+                "permission-numbers-batch-missing".into(),
+                1,
+                "2026-08-28T00:00:00Z".into(),
+            )
+            .unwrap_err()
+            .message
+            .contains("require exact_input")
+        );
+
+        let exact = r#"{"items":[{"item_id":"numbers-batch","provider_id":"spreadsheet.live","tool_name":"patch_selected_numbers_copy","expected_effect":"mutate_application","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"target":{"token":"cell-token","snapshot_id":"batch-snapshot","object_kind":"range","expires_at":"2026-08-28T00:01:00Z"},"output":{"destination_parent":{"token":"directory-token","snapshot_id":"directory-snapshot","object_kind":"directory","expires_at":"2026-08-28T00:01:00Z"},"native_file_name":"reviewed-copy.numbers"},"action":{"kind":"set_cell_value","params":{"value":"42"}}},"suggested_ttl_seconds":60,"suggested_max_uses":3,"reason":"Create the requested Numbers copy"}]}"#;
+        let request = build_permission_request(
+            &call(exact),
+            &registry,
+            "permission-numbers-batch".into(),
+            1,
+            "2026-08-28T00:00:00Z".into(),
+        )
+        .unwrap();
+        let item = &request.items[0];
+        assert_eq!(item.suggested_max_uses, 1);
+        assert_eq!(item.operation_scope, vec!["use_selected_object"]);
+        assert_eq!(item.resource_scope.len(), 2);
+        assert!(
+            item.resource_scope
+                .iter()
+                .all(|scope| scope.starts_with("selected:sha256:"))
+        );
+        assert!(item.canonical_input_digest_sha256.is_some());
     }
 
     #[test]

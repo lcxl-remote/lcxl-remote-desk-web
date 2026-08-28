@@ -651,17 +651,16 @@ impl BrowserDevtoolsBroker {
     }
 
     pub(super) async fn refresh(&self, context: &BrowserBrokerContext) {
-        if !context.enabled || !context.interactive_session_unlocked {
-            self.disconnect(if context.enabled {
-                BrowserReadinessReason::InteractiveSessionLocked
-            } else {
-                BrowserReadinessReason::Disconnected
-            })
+        if !context.enabled {
+            self.disconnect(
+                BrowserReadinessReason::Disconnected,
+                context.interactive_session_unlocked,
+            )
             .await;
             return;
         }
         if self.session.lock().await.is_some() {
-            self.refresh_timestamp();
+            self.refresh_timestamp(context.interactive_session_unlocked);
             return;
         }
         let now = now_unix_ms().unwrap_or(1);
@@ -677,13 +676,21 @@ impl BrowserDevtoolsBroker {
         let Some((browser_version, browser_major_version, profile_incarnation)) =
             installed_chrome_identity()
         else {
-            self.set_unavailable(BrowserReadinessReason::McpUnavailable, None);
+            self.set_unavailable(
+                BrowserReadinessReason::McpUnavailable,
+                None,
+                context.interactive_session_unlocked,
+            );
             return;
         };
         if browser_major_version
             < desk_agent_protocol::browser_control::MIN_CHROME_DEVTOOLS_MCP_MAJOR_VERSION
         {
-            self.set_unavailable(BrowserReadinessReason::UnsupportedBrowserVersion, None);
+            self.set_unavailable(
+                BrowserReadinessReason::UnsupportedBrowserVersion,
+                None,
+                context.interactive_session_unlocked,
+            );
             return;
         }
         let adapter = BrowserAdapterRef {
@@ -706,7 +713,11 @@ impl BrowserDevtoolsBroker {
                 log::warn!(
                     "[browser-devtools-mcp] pinned package unavailable during readiness refresh: {error}"
                 );
-                self.set_unavailable(BrowserReadinessReason::McpUnavailable, Some(adapter));
+                self.set_unavailable(
+                    BrowserReadinessReason::McpUnavailable,
+                    Some(adapter),
+                    context.interactive_session_unlocked,
+                );
                 return;
             }
         };
@@ -720,7 +731,7 @@ impl BrowserDevtoolsBroker {
                     remote_debugging_enabled: true,
                     user_approved: true,
                     connected: true,
-                    interactive_session_unlocked: true,
+                    interactive_session_unlocked: context.interactive_session_unlocked,
                     tools: vec![
                         BrowserToolKind::OpenPage,
                         BrowserToolKind::NavigatePage,
@@ -772,7 +783,7 @@ impl BrowserDevtoolsBroker {
                 } else {
                     BrowserReadinessReason::McpUnavailable
                 };
-                self.set_unavailable(reason, Some(adapter));
+                self.set_unavailable(reason, Some(adapter), context.interactive_session_unlocked);
             }
         }
     }
@@ -821,31 +832,48 @@ impl BrowserDevtoolsBroker {
             .execute(request)
             .await;
         if result.is_err() {
+            let interactive_session_unlocked = self
+                .projection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .readiness
+                .as_ref()
+                .is_none_or(|readiness| readiness.interactive_session_unlocked);
             *session = None;
             drop(session);
-            self.set_unavailable(BrowserReadinessReason::Disconnected, None);
+            self.set_unavailable(
+                BrowserReadinessReason::Disconnected,
+                None,
+                interactive_session_unlocked,
+            );
         }
         result
     }
 
-    async fn disconnect(&self, reason: BrowserReadinessReason) {
+    async fn disconnect(&self, reason: BrowserReadinessReason, interactive_session_unlocked: bool) {
         if let Some(session) = self.session.lock().await.take() {
             let _ = session.close().await;
         }
-        self.set_unavailable(reason, None);
+        self.set_unavailable(reason, None, interactive_session_unlocked);
     }
 
-    fn refresh_timestamp(&self) {
+    fn refresh_timestamp(&self, interactive_session_unlocked: bool) {
         let mut projection = self
             .projection
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(readiness) = projection.readiness.as_mut() {
             readiness.observed_at_unix_ms = now_unix_ms().unwrap_or(1);
+            readiness.interactive_session_unlocked = interactive_session_unlocked;
         }
     }
 
-    fn set_unavailable(&self, reason: BrowserReadinessReason, adapter: Option<BrowserAdapterRef>) {
+    fn set_unavailable(
+        &self,
+        reason: BrowserReadinessReason,
+        adapter: Option<BrowserAdapterRef>,
+        interactive_session_unlocked: bool,
+    ) {
         let mut projection = self
             .projection
             .lock()
@@ -865,7 +893,7 @@ impl BrowserDevtoolsBroker {
             remote_debugging_enabled: devtools_active_port().is_some(),
             user_approved: false,
             connected: false,
-            interactive_session_unlocked: true,
+            interactive_session_unlocked,
             tools: Vec::new(),
             reason: Some(reason),
             observed_at_unix_ms: now_unix_ms().unwrap_or(1),
@@ -894,9 +922,20 @@ fn locate_pinned_package() -> Result<ChromeDevtoolsMcpPackage, ChromeDevtoolsMcp
 }
 
 fn chrome_user_data_dir() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|root| root.join("Google/Chrome/User Data"))
+    #[cfg(windows)]
+    {
+        return std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|root| root.join("Google/Chrome/User Data"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|root| root.join("Library/Application Support/Google/Chrome"));
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    None
 }
 
 fn devtools_active_port() -> Option<String> {
@@ -910,35 +949,68 @@ fn devtools_active_port() -> Option<String> {
 }
 
 fn installed_chrome_identity() -> Option<(String, u16, String)> {
-    let local_app = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
-    let application_dir = [
-        local_app.map(|root| root.join("Google/Chrome/Application")),
-        program_files.map(|root| root.join("Google/Chrome/Application")),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|path| path.join("chrome.exe").is_file())?;
-    let version = fs::read_dir(application_dir)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_dir())
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| {
-            name.split('.').count() == 4
-                && name
-                    .split('.')
-                    .all(|component| component.parse::<u32>().is_ok())
-        })
-        .max_by_key(|name| {
-            name.split('.')
-                .filter_map(|component| component.parse::<u32>().ok())
-                .collect::<Vec<_>>()
-        })?;
-    let major = version.split('.').next()?.parse::<u16>().ok()?;
+    #[cfg(windows)]
+    let version = {
+        let local_app = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+        let application_dir = [
+            local_app.map(|root| root.join("Google/Chrome/Application")),
+            program_files.map(|root| root.join("Google/Chrome/Application")),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|path| path.join("chrome.exe").is_file())?;
+        fs::read_dir(application_dir)
+            .ok()?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .max_by_key(|name| parse_chrome_version(name).map(|(_, parts)| parts))?
+    };
+    #[cfg(target_os = "macos")]
+    let version = installed_macos_chrome_version()?;
+    #[cfg(not(any(windows, target_os = "macos")))]
+    return None;
+
+    let (major, _) = parse_chrome_version(&version)?;
     let active_port = devtools_active_port()?;
     let profile_incarnation = format!("{:x}", Sha256::digest(active_port.as_bytes()));
     Some((version, major, profile_incarnation))
+}
+
+fn parse_chrome_version(version: &str) -> Option<(u16, Vec<u32>)> {
+    let parts = version
+        .split('.')
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if parts.len() != 4 {
+        return None;
+    }
+    let major = u16::try_from(parts[0]).ok()?;
+    Some((major, parts))
+}
+
+#[cfg(target_os = "macos")]
+fn installed_macos_chrome_version() -> Option<String> {
+    let user_application = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|root| root.join("Applications/Google Chrome.app"));
+    let application = user_application
+        .into_iter()
+        .chain([PathBuf::from("/Applications/Google Chrome.app")])
+        .find(|path| {
+            path.join("Contents/MacOS/Google Chrome").is_file()
+                && path.join("Contents/Info.plist").is_file()
+        })?;
+    let output = std::process::Command::new("/usr/bin/plutil")
+        .args(["-extract", "CFBundleShortVersionString", "raw", "-o", "-"])
+        .arg(application.join("Contents/Info.plist"))
+        .output()
+        .ok()?;
+    output.status.success().then_some(())?;
+    let version = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    parse_chrome_version(&version).map(|_| version)
 }
 
 fn action_page(
@@ -1162,6 +1234,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unavailable_projection_preserves_locked_session_state() {
+        let broker = BrowserDevtoolsBroker::default();
+        broker.set_unavailable(
+            BrowserReadinessReason::InteractiveSessionLocked,
+            Some(live_adapter()),
+            false,
+        );
+        let readiness = broker.readiness().expect("browser readiness projection");
+        assert!(!readiness.interactive_session_unlocked);
+        assert!(!readiness.connected);
+        assert_eq!(
+            readiness.reason,
+            Some(BrowserReadinessReason::InteractiveSessionLocked)
+        );
+    }
+
+    #[test]
+    fn connected_projection_keeps_working_when_session_locks() {
+        let broker = BrowserDevtoolsBroker::default();
+        broker
+            .projection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .readiness = Some(BrowserReadiness {
+            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+            adapter: live_adapter(),
+            remote_debugging_enabled: true,
+            user_approved: true,
+            connected: true,
+            interactive_session_unlocked: true,
+            tools: vec![BrowserToolKind::TakeSnapshot],
+            reason: None,
+            observed_at_unix_ms: 1,
+        });
+
+        broker.refresh_timestamp(false);
+
+        let readiness = broker.readiness().expect("browser readiness projection");
+        assert!(readiness.connected);
+        assert!(!readiness.interactive_session_unlocked);
+        readiness.validate().unwrap();
+    }
+
     fn approved_websocket_endpoint() -> String {
         let port_file = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
             .join("Google/Chrome/User Data/DevToolsActivePort");
@@ -1314,6 +1430,27 @@ mod tests {
                 || argument.contains("experimentalThirdParty")
                 || argument.contains("allowUnrestrictedPaths")
         }));
+    }
+
+    #[test]
+    fn chrome_version_parser_requires_one_bounded_four_part_version() {
+        assert_eq!(
+            parse_chrome_version("151.0.7922.175"),
+            Some((151, vec![151, 0, 7922, 175]))
+        );
+        assert_eq!(parse_chrome_version("151.0.7922"), None);
+        assert_eq!(parse_chrome_version("latest"), None);
+        assert_eq!(parse_chrome_version("70000.0.0.0"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installed_macos_chrome_bundle_reports_a_supported_version_shape() {
+        let Some(version) = installed_macos_chrome_version() else {
+            return;
+        };
+        let (major, parts) = parse_chrome_version(&version).unwrap();
+        assert_eq!(u32::from(major), parts[0]);
     }
 
     #[test]

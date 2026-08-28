@@ -6,8 +6,10 @@
 //! before returning bounded metadata. File contents are never read here.
 
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
+use std::ffi::CString;
 use std::fs::{File, OpenOptions};
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -19,7 +21,7 @@ use desk_agent_protocol::computer_use::{
     ObjectRef,
 };
 use desk_agent_protocol::{AgentError, AgentErrorKind};
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use sha2::{Digest, Sha256};
 
 const FILE_REF_TTL_SECS: i64 = 5 * 60;
@@ -492,7 +494,92 @@ fn windows_file_time_value(value: i64) -> Option<DateTime<Utc>> {
     DateTime::<Utc>::from_timestamp(seconds, nanos)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn enumerate_directory(
+    stored: &StoredFile,
+    opened: &OpenedFile,
+    max_entries: usize,
+    filter: &ValidatedDirectoryFilter,
+) -> Result<(Vec<DirectoryEntryProjection>, bool), AgentError> {
+    use std::ffi::CStr;
+    use std::os::fd::IntoRawFd;
+
+    struct DirectoryStream(*mut libc::DIR);
+
+    impl Drop for DirectoryStream {
+        fn drop(&mut self) {
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
+    }
+
+    let duplicate = opened
+        .handle
+        .try_clone()
+        .map_err(|cause| io_error("duplicate selected directory handle", cause))?;
+    let stream = unsafe { libc::fdopendir(duplicate.into_raw_fd()) };
+    if stream.is_null() {
+        return Err(io_error(
+            "enumerate selected directory handle",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let stream = DirectoryStream(stream);
+    let mut rows = Vec::new();
+    loop {
+        unsafe {
+            *libc::__error() = 0;
+        }
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            let cause = std::io::Error::last_os_error();
+            if cause.raw_os_error().is_some_and(|code| code != 0) {
+                return Err(io_error("enumerate selected directory handle", cause));
+            }
+            return Ok((rows, false));
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        let child = match open_relative_macos(&opened.handle, name) {
+            Ok(child) => child,
+            Err(cause) if cause.raw_os_error() == Some(libc::ELOOP) => continue,
+            Err(cause) => return Err(io_error("open selected directory child", cause)),
+        };
+        let metadata = child
+            .metadata()
+            .map_err(|cause| io_error("read selected directory child metadata", cause))?;
+        if !metadata.is_file() && !metadata.is_dir() {
+            continue;
+        }
+        let display_name = String::from_utf8_lossy(name.to_bytes()).into_owned();
+        let is_directory = metadata.is_dir();
+        let byte_len = metadata.is_file().then_some(metadata.len());
+        let modified_at = metadata.modified().ok().map(DateTime::<Utc>::from);
+        let matches = if is_directory {
+            !filter.is_active()
+        } else {
+            filter.matches_file(&display_name, byte_len.unwrap_or(0), modified_at)
+        };
+        if !matches {
+            continue;
+        }
+        if rows.len() >= max_entries {
+            return Ok((rows, true));
+        }
+        rows.push(DirectoryEntryProjection {
+            parent_snapshot_id: stored.snapshot_id.clone(),
+            display_name: display_name.chars().take(512).collect(),
+            is_directory,
+            byte_len,
+            modified_at: modified_at.map(|timestamp| timestamp.to_rfc3339()),
+        });
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn enumerate_directory(
     _stored: &StoredFile,
     _opened: &OpenedFile,
@@ -506,7 +593,7 @@ fn enumerate_directory(
     ))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub fn read_text(params: &FileContentReadParams) -> Result<FileContentReadOutput, AgentError> {
     if params.max_bytes == 0 || params.max_bytes > MAX_TEXT_READ_BYTES {
         return Err(error(
@@ -581,7 +668,7 @@ pub fn read_text(params: &FileContentReadParams) -> Result<FileContentReadOutput
     })
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn read_text(_params: &FileContentReadParams) -> Result<FileContentReadOutput, AgentError> {
     Err(error(
         AgentErrorKind::UnsupportedCapability,
@@ -604,7 +691,465 @@ pub struct VerifiedFileBytes {
     pub sha256: String,
 }
 
-#[cfg(windows)]
+/// Native path retained only inside the worker for APIs such as ScriptingBridge
+/// that require a file URL. The model and central server receive only the
+/// original opaque ObjectRef and content digest.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct VerifiedNativeFile {
+    pub(super) path: PathBuf,
+    pub(super) display_name: String,
+    pub(super) byte_len: u64,
+    pub(super) sha256: String,
+}
+
+#[cfg(target_os = "macos")]
+pub(super) struct NativeArtifactStage {
+    directory_ref: ObjectRef,
+    parent_path: PathBuf,
+    parent: File,
+    parent_identity: FileIdentity,
+    stage: File,
+    stage_name: CString,
+    native_name: CString,
+    validation_name: CString,
+    pub(super) native_path: PathBuf,
+    pub(super) validation_path: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PublishedNativeArtifact {
+    pub(super) object_ref: ObjectRef,
+    pub(super) file_name: String,
+    pub(super) byte_len: u64,
+    pub(super) sha256: String,
+    pub(super) validation_byte_len: u64,
+    pub(super) validation_sha256: String,
+    pub(super) native_prefix: Vec<u8>,
+    pub(super) validation_prefix: Vec<u8>,
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn resolve_verified_native_file(
+    file: &ObjectRef,
+    allowed_extensions: &[&str],
+    max_bytes: u64,
+) -> Result<VerifiedNativeFile, AgentError> {
+    if max_bytes == 0 || max_bytes > 128 * 1024 * 1024 || file.object_kind != ObjectKind::File {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "selected native document exceeds its object or size ceiling",
+            false,
+        ));
+    }
+    let stored = resolve(file)?;
+    let extension = stored
+        .path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .ok_or_else(|| {
+            error(
+                AgentErrorKind::InvalidInput,
+                "selected native document has no supported extension",
+                false,
+            )
+        })?;
+    if !allowed_extensions
+        .iter()
+        .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+    {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "selected native document extension does not match the live provider",
+            false,
+        ));
+    }
+    let mut opened = open_verified_for_read(&stored.path)?;
+    if opened.identity != stored.identity || !opened.metadata.is_file() {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "selected native document changed after reference issuance",
+            false,
+        ));
+    }
+    let byte_len = opened.metadata.len();
+    if byte_len > max_bytes {
+        return Err(error(
+            AgentErrorKind::OutputLimitExceeded,
+            "selected native document exceeds the batch byte ceiling",
+            false,
+        ));
+    }
+    let sha256 = hash_open_file(&mut opened.handle, max_bytes)?;
+    let display_name = extension_display_name(&stored.path);
+    Ok(VerifiedNativeFile {
+        path: stored.path,
+        display_name,
+        byte_len,
+        sha256,
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn revalidate_verified_native_file(
+    file: &ObjectRef,
+    expected: &VerifiedNativeFile,
+    max_bytes: u64,
+) -> Result<(), AgentError> {
+    let stored = resolve(file)?;
+    if stored.path != expected.path {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "selected native document path binding changed",
+            false,
+        ));
+    }
+    let mut opened = open_verified_for_read(&stored.path)?;
+    if opened.identity != stored.identity
+        || !opened.metadata.is_file()
+        || opened.metadata.len() != expected.byte_len
+        || hash_open_file(&mut opened.handle, max_bytes)? != expected.sha256
+    {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "selected native document content changed during batch inspection",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn validate_native_artifact_destination(
+    directory: &ObjectRef,
+    allowed_roots: &[String],
+    native_file_name: &str,
+    native_extension: &str,
+) -> Result<(), AgentError> {
+    if directory.object_kind != ObjectKind::Directory {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "iWork batch output requires one selected directory reference",
+            false,
+        ));
+    }
+    validate_macos_leaf(native_file_name)?;
+    if !native_file_name
+        .to_ascii_lowercase()
+        .ends_with(&native_extension.to_ascii_lowercase())
+    {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "iWork batch output name does not match the provider native extension",
+            false,
+        ));
+    }
+    let stored = resolve(directory)?;
+    let selected = open_verified(&stored.path)?;
+    if selected.identity != stored.identity || !selected.metadata.is_dir() {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "selected iWork output directory changed after reference issuance",
+            false,
+        ));
+    }
+    let allowlisted = allowed_roots.iter().any(|root| {
+        open_verified(Path::new(root))
+            .ok()
+            .filter(|opened| opened.metadata.is_dir())
+            .map(|opened| opened.identity)
+            == Some(selected.identity.clone())
+    });
+    if !allowlisted {
+        return Err(error(
+            AgentErrorKind::PermissionDenied,
+            "selected iWork output directory is not an exact host-approved artifact root",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn prepare_native_artifact_stage(
+    directory: &ObjectRef,
+    allowed_roots: &[String],
+    native_file_name: &str,
+    native_extension: &str,
+    validation_extension: &str,
+) -> Result<NativeArtifactStage, AgentError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    validate_native_artifact_destination(
+        directory,
+        allowed_roots,
+        native_file_name,
+        native_extension,
+    )?;
+    if !matches!(validation_extension, ".pdf" | ".xlsx" | ".docx" | ".pptx") {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "iWork batch validation format is outside the frozen allowlist",
+            false,
+        ));
+    }
+    let stored = resolve(directory)?;
+    let selected = open_verified(&stored.path)?;
+    if selected.identity != stored.identity || !selected.metadata.is_dir() {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "selected iWork output directory changed after reference issuance",
+            false,
+        ));
+    }
+    let allowlisted = allowed_roots.iter().any(|root| {
+        open_verified(Path::new(root))
+            .ok()
+            .filter(|opened| opened.metadata.is_dir())
+            .map(|opened| opened.identity)
+            == Some(selected.identity.clone())
+    });
+    if !allowlisted {
+        return Err(error(
+            AgentErrorKind::PermissionDenied,
+            "selected iWork output directory is not an exact host-approved artifact root",
+            false,
+        ));
+    }
+
+    let stage_leaf = format!(".lrd-iwork-stage-{}", uuid::Uuid::new_v4());
+    let validation_leaf = format!(
+        ".lrd-iwork-validation-{}{}",
+        uuid::Uuid::new_v4(),
+        validation_extension
+    );
+    let stage_name = CString::new(stage_leaf.as_str()).expect("UUID stage leaf has no NUL");
+    let native_name = CString::new(native_file_name).map_err(|_| {
+        error(
+            AgentErrorKind::InvalidInput,
+            "iWork batch output name contains an invalid NUL byte",
+            false,
+        )
+    })?;
+    let validation_name =
+        CString::new(validation_leaf.as_str()).expect("UUID validation leaf has no NUL");
+    let created = unsafe { libc::mkdirat(selected.handle.as_raw_fd(), stage_name.as_ptr(), 0o700) };
+    if created != 0 {
+        return Err(io_error(
+            "create private iWork artifact stage",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let raw_stage = unsafe {
+        libc::openat(
+            selected.handle.as_raw_fd(),
+            stage_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw_stage < 0 {
+        unsafe {
+            libc::unlinkat(
+                selected.handle.as_raw_fd(),
+                stage_name.as_ptr(),
+                libc::AT_REMOVEDIR,
+            )
+        };
+        return Err(io_error(
+            "open private iWork artifact stage",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let parent_identity = selected.identity;
+    let parent = selected.handle;
+    let stage = unsafe { File::from_raw_fd(raw_stage) };
+    let stage_path = stored.path.join(stage_leaf);
+    Ok(NativeArtifactStage {
+        directory_ref: directory.clone(),
+        parent_path: stored.path,
+        parent,
+        parent_identity,
+        stage,
+        stage_name,
+        native_name,
+        validation_name,
+        native_path: stage_path.join(native_file_name),
+        validation_path: stage_path.join(validation_leaf),
+    })
+}
+
+#[cfg(target_os = "macos")]
+impl NativeArtifactStage {
+    pub(super) fn publish(
+        self,
+        native_magic: &[u8],
+        validation_magic: &[u8],
+    ) -> Result<PublishedNativeArtifact, AgentError> {
+        use std::os::fd::AsRawFd;
+
+        let stored = resolve(&self.directory_ref)?;
+        if stored.path != self.parent_path
+            || stored.identity != self.parent_identity
+            || macos_file_identity(&self.parent)
+                .map_err(|cause| io_error("revalidate iWork artifact parent identity", cause))?
+                != self.parent_identity
+        {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "selected iWork output directory changed before publish",
+                false,
+            ));
+        }
+        let native = artifact_evidence(&self.stage, &self.native_name, 128 * 1024 * 1024)?;
+        let validation = artifact_evidence(&self.stage, &self.validation_name, 128 * 1024 * 1024)?;
+        if !native.prefix.starts_with(native_magic)
+            || !validation.prefix.starts_with(validation_magic)
+        {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "iWork batch save or validation export has an unexpected file signature",
+                false,
+            ));
+        }
+        let renamed = unsafe {
+            libc::renameatx_np(
+                self.stage.as_raw_fd(),
+                self.native_name.as_ptr(),
+                self.parent.as_raw_fd(),
+                self.native_name.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        if renamed != 0 {
+            return Err(io_error(
+                "publish iWork native copy with no-replace semantics",
+                std::io::Error::last_os_error(),
+            ));
+        }
+        let file_name = self.native_name.to_string_lossy().into_owned();
+        let final_path = self.parent_path.join(&file_name);
+        let object_ref = issue(&final_path)?;
+        Ok(PublishedNativeArtifact {
+            object_ref,
+            file_name,
+            byte_len: native.byte_len,
+            sha256: native.sha256,
+            validation_byte_len: validation.byte_len,
+            validation_sha256: validation.sha256,
+            native_prefix: native.prefix,
+            validation_prefix: validation.prefix,
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for NativeArtifactStage {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+
+        unsafe {
+            let _ = libc::unlinkat(self.stage.as_raw_fd(), self.native_name.as_ptr(), 0);
+            let _ = libc::unlinkat(self.stage.as_raw_fd(), self.validation_name.as_ptr(), 0);
+            let _ = libc::unlinkat(
+                self.parent.as_raw_fd(),
+                self.stage_name.as_ptr(),
+                libc::AT_REMOVEDIR,
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct ArtifactEvidence {
+    byte_len: u64,
+    sha256: String,
+    prefix: Vec<u8>,
+}
+
+#[cfg(target_os = "macos")]
+fn artifact_evidence(
+    directory: &File,
+    name: &std::ffi::CStr,
+    max_bytes: u64,
+) -> Result<ArtifactEvidence, AgentError> {
+    let mut file = open_relative_macos(directory, name)
+        .map_err(|cause| io_error("open staged iWork artifact", cause))?;
+    let metadata = file
+        .metadata()
+        .map_err(|cause| io_error("inspect staged iWork artifact", cause))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > max_bytes {
+        return Err(error(
+            AgentErrorKind::OutputLimitExceeded,
+            "staged iWork artifact is empty, non-regular, or exceeds its byte ceiling",
+            false,
+        ));
+    }
+    let mut prefix = vec![0_u8; usize::try_from(metadata.len().min(16)).unwrap_or(16)];
+    file.read_exact(&mut prefix)
+        .map_err(|cause| io_error("read staged iWork artifact prefix", cause))?;
+    let sha256 = hash_open_file(&mut file, max_bytes)?;
+    Ok(ArtifactEvidence {
+        byte_len: metadata.len(),
+        sha256,
+        prefix,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn validate_macos_leaf(name: &str) -> Result<(), AgentError> {
+    if name.is_empty()
+        || name.len() > 200
+        || matches!(name, "." | "..")
+        || name
+            .chars()
+            .any(|character| character.is_control() || character == '/')
+    {
+        Err(error(
+            AgentErrorKind::InvalidInput,
+            "artifact name is not one safe macOS leaf component",
+            false,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn hash_open_file(file: &mut File, max_bytes: u64) -> Result<String, AgentError> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|cause| io_error("seek selected native document", cause))?;
+    let mut digest = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|cause| io_error("hash selected native document", cause))?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        if total > max_bytes {
+            return Err(error(
+                AgentErrorKind::OutputLimitExceeded,
+                "selected native document grew beyond the batch byte ceiling",
+                false,
+            ));
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn extension_display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().chars().take(512).collect())
+        .unwrap_or_else(|| "selected-file".into())
+}
+
+#[cfg(any(windows, target_os = "macos"))]
 pub fn read_verified_bytes(
     file: &ObjectRef,
     max_bytes: u64,
@@ -658,7 +1203,7 @@ pub fn read_verified_bytes(
     })
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn read_verified_bytes(
     _file: &ObjectRef,
     _max_bytes: u64,
@@ -849,7 +1394,131 @@ pub fn read_verified_spreadsheet_inputs(
     Ok((files, truncated))
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn read_verified_spreadsheet_inputs(
+    roots: &[ObjectRef],
+    max_files: usize,
+    max_file_bytes: u64,
+) -> Result<(Vec<VerifiedFileBytes>, bool), AgentError> {
+    use std::ffi::CString;
+
+    fn read_relative(
+        directory: &File,
+        display_name: &str,
+        max_file_bytes: u64,
+    ) -> Result<VerifiedFileBytes, AgentError> {
+        if display_name.is_empty()
+            || display_name.len() > 512
+            || matches!(display_name, "." | "..")
+            || display_name
+                .chars()
+                .any(|character| character.is_control() || character == '/')
+        {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "enumerated spreadsheet name is not one safe macOS leaf component",
+                false,
+            ));
+        }
+        let name = CString::new(display_name).map_err(|_| {
+            error(
+                AgentErrorKind::InvalidInput,
+                "enumerated spreadsheet name contains an invalid NUL byte",
+                false,
+            )
+        })?;
+        let mut file = open_relative_macos(directory, &name)
+            .map_err(|cause| io_error("open selected directory spreadsheet", cause))?;
+        let metadata = file
+            .metadata()
+            .map_err(|cause| io_error("read directory spreadsheet metadata", cause))?;
+        if !metadata.is_file() || metadata.len() > max_file_bytes {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "directory spreadsheet child exceeds its type or size ceiling",
+                false,
+            ));
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        Read::by_ref(&mut file)
+            .take(max_file_bytes + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|cause| io_error("read directory spreadsheet handle", cause))?;
+        if bytes.len() as u64 > max_file_bytes {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "directory spreadsheet child grew beyond its size ceiling",
+                false,
+            ));
+        }
+        Ok(VerifiedFileBytes {
+            display_name: display_name.to_string(),
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            bytes,
+        })
+    }
+
+    if roots.is_empty() || max_files == 0 || max_files > 8 || max_file_bytes == 0 {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "spreadsheet directory expansion exceeds its frozen ceiling",
+            false,
+        ));
+    }
+    let filter = ValidatedDirectoryFilter {
+        file_extensions: vec![".xlsx".into(), ".csv".into(), ".tsv".into()],
+        ..Default::default()
+    };
+    let mut files = Vec::new();
+    let mut truncated = false;
+    for root in roots {
+        if files.len() >= max_files {
+            truncated = true;
+            break;
+        }
+        match root.object_kind {
+            ObjectKind::File => files.push(read_verified_bytes(root, max_file_bytes)?),
+            ObjectKind::Directory => {
+                let stored = resolve(root)?;
+                let opened = open_verified_for_read(&stored.path)?;
+                if opened.identity != stored.identity || !opened.metadata.is_dir() {
+                    return Err(error(
+                        AgentErrorKind::InvalidInput,
+                        "selected spreadsheet directory changed after reference issuance",
+                        false,
+                    ));
+                }
+                let (mut entries, directory_truncated) =
+                    enumerate_directory(&stored, &opened, MAX_DIRECTORY_ENTRIES, &filter)?;
+                entries.sort_by(|left, right| {
+                    left.display_name
+                        .to_ascii_lowercase()
+                        .cmp(&right.display_name.to_ascii_lowercase())
+                        .then_with(|| left.display_name.cmp(&right.display_name))
+                });
+                let remaining = max_files - files.len();
+                truncated |= directory_truncated || entries.len() > remaining;
+                for entry in entries.into_iter().take(remaining) {
+                    files.push(read_relative(
+                        &opened.handle,
+                        &entry.display_name,
+                        max_file_bytes,
+                    )?);
+                }
+            }
+            _ => {
+                return Err(error(
+                    AgentErrorKind::InvalidInput,
+                    "spreadsheet input requires file or directory references",
+                    false,
+                ));
+            }
+        }
+    }
+    Ok((files, truncated))
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn read_verified_spreadsheet_inputs(
     _roots: &[ObjectRef],
     _max_files: usize,
@@ -1080,7 +1749,139 @@ pub fn create_text_artifact(
     create_binary_artifact(directory, allowed_roots, file_name, content_utf8.as_bytes())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn create_binary_artifact(
+    directory: &ObjectRef,
+    allowed_roots: &[String],
+    file_name: &str,
+    content_bytes: &[u8],
+) -> Result<CreatedTextArtifact, AgentError> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    if directory.object_kind != ObjectKind::Directory {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "artifact creation requires one selected directory reference",
+            false,
+        ));
+    }
+    if content_bytes.len() > 4 * 1024 * 1024 {
+        return Err(error(
+            AgentErrorKind::OutputLimitExceeded,
+            "artifact content exceeds the 4 MiB binary artifact ceiling",
+            false,
+        ));
+    }
+    if file_name.is_empty()
+        || file_name.len() > 200
+        || matches!(file_name, "." | "..")
+        || file_name
+            .chars()
+            .any(|character| character.is_control() || character == '/')
+    {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "artifact name is not one safe macOS leaf component",
+            false,
+        ));
+    }
+    let leaf = CString::new(file_name).map_err(|_| {
+        error(
+            AgentErrorKind::InvalidInput,
+            "artifact name contains an invalid NUL byte",
+            false,
+        )
+    })?;
+    let stored = resolve(directory)?;
+    let selected = open_verified(&stored.path)?;
+    if selected.identity != stored.identity || !selected.metadata.is_dir() {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "selected directory changed after reference issuance",
+            false,
+        ));
+    }
+    let allowlisted = allowed_roots.iter().any(|root| {
+        open_verified(Path::new(root))
+            .ok()
+            .filter(|opened| opened.metadata.is_dir())
+            .map(|opened| opened.identity)
+            == Some(selected.identity.clone())
+    });
+    if !allowlisted {
+        return Err(error(
+            AgentErrorKind::PermissionDenied,
+            "selected directory is not an exact host-approved artifact root",
+            false,
+        ));
+    }
+
+    let result = (|| -> std::io::Result<CreatedTextArtifact> {
+        let parent_identity = macos_file_identity(&selected.handle)?;
+        let raw = unsafe {
+            libc::openat(
+                selected.handle.as_raw_fd(),
+                leaf.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut created = unsafe { File::from_raw_fd(raw) };
+        created.write_all(content_bytes)?;
+        created.sync_all()?;
+        let created_identity = macos_file_identity(&created)?;
+        drop(created);
+        #[cfg(test)]
+        run_artifact_after_close_hook();
+        if macos_file_identity(&selected.handle)? != parent_identity {
+            return Err(std::io::Error::other(
+                "target parent identity changed during artifact creation",
+            ));
+        }
+        let mut verified = open_relative_macos(&selected.handle, &leaf)?;
+        if macos_file_identity(&verified)? != created_identity {
+            return Err(std::io::Error::other(
+                "artifact identity changed before read-back verification",
+            ));
+        }
+        let mut bytes = Vec::new();
+        verified.read_to_end(&mut bytes)?;
+        if bytes != content_bytes {
+            return Err(std::io::Error::other(
+                "artifact read-back differs from requested bytes",
+            ));
+        }
+        Ok(CreatedTextArtifact {
+            file_name: file_name.to_string(),
+            byte_len: bytes.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+        })
+    })();
+    result.map_err(|cause| io_error("create verified artifact", cause))
+}
+
+#[cfg(target_os = "macos")]
+pub fn create_text_artifact(
+    directory: &ObjectRef,
+    allowed_roots: &[String],
+    file_name: &str,
+    content_utf8: &str,
+) -> Result<CreatedTextArtifact, AgentError> {
+    if content_utf8.len() > 64 * 1024 {
+        return Err(error(
+            AgentErrorKind::OutputLimitExceeded,
+            "artifact content exceeds the 64 KiB text artifact ceiling",
+            false,
+        ));
+    }
+    create_binary_artifact(directory, allowed_roots, file_name, content_utf8.as_bytes())
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn create_binary_artifact(
     _directory: &ObjectRef,
     _allowed_roots: &[String],
@@ -1094,7 +1895,7 @@ pub fn create_binary_artifact(
     ))
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn create_text_artifact(
     _directory: &ObjectRef,
     _allowed_roots: &[String],
@@ -1237,7 +2038,62 @@ fn open_verified_with_access(
     })
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn open_verified(path: &Path) -> Result<OpenedFile, AgentError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|cause| io_error("open selected filesystem object", cause))?;
+    let metadata = file
+        .metadata()
+        .map_err(|cause| io_error("read selected filesystem metadata", cause))?;
+    let identity = macos_file_identity(&file)
+        .map_err(|cause| io_error("read selected filesystem identity", cause))?;
+    Ok(OpenedFile {
+        handle: file,
+        identity,
+        metadata,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn open_verified_for_read(path: &Path) -> Result<OpenedFile, AgentError> {
+    open_verified(path)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_file_identity(file: &File) -> std::io::Result<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file.metadata()?;
+    Ok(FileIdentity {
+        primary: metadata.dev(),
+        secondary: metadata.ino(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn open_relative_macos(directory: &File, name: &std::ffi::CStr) -> std::io::Result<File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let raw = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { File::from_raw_fd(raw) })
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn open_verified(path: &Path) -> Result<OpenedFile, AgentError> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|cause| io_error("inspect selected filesystem object", cause))?;
@@ -1268,7 +2124,7 @@ fn open_verified(path: &Path) -> Result<OpenedFile, AgentError> {
     })
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn open_verified_for_read(path: &Path) -> Result<OpenedFile, AgentError> {
     open_verified(path)
 }
@@ -1297,21 +2153,21 @@ pub(super) fn file_store_test_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "macos")))]
 type ArtifactAfterCloseHook = Box<dyn FnOnce() + Send>;
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "macos")))]
 fn artifact_after_close_hook() -> &'static Mutex<Option<ArtifactAfterCloseHook>> {
     static HOOK: OnceLock<Mutex<Option<ArtifactAfterCloseHook>>> = OnceLock::new();
     HOOK.get_or_init(|| Mutex::new(None))
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "macos")))]
 fn set_artifact_after_close_hook(hook: ArtifactAfterCloseHook) {
     *artifact_after_close_hook().lock().unwrap() = Some(hook);
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "macos")))]
 fn run_artifact_after_close_hook() {
     if let Some(hook) = artifact_after_close_hook().lock().unwrap().take() {
         hook();
@@ -1321,6 +2177,73 @@ fn run_artifact_after_close_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_document_path_binding_rejects_extension_and_content_drift() {
+        let _guard = file_store_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("selected.pages");
+        std::fs::write(&path, b"first native document bytes").unwrap();
+        reset_worker_incarnation();
+        let object_ref = issue(&path).unwrap();
+        let verified = resolve_verified_native_file(&object_ref, &[".pages"], 1024).unwrap();
+        assert_eq!(verified.display_name, "selected.pages");
+        assert_eq!(verified.byte_len, 27);
+        revalidate_verified_native_file(&object_ref, &verified, 1024).unwrap();
+
+        std::fs::write(&path, b"second native document bytes").unwrap();
+        let error = revalidate_verified_native_file(&object_ref, &verified, 1024).unwrap_err();
+        assert_eq!(error.kind, AgentErrorKind::InvalidInput);
+        assert!(!error.retryable);
+
+        let wrong = resolve_verified_native_file(&object_ref, &[".numbers"], 1024).unwrap_err();
+        assert_eq!(wrong.kind, AgentErrorKind::InvalidInput);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_artifact_stage_publishes_once_and_cleans_private_validation() {
+        let _guard = file_store_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        reset_worker_incarnation();
+        let directory = issue(temp.path()).unwrap();
+        let allowed = vec![temp.path().to_string_lossy().into_owned()];
+        let stage =
+            prepare_native_artifact_stage(&directory, &allowed, "result.pages", ".pages", ".pdf")
+                .unwrap();
+        std::fs::write(&stage.native_path, b"PK\x03\x04native-copy").unwrap();
+        std::fs::write(&stage.validation_path, b"%PDF-1.7\nvalidation").unwrap();
+        let published = stage.publish(b"PK\x03\x04", b"%PDF").unwrap();
+        assert_eq!(published.file_name, "result.pages");
+        assert_eq!(published.native_prefix, b"PK\x03\x04native-copy");
+        assert_eq!(published.validation_prefix, b"%PDF-1.7\nvalidat");
+        assert!(temp.path().join("result.pages").is_file());
+        assert_eq!(published.object_ref.object_kind, ObjectKind::File);
+        assert_eq!(
+            read_verified_bytes(&published.object_ref, 1024)
+                .unwrap()
+                .bytes,
+            b"PK\x03\x04native-copy"
+        );
+        assert_eq!(
+            std::fs::read_dir(temp.path()).unwrap().count(),
+            1,
+            "private validation and stage directory must be removed"
+        );
+
+        let second =
+            prepare_native_artifact_stage(&directory, &allowed, "result.pages", ".pages", ".pdf")
+                .unwrap();
+        std::fs::write(&second.native_path, b"PK\x03\x04second").unwrap();
+        std::fs::write(&second.validation_path, b"%PDF-second").unwrap();
+        let error = second.publish(b"PK\x03\x04", b"%PDF").unwrap_err();
+        assert_eq!(error.kind, AgentErrorKind::InvalidInput);
+        assert_eq!(
+            std::fs::read(temp.path().join("result.pages")).unwrap(),
+            b"PK\x03\x04native-copy"
+        );
+    }
 
     #[cfg(windows)]
     fn create_junction(link: &Path, target: &Path) {
@@ -1403,7 +2326,7 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn selected_exact_allowlisted_directory_creates_new_and_reads_back() {
         let _guard = file_store_test_lock();
@@ -1425,7 +2348,7 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn artifact_target_rename_competition_fails_identity_verification() {
         let _guard = file_store_test_lock();
@@ -1445,7 +2368,7 @@ mod tests {
         assert!(error.message.contains("artifact identity changed"));
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn selected_directory_enumeration_is_bounded_and_non_recursive() {
         let _guard = file_store_test_lock();
@@ -1496,7 +2419,7 @@ mod tests {
         assert!(bounded.truncated);
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn large_directory_enumeration_stops_at_the_shared_entry_ceiling() {
         let _guard = file_store_test_lock();
@@ -1581,7 +2504,7 @@ mod tests {
         assert!(OpenOptions::new().write(true).open(&path).is_ok());
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn selected_directory_filters_extensions_sizes_and_times_at_the_edge() {
         let _guard = file_store_test_lock();
@@ -1631,7 +2554,7 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn selected_text_read_uses_verified_handle_and_rejects_non_text_or_replacement() {
         let _guard = file_store_test_lock();
@@ -1674,7 +2597,7 @@ mod tests {
         assert_eq!(error.kind, AgentErrorKind::InvalidInput);
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn different_allowlisted_directory_identity_is_rejected() {
         let _guard = file_store_test_lock();
@@ -1692,5 +2615,62 @@ mod tests {
         assert_eq!(error.kind, AgentErrorKind::PermissionDenied);
         assert!(!selected.path().join("denied.txt").exists());
         assert!(!other.path().join("denied.txt").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_file_references_and_directory_enumeration_reject_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let _guard = file_store_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), b"outside").unwrap();
+        symlink(
+            outside.path().join("secret.txt"),
+            temp.path().join("linked.txt"),
+        )
+        .unwrap();
+        reset_worker_incarnation();
+        assert!(issue(&temp.path().join("linked.txt")).is_err());
+
+        let output = inspect(&FileMetadataInspectParams {
+            roots: vec![issue(temp.path()).unwrap()],
+            max_entries: 256,
+            max_bytes: 64 * 1024,
+            enumerate_directories: true,
+            file_extensions: vec![],
+            min_file_bytes: None,
+            max_file_bytes: None,
+            modified_after: None,
+            modified_before: None,
+        })
+        .unwrap();
+        assert!(output.directory_entries.is_empty());
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn spreadsheet_directory_expansion_reads_only_supported_direct_children() {
+        let _guard = file_store_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("a.csv"), b"a,b\n1,2\n").unwrap();
+        std::fs::write(temp.path().join("b.tsv"), b"a\tb\n3\t4\n").unwrap();
+        std::fs::write(temp.path().join("ignored.txt"), b"ignore").unwrap();
+        std::fs::create_dir(temp.path().join("nested")).unwrap();
+        std::fs::write(temp.path().join("nested").join("hidden.csv"), b"hidden").unwrap();
+        reset_worker_incarnation();
+
+        let (files, truncated) =
+            read_verified_spreadsheet_inputs(&[issue(temp.path()).unwrap()], 8, 64 * 1024).unwrap();
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["a.csv", "b.tsv"]
+        );
+        assert!(!truncated);
+        assert_eq!(files[0].bytes, b"a,b\n1,2\n");
     }
 }

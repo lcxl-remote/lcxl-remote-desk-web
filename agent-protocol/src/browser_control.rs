@@ -230,6 +230,8 @@ pub struct BrowserReadiness {
     pub remote_debugging_enabled: bool,
     pub user_approved: bool,
     pub connected: bool,
+    /// Informational session state. A live adapter may remain usable while the
+    /// desktop is locked, so this field is not itself an execution fence.
     pub interactive_session_unlocked: bool,
     pub tools: Vec<BrowserToolKind>,
     pub reason: Option<BrowserReadinessReason>,
@@ -244,10 +246,7 @@ impl BrowserReadiness {
             return Err(BrowserControlContractError::InvalidTimestamp);
         }
         if self.user_approved && !self.remote_debugging_enabled
-            || self.connected
-                && (!self.remote_debugging_enabled
-                    || !self.user_approved
-                    || !self.interactive_session_unlocked)
+            || self.connected && (!self.remote_debugging_enabled || !self.user_approved)
         {
             return Err(BrowserControlContractError::InvalidReadiness);
         }
@@ -1037,6 +1036,9 @@ mod tests {
             observed_at_unix_ms: 42,
         };
         readiness.validate().unwrap();
+        let mut locked_but_connected = readiness.clone();
+        locked_but_connected.interactive_session_unlocked = false;
+        locked_but_connected.validate().unwrap();
 
         let raw_tool = r#""evaluate_script""#;
         assert!(serde_json::from_str::<BrowserToolKind>(raw_tool).is_err());

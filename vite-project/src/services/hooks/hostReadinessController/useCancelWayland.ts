@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { CancelWaylandMutationRequest, CancelWaylandMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { CancelWaylandMutationRequest, CancelWaylandMutationResponse } from "../../types.ts";
-import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { cancelWayland } from "../../clients.ts";
+import { mutationOptions, useMutation } from "@tanstack/react-query";
 
 export const cancelWaylandMutationKey = () => [{ url: '/api/host-readiness/wayland/cancel' }] as const
 
