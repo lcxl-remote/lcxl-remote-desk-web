@@ -256,6 +256,23 @@ impl WorkerSession {
                                 == desk_agent_protocol::Capability::DesktopSessionInspect
                                 && entry.ready
                         });
+                    // Publish the cheap, current host snapshot before the optional browser
+                    // probe. Chrome may spend its full approval/readiness timeout here; if
+                    // we wait for it, the previous 25-second readiness lease can expire and
+                    // unrelated edge capabilities (for example Outlook handoff) fail closed
+                    // until the probe finishes. An equivalent same-revision heartbeat only
+                    // refreshes the lease; the post-probe report below still advances the
+                    // revision when browser material state actually changes.
+                    if readiness_writer
+                        .send(WorkerToService::ComputerUseReadinessUpdated(
+                            ComputerUseReadinessPayload {
+                                readiness: base_readiness,
+                            },
+                        ))
+                        .is_err()
+                    {
+                        return;
+                    }
                     readiness_broker
                         .refresh_browser_readiness(
                             browser_device_id,
