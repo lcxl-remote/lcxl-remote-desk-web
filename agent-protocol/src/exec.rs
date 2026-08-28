@@ -23,11 +23,18 @@
 //! daemon ↔ worker IPC carrying [`ExecPlan`] / [`ExecResultPayload`]), and
 //! `utoipa::ToSchema`.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{AgentOperation, AgentOutcome, RiskLevel};
+
+pub const COMMAND_DRAFT_SCHEMA_VERSION: u16 = 1;
+pub const MAX_COMMAND_DRAFT_BYTES: usize = 16 * 1024;
+pub const MAX_COMMAND_DRAFT_CWD_BYTES: usize = 4096;
+pub const MAX_COMMAND_DRAFT_TIMEOUT_MS: u32 = 7_200_000;
 
 // ============================ Correlation IDs ============================
 
@@ -217,6 +224,136 @@ pub struct ResolveExecData {
 pub struct ExecResultPayload {
     pub exec_request_id: ExecRequestId,
     pub outcome: AgentOutcome,
+}
+
+// ============================ Capability command contract ============================
+
+/// Model-facing proposal for one command. This value is never executable by
+/// itself: the server must classify it, render an [`ExecPlanDraft`], bind the
+/// current target/policy/input revisions, and issue a one-shot exact grant.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct CommandDraft {
+    pub schema_version: u16,
+    pub shell: String,
+    pub command: String,
+    pub cwd: Option<String>,
+    pub timeout_ms: u32,
+}
+
+impl CommandDraft {
+    pub fn validate(&self) -> Result<(), CommandContractError> {
+        if self.schema_version != COMMAND_DRAFT_SCHEMA_VERSION {
+            return Err(CommandContractError::UnsupportedSchemaVersion(
+                self.schema_version,
+            ));
+        }
+        validate_command_text("shell", &self.shell, 64)?;
+        validate_command_text("command", &self.command, MAX_COMMAND_DRAFT_BYTES)?;
+        if let Some(cwd) = &self.cwd {
+            validate_command_text("cwd", cwd, MAX_COMMAND_DRAFT_CWD_BYTES)?;
+        }
+        if self.timeout_ms == 0 || self.timeout_ms > MAX_COMMAND_DRAFT_TIMEOUT_MS {
+            return Err(CommandContractError::InvalidTimeout);
+        }
+        Ok(())
+    }
+}
+
+/// Server-authored identity for the exact command that a capability grant may
+/// authorize. The complete rendered plan remains the source of truth; the
+/// digest is the stable authority key stored in grant and audit records.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct CanonicalCommandIdentity {
+    pub schema_version: u16,
+    pub target_device_id: String,
+    pub policy_revision: i64,
+    pub input_revision: u64,
+    pub plan: ExecPlanDraft,
+    pub canonical_input_digest_sha256: String,
+}
+
+impl CanonicalCommandIdentity {
+    pub fn validate(&self) -> Result<(), CommandContractError> {
+        if self.schema_version != COMMAND_DRAFT_SCHEMA_VERSION {
+            return Err(CommandContractError::UnsupportedSchemaVersion(
+                self.schema_version,
+            ));
+        }
+        validate_command_text("target_device_id", &self.target_device_id, 256)?;
+        if self.policy_revision < 1 || self.input_revision == 0 {
+            return Err(CommandContractError::InvalidRevision);
+        }
+        if self.plan.execution_basis != ExecExecutionBasis::Template
+            || self.plan.template_id.trim().is_empty()
+            || self.plan.program.trim().is_empty()
+            || self.plan.argv.len() > 256
+            || self.plan.timeout_ms == 0
+            || self.plan.timeout_ms > MAX_COMMAND_DRAFT_TIMEOUT_MS
+        {
+            return Err(CommandContractError::InvalidSealedPlan);
+        }
+        validate_sha256(&self.canonical_input_digest_sha256)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandContractError {
+    UnsupportedSchemaVersion(u16),
+    InvalidField(&'static str),
+    InvalidTimeout,
+    InvalidRevision,
+    InvalidSealedPlan,
+    InvalidDigest,
+}
+
+impl fmt::Display for CommandContractError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedSchemaVersion(version) => {
+                write!(formatter, "unsupported command draft schema {version}")
+            }
+            Self::InvalidField(field) => write!(formatter, "invalid {field}"),
+            Self::InvalidTimeout => formatter.write_str("invalid command timeout"),
+            Self::InvalidRevision => formatter.write_str("invalid command binding revision"),
+            Self::InvalidSealedPlan => formatter.write_str("invalid sealed command plan"),
+            Self::InvalidDigest => formatter.write_str("invalid command sha256 digest"),
+        }
+    }
+}
+
+impl std::error::Error for CommandContractError {}
+
+fn validate_command_text(
+    field: &'static str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), CommandContractError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || value.len() > max_bytes
+        || value.chars().any(|character| character == '\0')
+    {
+        Err(CommandContractError::InvalidField(field))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_sha256(value: &str) -> Result<(), CommandContractError> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(CommandContractError::InvalidDigest)
+    }
 }
 
 // ============================ Authoritative plan ============================
@@ -520,6 +657,49 @@ mod tests {
             max_stderr_bytes: 65_536,
             containment: ExecContainmentSnapshot::default(),
         }
+    }
+
+    #[test]
+    fn command_draft_is_non_authoritative_and_bounded() {
+        let mut draft = CommandDraft {
+            schema_version: COMMAND_DRAFT_SCHEMA_VERSION,
+            shell: "powershell".into(),
+            command: "Get-Service -Name Spooler".into(),
+            cwd: None,
+            timeout_ms: 10_000,
+        };
+        draft.validate().unwrap();
+
+        draft.command = "x".repeat(MAX_COMMAND_DRAFT_BYTES + 1);
+        assert_eq!(
+            draft.validate(),
+            Err(CommandContractError::InvalidField("command"))
+        );
+    }
+
+    #[test]
+    fn canonical_command_identity_accepts_only_template_plan_and_exact_digest() {
+        let mut identity = CanonicalCommandIdentity {
+            schema_version: COMMAND_DRAFT_SCHEMA_VERSION,
+            target_device_id: "device-1".into(),
+            policy_revision: 7,
+            input_revision: 3,
+            plan: sample_draft(),
+            canonical_input_digest_sha256: "a".repeat(64),
+        };
+        identity.validate().unwrap();
+
+        identity.plan.execution_basis = ExecExecutionBasis::OwnerBlocklistOnly;
+        assert_eq!(
+            identity.validate(),
+            Err(CommandContractError::InvalidSealedPlan)
+        );
+        identity.plan.execution_basis = ExecExecutionBasis::Template;
+        identity.canonical_input_digest_sha256 = "not-a-digest".into();
+        assert_eq!(
+            identity.validate(),
+            Err(CommandContractError::InvalidDigest)
+        );
     }
 
     #[test]

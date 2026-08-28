@@ -36,7 +36,7 @@ use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use sea_orm::DatabaseConnection;
 
-use crate::diagnose_orchestrator::record_usage;
+use crate::agent_runtime::record_usage;
 use crate::model_dial::SignalModelSeam;
 use crate::model_provider;
 

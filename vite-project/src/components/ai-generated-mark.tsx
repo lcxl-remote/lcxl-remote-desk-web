@@ -19,7 +19,7 @@ export type AiProvenance = {
  * enriches the tooltip with the model that produced the content.
  *
  * `className` overrides the default themed styling for contexts that need it
- * (e.g. the diagnose panel's fixed dark overlay).
+ * (e.g. a fixed dark assistant overlay).
  */
 export function AiGeneratedMark({
     provenance,

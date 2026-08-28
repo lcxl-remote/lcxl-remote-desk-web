@@ -17,6 +17,12 @@ use desk_agent_protocol::authz::{
     AUTHORIZATION_BLOCK_VERSION, AuthorizationBlock, AuthorizedControlPayload, AuthzActor,
     AuthzDevice, ExecAdmissionPolicy,
 };
+use desk_agent_protocol::browser_control::{
+    BROWSER_CONTROL_SCHEMA_VERSION, BrowserAction, BrowserActionRequest, BrowserActionResult,
+    BrowserActivationClass, BrowserElementRef, BrowserFormField, BrowserFormFieldReadback,
+    BrowserFormReadbackKind, BrowserMutationClass, BrowserNavigationTarget, BrowserPageRef,
+    BrowserWaitState,
+};
 use desk_agent_protocol::capability_grant::{
     CAPABILITY_GRANT_SCHEMA_VERSION, CapabilityGrant, CapabilityGrantIssuer, CapabilityGrantLimits,
     CapabilityGrantUsePolicy, CapabilityRiskTier,
@@ -24,8 +30,14 @@ use desk_agent_protocol::capability_grant::{
 use desk_agent_protocol::capability_provider::{
     AuthorizationResourceKind, CapabilityDataCategory, ExecutionLocality, ProductSurface,
 };
+use desk_agent_protocol::communication::{
+    COMMUNICATION_SCHEMA_VERSION, CommunicationChannel, CommunicationDraftHandoff,
+    CommunicationPrepareVerification, CommunicationSendAuthority, CommunicationSurfaceKind,
+    CommunicationSurfaceRef, CommunicationSurfaceScope, GmailWebDraftHandoffInput,
+    LocalDraftDocument, OutlookNewComposeHandoffRequest, SlackWebDraftHandoffInput,
+};
 use desk_agent_protocol::computer_use::{
-    COMPUTER_USE_SCHEMA_VERSION, ComputerActionCompleted, ComputerActionKind,
+    COMPUTER_USE_SCHEMA_VERSION, ComputerActionCompleted, ComputerActionKind, ComputerActionOutput,
     ComputerActionResultClass, ComputerActionStarted, ComputerActionStep, ComputerUseAdapterKind,
     ComputerUseAdapterRef, FileContentReadParams, FileMetadataInspectParams, FilePatchAction,
     ObjectKind, ObjectRef, OfficeInspectParams, SealedComputerActionPlan,
@@ -35,6 +47,7 @@ use desk_agent_protocol::data_lineage::{
     ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance, DestinationIdentity,
     RetentionBoundary, Sensitivity,
 };
+use desk_agent_protocol::exec::{ApprovalId, CommandDraft, ExecRequestId};
 use desk_agent_protocol::remote_tool::{
     MAX_REMOTE_TOOL_RESULT_BYTES, REMOTE_TOOL_TIMEOUT_SECS, RemoteToolOutput, RemoteToolRequest,
     RemoteToolResponse, RemoteToolResponseChunk,
@@ -45,16 +58,21 @@ use desk_agent_protocol::{
     ProtocolVersion, ReadContextInput, RequestId, TargetRef,
 };
 use desk_diagnose_core::capability_grant::{
-    CapabilityGrantCall, canonical_compiled_scope, exact_external_query_resource_scope,
-    exact_external_url_resource_scope, fresh_object_resource_scope, match_capability_grant,
+    CapabilityGrantCall, canonical_compiled_scope, exact_command_resource_scope,
+    exact_external_query_resource_scope, exact_external_url_resource_scope,
+    fresh_object_resource_scope, match_capability_grant,
 };
 use desk_diagnose_core::capability_risk::{CapabilityRiskSignals, classify_capability_risk};
 use desk_diagnose_core::chat::ToolCall;
 use desk_diagnose_core::chunk::ByteReassembler;
 use desk_diagnose_core::device_assistant::{PREVIEW_COMPUTER_ACTION_TOOL, validate_preview_call};
+use desk_diagnose_core::permission_tools::canonical_permission_input_json;
 use desk_diagnose_core::provider_registry::ProviderRegistry;
 use desk_diagnose_core::read_tools::build_read_operation;
-use desk_diagnose_core::seam::{ExecContext, ExecOutcome, ToolRunOutput, ToolSeam};
+use desk_diagnose_core::seam::{ExecContext, ExecOutcome, ToolRunOutput, ToolSeam, WaitOutcome};
+use desk_diagnose_core::sink_authorizer::{
+    DefaultSinkAuthorizer, ExportDataAuthorization, SinkAuthorizer, SinkInput, authorize_export,
+};
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use desk_signal_facade::service::{ComputerActionObserver, RemoteToolObserver};
@@ -85,6 +103,74 @@ fn error(
         safe_for_model,
         error_code: None,
     }
+}
+
+fn browser_policy_auto_authorized(risk_tier: CapabilityRiskTier) -> bool {
+    matches!(risk_tier, CapabilityRiskTier::R0 | CapabilityRiskTier::R1)
+}
+
+fn exact_field_readback<'a>(
+    result: &'a BrowserActionResult,
+    expected: &BrowserElementRef,
+    value: &str,
+) -> Option<&'a BrowserFormFieldReadback> {
+    let mut matching = result.form_readback.iter().filter(|readback| {
+        readback.request_element_id == expected.element_id
+            && readback.request_role == expected.role
+            && readback.request_accessible_name == expected.accessible_name
+            && readback.value == value
+    });
+    let matched = matching.next()?;
+    matching.next().is_none().then_some(matched)
+}
+
+fn gmail_exact_form_readback(
+    result: &BrowserActionResult,
+    gmail: &GmailWebDraftHandoffInput,
+) -> bool {
+    if result.form_readback.len() != 3 {
+        return false;
+    }
+    let Some(to) = exact_field_readback(
+        result,
+        &gmail.to_field,
+        gmail.draft.recipients[0].address.as_str(),
+    ) else {
+        return false;
+    };
+    let Some(subject) =
+        exact_field_readback(result, &gmail.subject_field, gmail.draft.subject.as_str())
+    else {
+        return false;
+    };
+    let Some(body) = exact_field_readback(
+        result,
+        &gmail.body_field,
+        gmail.draft.body_plain_text.as_str(),
+    ) else {
+        return false;
+    };
+    if subject.kind != BrowserFormReadbackKind::ControlValue
+        || body.kind != BrowserFormReadbackKind::ControlValue
+    {
+        return false;
+    }
+    match to.kind {
+        BrowserFormReadbackKind::ControlValue => true,
+        BrowserFormReadbackKind::CommittedText => {
+            to.container_element_id.is_some()
+                && to.container_element_id == subject.container_element_id
+        }
+    }
+}
+
+fn slack_exact_form_readback(
+    result: &BrowserActionResult,
+    slack: &SlackWebDraftHandoffInput,
+) -> bool {
+    result.form_readback.len() == 1
+        && exact_field_readback(result, &slack.composer, slack.body_plain_text.as_str())
+            .is_some_and(|readback| readback.kind == BrowserFormReadbackKind::ControlValue)
 }
 
 fn decode_output(bytes: &[u8]) -> Result<RemoteToolOutput, AgentError> {
@@ -465,11 +551,15 @@ pub struct SignalDeviceAssistantTools {
     selected_file_roots: Vec<ObjectRef>,
     selected_spreadsheet_roots: Vec<ObjectRef>,
     selected_terminal_roots: Vec<ObjectRef>,
+    selected_browser_surface: Option<ObjectRef>,
+    selected_outlook_surface: Option<ObjectRef>,
     current_user_message: String,
     run_id: String,
     turn_id: String,
     policy_revision: i64,
     readiness_revision: u64,
+    max_command_runtime_ms: u32,
+    exec_tools: crate::agent_exec::SignalAgentTools,
 }
 
 impl SignalDeviceAssistantTools {
@@ -488,12 +578,33 @@ impl SignalDeviceAssistantTools {
         selected_file_roots: Vec<ObjectRef>,
         selected_spreadsheet_roots: Vec<ObjectRef>,
         selected_terminal_roots: Vec<ObjectRef>,
+        selected_browser_surface: Option<ObjectRef>,
+        selected_outlook_surface: Option<ObjectRef>,
         current_user_message: String,
         run_id: String,
         turn_id: String,
         policy_revision: i64,
         readiness_revision: u64,
+        available_exec_shells: Vec<String>,
+        max_command_runtime_ms: u32,
     ) -> Self {
+        let exec_tools = crate::agent_exec::SignalAgentTools::new(
+            db.clone(),
+            connections.clone(),
+            crate::agent_exec::global_agent_exec_pending(),
+            target_connection_id.clone(),
+            run_id.clone(),
+            desk_agent_protocol::evidence::EvidenceSnapshot::record(
+                "device-assistant-command",
+                "pre-approved safe-template command dispatch",
+                chrono::Utc::now().to_rfc3339(),
+                Vec::new(),
+            ),
+            ExecAdmissionPolicy::TemplateOnly,
+            desk_agent_protocol::RiskLevel::High,
+            available_exec_shells,
+            max_command_runtime_ms,
+        );
         Self {
             db,
             provider_registry,
@@ -509,34 +620,19 @@ impl SignalDeviceAssistantTools {
             selected_file_roots,
             selected_spreadsheet_roots,
             selected_terminal_roots,
+            selected_browser_surface,
+            selected_outlook_surface,
             current_user_message,
             run_id,
             turn_id,
             policy_revision,
             readiness_revision,
+            max_command_runtime_ms,
+            exec_tools,
         }
     }
 
     fn canonical_call_input(call: &ToolCall) -> Result<(String, String), AgentError> {
-        fn sort_json(value: serde_json::Value) -> serde_json::Value {
-            match value {
-                serde_json::Value::Array(values) => {
-                    serde_json::Value::Array(values.into_iter().map(sort_json).collect())
-                }
-                serde_json::Value::Object(values) => {
-                    let mut entries = values.into_iter().collect::<Vec<_>>();
-                    entries.sort_by(|left, right| left.0.cmp(&right.0));
-                    serde_json::Value::Object(
-                        entries
-                            .into_iter()
-                            .map(|(key, value)| (key, sort_json(value)))
-                            .collect(),
-                    )
-                }
-                scalar => scalar,
-            }
-        }
-
         let value = serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
             error(
                 AgentErrorKind::InvalidInput,
@@ -545,7 +641,7 @@ impl SignalDeviceAssistantTools {
                 true,
             )
         })?;
-        let canonical = serde_json::to_string(&sort_json(value)).map_err(|encode_error| {
+        let canonical = canonical_permission_input_json(value).map_err(|encode_error| {
             error(
                 AgentErrorKind::Internal,
                 format!("failed to canonicalize Provider tool input: {encode_error}"),
@@ -617,7 +713,7 @@ impl SignalDeviceAssistantTools {
             {
                 Err(error(
                     AgentErrorKind::PermissionDenied,
-                    "select at least one spreadsheet file before inspecting it",
+                    "select at least one spreadsheet file or directory before inspecting it",
                     false,
                     true,
                 ))
@@ -685,16 +781,45 @@ impl SignalDeviceAssistantTools {
 
     fn capability_risk(
         capability: &desk_diagnose_core::provider_registry::CapabilityDescriptor,
-    ) -> CapabilityRiskTier {
-        let sensitive_content = capability.wire.data_policy.reads.iter().any(|category| {
-            !matches!(
-                category,
-                CapabilityDataCategory::UserRequest
-                    | CapabilityDataCategory::DesktopSessionMetadata
-                    | CapabilityDataCategory::FileMetadata
+        call: &ToolCall,
+    ) -> Result<CapabilityRiskTier, AgentError> {
+        let process_command_line_requested = if capability
+            .wire
+            .data_policy
+            .reads
+            .contains(&CapabilityDataCategory::ProcessMetadata)
+        {
+            matches!(
+                build_read_operation(call)?,
+                (
+                    desk_agent_protocol::Capability::ProcessList,
+                    OperationInput::ReadContext(ReadContextInput {
+                        kind: ContextKind::ProcessList(desk_agent_protocol::ProcessListParams {
+                            include_command_line: true,
+                            ..
+                        }),
+                    })
+                )
             )
+        } else {
+            false
+        };
+        let sensitive_content = capability.wire.data_policy.reads.iter().any(|category| {
+            matches!(
+                category,
+                CapabilityDataCategory::UiSemanticTree
+                    | CapabilityDataCategory::OfficeSelection
+                    | CapabilityDataCategory::FileContent
+                    | CapabilityDataCategory::TerminalOutput
+                    | CapabilityDataCategory::ScreenPixels
+                    | CapabilityDataCategory::LogContent
+                    | CapabilityDataCategory::CommandOutput
+                    | CapabilityDataCategory::ExternalContent
+                    | CapabilityDataCategory::CommunicationContent
+            ) || (*category == CapabilityDataCategory::ProcessMetadata
+                && process_command_line_requested)
         });
-        classify_capability_risk(
+        Ok(classify_capability_risk(
             capability.wire.effect,
             CapabilityRiskSignals {
                 sensitive_content,
@@ -702,7 +827,7 @@ impl SignalDeviceAssistantTools {
                 destructive_or_overwrite: false,
                 unpredictable_input: false,
             },
-        )
+        ))
     }
 
     async fn verify_current_readiness(
@@ -807,7 +932,7 @@ impl SignalDeviceAssistantTools {
         }
         let operation_scope =
             compiled_scope.map_or_else(|| vec!["observe".to_string()], |scope| scope.operations);
-        let risk_tier = Self::capability_risk(capability);
+        let risk_tier = Self::capability_risk(capability, call)?;
         let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
             error(
                 AgentErrorKind::Internal,
@@ -1062,6 +1187,371 @@ impl SignalDeviceAssistantTools {
         }
     }
 
+    async fn authorize_and_execute_command(
+        &self,
+        call: &ToolCall,
+        ctx: &ExecContext,
+    ) -> Result<ExecOutcome, AgentError> {
+        if call.name != "execute_confirmed_command" {
+            return Err(error(
+                AgentErrorKind::UnsupportedCapability,
+                "command Provider is not registered",
+                false,
+                true,
+            ));
+        }
+        let command: CommandDraft =
+            serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
+                error(
+                    AgentErrorKind::InvalidInput,
+                    format!("invalid confirmed command input: {decode_error}"),
+                    false,
+                    true,
+                )
+            })?;
+        command.validate().map_err(|validation_error| {
+            error(
+                AgentErrorKind::InvalidInput,
+                format!("invalid confirmed command input: {validation_error}"),
+                false,
+                true,
+            )
+        })?;
+        let shell = desk_diagnose_core::exec_tools::canonical_exec_shell(&command.shell)
+            .ok_or_else(|| {
+                error(
+                    AgentErrorKind::InvalidInput,
+                    "confirmed command shell is not supported",
+                    false,
+                    true,
+                )
+            })?;
+        let mut validation_input = desk_agent_protocol::ExecInput {
+            target: desk_agent_protocol::ExecTarget::Shell {
+                shell: shell.into(),
+            },
+            command: command.command,
+            cwd: command.cwd,
+            timeout_ms: command.timeout_ms,
+            max_stdout_bytes: 65_536,
+            max_stderr_bytes: 65_536,
+        };
+        desk_diagnose_core::exec_tools::apply_exec_runtime_ceiling(
+            &mut validation_input,
+            self.max_command_runtime_ms,
+        );
+        let classified = desk_diagnose_core::exec_classify::classify_command_with_policy(
+            &validation_input,
+            &[],
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
+            ExecAdmissionPolicy::TemplateOnly,
+        );
+        let Some(command_plan) = classified.draft else {
+            return Ok(ExecOutcome::Rejected {
+                reason: Some(classified.classification.impact),
+            });
+        };
+        if classified.classification.decision
+            != desk_agent_protocol::exec::ExecDecision::ConfirmRequired
+            || command_plan.execution_basis
+                != desk_agent_protocol::exec::ExecExecutionBasis::Template
+        {
+            return Ok(ExecOutcome::Rejected {
+                reason: Some("the command does not match a safe template".into()),
+            });
+        }
+
+        let capability = self
+            .provider_registry
+            .capability_for_tool(&call.name)
+            .filter(|capability| {
+                capability.required_capability
+                    == desk_agent_protocol::Capability::ShellExecConfirmed
+            })
+            .ok_or_else(|| {
+                error(
+                    AgentErrorKind::UnsupportedCapability,
+                    "command Provider is not registered",
+                    false,
+                    true,
+                )
+            })?;
+        let provider = self
+            .provider_registry
+            .provider_for_capability(&capability.wire.capability_id)
+            .expect("registered command capability has a Provider");
+        self.verify_current_readiness(capability).await?;
+        let session = self.authoritative_session().await?;
+        let (canonical_input_json, canonical_input_digest_sha256) =
+            Self::canonical_call_input(call)?;
+        let identity = desk_agent_protocol::exec::CanonicalCommandIdentity {
+            schema_version: desk_agent_protocol::exec::COMMAND_DRAFT_SCHEMA_VERSION,
+            target_device_id: self.target_device_id.clone(),
+            policy_revision: self.policy_revision,
+            input_revision: session.input_revision,
+            plan: command_plan,
+            canonical_input_digest_sha256: canonical_input_digest_sha256.clone(),
+        };
+        identity.validate().map_err(|validation_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to freeze exact command identity: {validation_error}"),
+                false,
+                false,
+            )
+        })?;
+        let resource_scope = exact_command_resource_scope(&canonical_input_digest_sha256);
+        let operation_scope = vec!["execute_confirmed_command".into()];
+        let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
+            error(
+                AgentErrorKind::Internal,
+                "system clock predates the Unix epoch",
+                false,
+                false,
+            )
+        })?;
+        let server_call_id = format!(
+            "capability-call-{:x}",
+            Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
+        );
+        let call_authority = CapabilityGrantCall {
+            actor_id: &self.actor_id,
+            run_id: &self.run_id,
+            surface: ProductSurface::OssPersonalOwner,
+            target_device_id: &self.target_device_id,
+            target_session_id: None,
+            provider_id: &provider.wire.provider_id,
+            capability_id: &capability.wire.capability_id,
+            tool_name: &call.name,
+            tool_schema_version: capability.wire.input_schema_version,
+            effect: capability.wire.effect,
+            risk_tier: CapabilityRiskTier::R3,
+            resource_scope: &resource_scope,
+            operation_scope: &operation_scope,
+            export_destinations: &[],
+            envelope_ids: &[],
+            content_digests_sha256: &[],
+            canonical_input_digest_sha256: &canonical_input_digest_sha256,
+            byte_count: canonical_input_json.len() as u64,
+            item_count: 1,
+            policy_revision: self.policy_revision,
+            readiness_revision: self.readiness_revision,
+            now_unix_ms,
+        };
+        let store = SignalCapabilityGrantStore::new(self.db.clone());
+        let grant_id = if let Some(existing) = store
+            .prepared_grant_id(&server_call_id)
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to load prepared command authority: {db_error}"),
+                    false,
+                    false,
+                )
+            })? {
+            existing
+        } else {
+            store
+                .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to load command grants: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?
+                .into_iter()
+                .find(|grant| match_capability_grant(grant, &call_authority).is_ok())
+                .map(|grant| grant.grant_id)
+                .ok_or_else(|| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        "command execution requires an active one-shot exact grant",
+                        false,
+                        true,
+                    )
+                })?
+        };
+        let prepare = || PrepareCapabilityCall {
+            grant_id: &grant_id,
+            call_id: &server_call_id,
+            turn_id: &self.turn_id,
+            input_revision: session.input_revision,
+            input_watermark: session.latest_input_seq,
+            generation: 1,
+            canonical_input_json: &canonical_input_json,
+            call: call_authority.clone(),
+        };
+        let prepared = store.prepare(prepare()).await.map_err(|db_error| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                format!("command call authorization failed: {db_error}"),
+                false,
+                true,
+            )
+        })?;
+        let dispatch_id =
+            match store
+                .record_dispatch_intent(prepare())
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        format!("command dispatch authorization failed: {db_error}"),
+                        false,
+                        true,
+                    )
+                })? {
+                DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
+                DispatchIntentResult::SupersededBeforeIntent { .. } => {
+                    return Err(error(
+                        AgentErrorKind::PermissionDenied,
+                        "command call was superseded by newer user input",
+                        false,
+                        true,
+                    ));
+                }
+                DispatchIntentResult::RevokedBeforeIntent { .. } => {
+                    return Err(error(
+                        AgentErrorKind::PermissionDenied,
+                        "command grant was revoked before dispatch",
+                        false,
+                        true,
+                    ));
+                }
+            };
+        match store
+            .claim_dispatch(&dispatch_id, now_unix_ms)
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to claim command dispatch: {db_error}"),
+                    false,
+                    false,
+                )
+            })? {
+            DispatchClaimResult::Claimed(_) => {}
+            DispatchClaimResult::OutcomeUnknown { .. } => {
+                return Ok(ExecOutcome::Unknown(
+                    desk_diagnose_core::session::ActionIdentity::new(
+                        prepared.work_id,
+                        server_call_id,
+                        dispatch_id,
+                        desk_diagnose_core::session::WorkKind::AgentExec,
+                    ),
+                ));
+            }
+        }
+
+        let result = self
+            .exec_tools
+            .execute_preapproved(
+                validation_input,
+                ctx,
+                ExecRequestId(server_call_id.clone()),
+                dispatch_id.clone(),
+                ApprovalId(grant_id),
+            )
+            .await;
+        match result {
+            Ok(ExecOutcome::Executed { output, event_id }) => {
+                let (_, result_digest_sha256) = tool_output_fingerprint(&output)?;
+                store
+                    .record_dispatch_completion(
+                        &CapabilityDispatchCompletion {
+                            dispatch_id,
+                            call_id: server_call_id,
+                            generation: 1,
+                            outcome: CapabilityDispatchOutcome::Succeeded,
+                            result_digest_sha256,
+                        },
+                        now_unix_ms,
+                    )
+                    .await
+                    .map_err(|db_error| {
+                        error(
+                            AgentErrorKind::Internal,
+                            format!("failed to persist command completion: {db_error}"),
+                            false,
+                            false,
+                        )
+                    })?;
+                Ok(ExecOutcome::Executed { output, event_id })
+            }
+            Ok(ExecOutcome::Rejected { reason }) => {
+                let digest = format!(
+                    "{:x}",
+                    Sha256::digest(reason.as_deref().unwrap_or("command rejected").as_bytes())
+                );
+                store
+                    .record_dispatch_completion(
+                        &CapabilityDispatchCompletion {
+                            dispatch_id,
+                            call_id: server_call_id,
+                            generation: 1,
+                            outcome: CapabilityDispatchOutcome::Failed,
+                            result_digest_sha256: digest,
+                        },
+                        now_unix_ms,
+                    )
+                    .await
+                    .map_err(|db_error| {
+                        error(
+                            AgentErrorKind::Internal,
+                            format!("failed to persist command rejection: {db_error}"),
+                            false,
+                            false,
+                        )
+                    })?;
+                Ok(ExecOutcome::Rejected { reason })
+            }
+            Ok(ExecOutcome::Unknown(identity)) => {
+                store
+                    .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
+                    .await
+                    .map_err(|db_error| {
+                        error(
+                            AgentErrorKind::Internal,
+                            format!("failed to persist command unknown outcome: {db_error}"),
+                            false,
+                            false,
+                        )
+                    })?;
+                Ok(ExecOutcome::Unknown(identity))
+            }
+            Ok(other @ ExecOutcome::Dispatched(_)) => Ok(other),
+            Ok(other) => Ok(other),
+            Err(exec_error) => {
+                let digest = format!("{:x}", Sha256::digest(exec_error.message.as_bytes()));
+                store
+                    .record_dispatch_completion(
+                        &CapabilityDispatchCompletion {
+                            dispatch_id,
+                            call_id: server_call_id,
+                            generation: 1,
+                            outcome: CapabilityDispatchOutcome::Failed,
+                            result_digest_sha256: digest,
+                        },
+                        now_unix_ms,
+                    )
+                    .await
+                    .map_err(|db_error| {
+                        error(
+                            AgentErrorKind::Internal,
+                            format!("failed to persist command failure: {db_error}"),
+                            false,
+                            false,
+                        )
+                    })?;
+                Err(exec_error)
+            }
+        }
+    }
+
     async fn authorize_and_execute_artifact(
         &self,
         call: &ToolCall,
@@ -1094,6 +1584,12 @@ impl SignalDeviceAssistantTools {
             file_name: String,
             title: String,
         }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LocalDraftArgs {
+            file_name: String,
+            draft: desk_agent_protocol::communication::LocalDraftDocument,
+        }
         enum ArtifactRequest {
             Text(TextArgs),
             Spreadsheet(SpreadsheetArgs),
@@ -1102,6 +1598,7 @@ impl SignalDeviceAssistantTools {
                 policy_digest_sha256: String,
             },
             Word(WordArgs),
+            LocalDraft(LocalDraftArgs),
         }
 
         let (args, required_capability, operation, orchestrator_grant) = match call.name.as_str() {
@@ -1120,6 +1617,31 @@ impl SignalDeviceAssistantTools {
                 "create_new_artifact",
                 desk_diagnose_core::device_assistant::FILE_ARTIFACT_CREATE_CAPABILITY_ID,
             ),
+            "create_local_communication_draft" => {
+                let args: LocalDraftArgs =
+                    serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
+                        error(
+                            AgentErrorKind::InvalidInput,
+                            format!("invalid local communication draft input: {decode_error}"),
+                            false,
+                            true,
+                        )
+                    })?;
+                args.draft.validate().map_err(|validation_error| {
+                    error(
+                        AgentErrorKind::InvalidInput,
+                        format!("invalid local communication draft: {validation_error}"),
+                        false,
+                        true,
+                    )
+                })?;
+                (
+                    ArtifactRequest::LocalDraft(args),
+                    desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed,
+                    "create_new_artifact",
+                    desk_diagnose_core::device_assistant::LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID,
+                )
+            }
             "create_workbook_from_merge_preview" => (
                 ArtifactRequest::Spreadsheet(serde_json::from_str(&call.arguments_json).map_err(
                     |decode_error| {
@@ -1243,7 +1765,7 @@ impl SignalDeviceAssistantTools {
             Self::canonical_call_input(call)?;
         let resource_scope = fresh_object_resource_scope(&selected_directories);
         let operation_scope = vec![operation.to_string()];
-        let risk_tier = Self::capability_risk(capability);
+        let risk_tier = Self::capability_risk(capability, call)?;
         let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
             error(
                 AgentErrorKind::Internal,
@@ -1445,6 +1967,17 @@ impl SignalDeviceAssistantTools {
                 "new Word report does not exist in the selected directory".into(),
                 "materialize the retained merge preview as one new deterministic macro-free DOCX without overwrite".into(),
                 "reopen through the retained parent handle and verify the exact generated DOCX bytes plus SHA-256".into(),
+            ),
+            ArtifactRequest::LocalDraft(args) => (
+                ComputerActionKind::File(
+                    FilePatchAction::CreateLocalCommunicationDraftArtifact {
+                        file_name: args.file_name,
+                        draft: args.draft,
+                    },
+                ),
+                "new local communication draft does not exist in the selected directory".into(),
+                "create one inert local-only UTF-8 plain-text draft without overwrite or external delivery".into(),
+                "re-render with shared trusted logic, reopen through the retained parent handle, and verify exact bytes plus SHA-256".into(),
             ),
         };
         let plan = SealedComputerActionPlan {
@@ -1678,6 +2211,1719 @@ impl SignalDeviceAssistantTools {
         }
     }
 
+    fn browser_action_from_call(
+        call: &ToolCall,
+        server_call_id: &str,
+    ) -> Result<BrowserActionRequest, AgentError> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct OpenArgs {
+            target: BrowserNavigationTarget,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct NavigateArgs {
+            page: BrowserPageRef,
+            target: BrowserNavigationTarget,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SnapshotArgs {
+            page: BrowserPageRef,
+            max_elements: u16,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WaitArgs {
+            page: BrowserPageRef,
+            element: BrowserElementRef,
+            state: BrowserWaitState,
+            timeout_ms: u32,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct FillArgs {
+            page: BrowserPageRef,
+            fields: Vec<BrowserFormField>,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ActivateArgs {
+            page: BrowserPageRef,
+            element: BrowserElementRef,
+        }
+        let decode = |message: &str| {
+            error(
+                AgentErrorKind::InvalidInput,
+                format!("invalid browser Provider input: {message}"),
+                false,
+                true,
+            )
+        };
+        let action = match call.name.as_str() {
+            "browser_open_page" => {
+                let args: OpenArgs = serde_json::from_str(&call.arguments_json)
+                    .map_err(|error| decode(&error.to_string()))?;
+                BrowserAction::OpenPage {
+                    target: args.target,
+                }
+            }
+            "browser_navigate_page" => {
+                let args: NavigateArgs = serde_json::from_str(&call.arguments_json)
+                    .map_err(|error| decode(&error.to_string()))?;
+                BrowserAction::NavigatePage {
+                    page: args.page,
+                    target: args.target,
+                }
+            }
+            "browser_take_snapshot" => {
+                let args: SnapshotArgs = serde_json::from_str(&call.arguments_json)
+                    .map_err(|error| decode(&error.to_string()))?;
+                BrowserAction::TakeSnapshot {
+                    page: args.page,
+                    max_elements: args.max_elements,
+                }
+            }
+            "browser_wait_for" => {
+                let args: WaitArgs = serde_json::from_str(&call.arguments_json)
+                    .map_err(|error| decode(&error.to_string()))?;
+                BrowserAction::WaitFor {
+                    page: args.page,
+                    element: args.element,
+                    state: args.state,
+                    timeout_ms: args.timeout_ms,
+                }
+            }
+            "browser_fill_form" => {
+                let args: FillArgs = serde_json::from_str(&call.arguments_json)
+                    .map_err(|error| decode(&error.to_string()))?;
+                BrowserAction::FillForm {
+                    page: args.page,
+                    fields: args.fields,
+                    mutation_class: BrowserMutationClass::InputFallback,
+                }
+            }
+            "prepare_slack_web_message_handoff" => {
+                let args: SlackWebDraftHandoffInput = serde_json::from_str(&call.arguments_json)
+                    .map_err(|error| decode(&error.to_string()))?;
+                args.validate()
+                    .map_err(|error| decode(&error.to_string()))?;
+                BrowserAction::FillForm {
+                    page: args.page,
+                    fields: vec![BrowserFormField {
+                        element: args.composer,
+                        value: args.body_plain_text,
+                    }],
+                    mutation_class: BrowserMutationClass::WriteExternalDraft,
+                }
+            }
+            "prepare_gmail_web_draft_handoff" => {
+                let args: GmailWebDraftHandoffInput = serde_json::from_str(&call.arguments_json)
+                    .map_err(|error| decode(&error.to_string()))?;
+                args.validate()
+                    .map_err(|error| decode(&error.to_string()))?;
+                BrowserAction::FillForm {
+                    page: args.page,
+                    fields: vec![
+                        BrowserFormField {
+                            element: args.to_field,
+                            value: args.draft.recipients[0].address.clone(),
+                        },
+                        BrowserFormField {
+                            element: args.subject_field,
+                            value: args.draft.subject,
+                        },
+                        BrowserFormField {
+                            element: args.body_field,
+                            value: args.draft.body_plain_text,
+                        },
+                    ],
+                    mutation_class: BrowserMutationClass::WriteExternalDraft,
+                }
+            }
+            "browser_activate_element" => {
+                let args: ActivateArgs = serde_json::from_str(&call.arguments_json)
+                    .map_err(|error| decode(&error.to_string()))?;
+                BrowserAction::ActivateElement {
+                    page: args.page,
+                    element: args.element,
+                    activation_class: BrowserActivationClass::InputFallback,
+                }
+            }
+            _ => {
+                return Err(error(
+                    AgentErrorKind::UnsupportedCapability,
+                    "browser Provider is not registered",
+                    false,
+                    true,
+                ));
+            }
+        };
+        let request = BrowserActionRequest {
+            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+            call_id: server_call_id.into(),
+            action,
+        };
+        request.validate().map_err(|validation_error| {
+            error(
+                AgentErrorKind::InvalidInput,
+                format!("invalid browser Provider input: {validation_error}"),
+                false,
+                true,
+            )
+        })?;
+        Ok(request)
+    }
+
+    async fn authorize_and_execute_browser(
+        &self,
+        call: &ToolCall,
+    ) -> Result<ExecOutcome, AgentError> {
+        let surface = self.selected_browser_surface.clone().ok_or_else(|| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                "no fresh browser surface is available for this turn",
+                false,
+                true,
+            )
+        })?;
+        let capability = self
+            .provider_registry
+            .capability_for_tool(&call.name)
+            .ok_or_else(|| {
+                error(
+                    AgentErrorKind::UnsupportedCapability,
+                    "browser Provider is not registered",
+                    false,
+                    true,
+                )
+            })?;
+        self.verify_current_readiness(capability).await?;
+        let provider = self
+            .provider_registry
+            .provider_for_capability(&capability.wire.capability_id)
+            .expect("registered browser capability has a Provider");
+        let slack_input = if call.name == "prepare_slack_web_message_handoff" {
+            let input: SlackWebDraftHandoffInput = serde_json::from_str(&call.arguments_json)
+                .map_err(|decode_error| {
+                    error(
+                        AgentErrorKind::InvalidInput,
+                        format!("invalid Slack Web handoff input: {decode_error}"),
+                        false,
+                        true,
+                    )
+                })?;
+            input.validate().map_err(|validation_error| {
+                error(
+                    AgentErrorKind::InvalidInput,
+                    format!("invalid Slack Web handoff input: {validation_error}"),
+                    false,
+                    true,
+                )
+            })?;
+            Some(input)
+        } else {
+            None
+        };
+        let gmail_input = if call.name == "prepare_gmail_web_draft_handoff" {
+            let input: GmailWebDraftHandoffInput = serde_json::from_str(&call.arguments_json)
+                .map_err(|decode_error| {
+                    error(
+                        AgentErrorKind::InvalidInput,
+                        format!("invalid Gmail Web handoff input: {decode_error}"),
+                        false,
+                        true,
+                    )
+                })?;
+            input.validate().map_err(|validation_error| {
+                error(
+                    AgentErrorKind::InvalidInput,
+                    format!("invalid Gmail Web handoff input: {validation_error}"),
+                    false,
+                    true,
+                )
+            })?;
+            Some(input)
+        } else {
+            None
+        };
+        let session = self.authoritative_session().await?;
+        let (canonical_input_json, canonical_input_digest_sha256) =
+            Self::canonical_call_input(call)?;
+        let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
+            error(
+                AgentErrorKind::Internal,
+                "system clock predates the Unix epoch",
+                false,
+                false,
+            )
+        })?;
+        let server_call_id = format!(
+            "capability-call-{:x}",
+            Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
+        );
+        let request = Self::browser_action_from_call(call, &server_call_id)?;
+        if ComputerActionKind::Browser(request.clone()).required_capability()
+            != capability.required_capability
+        {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "browser action does not match the registered capability",
+                false,
+                true,
+            ));
+        }
+        let resource_scope = fresh_object_resource_scope(std::slice::from_ref(&surface));
+        let operation_scope = canonical_compiled_scope(
+            &capability.wire.authorization_hint.resources,
+            capability.wire.effect,
+        )
+        .ok_or_else(|| {
+            error(
+                AgentErrorKind::Internal,
+                "browser Provider has no compiled authorization scope",
+                false,
+                false,
+            )
+        })?
+        .operations;
+        let risk_tier = Self::capability_risk(capability, call)?;
+        let export_destinations = if gmail_input.is_some() {
+            vec![DestinationIdentity::EmailAccount {
+                account_id:
+                    desk_diagnose_core::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID
+                        .into(),
+            }]
+        } else if slack_input.is_some() {
+            vec![DestinationIdentity::ChatAccount {
+                account_id:
+                    desk_diagnose_core::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID
+                        .into(),
+            }]
+        } else {
+            Vec::new()
+        };
+        let call_authority = CapabilityGrantCall {
+            actor_id: &self.actor_id,
+            run_id: &self.run_id,
+            surface: ProductSurface::OssPersonalOwner,
+            target_device_id: &self.target_device_id,
+            target_session_id: None,
+            provider_id: &provider.wire.provider_id,
+            capability_id: &capability.wire.capability_id,
+            tool_name: &call.name,
+            tool_schema_version: capability.wire.input_schema_version,
+            effect: capability.wire.effect,
+            risk_tier,
+            resource_scope: &resource_scope,
+            operation_scope: &operation_scope,
+            export_destinations: &export_destinations,
+            envelope_ids: &[],
+            content_digests_sha256: &[],
+            canonical_input_digest_sha256: &canonical_input_digest_sha256,
+            byte_count: canonical_input_json.len() as u64,
+            item_count: 1,
+            policy_revision: self.policy_revision,
+            readiness_revision: self.readiness_revision,
+            now_unix_ms,
+        };
+        let store = SignalCapabilityGrantStore::new(self.db.clone());
+        let grant_id = if let Some(existing) = store
+            .prepared_grant_id(&server_call_id)
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to load prepared browser authority: {db_error}"),
+                    false,
+                    false,
+                )
+            })? {
+            existing
+        } else if browser_policy_auto_authorized(risk_tier) {
+            let grant_id = format!(
+                "policy-auto-browser-{:x}",
+                Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
+            );
+            let grant = CapabilityGrant {
+                schema_version: CAPABILITY_GRANT_SCHEMA_VERSION,
+                grant_id: grant_id.clone(),
+                actor_id: self.actor_id.clone(),
+                run_id: self.run_id.clone(),
+                surface: ProductSurface::OssPersonalOwner,
+                target_device_id: self.target_device_id.clone(),
+                target_session_id: None,
+                provider_id: provider.wire.provider_id.clone(),
+                capability_id: capability.wire.capability_id.clone(),
+                tool_name: call.name.clone(),
+                tool_schema_version: capability.wire.input_schema_version,
+                effect: capability.wire.effect,
+                risk_tier,
+                resource_scope: resource_scope.clone(),
+                operation_scope: operation_scope.clone(),
+                export_destinations: export_destinations.clone(),
+                allowed_envelope_ids: Vec::new(),
+                allowed_content_digests_sha256: Vec::new(),
+                use_policy: CapabilityGrantUsePolicy::OneShotExact,
+                canonical_input_digest_sha256: Some(canonical_input_digest_sha256.clone()),
+                issued_by: CapabilityGrantIssuer::PolicyAuto,
+                issued_at_unix_ms: now_unix_ms,
+                expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
+                remaining_uses: 1,
+                limits: CapabilityGrantLimits {
+                    max_bytes_per_call: capability.wire.limits.max_output_bytes,
+                    max_items_per_call: capability.wire.limits.max_objects,
+                    max_calls: 1,
+                },
+                policy_revision: self.policy_revision,
+                readiness_revision: self.readiness_revision,
+                revoked_at_unix_ms: None,
+                revoked_reason: None,
+            };
+            store.issue(&grant).await.map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to issue browser policy-auto grant: {db_error}"),
+                    false,
+                    false,
+                )
+            })?;
+            grant_id
+        } else {
+            store
+                .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to load browser grants: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?
+                .into_iter()
+                .find(|grant| match_capability_grant(grant, &call_authority).is_ok())
+                .map(|grant| grant.grant_id)
+                .ok_or_else(|| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        "browser action requires an active approved capability grant",
+                        false,
+                        true,
+                    )
+                })?
+        };
+        if slack_input.is_some() || gmail_input.is_some() {
+            let site = if gmail_input.is_some() {
+                "gmail"
+            } else {
+                "slack"
+            };
+            let destination = export_destinations
+                .first()
+                .expect("Web communication handoff has one fixed destination")
+                .clone();
+            let source_envelope_id = format!("{site}-source-{server_call_id}");
+            let source = DataEnvelope {
+                schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+                envelope_id: source_envelope_id.clone(),
+                content: ContentRef::ImmutableBlob {
+                    blob_id: format!("{site}-input-{server_call_id}"),
+                    sha256: canonical_input_digest_sha256.clone(),
+                    size_bytes: canonical_input_json.len() as u64,
+                    media_type: "application/json".into(),
+                },
+                provenance: DataProvenance {
+                    source_provider_id: provider.wire.provider_id.clone(),
+                    source_tool_name: call.name.clone(),
+                    source_object_id: Some(server_call_id.clone()),
+                    source_envelope_ids: Vec::new(),
+                },
+                digest_sha256: canonical_input_digest_sha256.clone(),
+                sensitivity: Sensitivity::Sensitive,
+                allowed_destinations: Vec::new(),
+                retention: RetentionBoundary {
+                    expires_at_unix_ms: Some(now_unix_ms.saturating_add(60_000)),
+                    delete_with_run: true,
+                },
+            };
+            let (exported, _) = authorize_export(
+                &source,
+                &format!("{site}-export-{server_call_id}"),
+                &ExportDataAuthorization {
+                    authorization_id: grant_id.clone(),
+                    source_envelope_ids: vec![source_envelope_id],
+                    destination: destination.clone(),
+                    max_sensitivity: Sensitivity::Sensitive,
+                    expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
+                    max_bytes: capability.wire.limits.max_input_bytes as u64,
+                },
+                now_unix_ms,
+            )
+            .map_err(|authorization_error| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    format!("Web communication sink authorization failed: {authorization_error}"),
+                    false,
+                    true,
+                )
+            })?;
+            DefaultSinkAuthorizer
+                .authorize(
+                    &destination,
+                    &[SinkInput {
+                        envelope: &exported,
+                        bytes: canonical_input_json.as_bytes(),
+                    }],
+                    now_unix_ms,
+                    capability.wire.limits.max_input_bytes as usize,
+                )
+                .map_err(|authorization_error| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        format!(
+                            "Web communication sink projection was rejected: {authorization_error}"
+                        ),
+                        false,
+                        true,
+                    )
+                })?;
+        }
+        let prepare = || PrepareCapabilityCall {
+            grant_id: &grant_id,
+            call_id: &server_call_id,
+            turn_id: &self.turn_id,
+            input_revision: session.input_revision,
+            input_watermark: session.latest_input_seq,
+            generation: 1,
+            canonical_input_json: &canonical_input_json,
+            call: call_authority.clone(),
+        };
+        let prepared = store.prepare(prepare()).await.map_err(|db_error| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                format!("browser call authorization failed: {db_error}"),
+                false,
+                true,
+            )
+        })?;
+        let dispatch_id =
+            match store
+                .record_dispatch_intent(prepare())
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        format!("browser dispatch authorization failed: {db_error}"),
+                        false,
+                        true,
+                    )
+                })? {
+                DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
+                DispatchIntentResult::SupersededBeforeIntent { .. } => {
+                    return Err(error(
+                        AgentErrorKind::PermissionDenied,
+                        "browser call was superseded by newer user input",
+                        false,
+                        true,
+                    ));
+                }
+                DispatchIntentResult::RevokedBeforeIntent { .. } => {
+                    return Err(error(
+                        AgentErrorKind::PermissionDenied,
+                        "browser grant was revoked before dispatch",
+                        false,
+                        true,
+                    ));
+                }
+            };
+        let claimed = match store
+            .claim_dispatch(&dispatch_id, now_unix_ms)
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to claim browser dispatch: {db_error}"),
+                    false,
+                    false,
+                )
+            })? {
+            DispatchClaimResult::Claimed(payload) => payload,
+            DispatchClaimResult::OutcomeUnknown { .. } => {
+                return Ok(ExecOutcome::Unknown(
+                    desk_diagnose_core::session::ActionIdentity::new(
+                        prepared.work_id,
+                        server_call_id,
+                        dispatch_id,
+                        desk_diagnose_core::session::WorkKind::ComputerAction,
+                    ),
+                ));
+            }
+        };
+        let readiness = crate::computer_use_readiness::global_computer_use_readiness_cache()
+            .get_fresh(&self.target_connection_id, chrono::Utc::now())
+            .ok_or_else(|| {
+                error(
+                    AgentErrorKind::TargetOffline,
+                    "browser readiness expired before dispatch",
+                    false,
+                    true,
+                )
+            })?;
+        let generation = dispatch_id.clone();
+        let plan = SealedComputerActionPlan {
+            schema_version: COMPUTER_USE_SCHEMA_VERSION,
+            work_id: claimed.work_id.to_string(),
+            action_request_id: server_call_id.clone(),
+            execution_generation: generation.clone(),
+            device_id: self.target_device_id.clone(),
+            interactive_session_incarnation: readiness.readiness.interactive_session_incarnation,
+            adapter: ComputerUseAdapterRef {
+                kind: ComputerUseAdapterKind::BrowserDevtoolsMcp,
+                version: desk_diagnose_core::device_assistant::BROWSER_DEVTOOLS_ADAPTER_VERSION
+                    .into(),
+            },
+            approval_id: grant_id.clone(),
+            approved_actor_id: self.actor_id.clone(),
+            draft_hash: canonical_input_digest_sha256.clone(),
+            expires_at: (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
+            timeout_ms: 30_000,
+            actions: vec![ComputerActionStep {
+                target: surface,
+                action: ComputerActionKind::Browser(request),
+                before_summary:
+                    "browser surface is bound to the approved profile and page revision".into(),
+                after_intent: if gmail_input.is_some() {
+                    "fill one Gmail Web To/Subject/Body set and stop without activating Send".into()
+                } else if slack_input.is_some() {
+                    "fill one Slack Web composer and stop without activating Send".into()
+                } else {
+                    "perform one closed semantic browser action".into()
+                },
+                verification: if gmail_input.is_some() {
+                    "read back the exact Gmail To/Subject/Body values and return ManualOnly handoff"
+                        .into()
+                } else if slack_input.is_some() {
+                    "read back the exact Slack composer value and return ManualOnly handoff".into()
+                } else {
+                    "return only a typed page-bound semantic result".into()
+                },
+            }],
+        };
+        plan.validate().map_err(|validation_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to seal browser plan: {validation_error}"),
+                false,
+                false,
+            )
+        })?;
+        let target = {
+            let map = self.connections.read().await;
+            map.get(&self.target_connection_id).cloned()
+        }
+        .ok_or_else(|| {
+            error(
+                AgentErrorKind::TargetOffline,
+                "target host is not connected",
+                false,
+                true,
+            )
+        })?;
+        let audience = target.model.version_info.client_id.clone().ok_or_else(|| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                "target host has no bound client id",
+                false,
+                false,
+            )
+        })?;
+        if audience != self.target_device_id {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "target device binding changed before browser dispatch",
+                false,
+                false,
+            ));
+        }
+        let max_risk = match risk_tier {
+            CapabilityRiskTier::R0 | CapabilityRiskTier::R1 => desk_agent_protocol::RiskLevel::Low,
+            CapabilityRiskTier::R2 => desk_agent_protocol::RiskLevel::Medium,
+            CapabilityRiskTier::R3 => desk_agent_protocol::RiskLevel::High,
+        };
+        let authz = AuthorizationBlock {
+            version: AUTHORIZATION_BLOCK_VERSION,
+            exec_admission_policy: ExecAdmissionPolicy::OwnerInteractive,
+            scope: AgentScope {
+                granted: vec![capability.required_capability],
+                mode: ExecutionMode::ConfirmEachAction,
+                expires_at: None,
+                policy_name: Some("oss-device-assistant-browser".into()),
+            },
+            orchestrator_grants: vec![capability.wire.capability_id.clone()],
+            max_risk,
+            actor: AuthzActor {
+                user_id: self.actor_id.parse().ok(),
+            },
+            device: AuthzDevice { device_id: None },
+            request_id: generation.clone(),
+            session_id: None,
+            expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339()),
+            issuer: "signal".into(),
+            audience,
+            signature: None,
+        };
+        let wrapper = AuthorizedControlPayload {
+            inner: serde_json::to_value(&plan).map_err(|encode_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to encode browser plan: {encode_error}"),
+                    false,
+                    false,
+                )
+            })?,
+            authz,
+        };
+        let mut frame = SignalingModel::new_request(
+            SignalingType::DispatchComputerAction,
+            None,
+            Some(&wrapper),
+        )
+        .map_err(|frame_error| {
+            error(
+                AgentErrorKind::TransportError,
+                format!("failed to build browser frame: {frame_error}"),
+                false,
+                false,
+            )
+        })?;
+        frame.request_id = generation.clone();
+        let text = serde_json::to_string(&frame).map_err(|encode_error| {
+            error(
+                AgentErrorKind::TransportError,
+                format!("failed to encode browser frame: {encode_error}"),
+                false,
+                false,
+            )
+        })?;
+        let (completion_tx, completion_rx) = oneshot::channel();
+        if !global_computer_action_pending().register(
+            generation.clone(),
+            self.target_connection_id.clone(),
+            completion_tx,
+        ) {
+            return Err(error(
+                AgentErrorKind::Internal,
+                "duplicate browser execution generation",
+                false,
+                false,
+            ));
+        }
+        if target.session.write().await.text(text).await.is_err() {
+            global_computer_action_pending().cancel(&generation);
+            store
+                .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to persist browser unknown outcome: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?;
+            return Ok(ExecOutcome::Unknown(
+                desk_diagnose_core::session::ActionIdentity::new(
+                    prepared.work_id,
+                    server_call_id,
+                    generation,
+                    desk_diagnose_core::session::WorkKind::ComputerAction,
+                ),
+            ));
+        }
+        let completion = match tokio::time::timeout(self.timeout, completion_rx).await {
+            Ok(Ok(Ok(completion))) => completion,
+            _ => {
+                global_computer_action_pending().cancel(&generation);
+                store
+                    .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
+                    .await
+                    .map_err(|db_error| {
+                        error(
+                            AgentErrorKind::Internal,
+                            format!("failed to persist browser unknown outcome: {db_error}"),
+                            false,
+                            false,
+                        )
+                    })?;
+                return Ok(ExecOutcome::Unknown(
+                    desk_diagnose_core::session::ActionIdentity::new(
+                        prepared.work_id,
+                        server_call_id,
+                        generation,
+                        desk_diagnose_core::session::WorkKind::ComputerAction,
+                    ),
+                ));
+            }
+        };
+        if completion.result == ComputerActionResultClass::OutcomeUnknown {
+            store
+                .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to persist browser unknown outcome: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?;
+            return Ok(ExecOutcome::Unknown(
+                desk_diagnose_core::session::ActionIdentity::new(
+                    prepared.work_id,
+                    server_call_id,
+                    generation,
+                    desk_diagnose_core::session::WorkKind::ComputerAction,
+                ),
+            ));
+        }
+        let browser_result = match completion.output.as_ref() {
+            Some(ComputerActionOutput::Browser(result))
+                if completion.result == ComputerActionResultClass::Verified
+                    && result.call_id == server_call_id =>
+            {
+                result.validate().map_err(|validation_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("invalid browser result from edge: {validation_error}"),
+                        false,
+                        false,
+                    )
+                })?;
+                Some(result.clone())
+            }
+            _ => None,
+        };
+        let output_json = if let Some(gmail) = gmail_input.as_ref() {
+            browser_result
+                .as_ref()
+                .and_then(|result| {
+                    (result.outcome
+                        == desk_agent_protocol::browser_control::BrowserActionOutcome::FormFilled
+                        && result.page.adapter == gmail.page.adapter
+                        && result.page.page_id == gmail.page.page_id
+                        && result.page.page_incarnation == gmail.page.page_incarnation
+                        && result.page.origin == gmail.page.origin
+                        && result.page.document_revision > gmail.page.document_revision
+                        && gmail_exact_form_readback(result, gmail))
+                        .then(|| {
+                            let compose_digest = format!(
+                                "{:x}",
+                                Sha256::digest(
+                                    format!(
+                                        "{}:{}:{}:{}:{}",
+                                        result.page.page_incarnation,
+                                        gmail.to_field.element_id,
+                                        gmail.subject_field.element_id,
+                                        gmail.body_field.element_id,
+                                        server_call_id
+                                    )
+                                    .as_bytes(),
+                                )
+                            );
+                            CommunicationDraftHandoff {
+                                schema_version: COMMUNICATION_SCHEMA_VERSION,
+                                handoff_id: format!("gmail-handoff-{compose_digest}"),
+                                run_id: self.run_id.clone(),
+                                surface: CommunicationSurfaceRef {
+                                    channel: CommunicationChannel::Email,
+                                    kind: CommunicationSurfaceKind::ChromeDevtoolsMcp,
+                                    scope: CommunicationSurfaceScope::WebOrigin {
+                                        origin: result.page.origin.clone(),
+                                    },
+                                    device_id: result.page.adapter.device_id.clone(),
+                                    os_session_id: result.page.adapter.os_session_id.clone(),
+                                    adapter_id: desk_diagnose_core::device_assistant::GMAIL_WEB_ADAPTER_ID.into(),
+                                    adapter_version: desk_diagnose_core::device_assistant::GMAIL_WEB_ADAPTER_VERSION.into(),
+                                    profile_id: result.page.adapter.profile_incarnation.clone(),
+                                    account_id: desk_diagnose_core::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
+                                    revision: result.page.adapter.connection_revision,
+                                },
+                                compose_id: format!("gmail-compose-{compose_digest}"),
+                                prepared_payload_sha256: canonical_input_digest_sha256.clone(),
+                                verification: CommunicationPrepareVerification::SemanticExact,
+                                readback_payload_sha256: Some(canonical_input_digest_sha256.clone()),
+                                send_authority: CommunicationSendAuthority::ManualOnly,
+                                handed_off_at_unix_ms: result.completed_at_unix_ms,
+                            }
+                        })
+                })
+                .map(|handoff| {
+                    handoff.validate().map(|_| handoff).map_err(|validation_error| {
+                        error(
+                            AgentErrorKind::Internal,
+                            format!("invalid Gmail handoff result: {validation_error}"),
+                            false,
+                            false,
+                        )
+                    })
+                })
+                .transpose()?
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|encode_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to encode Gmail handoff result: {encode_error}"),
+                        false,
+                        false,
+                    )
+                })?
+        } else if let Some(slack) = slack_input.as_ref() {
+            browser_result
+                .as_ref()
+                .and_then(|result| {
+                    (result.outcome
+                        == desk_agent_protocol::browser_control::BrowserActionOutcome::FormFilled
+                        && result.page.adapter == slack.page.adapter
+                        && result.page.page_id == slack.page.page_id
+                        && result.page.page_incarnation == slack.page.page_incarnation
+                        && result.page.origin == slack.page.origin
+                        && result.page.document_revision > slack.page.document_revision
+                        && slack_exact_form_readback(result, slack))
+                        .then(|| {
+                            let compose_digest = format!(
+                                "{:x}",
+                                Sha256::digest(
+                                    format!(
+                                        "{}:{}:{}",
+                                        result.page.page_incarnation,
+                                        slack.composer.element_id,
+                                        server_call_id
+                                    )
+                                    .as_bytes(),
+                                )
+                            );
+                            CommunicationDraftHandoff {
+                                schema_version: COMMUNICATION_SCHEMA_VERSION,
+                                handoff_id: format!("slack-handoff-{compose_digest}"),
+                                run_id: self.run_id.clone(),
+                                surface: CommunicationSurfaceRef {
+                                    channel: CommunicationChannel::Chat,
+                                    kind: CommunicationSurfaceKind::ChromeDevtoolsMcp,
+                                    scope: CommunicationSurfaceScope::WebOrigin {
+                                        origin: result.page.origin.clone(),
+                                    },
+                                    device_id: result.page.adapter.device_id.clone(),
+                                    os_session_id: result.page.adapter.os_session_id.clone(),
+                                    adapter_id: desk_diagnose_core::device_assistant::SLACK_WEB_ADAPTER_ID.into(),
+                                    adapter_version: desk_diagnose_core::device_assistant::SLACK_WEB_ADAPTER_VERSION.into(),
+                                    profile_id: result.page.adapter.profile_incarnation.clone(),
+                                    account_id: desk_diagnose_core::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
+                                    revision: result.page.adapter.connection_revision,
+                                },
+                                compose_id: format!("slack-compose-{compose_digest}"),
+                                prepared_payload_sha256: canonical_input_digest_sha256.clone(),
+                                verification: CommunicationPrepareVerification::SemanticExact,
+                                readback_payload_sha256: Some(canonical_input_digest_sha256.clone()),
+                                send_authority: CommunicationSendAuthority::ManualOnly,
+                                handed_off_at_unix_ms: result.completed_at_unix_ms,
+                            }
+                        })
+                })
+                .map(|handoff| {
+                    handoff.validate().map(|_| handoff).map_err(|validation_error| {
+                        error(
+                            AgentErrorKind::Internal,
+                            format!("invalid Slack handoff result: {validation_error}"),
+                            false,
+                            false,
+                        )
+                    })
+                })
+                .transpose()?
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|encode_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to encode Slack handoff result: {encode_error}"),
+                        false,
+                        false,
+                    )
+                })?
+        } else {
+            browser_result
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|encode_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to encode browser result: {encode_error}"),
+                        false,
+                        false,
+                    )
+                })?
+        };
+        let succeeded = output_json.is_some();
+        let result_digest_sha256 = format!(
+            "{:x}",
+            Sha256::digest(
+                output_json
+                    .as_deref()
+                    .unwrap_or("browser action failed")
+                    .as_bytes()
+            )
+        );
+        store
+            .record_dispatch_completion(
+                &CapabilityDispatchCompletion {
+                    dispatch_id,
+                    call_id: server_call_id,
+                    generation: 1,
+                    outcome: if succeeded {
+                        CapabilityDispatchOutcome::Succeeded
+                    } else {
+                        CapabilityDispatchOutcome::Failed
+                    },
+                    result_digest_sha256,
+                },
+                now_unix_ms,
+            )
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to persist browser completion: {db_error}"),
+                    false,
+                    false,
+                )
+            })?;
+        if let Some(content) = output_json {
+            Ok(ExecOutcome::Executed {
+                output: ToolRunOutput {
+                    content,
+                    image_data_url: None,
+                },
+                event_id: None,
+            })
+        } else {
+            Err(error(
+                AgentErrorKind::InvalidInput,
+                completion
+                    .message
+                    .unwrap_or_else(|| "browser Provider did not verify the action".into()),
+                false,
+                true,
+            ))
+        }
+    }
+
+    async fn authorize_and_execute_outlook_handoff(
+        &self,
+        call: &ToolCall,
+    ) -> Result<ExecOutcome, AgentError> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            draft: LocalDraftDocument,
+        }
+
+        let surface_ref = self.selected_outlook_surface.clone().ok_or_else(|| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                "no fresh Outlook (new) application surface is available for this turn",
+                false,
+                true,
+            )
+        })?;
+        let capability = self
+            .provider_registry
+            .capability_for_tool(&call.name)
+            .ok_or_else(|| {
+                error(
+                    AgentErrorKind::UnsupportedCapability,
+                    "Outlook handoff Provider is not registered",
+                    false,
+                    true,
+                )
+            })?;
+        self.verify_current_readiness(capability).await?;
+        let initial_readiness =
+            crate::computer_use_readiness::global_computer_use_readiness_cache()
+                .get_fresh(&self.target_connection_id, chrono::Utc::now())
+                .ok_or_else(|| {
+                    error(
+                        AgentErrorKind::TargetOffline,
+                        "Outlook readiness expired before request sealing",
+                        false,
+                        true,
+                    )
+                })?;
+        if initial_readiness.readiness.revision != self.readiness_revision {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "Outlook readiness changed before request sealing",
+                false,
+                true,
+            ));
+        }
+        let interactive_session_incarnation = initial_readiness
+            .readiness
+            .interactive_session_incarnation
+            .clone();
+        let provider = self
+            .provider_registry
+            .provider_for_capability(&capability.wire.capability_id)
+            .expect("registered Outlook capability has a Provider");
+        let args: Args = serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
+            error(
+                AgentErrorKind::InvalidInput,
+                format!("invalid Outlook handoff input: {decode_error}"),
+                false,
+                true,
+            )
+        })?;
+        args.draft.validate().map_err(|validation_error| {
+            error(
+                AgentErrorKind::InvalidInput,
+                format!("invalid Outlook handoff draft: {validation_error}"),
+                false,
+                true,
+            )
+        })?;
+        if !args.draft.attachment_labels.is_empty() {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "Outlook (new) mailto handoff does not accept attachments",
+                false,
+                true,
+            ));
+        }
+        for recipient in &args.draft.recipients {
+            if recipient.role == desk_agent_protocol::communication::RecipientRole::ChatDestination
+                || desk_diagnose_core::communication::canonicalize_email_address(&recipient.address)
+                    .is_err()
+            {
+                return Err(error(
+                    AgentErrorKind::InvalidInput,
+                    "Outlook handoff requires valid email To/Cc/Bcc recipients",
+                    false,
+                    true,
+                ));
+            }
+        }
+
+        let session = self.authoritative_session().await?;
+        let (canonical_input_json, canonical_input_digest_sha256) =
+            Self::canonical_call_input(call)?;
+        let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
+            error(
+                AgentErrorKind::Internal,
+                "system clock predates the Unix epoch",
+                false,
+                false,
+            )
+        })?;
+        let server_call_id = format!(
+            "capability-call-{:x}",
+            Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
+        );
+        let surface = CommunicationSurfaceRef {
+            channel: CommunicationChannel::Email,
+            kind: CommunicationSurfaceKind::OutlookNewDesktop,
+            scope: CommunicationSurfaceScope::DesktopApplication {
+                application_id: desk_diagnose_core::device_assistant::OUTLOOK_NEW_APPLICATION_ID
+                    .into(),
+            },
+            device_id: self.target_device_id.clone(),
+            os_session_id: interactive_session_incarnation.clone(),
+            adapter_id: desk_diagnose_core::device_assistant::OUTLOOK_NEW_MAILTO_ADAPTER_ID.into(),
+            adapter_version:
+                desk_diagnose_core::device_assistant::OUTLOOK_NEW_MAILTO_ADAPTER_VERSION.into(),
+            profile_id: interactive_session_incarnation.clone(),
+            account_id: desk_diagnose_core::device_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID
+                .into(),
+            revision: self.readiness_revision.max(1),
+        };
+        let request = OutlookNewComposeHandoffRequest {
+            schema_version: COMMUNICATION_SCHEMA_VERSION,
+            call_id: server_call_id.clone(),
+            run_id: self.run_id.clone(),
+            surface,
+            draft: args.draft,
+        };
+        request.validate().map_err(|validation_error| {
+            error(
+                AgentErrorKind::InvalidInput,
+                format!("invalid sealed Outlook handoff request: {validation_error}"),
+                false,
+                true,
+            )
+        })?;
+        let expected_surface = request.surface.clone();
+        let expected_handoff_digest_sha256 = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&request).map_err(|encode_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to seal Outlook handoff payload: {encode_error}"),
+                    false,
+                    false,
+                )
+            })?)
+        );
+        if ComputerActionKind::Communication(request.clone()).required_capability()
+            != capability.required_capability
+        {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "Outlook handoff action does not match the registered capability",
+                false,
+                true,
+            ));
+        }
+
+        let resource_scope = fresh_object_resource_scope(std::slice::from_ref(&surface_ref));
+        let operation_scope = canonical_compiled_scope(
+            &capability.wire.authorization_hint.resources,
+            capability.wire.effect,
+        )
+        .ok_or_else(|| {
+            error(
+                AgentErrorKind::Internal,
+                "Outlook handoff Provider has no compiled authorization scope",
+                false,
+                false,
+            )
+        })?
+        .operations;
+        let destination = DestinationIdentity::EmailAccount {
+            account_id: desk_diagnose_core::device_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID
+                .into(),
+        };
+        let export_destinations = vec![destination.clone()];
+        let risk_tier = Self::capability_risk(capability, call)?;
+        let call_authority = CapabilityGrantCall {
+            actor_id: &self.actor_id,
+            run_id: &self.run_id,
+            surface: ProductSurface::OssPersonalOwner,
+            target_device_id: &self.target_device_id,
+            target_session_id: None,
+            provider_id: &provider.wire.provider_id,
+            capability_id: &capability.wire.capability_id,
+            tool_name: &call.name,
+            tool_schema_version: capability.wire.input_schema_version,
+            effect: capability.wire.effect,
+            risk_tier,
+            resource_scope: &resource_scope,
+            operation_scope: &operation_scope,
+            export_destinations: &export_destinations,
+            envelope_ids: &[],
+            content_digests_sha256: &[],
+            canonical_input_digest_sha256: &canonical_input_digest_sha256,
+            byte_count: canonical_input_json.len() as u64,
+            item_count: 1,
+            policy_revision: self.policy_revision,
+            readiness_revision: self.readiness_revision,
+            now_unix_ms,
+        };
+        let store = SignalCapabilityGrantStore::new(self.db.clone());
+        let grant_id = if let Some(existing) = store
+            .prepared_grant_id(&server_call_id)
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to load prepared Outlook authority: {db_error}"),
+                    false,
+                    false,
+                )
+            })? {
+            existing
+        } else {
+            store
+                .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to load Outlook grants: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?
+                .into_iter()
+                .find(|grant| match_capability_grant(grant, &call_authority).is_ok())
+                .map(|grant| grant.grant_id)
+                .ok_or_else(|| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        "Outlook draft handoff requires an active exact WriteExternalDraft grant",
+                        false,
+                        true,
+                    )
+                })?
+        };
+
+        // The exact canonical tool bytes cross into an external, potentially
+        // cloud-synchronised draft sink. Expand their destination only under
+        // the matched grant, then run the unified sink check before dispatch.
+        let source_envelope_id = format!("outlook-source-{server_call_id}");
+        let source = DataEnvelope {
+            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+            envelope_id: source_envelope_id.clone(),
+            content: ContentRef::ImmutableBlob {
+                blob_id: format!("outlook-input-{server_call_id}"),
+                sha256: canonical_input_digest_sha256.clone(),
+                size_bytes: canonical_input_json.len() as u64,
+                media_type: "application/json".into(),
+            },
+            provenance: DataProvenance {
+                source_provider_id: provider.wire.provider_id.clone(),
+                source_tool_name: call.name.clone(),
+                source_object_id: Some(server_call_id.clone()),
+                source_envelope_ids: Vec::new(),
+            },
+            digest_sha256: canonical_input_digest_sha256.clone(),
+            sensitivity: Sensitivity::Sensitive,
+            allowed_destinations: Vec::new(),
+            retention: RetentionBoundary {
+                expires_at_unix_ms: Some(now_unix_ms.saturating_add(60_000)),
+                delete_with_run: true,
+            },
+        };
+        let (exported, _) = authorize_export(
+            &source,
+            &format!("outlook-export-{server_call_id}"),
+            &ExportDataAuthorization {
+                authorization_id: grant_id.clone(),
+                source_envelope_ids: vec![source_envelope_id],
+                destination: destination.clone(),
+                max_sensitivity: Sensitivity::Sensitive,
+                expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
+                max_bytes: capability.wire.limits.max_input_bytes as u64,
+            },
+            now_unix_ms,
+        )
+        .map_err(|authorization_error| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                format!("Outlook sink authorization failed: {authorization_error}"),
+                false,
+                true,
+            )
+        })?;
+        DefaultSinkAuthorizer
+            .authorize(
+                &destination,
+                &[SinkInput {
+                    envelope: &exported,
+                    bytes: canonical_input_json.as_bytes(),
+                }],
+                now_unix_ms,
+                capability.wire.limits.max_input_bytes as usize,
+            )
+            .map_err(|authorization_error| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    format!("Outlook sink projection was rejected: {authorization_error}"),
+                    false,
+                    true,
+                )
+            })?;
+
+        // Re-resolve all mutable target/session bindings before creating the
+        // durable dispatch intent. After intent, any transport uncertainty is
+        // OutcomeUnknown and the one-shot grant is never restored.
+        let dispatch_readiness =
+            crate::computer_use_readiness::global_computer_use_readiness_cache()
+                .get_fresh(&self.target_connection_id, chrono::Utc::now())
+                .ok_or_else(|| {
+                    error(
+                        AgentErrorKind::TargetOffline,
+                        "Outlook readiness expired before dispatch intent",
+                        false,
+                        true,
+                    )
+                })?;
+        if dispatch_readiness.readiness.revision != self.readiness_revision
+            || dispatch_readiness.readiness.interactive_session_incarnation
+                != interactive_session_incarnation
+        {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "Outlook readiness or interactive session changed before dispatch intent",
+                false,
+                true,
+            ));
+        }
+        let target = {
+            let map = self.connections.read().await;
+            map.get(&self.target_connection_id).cloned()
+        }
+        .ok_or_else(|| {
+            error(
+                AgentErrorKind::TargetOffline,
+                "target host is not connected",
+                false,
+                true,
+            )
+        })?;
+        let audience = target.model.version_info.client_id.clone().ok_or_else(|| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                "target host has no bound client id",
+                false,
+                false,
+            )
+        })?;
+        if audience != self.target_device_id {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "target device binding changed before Outlook dispatch intent",
+                false,
+                false,
+            ));
+        }
+
+        let prepare = || PrepareCapabilityCall {
+            grant_id: &grant_id,
+            call_id: &server_call_id,
+            turn_id: &self.turn_id,
+            input_revision: session.input_revision,
+            input_watermark: session.latest_input_seq,
+            generation: 1,
+            canonical_input_json: &canonical_input_json,
+            call: call_authority.clone(),
+        };
+        let prepared = store.prepare(prepare()).await.map_err(|db_error| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                format!("Outlook handoff authorization failed: {db_error}"),
+                false,
+                true,
+            )
+        })?;
+        let dispatch_id =
+            match store
+                .record_dispatch_intent(prepare())
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        format!("Outlook dispatch authorization failed: {db_error}"),
+                        false,
+                        true,
+                    )
+                })? {
+                DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
+                DispatchIntentResult::SupersededBeforeIntent { .. } => {
+                    return Err(error(
+                        AgentErrorKind::PermissionDenied,
+                        "Outlook handoff was superseded by newer user input",
+                        false,
+                        true,
+                    ));
+                }
+                DispatchIntentResult::RevokedBeforeIntent { .. } => {
+                    return Err(error(
+                        AgentErrorKind::PermissionDenied,
+                        "Outlook grant was revoked before dispatch",
+                        false,
+                        true,
+                    ));
+                }
+            };
+        let claimed = match store
+            .claim_dispatch(&dispatch_id, now_unix_ms)
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to claim Outlook dispatch: {db_error}"),
+                    false,
+                    false,
+                )
+            })? {
+            DispatchClaimResult::Claimed(payload) => payload,
+            DispatchClaimResult::OutcomeUnknown { .. } => {
+                return Ok(ExecOutcome::Unknown(
+                    desk_diagnose_core::session::ActionIdentity::new(
+                        prepared.work_id,
+                        server_call_id,
+                        dispatch_id,
+                        desk_diagnose_core::session::WorkKind::ComputerAction,
+                    ),
+                ));
+            }
+        };
+        let generation = dispatch_id.clone();
+        let plan = SealedComputerActionPlan {
+            schema_version: COMPUTER_USE_SCHEMA_VERSION,
+            work_id: claimed.work_id.to_string(),
+            action_request_id: server_call_id.clone(),
+            execution_generation: generation.clone(),
+            device_id: self.target_device_id.clone(),
+            interactive_session_incarnation,
+            adapter: ComputerUseAdapterRef {
+                kind: ComputerUseAdapterKind::OutlookNewMailto,
+                version:
+                    desk_diagnose_core::device_assistant::OUTLOOK_NEW_MAILTO_ADAPTER_VERSION
+                        .into(),
+            },
+            approval_id: grant_id,
+            approved_actor_id: self.actor_id.clone(),
+            draft_hash: canonical_input_digest_sha256,
+            expires_at: (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
+            timeout_ms: 30_000,
+            actions: vec![ComputerActionStep {
+                target: surface_ref,
+                action: ComputerActionKind::Communication(request),
+                before_summary: "the reviewed Outlook (new) mailto handler is ready in the current interactive session".into(),
+                after_intent: "open one bounded compose surface and stop before send".into(),
+                verification: "return only AssistiveUnverified ManualOnly HandedOffToUser".into(),
+            }],
+        };
+        plan.validate().map_err(|validation_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to seal Outlook handoff plan: {validation_error}"),
+                false,
+                false,
+            )
+        })?;
+        let authz = AuthorizationBlock {
+            version: AUTHORIZATION_BLOCK_VERSION,
+            exec_admission_policy: ExecAdmissionPolicy::OwnerInteractive,
+            scope: AgentScope {
+                granted: vec![capability.required_capability],
+                mode: ExecutionMode::ConfirmEachAction,
+                expires_at: None,
+                policy_name: Some("oss-device-assistant-outlook-handoff".into()),
+            },
+            orchestrator_grants: vec![capability.wire.capability_id.clone()],
+            max_risk: desk_agent_protocol::RiskLevel::Medium,
+            actor: AuthzActor {
+                user_id: self.actor_id.parse().ok(),
+            },
+            device: AuthzDevice { device_id: None },
+            request_id: generation.clone(),
+            session_id: None,
+            expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339()),
+            issuer: "signal".into(),
+            audience,
+            signature: None,
+        };
+        let wrapper = AuthorizedControlPayload {
+            inner: serde_json::to_value(&plan).map_err(|encode_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to encode Outlook handoff plan: {encode_error}"),
+                    false,
+                    false,
+                )
+            })?,
+            authz,
+        };
+        let mut frame = SignalingModel::new_request(
+            SignalingType::DispatchComputerAction,
+            None,
+            Some(&wrapper),
+        )
+        .map_err(|frame_error| {
+            error(
+                AgentErrorKind::TransportError,
+                format!("failed to build Outlook handoff frame: {frame_error}"),
+                false,
+                false,
+            )
+        })?;
+        frame.request_id = generation.clone();
+        let text = serde_json::to_string(&frame).map_err(|encode_error| {
+            error(
+                AgentErrorKind::TransportError,
+                format!("failed to encode Outlook handoff frame: {encode_error}"),
+                false,
+                false,
+            )
+        })?;
+        let (completion_tx, completion_rx) = oneshot::channel();
+        if !global_computer_action_pending().register(
+            generation.clone(),
+            self.target_connection_id.clone(),
+            completion_tx,
+        ) {
+            return Err(error(
+                AgentErrorKind::Internal,
+                "duplicate Outlook execution generation",
+                false,
+                false,
+            ));
+        }
+        if target.session.write().await.text(text).await.is_err() {
+            global_computer_action_pending().cancel(&generation);
+            store
+                .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to persist Outlook unknown outcome: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?;
+            return Ok(ExecOutcome::Unknown(
+                desk_diagnose_core::session::ActionIdentity::new(
+                    prepared.work_id,
+                    server_call_id,
+                    generation,
+                    desk_diagnose_core::session::WorkKind::ComputerAction,
+                ),
+            ));
+        }
+        let completion = match tokio::time::timeout(self.timeout, completion_rx).await {
+            Ok(Ok(Ok(completion))) => completion,
+            _ => {
+                global_computer_action_pending().cancel(&generation);
+                store
+                    .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
+                    .await
+                    .map_err(|db_error| {
+                        error(
+                            AgentErrorKind::Internal,
+                            format!("failed to persist Outlook unknown outcome: {db_error}"),
+                            false,
+                            false,
+                        )
+                    })?;
+                return Ok(ExecOutcome::Unknown(
+                    desk_diagnose_core::session::ActionIdentity::new(
+                        prepared.work_id,
+                        server_call_id,
+                        generation,
+                        desk_diagnose_core::session::WorkKind::ComputerAction,
+                    ),
+                ));
+            }
+        };
+        if completion.result == ComputerActionResultClass::OutcomeUnknown {
+            store
+                .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to persist Outlook unknown outcome: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?;
+            return Ok(ExecOutcome::Unknown(
+                desk_diagnose_core::session::ActionIdentity::new(
+                    prepared.work_id,
+                    server_call_id,
+                    generation,
+                    desk_diagnose_core::session::WorkKind::ComputerAction,
+                ),
+            ));
+        }
+        let handoff = match completion.output.as_ref() {
+            Some(ComputerActionOutput::CommunicationHandoff(handoff))
+                if completion.result == ComputerActionResultClass::ChangedButUnverified =>
+            {
+                handoff.validate().map_err(|validation_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("invalid Outlook handoff result from edge: {validation_error}"),
+                        false,
+                        false,
+                    )
+                })?;
+                if handoff.run_id == self.run_id
+                    && handoff.surface == expected_surface
+                    && handoff.prepared_payload_sha256 == expected_handoff_digest_sha256
+                    && handoff.verification == CommunicationPrepareVerification::AssistiveUnverified
+                    && handoff.readback_payload_sha256.is_none()
+                    && handoff.send_authority == CommunicationSendAuthority::ManualOnly
+                {
+                    Some(handoff.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let output_json = handoff
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|encode_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to encode Outlook handoff result: {encode_error}"),
+                    false,
+                    false,
+                )
+            })?;
+        let succeeded = output_json.is_some();
+        let result_digest_sha256 = format!(
+            "{:x}",
+            Sha256::digest(
+                output_json
+                    .as_deref()
+                    .unwrap_or("Outlook handoff failed")
+                    .as_bytes(),
+            )
+        );
+        store
+            .record_dispatch_completion(
+                &CapabilityDispatchCompletion {
+                    dispatch_id,
+                    call_id: server_call_id,
+                    generation: 1,
+                    outcome: if succeeded {
+                        CapabilityDispatchOutcome::Succeeded
+                    } else {
+                        CapabilityDispatchOutcome::Failed
+                    },
+                    result_digest_sha256,
+                },
+                now_unix_ms,
+            )
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to persist Outlook completion: {db_error}"),
+                    false,
+                    false,
+                )
+            })?;
+        if let Some(content) = output_json {
+            Ok(ExecOutcome::Executed {
+                output: ToolRunOutput {
+                    content,
+                    image_data_url: None,
+                },
+                event_id: None,
+            })
+        } else {
+            Err(error(
+                AgentErrorKind::InvalidInput,
+                completion
+                    .message
+                    .unwrap_or_else(|| "Outlook handoff was not completed".into()),
+                false,
+                true,
+            ))
+        }
+    }
+
     async fn invoke(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
         if call.name == WEB_FETCH_TOOL_NAME {
             let validated = validate_fetch_call(call, &self.current_user_message)?;
@@ -1769,7 +4015,7 @@ impl SignalDeviceAssistantTools {
             if files.is_empty() {
                 return Err(error(
                     AgentErrorKind::PermissionDenied,
-                    "select at least one spreadsheet file before inspecting it",
+                    "select at least one spreadsheet file or directory before inspecting it",
                     false,
                     true,
                 ));
@@ -1789,7 +4035,7 @@ impl SignalDeviceAssistantTools {
             if self.selected_spreadsheet_roots.is_empty() {
                 return Err(error(
                     AgentErrorKind::PermissionDenied,
-                    "select at least one spreadsheet file before previewing a merge",
+                    "select at least one spreadsheet file or directory before previewing a merge",
                     false,
                     true,
                 ));
@@ -1839,6 +4085,12 @@ impl SignalDeviceAssistantTools {
                 | desk_agent_protocol::Capability::SpreadsheetMergePreview
                 | desk_agent_protocol::Capability::TerminalOutputRead
                 | desk_agent_protocol::Capability::ScreenCaptureCurrent
+                | desk_agent_protocol::Capability::SystemInfo
+                | desk_agent_protocol::Capability::ProcessList
+                | desk_agent_protocol::Capability::NetworkPorts
+                | desk_agent_protocol::Capability::ServiceStatus
+                | desk_agent_protocol::Capability::LogRecent
+                | desk_agent_protocol::Capability::ContainerList
         ) {
             return Err(error(
                 AgentErrorKind::UnsupportedCapability,
@@ -1981,26 +4233,141 @@ impl SignalDeviceAssistantTools {
 #[async_trait(?Send)]
 impl ToolSeam for SignalDeviceAssistantTools {
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
+        if matches!(
+            call.name.as_str(),
+            "browser_take_snapshot" | "browser_wait_for"
+        ) {
+            return match self.authorize_and_execute_browser(call).await? {
+                ExecOutcome::Executed { output, .. } => Ok(output),
+                ExecOutcome::Unknown(_) => Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "browser observation outcome is unknown and cannot be retried automatically",
+                    false,
+                    true,
+                )),
+                ExecOutcome::Rejected { reason } => Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    reason.unwrap_or_else(|| "browser observation was rejected".into()),
+                    false,
+                    true,
+                )),
+                _ => Err(error(
+                    AgentErrorKind::Internal,
+                    "browser observation returned an invalid execution state",
+                    false,
+                    false,
+                )),
+            };
+        }
         self.authorize_and_invoke(call).await
     }
 
     async fn confirm_and_exec(
         &self,
         call: &ToolCall,
-        _ctx: &ExecContext,
+        ctx: &ExecContext,
     ) -> Result<ExecOutcome, AgentError> {
+        if call.name == "execute_confirmed_command" {
+            return self.authorize_and_execute_command(call, ctx).await;
+        }
+        if matches!(
+            call.name.as_str(),
+            "browser_open_page"
+                | "browser_navigate_page"
+                | "browser_take_snapshot"
+                | "browser_wait_for"
+                | "browser_fill_form"
+                | "browser_activate_element"
+                | "prepare_gmail_web_draft_handoff"
+                | "prepare_slack_web_message_handoff"
+        ) {
+            return self.authorize_and_execute_browser(call).await;
+        }
+        if call.name == "prepare_outlook_new_draft_handoff" {
+            return self.authorize_and_execute_outlook_handoff(call).await;
+        }
         if !matches!(
             call.name.as_str(),
             "create_text_artifact_in_selected_directory"
                 | "create_workbook_from_merge_preview"
                 | "create_formula_workbook_from_merge_preview"
                 | "create_word_report_from_merge_preview"
+                | "create_local_communication_draft"
         ) {
             return Ok(ExecOutcome::Rejected {
                 reason: Some("this Device Assistant mutation is not enabled".into()),
             });
         }
         self.authorize_and_execute_artifact(call).await
+    }
+
+    async fn ack_delivery(&self, event_id: &str) -> Result<(), AgentError> {
+        <crate::agent_exec::SignalAgentTools as ToolSeam>::ack_delivery(&self.exec_tools, event_id)
+            .await
+    }
+
+    async fn wait_for_task(
+        &self,
+        action_request_id: &str,
+        execution_id: &str,
+    ) -> Result<WaitOutcome, AgentError> {
+        let outcome = <crate::agent_exec::SignalAgentTools as ToolSeam>::wait_for_task(
+            &self.exec_tools,
+            action_request_id,
+            execution_id,
+        )
+        .await?;
+        let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
+            error(
+                AgentErrorKind::Internal,
+                "system clock predates the Unix epoch",
+                false,
+                false,
+            )
+        })?;
+        let store = SignalCapabilityGrantStore::new(self.db.clone());
+        match &outcome {
+            WaitOutcome::Completed { output, .. } => {
+                let (_, result_digest_sha256) = tool_output_fingerprint(output)?;
+                store
+                    .record_dispatch_completion(
+                        &CapabilityDispatchCompletion {
+                            dispatch_id: execution_id.to_string(),
+                            call_id: action_request_id.to_string(),
+                            generation: 1,
+                            outcome: CapabilityDispatchOutcome::Succeeded,
+                            result_digest_sha256,
+                        },
+                        now_unix_ms,
+                    )
+                    .await
+                    .map_err(|db_error| {
+                        error(
+                            AgentErrorKind::Internal,
+                            format!("failed to persist background command completion: {db_error}"),
+                            false,
+                            false,
+                        )
+                    })?;
+            }
+            WaitOutcome::Unknown => {
+                store
+                    .mark_dispatch_outcome_unknown(execution_id, action_request_id, 1, now_unix_ms)
+                    .await
+                    .map_err(|db_error| {
+                        error(
+                            AgentErrorKind::Internal,
+                            format!(
+                                "failed to persist background command unknown outcome: {db_error}"
+                            ),
+                            false,
+                            false,
+                        )
+                    })?;
+            }
+            WaitOutcome::StillRunning => {}
+        }
+        Ok(outcome)
     }
 
     fn read_data_envelope(
@@ -2056,16 +4423,18 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 source_envelope_ids: Vec::new(),
             },
             digest_sha256,
-            sensitivity: if capability.wire.capability_id
-                == desk_diagnose_core::device_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID
-            {
-                Sensitivity::Public
-            } else if capability.wire.capability_id
-                == desk_diagnose_core::device_assistant::DESKTOP_SESSION_CAPABILITY_ID
-            {
-                Sensitivity::UserContent
-            } else {
-                Sensitivity::Sensitive
+            sensitivity: match capability.wire.capability_id.as_str() {
+                desk_diagnose_core::device_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID => {
+                    Sensitivity::Public
+                }
+                desk_diagnose_core::device_assistant::DESKTOP_SESSION_CAPABILITY_ID
+                | desk_diagnose_core::device_assistant::SYSTEM_INFO_CAPABILITY_ID
+                | desk_diagnose_core::device_assistant::SYSTEM_NETWORK_CAPABILITY_ID
+                | desk_diagnose_core::device_assistant::SYSTEM_SERVICE_CAPABILITY_ID
+                | desk_diagnose_core::device_assistant::SYSTEM_CONTAINER_CAPABILITY_ID => {
+                    Sensitivity::UserContent
+                }
+                _ => Sensitivity::Sensitive,
             },
             // Read permission does not imply ExportData. The pre-model
             // authorizer must add one exact destination under an explicit grant.
@@ -2104,14 +4473,33 @@ impl ToolSeam for SignalDeviceAssistantTools {
             .provider_for_capability(&capability.wire.capability_id)
             .expect("registered capability has a provider");
         let (size_bytes, digest_sha256) = tool_output_fingerprint(output)?;
+        let browser_result = call.name.starts_with("browser_");
+        let observed_at_unix_ms =
+            u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
+                error(
+                    AgentErrorKind::Internal,
+                    "system clock predates the Unix epoch",
+                    false,
+                    false,
+                )
+            })?;
+        let expires_at_unix_ms = observed_at_unix_ms.saturating_add(5 * 60 * 1000);
         let envelope = DataEnvelope {
             schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
             envelope_id: format!("mutation-result-{}", uuid::Uuid::new_v4()),
-            content: ContentRef::ImmutableBlob {
-                blob_id: format!("mutation-content-{}", uuid::Uuid::new_v4()),
-                sha256: digest_sha256.clone(),
-                size_bytes,
-                media_type: "text/plain;charset=utf-8".into(),
+            content: if browser_result {
+                ContentRef::EphemeralObservation {
+                    observation_id: format!("browser-result-{}", uuid::Uuid::new_v4()),
+                    size_bytes,
+                    expires_at_unix_ms,
+                }
+            } else {
+                ContentRef::ImmutableBlob {
+                    blob_id: format!("mutation-content-{}", uuid::Uuid::new_v4()),
+                    sha256: digest_sha256.clone(),
+                    size_bytes,
+                    media_type: "text/plain;charset=utf-8".into(),
+                }
             },
             provenance: DataProvenance {
                 source_provider_id: provider.wire.provider_id.clone(),
@@ -2125,7 +4513,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
             // egress projector must authorize the exact resolved destination.
             allowed_destinations: Vec::new(),
             retention: RetentionBoundary {
-                expires_at_unix_ms: None,
+                expires_at_unix_ms: browser_result.then_some(expires_at_unix_ms),
                 delete_with_run: true,
             },
         };
@@ -2166,8 +4554,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_risk_keeps_only_bounded_session_metadata_at_r0() {
+    fn provider_risk_classifies_bounded_diagnostics_and_sensitive_reads() {
         let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        let call = |name: &str, arguments_json: &str| ToolCall {
+            id: format!("call-{name}"),
+            name: name.into(),
+            arguments_json: arguments_json.into(),
+        };
         let session = registry
             .capability(desk_diagnose_core::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
             .unwrap();
@@ -2177,18 +4570,383 @@ mod tests {
         let file = registry
             .capability(desk_diagnose_core::device_assistant::FILE_METADATA_CAPABILITY_ID)
             .unwrap();
+        let system = registry
+            .capability(desk_diagnose_core::device_assistant::SYSTEM_INFO_CAPABILITY_ID)
+            .unwrap();
+        let process = registry
+            .capability(desk_diagnose_core::device_assistant::SYSTEM_PROCESS_CAPABILITY_ID)
+            .unwrap();
+        let logs = registry
+            .capability(desk_diagnose_core::device_assistant::SYSTEM_LOG_CAPABILITY_ID)
+            .unwrap();
+        let browser_snapshot = registry
+            .capability(desk_diagnose_core::device_assistant::BROWSER_SNAPSHOT_CAPABILITY_ID)
+            .unwrap();
+        let browser_open = registry
+            .capability(desk_diagnose_core::device_assistant::BROWSER_OPEN_CAPABILITY_ID)
+            .unwrap();
+        let browser_fill = registry
+            .capability(desk_diagnose_core::device_assistant::BROWSER_FILL_CAPABILITY_ID)
+            .unwrap();
         assert_eq!(
-            SignalDeviceAssistantTools::capability_risk(session),
+            SignalDeviceAssistantTools::capability_risk(
+                session,
+                &call("inspect_desktop_session", "{}")
+            )
+            .unwrap(),
             CapabilityRiskTier::R0
         );
         assert_eq!(
-            SignalDeviceAssistantTools::capability_risk(office),
+            SignalDeviceAssistantTools::capability_risk(
+                office,
+                &call("inspect_office_selection", "{}")
+            )
+            .unwrap(),
             CapabilityRiskTier::R1
         );
         assert_eq!(
-            SignalDeviceAssistantTools::capability_risk(file),
+            SignalDeviceAssistantTools::capability_risk(
+                file,
+                &call("inspect_selected_file_metadata", "{}")
+            )
+            .unwrap(),
             CapabilityRiskTier::R1
         );
+        assert_eq!(
+            SignalDeviceAssistantTools::capability_risk(system, &call("read_system_info", "{}"))
+                .unwrap(),
+            CapabilityRiskTier::R0
+        );
+        assert_eq!(
+            SignalDeviceAssistantTools::capability_risk(process, &call("read_process_list", "{}"))
+                .unwrap(),
+            CapabilityRiskTier::R0
+        );
+        assert_eq!(
+            SignalDeviceAssistantTools::capability_risk(
+                process,
+                &call("read_process_list", r#"{"include_command_line":true}"#)
+            )
+            .unwrap(),
+            CapabilityRiskTier::R1
+        );
+        assert_eq!(
+            SignalDeviceAssistantTools::capability_risk(logs, &call("read_recent_logs", "{}"))
+                .unwrap(),
+            CapabilityRiskTier::R1
+        );
+        assert_eq!(
+            SignalDeviceAssistantTools::capability_risk(
+                browser_snapshot,
+                &call("browser_take_snapshot", "{}")
+            )
+            .unwrap(),
+            CapabilityRiskTier::R1
+        );
+        assert_eq!(
+            SignalDeviceAssistantTools::capability_risk(
+                browser_open,
+                &call("browser_open_page", "{}")
+            )
+            .unwrap(),
+            CapabilityRiskTier::R2
+        );
+        assert_eq!(
+            SignalDeviceAssistantTools::capability_risk(
+                browser_fill,
+                &call("browser_fill_form", "{}")
+            )
+            .unwrap(),
+            CapabilityRiskTier::R3
+        );
+    }
+
+    #[test]
+    fn generic_browser_fill_is_server_pinned_to_input_fallback() {
+        use desk_agent_protocol::browser_control::{
+            BrowserAdapterRef, BrowserElementRole, BrowserEngineKind, BrowserOrigin,
+            BrowserOriginKind,
+        };
+        let page = BrowserPageRef {
+            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+            adapter: BrowserAdapterRef {
+                engine: BrowserEngineKind::ChromeDevtoolsMcp,
+                device_id: "device-1".into(),
+                os_session_id: "session-1".into(),
+                browser_major_version: 151,
+                browser_version: "151.0.7922.174".into(),
+                adapter_id: "chrome-devtools-mcp".into(),
+                adapter_version: "1.7.0".into(),
+                profile_incarnation: "profile-1".into(),
+                connection_revision: 7,
+            },
+            page_id: "page-1".into(),
+            page_incarnation: "page-incarnation-1".into(),
+            origin: BrowserOrigin {
+                kind: BrowserOriginKind::Https,
+                host_ascii: "mail.google.com".into(),
+                port: 443,
+            },
+            document_revision: 2,
+            url_sha256: "a".repeat(64),
+            observed_at_unix_ms: 42,
+        };
+        let element = BrowserElementRef {
+            page_id: page.page_id.clone(),
+            page_incarnation: page.page_incarnation.clone(),
+            document_revision: page.document_revision,
+            element_id: "subject".into(),
+            role: BrowserElementRole::Textbox,
+            accessible_name: "Subject".into(),
+            value: None,
+            element_revision: 1,
+        };
+        let call = ToolCall {
+            id: "model-call".into(),
+            name: "browser_fill_form".into(),
+            arguments_json: serde_json::json!({
+                "page": page,
+                "fields": [{"element": element, "value": "bounded value"}]
+            })
+            .to_string(),
+        };
+        let request =
+            SignalDeviceAssistantTools::browser_action_from_call(&call, "server-call").unwrap();
+        assert_eq!(request.call_id, "server-call");
+        assert!(matches!(
+            request.action,
+            BrowserAction::FillForm {
+                mutation_class: BrowserMutationClass::InputFallback,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn slack_web_handoff_is_server_pinned_to_external_draft_without_send() {
+        use desk_agent_protocol::browser_control::{
+            BrowserAdapterRef, BrowserElementRole, BrowserEngineKind, BrowserOrigin,
+            BrowserOriginKind,
+        };
+        let page = BrowserPageRef {
+            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+            adapter: BrowserAdapterRef {
+                engine: BrowserEngineKind::ChromeDevtoolsMcp,
+                device_id: "device-1".into(),
+                os_session_id: "session-1".into(),
+                browser_major_version: 151,
+                browser_version: "151.0.0.0".into(),
+                adapter_id: "chrome-devtools-mcp".into(),
+                adapter_version: "1.7.0".into(),
+                profile_incarnation: "profile-1".into(),
+                connection_revision: 7,
+            },
+            page_id: "page-1".into(),
+            page_incarnation: "page-incarnation-1".into(),
+            origin: BrowserOrigin {
+                kind: BrowserOriginKind::Https,
+                host_ascii: "app.slack.com".into(),
+                port: 443,
+            },
+            document_revision: 2,
+            url_sha256: "a".repeat(64),
+            observed_at_unix_ms: 42,
+        };
+        let composer = BrowserElementRef {
+            page_id: page.page_id.clone(),
+            page_incarnation: page.page_incarnation.clone(),
+            document_revision: page.document_revision,
+            element_id: "composer-1".into(),
+            role: BrowserElementRole::Textbox,
+            accessible_name: "Message #test".into(),
+            value: None,
+            element_revision: 1,
+        };
+        let call = ToolCall {
+            id: "model-call".into(),
+            name: "prepare_slack_web_message_handoff".into(),
+            arguments_json: serde_json::json!({
+                "schema_version": desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION,
+                "page": page,
+                "composer": composer,
+                "body_plain_text": "Stage 5 draft verification"
+            })
+            .to_string(),
+        };
+        let request =
+            SignalDeviceAssistantTools::browser_action_from_call(&call, "server-call").unwrap();
+        assert!(matches!(
+            request.action,
+            BrowserAction::FillForm {
+                fields,
+                mutation_class: BrowserMutationClass::WriteExternalDraft,
+                ..
+            } if fields.len() == 1 && fields[0].value == "Stage 5 draft verification"
+        ));
+    }
+
+    #[test]
+    fn gmail_web_handoff_is_server_pinned_to_three_external_draft_fields_without_send() {
+        use desk_agent_protocol::browser_control::{
+            BrowserAdapterRef, BrowserElementRole, BrowserEngineKind, BrowserOrigin,
+            BrowserOriginKind,
+        };
+        let page = BrowserPageRef {
+            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+            adapter: BrowserAdapterRef {
+                engine: BrowserEngineKind::ChromeDevtoolsMcp,
+                device_id: "device-1".into(),
+                os_session_id: "session-1".into(),
+                browser_major_version: 151,
+                browser_version: "151.0.0.0".into(),
+                adapter_id: "chrome-devtools-mcp".into(),
+                adapter_version: "1.7.0".into(),
+                profile_incarnation: "profile-1".into(),
+                connection_revision: 7,
+            },
+            page_id: "page-1".into(),
+            page_incarnation: "page-incarnation-1".into(),
+            origin: BrowserOrigin {
+                kind: BrowserOriginKind::Https,
+                host_ascii: "mail.google.com".into(),
+                port: 443,
+            },
+            document_revision: 2,
+            url_sha256: "a".repeat(64),
+            observed_at_unix_ms: 42,
+        };
+        let field = |element_id: &str, accessible_name: &str| BrowserElementRef {
+            page_id: page.page_id.clone(),
+            page_incarnation: page.page_incarnation.clone(),
+            document_revision: page.document_revision,
+            element_id: element_id.into(),
+            role: BrowserElementRole::Textbox,
+            accessible_name: accessible_name.into(),
+            value: None,
+            element_revision: 1,
+        };
+        let mut to_field = field("to-1", "To recipients");
+        to_field.role = BrowserElementRole::Combobox;
+        let call = ToolCall {
+            id: "model-call".into(),
+            name: "prepare_gmail_web_draft_handoff".into(),
+            arguments_json: serde_json::json!({
+                "schema_version": desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION,
+                "page": page,
+                "to_field": to_field,
+                "subject_field": field("subject-1", "Subject"),
+                "body_field": field("body-1", "Message Body"),
+                "draft": {
+                    "schema_version": desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION,
+                    "recipients": [{"role": "to", "address": "alice@example.com", "display_name": null}],
+                    "subject": "Stage 5 Gmail verification",
+                    "body_plain_text": "Semantic draft only; do not send.",
+                    "attachment_labels": []
+                }
+            })
+            .to_string(),
+        };
+        let request =
+            SignalDeviceAssistantTools::browser_action_from_call(&call, "server-call").unwrap();
+        assert!(matches!(
+            request.action,
+            BrowserAction::FillForm {
+                fields,
+                mutation_class: BrowserMutationClass::WriteExternalDraft,
+                ..
+            } if fields.len() == 3
+                && fields[0].element.role == BrowserElementRole::Combobox
+                && fields[0].value == "alice@example.com"
+                && fields[1].value == "Stage 5 Gmail verification"
+                && fields[2].value == "Semantic draft only; do not send."
+        ));
+
+        let input: GmailWebDraftHandoffInput = serde_json::from_str(&call.arguments_json).unwrap();
+        let mut result_page = input.page.clone();
+        result_page.document_revision += 1;
+        let readback =
+            |field: &BrowserElementRef,
+             value: &str,
+             source_element_id: &str,
+             container_element_id: Option<&str>,
+             kind: BrowserFormReadbackKind| BrowserFormFieldReadback {
+                request_element_id: field.element_id.clone(),
+                request_role: field.role,
+                request_accessible_name: field.accessible_name.clone(),
+                source_element_id: source_element_id.into(),
+                container_element_id: container_element_id.map(str::to_string),
+                kind,
+                value: value.into(),
+            };
+        let result = BrowserActionResult {
+            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+            call_id: "server-call".into(),
+            outcome: desk_agent_protocol::browser_control::BrowserActionOutcome::FormFilled,
+            page: result_page.clone(),
+            snapshot: Some(
+                desk_agent_protocol::browser_control::BrowserSemanticSnapshot {
+                    schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+                    page: result_page,
+                    elements: Vec::new(),
+                    truncated: false,
+                    captured_at_unix_ms: 43,
+                },
+            ),
+            form_readback: vec![
+                readback(
+                    &input.to_field,
+                    input.draft.recipients[0].address.as_str(),
+                    "recipient-chip",
+                    Some("compose-form"),
+                    BrowserFormReadbackKind::CommittedText,
+                ),
+                readback(
+                    &input.subject_field,
+                    input.draft.subject.as_str(),
+                    input.subject_field.element_id.as_str(),
+                    Some("compose-form"),
+                    BrowserFormReadbackKind::ControlValue,
+                ),
+                readback(
+                    &input.body_field,
+                    input.draft.body_plain_text.as_str(),
+                    input.body_field.element_id.as_str(),
+                    None,
+                    BrowserFormReadbackKind::ControlValue,
+                ),
+            ],
+            completed_at_unix_ms: 44,
+        };
+        result.validate().unwrap();
+        assert!(gmail_exact_form_readback(&result, &input));
+
+        let mut wrong_container = result;
+        wrong_container.form_readback[0].container_element_id = Some("other-form".into());
+        assert!(!gmail_exact_form_readback(&wrong_container, &input));
+    }
+
+    #[test]
+    fn browser_grant_and_runtime_share_compiled_operation_scope() {
+        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        let capability = registry
+            .capability_for_tool("browser_open_page")
+            .expect("browser open capability is compiled");
+        let scope = canonical_compiled_scope(
+            &capability.wire.authorization_hint.resources,
+            capability.wire.effect,
+        )
+        .expect("browser capability has a compiled grant scope");
+
+        assert_eq!(scope.operations, vec!["use_selected_object"]);
+        assert_ne!(scope.operations, vec!["browser_open_page"]);
+    }
+
+    #[test]
+    fn browser_policy_auto_authorizes_only_low_risk_observation() {
+        assert!(browser_policy_auto_authorized(CapabilityRiskTier::R0));
+        assert!(browser_policy_auto_authorized(CapabilityRiskTier::R1));
+        assert!(!browser_policy_auto_authorized(CapabilityRiskTier::R2));
+        assert!(!browser_policy_auto_authorized(CapabilityRiskTier::R3));
     }
 
     #[test]

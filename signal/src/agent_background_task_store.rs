@@ -821,7 +821,7 @@ impl SignalBackgroundTaskStore {
                 EventAppend::Busy
             ));
         }
-        match crate::diagnose_orchestrator::resume_completion_turn(
+        match crate::agent_runtime::resume_completion_turn(
             self.db.clone(),
             session,
             WorkKind::CapabilityProvider,

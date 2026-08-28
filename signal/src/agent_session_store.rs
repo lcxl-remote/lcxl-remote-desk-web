@@ -9,6 +9,7 @@ use desk_agent_protocol::{
         CapabilityGrantLimits, CapabilityGrantUsePolicy,
     },
     capability_provider::{AuthorizationResourceKind, CapabilityDataCategory, ProductSurface},
+    computer_use::{ObjectKind, ObjectRef},
     data_lineage::DestinationIdentity,
 };
 use desk_diagnose_core::capability_availability::CapabilityAvailability;
@@ -41,6 +42,10 @@ pub struct PermissionGrantIssuanceContext<'a> {
     pub inventory: &'a [CapabilityAvailability],
     pub readiness_revision: u64,
     pub now_unix_ms: u64,
+    /// Server-issued, readiness-bound object references that are selected by
+    /// capability rather than by a persisted user attachment. The decision
+    /// payload can only narrow display scopes; it cannot inject these refs.
+    pub implicit_fresh_object_refs: &'a [ObjectRef],
 }
 
 const LEASE_TTL_SECS: i64 = 90;
@@ -624,7 +629,7 @@ impl SignalAgentSessionStore {
         row.map(snapshot_from_row).transpose()
     }
 
-    pub async fn list_diagnose_sessions(
+    pub async fn list_device_assistant_sessions(
         &self,
         actor_id: &str,
         device_id: &str,
@@ -652,10 +657,7 @@ impl SignalAgentSessionStore {
                         return None;
                     }
                 };
-                if !matches!(
-                    session.surface,
-                    AgentSessionSurface::Unknown | AgentSessionSurface::Diagnose
-                ) {
+                if session.surface != AgentSessionSurface::DeviceAssistant {
                     return None;
                 }
                 let first_question = session
@@ -1085,33 +1087,10 @@ fn build_permission_grants(
                 .iter()
                 .filter(|attachment| {
                     matches!(attachment.state, AttachmentState::Active)
-                        && match capability.required_capability {
-                            desk_agent_protocol::Capability::FileArtifactCreateConfirmed
-                            | desk_agent_protocol::Capability::SpreadsheetWorkbookCreateConfirmed
-                            | desk_agent_protocol::Capability::SpreadsheetFormulaWorkbookCreateConfirmed
-                            | desk_agent_protocol::Capability::WordDocumentCreateConfirmed => {
-                                attachment.kind == ContextAttachmentKind::DirectorySelection
-                            }
-                            desk_agent_protocol::Capability::FileMetadataRead => matches!(
-                                attachment.kind,
-                                ContextAttachmentKind::File
-                                    | ContextAttachmentKind::DirectorySelection
-                            ),
-                            desk_agent_protocol::Capability::FileContentRead => {
-                                attachment.kind == ContextAttachmentKind::File
-                            }
-                            desk_agent_protocol::Capability::SpreadsheetFileInspect
-                            | desk_agent_protocol::Capability::SpreadsheetMergePreview => {
-                                attachment.kind == ContextAttachmentKind::File
-                                    && is_supported_spreadsheet_attachment(
-                                        &attachment.display_summary,
-                                    )
-                            }
-                            desk_agent_protocol::Capability::TerminalOutputRead => {
-                                attachment.kind == ContextAttachmentKind::TerminalSessionRef
-                            }
-                            _ => false,
-                        }
+                        && attachment_matches_fresh_object_capability(
+                            capability.required_capability,
+                            attachment,
+                        )
                 })
                 .filter_map(|attachment| {
                     serde_json::from_str::<desk_agent_protocol::computer_use::ObjectRef>(
@@ -1119,6 +1098,18 @@ fn build_permission_grants(
                     )
                     .ok()
                 })
+                .chain(
+                    context
+                        .implicit_fresh_object_refs
+                        .iter()
+                        .filter(|object_ref| {
+                            object_ref_matches_fresh_object_capability(
+                                capability.required_capability,
+                                object_ref,
+                            )
+                        })
+                        .cloned(),
+                )
                 .collect::<Vec<_>>();
             let exact =
                 desk_diagnose_core::capability_grant::fresh_object_resource_scope(&object_refs);
@@ -1242,6 +1233,54 @@ fn is_supported_spreadsheet_attachment(display_summary: &str) -> bool {
     [".xlsx", ".csv", ".tsv"]
         .iter()
         .any(|extension| display_summary.ends_with(extension))
+}
+
+fn attachment_matches_fresh_object_capability(
+    capability: desk_agent_protocol::Capability,
+    attachment: &ContextAttachment,
+) -> bool {
+    match capability {
+        desk_agent_protocol::Capability::FileArtifactCreateConfirmed
+        | desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed
+        | desk_agent_protocol::Capability::SpreadsheetWorkbookCreateConfirmed
+        | desk_agent_protocol::Capability::SpreadsheetFormulaWorkbookCreateConfirmed
+        | desk_agent_protocol::Capability::WordDocumentCreateConfirmed => {
+            attachment.kind == ContextAttachmentKind::DirectorySelection
+        }
+        desk_agent_protocol::Capability::FileMetadataRead => matches!(
+            attachment.kind,
+            ContextAttachmentKind::File | ContextAttachmentKind::DirectorySelection
+        ),
+        desk_agent_protocol::Capability::FileContentRead => {
+            attachment.kind == ContextAttachmentKind::File
+        }
+        desk_agent_protocol::Capability::SpreadsheetFileInspect
+        | desk_agent_protocol::Capability::SpreadsheetMergePreview => {
+            attachment.kind == ContextAttachmentKind::DirectorySelection
+                || (attachment.kind == ContextAttachmentKind::File
+                    && is_supported_spreadsheet_attachment(&attachment.display_summary))
+        }
+        desk_agent_protocol::Capability::TerminalOutputRead => {
+            attachment.kind == ContextAttachmentKind::TerminalSessionRef
+        }
+        _ => false,
+    }
+}
+
+fn object_ref_matches_fresh_object_capability(
+    capability: desk_agent_protocol::Capability,
+    object_ref: &ObjectRef,
+) -> bool {
+    (matches!(
+        capability,
+        desk_agent_protocol::Capability::BrowserPageObserve
+            | desk_agent_protocol::Capability::BrowserPageNavigateConfirmed
+            | desk_agent_protocol::Capability::BrowserInputFallbackConfirmed
+            | desk_agent_protocol::Capability::BrowserExternalDraftWriteConfirmed
+            | desk_agent_protocol::Capability::BrowserExternalSendConfirmed
+    ) && object_ref.object_kind == ObjectKind::BrowserSurface)
+        || (capability == desk_agent_protocol::Capability::CommunicationOutlookNewHandoffConfirmed
+            && object_ref.object_kind == ObjectKind::Application)
 }
 
 #[derive(Debug, Clone)]
@@ -2436,6 +2475,7 @@ mod tests {
                     inventory: &inventory,
                     readiness_revision: 3,
                     now_unix_ms: 1_000,
+                    implicit_fresh_object_refs: &[],
                 },
                 "2026-08-26T00:01:00Z",
             )
@@ -2627,6 +2667,61 @@ mod tests {
             },
             state: AttachmentState::Active,
         }
+    }
+
+    #[test]
+    fn directory_selection_can_back_spreadsheet_and_local_draft_grants() {
+        let mut directory = context_attachment("directory", "attach-directory", "worker-1", 1);
+        directory.kind = ContextAttachmentKind::DirectorySelection;
+        directory.display_summary = "selected spreadsheet input directory".into();
+
+        assert!(attachment_matches_fresh_object_capability(
+            desk_agent_protocol::Capability::SpreadsheetFileInspect,
+            &directory,
+        ));
+        assert!(attachment_matches_fresh_object_capability(
+            desk_agent_protocol::Capability::SpreadsheetMergePreview,
+            &directory,
+        ));
+        assert!(!attachment_matches_fresh_object_capability(
+            desk_agent_protocol::Capability::FileContentRead,
+            &directory,
+        ));
+        assert!(attachment_matches_fresh_object_capability(
+            desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed,
+            &directory,
+        ));
+
+        let mut unsupported_file = directory;
+        unsupported_file.kind = ContextAttachmentKind::File;
+        unsupported_file.display_summary = "notes.txt".into();
+        assert!(!attachment_matches_fresh_object_capability(
+            desk_agent_protocol::Capability::SpreadsheetFileInspect,
+            &unsupported_file,
+        ));
+    }
+
+    #[test]
+    fn readiness_browser_surface_can_back_only_browser_grants() {
+        let surface = ObjectRef {
+            token: "browser-surface".into(),
+            snapshot_id: "browser-connection-1".into(),
+            object_kind: ObjectKind::BrowserSurface,
+            expires_at: "2026-08-27T12:00:00Z".into(),
+        };
+
+        assert!(object_ref_matches_fresh_object_capability(
+            desk_agent_protocol::Capability::BrowserPageNavigateConfirmed,
+            &surface,
+        ));
+        assert!(object_ref_matches_fresh_object_capability(
+            desk_agent_protocol::Capability::BrowserInputFallbackConfirmed,
+            &surface,
+        ));
+        assert!(!object_ref_matches_fresh_object_capability(
+            desk_agent_protocol::Capability::FileMetadataRead,
+            &surface,
+        ));
     }
 
     #[tokio::test]
@@ -3106,8 +3201,10 @@ mod tests {
 
         let base = store().await;
         let db = base.db.clone();
-        let diagnose = SignalAgentSessionStore::new(db.clone())
-            .with_client_metadata(Some("client-conv-1".into()), AgentSessionSurface::Diagnose);
+        let diagnose = SignalAgentSessionStore::new(db.clone()).with_client_metadata(
+            Some("client-conv-1".into()),
+            AgentSessionSurface::DeviceAssistant,
+        );
         let mut session = diagnose.claim_turn(claim("turn-1")).await.unwrap();
         session
             .conversation
@@ -3126,7 +3223,7 @@ mod tests {
         terminal.save(&mut terminal_session).await.unwrap();
 
         let initial = diagnose
-            .list_diagnose_sessions("1", "device-1", 30)
+            .list_device_assistant_sessions("1", "device-1", 30)
             .await
             .unwrap();
         assert_eq!(initial.len(), 1);
@@ -3141,7 +3238,7 @@ mod tests {
             .await
             .unwrap();
         let summaries = diagnose
-            .list_diagnose_sessions("1", "device-1", 30)
+            .list_device_assistant_sessions("1", "device-1", 30)
             .await
             .unwrap();
         assert_eq!(summaries.len(), 1);

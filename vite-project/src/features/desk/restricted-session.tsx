@@ -7,7 +7,7 @@
 // This drives entry visibility only — a UX convenience, not a security boundary. The
 // host independently enforces `meet(ceiling, global)` plus live approval and
 // fail-closes, so a control end that ignores this gains nothing. Two visibility rules:
-//   - Owner-plane entries (settings, AI diagnose, virtual display) are hidden in a
+//   - Owner-plane entries (settings, Device Assistant, virtual display) are hidden in a
 //     restricted session: they are not grantable capabilities at all.
 //   - A capability entry is shown unless the ceiling explicitly denies it (`false`);
 //     an unset dimension (`null`/prompt) stays visible-and-tryable, because the host
@@ -42,7 +42,7 @@ export interface RestrictedSession {
     grantSessionId: string | null;
     // The code's ceiling, or null when unrestricted / unconfigured.
     ceiling: SecuritySettings | null;
-    // Whether owner-plane entries (settings / diagnose / virtual display) should show.
+    // Whether owner-plane entries (settings / Device Assistant / virtual display) should show.
     ownerPlaneVisible: boolean;
     // Whether a capability entry should show (hidden only when the ceiling denies it).
     capabilityVisible: (key: CapabilityKey) => boolean;

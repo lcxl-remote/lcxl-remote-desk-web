@@ -385,7 +385,8 @@ export const capabilityEffectEnum = {
     write_external_draft: "write_external_draft",
     send_external: "send_external",
     capture_screen: "capture_screen",
-    input_fallback: "input_fallback"
+    input_fallback: "input_fallback",
+    execute_command: "execute_command"
 } as const;
 
 export type CapabilityEffectEnumKey = (typeof capabilityEffectEnum)[keyof typeof capabilityEffectEnum];
@@ -1417,132 +1418,7 @@ export type DestinationIdentity = ({
     workspace_id: string;
 });
 
-export type DeviceCodeBatchDeleteParams = {
-    /**
-     * @type array
-    */
-    ids: number[];
-};
-
-/**
- * @description Security settings for controlling remote access permissions.\n\nEach capability field uses `Option<bool>`:\n  - `None`  — not configured (GUI: prompt user; headless: deny)\n  - `Some(true)`  — always allow\n  - `Some(false)` — always deny\n\n`approval_timeout` is different: a missing value on the wire is normalized to\n[`DEFAULT_APPROVAL_TIMEOUT_SECS`] (see [`SecuritySettings::normalize`]), and\nthe explicit \"never\" choice is persisted as the present value `Some(0)` — not\n`None` — so it survives a save/reload round-trip (TOML omits `None`, and the\n`serde(default)` reload would otherwise resurrect the 30s default).
-*/
-export type SecuritySettings = {
-    /**
-     * @description Allow clipboard synchronization
-     * @type boolean,null
-    */
-    allow_clipboard_sync?: boolean | null;
-    /**
-     * @description Allow file browsing (list files and inspect metadata via signaling)
-     * @type boolean,null
-    */
-    allow_file_browse?: boolean | null;
-    /**
-     * @description Allow deleting files via signaling
-     * @type boolean,null
-    */
-    allow_file_delete?: boolean | null;
-    /**
-     * @description Allow file transfer (upload/download via DataChannel)
-     * @type boolean,null
-    */
-    allow_file_transfer?: boolean | null;
-    /**
-     * @description Allow enabling private screen mode
-     * @type boolean,null
-    */
-    allow_private_screen?: boolean | null;
-    /**
-     * @description Allow remote desktop control (mouse/keyboard input)
-     * @type boolean,null
-    */
-    allow_remote_control?: boolean | null;
-    /**
-     * @description Allow capture and transmission of the host\'s system audio
-     * @type boolean,null
-    */
-    allow_system_audio_capture?: boolean | null;
-    /**
-     * @description Allow remote terminal access
-     * @type boolean,null
-    */
-    allow_terminal?: boolean | null;
-    /**
-     * @description Allow whiteboard overlay
-     * @type boolean,null
-    */
-    allow_whiteboard?: boolean | null;
-    /**
-     * @description Timeout for security approval requests in seconds.\n`Some(0)` means \"never time out\"; `None` on the wire is normalized to the\n30s default rather than treated as \"never\".
-     * @minLength 0
-     * @default 30
-     * @type integer,null, int32
-    */
-    approval_timeout?: number | null;
-};
-
-export type DeviceCodeCreateParams = {
-    capabilities?: (null | SecuritySettings);
-    /**
-     * @type string
-    */
-    client_id: string;
-    /**
-     * @type string,null
-    */
-    device_code?: string | null;
-};
-
-export type DeviceCodeItem = {
-    capabilities?: (null | SecuritySettings);
-    /**
-     * @type string
-    */
-    clientId: string;
-    /**
-     * @type string
-    */
-    createdAt: string;
-    /**
-     * @type string
-    */
-    deviceCode: string;
-    /**
-     * @type integer, int32
-    */
-    id: number;
-    /**
-     * @type boolean
-    */
-    isOnline: boolean;
-    /**
-     * @type string
-    */
-    updatedAt: string;
-};
-
-export type DeviceCodeListResult = {
-    /**
-     * @type array
-    */
-    items: DeviceCodeItem[];
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    total: number;
-};
-
-export type DeviceCodeUpdateParams = {
-    capabilities?: (null | SecuritySettings);
-    /**
-     * @type string
-    */
-    device_code: string;
-};
-
-export type DiagnoseSessionSummaryDto = {
+export type DeviceAssistantSessionSummaryDto = {
     /**
      * @type boolean
     */
@@ -1574,11 +1450,11 @@ export type DiagnoseSessionSummaryDto = {
     updatedAt: string;
 };
 
-export type DiagnoseSessionListDto = {
+export type DeviceAssistantSessionListDto = {
     /**
      * @type array
     */
-    sessions: DiagnoseSessionSummaryDto[];
+    sessions: DeviceAssistantSessionSummaryDto[];
 };
 
 export type SnapshotToolCallDto = {
@@ -1772,7 +1648,7 @@ export type TaskStatusProjectionDto = {
     updatedAt: string;
 };
 
-export type DiagnoseSessionSnapshotDto = {
+export type DeviceAssistantSessionSnapshotDto = {
     /**
      * @description Whether the persisted turn is still running or awaiting approval.
      * @type boolean
@@ -1829,7 +1705,7 @@ export type DiagnoseSessionSnapshotDto = {
     */
     permissionRequests: PermissionRequestDto[];
     /**
-     * @description Diagnose request currently represented by the persisted turn.
+     * @description Device Assistant request currently represented by the persisted turn.
      * @type string,null
     */
     requestId?: string | null;
@@ -1838,6 +1714,131 @@ export type DiagnoseSessionSnapshotDto = {
     */
     seq: number;
     taskStatusProjection?: (null | TaskStatusProjectionDto);
+};
+
+export type DeviceCodeBatchDeleteParams = {
+    /**
+     * @type array
+    */
+    ids: number[];
+};
+
+/**
+ * @description Security settings for controlling remote access permissions.\n\nEach capability field uses `Option<bool>`:\n  - `None`  — not configured (GUI: prompt user; headless: deny)\n  - `Some(true)`  — always allow\n  - `Some(false)` — always deny\n\n`approval_timeout` is different: a missing value on the wire is normalized to\n[`DEFAULT_APPROVAL_TIMEOUT_SECS`] (see [`SecuritySettings::normalize`]), and\nthe explicit \"never\" choice is persisted as the present value `Some(0)` — not\n`None` — so it survives a save/reload round-trip (TOML omits `None`, and the\n`serde(default)` reload would otherwise resurrect the 30s default).
+*/
+export type SecuritySettings = {
+    /**
+     * @description Allow clipboard synchronization
+     * @type boolean,null
+    */
+    allow_clipboard_sync?: boolean | null;
+    /**
+     * @description Allow file browsing (list files and inspect metadata via signaling)
+     * @type boolean,null
+    */
+    allow_file_browse?: boolean | null;
+    /**
+     * @description Allow deleting files via signaling
+     * @type boolean,null
+    */
+    allow_file_delete?: boolean | null;
+    /**
+     * @description Allow file transfer (upload/download via DataChannel)
+     * @type boolean,null
+    */
+    allow_file_transfer?: boolean | null;
+    /**
+     * @description Allow enabling private screen mode
+     * @type boolean,null
+    */
+    allow_private_screen?: boolean | null;
+    /**
+     * @description Allow remote desktop control (mouse/keyboard input)
+     * @type boolean,null
+    */
+    allow_remote_control?: boolean | null;
+    /**
+     * @description Allow capture and transmission of the host\'s system audio
+     * @type boolean,null
+    */
+    allow_system_audio_capture?: boolean | null;
+    /**
+     * @description Allow remote terminal access
+     * @type boolean,null
+    */
+    allow_terminal?: boolean | null;
+    /**
+     * @description Allow whiteboard overlay
+     * @type boolean,null
+    */
+    allow_whiteboard?: boolean | null;
+    /**
+     * @description Timeout for security approval requests in seconds.\n`Some(0)` means \"never time out\"; `None` on the wire is normalized to the\n30s default rather than treated as \"never\".
+     * @minLength 0
+     * @default 30
+     * @type integer,null, int32
+    */
+    approval_timeout?: number | null;
+};
+
+export type DeviceCodeCreateParams = {
+    capabilities?: (null | SecuritySettings);
+    /**
+     * @type string
+    */
+    client_id: string;
+    /**
+     * @type string,null
+    */
+    device_code?: string | null;
+};
+
+export type DeviceCodeItem = {
+    capabilities?: (null | SecuritySettings);
+    /**
+     * @type string
+    */
+    clientId: string;
+    /**
+     * @type string
+    */
+    createdAt: string;
+    /**
+     * @type string
+    */
+    deviceCode: string;
+    /**
+     * @type integer, int32
+    */
+    id: number;
+    /**
+     * @type boolean
+    */
+    isOnline: boolean;
+    /**
+     * @type string
+    */
+    updatedAt: string;
+};
+
+export type DeviceCodeListResult = {
+    /**
+     * @type array
+    */
+    items: DeviceCodeItem[];
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    total: number;
+};
+
+export type DeviceCodeUpdateParams = {
+    capabilities?: (null | SecuritySettings);
+    /**
+     * @type string
+    */
+    device_code: string;
 };
 
 /**
@@ -3899,7 +3900,7 @@ export type RestResponseCurrentUserDto = {
     success: boolean;
 };
 
-export type RestResponseDiagnoseSessionListDto = {
+export type RestResponseDeviceAssistantSessionListDto = {
     /**
      * @type integer, int32
     */
@@ -3911,7 +3912,7 @@ export type RestResponseDiagnoseSessionListDto = {
         /**
          * @type array
         */
-        sessions: DiagnoseSessionSummaryDto[];
+        sessions: DeviceAssistantSessionSummaryDto[];
     };
     /**
      * @type string,null
@@ -3923,7 +3924,7 @@ export type RestResponseDiagnoseSessionListDto = {
     success: boolean;
 };
 
-export type RestResponseDiagnoseSessionSnapshotDto = {
+export type RestResponseDeviceAssistantSessionSnapshotDto = {
     /**
      * @type integer, int32
     */
@@ -3988,7 +3989,7 @@ export type RestResponseDiagnoseSessionSnapshotDto = {
         */
         permissionRequests: PermissionRequestDto[];
         /**
-         * @description Diagnose request currently represented by the persisted turn.
+         * @description Device Assistant request currently represented by the persisted turn.
          * @type string,null
         */
         requestId?: string | null;
@@ -7037,7 +7038,7 @@ export type GetModelUsageQuery = {
     Errors: any;
 };
 
-export type GetDiagnoseSessionQueryParams = {
+export type GetDeviceAssistantSessionQueryParams = {
     /**
      * @description Target connection id
      * @type string
@@ -7058,62 +7059,62 @@ export type GetDiagnoseSessionQueryParams = {
 /**
  * @description Conversation snapshot, or a uniform not-found/not-accessible response
 */
-export type GetDiagnoseSession200 = RestResponseDiagnoseSessionSnapshotDto;
+export type GetDeviceAssistantSession200 = RestResponseDeviceAssistantSessionSnapshotDto;
 
-export type GetDiagnoseSessionQueryResponse = GetDiagnoseSession200;
+export type GetDeviceAssistantSessionQueryResponse = GetDeviceAssistantSession200;
 
-export type GetDiagnoseSessionQuery = {
-    Response: GetDiagnoseSession200;
-    QueryParams: GetDiagnoseSessionQueryParams;
+export type GetDeviceAssistantSessionQuery = {
+    Response: GetDeviceAssistantSession200;
+    QueryParams: GetDeviceAssistantSessionQueryParams;
     Errors: any;
 };
 
 /**
  * @description Durable cancellation intent; Provider delivery is asynchronous
 */
-export type CancelDiagnoseBackgroundTask200 = RestResponseBackgroundTaskDto;
+export type CancelDeviceAssistantBackgroundTask200 = RestResponseBackgroundTaskDto;
 
-export type CancelDiagnoseBackgroundTaskMutationRequest = BackgroundCancelBody;
+export type CancelDeviceAssistantBackgroundTaskMutationRequest = BackgroundCancelBody;
 
-export type CancelDiagnoseBackgroundTaskMutationResponse = CancelDiagnoseBackgroundTask200;
+export type CancelDeviceAssistantBackgroundTaskMutationResponse = CancelDeviceAssistantBackgroundTask200;
 
-export type CancelDiagnoseBackgroundTaskMutation = {
-    Response: CancelDiagnoseBackgroundTask200;
-    Request: CancelDiagnoseBackgroundTaskMutationRequest;
+export type CancelDeviceAssistantBackgroundTaskMutation = {
+    Response: CancelDeviceAssistantBackgroundTask200;
+    Request: CancelDeviceAssistantBackgroundTaskMutationRequest;
     Errors: any;
 };
 
 /**
  * @description Revoked grant metadata; no work is dispatched
 */
-export type RevokeDiagnoseCapabilityGrant200 = RestResponseCapabilityGrantDto;
+export type RevokeDeviceAssistantCapabilityGrant200 = RestResponseCapabilityGrantDto;
 
-export type RevokeDiagnoseCapabilityGrantMutationRequest = CapabilityGrantRevokeBody;
+export type RevokeDeviceAssistantCapabilityGrantMutationRequest = CapabilityGrantRevokeBody;
 
-export type RevokeDiagnoseCapabilityGrantMutationResponse = RevokeDiagnoseCapabilityGrant200;
+export type RevokeDeviceAssistantCapabilityGrantMutationResponse = RevokeDeviceAssistantCapabilityGrant200;
 
-export type RevokeDiagnoseCapabilityGrantMutation = {
-    Response: RevokeDiagnoseCapabilityGrant200;
-    Request: RevokeDiagnoseCapabilityGrantMutationRequest;
+export type RevokeDeviceAssistantCapabilityGrantMutation = {
+    Response: RevokeDeviceAssistantCapabilityGrant200;
+    Request: RevokeDeviceAssistantCapabilityGrantMutationRequest;
     Errors: any;
 };
 
 /**
  * @description Durable decision projection; no tool is dispatched
 */
-export type DecideDiagnosePermission200 = RestResponsePermissionDecisionResponse;
+export type DecideDeviceAssistantPermission200 = RestResponsePermissionDecisionResponse;
 
-export type DecideDiagnosePermissionMutationRequest = PermissionDecisionBody;
+export type DecideDeviceAssistantPermissionMutationRequest = PermissionDecisionBody;
 
-export type DecideDiagnosePermissionMutationResponse = DecideDiagnosePermission200;
+export type DecideDeviceAssistantPermissionMutationResponse = DecideDeviceAssistantPermission200;
 
-export type DecideDiagnosePermissionMutation = {
-    Response: DecideDiagnosePermission200;
-    Request: DecideDiagnosePermissionMutationRequest;
+export type DecideDeviceAssistantPermissionMutation = {
+    Response: DecideDeviceAssistantPermission200;
+    Request: DecideDeviceAssistantPermissionMutationRequest;
     Errors: any;
 };
 
-export type ListDiagnoseSessionsQueryParams = {
+export type ListDeviceAssistantSessionsQueryParams = {
     /**
      * @description Target connection id
      * @type string
@@ -7128,15 +7129,15 @@ export type ListDiagnoseSessionsQueryParams = {
 };
 
 /**
- * @description Authorized recent diagnose sessions
+ * @description Authorized recent Device Assistant sessions
 */
-export type ListDiagnoseSessions200 = RestResponseDiagnoseSessionListDto;
+export type ListDeviceAssistantSessions200 = RestResponseDeviceAssistantSessionListDto;
 
-export type ListDiagnoseSessionsQueryResponse = ListDiagnoseSessions200;
+export type ListDeviceAssistantSessionsQueryResponse = ListDeviceAssistantSessions200;
 
-export type ListDiagnoseSessionsQuery = {
-    Response: ListDiagnoseSessions200;
-    QueryParams: ListDiagnoseSessionsQueryParams;
+export type ListDeviceAssistantSessionsQuery = {
+    Response: ListDeviceAssistantSessions200;
+    QueryParams: ListDeviceAssistantSessionsQueryParams;
     Errors: any;
 };
 

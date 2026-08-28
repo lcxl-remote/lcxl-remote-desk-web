@@ -11,7 +11,7 @@ import type { SignalingMessage, SignalingSubscriber } from '../desk/use-desk-sig
 
 // Wire types — mirror `desk_agent_protocol::terminal_copilot`. They ride the
 // `TerminalCopilot{Ask,Event,Cancel}` signaling types as `signaling_data`; like
-// the diagnose payloads they are not part of the REST OpenAPI surface, so they
+// these signaling payloads are not part of the REST OpenAPI surface, so they
 // are declared here.
 
 export type TerminalCopilotMode = 'how_to' | 'explain_error';

@@ -223,9 +223,9 @@ pub async fn open_signaling_handle(
         // the default would reject with `ProtocolError::Overflow` before
         // continuation aggregation, dropping the edge connection. Mirrors the
         // manager signaling endpoint.
-        .max_frame_size(desk_agent_protocol::diagnose::SIGNALING_FRAME_LIMIT)
+        .max_frame_size(desk_agent_protocol::remote_tool::SIGNALING_FRAME_LIMIT)
         .aggregate_continuations()
-        .max_continuation_size(desk_agent_protocol::diagnose::SIGNALING_FRAME_LIMIT);
+        .max_continuation_size(desk_agent_protocol::remote_tool::SIGNALING_FRAME_LIMIT);
 
     let mut version_info = version_info_opt.unwrap_or_else(|| VersionInfo {
         api_version: desk_server_version::SERVER_API_VERSION,
@@ -385,23 +385,25 @@ mod tests {
         );
     }
 
-    /// A chunked diagnose `CollectResponse` rides the signaling socket as a
-    /// single (unfragmented) WS text frame up to `COLLECT_CHUNK_PAYLOAD_LIMIT`.
+    /// A chunked Provider response rides the signaling socket as a single
+    /// (unfragmented) WS text frame up to `REMOTE_TOOL_CHUNK_PAYLOAD_LIMIT`.
     /// The endpoint raises the codec frame ceiling to `SIGNALING_FRAME_LIMIT`;
     /// the actix-ws 64 KiB default rejects such a frame with
     /// `ProtocolError::Overflow` *before* continuation aggregation, which used to
-    /// drop the edge connection and fail the diagnosis. Pin the codec contract:
+    /// drop the edge connection and fail the Provider call. Pin the codec contract:
     /// the default rejects the max chunk frame, the raised ceiling accepts it.
     #[test]
-    fn signaling_codec_ceiling_accepts_max_diagnose_chunk_frame() {
+    fn signaling_codec_ceiling_accepts_max_provider_chunk_frame() {
         use actix_http::ws::{Codec, Frame, Message, ProtocolError};
         use bytes::BytesMut;
-        use desk_agent_protocol::diagnose::{COLLECT_CHUNK_PAYLOAD_LIMIT, SIGNALING_FRAME_LIMIT};
+        use desk_agent_protocol::remote_tool::{
+            REMOTE_TOOL_CHUNK_PAYLOAD_LIMIT, SIGNALING_FRAME_LIMIT,
+        };
         use tokio_util::codec::{Decoder, Encoder};
 
         // Encode a maximally-sized client text frame onto the wire (client frames
         // are masked, matching what the edge sends).
-        let payload = "A".repeat(COLLECT_CHUNK_PAYLOAD_LIMIT);
+        let payload = "A".repeat(REMOTE_TOOL_CHUNK_PAYLOAD_LIMIT);
         let mut client = Codec::new().client_mode();
         let mut wire = BytesMut::new();
         client
@@ -416,7 +418,7 @@ mod tests {
                 default_codec.decode(&mut default_buf),
                 Err(ProtocolError::Overflow)
             ),
-            "default 64 KiB codec must reject a {COLLECT_CHUNK_PAYLOAD_LIMIT}-byte frame"
+            "default 64 KiB codec must reject a {REMOTE_TOOL_CHUNK_PAYLOAD_LIMIT}-byte frame"
         );
 
         // The endpoint's raised ceiling accepts the full frame.
@@ -427,7 +429,7 @@ mod tests {
             .expect("decode under raised ceiling")
         {
             Some(Frame::Text(bytes)) => {
-                assert_eq!(bytes.len(), COLLECT_CHUNK_PAYLOAD_LIMIT)
+                assert_eq!(bytes.len(), REMOTE_TOOL_CHUNK_PAYLOAD_LIMIT)
             }
             other => panic!("expected a complete text frame, got {other:?}"),
         }

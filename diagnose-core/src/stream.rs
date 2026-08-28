@@ -1,22 +1,22 @@
 //! Streaming bridge: maps the agentic loop's [`TurnSink`] lifecycle onto
-//! [`DiagnoseEvent`] wire frames.
+//! [`AgentEvent`] wire frames.
 //!
 //! Both runtimes drive the same loop and both surface progress to the control end
-//! as notification-style `DiagnoseEvent` frames, so the mapping lives here once —
+//! as notification-style `AgentEvent` frames, so the mapping lives here once —
 //! the Direct runtime and the manager wrap it over their own outbound channels and
 //! can never drift on frame shape, sequencing, or terminal semantics.
 //!
 //! A [`StreamingTurnSink`] owns a monotonic `seq` and a `terminated` latch: the
-//! loop's `on_answer_committed` emits the terminal [`DiagnoseEventKind::Answer`],
+//! loop's `on_answer_committed` emits the terminal [`AgentEventKind::Answer`],
 //! and the runtime maps any non-answered outcome to a terminal
-//! [`DiagnoseEventKind::Error`] via [`StreamingTurnSink::finish_outcome`]. The
+//! [`AgentEventKind::Error`] via [`StreamingTurnSink::finish_outcome`]. The
 //! latch guarantees exactly one terminal frame even if a late save error follows a
 //! committed answer. The loop does not push the turn's start through `TurnSink`
 //! (it has no turn id), so the runtime emits it via
 //! [`StreamingTurnSink::turn_started`] before running the turn.
 
+use desk_agent_protocol::agent_event::AgentEvent;
 use desk_agent_protocol::content_safety::StreamRetractionReason;
-use desk_agent_protocol::diagnose::DiagnoseEvent;
 use desk_agent_protocol::provenance::AiProvenance;
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_utils::error::DeskErrorCode;
@@ -25,23 +25,23 @@ use crate::agent_loop::{CircuitBreakReason, LoopOutcome};
 use crate::content_safety::{content_blocked_error, stream_retraction_reason_for};
 use crate::seam::TurnSink;
 
-/// Emits assembled [`DiagnoseEvent`] frames over a runtime's outbound channel. The
+/// Emits assembled [`AgentEvent`] frames over a runtime's outbound channel. The
 /// Direct runtime implements it over the connection's frame sender; the manager
-/// over its cross-instance stream. A blanket impl covers any `Fn(DiagnoseEvent)`,
+/// over its cross-instance stream. A blanket impl covers any `Fn(AgentEvent)`,
 /// so a runtime can pass a closure that forwards to its existing sink.
-pub trait DiagnoseFrameSink {
-    fn emit(&self, event: DiagnoseEvent);
+pub trait AgentFrameSink {
+    fn emit(&self, event: AgentEvent);
 }
 
-impl<F: Fn(DiagnoseEvent)> DiagnoseFrameSink for F {
-    fn emit(&self, event: DiagnoseEvent) {
+impl<F: Fn(AgentEvent)> AgentFrameSink for F {
+    fn emit(&self, event: AgentEvent) {
         self(event)
     }
 }
 
 /// A [`TurnSink`] that turns the loop's streaming + lifecycle callbacks into
-/// `DiagnoseEvent` frames with a monotonic `seq`, forwarding each to a
-/// [`DiagnoseFrameSink`]. Holds a `terminated` latch so at most one terminal frame
+/// `AgentEvent` frames with a monotonic `seq`, forwarding each to a
+/// [`AgentFrameSink`]. Holds a `terminated` latch so at most one terminal frame
 /// (an `Answer` or an `Error`) is ever emitted for the request.
 pub struct StreamingTurnSink<S> {
     sink: S,
@@ -58,7 +58,7 @@ pub struct StreamingTurnSink<S> {
     provenance: Option<AiProvenance>,
 }
 
-impl<S: DiagnoseFrameSink> StreamingTurnSink<S> {
+impl<S: AgentFrameSink> StreamingTurnSink<S> {
     /// Build a sink streaming a single diagnose request's frames to `sink`.
     pub fn new(sink: S, request_id: impl Into<String>) -> Self {
         Self::starting_at(sink, request_id, 0)
@@ -104,7 +104,7 @@ impl<S: DiagnoseFrameSink> StreamingTurnSink<S> {
         }
         let seq = self.next_seq();
         self.sink
-            .emit(DiagnoseEvent::turn_started(&self.request_id, seq, turn_id));
+            .emit(AgentEvent::turn_started(&self.request_id, seq, turn_id));
     }
 
     /// Emit a terminal `Error` frame, unless a terminal frame was already sent
@@ -121,9 +121,9 @@ impl<S: DiagnoseFrameSink> StreamingTurnSink<S> {
         let seq = self.next_seq();
         let event = match reason {
             Some(reason) => {
-                DiagnoseEvent::error_with_retraction_reason(&self.request_id, seq, error, reason)
+                AgentEvent::error_with_retraction_reason(&self.request_id, seq, error, reason)
             }
-            None => DiagnoseEvent::error(&self.request_id, seq, error),
+            None => AgentEvent::error(&self.request_id, seq, error),
         };
         self.sink.emit(event);
         self.uncommitted_partial = false;
@@ -151,7 +151,7 @@ impl<S: DiagnoseFrameSink> StreamingTurnSink<S> {
     }
 }
 
-impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
+impl<S: AgentFrameSink> TurnSink for StreamingTurnSink<S> {
     fn on_text_delta(&mut self, delta: &str) {
         // Provisional streaming text; the committed answer is authoritative. Skip
         // empty deltas to avoid emitting no-op partial frames.
@@ -160,7 +160,7 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
         }
         let seq = self.next_seq();
         self.sink
-            .emit(DiagnoseEvent::partial(&self.request_id, seq, delta));
+            .emit(AgentEvent::partial(&self.request_id, seq, delta));
         self.uncommitted_partial = true;
     }
 
@@ -170,7 +170,7 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
         }
         let seq = self.next_seq();
         self.sink
-            .emit(DiagnoseEvent::partial_committed(&self.request_id, seq));
+            .emit(AgentEvent::partial_committed(&self.request_id, seq));
         self.uncommitted_partial = false;
     }
 
@@ -180,12 +180,8 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
         }
         if self.uncommitted_partial {
             let seq = self.next_seq();
-            self.sink.emit(DiagnoseEvent::retracted(
-                &self.request_id,
-                seq,
-                reason,
-                error,
-            ));
+            self.sink
+                .emit(AgentEvent::retracted(&self.request_id, seq, reason, error));
             self.uncommitted_partial = false;
             self.terminated = true;
         } else if let Some(error) = error {
@@ -198,7 +194,7 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
             return;
         }
         let seq = self.next_seq();
-        self.sink.emit(DiagnoseEvent::tool_started(
+        self.sink.emit(AgentEvent::tool_started(
             &self.request_id,
             seq,
             tool_name,
@@ -213,7 +209,7 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
             return;
         }
         let seq = self.next_seq();
-        self.sink.emit(DiagnoseEvent::tool_started(
+        self.sink.emit(AgentEvent::tool_started(
             &self.request_id,
             seq,
             tool_name,
@@ -234,7 +230,7 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
             return;
         }
         let seq = self.next_seq();
-        let mut event = DiagnoseEvent::tool_finished(&self.request_id, seq, call_id, ok, output);
+        let mut event = AgentEvent::tool_finished(&self.request_id, seq, call_id, ok, output);
         if let Some(background_task_id) = background_task_id {
             event = event.with_background_task_id(background_task_id);
         }
@@ -246,7 +242,7 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
             return;
         }
         let seq = self.next_seq();
-        self.sink.emit(DiagnoseEvent::permission_required(
+        self.sink.emit(AgentEvent::permission_required(
             &self.request_id,
             seq,
             request_id,
@@ -261,7 +257,7 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
             return;
         }
         let seq = self.next_seq();
-        let mut frame = DiagnoseEvent::answer(&self.request_id, seq, text);
+        let mut frame = AgentEvent::answer(&self.request_id, seq, text);
         if let Some(provenance) = &self.provenance {
             frame = frame.with_provenance(provenance.clone());
         }
@@ -276,7 +272,7 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
         }
         self.context_trimmed_turn_id = Some(turn_id.to_string());
         let seq = self.next_seq();
-        self.sink.emit(DiagnoseEvent::status_for_turn(
+        self.sink.emit(AgentEvent::status_for_turn(
             &self.request_id,
             seq,
             "context_trimmed",
@@ -290,7 +286,7 @@ impl<S: DiagnoseFrameSink> TurnSink for StreamingTurnSink<S> {
         }
         self.context_compacted_generation = Some(generation);
         let seq = self.next_seq();
-        self.sink.emit(DiagnoseEvent::context_compacted(
+        self.sink.emit(AgentEvent::context_compacted(
             &self.request_id,
             seq,
             turn_id,
@@ -380,12 +376,12 @@ mod tests {
     use super::*;
     use crate::chat::{ModelTurnError, StopReason};
     use crate::session::SubjectMismatch;
-    use desk_agent_protocol::diagnose::DiagnoseEventKind;
+    use desk_agent_protocol::agent_event::AgentEventKind;
     use std::cell::RefCell;
     use std::rc::Rc;
 
     /// A recording frame sink: a closure pushing each frame into a shared buffer.
-    fn recorder() -> (Rc<RefCell<Vec<DiagnoseEvent>>>, impl Fn(DiagnoseEvent)) {
+    fn recorder() -> (Rc<RefCell<Vec<AgentEvent>>>, impl Fn(AgentEvent)) {
         let store = Rc::new(RefCell::new(Vec::new()));
         let s = store.clone();
         (store, move |e| s.borrow_mut().push(e))
@@ -407,10 +403,10 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
-                DiagnoseEventKind::TurnStarted,
-                DiagnoseEventKind::ToolStarted,
-                DiagnoseEventKind::ToolFinished,
-                DiagnoseEventKind::Answer,
+                AgentEventKind::TurnStarted,
+                AgentEventKind::ToolStarted,
+                AgentEventKind::ToolFinished,
+                AgentEventKind::Answer,
             ]
         );
         assert_eq!(
@@ -487,7 +483,7 @@ mod tests {
         let mut b = StreamingTurnSink::new(sink, "r");
         b.on_awaiting_approval("exec_command", "c1", r#"{"command":"uptime"}"#);
         let ev = store.borrow();
-        assert_eq!(ev[0].kind, DiagnoseEventKind::ToolStarted);
+        assert_eq!(ev[0].kind, AgentEventKind::ToolStarted);
         assert_eq!(ev[0].tool_name.as_deref(), Some("exec_command"));
         assert_eq!(
             ev[0].tool_arguments_json.as_deref(),
@@ -506,7 +502,7 @@ mod tests {
         b.on_text_delta("8080 busy");
         let ev = store.borrow();
         assert_eq!(ev.len(), 2);
-        assert!(ev.iter().all(|e| e.kind == DiagnoseEventKind::Partial));
+        assert!(ev.iter().all(|e| e.kind == AgentEventKind::Partial));
         assert_eq!(ev[0].partial_summary.as_deref(), Some("Port "));
         assert_eq!(ev[1].partial_summary.as_deref(), Some("8080 busy"));
     }
@@ -529,7 +525,7 @@ mod tests {
         b.finish_outcome(&LoopOutcome::Answered("done".into()));
         let ev = store.borrow();
         assert_eq!(ev.len(), 1);
-        assert_eq!(ev[0].kind, DiagnoseEventKind::Answer);
+        assert_eq!(ev[0].kind, AgentEventKind::Answer);
     }
 
     /// `finish_outcome` on a successful answer emits nothing extra.
@@ -563,7 +559,7 @@ mod tests {
             b.finish_outcome(&outcome);
             let ev = store.borrow();
             assert_eq!(ev.len(), 1, "outcome {outcome:?} should emit one frame");
-            assert_eq!(ev[0].kind, DiagnoseEventKind::Error);
+            assert_eq!(ev[0].kind, AgentEventKind::Error);
             assert!(ev[0].is_terminal());
             assert!(ev[0].error.is_some());
         }
@@ -642,9 +638,9 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
-                DiagnoseEventKind::TurnStarted,
-                DiagnoseEventKind::Partial,
-                DiagnoseEventKind::Error,
+                AgentEventKind::TurnStarted,
+                AgentEventKind::Partial,
+                AgentEventKind::Error,
             ]
         );
         assert!(ev.last().unwrap().is_terminal());
@@ -665,8 +661,8 @@ mod tests {
 
         let events = store.borrow();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].kind, DiagnoseEventKind::Partial);
-        assert_eq!(events[1].kind, DiagnoseEventKind::Retracted);
+        assert_eq!(events[0].kind, AgentEventKind::Partial);
+        assert_eq!(events[1].kind, AgentEventKind::Retracted);
         assert!(events[1].is_terminal());
         assert_eq!(
             events[1].retraction_reason,
@@ -687,7 +683,7 @@ mod tests {
 
         let events = store.borrow();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, DiagnoseEventKind::Error);
+        assert_eq!(events[0].kind, AgentEventKind::Error);
         assert_eq!(
             events[0].retraction_reason,
             Some(StreamRetractionReason::SafeRedirect)
@@ -707,7 +703,7 @@ mod tests {
 
         let events = store.borrow();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, DiagnoseEventKind::Error);
+        assert_eq!(events[0].kind, AgentEventKind::Error);
         assert_eq!(
             events[0].retraction_reason,
             Some(StreamRetractionReason::SafeRedirect)
@@ -724,11 +720,11 @@ mod tests {
 
         let events = store.borrow();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].kind, DiagnoseEventKind::Status);
+        assert_eq!(events[0].kind, AgentEventKind::Status);
         assert_eq!(events[0].status.as_deref(), Some("context_trimmed"));
         assert_eq!(events[0].turn_id.as_deref(), Some("turn-7"));
         assert!(!events[0].is_terminal());
-        assert_eq!(events[1].kind, DiagnoseEventKind::Answer);
+        assert_eq!(events[1].kind, AgentEventKind::Answer);
     }
 
     #[test]
@@ -741,13 +737,13 @@ mod tests {
 
         let events = store.borrow();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].kind, DiagnoseEventKind::Status);
+        assert_eq!(events[0].kind, AgentEventKind::Status);
         assert_eq!(events[0].status.as_deref(), Some("context_compacted"));
         assert_eq!(events[0].turn_id.as_deref(), Some("turn-7"));
         assert_eq!(events[0].checkpoint_generation, Some(2));
         assert_eq!(events[0].covered_message_count, Some(9));
         assert!(!events[0].is_terminal());
-        assert_eq!(events[1].kind, DiagnoseEventKind::Answer);
+        assert_eq!(events[1].kind, AgentEventKind::Answer);
     }
 
     #[test]
@@ -768,10 +764,10 @@ mod tests {
         assert_eq!(
             events.iter().map(|event| event.kind).collect::<Vec<_>>(),
             vec![
-                DiagnoseEventKind::Partial,
-                DiagnoseEventKind::PartialCommitted,
-                DiagnoseEventKind::ToolStarted,
-                DiagnoseEventKind::Error,
+                AgentEventKind::Partial,
+                AgentEventKind::PartialCommitted,
+                AgentEventKind::ToolStarted,
+                AgentEventKind::Error,
             ]
         );
         assert!(events.last().unwrap().is_terminal());

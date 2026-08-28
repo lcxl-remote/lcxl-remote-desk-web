@@ -88,11 +88,9 @@ impl Drop for ConnectionDeviceGuard {
 /// the result waiter into the conservative unknown outcome.
 struct CentralPendingConnectionGuard {
     pending: Arc<crate::agent_exec::SignalAgentExecPending>,
-    collect_pending: Arc<crate::collect_pending::CollectPendingStore>,
     computer_use_readiness: Arc<crate::computer_use_readiness::ComputerUseReadinessCache>,
     remote_tool_pending: Arc<crate::remote_tool_edge::SignalRemoteToolPendingStore>,
     computer_action_pending: Arc<crate::remote_tool_edge::SignalComputerActionPendingStore>,
-    connection_map: web::Data<SharedConnectionMap>,
     connection_id: String,
 }
 
@@ -105,23 +103,6 @@ impl Drop for CentralPendingConnectionGuard {
             .drain_for_connection(&self.connection_id);
         self.computer_action_pending
             .drain_for_connection(&self.connection_id);
-        let affected = self
-            .collect_pending
-            .drain_for_connection(&self.connection_id);
-        let disconnected = self.connection_id.clone();
-        for ctx in affected {
-            if ctx.browser_connection_id == disconnected {
-                continue;
-            }
-            let connection_map = self.connection_map.clone();
-            actix_web::rt::spawn(async move {
-                crate::diagnose_orchestrator::stream_collection_connection_lost(
-                    connection_map.as_ref(),
-                    ctx,
-                )
-                .await;
-            });
-        }
     }
 }
 
@@ -228,31 +209,22 @@ pub async fn handle_signaling(
     let auth_context =
         browser_auth_context(code_session.as_ref(), client_version_info.remote_desk_type);
 
-    // The central-brain injection points: a single-account policy decision point
-    // that authorizes/orchestrates the control-end AI frames, and a collect
-    // observer that feeds inbound evidence responses back into the diagnosis. Both
-    // share the process-global pending store (the portable signal is single-node).
-    let collect_pending = crate::diagnose_orchestrator::global_pending_store();
+    // The central-brain injection point authorizes the single-account Device
+    // Assistant and execution surfaces.
     let computer_use_readiness =
         crate::computer_use_readiness::global_computer_use_readiness_cache();
     let _central_pending_guard = CentralPendingConnectionGuard {
         pending: crate::agent_exec::global_agent_exec_pending(),
-        collect_pending: collect_pending.clone(),
         computer_use_readiness: computer_use_readiness.clone(),
         remote_tool_pending: crate::remote_tool_edge::global_remote_tool_pending(),
         computer_action_pending: crate::remote_tool_edge::global_computer_action_pending(),
-        connection_map: connection_map.clone(),
         connection_id: connection_id.clone(),
     };
     let control_authorizer =
         std::sync::Arc::new(crate::control_authorizer::SignalControlAuthorizer::new(
             crate::db::get_db().clone(),
-            collect_pending,
             connection_map.clone(),
         ));
-    let collect_observer = std::sync::Arc::new(
-        crate::diagnose_orchestrator::SignalCollectObserver::new(connection_map.clone()),
-    );
     let edge_exec_observer = std::sync::Arc::new(crate::agent_exec::SignalEdgeExecObserver::new(
         crate::agent_exec::global_agent_exec_pending(),
         crate::db::get_db().clone(),
@@ -305,7 +277,6 @@ pub async fn handle_signaling(
     .await?
     .with_control_authorizer(control_authorizer)
     .with_request_remote_authorizer(request_remote_authorizer)
-    .with_collect_observer(collect_observer)
     .with_computer_use_readiness_observer(std::sync::Arc::new(
         crate::computer_use_readiness::SignalComputerUseReadinessObserver::new(
             computer_use_readiness,

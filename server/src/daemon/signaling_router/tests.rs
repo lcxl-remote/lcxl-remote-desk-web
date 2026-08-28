@@ -87,7 +87,6 @@ async fn make_ctx() -> RouterContext {
         command_templates: Arc::new(crate::daemon::command_templates::CommandTemplateCache::new()),
         command_blocklist: Arc::new(crate::daemon::command_blocklist::CommandBlocklistCache::new()),
         audit: Arc::new(crate::worker::agent::audit_sink::LogAuditSink),
-        diagnose_tasks: Default::default(),
         inbound_authz: None,
         inbound_request_remote_authz: None,
         inbound_start_terminal_authz: None,
@@ -118,7 +117,6 @@ async fn seed_test_desktop_pc(ctx: &RouterContext, connection_id: &str) {
 
 mod access_policy;
 mod agent;
-mod diagnose;
 mod exec_confirm;
 mod exec_edge;
 mod exec_lifecycle;

@@ -308,7 +308,7 @@ impl SignalAgentExecStore {
             ));
         }
 
-        match crate::diagnose_orchestrator::resume_completion_turn(
+        match crate::agent_runtime::resume_completion_turn(
             self.db.clone(),
             session,
             desk_diagnose_core::session::WorkKind::AgentExec,

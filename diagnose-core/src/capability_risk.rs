@@ -48,7 +48,7 @@ pub const fn classify_capability_risk(
                 Risk::R2
             }
         }
-        Effect::SendExternal | Effect::InputFallback => Risk::R3,
+        Effect::SendExternal | Effect::InputFallback | Effect::ExecuteCommand => Risk::R3,
     }
 }
 
@@ -81,6 +81,7 @@ mod tests {
             (CapabilityEffect::SendExternal, CapabilityRiskTier::R3),
             (CapabilityEffect::CaptureScreen, CapabilityRiskTier::R1),
             (CapabilityEffect::InputFallback, CapabilityRiskTier::R3),
+            (CapabilityEffect::ExecuteCommand, CapabilityRiskTier::R3),
         ];
         for (effect, expected) in cases {
             assert_eq!(classify_capability_risk(effect, plain), expected);

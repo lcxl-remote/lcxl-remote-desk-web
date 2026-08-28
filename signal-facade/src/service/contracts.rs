@@ -39,10 +39,9 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::StartTerminal
         | SignalingType::ListTerminalCommands
         | SignalingType::InvokeAgentCapability
-        | SignalingType::DiagnoseDevice
+        | SignalingType::CollectEvidence
         | SignalingType::PreviewExecution
         | SignalingType::ResolveExecution
-        | SignalingType::CollectEvidence
         | SignalingType::ExecuteEdgePlan
         | SignalingType::InvokeRemoteTool
         | SignalingType::AskTerminalCopilot
@@ -75,10 +74,9 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::TerminalStarted
         | SignalingType::TerminalCommandsListed
         | SignalingType::AgentCapabilityCompleted
-        | SignalingType::DiagnosisUpdated
+        | SignalingType::EvidenceCollectionUpdated
         | SignalingType::ExecutionPreviewGenerated
         | SignalingType::ExecutionCompleted
-        | SignalingType::EvidenceCollectionUpdated
         | SignalingType::EdgeExecutionCompleted
         | SignalingType::RemoteToolOutputUpdated
         | SignalingType::TerminalCopilotUpdated
@@ -99,7 +97,6 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::SendTerminalInput
         | SignalingType::ResizeTerminal
         | SignalingType::CloseTerminal
-        | SignalingType::CancelDiagnosis
         | SignalingType::ReportAiAuditEvent
         | SignalingType::SyncCommandTemplates
         | SignalingType::CancelTerminalCopilot
@@ -147,10 +144,9 @@ pub fn response_type_for_request(t: SignalingType) -> Option<SignalingType> {
         SignalingType::StartTerminal => SignalingType::TerminalStarted,
         SignalingType::ListTerminalCommands => SignalingType::TerminalCommandsListed,
         SignalingType::InvokeAgentCapability => SignalingType::AgentCapabilityCompleted,
-        SignalingType::DiagnoseDevice => SignalingType::DiagnosisUpdated,
+        SignalingType::CollectEvidence => SignalingType::EvidenceCollectionUpdated,
         SignalingType::PreviewExecution => SignalingType::ExecutionPreviewGenerated,
         SignalingType::ResolveExecution => SignalingType::ExecutionCompleted,
-        SignalingType::CollectEvidence => SignalingType::EvidenceCollectionUpdated,
         SignalingType::ExecuteEdgePlan => SignalingType::EdgeExecutionCompleted,
         SignalingType::InvokeRemoteTool => SignalingType::RemoteToolOutputUpdated,
         SignalingType::AskTerminalCopilot => SignalingType::TerminalCopilotUpdated,
@@ -196,10 +192,9 @@ pub fn response_types_for_request(t: SignalingType) -> &'static [SignalingType] 
         StartTerminal => &[TerminalStarted],
         ListTerminalCommands => &[TerminalCommandsListed],
         InvokeAgentCapability => &[AgentCapabilityCompleted],
-        DiagnoseDevice => &[DiagnosisUpdated],
+        CollectEvidence => &[EvidenceCollectionUpdated],
         PreviewExecution => &[ExecutionPreviewGenerated],
         ResolveExecution => &[ExecutionCompleted],
-        CollectEvidence => &[EvidenceCollectionUpdated],
         ExecuteEdgePlan => &[EdgeExecutionCompleted],
         InvokeRemoteTool => &[RemoteToolOutputUpdated],
         AskTerminalCopilot => &[TerminalCopilotUpdated],
@@ -480,14 +475,9 @@ pub trait AuditObserver: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 }
 
-// ====== CollectObserver trait ======
+// ====== EdgeExecObserver trait ======
 
-/// Consumes inbound `CollectResponse` frames (chunks of an evidence snapshot, or
-/// a wholesale error) from a desk-server daemon. The manager implements this to
-/// route the chunk into its orchestrator's pending store, keyed by `request_id`
-/// and validated against the connection that the matching `CollectRequest` was
-/// pushed to; the signal server leaves it unset, so the frames are ignored there.
-/// `source` is the reporting connection (a token-authenticated desk server).
+/// Consumes enterprise fleet evidence responses from a desk-server daemon.
 pub trait CollectObserver: Send + Sync {
     fn on_collect_response<'a>(
         &'a self,
@@ -495,8 +485,6 @@ pub trait CollectObserver: Send + Sync {
         model: &'a SignalingModel,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 }
-
-// ====== EdgeExecObserver trait ======
 
 /// Consumes inbound `EdgeExecResult` frames (a structured
 /// `EdgeExecDisposition` for one central-agent or fleet execution attempt) from

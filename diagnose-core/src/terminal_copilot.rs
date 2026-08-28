@@ -19,10 +19,10 @@ use serde::Deserialize;
 
 use crate::chat::{ChatMessage, ChatRole};
 use crate::exec_classify::classify_command;
-use crate::parser::{ParseOutcome, extract_json_object, truncate_on_char_boundary};
 use crate::read_tools::read_tool_registry;
 use crate::registry::RegisteredTool;
 use crate::seam::TurnSink;
+use crate::text_parse::{ParseOutcome, extract_json_object, truncate_on_char_boundary};
 
 /// Default per-turn reasoning-round budget for the interactive copilot.
 ///

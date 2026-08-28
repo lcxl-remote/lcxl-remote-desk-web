@@ -253,25 +253,6 @@ pub enum SignalingType {
     #[wincode(tag = 601)]
     AgentCapabilityCompleted = 601,
 
-    /// AI Diagnose request (control end → host). Carries
-    /// `desk_agent_protocol::diagnose::DiagnoseRequestData` as signaling_data;
-    /// the daemon runs the diagnose orchestrator (Default / DeskServer) or
-    /// replies `FEATURE_UNAVAILABLE` (ServiceDaemon).
-    #[wincode(tag = 602)]
-    DiagnoseDevice = 602,
-    /// AI Diagnose streamed event (host → control end). Carries
-    /// `desk_agent_protocol::diagnose::DiagnoseEvent` as signaling_data.
-    /// Notification-style (`response_state = None`) so multiple frames reach
-    /// the control end instead of being consumed by the one-shot callback map.
-    #[wincode(tag = 603)]
-    DiagnosisUpdated = 603,
-    /// AI Diagnose cancellation (control end → host / manager). Sent when the
-    /// operator starts over while a diagnosis is still running. Carries no
-    /// payload; the message `request_id` correlates the cancelled diagnosis so
-    /// pending collection, approval, and model work can be stopped and audited.
-    #[wincode(tag = 604)]
-    CancelDiagnosis = 604,
-
     /// AI confirmed-execution: classify/preview request (control end → host).
     /// Carries `desk_agent_protocol::exec::ConfirmExecData` as signaling_data;
     /// the daemon classifies the command and replies with `ExecPreview`.
@@ -310,23 +291,12 @@ pub enum SignalingType {
     /// (`response_state = None`).
     #[wincode(tag = 610)]
     SyncCommandTemplates = 610,
-    /// Remote-collect request (manager → desk-server daemon only). Carries
-    /// `desk_agent_protocol::diagnose::CollectRequest`. In the thin-edge model
-    /// the diagnose orchestrator runs centrally; the manager pushes this over the
-    /// established desk-server link to ask the edge to run its read-only
-    /// collectors. Accepted only from the trusted manager link (the inbound
-    /// source gate drops it from any other source). Notification-style
-    /// (`response_state = None`).
+    /// Fleet evidence collection request (manager → desk-server daemon only).
     #[wincode(tag = 611)]
     CollectEvidence = 611,
-    /// Remote-collect response (desk-server daemon → manager only). Carries
-    /// `desk_agent_protocol::diagnose::CollectResponse` (a chunk of the evidence
-    /// snapshot or a wholesale error). Consumed by the manager's orchestrator
-    /// pending store, never relayed to a browser or another peer. Notification-
-    /// style (`response_state = None`).
+    /// Fleet evidence collection response (desk-server daemon → manager only).
     #[wincode(tag = 612)]
     EvidenceCollectionUpdated = 612,
-
     /// Fleet batch-execution request (manager → desk-server daemon only).
     /// Carries `AuthorizedControlPayload<desk_agent_protocol::exec::ExecPlan>` —
     /// a manager-sealed, approved execution plan plus the

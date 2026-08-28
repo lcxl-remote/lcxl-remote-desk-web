@@ -8,7 +8,7 @@ import type {
     PermissionDecisionBody,
     PermissionRequestDto,
 } from '@/services/types';
-import type { DiagnoseEvent } from './diagnose-state';
+import type { DeviceAssistantEvent } from './device-assistant-event';
 import {
     SIGNALING_TYPE_CODE_ASK_DEVICE_ASSISTANT,
     SIGNALING_TYPE_CODE_CANCEL_DEVICE_ASSISTANT,
@@ -239,7 +239,7 @@ export function useDeviceAssistantChat({
         if (showHydrating) setHydrating(true);
         try {
             const response = await fetch(
-            `/api/my/diagnose-session?connection=${encodeURIComponent(deskId)}` +
+            `/api/my/device-assistant-session?connection=${encodeURIComponent(deskId)}` +
                 `&conversation=${encodeURIComponent(expectedConversationId)}`,
             { credentials: 'include', headers: { Accept: 'application/json' } },
             );
@@ -399,7 +399,7 @@ export function useDeviceAssistantChat({
         }
         if (message.signaling_type !== SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_UPDATED) return;
         if (!activeRequest.current || message.request_id !== activeRequest.current) return;
-        const event = message.signaling_data as DiagnoseEvent;
+        const event = message.signaling_data as DeviceAssistantEvent;
         if (event.seq <= lastSeq.current) return;
         lastSeq.current = event.seq;
 
@@ -475,9 +475,6 @@ export function useDeviceAssistantChat({
                 activeRequest.current = null;
                 setRemoteActive(false);
                 if (conversationId.current) void loadSnapshot(conversationId.current);
-                break;
-            case 'final':
-                // Device Assistant uses agentic `answer`, never Diagnose `final`.
                 break;
         }
     }), [loadSnapshot, subscribe]);
@@ -609,7 +606,7 @@ export function useDeviceAssistantChat({
         setPermissionUpdating(true);
         setError(null);
         try {
-            const response = await fetch('/api/my/diagnose-session/permission-decision', {
+            const response = await fetch('/api/my/device-assistant-session/permission-decision', {
                 method: 'POST',
                 credentials: 'include',
                 headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
@@ -660,7 +657,7 @@ export function useDeviceAssistantChat({
         setGrantRevoking(grantId);
         setError(null);
         try {
-            const response = await fetch('/api/my/diagnose-session/capability-grant/revoke', {
+            const response = await fetch('/api/my/device-assistant-session/capability-grant/revoke', {
                 method: 'POST',
                 credentials: 'include',
                 headers: { Accept: 'application/json', 'Content-Type': 'application/json' },

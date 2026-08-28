@@ -23,7 +23,6 @@ import {
     Settings,
     ShieldCheck,
     ShieldOff,
-    Sparkles,
     Volume2,
     VolumeX,
     XSquare,
@@ -92,9 +91,7 @@ type DeskControlBarProps = {
     onTogglePrivateScreen: () => void
     operationSystem?: OperationSystemEnum
     restricted: RestrictedSession
-    setShowDiagnose: (show: boolean) => void
     setShowStats: (show: boolean) => void
-    showDiagnose: boolean
     showStats: boolean
     macKeyboardMappingController?: DesktopControllerPlatform
     whiteboard: ReturnType<typeof useDeskWhiteboard>
@@ -125,9 +122,7 @@ export function DeskControlBar({
     onTogglePrivateScreen,
     operationSystem,
     restricted,
-    setShowDiagnose,
     setShowStats,
-    showDiagnose,
     showStats,
     macKeyboardMappingController,
     whiteboard,
@@ -135,7 +130,6 @@ export function DeskControlBar({
     const { t } = useTranslation()
     const [isHovered, setIsHovered] = useState(false)
     const [isMenuOpen, setIsMenuOpen] = useState(false)
-    const [isDiagnoseHovered, setIsDiagnoseHovered] = useState(false)
     const [isKeyboardMappingOpen, setIsKeyboardMappingOpen] = useState(false)
     const isExpanded = isHovered || isMenuOpen || isDragging
     const keyboardMappingVariables = macKeyboardMappingController === "Linux"
@@ -261,49 +255,6 @@ export function DeskControlBar({
                             <p>{showStats ? t("pages.desk.hideStats") : t("pages.desk.showStats")}</p>
                         </TooltipContent>
                     </Tooltip>
-
-                    <svg
-                        aria-hidden="true"
-                        className="absolute h-0 w-0"
-                        height="0"
-                        width="0"
-                    >
-                        <defs>
-                            <linearGradient id="ai-rainbow-gradient" x1="0%" x2="100%" y1="0%" y2="100%">
-                                <stop offset="0%" stopColor="#3b82f6">
-                                    <animate attributeName="stop-color" dur={isDiagnoseHovered ? "0.8s" : "4s"} repeatCount="indefinite" values="#3b82f6; #8b5cf6; #d946ef; #f43f5e; #3b82f6" />
-                                </stop>
-                                <stop offset="33%" stopColor="#8b5cf6">
-                                    <animate attributeName="stop-color" dur={isDiagnoseHovered ? "0.8s" : "4s"} repeatCount="indefinite" values="#8b5cf6; #d946ef; #f43f5e; #3b82f6; #8b5cf6" />
-                                </stop>
-                                <stop offset="66%" stopColor="#d946ef">
-                                    <animate attributeName="stop-color" dur={isDiagnoseHovered ? "0.8s" : "4s"} repeatCount="indefinite" values="#d946ef; #f43f5e; #3b82f6; #8b5cf6; #d946ef" />
-                                </stop>
-                                <stop offset="100%" stopColor="#f43f5e">
-                                    <animate attributeName="stop-color" dur={isDiagnoseHovered ? "0.8s" : "4s"} repeatCount="indefinite" values="#f43f5e; #3b82f6; #8b5cf6; #d946ef; #f43f5e" />
-                                </stop>
-                            </linearGradient>
-                        </defs>
-                    </svg>
-
-                    {restricted.ownerPlaneVisible && (
-                        <Tooltip>
-                            <TooltipTrigger asChild>
-                                <Button
-                                    className={`controlButton ${showDiagnose ? "bg-white/20" : ""}`}
-                                    onClick={() => setShowDiagnose(!showDiagnose)}
-                                    onMouseEnter={() => setIsDiagnoseHovered(true)}
-                                    onMouseLeave={() => setIsDiagnoseHovered(false)}
-                                    variant="ghost"
-                                >
-                                    <Sparkles style={{ stroke: "url(#ai-rainbow-gradient)" }} />
-                                </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                                <p>{showDiagnose ? t("pages.desk.diagnose.hidePanel") : t("pages.desk.diagnose.showPanel")}</p>
-                            </TooltipContent>
-                        </Tooltip>
-                    )}
 
                     {hasControl
                         && isPrivateScreenSupported

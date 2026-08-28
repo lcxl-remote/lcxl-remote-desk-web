@@ -826,6 +826,19 @@ impl Capability {
             Capability::FilePatchConfirmed => "file.patch.confirmed",
             Capability::FileCopyConfirmed => "file.copy.confirmed",
             Capability::FileArtifactCreateConfirmed => "file.artifact.create.confirmed",
+            Capability::CommunicationLocalDraftCreateConfirmed => {
+                "communication.local_draft.create.confirmed"
+            }
+            Capability::CommunicationOutlookNewHandoffConfirmed => {
+                "communication.outlook_new.handoff.confirmed"
+            }
+            Capability::BrowserPageObserve => "browser.page.observe",
+            Capability::BrowserPageNavigateConfirmed => "browser.page.navigate.confirmed",
+            Capability::BrowserInputFallbackConfirmed => "browser.input.fallback.confirmed",
+            Capability::BrowserExternalDraftWriteConfirmed => {
+                "browser.external_draft.write.confirmed"
+            }
+            Capability::BrowserExternalSendConfirmed => "browser.external.send.confirmed",
             Capability::FileDeleteConfirmed => "file.delete.confirmed",
         }
     }

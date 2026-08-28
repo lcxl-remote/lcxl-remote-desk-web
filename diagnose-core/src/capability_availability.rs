@@ -317,7 +317,11 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        assert_eq!(inventory.len(), 16);
+        let registered_capability_count = registry
+            .providers()
+            .map(|provider| provider.capabilities.len())
+            .sum::<usize>();
+        assert_eq!(inventory.len(), registered_capability_count);
         assert!(inventory.iter().any(|item| {
             item.capability_id == DESKTOP_UI_CAPABILITY_ID
                 && !item.callable()

@@ -1,4 +1,4 @@
-//! Host-side evidence snapshot redaction (security model §9).
+//! Host-side Provider result redaction (security model §9).
 //!
 //! The string-level secret scrubber ([`Redactor`] / [`RegexRedactor`]) is shared
 //! with the manager via [`desk_diagnose_core::redaction`] so both runtimes scrub

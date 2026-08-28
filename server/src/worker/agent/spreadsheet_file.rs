@@ -16,7 +16,7 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use zip::ZipArchive;
 
-use super::file_reference_store::read_verified_bytes;
+use super::file_reference_store::read_verified_spreadsheet_inputs;
 
 const MAX_WORKBOOK_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ZIP_ENTRIES: usize = 512;
@@ -102,10 +102,13 @@ pub fn inspect(
         ));
     }
 
+    let (selected_inputs, mut truncated) = read_verified_spreadsheet_inputs(
+        &params.files,
+        params.max_workbooks as usize,
+        MAX_WORKBOOK_BYTES,
+    )?;
     let mut workbooks = Vec::new();
-    let mut truncated = false;
-    for file in params.files.iter().take(params.max_workbooks as usize) {
-        let selected = read_verified_bytes(file, MAX_WORKBOOK_BYTES)?;
+    for selected in selected_inputs {
         let lower = selected.display_name.to_ascii_lowercase();
         let workbook = if lower.ends_with(".xlsx") {
             inspect_xlsx(
@@ -137,7 +140,6 @@ pub fn inspect(
             break;
         }
     }
-    truncated |= params.files.len() > workbooks.len();
     Ok(SpreadsheetFileInspectOutput {
         snapshot_id: format!("spreadsheet-selection-{}", uuid::Uuid::new_v4()),
         workbooks,
@@ -1742,6 +1744,55 @@ mod tests {
         assert_eq!(candidate.value, "=1+1");
         assert!(candidate.formula.is_none());
         assert!(candidate.formula_injection_candidate);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn selected_directory_expands_only_bounded_direct_spreadsheet_children() {
+        let _guard = super::super::file_reference_store::file_store_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        for index in 0..10 {
+            std::fs::write(
+                temp.path().join(format!("input-{index:02}.csv")),
+                format!("name,value\r\nrow-{index},{index}"),
+            )
+            .unwrap();
+        }
+        std::fs::write(temp.path().join("ignored.txt"), "not a spreadsheet").unwrap();
+        std::fs::create_dir(temp.path().join("nested")).unwrap();
+        std::fs::write(
+            temp.path().join("nested").join("hidden.csv"),
+            "name,value\r\nhidden,999",
+        )
+        .unwrap();
+        super::super::file_reference_store::reset_worker_incarnation();
+        let directory = super::super::file_reference_store::issue(temp.path()).unwrap();
+        let output = inspect(&SpreadsheetFileInspectParams {
+            files: vec![directory],
+            max_workbooks: 8,
+            max_sheets: 16,
+            max_rows: 200,
+            max_columns: 64,
+            max_bytes: 256 * 1024,
+        })
+        .unwrap();
+
+        assert_eq!(output.workbooks.len(), 8);
+        assert!(output.truncated);
+        assert_eq!(output.workbooks[0].display_name, "input-00.csv");
+        assert_eq!(output.workbooks[7].display_name, "input-07.csv");
+        assert!(
+            output
+                .workbooks
+                .iter()
+                .all(|workbook| workbook.display_name.ends_with(".csv"))
+        );
+        assert!(
+            output
+                .workbooks
+                .iter()
+                .all(|workbook| workbook.display_name != "hidden.csv")
+        );
     }
 
     #[cfg(windows)]

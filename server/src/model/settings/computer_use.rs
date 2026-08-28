@@ -20,6 +20,13 @@ pub struct ComputerUseSettings {
     pub observe: bool,
     /// Allow semantic Office adapters after their independent production gate.
     pub office_semantic: bool,
+    /// Allow the built-in, closed-surface browser semantic adapter after the
+    /// user has enabled Chrome remote debugging and approved the connection.
+    pub browser_semantic: bool,
+    /// Allow the reviewed Outlook (new) `mailto:` compose handoff adapter.
+    /// This may create a cloud-synchronised draft, so central WriteExternalDraft
+    /// authorization is still required for every exact input.
+    pub communication_handoff: bool,
     /// Allow semantic desktop UI actions after their independent production gate.
     pub generic_semantic_ui: bool,
     /// Allow raw input fallback after its independent beta gate.
@@ -45,6 +52,11 @@ impl ComputerUseSettings {
     #[must_use]
     pub fn file_artifact_create_enabled(&self) -> bool {
         self.enabled && self.file_artifact_create && !self.allowed_file_roots.is_empty()
+    }
+
+    #[must_use]
+    pub const fn communication_handoff_enabled(&self) -> bool {
+        self.enabled && self.communication_handoff
     }
 
     #[must_use]
@@ -76,6 +88,8 @@ mod tests {
         assert!(!settings.observation_enabled());
         assert_eq!(settings.revision, 0);
         assert!(!settings.office_semantic);
+        assert!(!settings.browser_semantic);
+        assert!(!settings.communication_handoff);
         assert!(!settings.generic_semantic_ui);
         assert!(!settings.raw_input_fallback);
         assert!(!settings.file_artifact_create);

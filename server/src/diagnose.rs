@@ -11,12 +11,17 @@
 
 pub mod agent;
 pub mod collector;
-pub mod model;
-pub mod redaction;
-pub mod remote_read;
 pub mod selection;
-pub mod terminal_complete;
-pub mod terminal_copilot;
+
+pub mod redaction {
+    pub use crate::agent_adapter::redaction::*;
+}
+
+pub mod model {
+    pub mod screenshot {
+        pub use crate::agent_adapter::screenshot::*;
+    }
+}
 
 use std::sync::Arc;
 

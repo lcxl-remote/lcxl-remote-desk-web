@@ -147,54 +147,6 @@ pub(super) fn emit_agent_error(ctx: &RouterContext, model: &SignalingModel, erro
     }
 }
 
-/// Send one `DiagnoseEvent` to the control end as a **notification-style**
-/// signaling frame. `response_state = None` is essential: a `Some(_)` value
-/// marks the frame as the one-shot response to the originating `Diagnose`
-/// request, which the signaling callback map consumes and removes — collapsing
-/// the stream after the first frame. With `None`, every frame is delivered as an
-/// event. Build / serialise failures are non-fatal — log + drop.
-pub(super) fn send_diagnose_frame(
-    outbound_tx: &broadcast::Sender<String>,
-    to_connection_id: Option<String>,
-    event: DiagnoseEvent,
-) {
-    let request_id = event.request_id.clone();
-    let data = match serde_json::to_value(&event) {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!("[router] failed to serialise DiagnoseEvent: {e} (request_id={request_id})");
-            return;
-        }
-    };
-    let frame = SignalingModel::new(
-        &request_id,
-        SignalingType::DiagnosisUpdated,
-        None,
-        to_connection_id,
-        Some(data),
-        // Notification, not a one-shot response — see the doc comment.
-        None,
-    );
-    match serde_json::to_string(&frame) {
-        Ok(text) => {
-            let _ = outbound_tx.send(text);
-        }
-        Err(e) => log::warn!(
-            "[router] failed to serialise DiagnoseEvent frame: {e} (request_id={request_id})"
-        ),
-    }
-}
-
-/// Emit a single (typically terminal) `DiagnoseEvent` for a request, before the
-/// orchestrator runs (disabled gate / unsupported mode / bad payload).
-pub(super) fn emit_diagnose_event(
-    ctx: &RouterContext,
-    model: &SignalingModel,
-    event: DiagnoseEvent,
-) {
-    send_diagnose_frame(&ctx.outbound_tx, model.from_connection_id.clone(), event);
-}
-
 /// Route a control-end `TerminalCopilotAsk`. The terminal copilot is orchestrated
 /// by the central signaling brain (signal / manager): the control end sends the
 /// ask — carrying the terminal context inline — to the central server, which dials
@@ -230,7 +182,7 @@ pub(super) async fn handle_terminal_complete_inbound(
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
     use desk_agent_protocol::terminal_complete::TerminalCompleteResult;
-    crate::diagnose::terminal_complete::send_completion_result(
+    crate::terminal_complete::send_completion_result(
         &ctx.outbound_tx,
         model.from_connection_id.clone(),
         &TerminalCompleteResult::failed(
@@ -243,60 +195,6 @@ pub(super) async fn handle_terminal_complete_inbound(
             ),
         ),
     );
-    Ok(())
-}
-
-/// Route a control-end `Diagnose`. AI diagnosis is orchestrated by the central
-/// signaling brain (signal / manager): the control end sends `Diagnose` to the
-/// central server, which drives the model and pulls read-only evidence from this
-/// host through a `CollectRequest` (served by `handle_collect_request_inbound`).
-/// This host therefore never runs a browser-facing diagnosis locally. If a
-/// `Diagnose` frame still reaches the edge router (a link without a central
-/// brain), reply with one terminal `DiagnoseEvent::error` (notification-style,
-/// never a one-shot response) so the control end stops treating frames as an
-/// in-progress stream.
-pub(super) async fn handle_diagnose_inbound(
-    ctx: &RouterContext,
-    model: &SignalingModel,
-) -> Result<(), RouterError> {
-    emit_diagnose_event(
-        ctx,
-        model,
-        DiagnoseEvent::error(
-            &model.request_id,
-            0,
-            agent_error(
-                AgentErrorKind::UnsupportedCapability,
-                "AI diagnosis is handled by the central signaling server; this host only \
-                 serves evidence collection",
-                false,
-                true,
-            ),
-        ),
-    );
-    Ok(())
-}
-
-/// Route a control-end `DiagnoseCancel` when the operator starts over. The message
-/// `request_id` is the cancelled diagnosis's id. AI diagnosis is orchestrated by
-/// the central signaling brain, which owns the run lifecycle and audit trail, so
-/// on the edge this only aborts any locally tracked task handle (defensive) and
-/// is otherwise a no-op. No `DiagnoseEvent` is streamed back — the control end
-/// already reset the panel.
-pub(super) async fn handle_diagnose_cancel_inbound(
-    ctx: &RouterContext,
-    model: &SignalingModel,
-) -> Result<(), RouterError> {
-    // Abort the in-flight run if it is still tracked, so a slow model call stops
-    // instead of streaming into a closed / superseded connection.
-    if let Some(handle) = ctx
-        .diagnose_tasks
-        .lock()
-        .expect("diagnose tasks lock")
-        .remove(&model.request_id)
-    {
-        handle.abort();
-    }
     Ok(())
 }
 

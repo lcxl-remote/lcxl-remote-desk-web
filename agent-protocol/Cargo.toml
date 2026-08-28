@@ -12,3 +12,4 @@ serde_json = { workspace = true }
 wincode = { workspace = true }
 utoipa = { workspace = true }
 async-trait = { workspace = true }
+url = { workspace = true }

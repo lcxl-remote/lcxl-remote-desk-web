@@ -44,6 +44,7 @@ pub enum CapabilityEffect {
     SendExternal,
     CaptureScreen,
     InputFallback,
+    ExecuteCommand,
 }
 
 impl CapabilityEffect {
@@ -55,6 +56,7 @@ impl CapabilityEffect {
                 | Self::WriteExternalDraft
                 | Self::SendExternal
                 | Self::InputFallback
+                | Self::ExecuteCommand
         )
     }
 }
@@ -157,6 +159,7 @@ pub enum CapabilityPlatform {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ApplicationPrerequisite {
+    GoogleChrome,
     MicrosoftExcel,
     MicrosoftWord,
     MicrosoftPowerPoint,
@@ -223,6 +226,13 @@ pub enum CapabilityDataCategory {
     FileMetadata,
     FileContent,
     TerminalOutput,
+    SystemMetadata,
+    ProcessMetadata,
+    NetworkMetadata,
+    ServiceMetadata,
+    LogContent,
+    ContainerMetadata,
+    CommandOutput,
     ExternalContent,
     CommunicationContent,
 }
@@ -270,6 +280,15 @@ pub enum AuthorizationResourceKind {
     /// One exact owner-supplied Web Search query, bound to the canonical tool
     /// input digest and to a server-owned connector destination.
     ExternalQuery,
+    /// One server-classified command plan, bound to the exact canonical tool
+    /// input digest and the target device. The raw command is never authority.
+    ExactCommand,
+    /// One canonical browser origin on the current approved Chrome profile
+    /// incarnation. Paths and model labels are not authority.
+    BrowserOrigin,
+    /// One stable page/document incarnation produced by the controlled-edge
+    /// Browser Provider. Stale page and element references fail closed.
+    BrowserPage,
     ExternalAccount,
     ExactRecipientsAndArtifacts,
 }
@@ -445,6 +464,9 @@ pub enum CapabilityBlockedReason {
     VersionMismatch,
     EdgeDisconnected,
     AdapterUnavailable,
+    RemoteDebuggingDisabled,
+    BrowserApprovalRequired,
+    BrowserDisconnected,
     ApplicationNotInstalled,
     PermissionMissing,
     OfficeBridgeNotPaired,
@@ -895,9 +917,11 @@ mod tests {
     }
 
     #[test]
-    fn effect_set_contains_external_draft_as_a_side_effect() {
+    fn effect_set_contains_all_mutating_authorities_as_side_effects() {
         assert!(CapabilityEffect::WriteExternalDraft.is_side_effecting());
+        assert!(CapabilityEffect::ExecuteCommand.is_side_effecting());
         assert!(!CapabilityEffect::ReadDevice.is_side_effecting());
+        assert!(serde_json::from_str::<CapabilityEffect>("\"future_effect\"").is_err());
     }
 
     #[test]

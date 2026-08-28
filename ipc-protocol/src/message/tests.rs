@@ -1632,6 +1632,7 @@ fn worker_to_service_all_variants_round_trip() {
                 result: desk_agent_protocol::computer_use::ComputerActionResultClass::Verified,
                 facts: vec![],
                 message: None,
+                output: None,
             },
         }),
         WorkerToService::ComputerActionStateReported(ComputerActionStateReportedPayload {

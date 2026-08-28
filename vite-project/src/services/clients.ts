@@ -5,7 +5,7 @@
 
 import fetch from "@/lib/kubb-client";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
-import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword401, ChangePassword403, LoginAccountMutationRequest, LoginAccountMutationResponse, LogoutAccountMutationResponse, GetCurrentUserQueryResponse, GetCurrentUser401, LoginTauriMutationResponse, LoginTauriQueryParams, VerifyConnectionMutationRequest, VerifyConnectionMutationResponse, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, QueryMacosAutologinQueryResponse, RetryManagerLinkMutationResponse, QueryManagerLinkStatusQueryResponse, RedeemCodeMutationRequest, RedeemCodeMutationResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, StartSupportMutationResponse, SupportStatusQueryResponse, StopSupportMutationResponse, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, RequestMacosPermissionsMutationResponse, AuthorizeWaylandMutationRequest, AuthorizeWaylandMutationResponse, CancelWaylandMutationRequest, CancelWaylandMutationResponse, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, InitRequirementsQueryResponse, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, TestModelProviderMutationRequest, TestModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, GetDiagnoseSessionQueryResponse, GetDiagnoseSessionQueryParams, CancelDiagnoseBackgroundTaskMutationRequest, CancelDiagnoseBackgroundTaskMutationResponse, RevokeDiagnoseCapabilityGrantMutationRequest, RevokeDiagnoseCapabilityGrantMutationResponse, DecideDiagnosePermissionMutationRequest, DecideDiagnosePermissionMutationResponse, ListDiagnoseSessionsQueryResponse, ListDiagnoseSessionsQueryParams, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics503, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, GetUsageRetentionQueryResponse, UpdateUsageRetentionMutationRequest, UpdateUsageRetentionMutationResponse, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
+import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword401, ChangePassword403, LoginAccountMutationRequest, LoginAccountMutationResponse, LogoutAccountMutationResponse, GetCurrentUserQueryResponse, GetCurrentUser401, LoginTauriMutationResponse, LoginTauriQueryParams, VerifyConnectionMutationRequest, VerifyConnectionMutationResponse, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, QueryMacosAutologinQueryResponse, RetryManagerLinkMutationResponse, QueryManagerLinkStatusQueryResponse, RedeemCodeMutationRequest, RedeemCodeMutationResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, StartSupportMutationResponse, SupportStatusQueryResponse, StopSupportMutationResponse, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, RequestMacosPermissionsMutationResponse, AuthorizeWaylandMutationRequest, AuthorizeWaylandMutationResponse, CancelWaylandMutationRequest, CancelWaylandMutationResponse, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, InitRequirementsQueryResponse, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, TestModelProviderMutationRequest, TestModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, GetDeviceAssistantSessionQueryResponse, GetDeviceAssistantSessionQueryParams, CancelDeviceAssistantBackgroundTaskMutationRequest, CancelDeviceAssistantBackgroundTaskMutationResponse, RevokeDeviceAssistantCapabilityGrantMutationRequest, RevokeDeviceAssistantCapabilityGrantMutationResponse, DecideDeviceAssistantPermissionMutationRequest, DecideDeviceAssistantPermissionMutationResponse, ListDeviceAssistantSessionsQueryResponse, ListDeviceAssistantSessionsQueryParams, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics503, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, GetUsageRetentionQueryResponse, UpdateUsageRetentionMutationRequest, UpdateUsageRetentionMutationResponse, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
 
 function getChangePasswordUrl() {
   const res = { method: 'PATCH', url: `/api/auth/credentials` as const }
@@ -987,93 +987,93 @@ export async function getModelUsage(params?: GetModelUsageQueryParams, config: P
   return res.data
 }
 
-function getGetDiagnoseSessionUrl() {
-  const res = { method: 'GET', url: `/api/my/diagnose-session` as const }
+function getGetDeviceAssistantSessionUrl() {
+  const res = { method: 'GET', url: `/api/my/device-assistant-session` as const }
   return res
 }
 
 /**
- * @summary Read an AI-diagnose conversation snapshot (browser view)
- * {@link /api/my/diagnose-session}
+ * @summary Read a Device Assistant conversation snapshot (browser view)
+ * {@link /api/my/device-assistant-session}
  */
-export async function getDiagnoseSession(params: GetDiagnoseSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+export async function getDeviceAssistantSession(params: GetDeviceAssistantSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
 
 
-  const res = await request<GetDiagnoseSessionQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetDiagnoseSessionUrl().url.toString(), params, ... requestConfig })
+  const res = await request<GetDeviceAssistantSessionQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetDeviceAssistantSessionUrl().url.toString(), params, ... requestConfig })
   return res.data
 }
 
-function getCancelDiagnoseBackgroundTaskUrl() {
-  const res = { method: 'POST', url: `/api/my/diagnose-session/background-task/cancel` as const }
+function getCancelDeviceAssistantBackgroundTaskUrl() {
+  const res = { method: 'POST', url: `/api/my/device-assistant-session/background-task/cancel` as const }
   return res
 }
 
 /**
  * @summary Request cancellation of an authorized Device Assistant background task
- * {@link /api/my/diagnose-session/background-task/cancel}
+ * {@link /api/my/device-assistant-session/background-task/cancel}
  */
-export async function cancelDiagnoseBackgroundTask(data: CancelDiagnoseBackgroundTaskMutationRequest, config: Partial<RequestConfig<CancelDiagnoseBackgroundTaskMutationRequest>> & { client?: Client } = {}) {
+export async function cancelDeviceAssistantBackgroundTask(data: CancelDeviceAssistantBackgroundTaskMutationRequest, config: Partial<RequestConfig<CancelDeviceAssistantBackgroundTaskMutationRequest>> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
   const requestData = data
 
-  const res = await request<CancelDiagnoseBackgroundTaskMutationResponse, ResponseErrorConfig<Error>, CancelDiagnoseBackgroundTaskMutationRequest>({ method : "POST", url : getCancelDiagnoseBackgroundTaskUrl().url.toString(), data : requestData, ... requestConfig })
+  const res = await request<CancelDeviceAssistantBackgroundTaskMutationResponse, ResponseErrorConfig<Error>, CancelDeviceAssistantBackgroundTaskMutationRequest>({ method : "POST", url : getCancelDeviceAssistantBackgroundTaskUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 
-function getRevokeDiagnoseCapabilityGrantUrl() {
-  const res = { method: 'POST', url: `/api/my/diagnose-session/capability-grant/revoke` as const }
+function getRevokeDeviceAssistantCapabilityGrantUrl() {
+  const res = { method: 'POST', url: `/api/my/device-assistant-session/capability-grant/revoke` as const }
   return res
 }
 
 /**
  * @summary Revoke one owner-scoped Device Assistant capability grant
- * {@link /api/my/diagnose-session/capability-grant/revoke}
+ * {@link /api/my/device-assistant-session/capability-grant/revoke}
  */
-export async function revokeDiagnoseCapabilityGrant(data: RevokeDiagnoseCapabilityGrantMutationRequest, config: Partial<RequestConfig<RevokeDiagnoseCapabilityGrantMutationRequest>> & { client?: Client } = {}) {
+export async function revokeDeviceAssistantCapabilityGrant(data: RevokeDeviceAssistantCapabilityGrantMutationRequest, config: Partial<RequestConfig<RevokeDeviceAssistantCapabilityGrantMutationRequest>> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
   const requestData = data
 
-  const res = await request<RevokeDiagnoseCapabilityGrantMutationResponse, ResponseErrorConfig<Error>, RevokeDiagnoseCapabilityGrantMutationRequest>({ method : "POST", url : getRevokeDiagnoseCapabilityGrantUrl().url.toString(), data : requestData, ... requestConfig })
+  const res = await request<RevokeDeviceAssistantCapabilityGrantMutationResponse, ResponseErrorConfig<Error>, RevokeDeviceAssistantCapabilityGrantMutationRequest>({ method : "POST", url : getRevokeDeviceAssistantCapabilityGrantUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 
-function getDecideDiagnosePermissionUrl() {
-  const res = { method: 'POST', url: `/api/my/diagnose-session/permission-decision` as const }
+function getDecideDeviceAssistantPermissionUrl() {
+  const res = { method: 'POST', url: `/api/my/device-assistant-session/permission-decision` as const }
   return res
 }
 
 /**
  * @summary Decide one pending Device Assistant permission request
- * {@link /api/my/diagnose-session/permission-decision}
+ * {@link /api/my/device-assistant-session/permission-decision}
  */
-export async function decideDiagnosePermission(data: DecideDiagnosePermissionMutationRequest, config: Partial<RequestConfig<DecideDiagnosePermissionMutationRequest>> & { client?: Client } = {}) {
+export async function decideDeviceAssistantPermission(data: DecideDeviceAssistantPermissionMutationRequest, config: Partial<RequestConfig<DecideDeviceAssistantPermissionMutationRequest>> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
   const requestData = data
 
-  const res = await request<DecideDiagnosePermissionMutationResponse, ResponseErrorConfig<Error>, DecideDiagnosePermissionMutationRequest>({ method : "POST", url : getDecideDiagnosePermissionUrl().url.toString(), data : requestData, ... requestConfig })
+  const res = await request<DecideDeviceAssistantPermissionMutationResponse, ResponseErrorConfig<Error>, DecideDeviceAssistantPermissionMutationRequest>({ method : "POST", url : getDecideDeviceAssistantPermissionUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 
-function getListDiagnoseSessionsUrl() {
-  const res = { method: 'GET', url: `/api/my/diagnose-sessions` as const }
+function getListDeviceAssistantSessionsUrl() {
+  const res = { method: 'GET', url: `/api/my/device-assistant-sessions` as const }
   return res
 }
 
 /**
- * @summary List recent AI-diagnose conversations for a device
- * {@link /api/my/diagnose-sessions}
+ * @summary List recent Device Assistant conversations for a device
+ * {@link /api/my/device-assistant-sessions}
  */
-export async function listDiagnoseSessions(params: ListDiagnoseSessionsQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+export async function listDeviceAssistantSessions(params: ListDeviceAssistantSessionsQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
 
 
-  const res = await request<ListDiagnoseSessionsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getListDiagnoseSessionsUrl().url.toString(), params, ... requestConfig })
+  const res = await request<ListDeviceAssistantSessionsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getListDeviceAssistantSessionsUrl().url.toString(), params, ... requestConfig })
   return res.data
 }
 

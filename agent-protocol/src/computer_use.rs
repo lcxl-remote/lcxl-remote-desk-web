@@ -10,7 +10,14 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{Capability, RiskLevel};
+use crate::{
+    Capability, RiskLevel,
+    browser_control::{
+        BrowserAction, BrowserActionRequest, BrowserActionResult, BrowserActivationClass,
+        BrowserMutationClass,
+    },
+    communication::{CommunicationDraftHandoff, OutlookNewComposeHandoffRequest},
+};
 
 pub const COMPUTER_USE_SCHEMA_VERSION: u16 = 1;
 pub const MAX_COMPUTER_ACTIONS: usize = 32;
@@ -49,6 +56,7 @@ pub enum ObjectKind {
     File,
     Directory,
     TerminalOutput,
+    BrowserSurface,
 }
 
 /// Short-lived, device-issued reference to an observed object.
@@ -100,6 +108,9 @@ pub enum ComputerUseAdapterKind {
     FileSystem,
     Terminal,
     ScreenCapture,
+    SystemDiagnostics,
+    BrowserDevtoolsMcp,
+    OutlookNewMailto,
 }
 
 #[derive(
@@ -606,6 +617,13 @@ pub enum FilePatchAction {
         file_name: String,
         title: String,
     },
+    /// Create one inert local-only communication draft as UTF-8 plain text.
+    /// The typed document is validated and rendered by shared trusted logic;
+    /// it carries no external account identity or send authority.
+    CreateLocalCommunicationDraftArtifact {
+        file_name: String,
+        draft: crate::communication::LocalDraftDocument,
+    },
     ApplyTextPatch {
         patch: String,
     },
@@ -623,6 +641,8 @@ pub enum ComputerActionKind {
     Excel(ExcelPatchAction),
     PowerPoint(PowerPointPatchAction),
     File(FilePatchAction),
+    Browser(BrowserActionRequest),
+    Communication(OutlookNewComposeHandoffRequest),
 }
 
 impl ComputerActionKind {
@@ -645,8 +665,42 @@ impl ComputerActionKind {
             Self::File(FilePatchAction::CreateWordReportArtifact { .. }) => {
                 Capability::WordDocumentCreateConfirmed
             }
+            Self::File(FilePatchAction::CreateLocalCommunicationDraftArtifact { .. }) => {
+                Capability::CommunicationLocalDraftCreateConfirmed
+            }
             Self::File(FilePatchAction::Delete) => Capability::FileDeleteConfirmed,
             Self::File(FilePatchAction::ApplyTextPatch { .. }) => Capability::FilePatchConfirmed,
+            Self::Browser(request) => match &request.action {
+                BrowserAction::TakeSnapshot { .. } | BrowserAction::WaitFor { .. } => {
+                    Capability::BrowserPageObserve
+                }
+                BrowserAction::OpenPage { .. } | BrowserAction::NavigatePage { .. } => {
+                    Capability::BrowserPageNavigateConfirmed
+                }
+                BrowserAction::FillForm { mutation_class, .. }
+                | BrowserAction::UploadFile { mutation_class, .. } => match mutation_class {
+                    BrowserMutationClass::WriteExternalDraft => {
+                        Capability::BrowserExternalDraftWriteConfirmed
+                    }
+                    BrowserMutationClass::InputFallback => {
+                        Capability::BrowserInputFallbackConfirmed
+                    }
+                },
+                BrowserAction::ActivateElement {
+                    activation_class, ..
+                } => match activation_class {
+                    BrowserActivationClass::WriteExternalDraft => {
+                        Capability::BrowserExternalDraftWriteConfirmed
+                    }
+                    BrowserActivationClass::InputFallback => {
+                        Capability::BrowserInputFallbackConfirmed
+                    }
+                    BrowserActivationClass::SendExternal { .. } => {
+                        Capability::BrowserExternalSendConfirmed
+                    }
+                },
+            },
+            Self::Communication(_) => Capability::CommunicationOutlookNewHandoffConfirmed,
         }
     }
 }
@@ -785,6 +839,22 @@ impl SealedComputerActionPlan {
         }
         validate_adapter(&self.adapter)?;
         validate_actions(&self.adapter, &self.actions)?;
+        for step in &self.actions {
+            if let ComputerActionKind::Browser(request) = &step.action
+                && request.call_id != self.action_request_id
+            {
+                return Err(ComputerUseValidationError::InvalidContextReference(
+                    "browser call_id is not bound to the sealed action request",
+                ));
+            }
+            if let ComputerActionKind::Communication(request) = &step.action
+                && request.call_id != self.action_request_id
+            {
+                return Err(ComputerUseValidationError::InvalidContextReference(
+                    "communication call_id is not bound to the sealed action request",
+                ));
+            }
+        }
         if self.timeout_ms == 0 || self.timeout_ms > MAX_COMPUTER_ACTION_TIMEOUT_MS {
             return Err(ComputerUseValidationError::InvalidTimeout {
                 actual: self.timeout_ms,
@@ -840,6 +910,12 @@ fn validate_actions(
             ) | (
                 ComputerUseAdapterKind::FileSystem,
                 ComputerActionKind::File(_)
+            ) | (
+                ComputerUseAdapterKind::BrowserDevtoolsMcp,
+                ComputerActionKind::Browser(_)
+            ) | (
+                ComputerUseAdapterKind::OutlookNewMailto,
+                ComputerActionKind::Communication(_)
             )
         );
         if !adapter_matches {
@@ -856,6 +932,7 @@ fn validate_actions(
                             | FilePatchAction::CreateSpreadsheetArtifact { .. }
                             | FilePatchAction::CreateSpreadsheetFormulaArtifact { .. }
                             | FilePatchAction::CreateWordReportArtifact { .. }
+                            | FilePatchAction::CreateLocalCommunicationDraftArtifact { .. }
                     ),
                     ObjectKind::Directory
                 )
@@ -867,9 +944,28 @@ fn validate_actions(
                     ),
                     ObjectKind::File
                 )
+                | (ComputerActionKind::Browser(_), ObjectKind::BrowserSurface)
+                | (
+                    ComputerActionKind::Communication(_),
+                    ObjectKind::Application
+                )
         );
         if !target_matches {
             return Err(ComputerUseValidationError::IncompatibleActionTarget);
+        }
+        if let ComputerActionKind::Browser(request) = &step.action {
+            request.validate().map_err(|_| {
+                ComputerUseValidationError::InvalidContextReference(
+                    "browser action request is invalid",
+                )
+            })?;
+        }
+        if let ComputerActionKind::Communication(request) = &step.action {
+            request.validate().map_err(|_| {
+                ComputerUseValidationError::InvalidContextReference(
+                    "communication handoff request is invalid",
+                )
+            })?;
         }
         for (field, value) in [
             ("object_ref.token", step.target.token.as_str()),
@@ -1011,6 +1107,18 @@ pub struct ComputerActionCompleted {
     pub result: ComputerActionResultClass,
     pub facts: Vec<ComputerActionStepFact>,
     pub message: Option<String>,
+    /// Bounded typed output for action families that return semantic state.
+    /// File/UI actions leave this absent; raw adapter output is never carried.
+    pub output: Option<ComputerActionOutput>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum ComputerActionOutput {
+    Browser(BrowserActionResult),
+    CommunicationHandoff(CommunicationDraftHandoff),
 }
 
 #[derive(
@@ -1192,6 +1300,26 @@ impl ComputerUseReadiness {
             {
                 return Err(ComputerUseValidationError::InvalidContextReference(
                     "Office capability requires an Office document object",
+                ));
+            }
+            if matches!(
+                reference.capability,
+                Capability::BrowserPageObserve
+                    | Capability::BrowserPageNavigateConfirmed
+                    | Capability::BrowserInputFallbackConfirmed
+                    | Capability::BrowserExternalDraftWriteConfirmed
+                    | Capability::BrowserExternalSendConfirmed
+            ) && reference.object_ref.object_kind != ObjectKind::BrowserSurface
+            {
+                return Err(ComputerUseValidationError::InvalidContextReference(
+                    "browser capability requires a browser surface object",
+                ));
+            }
+            if reference.capability == Capability::CommunicationOutlookNewHandoffConfirmed
+                && reference.object_ref.object_kind != ObjectKind::Application
+            {
+                return Err(ComputerUseValidationError::InvalidContextReference(
+                    "Outlook handoff capability requires an application object",
                 ));
             }
         }
@@ -1387,5 +1515,58 @@ mod tests {
         readiness.validate().unwrap();
         readiness.context_references[0].object_ref.object_kind = ObjectKind::File;
         assert!(readiness.validate().is_err());
+    }
+
+    #[test]
+    fn sealed_browser_action_binds_surface_adapter_capability_and_server_call_id() {
+        use crate::browser_control::{
+            BROWSER_CONTROL_SCHEMA_VERSION, BrowserAction, BrowserActionRequest,
+            BrowserNavigationTarget, BrowserOrigin, BrowserOriginKind,
+        };
+        let mut sealed = plan();
+        sealed.action_request_id = "browser-call-1".into();
+        sealed.adapter = ComputerUseAdapterRef {
+            kind: ComputerUseAdapterKind::BrowserDevtoolsMcp,
+            version: "chrome-devtools-mcp/1.7.0".into(),
+        };
+        sealed.actions = vec![ComputerActionStep {
+            target: ObjectRef {
+                token: "browser-surface-token".into(),
+                snapshot_id: "browser-connection-1".into(),
+                object_kind: ObjectKind::BrowserSurface,
+                expires_at: "2026-08-23T12:00:00Z".into(),
+            },
+            action: ComputerActionKind::Browser(BrowserActionRequest {
+                schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+                call_id: "browser-call-1".into(),
+                action: BrowserAction::OpenPage {
+                    target: BrowserNavigationTarget {
+                        url: "https://example.com/compose".into(),
+                        origin: BrowserOrigin {
+                            kind: BrowserOriginKind::Https,
+                            host_ascii: "example.com".into(),
+                            port: 443,
+                        },
+                    },
+                },
+            }),
+            before_summary: "bound browser surface".into(),
+            after_intent: "open exact page".into(),
+            verification: "return typed page ref".into(),
+        }];
+        sealed.validate().unwrap();
+        assert_eq!(
+            sealed.actions[0].action.required_capability(),
+            Capability::BrowserPageNavigateConfirmed
+        );
+
+        let ComputerActionKind::Browser(request) = &mut sealed.actions[0].action else {
+            unreachable!()
+        };
+        request.call_id = "model-chosen-call".into();
+        assert!(matches!(
+            sealed.validate(),
+            Err(ComputerUseValidationError::InvalidContextReference(_))
+        ));
     }
 }

@@ -1,3 +1,4 @@
+pub mod agent_adapter;
 pub mod controller;
 pub mod daemon;
 pub mod diagnose;
@@ -19,6 +20,8 @@ pub mod model;
 pub mod openapi;
 pub mod service;
 pub mod telemetry;
+pub mod terminal_complete;
+pub mod terminal_copilot;
 pub mod transport_guard;
 pub mod version;
 pub mod worker;
@@ -83,13 +86,14 @@ use desk_signal::{
     controller::{
         ai_usage::get_model_usage,
         connection::list_connections,
+        device_assistant_session::{
+            cancel_device_assistant_background_task, decide_device_assistant_permission,
+            get_device_assistant_session, list_device_assistant_sessions,
+            revoke_device_assistant_capability_grant,
+        },
         device_code::{
             batch_delete_device_codes, create_device_code, delete_device_code, list_device_codes,
             update_device_code,
-        },
-        diagnose_session::{
-            cancel_diagnose_background_task, decide_diagnose_permission, get_diagnose_session,
-            list_diagnose_sessions, revoke_diagnose_capability_grant,
         },
         model_provider::{get_model_provider, test_model_provider, update_model_provider},
         signaling::open_signaling_handle,
@@ -244,11 +248,11 @@ pub fn configure_api_surface(
                 // no embedded signaling route, so it never offers this endpoint.
                 if opts.include_signaling {
                     cfg.service(create_token)
-                        .service(get_diagnose_session)
-                        .service(decide_diagnose_permission)
-                        .service(revoke_diagnose_capability_grant)
-                        .service(cancel_diagnose_background_task)
-                        .service(list_diagnose_sessions);
+                        .service(get_device_assistant_session)
+                        .service(decide_device_assistant_permission)
+                        .service(revoke_device_assistant_capability_grant)
+                        .service(cancel_device_assistant_background_task)
+                        .service(list_device_assistant_sessions);
                 }
             })
             .service(
@@ -1346,10 +1350,10 @@ mod tests {
             "/api/desk/settings",
             "/api/desk/device_codes",
             "/api/desk/signaling",
-            "/api/my/diagnose-session",
-            "/api/my/diagnose-session/permission-decision",
-            "/api/my/diagnose-session/background-task/cancel",
-            "/api/my/diagnose-sessions",
+            "/api/my/device-assistant-session",
+            "/api/my/device-assistant-session/permission-decision",
+            "/api/my/device-assistant-session/background-task/cancel",
+            "/api/my/device-assistant-sessions",
             "/api/turn/info",
         ] {
             assert!(

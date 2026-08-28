@@ -29,7 +29,6 @@ use actix_web::web;
 use desk_agent_protocol::audit::{AuditEvent, AuditSink};
 use desk_agent_protocol::diagnose::{
     COLLECT_CHUNK_PAYLOAD_LIMIT, CollectRequest, CollectResponse, CollectResponseError,
-    DiagnoseEvent,
 };
 use desk_agent_protocol::edge_exec::{
     EdgeExecDisposition, EdgeExecRequestPayload, EdgeExecResultPayload,
@@ -40,7 +39,7 @@ use desk_agent_protocol::exec::{
 };
 use desk_agent_protocol::exec_policy::{DEFAULT_OUTPUT_BYTES, build_exact_argv_draft};
 
-use crate::diagnose::terminal_copilot::copilot_signaling_sink;
+use crate::terminal_copilot::copilot_signaling_sink;
 use desk_agent_protocol::exec_lifecycle::{ExecControlAction, ExecControlPayload};
 use desk_agent_protocol::{
     ActorRef, ActorType, AgentEnvelope, AgentError, AgentErrorKind, AgentOperation, AgentOutcome,
@@ -188,9 +187,6 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         //   emits it via typed `WorkerToService::AgentCapabilityCompleted`; the
         //   control end never echoes it back. A stray inbound copy is a
         //   protocol error — daemon swallows it.
-        // - `DiagnosisUpdated`: host → control end only (streamed). The
-        //   daemon orchestrator emits it; the control end never echoes
-        //   it back. A stray inbound copy is a protocol error — swallow.
         // - `ExecutionPreviewGenerated` / `ExecutionCompleted`: host → control end only (the
         //   confirm-execution preview and result). Daemon-emitted; a stray
         //   inbound copy is a protocol error — swallow.
@@ -208,7 +204,6 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::TerminalStarted
         | SignalingType::TerminalClosed
         | SignalingType::AgentCapabilityCompleted
-        | SignalingType::DiagnosisUpdated
         | SignalingType::TerminalCopilotUpdated
         | SignalingType::TerminalCompletionsGenerated
         | SignalingType::ExecutionPreviewGenerated
@@ -236,7 +231,6 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // forwarded over IPC.
         // DiagnoseCancel stops a run the control end abandoned by starting over;
         // handle it inline against the daemon's orchestrator, like `Diagnose`.
-        SignalingType::DiagnoseDevice | SignalingType::CancelDiagnosis => RouteOwnership::Daemon,
 
         // In-terminal AI copilot: control end → daemon. Like `Diagnose`, the
         // copilot orchestrator runs daemon-side (model call + redaction +
@@ -291,6 +285,10 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // classifier's Step 0 reads it); never forwarded to the worker.
         SignalingType::SyncCommandBlocklist => RouteOwnership::Daemon,
 
+        SignalingType::CollectEvidence | SignalingType::EvidenceCollectionUpdated => {
+            RouteOwnership::Daemon
+        }
+
         // Temporary-support code: manager → daemon, pushed over the host's regular
         // `Server` upstream after the manager issues a code for that connection.
         // The daemon consumes it locally (surfaces the code to the local user);
@@ -317,7 +315,6 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // against the daemon's collector, never forwarded to the worker.
         // CollectResponse is daemon-emitted toward the manager and never received
         // inbound here, so a stray inbound copy is swallowed daemon-side.
-        SignalingType::CollectEvidence | SignalingType::EvidenceCollectionUpdated => RouteOwnership::Daemon,
 
         // Fleet batch-execution: `EdgeExecRequest` is manager → daemon (the
         // daemon PEP re-validates the manager-sealed `ExecPlan` and dispatches it
@@ -462,18 +459,19 @@ pub struct RouterContext {
     /// `ChangeDisplaySettings` route always replies with
     /// `FEATURE_UNAVAILABLE` outside service mode.
     pub virtual_display: Option<Arc<VirtualDisplaySupervisor>>,
+    /// Enterprise fleet evidence collector.
+    pub diagnose_orchestrator: Option<Arc<DiagnoseOrchestrator>>,
     /// `Some(...)` in modes with an in-process worker (Default / DeskServer),
     /// where the host can collect read-only evidence locally. AI diagnosis is
     /// orchestrated by the central signaling brain, so this serves the
     /// remote-collect edge path (`collect_for_remote`): the central server pushes a
     /// `CollectRequest` and this host streams the redacted evidence back. `None` in
     /// ServiceDaemon mode, where a `CollectRequest` replies with a wholesale error.
-    pub diagnose_orchestrator: Option<Arc<DiagnoseOrchestrator>>,
     /// Serves a manager remote read tool call (§8.3) against the in-process device
     /// agent. Present in the same modes as `diagnose_orchestrator` (an in-process
     /// worker can read locally); `None` in ServiceDaemon, where a `RemoteToolRequest`
     /// replies with a wholesale error.
-    pub remote_read: Option<Arc<crate::diagnose::remote_read::EdgeReadInvoker>>,
+    pub remote_read: Option<Arc<crate::agent_adapter::remote_read::EdgeReadInvoker>>,
     /// Whether confirmed execution is available in this startup mode. `true`
     /// only where an in-process worker can execute (Default / DeskServer);
     /// `false` in ServiceDaemon mode, where `ConfirmExec` / `ResolveExec` reply
@@ -510,9 +508,6 @@ pub struct RouterContext {
     /// `DiagnoseCancel` (the control end starting over or handing off) aborts the
     /// matching run so a slow model call stops instead of streaming into a closed
     /// connection. Entries remove themselves on natural completion.
-    pub diagnose_tasks: Arc<
-        std::sync::Mutex<std::collections::HashMap<String, actix_web::rt::task::JoinHandle<()>>>,
-    >,
     /// Manager-injected authorization for the current inbound AI frame, set per
     /// call by the proxy when a validated `AuthorizedControlPayload` arrives on
     /// the Manager link. `None` on the local / remote-signaling links, where the
@@ -1051,7 +1046,6 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         | SignalingType::AgentCapabilityCompleted
         // DiagnoseEvent only flows host → control end (streamed); an
         // inbound copy is a protocol error — swallow it.
-        | SignalingType::DiagnosisUpdated
         // TerminalCopilotEvent only flows host → control end (streamed); an
         // inbound copy is a protocol error — swallow it.
         | SignalingType::TerminalCopilotUpdated
@@ -1109,10 +1103,8 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // AI Diagnose: run the daemon-side orchestrator (Default / DeskServer)
         // or reply `FEATURE_UNAVAILABLE` (ServiceDaemon, where the orchestrator
         // is not injected). Streams `DiagnoseEvent` frames back to the browser.
-        SignalingType::DiagnoseDevice => handle_diagnose_inbound(ctx, model).await,
         // AI Diagnose cancellation: stop the run abandoned by a UI start-over and
         // record an `ai.task.cancelled` audit; no `DiagnoseEvent` is streamed back.
-        SignalingType::CancelDiagnosis => handle_diagnose_cancel_inbound(ctx, model).await,
         // In-terminal AI copilot: run the daemon-side orchestrator (Default /
         // DeskServer) or reply `FEATURE_UNAVAILABLE` (ServiceDaemon, where the
         // orchestrator is not injected). Streams `TerminalCopilotEvent` frames
@@ -1161,6 +1153,8 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // (`handle_inbound_signaling_text`) has already dropped any non-central
         // origin before reaching here; this only applies the validated set.
         SignalingType::SyncCommandBlocklist => handle_command_blocklist_sync_inbound(ctx, model),
+        SignalingType::CollectEvidence => handle_collect_request_inbound(ctx, model).await,
+        SignalingType::EvidenceCollectionUpdated => Ok(()),
         // Temporary-support code issued by the manager over this host's dedicated
         // Support upstream. The daemon surfaces it to the local user, who reads it
         // out to a supporter. The source gate (`handle_inbound_signaling_text`) has
@@ -1179,10 +1173,8 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // collectors and stream a chunked CollectResponse back. The source gate
         // (`handle_inbound_signaling_text`) has already dropped any non-Manager
         // origin before reaching here.
-        SignalingType::CollectEvidence => handle_collect_request_inbound(ctx, model).await,
         // CollectResponse is emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never consumes its own stream).
-        SignalingType::EvidenceCollectionUpdated => Ok(()),
         // Fleet batch-execution request from the manager: PEP re-validate the
         // manager-sealed `ExecPlan` and dispatch it to the worker, correlating
         // the worker's result back to the manager as a `EdgeExecResult`. The

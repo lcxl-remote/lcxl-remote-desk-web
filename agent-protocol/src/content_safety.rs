@@ -23,7 +23,7 @@ use wincode::{SchemaRead, SchemaWrite};
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ContentSafetySurface {
-    Diagnosis,
+    AssistantAnswer,
     TerminalCopilot,
     DeviceAssistant,
     TerminalCompletion,

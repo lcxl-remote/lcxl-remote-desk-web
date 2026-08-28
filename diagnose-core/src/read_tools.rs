@@ -63,6 +63,24 @@ fn read(
     }
 }
 
+const MAX_PROCESS_LIST_ENTRIES: u32 = 256;
+const MAX_LOG_EVENTS: u32 = 200;
+const MAX_LOG_WINDOW_MINUTES: u32 = 24 * 60;
+const MAX_DIAGNOSTIC_FILTER_CHARS: usize = 128;
+
+fn validate_optional_filter(value: &Option<String>, field: &str) -> Result<(), AgentError> {
+    if let Some(value) = value
+        && (value.is_empty()
+            || value.chars().count() > MAX_DIAGNOSTIC_FILTER_CHARS
+            || value.chars().any(char::is_control))
+    {
+        return Err(bad_arguments(format!(
+            "{field} must contain 1..={MAX_DIAGNOSTIC_FILTER_CHARS} non-control characters"
+        )));
+    }
+    Ok(())
+}
+
 /// The read-only tools the agent loop exposes (subject to scope/mode filtering).
 /// Each tool name maps to one [`ContextKind`] in [`build_read_operation`].
 pub fn read_tool_registry() -> Vec<RegisteredTool> {
@@ -76,7 +94,8 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
                 "properties": {
                     "include_hardware": {"type": "boolean"},
                     "include_network_summary": {"type": "boolean"}
-                }
+                },
+                "additionalProperties": false
             }),
         ),
         read(
@@ -86,10 +105,11 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "minimum": 0},
+                    "limit": {"type": "integer", "minimum": 0, "maximum": MAX_PROCESS_LIST_ENTRIES},
                     "sort": {"type": "string", "enum": ["cpu_desc", "memory_desc", "pid"]},
                     "include_command_line": {"type": "boolean"}
-                }
+                },
+                "additionalProperties": false
             }),
         ),
         read(
@@ -98,7 +118,8 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
             "List listening network ports; optionally filter by protocol.",
             json!({
                 "type": "object",
-                "properties": {"protocol": {"type": "string"}}
+                "properties": {"protocol": {"type": "string", "enum": ["tcp", "udp"]}},
+                "additionalProperties": false
             }),
         ),
         read(
@@ -107,20 +128,35 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
             "Read the status of system services; name one or enumerate.",
             json!({
                 "type": "object",
-                "properties": {"name": {"type": "string"}}
+                "properties": {"name": {"type": "string", "minLength": 1, "maxLength": MAX_DIAGNOSTIC_FILTER_CHARS}},
+                "additionalProperties": false
             }),
         ),
         read(
             "read_recent_logs",
             Capability::LogRecent,
             "Read recent system log events (redacted).",
-            json!({"type": "object"}),
+            json!({
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string", "minLength": 1, "maxLength": MAX_DIAGNOSTIC_FILTER_CHARS},
+                    "since_minutes": {"type": "integer", "minimum": 1, "maximum": MAX_LOG_WINDOW_MINUTES},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LOG_EVENTS},
+                    "severity": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["error", "warning", "info", "debug"]},
+                        "maxItems": 4,
+                        "uniqueItems": true
+                    }
+                },
+                "additionalProperties": false
+            }),
         ),
         read(
             "read_container_list",
             Capability::ContainerList,
             "List containers on the device.",
-            json!({"type": "object"}),
+            json!({"type": "object", "additionalProperties": false}),
         ),
         read(
             "read_current_screen",
@@ -248,7 +284,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_selected_spreadsheets",
             Capability::SpreadsheetFileInspect,
-            "Read bounded cell, formula, and value projections from explicitly owner-selected inert .xlsx, .csv, or .tsv files. Macros, external links, data connections, and model-provided paths are rejected.",
+            "Read bounded cell, formula, and value projections from explicitly owner-selected inert .xlsx, .csv, or .tsv files, or from supported direct children of an explicitly selected directory. Directory expansion is non-recursive and bounded; macros, external links, data connections, and model-provided paths are rejected.",
             json!({
                 "type": "object",
                 "properties": {},
@@ -422,16 +458,51 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
             ContextKind::SystemInfo(parse_params::<SystemInfoParams>(&call.arguments_json)?)
         }
         "read_process_list" => {
-            ContextKind::ProcessList(parse_params::<ProcessListParams>(&call.arguments_json)?)
+            let params = parse_params::<ProcessListParams>(&call.arguments_json)?;
+            if params.limit > MAX_PROCESS_LIST_ENTRIES {
+                return Err(bad_arguments(format!(
+                    "limit must be at most {MAX_PROCESS_LIST_ENTRIES}"
+                )));
+            }
+            ContextKind::ProcessList(params)
         }
         "read_network_ports" => {
-            ContextKind::NetworkPorts(parse_params::<NetworkPortsParams>(&call.arguments_json)?)
+            let params = parse_params::<NetworkPortsParams>(&call.arguments_json)?;
+            validate_optional_filter(&params.protocol, "protocol")?;
+            if params
+                .protocol
+                .as_deref()
+                .is_some_and(|protocol| !matches!(protocol, "tcp" | "udp"))
+            {
+                return Err(bad_arguments("protocol must be tcp or udp"));
+            }
+            ContextKind::NetworkPorts(params)
         }
         "read_service_status" => {
-            ContextKind::ServiceStatus(parse_params::<ServiceStatusParams>(&call.arguments_json)?)
+            let params = parse_params::<ServiceStatusParams>(&call.arguments_json)?;
+            validate_optional_filter(&params.name, "name")?;
+            ContextKind::ServiceStatus(params)
         }
         "read_recent_logs" => {
-            ContextKind::LogRecent(parse_params::<LogRecentParams>(&call.arguments_json)?)
+            let params = parse_params::<LogRecentParams>(&call.arguments_json)?;
+            validate_optional_filter(&params.source, "source")?;
+            if params
+                .since_minutes
+                .is_some_and(|minutes| minutes == 0 || minutes > MAX_LOG_WINDOW_MINUTES)
+            {
+                return Err(bad_arguments(format!(
+                    "since_minutes must be within 1..={MAX_LOG_WINDOW_MINUTES}"
+                )));
+            }
+            if params
+                .limit
+                .is_some_and(|limit| limit == 0 || limit > MAX_LOG_EVENTS)
+            {
+                return Err(bad_arguments(format!(
+                    "limit must be within 1..={MAX_LOG_EVENTS}"
+                )));
+            }
+            ContextKind::LogRecent(params)
         }
         "read_container_list" => {
             ContextKind::ContainerList(parse_params::<ContainerListParams>(&call.arguments_json)?)

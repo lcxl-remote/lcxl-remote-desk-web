@@ -1,6 +1,7 @@
 //! OSS Signal's owner-only, read-only Device Assistant orchestrator.
 
 use actix_web::web;
+use desk_agent_protocol::agent_event::AgentEvent;
 use desk_agent_protocol::computer_use::ComputerUseReadiness;
 use desk_agent_protocol::data_lineage::{
     ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance, DestinationIdentity,
@@ -11,10 +12,11 @@ use desk_agent_protocol::device_assistant::{
     DeviceAssistantEvent, DeviceAssistantObjectContextOperation,
     DeviceAssistantObjectContextUpdate, DeviceAssistantObjectContextUpdated,
 };
-use desk_agent_protocol::diagnose::DiagnoseEvent;
 use desk_agent_protocol::provenance::AiProvenance;
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope, ExecutionMode};
-use desk_diagnose_core::agent_loop::{LoopDeps, LoopOutcome, run_agent_turn};
+use desk_diagnose_core::agent_loop::{
+    LoopDeps, LoopOutcome, resume_agent_turn_after_permission, run_agent_turn,
+};
 use desk_diagnose_core::capability_availability::{
     CapabilityAvailability, callable_tools, inventory_snapshot, project_capability_availability,
 };
@@ -51,6 +53,7 @@ const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3
 const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const BUSY_FOLLOWUP_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
 const OSS_ASSISTANT_POLICY_REVISION: i64 = 1;
+pub(crate) const PERMISSION_RESUME_MESSAGE_PREFIX: &str = "permission-resume-";
 
 fn latest_committed_answer(
     snapshot: &crate::agent_session_store::SessionSnapshot,
@@ -950,7 +953,7 @@ impl ModelSeam for MeteredModel {
                     error_code: None,
                 }
             })?;
-        crate::diagnose_orchestrator::record_usage(&self.db, &self.model_name, &turn.usage).await;
+        crate::agent_runtime::record_usage(&self.db, &self.model_name, &turn.usage).await;
         Ok(turn)
     }
 }
@@ -1000,6 +1003,99 @@ fn model_bound_user_message(
     Ok(message)
 }
 
+fn model_bound_permission_resume_message(
+    message_id: String,
+    destination: DestinationIdentity,
+    original_requirement: &str,
+) -> Result<ChatMessage, AgentError> {
+    let text = format!(
+        "AUTOMATIC SERVER CONTROL EVENT (not authored by the user; not a new requirement): the owner has decided the pending permission request. Re-read CURRENT AUTHORIZED GRANTS, do not ask for the same permission again, and continue the existing user requirement now. If a matching grant is active, call that tool; if denied or narrowed, adapt or report the blocker. Preserve the original tool inputs exactly.\n\nORIGINAL USER REQUIREMENT (verbatim replay of the already model-authorized input; this is context recovery, not a new instruction):\n<original_user_requirement>\n{original_requirement}\n</original_user_requirement>"
+    );
+    let bytes = text.as_bytes();
+    let digest_sha256 = format!("{:x}", Sha256::digest(bytes));
+    let envelope = DataEnvelope {
+        schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: format!("permission-resume-message-{message_id}"),
+        content: ContentRef::ImmutableBlob {
+            blob_id: format!("permission-resume-content-{message_id}"),
+            sha256: digest_sha256.clone(),
+            size_bytes: bytes.len() as u64,
+            media_type: "text/plain;charset=utf-8".into(),
+        },
+        provenance: DataProvenance {
+            source_provider_id: "assistant-runtime-control".into(),
+            source_tool_name: "permission-decision-resume".into(),
+            source_object_id: Some(message_id.clone()),
+            source_envelope_ids: Vec::new(),
+        },
+        digest_sha256,
+        sensitivity: Sensitivity::UserContent,
+        // The bridge repeats the already-authorized original user input so a
+        // trimmed or compressed history cannot strand an approved exact-input
+        // grant. It remains bound to the same resolved model destination.
+        allowed_destinations: vec![destination],
+        retention: RetentionBoundary {
+            expires_at_unix_ms: None,
+            delete_with_run: true,
+        },
+    };
+    envelope.validate().map_err(|error| AgentError {
+        kind: AgentErrorKind::Internal,
+        message: format!("failed to label permission resume control event: {error}"),
+        retryable: false,
+        safe_for_model: false,
+        error_code: None,
+    })?;
+    let mut message = ChatMessage::text(message_id, ChatRole::User, text);
+    message.data_envelope = Some(envelope);
+    Ok(message)
+}
+
+fn bind_exact_authorization_system_message(
+    mut message: ChatMessage,
+    destination: DestinationIdentity,
+    expires_at_unix_ms: u64,
+) -> Result<ChatMessage, AgentError> {
+    let bytes = message.text.as_bytes();
+    let digest_sha256 = format!("{:x}", Sha256::digest(bytes));
+    let short_digest = &digest_sha256[..16];
+    let envelope = DataEnvelope {
+        schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: format!("exact-authorization-{short_digest}"),
+        content: ContentRef::ImmutableBlob {
+            blob_id: format!("exact-authorization-content-{short_digest}"),
+            sha256: digest_sha256.clone(),
+            size_bytes: bytes.len() as u64,
+            media_type: "text/plain;charset=utf-8".into(),
+        },
+        provenance: DataProvenance {
+            source_provider_id: "assistant-runtime-control".into(),
+            source_tool_name: "capability-authorization".into(),
+            source_object_id: Some(format!("exact-authorization-{short_digest}")),
+            source_envelope_ids: Vec::new(),
+        },
+        digest_sha256,
+        // The projection can contain recipient/body data and opaque provider
+        // references. It is not a public system prompt merely because the
+        // server authored it.
+        sensitivity: Sensitivity::Sensitive,
+        allowed_destinations: vec![destination],
+        retention: RetentionBoundary {
+            expires_at_unix_ms: Some(expires_at_unix_ms),
+            delete_with_run: true,
+        },
+    };
+    envelope.validate().map_err(|error| AgentError {
+        kind: AgentErrorKind::Internal,
+        message: format!("failed to label exact authorization projection: {error}"),
+        retryable: false,
+        safe_for_model: false,
+        error_code: None,
+    })?;
+    message.data_envelope = Some(envelope);
+    Ok(message)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn(
     connections: web::Data<SharedConnectionMap>,
@@ -1011,10 +1107,65 @@ pub async fn run_turn(
     target_device_id: String,
     ask: DeviceAssistantAsk,
 ) {
+    run_turn_inner(
+        connections,
+        db,
+        request_id,
+        browser_connection_id,
+        target_connection_id,
+        actor_user_id,
+        target_device_id,
+        ask,
+        None,
+    )
+    .await;
+}
+
+/// Resume the exact persisted requirement after its owner records a permission
+/// decision. A hidden, server-authored protocol bridge is appended so
+/// chat-completions providers reliably start a new turn; it is not recorded as
+/// user input and carries no new requirement.
+#[allow(clippy::too_many_arguments)]
+pub async fn resume_after_permission_decision(
+    connections: web::Data<SharedConnectionMap>,
+    db: DatabaseConnection,
+    request_id: String,
+    target_connection_id: String,
+    actor_user_id: i32,
+    target_device_id: String,
+    conversation_id: String,
+    ask: DeviceAssistantAsk,
+) {
+    run_turn_inner(
+        connections,
+        db,
+        request_id,
+        String::new(),
+        target_connection_id,
+        actor_user_id,
+        target_device_id,
+        ask,
+        Some(conversation_id),
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_turn_inner(
+    connections: web::Data<SharedConnectionMap>,
+    db: DatabaseConnection,
+    request_id: String,
+    browser_connection_id: String,
+    target_connection_id: String,
+    actor_user_id: i32,
+    target_device_id: String,
+    ask: DeviceAssistantAsk,
+    resume_conversation_id: Option<String>,
+) {
     stream_event(
         connections.as_ref(),
         &browser_connection_id,
-        &DiagnoseEvent::status(&request_id, 0, "accepting"),
+        &AgentEvent::status(&request_id, 0, "accepting"),
     )
     .await;
 
@@ -1024,7 +1175,7 @@ pub async fn run_turn(
             stream_event(
                 connections.as_ref(),
                 &browser_connection_id,
-                &DiagnoseEvent::error(
+                &AgentEvent::error(
                     &request_id,
                     1,
                     transport_error(format!("failed to load model provider config: {e}")),
@@ -1040,7 +1191,7 @@ pub async fn run_turn(
             stream_event(
                 connections.as_ref(),
                 &browser_connection_id,
-                &DiagnoseEvent::error(&request_id, 1, error),
+                &AgentEvent::error(&request_id, 1, error),
             )
             .await;
             return;
@@ -1052,7 +1203,7 @@ pub async fn run_turn(
             stream_event(
                 connections.as_ref(),
                 &browser_connection_id,
-                &DiagnoseEvent::error(
+                &AgentEvent::error(
                     &request_id,
                     1,
                     transport_error(format!("failed to resolve model destination: {error}")),
@@ -1069,12 +1220,14 @@ pub async fn run_turn(
         .map(str::trim)
         .filter(|id| is_valid_client_conversation_id(id))
         .map(str::to_string);
-    let conversation_id = derive_conversation_key(
-        &actor_id,
-        &target_device_id,
-        ask.conversation_id.as_deref(),
-        &request_id,
-    );
+    let conversation_id = resume_conversation_id.clone().unwrap_or_else(|| {
+        derive_conversation_key(
+            &actor_id,
+            &target_device_id,
+            ask.conversation_id.as_deref(),
+            &request_id,
+        )
+    });
     let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
         .expect("current time is after the Unix epoch");
     let session_reader = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
@@ -1091,7 +1244,7 @@ pub async fn run_turn(
             stream_event(
                 connections.as_ref(),
                 &browser_connection_id,
-                &DiagnoseEvent::error(&request_id, 1, error),
+                &AgentEvent::error(&request_id, 1, error),
             )
             .await;
             return;
@@ -1105,7 +1258,7 @@ pub async fn run_turn(
             stream_event(
                 connections.as_ref(),
                 &browser_connection_id,
-                &DiagnoseEvent::error(
+                &AgentEvent::error(
                     &request_id,
                     1,
                     transport_error("selected Device Assistant attachment does not exist"),
@@ -1121,7 +1274,7 @@ pub async fn run_turn(
                 stream_event(
                     connections.as_ref(),
                     &browser_connection_id,
-                    &DiagnoseEvent::error(
+                    &AgentEvent::error(
                         &request_id,
                         1,
                         transport_error(format!(
@@ -1145,7 +1298,7 @@ pub async fn run_turn(
                         stream_event(
                             connections.as_ref(),
                             &browser_connection_id,
-                            &DiagnoseEvent::error(
+                            &AgentEvent::error(
                                 &request_id,
                                 1,
                                 transport_error("selected file attachment is invalid"),
@@ -1155,9 +1308,7 @@ pub async fn run_turn(
                         return;
                     }
                 };
-                if attachment.kind == ContextAttachmentKind::File
-                    && is_supported_spreadsheet_attachment(&attachment.display_summary)
-                {
+                if is_spreadsheet_input_attachment(attachment.kind, &attachment.display_summary) {
                     selected_spreadsheet_roots.push(object_ref.clone());
                 }
                 selected_file_roots.push(object_ref);
@@ -1171,7 +1322,7 @@ pub async fn run_turn(
                         stream_event(
                             connections.as_ref(),
                             &browser_connection_id,
-                            &DiagnoseEvent::error(
+                            &AgentEvent::error(
                                 &request_id,
                                 1,
                                 transport_error("selected terminal attachment is invalid"),
@@ -1210,11 +1361,30 @@ pub async fn run_turn(
             })
             .map(|reference| reference.object_ref.clone())
     });
+    let selected_browser_surface = readiness.as_ref().and_then(|readiness| {
+        readiness
+            .context_references
+            .iter()
+            .find(|reference| {
+                reference.capability == desk_agent_protocol::Capability::BrowserPageObserve
+            })
+            .map(|reference| reference.object_ref.clone())
+    });
+    let selected_outlook_surface = readiness.as_ref().and_then(|readiness| {
+        readiness
+            .context_references
+            .iter()
+            .find(|reference| {
+                reference.capability
+                    == desk_agent_protocol::Capability::CommunicationOutlookNewHandoffConfirmed
+            })
+            .map(|reference| reference.object_ref.clone())
+    });
     if office_selected && selected_office_document.is_none() {
         stream_event(
             connections.as_ref(),
             &browser_connection_id,
-            &DiagnoseEvent::error(
+            &AgentEvent::error(
                 &request_id,
                 1,
                 transport_error(
@@ -1242,6 +1412,7 @@ pub async fn run_turn(
             object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::Directory
         }) {
             selected_source_tools.insert("create_text_artifact_in_selected_directory".into());
+            selected_source_tools.insert("create_local_communication_draft".into());
         }
     }
     if !selected_spreadsheet_roots.is_empty() {
@@ -1258,10 +1429,35 @@ pub async fn run_turn(
     if !selected_terminal_roots.is_empty() {
         selected_source_tools.insert("inspect_selected_terminal_output".into());
     }
+    if selected_browser_surface.is_some() {
+        selected_source_tools.extend(
+            [
+                "browser_open_page",
+                "browser_navigate_page",
+                "browser_take_snapshot",
+                "browser_wait_for",
+                "browser_fill_form",
+                "browser_activate_element",
+                "prepare_gmail_web_draft_handoff",
+                "prepare_slack_web_message_handoff",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+    }
+    if selected_outlook_surface.is_some() {
+        selected_source_tools.insert("prepare_outlook_new_draft_handoff".into());
+    }
     selected_source_tools
         .insert(desk_diagnose_core::device_assistant::PREVIEW_COMPUTER_ACTION_TOOL.to_string());
     selected_source_tools.insert(crate::web_research::WEB_FETCH_TOOL_NAME.to_string());
     selected_source_tools.insert(crate::web_research::WEB_SEARCH_TOOL_NAME.to_string());
+    selected_source_tools.extend(
+        desk_diagnose_core::device_assistant::SYSTEM_DIAGNOSTIC_TOOL_NAMES
+            .into_iter()
+            .map(str::to_string),
+    );
+    selected_source_tools.insert("execute_confirmed_command".into());
     let export_authorization_id = format!(
         "assistant-export-{:x}",
         Sha256::digest(format!("{actor_user_id}:{target_device_id}:{request_id}").as_bytes())
@@ -1286,6 +1482,13 @@ pub async fn run_turn(
     let mut selected_tool_capability_ids = ask.selected_capability_ids.clone();
     selected_tool_capability_ids
         .push(desk_diagnose_core::device_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID.into());
+    selected_tool_capability_ids.extend(
+        desk_diagnose_core::device_assistant::SYSTEM_DIAGNOSTIC_CAPABILITY_IDS
+            .into_iter()
+            .map(str::to_string),
+    );
+    selected_tool_capability_ids
+        .push(desk_diagnose_core::device_assistant::SYSTEM_COMMAND_CAPABILITY_ID.into());
     if !selected_file_roots.is_empty() {
         selected_tool_capability_ids
             .push(desk_diagnose_core::device_assistant::FILE_METADATA_CAPABILITY_ID.into());
@@ -1300,6 +1503,10 @@ pub async fn run_turn(
         }) {
             selected_tool_capability_ids.push(
                 desk_diagnose_core::device_assistant::FILE_ARTIFACT_CREATE_CAPABILITY_ID.into(),
+            );
+            selected_tool_capability_ids.push(
+                desk_diagnose_core::device_assistant::LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID
+                    .into(),
             );
         }
     }
@@ -1328,6 +1535,26 @@ pub async fn run_turn(
         selected_tool_capability_ids
             .push(desk_diagnose_core::device_assistant::TERMINAL_OUTPUT_CAPABILITY_ID.into());
     }
+    if selected_browser_surface.is_some() {
+        selected_tool_capability_ids.extend(
+            [
+                desk_diagnose_core::device_assistant::BROWSER_OPEN_CAPABILITY_ID,
+                desk_diagnose_core::device_assistant::BROWSER_NAVIGATE_CAPABILITY_ID,
+                desk_diagnose_core::device_assistant::BROWSER_SNAPSHOT_CAPABILITY_ID,
+                desk_diagnose_core::device_assistant::BROWSER_WAIT_CAPABILITY_ID,
+                desk_diagnose_core::device_assistant::BROWSER_FILL_CAPABILITY_ID,
+                desk_diagnose_core::device_assistant::BROWSER_ACTIVATE_CAPABILITY_ID,
+                desk_diagnose_core::device_assistant::GMAIL_WEB_HANDOFF_CAPABILITY_ID,
+                desk_diagnose_core::device_assistant::SLACK_WEB_HANDOFF_CAPABILITY_ID,
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+    }
+    if selected_outlook_surface.is_some() {
+        selected_tool_capability_ids
+            .push(desk_diagnose_core::device_assistant::OUTLOOK_NEW_HANDOFF_CAPABILITY_ID.into());
+    }
     desk_diagnose_core::device_assistant::retain_selected_context_tools(
         &provider_registry,
         &mut registry,
@@ -1348,7 +1575,7 @@ pub async fn run_turn(
                 stream_event(
                     connections.as_ref(),
                     &browser_connection_id,
-                    &DiagnoseEvent::error(
+                    &AgentEvent::error(
                         &request_id,
                         1,
                         transport_error(format!("failed to load capability grants: {error}")),
@@ -1358,9 +1585,14 @@ pub async fn run_turn(
                 return;
             }
         };
+    let permission_requests = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.permission_requests.as_slice())
+        .unwrap_or_default();
     let capability_authorization =
         desk_diagnose_core::permission_tools::capability_authorization_prompt(
             &capability_grants,
+            permission_requests,
             now_unix_ms,
         );
     // Internal run projection is not a Provider capability and grants no device
@@ -1386,7 +1618,7 @@ pub async fn run_turn(
             stream_event(
                 connections.as_ref(),
                 &browser_connection_id,
-                &DiagnoseEvent::error(&request_id, 1, error),
+                &AgentEvent::error(&request_id, 1, error),
             )
             .await;
             return;
@@ -1405,6 +1637,13 @@ pub async fn run_turn(
         &ask.selected_capability_ids,
     )
     .expect("control authorizer validated selected Device Assistant context");
+    granted.extend(desk_diagnose_core::device_assistant::system_diagnostic_capabilities());
+    // The command Provider itself remains a fixed R3 one-shot exact grant.
+    // These two edge capabilities only let the daemon accept the server-owned
+    // classifier's read-only vs mutating effect after it reproduces the sealed
+    // safe-template plan; neither one exposes the legacy free-form exec tool.
+    granted.push(desk_agent_protocol::Capability::ShellExecReadonly);
+    granted.push(desk_agent_protocol::Capability::ShellExecConfirmed);
     if !selected_file_roots.is_empty() {
         granted.push(desk_agent_protocol::Capability::FileMetadataRead);
         if selected_file_roots.iter().any(|object_ref| {
@@ -1416,6 +1655,7 @@ pub async fn run_turn(
             object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::Directory
         }) {
             granted.push(desk_agent_protocol::Capability::FileArtifactCreateConfirmed);
+            granted.push(desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed);
         }
     }
     if !selected_spreadsheet_roots.is_empty() {
@@ -1433,20 +1673,39 @@ pub async fn run_turn(
     if !selected_terminal_roots.is_empty() {
         granted.push(desk_agent_protocol::Capability::TerminalOutputRead);
     }
+    if selected_browser_surface.is_some() {
+        granted.extend([
+            desk_agent_protocol::Capability::BrowserPageObserve,
+            desk_agent_protocol::Capability::BrowserPageNavigateConfirmed,
+            desk_agent_protocol::Capability::BrowserInputFallbackConfirmed,
+            desk_agent_protocol::Capability::BrowserExternalDraftWriteConfirmed,
+        ]);
+    }
+    if selected_outlook_surface.is_some() {
+        granted.push(desk_agent_protocol::Capability::CommunicationOutlookNewHandoffConfirmed);
+    }
     let mutation_enabled = granted.iter().any(|capability| {
         matches!(
             capability,
             desk_agent_protocol::Capability::FileArtifactCreateConfirmed
+                | desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed
                 | desk_agent_protocol::Capability::SpreadsheetWorkbookCreateConfirmed
                 | desk_agent_protocol::Capability::SpreadsheetFormulaWorkbookCreateConfirmed
                 | desk_agent_protocol::Capability::WordDocumentCreateConfirmed
+                | desk_agent_protocol::Capability::ShellExecConfirmed
+                | desk_agent_protocol::Capability::BrowserPageNavigateConfirmed
+                | desk_agent_protocol::Capability::BrowserInputFallbackConfirmed
+                | desk_agent_protocol::Capability::BrowserExternalDraftWriteConfirmed
+                | desk_agent_protocol::Capability::CommunicationOutlookNewHandoffConfirmed
         )
     });
     let scope = AgentScope {
         granted,
         // Even a provider configured for confirmed exec is hard-clamped here.
         mode: if mutation_enabled {
-            ExecutionMode::ConfirmEachAction
+            config
+                .execution_mode
+                .restrict_to(ExecutionMode::ConfirmEachAction)
         } else {
             ExecutionMode::ReadOnly
         },
@@ -1455,6 +1714,22 @@ pub async fn run_turn(
     };
     let clock = || chrono::Utc::now().to_rfc3339();
     let turn_id = uuid::Uuid::new_v4().to_string();
+    let (available_exec_shells, max_command_runtime_ms) = {
+        let connections = connections.read().await;
+        connections
+            .get(&target_connection_id)
+            .map(|target| {
+                (
+                    target.model.version_info.available_exec_shell_list(),
+                    target
+                        .model
+                        .version_info
+                        .max_ai_command_runtime_ms
+                        .unwrap_or(desk_agent_protocol::exec_policy::DEFAULT_TIMEOUT_MS),
+                )
+            })
+            .unwrap_or_default()
+    };
     let tools = crate::remote_tool_edge::SignalDeviceAssistantTools::new(
         db.clone(),
         provider_registry.clone(),
@@ -1469,12 +1744,45 @@ pub async fn run_turn(
         selected_file_roots,
         selected_spreadsheet_roots,
         selected_terminal_roots,
+        selected_browser_surface,
+        selected_outlook_surface,
         ask.question.clone(),
         conversation_id.clone(),
         turn_id.clone(),
         OSS_ASSISTANT_POLICY_REVISION,
         readiness_revision,
+        available_exec_shells,
+        max_command_runtime_ms,
     );
+    let mut system_prompt = build_device_assistant_system_message_with_catalog(
+        ask.locale.as_deref(),
+        &format!("{capability_catalog}\n\n{}", capability_authorization.text),
+    );
+    if resume_conversation_id.is_some() {
+        system_prompt.text.push_str(
+            "\n\nPERMISSION DECISION RESUME (server authoritative): the owner has just decided the pending permission request. Re-read CURRENT AUTHORIZED GRANTS above. Do not request or ask for the same permission again. If a matching active grant exists, continue the existing user requirement now and call the authorized tool. If the item was denied or narrowed so the call no longer matches, adapt the plan or explain the remaining blocker. This trigger adds no new user requirement and does not change the original tool inputs.",
+        );
+    }
+    if let Some(expires_at_unix_ms) =
+        capability_authorization.approved_exact_input_expires_at_unix_ms
+    {
+        system_prompt = match bind_exact_authorization_system_message(
+            system_prompt,
+            destination.clone(),
+            expires_at_unix_ms,
+        ) {
+            Ok(system_prompt) => system_prompt,
+            Err(error) => {
+                stream_event(
+                    connections.as_ref(),
+                    &browser_connection_id,
+                    &AgentEvent::error(&request_id, 1, error),
+                )
+                .await;
+                return;
+            }
+        };
+    }
     let deps = LoopDeps {
         session_seam: &sessions,
         model: &model,
@@ -1484,16 +1792,62 @@ pub async fn run_turn(
         provider_registry: Some(&provider_registry),
         capability_inventory: Some(&inventory),
         response_format: ResponseFormatSpec::None,
-        system_prompt: build_device_assistant_system_message_with_catalog(
-            ask.locale.as_deref(),
-            &format!("{capability_catalog}\n\n{capability_authorization}"),
-        ),
+        system_prompt,
         max_steps_per_turn: config.max_steps_per_turn,
         max_same_tool_per_turn: config.max_same_tool_calls_per_turn,
         clock: &clock,
         heartbeat: Some(&heartbeat),
     };
     let accepted_at = clock();
+    if resume_conversation_id.is_some() {
+        let decision_message = match model_bound_permission_resume_message(
+            format!("{request_id}-decision"),
+            destination,
+            &ask.question,
+        ) {
+            Ok(message) => message,
+            Err(error) => {
+                log::warn!("[device-assistant] failed to bind permission resume event: {error:?}");
+                return;
+            }
+        };
+        let claim = ClaimTurnParams {
+            conversation_id,
+            actor_id,
+            device_id: target_device_id,
+            policy_revision: OSS_ASSISTANT_POLICY_REVISION,
+            current_pdp_scope: scope,
+            turn_id: turn_id.clone(),
+            request_id: None,
+            connection_id: None,
+            trigger_origin: TriggerOrigin::PermissionDecision,
+            now: accepted_at,
+        };
+        let mut sink =
+            StreamingTurnSink::starting_at(|_event: DeviceAssistantEvent| {}, request_id, 0);
+        sink.set_provenance(AiProvenance::stamp(
+            config.model,
+            Some(chrono::Utc::now().to_rfc3339()),
+        ));
+        sink.turn_started(&turn_id);
+        match resume_agent_turn_after_permission(&deps, claim, decision_message, &mut sink).await {
+            Ok(LoopOutcome::TurnBusy) => {
+                // A newer owner follow-up won the claim. Its input supersedes
+                // this grant-triggered resume, so no retry is appropriate.
+            }
+            Ok(outcome) => sink.finish_outcome(&outcome),
+            Err(error) => {
+                log::warn!(
+                    "[device-assistant] permission-resumed turn failed: kind={:?}, retryable={}, message={}",
+                    error.kind,
+                    error.retryable,
+                    error.message
+                );
+                sink.error(error);
+            }
+        }
+        return;
+    }
     let user =
         match model_bound_user_message(ask.client_message_id.clone(), ask.question, destination) {
             Ok(user) => user,
@@ -1501,7 +1855,7 @@ pub async fn run_turn(
                 stream_event(
                     connections.as_ref(),
                     &browser_connection_id,
-                    &DiagnoseEvent::error(&request_id, 1, error),
+                    &AgentEvent::error(&request_id, 1, error),
                 )
                 .await;
                 return;
@@ -1527,7 +1881,7 @@ pub async fn run_turn(
             stream_event(
                 connections.as_ref(),
                 &browser_connection_id,
-                &DiagnoseEvent::error(&request_id, 1, error),
+                &AgentEvent::error(&request_id, 1, error),
             )
             .await;
             return;
@@ -1536,7 +1890,7 @@ pub async fn run_turn(
     stream_event(
         connections.as_ref(),
         &browser_connection_id,
-        &DiagnoseEvent::status(&request_id, 1, "accepted"),
+        &AgentEvent::status(&request_id, 1, "accepted"),
     )
     .await;
     if ack.already_handled {
@@ -1546,7 +1900,7 @@ pub async fn run_turn(
                     stream_event(
                         connections.as_ref(),
                         &browser_connection_id,
-                        &DiagnoseEvent::answer(&request_id, 2, answer),
+                        &AgentEvent::answer(&request_id, 2, answer),
                     )
                     .await;
                     return;
@@ -1557,7 +1911,7 @@ pub async fn run_turn(
                 stream_event(
                     connections.as_ref(),
                     &browser_connection_id,
-                    &DiagnoseEvent::error(&request_id, 2, error),
+                    &AgentEvent::error(&request_id, 2, error),
                 )
                 .await;
                 return;
@@ -1628,6 +1982,12 @@ pub async fn run_turn(
                 break;
             }
             Err(error) => {
+                log::warn!(
+                    "[device-assistant] owner turn failed: kind={:?}, retryable={}, message={}",
+                    error.kind,
+                    error.retryable,
+                    error.message
+                );
                 sink.error(error);
                 break;
             }
@@ -1644,6 +2004,12 @@ fn is_supported_spreadsheet_attachment(display_summary: &str) -> bool {
         .any(|extension| display_summary.ends_with(extension))
 }
 
+fn is_spreadsheet_input_attachment(kind: ContextAttachmentKind, display_summary: &str) -> bool {
+    kind == ContextAttachmentKind::DirectorySelection
+        || (kind == ContextAttachmentKind::File
+            && is_supported_spreadsheet_attachment(display_summary))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1652,6 +2018,90 @@ mod tests {
     use sea_orm::{Database, EntityTrait};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn spreadsheet_tools_accept_explicit_directories_and_supported_files_only() {
+        assert!(is_spreadsheet_input_attachment(
+            ContextAttachmentKind::DirectorySelection,
+            "Quarterly reports"
+        ));
+        assert!(is_spreadsheet_input_attachment(
+            ContextAttachmentKind::File,
+            "report.XLSX"
+        ));
+        assert!(!is_spreadsheet_input_attachment(
+            ContextAttachmentKind::File,
+            "notes.txt"
+        ));
+    }
+
+    #[test]
+    fn permission_resume_bridge_replays_original_requirement_with_user_sensitivity() {
+        let destination = DestinationIdentity::Model {
+            connection_id: "gateway-1".into(),
+            connection_revision: 2,
+            model_id: "model-1".into(),
+            profile_revision: 3,
+        };
+        let message = model_bound_permission_resume_message(
+            "permission-resume-request-1-decision".into(),
+            destination.clone(),
+            "prepare the exact draft and do not send it",
+        )
+        .unwrap();
+
+        assert_eq!(message.role, ChatRole::User);
+        assert!(message.text.starts_with("AUTOMATIC SERVER CONTROL EVENT"));
+        assert!(
+            message
+                .text
+                .contains("prepare the exact draft and do not send it")
+        );
+        let envelope = message.data_envelope.unwrap();
+        assert_eq!(envelope.sensitivity, Sensitivity::UserContent);
+        assert_eq!(envelope.allowed_destinations, vec![destination]);
+        assert_eq!(
+            envelope.provenance.source_provider_id,
+            "assistant-runtime-control"
+        );
+        assert!(envelope.retention.delete_with_run);
+        envelope.validate().unwrap();
+    }
+
+    #[test]
+    fn exact_authorization_projection_is_not_labeled_as_public_system_text() {
+        let destination = DestinationIdentity::Model {
+            connection_id: "gateway-1".into(),
+            connection_revision: 2,
+            model_id: "model-1".into(),
+            profile_revision: 3,
+        };
+        let message = ChatMessage::text(
+            "system-exact-authorization",
+            ChatRole::System,
+            r#"approved_exact_input={"body":"private draft"}"#,
+        );
+        let bound = bind_exact_authorization_system_message(
+            message,
+            destination.clone(),
+            1_900_000_000_000,
+        )
+        .unwrap();
+
+        let envelope = bound.data_envelope.unwrap();
+        assert_eq!(envelope.sensitivity, Sensitivity::Sensitive);
+        assert_eq!(envelope.allowed_destinations, vec![destination]);
+        assert_eq!(
+            envelope.retention.expires_at_unix_ms,
+            Some(1_900_000_000_000)
+        );
+        assert!(envelope.retention.delete_with_run);
+        assert_eq!(
+            envelope.provenance.source_tool_name,
+            "capability-authorization"
+        );
+        envelope.validate().unwrap();
+    }
 
     async fn capture_one_openai_request(listener: TcpListener) -> Vec<u8> {
         let (mut socket, _) = listener.accept().await.unwrap();

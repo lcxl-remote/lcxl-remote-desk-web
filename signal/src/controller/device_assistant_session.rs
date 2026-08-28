@@ -1,4 +1,4 @@
-//! Browser-facing read of an OSS Signal AI-diagnose conversation.
+//! Browser-facing access to an OSS Device Assistant conversation.
 //!
 //! The browser supplies the same target connection and conversation intent used
 //! by the signaling turn. The server resolves the target's authenticated client
@@ -6,6 +6,7 @@
 //! select an arbitrary SQLite row.
 
 use actix_web::{HttpResponse, get, post, web};
+use desk_agent_protocol::device_assistant::DeviceAssistantAsk;
 use desk_diagnose_core::chat::ChatMessage;
 use desk_diagnose_core::context_attachment::{
     AttachmentStaleReason, AttachmentState, ContextAttachment, ContextAttachmentKind,
@@ -26,17 +27,17 @@ use crate::agent_session_store::{PermissionGrantIssuanceContext, SignalAgentSess
 use crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
 use crate::error::DeskSignalError;
 
-pub const TAG: &str = "DiagnoseSession";
+pub const TAG: &str = "DeviceAssistantSession";
 
 #[derive(Debug, Deserialize, ToSchema)]
-pub struct DiagnoseSessionQuery {
+pub struct DeviceAssistantSessionQuery {
     pub connection: String,
     pub conversation: Option<String>,
     pub session: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-pub struct DiagnoseSessionListQuery {
+pub struct DeviceAssistantSessionListQuery {
     pub connection: String,
     pub limit: Option<u64>,
 }
@@ -303,11 +304,11 @@ fn stale_reason_name(reason: AttachmentStaleReason) -> &'static str {
 
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct DiagnoseSessionSnapshotDto {
+pub struct DeviceAssistantSessionSnapshotDto {
     pub seq: i64,
     /// Whether the persisted turn is still running or awaiting approval.
     pub active: bool,
-    /// Diagnose request currently represented by the persisted turn.
+    /// Device Assistant request currently represented by the persisted turn.
     pub request_id: Option<String>,
     /// Running background command generation that may be cancelled.
     pub active_execution_generation: Option<String>,
@@ -564,7 +565,7 @@ impl From<desk_diagnose_core::dynamic_run::PermissionRequest> for PermissionRequ
 
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct DiagnoseSessionSummaryDto {
+pub struct DeviceAssistantSessionSummaryDto {
     pub session_id: String,
     pub conversation_id: Option<String>,
     pub first_question: Option<String>,
@@ -576,32 +577,32 @@ pub struct DiagnoseSessionSummaryDto {
 
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct DiagnoseSessionListDto {
-    pub sessions: Vec<DiagnoseSessionSummaryDto>,
+pub struct DeviceAssistantSessionListDto {
+    pub sessions: Vec<DeviceAssistantSessionSummaryDto>,
 }
 
 fn not_accessible() -> HttpResponse {
     HttpResponse::Ok().json(RestResponse::<()>::failed(
         DeskErrorCode::PERMISSION_ERROR,
-        "Diagnose session not found or not accessible".to_string(),
+        "Device Assistant session not found or not accessible".to_string(),
     ))
 }
 
 #[utoipa::path(
     tag = TAG,
-    summary = "Read an AI-diagnose conversation snapshot (browser view)",
+    summary = "Read a Device Assistant conversation snapshot (browser view)",
     params(
         ("connection" = String, Query, description = "Target connection id"),
         ("conversation" = Option<String>, Query, description = "Client conversation intent"),
         ("session" = Option<String>, Query, description = "Opaque session id from history list"),
     ),
     responses((status = 200, description = "Conversation snapshot, or a uniform \
-        not-found/not-accessible response", body = RestResponse<DiagnoseSessionSnapshotDto>)),
+        not-found/not-accessible response", body = RestResponse<DeviceAssistantSessionSnapshotDto>)),
 )]
-#[get("/my/diagnose-session")]
-pub async fn get_diagnose_session(
+#[get("/my/device-assistant-session")]
+pub async fn get_device_assistant_session(
     connection_map: web::Data<SharedConnectionMap>,
-    query: web::Query<DiagnoseSessionQuery>,
+    query: web::Query<DeviceAssistantSessionQuery>,
 ) -> Result<HttpResponse, DeskSignalError> {
     let target_audience = {
         let map = connection_map.read().await;
@@ -663,7 +664,7 @@ pub async fn get_diagnose_session(
                 )
             })?;
             Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
-                DiagnoseSessionSnapshotDto {
+                DeviceAssistantSessionSnapshotDto {
                     seq: snapshot.seq,
                     active: snapshot.active,
                     request_id: snapshot.request_id,
@@ -679,7 +680,16 @@ pub async fn get_diagnose_session(
                         .collect(),
                     background_tasks: background_tasks.into_iter().map(Into::into).collect(),
                     capability_grants: capability_grants.into_iter().map(Into::into).collect(),
-                    messages: snapshot.messages.into_iter().map(Into::into).collect(),
+                    messages: snapshot
+                        .messages
+                        .into_iter()
+                        .filter(|message| {
+                            !message.message_id.starts_with(
+                                crate::device_assistant_orchestrator::PERMISSION_RESUME_MESSAGE_PREFIX,
+                            )
+                        })
+                        .map(Into::into)
+                        .collect(),
                     context_notices: snapshot
                         .context_notices
                         .into_iter()
@@ -703,8 +713,8 @@ pub async fn get_diagnose_session(
     request_body = CapabilityGrantRevokeBody,
     responses((status = 200, description = "Revoked grant metadata; no work is dispatched", body = RestResponse<CapabilityGrantDto>)),
 )]
-#[post("/my/diagnose-session/capability-grant/revoke")]
-pub async fn revoke_diagnose_capability_grant(
+#[post("/my/device-assistant-session/capability-grant/revoke")]
+pub async fn revoke_device_assistant_capability_grant(
     connection_map: web::Data<SharedConnectionMap>,
     body: web::Json<CapabilityGrantRevokeBody>,
 ) -> Result<HttpResponse, DeskSignalError> {
@@ -778,8 +788,8 @@ pub async fn revoke_diagnose_capability_grant(
     request_body = PermissionDecisionBody,
     responses((status = 200, description = "Durable decision projection; no tool is dispatched", body = RestResponse<PermissionDecisionResponse>)),
 )]
-#[post("/my/diagnose-session/permission-decision")]
-pub async fn decide_diagnose_permission(
+#[post("/my/device-assistant-session/permission-decision")]
+pub async fn decide_device_assistant_permission(
     connection_map: web::Data<SharedConnectionMap>,
     body: web::Json<PermissionDecisionBody>,
 ) -> Result<HttpResponse, DeskSignalError> {
@@ -826,6 +836,19 @@ pub async fn decide_diagnose_permission(
             )
         })?;
     let readiness_revision = readiness.readiness.revision;
+    let implicit_fresh_object_refs = readiness
+        .readiness
+        .context_references
+        .iter()
+        .filter(|reference| {
+            matches!(
+                reference.object_ref.object_kind,
+                desk_agent_protocol::computer_use::ObjectKind::BrowserSurface
+                    | desk_agent_protocol::computer_use::ObjectKind::Application
+            )
+        })
+        .map(|reference| reference.object_ref.clone())
+        .collect::<Vec<_>>();
     let reports = provider_readiness_reports(&readiness.readiness).map_err(|error| {
         DeskSignalError::new_custom_error(
             DeskErrorCode::PRECONDITION_FAILED,
@@ -859,6 +882,7 @@ pub async fn decide_diagnose_permission(
                 inventory: &inventory,
                 readiness_revision,
                 now_unix_ms,
+                implicit_fresh_object_refs: &implicit_fresh_object_refs,
             },
             &now,
         )
@@ -866,6 +890,76 @@ pub async fn decide_diagnose_permission(
         .map_err(|error| {
             DeskSignalError::new_custom_error(DeskErrorCode::PRECONDITION_FAILED, &error.message)
         })?;
+    if let Some(snapshot) = store
+        .read_snapshot_for_subject(&session_id, &actor_id, &target_audience)
+        .await
+        .map_err(|error| {
+            DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
+        })?
+        && let Some(question) = snapshot
+            .messages
+            .iter()
+            .rev()
+            .find(|message| {
+                message.role == desk_diagnose_core::chat::ChatRole::User
+                    && !message.message_id.starts_with(
+                        crate::device_assistant_orchestrator::PERMISSION_RESUME_MESSAGE_PREFIX,
+                    )
+            })
+            .map(|message| message.text.clone())
+    {
+        let active_attachments = snapshot
+            .context_attachments
+            .iter()
+            .filter(|attachment| attachment.is_active_at(now_unix_ms))
+            .collect::<Vec<_>>();
+        let selected_attachment_ids = active_attachments
+            .iter()
+            .map(|attachment| attachment.attachment_id.clone())
+            .collect::<Vec<_>>();
+        let mut selected_capability_ids = active_attachments
+            .iter()
+            .map(|attachment| attachment.object_ref.source_capability_id.clone())
+            .filter(|capability_id| {
+                matches!(
+                    capability_id.as_str(),
+                    desk_diagnose_core::device_assistant::DESKTOP_SESSION_CAPABILITY_ID
+                        | desk_diagnose_core::device_assistant::DESKTOP_UI_CAPABILITY_ID
+                        | desk_diagnose_core::device_assistant::OFFICE_DOCUMENT_CAPABILITY_ID
+                        | desk_diagnose_core::device_assistant::CURRENT_SCREEN_CAPABILITY_ID
+                )
+            })
+            .collect::<Vec<_>>();
+        selected_capability_ids.sort();
+        selected_capability_ids.dedup();
+        let resume_request_id = format!("permission-resume-{}", body.request_id);
+        let resume_ask = DeviceAssistantAsk {
+            question,
+            client_message_id: resume_request_id.clone(),
+            conversation_id: body.conversation.clone(),
+            locale: None,
+            selected_capability_ids,
+            selected_attachment_ids,
+        };
+        let resume_connections = connection_map.clone();
+        let resume_db = crate::db::get_db().clone();
+        let resume_target_connection = body.connection.clone();
+        let resume_target_audience = target_audience.clone();
+        let resume_session_id = session_id.clone();
+        actix_web::rt::spawn(async move {
+            crate::device_assistant_orchestrator::resume_after_permission_decision(
+                resume_connections,
+                resume_db,
+                resume_request_id,
+                resume_target_connection,
+                SINGLE_ACCOUNT_USER_ID,
+                resume_target_audience,
+                resume_session_id,
+                resume_ask,
+            )
+            .await;
+        });
+    }
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
         PermissionDecisionResponse {
             state: state.into(),
@@ -879,8 +973,8 @@ pub async fn decide_diagnose_permission(
     request_body = BackgroundCancelBody,
     responses((status = 200, description = "Durable cancellation intent; Provider delivery is asynchronous", body = RestResponse<BackgroundTaskDto>)),
 )]
-#[post("/my/diagnose-session/background-task/cancel")]
-pub async fn cancel_diagnose_background_task(
+#[post("/my/device-assistant-session/background-task/cancel")]
+pub async fn cancel_device_assistant_background_task(
     connection_map: web::Data<SharedConnectionMap>,
     body: web::Json<BackgroundCancelBody>,
 ) -> Result<HttpResponse, DeskSignalError> {
@@ -951,18 +1045,18 @@ pub async fn cancel_diagnose_background_task(
 
 #[utoipa::path(
     tag = TAG,
-    summary = "List recent AI-diagnose conversations for a device",
+    summary = "List recent Device Assistant conversations for a device",
     params(
         ("connection" = String, Query, description = "Target connection id"),
         ("limit" = Option<u64>, Query, description = "Maximum rows, default 30 and capped at 100"),
     ),
-    responses((status = 200, description = "Authorized recent diagnose sessions",
-        body = RestResponse<DiagnoseSessionListDto>)),
+    responses((status = 200, description = "Authorized recent Device Assistant sessions",
+        body = RestResponse<DeviceAssistantSessionListDto>)),
 )]
-#[get("/my/diagnose-sessions")]
-pub async fn list_diagnose_sessions(
+#[get("/my/device-assistant-sessions")]
+pub async fn list_device_assistant_sessions(
     connection_map: web::Data<SharedConnectionMap>,
-    query: web::Query<DiagnoseSessionListQuery>,
+    query: web::Query<DeviceAssistantSessionListQuery>,
 ) -> Result<HttpResponse, DeskSignalError> {
     let target_audience = {
         let map = connection_map.read().await;
@@ -982,14 +1076,14 @@ pub async fn list_diagnose_sessions(
     let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
     let limit = query.limit.unwrap_or(30).clamp(1, 100);
     let summaries = SignalAgentSessionStore::new(crate::db::get_db().clone())
-        .list_diagnose_sessions(&actor_id, &target_audience, limit)
+        .list_device_assistant_sessions(&actor_id, &target_audience, limit)
         .await
         .map_err(|error| {
             DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
         })?;
     let sessions = summaries
         .into_iter()
-        .map(|summary| DiagnoseSessionSummaryDto {
+        .map(|summary| DeviceAssistantSessionSummaryDto {
             session_id: summary.session_id,
             conversation_id: summary.client_conversation_id,
             first_question: summary.first_question,
@@ -999,11 +1093,9 @@ pub async fn list_diagnose_sessions(
             message_count: summary.message_count,
         })
         .collect();
-    Ok(
-        HttpResponse::Ok().json(RestResponse::succeed_with_data(DiagnoseSessionListDto {
-            sessions,
-        })),
-    )
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
+        DeviceAssistantSessionListDto { sessions },
+    )))
 }
 
 #[cfg(test)]

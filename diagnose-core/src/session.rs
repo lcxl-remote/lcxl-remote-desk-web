@@ -350,6 +350,8 @@ impl ExecutionState {
 /// `User` is a control-end request (a browser / app follow-up). `ExecCompletion`
 /// is an automation turn the manager fires by itself after a background command
 /// finishes, so the model reacts to the result without a human prompt.
+/// `PermissionDecision` resumes the same owner-directed requirement after the
+/// owner records a grant decision; it appends no synthetic user message.
 ///
 /// The origin is adopted at the turn boundary (part of the claim) and pins one
 /// security-relevant invariant for the whole turn: an automation turn must not be
@@ -364,6 +366,9 @@ pub enum TriggerOrigin {
     /// A control-end (browser / app) request. The default for any turn.
     #[default]
     User,
+    /// An owner decision resumes the existing requirement. It may consume a
+    /// matching grant, but does not reset the task's automation chain.
+    PermissionDecision,
     /// A manager-fired automation turn reacting to a completed background command.
     /// Retained only to deserialize sessions written before generic work origins.
     ExecCompletion,
@@ -373,15 +378,13 @@ pub enum TriggerOrigin {
 
 /// User-facing surface that owns an agent session.
 ///
-/// Older persisted rows predate this discriminator and deserialize as
-/// [`Unknown`]. Callers may keep those rows visible for backward-compatible
-/// read-only history, while newly created sessions are tagged precisely.
+/// `Unknown` exists only as the short-lived default before a newly constructed
+/// session is assigned its owning surface; persisted rows must be explicit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentSessionSurface {
     #[default]
     Unknown,
-    Diagnose,
     TerminalCopilot,
     DeviceAssistant,
 }
@@ -391,7 +394,10 @@ impl TriggerOrigin {
     /// `User` turn may; an `ExecCompletion` turn is barred so completions cannot
     /// drive an unbounded self-triggering chain of executions.
     pub fn allows_new_mutation(self) -> bool {
-        matches!(self, TriggerOrigin::User)
+        matches!(
+            self,
+            TriggerOrigin::User | TriggerOrigin::PermissionDecision
+        )
     }
 }
 
@@ -981,18 +987,9 @@ impl PersistedAgentSession {
         Ok(())
     }
 
-    /// Enforce conversation-domain separation before legacy metadata adoption.
-    /// A legacy `Unknown` row may remain visible/adoptable from the historical
-    /// Diagnose/TerminalCopilot surfaces, but it can never be upgraded into a
-    /// mutation-capable DeviceAssistant conversation.
+    /// Enforce conversation-domain separation. Persisted sessions with no
+    /// explicit surface fail closed; this system has no legacy adoption path.
     pub fn check_surface(&self, requested: AgentSessionSurface) -> Result<(), SubjectMismatch> {
-        if self.surface == AgentSessionSurface::Unknown {
-            return if requested == AgentSessionSurface::DeviceAssistant {
-                Err(SubjectMismatch::Surface)
-            } else {
-                Ok(())
-            };
-        }
         if self.surface != requested {
             return Err(SubjectMismatch::Surface);
         }
@@ -1140,6 +1137,7 @@ impl PersistedAgentSession {
                 self.chain_id = turn_id.to_string();
                 self.automation_turns_used = 0;
             }
+            TriggerOrigin::PermissionDecision => {}
             TriggerOrigin::ExecCompletion | TriggerOrigin::WorkCompletion { .. } => {
                 self.automation_turns_used = self.automation_turns_used.saturating_add(1);
             }
@@ -1891,6 +1889,14 @@ mod tests {
         s.adopt_trigger(TriggerOrigin::ExecCompletion, "auto-b");
         assert_eq!(s.automation_turns_used, 2);
 
+        // An owner permission decision can consume the newly issued grant but
+        // neither opens a fresh chain nor spends automation budget.
+        s.adopt_trigger(TriggerOrigin::PermissionDecision, "permission-a");
+        assert_eq!(s.trigger_origin, TriggerOrigin::PermissionDecision);
+        assert!(s.trigger_origin.allows_new_mutation());
+        assert_eq!(s.chain_id, "u1");
+        assert_eq!(s.automation_turns_used, 2);
+
         // A new user turn supersedes the chain and resets the budget.
         s.adopt_trigger(TriggerOrigin::User, "u2");
         assert_eq!(s.chain_id, "u2");
@@ -1934,19 +1940,22 @@ mod tests {
     }
 
     #[test]
-    fn surface_check_never_upgrades_legacy_history_into_device_assistant() {
-        let mut legacy = session();
-        assert_eq!(legacy.surface, AgentSessionSurface::Unknown);
-        assert!(legacy.check_surface(AgentSessionSurface::Diagnose).is_ok());
+    fn surface_check_rejects_unassigned_and_cross_surface_sessions() {
+        let mut session = session();
+        assert_eq!(session.surface, AgentSessionSurface::Unknown);
         assert_eq!(
-            legacy.check_surface(AgentSessionSurface::DeviceAssistant),
+            session.check_surface(AgentSessionSurface::DeviceAssistant),
             Err(SubjectMismatch::Surface)
         );
 
-        legacy.adopt_client_metadata(None, AgentSessionSurface::Diagnose);
-        assert!(legacy.check_surface(AgentSessionSurface::Diagnose).is_ok());
+        session.adopt_client_metadata(None, AgentSessionSurface::DeviceAssistant);
+        assert!(
+            session
+                .check_surface(AgentSessionSurface::DeviceAssistant)
+                .is_ok()
+        );
         assert_eq!(
-            legacy.check_surface(AgentSessionSurface::TerminalCopilot),
+            session.check_surface(AgentSessionSurface::TerminalCopilot),
             Err(SubjectMismatch::Surface)
         );
     }

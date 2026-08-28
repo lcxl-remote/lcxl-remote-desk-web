@@ -209,7 +209,7 @@ pub fn inspect(
                 break;
             }
             let (mut listed, listed_truncated) =
-                enumerate_directory(&stored, opened, remaining, &directory_filter)?;
+                enumerate_directory(&stored, &opened, remaining, &directory_filter)?;
             directory_entries.append(&mut listed);
             truncated |= listed_truncated;
         }
@@ -362,7 +362,7 @@ fn invalid_file_filter() -> AgentError {
 #[cfg(windows)]
 fn enumerate_directory(
     stored: &StoredFile,
-    opened: OpenedFile,
+    opened: &OpenedFile,
     max_entries: usize,
     filter: &ValidatedDirectoryFilter,
 ) -> Result<(Vec<DirectoryEntryProjection>, bool), AgentError> {
@@ -495,7 +495,7 @@ fn windows_file_time_value(value: i64) -> Option<DateTime<Utc>> {
 #[cfg(not(windows))]
 fn enumerate_directory(
     _stored: &StoredFile,
-    _opened: OpenedFile,
+    _opened: &OpenedFile,
     _max_entries: usize,
     _filter: &ValidatedDirectoryFilter,
 ) -> Result<(Vec<DirectoryEntryProjection>, bool), AgentError> {
@@ -543,10 +543,17 @@ pub fn read_text(params: &FileContentReadParams) -> Result<FileContentReadOutput
         ));
     }
     let mut bytes = Vec::with_capacity(opened.metadata.len() as usize);
-    opened
-        .handle
+    Read::by_ref(&mut opened.handle)
+        .take(params.max_bytes as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|cause| io_error("read selected file handle", cause))?;
+    if bytes.len() > params.max_bytes as usize {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "selected file grew beyond the text read ceiling while it was being read",
+            false,
+        ));
+    }
     if bytes.contains(&0) {
         return Err(error(
             AgentErrorKind::InvalidInput,
@@ -629,10 +636,17 @@ pub fn read_verified_bytes(
         ));
     }
     let mut bytes = Vec::with_capacity(opened.metadata.len() as usize);
-    opened
-        .handle
+    Read::by_ref(&mut opened.handle)
+        .take(max_bytes + 1)
         .read_to_end(&mut bytes)
         .map_err(|cause| io_error("read selected file handle", cause))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "selected file grew beyond the byte read ceiling while it was being read",
+            false,
+        ));
+    }
     Ok(VerifiedFileBytes {
         display_name: stored
             .path
@@ -652,6 +666,198 @@ pub fn read_verified_bytes(
     Err(error(
         AgentErrorKind::UnsupportedCapability,
         "handle-bound file reading is currently enabled only on Windows",
+        false,
+    ))
+}
+
+/// Resolve explicit spreadsheet files and direct spreadsheet children of an
+/// explicitly selected directory. Directory children are never minted as
+/// reusable references: they are enumerated and opened relative to the same
+/// retained directory handle within this call.
+#[cfg(windows)]
+pub fn read_verified_spreadsheet_inputs(
+    roots: &[ObjectRef],
+    max_files: usize,
+    max_file_bytes: u64,
+) -> Result<(Vec<VerifiedFileBytes>, bool), AgentError> {
+    use anyhow::{Context, anyhow, bail};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows::Wdk::Storage::FileSystem::{
+        FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        NtCreateFile,
+    };
+    use windows::Win32::Foundation::{
+        HANDLE, OBJ_CASE_INSENSITIVE, STATUS_SUCCESS, UNICODE_STRING,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ, GetFileInformationByHandle,
+        SYNCHRONIZE,
+    };
+    use windows::Win32::System::IO::IO_STATUS_BLOCK;
+    use windows::core::PWSTR;
+
+    fn read_relative(
+        directory: &File,
+        display_name: &str,
+        max_file_bytes: u64,
+    ) -> anyhow::Result<VerifiedFileBytes> {
+        if display_name.is_empty()
+            || display_name.len() > 512
+            || matches!(display_name, "." | "..")
+            || display_name
+                .chars()
+                .any(|character| character.is_control() || "\\/:*?\"<>|".contains(character))
+        {
+            bail!("enumerated spreadsheet name is not one safe Windows leaf component");
+        }
+        let mut utf16 = display_name.encode_utf16().collect::<Vec<_>>();
+        let byte_len = utf16
+            .len()
+            .checked_mul(std::mem::size_of::<u16>())
+            .and_then(|length| u16::try_from(length).ok())
+            .ok_or_else(|| anyhow!("spreadsheet name exceeds UNICODE_STRING bounds"))?;
+        let unicode_name = UNICODE_STRING {
+            Length: byte_len,
+            MaximumLength: byte_len,
+            Buffer: PWSTR(utf16.as_mut_ptr()),
+        };
+        let attributes = OBJECT_ATTRIBUTES {
+            Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+            RootDirectory: HANDLE(directory.as_raw_handle()),
+            ObjectName: &unicode_name,
+            Attributes: OBJ_CASE_INSENSITIVE,
+            SecurityDescriptor: std::ptr::null(),
+            SecurityQualityOfService: std::ptr::null(),
+        };
+        let mut handle = HANDLE::default();
+        let mut io_status = IO_STATUS_BLOCK::default();
+        let status = unsafe {
+            NtCreateFile(
+                &mut handle,
+                FILE_GENERIC_READ | SYNCHRONIZE,
+                &attributes,
+                &mut io_status,
+                None,
+                FILE_ATTRIBUTE_NORMAL,
+                FILE_SHARE_READ | FILE_SHARE_DELETE,
+                FILE_OPEN,
+                FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+                None,
+                0,
+            )
+        };
+        if status != STATUS_SUCCESS {
+            bail!(
+                "open directory spreadsheet failed closed with NTSTATUS {:#x}",
+                status.0 as u32
+            );
+        }
+        let mut file = unsafe { File::from_raw_handle(handle.0) };
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe {
+            GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut information)
+                .context("read directory spreadsheet attributes")?;
+        }
+        if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            bail!("directory spreadsheet child is a reparse point");
+        }
+        let metadata = file
+            .metadata()
+            .context("read directory spreadsheet metadata")?;
+        if !metadata.is_file() || metadata.len() > max_file_bytes {
+            bail!("directory spreadsheet child exceeds its type or size ceiling");
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        Read::by_ref(&mut file)
+            .take(max_file_bytes + 1)
+            .read_to_end(&mut bytes)
+            .context("read directory spreadsheet handle")?;
+        if bytes.len() as u64 > max_file_bytes {
+            bail!("directory spreadsheet child grew beyond its size ceiling");
+        }
+        Ok(VerifiedFileBytes {
+            display_name: display_name.to_string(),
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            bytes,
+        })
+    }
+
+    if roots.is_empty() || max_files == 0 || max_files > 8 || max_file_bytes == 0 {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "spreadsheet directory expansion exceeds its frozen ceiling",
+            false,
+        ));
+    }
+    let filter = ValidatedDirectoryFilter {
+        file_extensions: vec![".xlsx".into(), ".csv".into(), ".tsv".into()],
+        ..Default::default()
+    };
+    let mut files = Vec::new();
+    let mut truncated = false;
+    for root in roots {
+        if files.len() >= max_files {
+            truncated = true;
+            break;
+        }
+        match root.object_kind {
+            ObjectKind::File => files.push(read_verified_bytes(root, max_file_bytes)?),
+            ObjectKind::Directory => {
+                let stored = resolve(root)?;
+                let opened = open_verified_for_read(&stored.path)?;
+                if opened.identity != stored.identity || !opened.metadata.is_dir() {
+                    return Err(error(
+                        AgentErrorKind::InvalidInput,
+                        "selected spreadsheet directory changed after reference issuance",
+                        false,
+                    ));
+                }
+                let (mut entries, directory_truncated) =
+                    enumerate_directory(&stored, &opened, MAX_DIRECTORY_ENTRIES, &filter)?;
+                entries.sort_by(|left, right| {
+                    left.display_name
+                        .to_ascii_lowercase()
+                        .cmp(&right.display_name.to_ascii_lowercase())
+                        .then_with(|| left.display_name.cmp(&right.display_name))
+                });
+                let remaining = max_files - files.len();
+                truncated |= directory_truncated || entries.len() > remaining;
+                for entry in entries.into_iter().take(remaining) {
+                    files.push(
+                        read_relative(&opened.handle, &entry.display_name, max_file_bytes)
+                            .map_err(|cause| {
+                                error(
+                                    AgentErrorKind::InvalidInput,
+                                    format!("read selected directory spreadsheet: {cause}"),
+                                    false,
+                                )
+                            })?,
+                    );
+                }
+            }
+            _ => {
+                return Err(error(
+                    AgentErrorKind::InvalidInput,
+                    "spreadsheet input requires file or directory references",
+                    false,
+                ));
+            }
+        }
+    }
+    Ok((files, truncated))
+}
+
+#[cfg(not(windows))]
+pub fn read_verified_spreadsheet_inputs(
+    _roots: &[ObjectRef],
+    _max_files: usize,
+    _max_file_bytes: u64,
+) -> Result<(Vec<VerifiedFileBytes>, bool), AgentError> {
+    Err(error(
+        AgentErrorKind::UnsupportedCapability,
+        "handle-bound spreadsheet directory expansion is currently Windows-only",
         false,
     ))
 }
@@ -825,11 +1031,17 @@ pub fn create_binary_artifact(
         let mut created = relative_file(&selected.handle, file_name, FILE_CREATE)?;
         created.write_all(content_bytes)?;
         created.sync_all()?;
+        let created_identity = identity(&created)?;
         drop(created);
+        #[cfg(test)]
+        run_artifact_after_close_hook();
         if identity(&selected.handle)? != parent_identity {
             bail!("target parent identity changed during artifact creation");
         }
         let mut verified = relative_file(&selected.handle, file_name, FILE_OPEN)?;
+        if identity(&verified)? != created_identity {
+            bail!("artifact identity changed before read-back verification");
+        }
         let mut bytes = Vec::new();
         verified.seek(SeekFrom::Start(0))?;
         verified.read_to_end(&mut bytes)?;
@@ -946,32 +1158,51 @@ struct OpenedFile {
 
 #[cfg(windows)]
 fn open_verified(path: &Path) -> Result<OpenedFile, AgentError> {
-    use windows::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
 
-    open_verified_with_access(path, FILE_READ_ATTRIBUTES.0)
+    open_verified_with_access(
+        path,
+        FILE_READ_ATTRIBUTES.0,
+        (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0,
+    )
 }
 
 #[cfg(windows)]
 fn open_verified_for_read(path: &Path) -> Result<OpenedFile, AgentError> {
-    use windows::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    };
 
-    open_verified_with_access(path, FILE_GENERIC_READ.0)
+    // Excluding FILE_SHARE_WRITE turns the retained read handle into a stable
+    // snapshot boundary: a concurrent writer must finish before this open or
+    // wait until the bounded read/enumeration closes the handle. Rename/delete
+    // remains allowed, but the handle continues to name the same identity.
+    open_verified_with_access(
+        path,
+        FILE_GENERIC_READ.0,
+        (FILE_SHARE_READ | FILE_SHARE_DELETE).0,
+    )
 }
 
 #[cfg(windows)]
-fn open_verified_with_access(path: &Path, access_mode: u32) -> Result<OpenedFile, AgentError> {
+fn open_verified_with_access(
+    path: &Path,
+    access_mode: u32,
+    share_mode: u32,
+) -> Result<OpenedFile, AgentError> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        GetFileInformationByHandle,
+        FILE_FLAG_OPEN_REPARSE_POINT, GetFileInformationByHandle,
     };
 
     let file = OpenOptions::new()
         .access_mode(access_mode)
-        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+        .share_mode(share_mode)
         .custom_flags((FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS).0)
         .open(path)
         .map_err(|cause| io_error("open selected filesystem object", cause))?;
@@ -1066,9 +1297,45 @@ pub(super) fn file_store_test_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
+#[cfg(all(test, windows))]
+type ArtifactAfterCloseHook = Box<dyn FnOnce() + Send>;
+
+#[cfg(all(test, windows))]
+fn artifact_after_close_hook() -> &'static Mutex<Option<ArtifactAfterCloseHook>> {
+    static HOOK: OnceLock<Mutex<Option<ArtifactAfterCloseHook>>> = OnceLock::new();
+    HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(all(test, windows))]
+fn set_artifact_after_close_hook(hook: ArtifactAfterCloseHook) {
+    *artifact_after_close_hook().lock().unwrap() = Some(hook);
+}
+
+#[cfg(all(test, windows))]
+fn run_artifact_after_close_hook() {
+    if let Some(hook) = artifact_after_close_hook().lock().unwrap().take() {
+        hook();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    fn create_junction(link: &Path, target: &Path) {
+        let output = std::process::Command::new("cmd")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .expect("launch mklink junction fixture");
+        assert!(
+            output.status.success(),
+            "junction fixture failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn issued_reference_reads_metadata_and_tampering_fails_closed() {
@@ -1160,6 +1427,26 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn artifact_target_rename_competition_fails_identity_verification() {
+        let _guard = file_store_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        reset_worker_incarnation();
+        let directory = issue(temp.path()).unwrap();
+        let allowed = vec![temp.path().to_string_lossy().to_string()];
+        let target = temp.path().join("raced.txt");
+        let displaced = temp.path().join("raced-original.txt");
+        set_artifact_after_close_hook(Box::new(move || {
+            std::fs::rename(&target, &displaced).unwrap();
+            std::fs::write(&target, b"same bytes").unwrap();
+        }));
+
+        let error = create_text_artifact(&directory, &allowed, "raced.txt", "same bytes")
+            .expect_err("a same-byte replacement must not pass identity verification");
+        assert!(error.message.contains("artifact identity changed"));
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn selected_directory_enumeration_is_bounded_and_non_recursive() {
         let _guard = file_store_test_lock();
         let temp = tempfile::tempdir().unwrap();
@@ -1207,6 +1494,91 @@ mod tests {
         .unwrap();
         assert_eq!(bounded.directory_entries.len(), 1);
         assert!(bounded.truncated);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn large_directory_enumeration_stops_at_the_shared_entry_ceiling() {
+        let _guard = file_store_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        for index in 0..600 {
+            std::fs::write(temp.path().join(format!("entry-{index:04}.txt")), b"x").unwrap();
+        }
+        reset_worker_incarnation();
+        let output = inspect(&FileMetadataInspectParams {
+            roots: vec![issue(temp.path()).unwrap()],
+            max_entries: MAX_DIRECTORY_ENTRIES as u32,
+            max_bytes: 256 * 1024,
+            enumerate_directories: true,
+            file_extensions: vec![],
+            min_file_bytes: None,
+            max_file_bytes: None,
+            modified_after: None,
+            modified_before: None,
+        })
+        .unwrap();
+
+        assert_eq!(output.entries.len(), 1);
+        assert_eq!(output.directory_entries.len(), MAX_DIRECTORY_ENTRIES - 1);
+        assert!(output.truncated);
+        assert!(
+            output
+                .directory_entries
+                .iter()
+                .all(|entry| entry.display_name.starts_with("entry-"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parent_junction_replacement_cannot_rebind_a_selected_file() {
+        let _guard = file_store_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("selected-parent");
+        let retained = temp.path().join("retained-parent");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::write(parent.join("selected.txt"), b"approved bytes").unwrap();
+        std::fs::write(outside.path().join("selected.txt"), b"outside bytes").unwrap();
+        reset_worker_incarnation();
+        let selected = issue(&parent.join("selected.txt")).unwrap();
+
+        std::fs::rename(&parent, &retained).unwrap();
+        create_junction(&parent, outside.path());
+        let error = read_text(&FileContentReadParams {
+            file: selected,
+            max_bytes: MAX_TEXT_READ_BYTES,
+        })
+        .expect_err("the stored path must not rebind through a replacement junction");
+        assert_eq!(error.kind, AgentErrorKind::InvalidInput);
+        assert!(!error.message.contains("outside bytes"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retained_read_handle_excludes_concurrent_writers() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let _guard = file_store_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("selected.txt");
+        std::fs::write(&path, b"stable bytes").unwrap();
+        let opened = open_verified_for_read(&path).unwrap();
+        let concurrent_write = OpenOptions::new()
+            .write(true)
+            .share_mode(
+                (windows::Win32::Storage::FileSystem::FILE_SHARE_READ
+                    | windows::Win32::Storage::FileSystem::FILE_SHARE_WRITE
+                    | windows::Win32::Storage::FileSystem::FILE_SHARE_DELETE)
+                    .0,
+            )
+            .open(&path);
+        assert!(
+            concurrent_write.is_err(),
+            "a bounded read handle must prevent in-place mutation during the snapshot"
+        );
+        drop(opened);
+        assert!(OpenOptions::new().write(true).open(&path).is_ok());
     }
 
     #[cfg(windows)]

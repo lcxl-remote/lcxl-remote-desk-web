@@ -13,6 +13,7 @@
 //! instead of failing the transport.
 
 pub mod audit_sink;
+pub mod browser_devtools_mcp;
 pub mod collectors;
 pub mod computer_use_broker;
 pub mod computer_use_writer;
@@ -20,6 +21,7 @@ pub mod eval;
 pub mod file_reference_store;
 #[cfg(windows)]
 pub mod office_bridge_observer;
+pub mod outlook_new_handoff;
 pub mod spreadsheet_file;
 pub mod terminal_reference_store;
 #[cfg(windows)]

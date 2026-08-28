@@ -27,7 +27,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::sync::watch;
 
-use crate::diagnose::redaction::{Redactor, RegexRedactor};
+use crate::agent_adapter::redaction::{Redactor, RegexRedactor};
 use crate::worker::exec_containment::Containment;
 use desk_ipc_protocol::message::ExecSpawnReport;
 

@@ -134,7 +134,7 @@ impl AuthorizationBlock {
 
 /// Manager → daemon wrapper: the original control payload plus the manager's
 /// authorization decision. The `inner` payload is byte-for-byte the public
-/// control type (`AgentRequestData` / `DiagnoseRequestData` / `ConfirmExecData`)
+/// control type (`AgentRequestData` / `DeviceAssistantAsk` / `ConfirmExecData`)
 /// — it is never mutated, preserving the "control end carries no trusted field"
 /// invariant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -224,14 +224,15 @@ mod tests {
     fn wrapper_round_trips_and_preserves_inner() {
         // The inner payload is preserved verbatim through a serde round-trip.
         let wrapper = AuthorizedControlPayload {
-            inner: crate::diagnose::DiagnoseRequestData {
+            inner: crate::device_assistant::DeviceAssistantAsk {
                 question: "why slow?".to_string(),
+                client_message_id: "message-1".to_string(),
                 ..Default::default()
             },
             authz: block(),
         };
         let json = serde_json::to_string(&wrapper).expect("encode");
-        let back: AuthorizedControlPayload<crate::diagnose::DiagnoseRequestData> =
+        let back: AuthorizedControlPayload<crate::device_assistant::DeviceAssistantAsk> =
             serde_json::from_str(&json).expect("decode");
         assert_eq!(back.inner.question, "why slow?");
         assert_eq!(back.authz, block());

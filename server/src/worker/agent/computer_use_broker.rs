@@ -10,6 +10,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Duration, Utc};
+use desk_agent_protocol::browser_control::{
+    BrowserActionRequest, BrowserActionResult, BrowserAdapterRef, BrowserReadinessReason,
+};
+use desk_agent_protocol::communication::{
+    CommunicationDraftHandoff, OutlookNewComposeHandoffRequest,
+};
 use desk_agent_protocol::computer_use::{
     COMPUTER_USE_SCHEMA_VERSION, ComputerUseAdapterKind, ComputerUseAdapterRef,
     ComputerUseCapabilityReadiness, ComputerUseContextReference, ComputerUseReadiness,
@@ -21,12 +27,16 @@ use desk_agent_protocol::computer_use::{
 use desk_agent_protocol::{AgentError, AgentErrorKind, Capability};
 use desk_diagnose_core::device_assistant::{
     CURRENT_SCREEN_ADAPTER_ID, DESKTOP_SESSION_ADAPTER_ID, FILE_ARTIFACT_ADAPTER_ID,
-    FILE_WORKSPACE_ADAPTER_ID, OFFICE_EXCEL_ADAPTER_ID, SPREADSHEET_FILE_ADAPTER_ID,
+    FILE_WORKSPACE_ADAPTER_ID, OFFICE_EXCEL_ADAPTER_ID, OUTLOOK_NEW_MAILTO_ADAPTER_VERSION,
+    SPREADSHEET_FILE_ADAPTER_ID, SYSTEM_COMMAND_ADAPTER_ID, SYSTEM_DIAGNOSTICS_ADAPTER_ID,
     TERMINAL_OUTPUT_ADAPTER_ID, WINDOWS_UIA_ADAPTER_ID, device_assistant_edge_adapter_registry,
 };
 
 use crate::model::settings::ComputerUseSettings;
 
+use super::browser_devtools_mcp::{
+    BrowserBrokerContext, BrowserDevtoolsBroker, ChromeDevtoolsMcpError,
+};
 use super::computer_use_writer::{
     InputPreemptionSource, WriterLeaseCoordinator, WriterLeaseRequest, WriterLeaseState,
 };
@@ -105,6 +115,7 @@ struct ReadinessFingerprint {
     local_ceiling_revision: u64,
     capabilities: Vec<ComputerUseCapabilityReadiness>,
     context_capabilities: Vec<Capability>,
+    browser_adapter: Option<BrowserAdapterRef>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +133,7 @@ pub struct ComputerUseBroker {
     human_input_epoch: AtomicU64,
     objects: Mutex<HashMap<String, StoredObject>>,
     writer_lease: WriterLeaseCoordinator,
+    browser: BrowserDevtoolsBroker,
 }
 
 impl Default for ComputerUseBroker {
@@ -142,7 +154,73 @@ impl ComputerUseBroker {
             human_input_epoch: AtomicU64::new(0),
             objects: Mutex::new(HashMap::new()),
             writer_lease: WriterLeaseCoordinator::new(),
+            browser: BrowserDevtoolsBroker::default(),
         }
+    }
+
+    pub async fn refresh_browser_readiness(
+        &self,
+        device_id: String,
+        os_session_id: String,
+        enabled: bool,
+        interactive_session_unlocked: bool,
+    ) {
+        self.browser
+            .refresh(&BrowserBrokerContext {
+                device_id,
+                os_session_id,
+                enabled,
+                interactive_session_unlocked,
+            })
+            .await;
+    }
+
+    pub fn preflight_browser_action(
+        &self,
+        surface: &ObjectRef,
+        request: &BrowserActionRequest,
+    ) -> Result<(), ChromeDevtoolsMcpError> {
+        self.browser.preflight(surface, request)
+    }
+
+    pub async fn execute_browser_action(
+        &self,
+        surface: &ObjectRef,
+        request: &BrowserActionRequest,
+    ) -> Result<BrowserActionResult, ChromeDevtoolsMcpError> {
+        self.browser.execute(surface, request).await
+    }
+
+    pub fn preflight_outlook_new_handoff(
+        &self,
+        application: &ObjectRef,
+        request: &OutlookNewComposeHandoffRequest,
+    ) -> Result<(), AgentError> {
+        let ResolvedObject::Application { image_path, .. } = self.resolve_ref(application)? else {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "Outlook handoff target is not an application reference",
+                false,
+            ));
+        };
+        let handler = super::outlook_new_handoff::preflight(request)?;
+        if !image_path.eq_ignore_ascii_case(&handler.executable_path) {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "the registered mailto handler changed after readiness was observed",
+                false,
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn execute_outlook_new_handoff(
+        &self,
+        application: &ObjectRef,
+        request: &OutlookNewComposeHandoffRequest,
+    ) -> Result<CommunicationDraftHandoff, AgentError> {
+        self.preflight_outlook_new_handoff(application, request)?;
+        super::outlook_new_handoff::execute(request)
     }
 
     pub fn inspect_desktop_session(
@@ -241,6 +319,16 @@ impl ComputerUseBroker {
             .expect("compiled current screen adapter is registered")
             .adapter_version
             .clone();
+        let system_diagnostics_adapter_version = edge_registry
+            .adapter(SYSTEM_DIAGNOSTICS_ADAPTER_ID)
+            .expect("compiled system diagnostics adapter is registered")
+            .adapter_version
+            .clone();
+        let system_command_adapter_version = edge_registry
+            .adapter(SYSTEM_COMMAND_ADAPTER_ID)
+            .expect("compiled system command adapter is registered")
+            .adapter_version
+            .clone();
         let observed_at = Utc::now();
         let expires_at = observed_at + Duration::seconds(25);
         let observation = if ceiling.observation_enabled() {
@@ -305,10 +393,95 @@ impl ComputerUseBroker {
             allow_screen,
             display_selected,
         );
+        let browser_readiness = self.browser.readiness();
+        let browser_surface = self.browser.surface_ref();
+        let browser_ready = platform_supported
+            && session_ready
+            && ceiling.browser_semantic
+            && browser_readiness
+                .as_ref()
+                .is_some_and(|readiness| readiness.connected)
+            && browser_surface.is_some();
+        let browser_reason = (!browser_ready).then_some(if !ceiling.browser_semantic {
+            ComputerUseReadinessReason::DisabledByLocalCeiling
+        } else if !platform_supported {
+            ComputerUseReadinessReason::UnsupportedPlatform
+        } else if !session_ready {
+            session_reason.unwrap_or(ComputerUseReadinessReason::NoInteractiveSession)
+        } else {
+            match browser_readiness
+                .as_ref()
+                .and_then(|readiness| readiness.reason)
+            {
+                Some(BrowserReadinessReason::UserApprovalRequired)
+                | Some(BrowserReadinessReason::UserDenied) => {
+                    ComputerUseReadinessReason::PermissionMissing
+                }
+                _ => ComputerUseReadinessReason::AdapterUnavailable,
+            }
+        });
+        let slack_ready = browser_ready && ceiling.communication_handoff_enabled();
+        let slack_reason = (!slack_ready).then_some(if !ceiling.communication_handoff_enabled() {
+            ComputerUseReadinessReason::DisabledByLocalCeiling
+        } else {
+            browser_reason.unwrap_or(ComputerUseReadinessReason::AdapterUnavailable)
+        });
+        let slack_browser_surface = slack_ready.then(|| browser_surface.clone()).flatten();
+        let browser_adapter = ComputerUseAdapterRef {
+            kind: ComputerUseAdapterKind::BrowserDevtoolsMcp,
+            version: super::browser_devtools_mcp::CHROME_DEVTOOLS_MCP_VERSION.into(),
+        };
+        let outlook_handler =
+            if platform_supported && session_ready && ceiling.communication_handoff_enabled() {
+                super::outlook_new_handoff::probe_handler().ok()
+            } else {
+                None
+            };
+        let outlook_application_ref = outlook_handler.as_ref().and_then(|handler| {
+            let snapshot_id = self.next_snapshot_id();
+            self.issue_ref(
+                &snapshot_id,
+                &interactive_session_incarnation,
+                ObjectKind::Application,
+                ResolvedObject::Application {
+                    process_id: 0,
+                    image_path: handler.executable_path.clone(),
+                },
+            )
+            .ok()
+        });
+        let outlook_ready = outlook_application_ref.is_some();
+        let outlook_reason =
+            (!outlook_ready).then_some(if !ceiling.communication_handoff_enabled() {
+                ComputerUseReadinessReason::DisabledByLocalCeiling
+            } else if !platform_supported {
+                ComputerUseReadinessReason::UnsupportedPlatform
+            } else if !session_ready {
+                session_reason.unwrap_or(ComputerUseReadinessReason::NoInteractiveSession)
+            } else {
+                ComputerUseReadinessReason::AdapterUnavailable
+            });
+        let outlook_adapter = ComputerUseAdapterRef {
+            kind: ComputerUseAdapterKind::OutlookNewMailto,
+            version: OUTLOOK_NEW_MAILTO_ADAPTER_VERSION.into(),
+        };
         let adapter = ComputerUseAdapterRef {
             kind: ComputerUseAdapterKind::WindowsUia,
             version: session_adapter_version,
         };
+        let diagnostic_adapter = ComputerUseAdapterRef {
+            kind: ComputerUseAdapterKind::SystemDiagnostics,
+            version: system_diagnostics_adapter_version,
+        };
+        let diagnostic_reason =
+            (!platform_supported).then_some(ComputerUseReadinessReason::UnsupportedPlatform);
+        let command_shells_available = !crate::exec_shells::available_exec_shells().is_empty();
+        let command_ready = platform_supported && command_shells_available;
+        let command_reason = (!command_ready).then_some(if !platform_supported {
+            ComputerUseReadinessReason::UnsupportedPlatform
+        } else {
+            ComputerUseReadinessReason::AdapterUnavailable
+        });
         let mut readiness = ComputerUseReadiness {
             schema_version: COMPUTER_USE_SCHEMA_VERSION,
             revision: 0,
@@ -319,6 +492,58 @@ impl ComputerUseBroker {
             interactive_session_incarnation,
             local_ceiling_revision: ceiling.revision,
             capabilities: vec![
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::SystemInfo,
+                    adapter: diagnostic_adapter.clone(),
+                    supported: platform_supported,
+                    ready: platform_supported,
+                    reason: diagnostic_reason,
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::ProcessList,
+                    adapter: diagnostic_adapter.clone(),
+                    supported: platform_supported,
+                    ready: platform_supported,
+                    reason: diagnostic_reason,
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::NetworkPorts,
+                    adapter: diagnostic_adapter.clone(),
+                    supported: platform_supported,
+                    ready: platform_supported,
+                    reason: diagnostic_reason,
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::ServiceStatus,
+                    adapter: diagnostic_adapter.clone(),
+                    supported: platform_supported,
+                    ready: platform_supported,
+                    reason: diagnostic_reason,
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::LogRecent,
+                    adapter: diagnostic_adapter.clone(),
+                    supported: platform_supported,
+                    ready: platform_supported,
+                    reason: diagnostic_reason,
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::ContainerList,
+                    adapter: diagnostic_adapter,
+                    supported: platform_supported,
+                    ready: platform_supported,
+                    reason: diagnostic_reason,
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::ShellExecConfirmed,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::Terminal,
+                        version: system_command_adapter_version,
+                    },
+                    supported: platform_supported,
+                    ready: command_ready,
+                    reason: command_reason,
+                },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::DesktopSessionInspect,
                     adapter: adapter.clone(),
@@ -460,6 +685,21 @@ impl ComputerUseBroker {
                     capability: Capability::FileArtifactCreateConfirmed,
                     adapter: ComputerUseAdapterRef {
                         kind: ComputerUseAdapterKind::FileSystem,
+                        version: file_artifact_adapter_version.clone(),
+                    },
+                    supported: platform_supported,
+                    ready: platform_supported && ceiling.file_artifact_create_enabled(),
+                    reason: (!(platform_supported && ceiling.file_artifact_create_enabled()))
+                        .then_some(if !platform_supported {
+                            ComputerUseReadinessReason::UnsupportedPlatform
+                        } else {
+                            ComputerUseReadinessReason::DisabledByLocalCeiling
+                        }),
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::CommunicationLocalDraftCreateConfirmed,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::FileSystem,
                         version: file_artifact_adapter_version,
                     },
                     supported: platform_supported,
@@ -470,6 +710,13 @@ impl ComputerUseBroker {
                         } else {
                             ComputerUseReadinessReason::DisabledByLocalCeiling
                         }),
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::CommunicationOutlookNewHandoffConfirmed,
+                    adapter: outlook_adapter,
+                    supported: platform_supported,
+                    ready: outlook_ready,
+                    reason: outlook_reason,
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::TerminalOutputRead,
@@ -492,6 +739,37 @@ impl ComputerUseBroker {
                     ready: screen_ready,
                     reason: screen_reason,
                 },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::BrowserPageObserve,
+                    adapter: browser_adapter.clone(),
+                    supported: platform_supported,
+                    ready: browser_ready,
+                    reason: browser_reason,
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::BrowserPageNavigateConfirmed,
+                    adapter: browser_adapter.clone(),
+                    supported: platform_supported,
+                    ready: browser_ready,
+                    reason: browser_reason,
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::BrowserInputFallbackConfirmed,
+                    adapter: browser_adapter,
+                    supported: platform_supported,
+                    ready: browser_ready,
+                    reason: browser_reason,
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::BrowserExternalDraftWriteConfirmed,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::BrowserDevtoolsMcp,
+                        version: super::browser_devtools_mcp::CHROME_DEVTOOLS_MCP_VERSION.into(),
+                    },
+                    supported: platform_supported,
+                    ready: slack_ready,
+                    reason: slack_reason,
+                },
             ],
             context_references: office_document_ref
                 .into_iter()
@@ -499,6 +777,30 @@ impl ComputerUseBroker {
                     capability: Capability::OfficeDocumentInspect,
                     object_ref,
                 })
+                .chain(browser_surface.into_iter().flat_map(|object_ref| {
+                    [
+                        Capability::BrowserPageObserve,
+                        Capability::BrowserPageNavigateConfirmed,
+                        Capability::BrowserInputFallbackConfirmed,
+                    ]
+                    .into_iter()
+                    .map(move |capability| ComputerUseContextReference {
+                        capability,
+                        object_ref: object_ref.clone(),
+                    })
+                }))
+                .chain(slack_browser_surface.into_iter().map(|object_ref| {
+                    ComputerUseContextReference {
+                        capability: Capability::BrowserExternalDraftWriteConfirmed,
+                        object_ref,
+                    }
+                }))
+                .chain(outlook_application_ref.into_iter().map(|object_ref| {
+                    ComputerUseContextReference {
+                        capability: Capability::CommunicationOutlookNewHandoffConfirmed,
+                        object_ref,
+                    }
+                }))
                 .collect(),
         };
         readiness.revision = self.stable_readiness_revision(&readiness);
@@ -522,6 +824,7 @@ impl ComputerUseBroker {
                 .iter()
                 .map(|reference| reference.capability)
                 .collect(),
+            browser_adapter: self.browser.readiness().map(|readiness| readiness.adapter),
         };
         let mut state = self
             .readiness_revision_state
@@ -1351,21 +1654,30 @@ mod tests {
     }
 
     #[test]
-    fn disabled_readiness_is_valid_and_never_advertises_mutation() {
+    fn disabled_observation_keeps_only_independent_diagnostics_and_safe_exec_ready() {
         let broker = ComputerUseBroker::new();
         let readiness = broker.readiness(&ComputerUseSettings::default(), false, false);
         readiness.validate().unwrap();
-        assert_eq!(readiness.capabilities.len(), 13);
+        assert_eq!(readiness.capabilities.len(), 26);
         assert!(readiness.capabilities.iter().all(|entry| {
             if matches!(
                 entry.capability,
-                Capability::FileMetadataRead
+                Capability::SystemInfo
+                    | Capability::ProcessList
+                    | Capability::NetworkPorts
+                    | Capability::ServiceStatus
+                    | Capability::LogRecent
+                    | Capability::ContainerList
+                    | Capability::FileMetadataRead
                     | Capability::FileContentRead
                     | Capability::SpreadsheetFileInspect
                     | Capability::SpreadsheetMergePreview
                     | Capability::TerminalOutputRead
             ) {
                 entry.ready == cfg!(windows)
+            } else if entry.capability == Capability::ShellExecConfirmed {
+                entry.ready
+                    == (cfg!(windows) && !crate::exec_shells::available_exec_shells().is_empty())
             } else {
                 !entry.ready
             }
@@ -1373,7 +1685,13 @@ mod tests {
         assert!(readiness.capabilities.iter().all(|entry| {
             matches!(
                 entry.capability,
-                Capability::DesktopSessionInspect
+                Capability::SystemInfo
+                    | Capability::ProcessList
+                    | Capability::NetworkPorts
+                    | Capability::ServiceStatus
+                    | Capability::LogRecent
+                    | Capability::ContainerList
+                    | Capability::DesktopSessionInspect
                     | Capability::DesktopUiInspect
                     | Capability::OfficeDocumentInspect
                     | Capability::FileMetadataRead
@@ -1384,8 +1702,15 @@ mod tests {
                     | Capability::SpreadsheetFormulaWorkbookCreateConfirmed
                     | Capability::WordDocumentCreateConfirmed
                     | Capability::FileArtifactCreateConfirmed
+                    | Capability::CommunicationLocalDraftCreateConfirmed
+                    | Capability::CommunicationOutlookNewHandoffConfirmed
                     | Capability::TerminalOutputRead
                     | Capability::ScreenCaptureCurrent
+                    | Capability::ShellExecConfirmed
+                    | Capability::BrowserPageObserve
+                    | Capability::BrowserPageNavigateConfirmed
+                    | Capability::BrowserInputFallbackConfirmed
+                    | Capability::BrowserExternalDraftWriteConfirmed
             )
         }));
     }

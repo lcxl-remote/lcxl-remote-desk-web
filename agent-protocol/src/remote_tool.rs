@@ -8,20 +8,21 @@
 //! party permitted to answer a request and re-runs its own capability gate before
 //! running anything, so it keeps final say over what leaves the machine.
 //!
-//! This mirrors the diagnose remote-collect RPC ([`crate::diagnose`]) but carries
-//! a single capability call (a full server-stamped [`crate::AgentEnvelope`]),
-//! not a diagnosis intent. The chunk framing is identical (byte-sliced, base64,
+//! It carries a single capability call (a full server-stamped
+//! [`crate::AgentEnvelope`]). The chunk framing is byte-sliced, base64,
 //! length + final SHA-256) so the manager reassembler stays the same shape; the
 //! reassembler additionally enforces a hard upper bound on the declared length
 //! *before* allocating (§8.2), since a remote tool result is attacker-influenced
 //! in a way the trusted diagnose snapshot is not.
 //!
-//! These ride the signaling socket as JSON, like [`crate::diagnose::CollectResponse`],
-//! so they derive only `serde` (no `wincode` / `utoipa`).
+//! These ride the signaling socket as JSON, so they derive only `serde`.
 
 use serde::{Deserialize, Serialize};
 
 use crate::{AgentError, AgentOutcome, ReadonlyAgentEnvelope};
+
+/// Signaling WebSocket frame ceiling shared by Device Assistant RPCs.
+pub const SIGNALING_FRAME_LIMIT: usize = 1024 * 1024;
 
 /// Hard upper bound on the total (pre-base64) byte length of a reassembled remote
 /// tool result. The reassembler rejects a first chunk whose declared `total_len`
@@ -34,7 +35,7 @@ pub const MAX_REMOTE_TOOL_RESULT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Upper bound on the base64 `payload_b64` slice in a single
 /// [`RemoteToolResponseChunk`]. Held below the signaling WebSocket's per-frame
-/// continuation cap ([`crate::diagnose::SIGNALING_FRAME_LIMIT`]) with headroom for
+/// continuation cap ([`SIGNALING_FRAME_LIMIT`]) with headroom for
 /// the surrounding JSON + `SignalingModel` envelope, exactly as the collect chunk
 /// budget is.
 pub const REMOTE_TOOL_CHUNK_PAYLOAD_LIMIT: usize = 768 * 1024;
@@ -96,7 +97,7 @@ pub struct RemoteToolImage {
 /// slices those bytes on byte boundaries, and base64-encodes each slice. The
 /// manager reassembles by ordering on `seq`, concatenating the decoded bytes,
 /// verifying `total_len` and the final `sha256`, then deserializing. Field shape
-/// matches [`crate::diagnose::CollectResponseChunk`].
+/// is stable across all Provider responses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteToolResponseChunk {
     /// Correlates back to the originating [`RemoteToolRequest`].
@@ -129,7 +130,7 @@ pub struct RemoteToolResponseError {
 
 /// B→A response frame for a [`RemoteToolRequest`]: either a chunk of the result or
 /// a wholesale failure. Carried by one `SignalingType` variant so the manager has
-/// a single consume path, like [`crate::diagnose::CollectResponse`].
+/// a single consume path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RemoteToolResponse {

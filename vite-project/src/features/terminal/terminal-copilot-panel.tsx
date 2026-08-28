@@ -28,7 +28,7 @@ import type { ExecEntry, ExecRequestInput } from '../exec/use-confirm-exec';
 import { ModelSelector } from '../desk/model-selector';
 import { useFollowLatest } from '@/hooks/use-follow-latest';
 
-/** Confirmed-execution controls, shared with the diagnose panel via
+/** Confirmed-execution controls shared by AI surfaces via
  *  `useConfirmExec`. Omitted when the copilot is rendered suggest-only. */
 export type CopilotExecControls = {
     entries: Record<number, ExecEntry>;
@@ -47,7 +47,7 @@ const COPILOT_INDEX_STRIDE = 100;
 const COPILOT_MIN_WIDTH = 280;
 const COPILOT_MAX_WIDTH = 720;
 
-/** Map a suggested-command risk level to a badge colour (mirrors the diagnose
+/** Map a suggested-command risk level to a badge colour (mirrors other AI
  *  panel so the two AI surfaces read consistently). */
 function riskClass(risk: RiskLevel): string {
     switch (risk) {

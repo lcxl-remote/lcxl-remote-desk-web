@@ -24,7 +24,7 @@ function riskClass(risk: string): string {
  * Reject -> result. Nothing runs without an explicit Approve; a non-executable
  * preview (blocked / off-template / mode) is shown but not runnable.
  *
- * Feature-neutral: both the diagnose panel and the terminal copilot render it
+ * Feature-neutral: AI surfaces render it
  * once `useConfirmExec` has an entry for the row. The initial trigger (the
  * "Execute" / "Run" button shown before any entry exists) stays caller-specific,
  * since each surface places it differently.

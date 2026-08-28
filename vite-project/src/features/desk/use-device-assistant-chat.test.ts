@@ -542,7 +542,7 @@ describe('useDeviceAssistantChat', () => {
         expect(result.current.status).toBe('done');
         expect(result.current.error).toBeNull();
         expect(fetchMock).toHaveBeenCalledWith(
-            '/api/my/diagnose-session/permission-decision',
+            '/api/my/device-assistant-session/permission-decision',
             expect.objectContaining({ method: 'POST' }),
         );
     });
@@ -611,7 +611,7 @@ describe('useDeviceAssistantChat', () => {
             result.current.capabilityGrants[0]?.revokedReason,
         ).toBe('revoked_by_owner'));
         expect(fetchMock).toHaveBeenCalledWith(
-            '/api/my/diagnose-session/capability-grant/revoke',
+            '/api/my/device-assistant-session/capability-grant/revoke',
             expect.objectContaining({ method: 'POST' }),
         );
     });

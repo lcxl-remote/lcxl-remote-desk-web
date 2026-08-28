@@ -69,6 +69,14 @@ pub fn canonical_compiled_scope(
             operations: vec!["search_public_web".into()],
         });
     }
+    if authorization_resources == [AuthorizationResourceKind::ExactCommand]
+        && effect == CapabilityEffect::ExecuteCommand
+    {
+        return Some(CanonicalGrantScope {
+            resources: vec!["command:exact_input_required".into()],
+            operations: vec!["execute_confirmed_command".into()],
+        });
+    }
     None
 }
 
@@ -87,6 +95,14 @@ pub fn exact_external_url_resource_scope(canonical_input_digest_sha256: &str) ->
 pub fn exact_external_query_resource_scope(canonical_input_digest_sha256: &str) -> Vec<String> {
     vec![format!(
         "external_query_input:sha256:{canonical_input_digest_sha256}"
+    )]
+}
+
+/// Stable authority label for one server-classified command. The raw command
+/// and argv remain in the sealed execution record, not in grant/audit labels.
+pub fn exact_command_resource_scope(canonical_input_digest_sha256: &str) -> Vec<String> {
+    vec![format!(
+        "command_input:sha256:{canonical_input_digest_sha256}"
     )]
 }
 
@@ -328,6 +344,17 @@ mod tests {
                 CapabilityEffect::MutateApplication,
             )
             .is_none()
+        );
+        let command = canonical_compiled_scope(
+            &[AuthorizationResourceKind::ExactCommand],
+            CapabilityEffect::ExecuteCommand,
+        )
+        .unwrap();
+        assert_eq!(command.resources, vec!["command:exact_input_required"]);
+        assert_eq!(command.operations, vec!["execute_confirmed_command"]);
+        assert_eq!(
+            exact_command_resource_scope(&digest('a')),
+            vec![format!("command_input:sha256:{}", digest('a'))]
         );
     }
 

@@ -11,9 +11,6 @@ import "./desk-session.css"
 import { useDeskSignaling } from "./use-desk-signaling"
 import type { SignalingMessage } from "./use-desk-signaling"
 import { useDeskRTC } from "./use-desk-rtc"
-import { useDeskDiagnose } from "./use-desk-diagnose"
-import { DiagnosePanel } from "./diagnose-panel"
-import { useConfirmExec } from "../exec/use-confirm-exec"
 import { useDeskInput } from "./use-desk-input"
 import { lockEscapeKey, unlockKeyboard, isKeyboardLockSupported } from "./fullscreen-keyboard"
 import { useBeforeUnloadConfirm } from "./use-before-unload-confirm"
@@ -350,7 +347,6 @@ export default function DeskSession({
     })
 
     const [showStats, setShowStats] = useState(false);
-    const [showDiagnose, setShowDiagnose] = useState(false);
 
     const [adaptiveQualityEnabled, setAdaptiveQualityEnabled] =
         useState(DEFAULT_DESK_USER_PREFERENCES.adaptiveQualityEnabled);
@@ -661,23 +657,6 @@ export default function DeskSession({
 
     // Guard against accidentally closing/reloading an active session.
     useBeforeUnloadConfirm(isRTCConnected);
-
-    // AI diagnose stream: sends `Diagnose` and aggregates `DiagnoseEvent`
-    // frames off the same signaling channel.
-    const diagnose = useDeskDiagnose({
-        deskId: deskId || null,
-        subscribe,
-        sendMessage,
-    });
-
-    // Confirmed execution of a suggested command: ConfirmExec -> ExecPreview ->
-    // ResolveExec -> ExecResult, keyed by command row.
-    const exec = useConfirmExec({
-        deskId: deskId || null,
-        subscribe,
-        sendMessage,
-        orgId,
-    });
 
     // The daemon keeps the WebRTC PC alive across worker
     // swaps. The desktop-switch reconnect state machine
@@ -1787,27 +1766,6 @@ export default function DeskSession({
                             </div>
                         )}
 
-                        {showDiagnose && (
-                            <DiagnosePanel
-                                state={diagnose.state}
-                                onStart={diagnose.start}
-                                onReset={diagnose.reset}
-                                onClose={() => setShowDiagnose(false)}
-                                isConnected={isConnected}
-                                exec={exec}
-                                onApproveExec={diagnose.approveExec}
-                                onRejectExec={diagnose.rejectExec}
-                                onCancelBackgroundExec={diagnose.cancelBackgroundExec}
-                                historySessions={diagnose.historySessions}
-                                historyLoading={diagnose.historyLoading}
-                                historyError={diagnose.historyError}
-                                onRefreshHistory={diagnose.refreshHistory}
-                                onRestoreSession={diagnose.restoreSession}
-                                canContinue={diagnose.canContinue}
-                                orgId={orgId}
-                            />
-                        )}
-
                         {transferStatus !== 'idle' && transferStatus !== 'error' && (
                             <div className="absolute top-16 right-4 z-[60] bg-black/80 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-lg backdrop-blur-md border border-white/10 flex items-center gap-2 animate-in fade-in slide-in-from-top-4">
                                 <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
@@ -1853,9 +1811,7 @@ export default function DeskSession({
                                 onTogglePrivateScreen={handleTogglePrivateScreen}
                                 operationSystem={initData?.operation_system}
                                 restricted={restricted}
-                                setShowDiagnose={setShowDiagnose}
                                 setShowStats={setShowStats}
-                                showDiagnose={showDiagnose}
                                 showStats={showStats}
                                 macKeyboardMappingController={macKeyboardMappingController}
                                 whiteboard={whiteboard}

@@ -63,7 +63,7 @@ type ModelSelectorProps = {
     onChange: (modelId: number | null) => void
     /** Optional richer selection callback for hosts that gate capability-specific UI. */
     onModelChange?: (model: AiModelDto | null) => void
-    /** Extra classes for the `<select>`, so each host (the dark diagnose overlay vs.
+    /** Extra classes for the `<select>`, so each host (a dark assistant overlay vs.
      *  the themed terminal card) can blend it in. */
     className?: string
     /**

@@ -12,9 +12,9 @@ import type { SignalingMessage, SignalingSubscriber } from '../desk/use-desk-sig
 
 // Wire types — mirror `desk_agent_protocol::exec`. These ride the ConfirmExec /
 // ExecPreview / ResolveExec / ExecResult signaling types as `signaling_data`;
-// like the diagnose types they are not part of the REST OpenAPI surface.
+// These signaling types are not part of the REST OpenAPI surface.
 //
-// This hook is feature-neutral: both the diagnose panel and the terminal copilot
+// This hook is feature-neutral: Device Assistant and the terminal copilot
 // drive the same sealed confirm-exec lifecycle through it. It does not depend on
 // any feature's suggestion shape — callers map their own suggestion into the
 // neutral `ExecRequestInput`.
@@ -144,7 +144,7 @@ export type ExecEntry = {
 
 /**
  * A command to ask the host to classify and (on approval) run. Feature-neutral:
- * the diagnose panel maps a `SuggestedCommand` here (with `cwd: null`, since a
+ * callers map a `SuggestedCommand` here (with `cwd: null` when a
  * diagnosis carries no working directory), and the terminal copilot maps a
  * `CommandSuggestion` here, preserving the suggestion's own `cwd`.
  */

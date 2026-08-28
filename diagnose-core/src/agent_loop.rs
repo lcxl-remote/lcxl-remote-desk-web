@@ -310,6 +310,30 @@ pub async fn resume_agent_turn(
     run_or_resume(deps, claim, None, sink).await
 }
 
+/// Resume after an owner permission decision and append one trusted protocol
+/// bridge at the conversation tail. Chat-completions providers commonly require
+/// a final user-role message to start a new completion, so the bridge uses that
+/// wire role while explicitly declaring that it is not user-authored and carries
+/// no new requirement. The signal runtime omits it from the product transcript
+/// and user-input event stream.
+pub async fn resume_agent_turn_after_permission(
+    deps: &LoopDeps<'_>,
+    claim: ClaimTurnParams,
+    decision_message: ChatMessage,
+    sink: &mut dyn TurnSink,
+) -> Result<LoopOutcome, AgentError> {
+    if decision_message.role != ChatRole::User {
+        return Err(AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "permission resume bridge must use the user protocol role".into(),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        });
+    }
+    run_or_resume(deps, claim, Some(decision_message), sink).await
+}
+
 /// Shared body of [`run_agent_turn`] / [`resume_agent_turn`]: claim the turn, keep
 /// the lease alive, optionally append a message, run the loop, then settle and
 /// persist once. `to_append` is the user message for a control-end turn, or `None`

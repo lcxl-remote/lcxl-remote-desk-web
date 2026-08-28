@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use desk_agent_protocol::capability_grant::CapabilityGrant;
+use desk_agent_protocol::capability_grant::{CapabilityGrant, CapabilityGrantUsePolicy};
 use desk_agent_protocol::capability_provider::{AuthorizationResourceKind, CapabilityEffect};
 use desk_agent_protocol::{AgentError, AgentErrorKind, Capability};
 use serde::Deserialize;
@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::capability_availability::CapabilityAvailability;
 use crate::capability_grant::{
-    canonical_compiled_scope, exact_external_query_resource_scope,
+    canonical_compiled_scope, exact_command_resource_scope, exact_external_query_resource_scope,
     exact_external_url_resource_scope,
 };
 use crate::chat::{ToolCall, ToolSpec};
@@ -25,6 +25,8 @@ use crate::dynamic_run::{
     MAX_PERMISSION_SCOPE_VALUES, PERMISSION_REQUEST_SCHEMA_VERSION, PermissionRequest,
     PermissionRequestState,
 };
+use crate::exec_classify::classify_command;
+use crate::exec_tools::canonical_exec_shell;
 use crate::provider_registry::ProviderRegistry;
 use crate::registry::{RegisteredTool, ToolEffect};
 
@@ -39,37 +41,95 @@ pub const MAX_REQUEST_USES: u32 = 16;
 /// Re-projecting grants on every turn gives the model current authority facts
 /// without exposing grant ids or trusting model-maintained history. Actual
 /// dispatch still has to pass the grant matcher and transactional reservation.
-pub fn capability_authorization_prompt(grants: &[CapabilityGrant], now_unix_ms: u64) -> String {
-    let entries = grants
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityAuthorizationPrompt {
+    pub text: String,
+    /// Earliest expiry among exact inputs included in `text`. The caller uses
+    /// this to put the whole prompt behind the same model-egress boundary.
+    pub approved_exact_input_expires_at_unix_ms: Option<u64>,
+}
+
+pub fn capability_authorization_prompt(
+    grants: &[CapabilityGrant],
+    permission_requests: &[PermissionRequest],
+    now_unix_ms: u64,
+) -> CapabilityAuthorizationPrompt {
+    let mut approved_exact_input_expires_at_unix_ms: Option<u64> = None;
+    let mut entries = Vec::with_capacity(grants.len());
+    for grant in grants {
+        let state = if grant.revoked_at_unix_ms.is_some() {
+            "revoked"
+        } else if grant.expires_at_unix_ms <= now_unix_ms {
+            "expired"
+        } else if grant.remaining_uses == 0 {
+            "exhausted"
+        } else {
+            "active"
+        };
+        let mut entry = json!({
+            "provider_id": grant.provider_id,
+            "capability_id": grant.capability_id,
+            "tool_name": grant.tool_name,
+            "effect": grant.effect,
+            "risk_tier": grant.risk_tier,
+            "state": state,
+            "remaining_uses": grant.remaining_uses,
+            "expires_at_unix_ms": grant.expires_at_unix_ms,
+            "resource_scope": grant.resource_scope,
+            "operation_scope": grant.operation_scope,
+        });
+        if state == "active"
+            && grant.use_policy == CapabilityGrantUsePolicy::OneShotExact
+            && let Some((canonical_input, digest)) =
+                approved_exact_input(grant, permission_requests)
+        {
+            entry["canonical_input_digest_sha256"] = json!(digest);
+            entry["approved_exact_input"] = canonical_input;
+            approved_exact_input_expires_at_unix_ms = Some(
+                approved_exact_input_expires_at_unix_ms
+                    .map_or(grant.expires_at_unix_ms, |current| {
+                        current.min(grant.expires_at_unix_ms)
+                    }),
+            );
+        }
+        entries.push(entry);
+    }
+    CapabilityAuthorizationPrompt {
+        text: format!(
+            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For an active one-shot exact grant, approved_exact_input is the immutable server-canonicalized JSON the owner approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it after the tool returns. Exact input is deliberately omitted for every non-active or non-exact grant. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
+            serde_json::to_string(&entries).expect("authorization projection is serializable")
+        ),
+        approved_exact_input_expires_at_unix_ms,
+    }
+}
+
+fn approved_exact_input(
+    grant: &CapabilityGrant,
+    permission_requests: &[PermissionRequest],
+) -> Option<(serde_json::Value, String)> {
+    let digest = grant.canonical_input_digest_sha256.as_deref()?;
+    permission_requests
         .iter()
-        .map(|grant| {
-            let state = if grant.revoked_at_unix_ms.is_some() {
-                "revoked"
-            } else if grant.expires_at_unix_ms <= now_unix_ms {
-                "expired"
-            } else if grant.remaining_uses == 0 {
-                "exhausted"
-            } else {
-                "active"
-            };
-            json!({
-                "provider_id": grant.provider_id,
-                "capability_id": grant.capability_id,
-                "tool_name": grant.tool_name,
-                "effect": grant.effect,
-                "risk_tier": grant.risk_tier,
-                "state": state,
-                "remaining_uses": grant.remaining_uses,
-                "expires_at_unix_ms": grant.expires_at_unix_ms,
-                "resource_scope": grant.resource_scope,
-                "operation_scope": grant.operation_scope,
-            })
+        .filter(|request| {
+            matches!(
+                request.state,
+                PermissionRequestState::Approved | PermissionRequestState::PartiallyApproved
+            )
         })
-        .collect::<Vec<_>>();
-    format!(
-        "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
-        serde_json::to_string(&entries).expect("authorization projection is serializable")
-    )
+        .flat_map(|request| &request.items)
+        .find_map(|item| {
+            if item.provider_id != grant.provider_id
+                || item.tool_name != grant.tool_name
+                || item.canonical_input_digest_sha256.as_deref() != Some(digest)
+            {
+                return None;
+            }
+            let canonical = item.canonical_input_json.as_deref()?;
+            (format!("{:x}", Sha256::digest(canonical.as_bytes())) == digest)
+                .then(|| serde_json::from_str(canonical).ok())
+                .flatten()
+                .map(|value| (value, digest.to_string()))
+        })
 }
 
 /// Build the exact server-owned capability catalog shown to the model. The
@@ -186,6 +246,36 @@ fn invalid(detail: impl std::fmt::Display) -> AgentError {
     }
 }
 
+/// Canonical JSON representation shared by permission planning and the runtime
+/// call authorizer. Object member order is not semantically meaningful, so an
+/// approved exact input must continue to match when a model serializes the same
+/// object with a different key order. Arrays remain ordered and scalar values
+/// remain unchanged.
+pub fn canonical_permission_input_json(
+    value: serde_json::Value,
+) -> Result<String, serde_json::Error> {
+    fn sort_json(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.into_iter().map(sort_json).collect())
+            }
+            serde_json::Value::Object(values) => {
+                let mut entries = values.into_iter().collect::<Vec<_>>();
+                entries.sort_by(|left, right| left.0.cmp(&right.0));
+                serde_json::Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key, sort_json(value)))
+                        .collect(),
+                )
+            }
+            scalar => scalar,
+        }
+    }
+
+    serde_json::to_string(&sort_json(value))
+}
+
 /// The placeholder capability is ignored by PermissionPlanning exposure. It
 /// exists only because RegisteredTool deliberately requires a closed capability.
 pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
@@ -209,7 +299,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 "expected_effect": {"type": "string", "enum": [
                                     "read_device", "read_file", "read_external", "export_data",
                                     "write_artifact", "mutate_application", "write_external_draft",
-                                    "send_external", "capture_screen", "input_fallback"
+                                    "send_external", "capture_screen", "input_fallback", "execute_command"
                                 ]},
                                 "resource_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "operation_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
@@ -269,14 +359,20 @@ pub fn build_permission_request(
                 item.tool_name
             )));
         }
-        if item.expected_effect != CapabilityEffect::ExportData
-            && !item.export_destinations.is_empty()
+        if !matches!(
+            item.expected_effect,
+            CapabilityEffect::ExportData
+                | CapabilityEffect::WriteExternalDraft
+                | CapabilityEffect::SendExternal
+        ) && !item.export_destinations.is_empty()
         {
-            return Err(invalid("export_destinations are only valid for ExportData"));
+            return Err(invalid(
+                "export_destinations are only valid for external egress effects",
+            ));
         }
         let (canonical_input_json, canonical_input_digest_sha256) = match item.exact_input {
             Some(input) => {
-                let canonical = serde_json::to_string(&input)
+                let canonical = canonical_permission_input_json(input)
                     .map_err(|error| invalid(format!("canonicalize exact_input: {error}")))?;
                 if canonical.len() > crate::dynamic_run::MAX_PERMISSION_EXACT_INPUT_BYTES {
                     return Err(invalid("exact_input exceeds the bounded storage limit"));
@@ -286,11 +382,14 @@ pub fn build_permission_request(
             }
             None => (None, None),
         };
-        if matches!(
+        let inherently_r3 = matches!(
             item.expected_effect,
-            CapabilityEffect::SendExternal | CapabilityEffect::InputFallback
-        ) && canonical_input_json.is_none()
-        {
+            CapabilityEffect::SendExternal
+                | CapabilityEffect::WriteExternalDraft
+                | CapabilityEffect::InputFallback
+                | CapabilityEffect::ExecuteCommand
+        );
+        if inherently_r3 && canonical_input_json.is_none() {
             return Err(invalid("inherently R3 tools require exact_input"));
         }
         if capability.required_capability == Capability::SpreadsheetFormulaWorkbookCreateConfirmed
@@ -304,10 +403,75 @@ pub fn build_permission_request(
             == [AuthorizationResourceKind::ExternalUrl];
         let exact_external_query = capability.wire.authorization_hint.resources
             == [AuthorizationResourceKind::ExternalQuery];
-        if (exact_external_url || exact_external_query) && canonical_input_digest_sha256.is_none() {
+        let exact_command = capability.wire.authorization_hint.resources
+            == [AuthorizationResourceKind::ExactCommand];
+        let exact_outlook_handoff = capability.wire.capability_id
+            == crate::device_assistant::OUTLOOK_NEW_HANDOFF_CAPABILITY_ID;
+        let exact_gmail_handoff = capability.wire.capability_id
+            == crate::device_assistant::GMAIL_WEB_HANDOFF_CAPABILITY_ID;
+        let exact_slack_handoff = capability.wire.capability_id
+            == crate::device_assistant::SLACK_WEB_HANDOFF_CAPABILITY_ID;
+        if exact_gmail_handoff {
+            let canonical = canonical_input_json
+                .as_deref()
+                .ok_or_else(|| invalid("Gmail Web handoff requires exact_input"))?;
+            let input: desk_agent_protocol::communication::GmailWebDraftHandoffInput =
+                serde_json::from_str(canonical)
+                    .map_err(|error| invalid(format!("decode Gmail Web handoff input: {error}")))?;
+            input
+                .validate()
+                .map_err(|error| invalid(format!("validate Gmail Web handoff input: {error}")))?;
+        }
+        if exact_slack_handoff {
+            let canonical = canonical_input_json
+                .as_deref()
+                .ok_or_else(|| invalid("Slack Web handoff requires exact_input"))?;
+            let input: desk_agent_protocol::communication::SlackWebDraftHandoffInput =
+                serde_json::from_str(canonical)
+                    .map_err(|error| invalid(format!("decode Slack Web handoff input: {error}")))?;
+            input
+                .validate()
+                .map_err(|error| invalid(format!("validate Slack Web handoff input: {error}")))?;
+        }
+        if (exact_external_url || exact_external_query || exact_command)
+            && canonical_input_digest_sha256.is_none()
+        {
             return Err(invalid(
-                "external URL/query permissions require exact_input so the approved input is immutable",
+                "exact URL/query/command permissions require exact_input so the approved input is immutable",
             ));
+        }
+        if exact_command {
+            let canonical = canonical_input_json
+                .as_deref()
+                .expect("ExactCommand exact input was checked");
+            let draft: desk_agent_protocol::exec::CommandDraft = serde_json::from_str(canonical)
+                .map_err(|error| invalid(format!("decode exact command input: {error}")))?;
+            draft
+                .validate()
+                .map_err(|error| invalid(format!("validate exact command input: {error}")))?;
+            let shell = canonical_exec_shell(&draft.shell)
+                .ok_or_else(|| invalid("exact command shell is not supported"))?;
+            let input = desk_agent_protocol::ExecInput {
+                target: desk_agent_protocol::ExecTarget::Shell {
+                    shell: shell.to_string(),
+                },
+                command: draft.command,
+                cwd: draft.cwd,
+                timeout_ms: draft.timeout_ms,
+                max_stdout_bytes: 65_536,
+                max_stderr_bytes: 65_536,
+            };
+            let classified = classify_command(&input);
+            if classified.classification.decision
+                != desk_agent_protocol::exec::ExecDecision::ConfirmRequired
+                || classified.draft.as_ref().is_none_or(|plan| {
+                    plan.execution_basis != desk_agent_protocol::exec::ExecExecutionBasis::Template
+                })
+            {
+                return Err(invalid(
+                    "exact command does not match a server-owned safe template",
+                ));
+            }
         }
         let compiled_scope = canonical_compiled_scope(
             &capability.wire.authorization_hint.resources,
@@ -324,6 +488,12 @@ pub fn build_permission_request(
                 canonical_input_digest_sha256
                     .as_deref()
                     .expect("ExternalQuery exact input was checked"),
+            )
+        } else if exact_command {
+            exact_command_resource_scope(
+                canonical_input_digest_sha256
+                    .as_deref()
+                    .expect("ExactCommand exact input was checked"),
             )
         } else {
             compiled_scope.as_ref().map_or_else(
@@ -347,13 +517,43 @@ pub fn build_permission_request(
                         connector_id: DUCKDUCKGO_HTML_CONNECTOR_ID.into(),
                     },
                 ]
+            } else if exact_outlook_handoff {
+                vec![
+                    desk_agent_protocol::data_lineage::DestinationIdentity::EmailAccount {
+                        account_id: crate::device_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID
+                            .into(),
+                    },
+                ]
+            } else if exact_gmail_handoff {
+                vec![
+                    desk_agent_protocol::data_lineage::DestinationIdentity::EmailAccount {
+                        account_id: crate::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID
+                            .into(),
+                    },
+                ]
+            } else if exact_slack_handoff {
+                vec![
+                    desk_agent_protocol::data_lineage::DestinationIdentity::ChatAccount {
+                        account_id: crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID
+                            .into(),
+                    },
+                ]
             } else {
                 item.export_destinations
             },
             canonical_input_json,
             canonical_input_digest_sha256,
             suggested_ttl_seconds: item.suggested_ttl_seconds.clamp(1, MAX_REQUEST_TTL_SECONDS),
-            suggested_max_uses: item.suggested_max_uses.clamp(1, MAX_REQUEST_USES),
+            suggested_max_uses: if inherently_r3
+                || exact_command
+                || exact_outlook_handoff
+                || exact_gmail_handoff
+                || exact_slack_handoff
+            {
+                1
+            } else {
+                item.suggested_max_uses.clamp(1, MAX_REQUEST_USES)
+            },
             reason: item.reason.trim().to_string(),
         });
     }
@@ -483,6 +683,45 @@ mod tests {
     }
 
     #[test]
+    fn exact_input_digest_ignores_nested_object_member_order() {
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let first = r#"{"items":[{"item_id":"browser","provider_id":"browser.page.open","tool_name":"browser_open_page","expected_effect":"mutate_application","exact_input":{"target":{"url":"http://127.0.0.1:5174/user/login","origin":{"kind":"http_loopback","host_ascii":"127.0.0.1","port":5174}}},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Open the selected local development page"}]}"#;
+        let reordered = r#"{"items":[{"item_id":"browser","provider_id":"browser.page.open","tool_name":"browser_open_page","expected_effect":"mutate_application","exact_input":{"target":{"origin":{"port":5174,"host_ascii":"127.0.0.1","kind":"http_loopback"},"url":"http://127.0.0.1:5174/user/login"}},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Open the selected local development page"}]}"#;
+
+        let first = build_permission_request(
+            &call(first),
+            &registry,
+            "permission-browser-a".into(),
+            1,
+            "2026-08-27T00:00:00Z".into(),
+        )
+        .unwrap();
+        let reordered = build_permission_request(
+            &call(reordered),
+            &registry,
+            "permission-browser-b".into(),
+            1,
+            "2026-08-27T00:00:00Z".into(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            first.items[0].canonical_input_json,
+            reordered.items[0].canonical_input_json
+        );
+        assert_eq!(
+            first.items[0].canonical_input_digest_sha256,
+            reordered.items[0].canonical_input_digest_sha256
+        );
+        assert_eq!(
+            first.items[0].canonical_input_json.as_deref(),
+            Some(
+                r#"{"target":{"origin":{"host_ascii":"127.0.0.1","kind":"http_loopback","port":5174},"url":"http://127.0.0.1:5174/user/login"}}"#
+            )
+        );
+    }
+
+    #[test]
     fn external_query_permission_fixes_input_scope_and_connector_destination() {
         let registry = crate::device_assistant::device_assistant_provider_registry();
         let missing = r#"{"items":[{"item_id":"search","provider_id":"web.search","tool_name":"search_public_web","expected_effect":"export_data","suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Search public sources"}]}"#;
@@ -521,6 +760,75 @@ mod tests {
             item.canonical_input_json.as_deref(),
             Some(r#"{"max_results":5,"query":"Rust language"}"#)
         );
+    }
+
+    #[test]
+    fn command_permission_requires_exact_input_and_forces_one_shot_scope() {
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let missing = r#"{"items":[{"item_id":"command","provider_id":"system.command","tool_name":"execute_confirmed_command","expected_effect":"execute_command","suggested_ttl_seconds":60,"suggested_max_uses":9,"reason":"Restart the requested service"}]}"#;
+        assert!(
+            build_permission_request(
+                &call(missing),
+                &registry,
+                "permission-command".into(),
+                1,
+                "2026-08-26T00:00:00Z".into(),
+            )
+            .is_err()
+        );
+
+        let exact = r#"{"items":[{"item_id":"command","provider_id":"system.command","tool_name":"execute_confirmed_command","expected_effect":"execute_command","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"schema_version":1,"shell":"powershell","command":"Restart-Service -Name Spooler","timeout_ms":10000},"suggested_ttl_seconds":60,"suggested_max_uses":9,"reason":"Restart the requested service"}]}"#;
+        let request = build_permission_request(
+            &call(exact),
+            &registry,
+            "permission-command".into(),
+            1,
+            "2026-08-26T00:00:00Z".into(),
+        )
+        .unwrap();
+        let item = &request.items[0];
+        assert_eq!(item.operation_scope, vec!["execute_confirmed_command"]);
+        assert!(item.resource_scope[0].starts_with("command_input:sha256:"));
+        assert_eq!(item.suggested_max_uses, 1);
+        assert!(
+            !item
+                .resource_scope
+                .iter()
+                .any(|scope| scope == "model:chosen")
+        );
+
+        let off_template = r#"{"items":[{"item_id":"command","provider_id":"system.command","tool_name":"execute_confirmed_command","expected_effect":"execute_command","exact_input":{"schema_version":1,"shell":"powershell","command":"Remove-Item C:\\temp\\anything","timeout_ms":10000},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Delete files"}]}"#;
+        let error = build_permission_request(
+            &call(off_template),
+            &registry,
+            "permission-command-off-template".into(),
+            1,
+            "2026-08-26T00:00:00Z".into(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("does not match a server-owned safe template")
+        );
+    }
+
+    #[test]
+    fn input_fallback_permission_is_narrowed_to_one_shot_before_pending() {
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let request = build_permission_request(
+            &call(
+                r#"{"items":[{"item_id":"activate","provider_id":"browser.element.activate","tool_name":"browser_activate_element","expected_effect":"input_fallback","exact_input":{"page":"provider-owned-page","element":"provider-owned-element"},"suggested_ttl_seconds":300,"suggested_max_uses":2,"reason":"Activate the selected semantic element once"}]}"#,
+            ),
+            &registry,
+            "permission-browser-activate".into(),
+            1,
+            "2026-08-27T00:00:00Z".into(),
+        )
+        .unwrap();
+
+        assert_eq!(request.items[0].suggested_max_uses, 1);
+        assert!(request.items[0].canonical_input_digest_sha256.is_some());
     }
 
     #[test]
@@ -685,10 +993,334 @@ mod tests {
             revoked_at_unix_ms: None,
             revoked_reason: None,
         };
-        let prompt = capability_authorization_prompt(&[grant], 500);
-        assert!(prompt.contains("\"state\":\"active\""));
-        assert!(prompt.contains("inspect_office_selection"));
-        assert!(!prompt.contains("secret-grant-id"));
-        assert!(prompt.contains("supersedes any older assistant statement"));
+        let prompt = capability_authorization_prompt(&[grant], &[], 500);
+        assert!(prompt.text.contains("\"state\":\"active\""));
+        assert!(prompt.text.contains("inspect_office_selection"));
+        assert!(!prompt.text.contains("secret-grant-id"));
+        assert!(
+            prompt
+                .text
+                .contains("supersedes any older assistant statement")
+        );
+        assert_eq!(prompt.approved_exact_input_expires_at_unix_ms, None);
+    }
+
+    #[test]
+    fn authorization_projection_recovers_only_active_approved_exact_input() {
+        use desk_agent_protocol::capability_grant::{
+            CAPABILITY_GRANT_SCHEMA_VERSION, CapabilityGrantIssuer, CapabilityGrantLimits,
+            CapabilityGrantUsePolicy, CapabilityRiskTier,
+        };
+        use desk_agent_protocol::capability_provider::ProductSurface;
+
+        let canonical_input = r#"{"element":{"element_id":"element-1"},"value":"approved"}"#;
+        let digest = format!("{:x}", Sha256::digest(canonical_input.as_bytes()));
+        let grant = CapabilityGrant {
+            schema_version: CAPABILITY_GRANT_SCHEMA_VERSION,
+            grant_id: "secret-exact-grant-id".into(),
+            actor_id: "owner".into(),
+            run_id: "run".into(),
+            surface: ProductSurface::OssPersonalOwner,
+            target_device_id: "device".into(),
+            target_session_id: None,
+            provider_id: "browser.devtools_mcp".into(),
+            capability_id: "browser.activate".into(),
+            tool_name: "browser_activate_element".into(),
+            tool_schema_version: 1,
+            effect: CapabilityEffect::InputFallback,
+            risk_tier: CapabilityRiskTier::R3,
+            resource_scope: vec!["browser:current_profile".into()],
+            operation_scope: vec!["activate_element".into()],
+            export_destinations: Vec::new(),
+            allowed_envelope_ids: Vec::new(),
+            allowed_content_digests_sha256: Vec::new(),
+            use_policy: CapabilityGrantUsePolicy::OneShotExact,
+            canonical_input_digest_sha256: Some(digest.clone()),
+            issued_by: CapabilityGrantIssuer::UserDecision,
+            issued_at_unix_ms: 100,
+            expires_at_unix_ms: 1_000,
+            remaining_uses: 1,
+            limits: CapabilityGrantLimits {
+                max_bytes_per_call: 1024,
+                max_items_per_call: 1,
+                max_calls: 1,
+            },
+            policy_revision: 1,
+            readiness_revision: 1,
+            revoked_at_unix_ms: None,
+            revoked_reason: None,
+        };
+        let request = PermissionRequest {
+            schema_version: PERMISSION_REQUEST_SCHEMA_VERSION,
+            request_id: "permission-exact".into(),
+            input_revision: 1,
+            state: PermissionRequestState::Approved,
+            items: vec![GrantRequestItem {
+                item_id: "activate".into(),
+                provider_id: grant.provider_id.clone(),
+                tool_name: grant.tool_name.clone(),
+                expected_effect: grant.effect,
+                resource_scope: grant.resource_scope.clone(),
+                operation_scope: grant.operation_scope.clone(),
+                export_destinations: Vec::new(),
+                canonical_input_json: Some(canonical_input.into()),
+                canonical_input_digest_sha256: Some(digest),
+                suggested_ttl_seconds: 300,
+                suggested_max_uses: 1,
+                reason: "Activate the approved element".into(),
+            }],
+            created_at: "2026-08-28T00:00:00Z".into(),
+        };
+
+        let active = capability_authorization_prompt(
+            std::slice::from_ref(&grant),
+            std::slice::from_ref(&request),
+            500,
+        );
+        assert!(active.text.contains("\"approved_exact_input\""));
+        assert!(active.text.contains("\"value\":\"approved\""));
+        assert!(!active.text.contains("secret-exact-grant-id"));
+        assert_eq!(active.approved_exact_input_expires_at_unix_ms, Some(1_000));
+
+        for inactive in [
+            {
+                let mut value = grant.clone();
+                value.remaining_uses = 0;
+                value
+            },
+            {
+                let mut value = grant.clone();
+                value.revoked_at_unix_ms = Some(400);
+                value.revoked_reason = Some("owner revoked".into());
+                value
+            },
+            {
+                let mut value = grant.clone();
+                value.expires_at_unix_ms = 500;
+                value
+            },
+        ] {
+            // Keep the stored contract internally valid for every state fixture.
+            inactive.validate().unwrap();
+            let projection = capability_authorization_prompt(&[inactive], &[request.clone()], 500);
+            assert!(!projection.text.contains("\"approved_exact_input\""));
+            assert_eq!(projection.approved_exact_input_expires_at_unix_ms, None);
+        }
+    }
+
+    #[test]
+    fn outlook_external_draft_permission_is_exact_one_shot_and_destination_bound() {
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let request = build_permission_request(
+            &call(
+                r#"{"items":[{"item_id":"outlook","provider_id":"communication.outlook_new.handoff","tool_name":"prepare_outlook_new_draft_handoff","expected_effect":"write_external_draft","resource_scope":[],"operation_scope":[],"export_destinations":[],"exact_input":{"draft":{"schema_version":3,"recipients":[{"role":"to","address":"review@example.invalid","display_name":null}],"subject":"Review","body_plain_text":"Please review","attachment_labels":[]}},"suggested_ttl_seconds":300,"suggested_max_uses":5,"reason":"Prepare a manual Outlook draft"}]}"#,
+            ),
+            &registry,
+            "permission-outlook".into(),
+            1,
+            "2026-08-27T00:00:00Z".into(),
+        )
+        .unwrap();
+        let item = &request.items[0];
+        assert_eq!(item.suggested_max_uses, 1);
+        assert!(item.canonical_input_digest_sha256.is_some());
+        assert_eq!(
+            item.export_destinations,
+            vec![
+                desk_agent_protocol::data_lineage::DestinationIdentity::EmailAccount {
+                    account_id: crate::device_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID.into(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn slack_external_draft_permission_validates_site_and_fixes_destination() {
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let exact_input = serde_json::json!({
+            "schema_version": desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION,
+            "page": {
+                "schema_version": desk_agent_protocol::browser_control::BROWSER_CONTROL_SCHEMA_VERSION,
+                "adapter": {
+                    "engine": "chrome_devtools_mcp",
+                    "device_id": "device-1",
+                    "os_session_id": "session-1",
+                    "browser_major_version": 151,
+                    "browser_version": "151.0.0.0",
+                    "adapter_id": "chrome-devtools-mcp",
+                    "adapter_version": "1.7.0",
+                    "profile_incarnation": "profile-1",
+                    "connection_revision": 7
+                },
+                "page_id": "page-1",
+                "page_incarnation": "page-incarnation-1",
+                "origin": {"kind": "https", "host_ascii": "app.slack.com", "port": 443},
+                "document_revision": 2,
+                "url_sha256": "a".repeat(64),
+                "observed_at_unix_ms": 42
+            },
+            "composer": {
+                "page_id": "page-1",
+                "page_incarnation": "page-incarnation-1",
+                "document_revision": 2,
+                "element_id": "composer-1",
+                "role": "textbox",
+                "accessible_name": "Message #test",
+                "value": null,
+                "element_revision": 1
+            },
+            "body_plain_text": "Stage 5 draft verification"
+        });
+        let arguments = serde_json::json!({
+            "items": [{
+                "item_id": "slack",
+                "provider_id": crate::device_assistant::SLACK_WEB_HANDOFF_PROVIDER_ID,
+                "tool_name": "prepare_slack_web_message_handoff",
+                "expected_effect": "write_external_draft",
+                "resource_scope": ["model:chosen"],
+                "operation_scope": ["anything"],
+                "export_destinations": [],
+                "exact_input": exact_input,
+                "suggested_ttl_seconds": 300,
+                "suggested_max_uses": 5,
+                "reason": "Prepare a manual Slack Web draft"
+            }]
+        })
+        .to_string();
+        let request = build_permission_request(
+            &call(&arguments),
+            &registry,
+            "permission-slack".into(),
+            1,
+            "2026-08-27T00:00:00Z".into(),
+        )
+        .unwrap();
+        let item = &request.items[0];
+        assert_eq!(item.suggested_max_uses, 1);
+        assert!(item.canonical_input_digest_sha256.is_some());
+        assert_eq!(
+            item.export_destinations,
+            vec![
+                desk_agent_protocol::data_lineage::DestinationIdentity::ChatAccount {
+                    account_id: crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID
+                        .into(),
+                }
+            ]
+        );
+
+        let mut invalid = serde_json::from_str::<serde_json::Value>(&arguments).unwrap();
+        invalid["items"][0]["exact_input"]["page"]["origin"]["host_ascii"] =
+            serde_json::Value::String("example.com".into());
+        assert!(
+            build_permission_request(
+                &call(&invalid.to_string()),
+                &registry,
+                "permission-slack-invalid".into(),
+                1,
+                "2026-08-27T00:00:00Z".into(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn gmail_external_draft_permission_validates_fields_and_fixes_destination() {
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let page = serde_json::json!({
+            "schema_version": desk_agent_protocol::browser_control::BROWSER_CONTROL_SCHEMA_VERSION,
+            "adapter": {
+                "engine": "chrome_devtools_mcp",
+                "device_id": "device-1",
+                "os_session_id": "session-1",
+                "browser_major_version": 151,
+                "browser_version": "151.0.0.0",
+                "adapter_id": "chrome-devtools-mcp",
+                "adapter_version": "1.7.0",
+                "profile_incarnation": "profile-1",
+                "connection_revision": 7
+            },
+            "page_id": "page-1",
+            "page_incarnation": "page-incarnation-1",
+            "origin": {"kind": "https", "host_ascii": "mail.google.com", "port": 443},
+            "document_revision": 2,
+            "url_sha256": "a".repeat(64),
+            "observed_at_unix_ms": 42
+        });
+        let field = |element_id: &str, accessible_name: &str, role: &str| {
+            serde_json::json!({
+                "page_id": "page-1",
+                "page_incarnation": "page-incarnation-1",
+                "document_revision": 2,
+                "element_id": element_id,
+                "role": role,
+                "accessible_name": accessible_name,
+                "value": null,
+                "element_revision": 1
+            })
+        };
+        let exact_input = serde_json::json!({
+            "schema_version": desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION,
+            "page": page,
+            "to_field": field("to-1", "To recipients", "combobox"),
+            "subject_field": field("subject-1", "Subject", "textbox"),
+            "body_field": field("body-1", "Message Body", "textbox"),
+            "draft": {
+                "schema_version": desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION,
+                "recipients": [{"role": "to", "address": "alice@example.com", "display_name": null}],
+                "subject": "Stage 5 Gmail verification",
+                "body_plain_text": "Semantic draft only; do not send.",
+                "attachment_labels": []
+            }
+        });
+        let arguments = serde_json::json!({
+            "items": [{
+                "item_id": "gmail",
+                "provider_id": crate::device_assistant::GMAIL_WEB_HANDOFF_PROVIDER_ID,
+                "tool_name": "prepare_gmail_web_draft_handoff",
+                "expected_effect": "write_external_draft",
+                "resource_scope": ["model:chosen"],
+                "operation_scope": ["anything"],
+                "export_destinations": [],
+                "exact_input": exact_input,
+                "suggested_ttl_seconds": 300,
+                "suggested_max_uses": 5,
+                "reason": "Prepare a manual Gmail Web draft"
+            }]
+        })
+        .to_string();
+        let request = build_permission_request(
+            &call(&arguments),
+            &registry,
+            "permission-gmail".into(),
+            1,
+            "2026-08-27T00:00:00Z".into(),
+        )
+        .unwrap();
+        let item = &request.items[0];
+        assert_eq!(item.suggested_max_uses, 1);
+        assert!(item.canonical_input_digest_sha256.is_some());
+        assert_eq!(
+            item.export_destinations,
+            vec![
+                desk_agent_protocol::data_lineage::DestinationIdentity::EmailAccount {
+                    account_id: crate::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID
+                        .into(),
+                }
+            ]
+        );
+
+        let mut invalid = serde_json::from_str::<serde_json::Value>(&arguments).unwrap();
+        invalid["items"][0]["exact_input"]["body_field"]["element_id"] =
+            invalid["items"][0]["exact_input"]["subject_field"]["element_id"].clone();
+        assert!(
+            build_permission_request(
+                &call(&invalid.to_string()),
+                &registry,
+                "permission-gmail-invalid".into(),
+                1,
+                "2026-08-27T00:00:00Z".into(),
+            )
+            .is_err()
+        );
     }
 }

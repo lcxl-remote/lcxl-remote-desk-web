@@ -207,9 +207,7 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// in the manager (which persists them); `None` elsewhere, where they are
     /// ignored.
     pub audit_observer: Option<Arc<dyn AuditObserver>>,
-    /// Remote-collect response consumer for inbound `CollectResponse` frames.
-    /// `Some` only in the manager (which feeds them into its orchestrator's
-    /// pending store); `None` elsewhere, where they are ignored.
+    /// Enterprise fleet evidence response consumer.
     pub collect_observer: Option<Arc<dyn CollectObserver>>,
     /// Central-agent execution result consumer for inbound `EdgeExecResult`
     /// frames. Manager feeds its distributed execution ledger; OSS Signal feeds
@@ -467,9 +465,6 @@ impl<U: SignalingUser> SignalingHandler<U> {
         self
     }
 
-    /// Attach a remote-collect response consumer (the manager orchestrator's
-    /// pending store). The signal server never calls this, so inbound
-    /// `CollectResponse` frames are ignored there.
     pub fn with_collect_observer(mut self, observer: Arc<dyn CollectObserver>) -> Self {
         self.collect_observer = Some(observer);
         self
@@ -1105,7 +1100,6 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // AI host → control-end responses are plain relayed types (no
             // authorization injection on the reply path).
             | SignalingType::AgentCapabilityCompleted
-            | SignalingType::DiagnosisUpdated
             | SignalingType::DeviceAssistantUpdated
             | SignalingType::DeviceAssistantCapabilitiesUpdated
             | SignalingType::DeviceAssistantContextUpdated
@@ -1209,8 +1203,6 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // ResolveExec is relayed unwrapped by the authorizer (`Forward`); with no
             // authorizer (signal server) it relays plainly, exactly like before.
             SignalingType::InvokeAgentCapability
-            | SignalingType::DiagnoseDevice
-            | SignalingType::CancelDiagnosis
             | SignalingType::AskTerminalCopilot
             | SignalingType::CancelTerminalCopilot
             | SignalingType::GenerateTerminalCompletions
@@ -1268,20 +1260,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 );
             }
             SignalingType::CollectEvidence => {
-                // Manager → daemon only, originated server-side and written
-                // directly to the desk-server's session. A client sending it
-                // inbound to the signaling server is a protocol error; swallow it
-                // so a control end cannot forge an evidence-collection request.
                 log::warn!(
-                    "Received remote-collect request from client {}, ignoring",
+                    "Received fleet evidence request from client {}, ignoring",
                     self.connection_state.model.connection_id
                 );
             }
             SignalingType::EvidenceCollectionUpdated => {
-                // Desk-server daemon → manager only. Consumed by the manager
-                // orchestrator's pending store; never relayed to a peer (it must
-                // not re-enter the control-end broadcast lane). Ignored where no
-                // orchestrator consumer is attached (the signal server).
                 if let Some(observer) = self.collect_observer.clone() {
                     observer
                         .on_collect_response(&self.connection_state, &signaling_model)

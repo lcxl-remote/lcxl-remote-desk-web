@@ -563,6 +563,137 @@ impl SignalAgentTools {
             Err(_) => Ok(SignalDispatch::Dispatched(task)),
         }
     }
+
+    /// Execute a command whose user confirmation was already represented by a
+    /// one-shot exact capability grant. This path deliberately skips the legacy
+    /// `ExecPreview`/`ResolveExec` dialog, but keeps every other defense: current
+    /// execution-mode ceiling, verified shell availability, TemplateOnly
+    /// classification, immutable plan sealing, daemon re-classification, durable
+    /// task tracking and OutcomeUnknown handling.
+    pub(crate) async fn execute_preapproved(
+        &self,
+        mut validation_input: ExecInput,
+        ctx: &ExecContext,
+        exec_request_id: ExecRequestId,
+        execution_generation: String,
+        approval_id: ApprovalId,
+    ) -> Result<ExecOutcome, AgentError> {
+        desk_diagnose_core::exec_tools::apply_exec_runtime_ceiling(
+            &mut validation_input,
+            self.max_command_runtime_ms,
+        );
+        let requested_shell = match &validation_input.target {
+            desk_agent_protocol::ExecTarget::Shell { shell } => shell.as_str(),
+            _ => "",
+        };
+        if !exec_shell_is_available(requested_shell, &self.available_exec_shells) {
+            return Err(unsupported_exec_shell_error(
+                requested_shell,
+                &self.available_exec_shells,
+            ));
+        }
+        let classified = classify_command_with_policy(
+            &validation_input,
+            &[],
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
+            ExecAdmissionPolicy::TemplateOnly,
+        );
+        let Some(draft) = classified.draft else {
+            return Ok(ExecOutcome::Rejected {
+                reason: Some(classified.classification.impact),
+            });
+        };
+        if classified.classification.decision != ExecDecision::ConfirmRequired
+            || draft.execution_basis != ExecExecutionBasis::Template
+            || draft.risk > self.max_risk
+        {
+            return Ok(ExecOutcome::Rejected {
+                reason: Some("the command is not admitted by the safe-template policy".into()),
+            });
+        }
+
+        let current_mode = crate::model_provider::load(&self.db)
+            .await
+            .map_err(|e| {
+                safe(
+                    AgentErrorKind::PermissionDenied,
+                    format!("execution policy could not be refreshed: {e}"),
+                )
+            })?
+            .execution_mode;
+        let effective_mode = ctx.scope.mode.restrict_to(current_mode);
+        if effective_mode != desk_agent_protocol::ExecutionMode::ConfirmEachAction {
+            return Ok(ExecOutcome::Rejected {
+                reason: Some("confirmed command execution is disabled by current policy".into()),
+            });
+        }
+        let refreshed = classify_command_with_policy(
+            &validation_input,
+            &[],
+            desk_agent_protocol::exec_policy::builtin_blocklist(),
+            ExecAdmissionPolicy::TemplateOnly,
+        );
+        if refreshed.draft.as_ref() != Some(&draft) {
+            return Ok(ExecOutcome::Rejected {
+                reason: Some("execution policy changed; request permission again".into()),
+            });
+        }
+
+        let plan = ExecPlan::from_draft(exec_request_id, execution_generation, approval_id, draft);
+        let actor_user_id = ctx.actor_id.parse::<i32>().map_err(|_| {
+            safe(
+                AgentErrorKind::PermissionDenied,
+                "invalid operator identity",
+            )
+        })?;
+        let mut refreshed_scope = ctx.scope.clone();
+        refreshed_scope.mode = effective_mode;
+        match self
+            .dispatch(actor_user_id, refreshed_scope, plan, validation_input, ctx)
+            .await?
+        {
+            SignalDispatch::Settled {
+                task,
+                disposition: EdgeExecDisposition::Executed { outcome },
+            } => Ok(ExecOutcome::Executed {
+                output: ToolRunOutput {
+                    content: outcome_content(&outcome),
+                    image_data_url: None,
+                },
+                event_id: Some(task.event_id),
+            }),
+            SignalDispatch::Settled {
+                task,
+                disposition:
+                    EdgeExecDisposition::RejectedBeforeDispatch { error }
+                    | EdgeExecDisposition::DispatchFailedBeforeWorker { error }
+                    | EdgeExecDisposition::HostAtCapacity { error },
+            } => {
+                crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone())
+                    .consume_event(&task.event_id)
+                    .await?;
+                Err(error)
+            }
+            SignalDispatch::Settled {
+                task,
+                disposition: EdgeExecDisposition::ExecutionStateUnknown { .. },
+            }
+            | SignalDispatch::Unknown(task) => Ok(ExecOutcome::Unknown(
+                desk_diagnose_core::session::ActionIdentity::agent_exec(
+                    task.id,
+                    task.exec_request_id,
+                    task.execution_generation,
+                ),
+            )),
+            SignalDispatch::Dispatched(task) => Ok(ExecOutcome::Dispatched(
+                desk_diagnose_core::session::ActionIdentity::agent_exec(
+                    task.id,
+                    task.exec_request_id,
+                    task.execution_generation,
+                ),
+            )),
+        }
+    }
 }
 
 #[async_trait(?Send)]
@@ -953,10 +1084,16 @@ impl EdgeExecObserver for SignalEdgeExecObserver {
                     false
                 }
             };
-            if correlated {
-                let _ = self
+            if correlated
+                || self
                     .pending
-                    .deliver_result(&source.model.connection_id, payload);
+                    .deliver_result(&source.model.connection_id, payload.clone())
+            {
+                if correlated {
+                    let _ = self
+                        .pending
+                        .deliver_result(&source.model.connection_id, payload);
+                }
             } else {
                 log::warn!("[agent-exec] uncorrelated EdgeExecResult was dropped");
             }

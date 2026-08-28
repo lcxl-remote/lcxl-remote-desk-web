@@ -19,10 +19,11 @@ use crate::{
     },
 };
 use actix_web::web;
+use desk_agent_protocol::browser_control::BrowserAction;
 use desk_agent_protocol::computer_use::{
-    ComputerActionCompleted, ComputerActionKind, ComputerActionPhase, ComputerActionResultClass,
-    ComputerActionStartDisposition, ComputerActionStarted, ComputerActionStateReport,
-    ComputerActionStepFact, FilePatchAction,
+    ComputerActionCompleted, ComputerActionKind, ComputerActionOutput, ComputerActionPhase,
+    ComputerActionResultClass, ComputerActionStartDisposition, ComputerActionStarted,
+    ComputerActionStateReport, ComputerActionStepFact, FilePatchAction,
 };
 use desk_agent_protocol::{AgentOutcome, DeviceAgent};
 use desk_input_injection::display_watcher;

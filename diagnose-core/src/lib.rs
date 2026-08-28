@@ -1,5 +1,4 @@
-//! Model-agnostic diagnose logic shared by the thin edge (被控端 B) and the
-//! central orchestrator (A = manager).
+//! Model-agnostic Device Assistant logic shared by the thin edge and central brain.
 //!
 //! Splitting this out of `server` lets the manager run the same capability
 //! selection, prompt assembly, response parsing, and evidence chunking the edge
@@ -9,8 +8,6 @@
 //! platform dependency — screenshot re-encoding, the model transport adapters —
 //! stays in `server`.
 //!
-//! - [`selection`]: which capabilities a diagnosis collects, gated by policy.
-//! - [`parser`]: model response text → structured [`desk_agent_protocol::diagnose::Diagnosis`].
 //! - [`prompt`]: redacted evidence → neutral chat messages (text only; the edge
 //!   has already turned any screenshot into a model-ready data URL).
 //! - [`chunk`]: serialize / reassemble an [`desk_agent_protocol::evidence::EvidenceSnapshot`]
@@ -28,11 +25,13 @@ pub mod agent_loop;
 #[cfg(test)]
 mod agent_loop_acceptance;
 pub mod agentic_prompt;
+pub mod browser_control;
 pub mod capability_availability;
 pub mod capability_grant;
 pub mod capability_risk;
 pub mod chat;
 pub mod chunk;
+pub mod communication;
 pub mod content_safety;
 pub mod context_attachment;
 pub mod conversation_key;
@@ -67,6 +66,7 @@ pub mod stream;
 pub mod task_status_tools;
 pub mod terminal_complete;
 pub mod terminal_copilot;
+mod text_parse;
 pub mod trim;
 pub mod wait_tools;
 

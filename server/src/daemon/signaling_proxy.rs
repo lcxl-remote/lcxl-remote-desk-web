@@ -5,9 +5,9 @@ use super::signaling_router::{self, RouterContext};
 use super::support_link_state::SupportLinkState;
 use super::virtual_display::VirtualDisplaySupervisor;
 use super::worker_manager::{WorkerManager, WorkerMessageReceiver};
+use crate::agent_adapter::redaction::RegexRedactor;
 use crate::diagnose::DiagnoseOrchestrator;
 use crate::diagnose::collector::AgentContextCollector;
-use crate::diagnose::redaction::RegexRedactor;
 use crate::host_control::HostControlHub;
 use crate::model::settings::{SharedSettings, StartupMode};
 use crate::worker::agent::LocalDeviceAgent;
@@ -205,13 +205,8 @@ pub async fn run_signaling_proxy(
     let command_blocklist =
         Arc::new(crate::daemon::command_blocklist::CommandBlocklistCache::new());
 
-    // The diagnose orchestrator runs daemon-side wherever an in-process worker
-    // can collect locally (Default / DeskServer); ServiceDaemon leaves it `None`.
-    // AI diagnosis is orchestrated by the central signaling brain, so this host
-    // only serves the remote-collect edge path: the central server pushes a
-    // `CollectRequest` and the orchestrator gathers evidence through the in-process
-    // agent and scrubs it with the regex redactor before streaming it back. The
-    // `EdgeReadInvoker` serves the central read-tool path against the same agent.
+    // The shared Provider read adapter is available wherever an in-process worker
+    // can read locally (Default / DeskServer); ServiceDaemon leaves it `None`.
     let (diagnose_orchestrator, remote_read) = match settings.read().await.args.startup_mode {
         StartupMode::ServiceDaemon => (None, None),
         _ => {
@@ -230,16 +225,13 @@ pub async fn run_signaling_proxy(
                 agent.clone(),
                 settings.clone().into_inner(),
             ));
-            // The orchestrator only serves `collect_for_remote`: it runs the
-            // collect + fail-closed redact phases and never dials a model
-            // (diagnosis is orchestrated centrally).
             let orchestrator = Arc::new(DiagnoseOrchestrator::new(
                 collector,
                 Arc::new(RegexRedactor::new()),
             ));
-            // Serves a central read-tool call (§8.3) against the same in-process
+            // Serves a central read-tool call against the same in-process
             // agent, redacting fail-closed.
-            let edge_read = Arc::new(crate::diagnose::remote_read::EdgeReadInvoker::new(
+            let edge_read = Arc::new(crate::agent_adapter::remote_read::EdgeReadInvoker::new(
                 agent,
                 Arc::new(RegexRedactor::new()),
                 settings.clone().into_inner(),
@@ -284,11 +276,11 @@ pub async fn run_signaling_proxy(
         // with FEATURE_UNAVAILABLE for every inbound
         // ChangeDisplaySettings.
         virtual_display: virtual_display.clone(),
-        diagnose_orchestrator: diagnose_orchestrator.clone(),
+        diagnose_orchestrator,
         remote_read: remote_read.clone(),
         // Confirmed execution is available wherever an in-process worker can
-        // execute (Default / DeskServer), gated like the diagnose orchestrator.
-        exec_supported: diagnose_orchestrator.is_some(),
+        // execute (Default / DeskServer), using the same in-process availability.
+        exec_supported: remote_read.is_some(),
         exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
         session_approvals: Arc::new(crate::daemon::session_approval::SessionApprovalStore::new()),
         command_templates: command_templates.clone(),
@@ -296,7 +288,6 @@ pub async fn run_signaling_proxy(
         // Audit sink: in fleet mode (a manager is configured) report events to
         // the manager for DB persistence; otherwise keep the local log sink.
         audit: audit_sink.clone(),
-        diagnose_tasks: Default::default(),
         // Per-call trusted-central authorization is injected by the inbound
         // dispatcher; the shared base context carries none.
         inbound_authz: None,

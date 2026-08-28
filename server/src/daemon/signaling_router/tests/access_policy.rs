@@ -167,7 +167,6 @@ pub(super) fn capped_session_permits_matrix_over_all_signaling_types() {
         CollectEvidence,
         ExecuteEdgePlan,
         InvokeRemoteTool,
-        DiagnoseDevice,
     ] {
         assert!(
             !capped_session_permits(t, &allow_families),

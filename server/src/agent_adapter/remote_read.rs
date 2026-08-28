@@ -1,4 +1,4 @@
-//! Edge-side execution of a manager remote read tool call (§8.3).
+//! Edge-side execution of a central Device Assistant read Provider call.
 //!
 //! When the agentic loop runs centrally on the manager, the manager ships a
 //! server-stamped [`RemoteToolRequest`](desk_agent_protocol::remote_tool::RemoteToolRequest)
@@ -62,10 +62,10 @@ fn sanitize_remote_output(
                 error_code: None,
             });
         };
-        let fitted = super::model::screenshot::fit_screenshot_to_budget(
+        let fitted = super::screenshot::fit_screenshot_to_budget(
             &shot.image,
-            super::model::screenshot::DEFAULT_MAX_DIMENSION,
-            super::model::screenshot::DEFAULT_MAX_BYTES,
+            super::screenshot::DEFAULT_MAX_DIMENSION,
+            super::screenshot::DEFAULT_MAX_BYTES,
         )
         .map_err(|_| AgentError {
             kind: AgentErrorKind::Internal,
@@ -74,8 +74,7 @@ fn sanitize_remote_output(
             safe_for_model: true,
             error_code: None,
         })?;
-        if fitted.jpeg.is_empty() || fitted.jpeg.len() > super::model::screenshot::DEFAULT_MAX_BYTES
-        {
+        if fitted.jpeg.is_empty() || fitted.jpeg.len() > super::screenshot::DEFAULT_MAX_BYTES {
             return Err(AgentError {
                 kind: AgentErrorKind::InvalidInput,
                 message: "screen capture could not be fitted within the image limit".into(),
@@ -211,7 +210,7 @@ impl EdgeReadInvoker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagnose::redaction::RegexRedactor;
+    use crate::agent_adapter::redaction::RegexRedactor;
     use crate::model::settings::Settings;
     use desk_agent_protocol::{
         ActorRef, ActorType, AgentOperation, AgentScope, AuditMeta, CallerRef, CallerType,

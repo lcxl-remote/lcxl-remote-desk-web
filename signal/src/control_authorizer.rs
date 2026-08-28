@@ -1,9 +1,9 @@
 //! Signal single-account policy decision point for control-end AI frames.
 //!
 //! The portable signal server is the OSS central brain (thin-edge model): it
-//! authorizes and wraps the control-end AI frames (`AgentRequest` / `ConfirmExec`)
-//! as they are relayed to the edge, and owns the centrally-orchestrated frames
-//! (`Diagnose` / terminal copilot / completion) which it runs itself rather than
+//! authorizes and wraps control-end capability and execution frames as they are
+//! relayed to the edge, and owns Device Assistant / terminal AI frames which it
+//! runs centrally rather than
 //! relaying. This mirrors the manager's `ManagerControlAuthorizer`, but as a
 //! **separate, much simpler implementation**: OSS signal is single-account, so
 //! there is no organization governance matrix, no cross-instance ledger / quota /
@@ -22,8 +22,6 @@
 //! durable in the local SQLite database (it is not horizontally scaled like the
 //! manager).
 
-use std::sync::Arc;
-
 use actix_web::web;
 use desk_agent_protocol::authz::{
     AUTHORIZATION_BLOCK_VERSION, AuthorizationBlock, AuthorizedControlPayload, AuthzActor,
@@ -32,7 +30,6 @@ use desk_agent_protocol::authz::{
 use desk_agent_protocol::device_assistant::{
     DeviceAssistantAsk, DeviceAssistantContextUpdate, DeviceAssistantObjectContextUpdate,
 };
-use desk_agent_protocol::diagnose::DiagnoseRequestData;
 use desk_agent_protocol::exec::ResolveExecData;
 use desk_agent_protocol::{AgentScope, Capability, ExecutionMode, RiskLevel};
 use desk_signal_facade::model::auth_context::{AuthContext, AuthKind};
@@ -42,7 +39,6 @@ use desk_signal_facade::service::{ControlFrameAuthorizer, ControlFrameOutcome};
 use desk_utils::error::DeskErrorCode;
 use sea_orm::DatabaseConnection;
 
-use crate::collect_pending::CollectPendingStore;
 use crate::model_provider;
 
 /// The single account's synthetic user id. OSS signal has no multi-user table;
@@ -59,13 +55,13 @@ pub const SINGLE_ACCOUNT_TOKEN_ID: i32 = 1;
 /// manager's `AUTHZ_TTL_SECS`; doubles as the wrapper replay window the edge
 /// enforces via `expires_at`.
 const AUTHZ_TTL_SECS: i64 = 300;
-/// The orchestrator-layer permission gating AI diagnosis.
-const AI_DIAGNOSE_GRANT: &str = "ai.diagnose";
+/// The orchestrator-layer permission gating Device Assistant.
+const AI_ASSISTANT_GRANT: &str = "ai.assistant";
 /// The orchestrator-layer permission gating the terminal AI copilot / completion.
 const AI_COPILOT_GRANT: &str = "ai.terminal_copilot";
 
-/// The nine read-evidence capabilities a diagnosis may draw on.
-fn evidence_capabilities() -> [Capability; 9] {
+/// The nine shared read-evidence capabilities exposed through Providers.
+fn read_evidence_capabilities() -> [Capability; 9] {
     [
         Capability::SystemInfo,
         Capability::ProcessList,
@@ -99,7 +95,7 @@ fn computer_use_observation_capabilities() -> [Capability; 3] {
 /// the edge's local settings. The risk ceiling is the highest non-blocked level;
 /// the edge's confirm-exec gate is the real bound.
 fn single_account_decision(mode: ExecutionMode) -> (AgentScope, Vec<String>, RiskLevel) {
-    let mut granted: Vec<Capability> = evidence_capabilities().to_vec();
+    let mut granted: Vec<Capability> = read_evidence_capabilities().to_vec();
     granted.extend(computer_use_observation_capabilities());
     granted.push(Capability::ShellExecReadonly);
     granted.push(Capability::ShellExecConfirmed);
@@ -112,7 +108,7 @@ fn single_account_decision(mode: ExecutionMode) -> (AgentScope, Vec<String>, Ris
     (
         scope,
         vec![
-            AI_DIAGNOSE_GRANT.to_string(),
+            AI_ASSISTANT_GRANT.to_string(),
             AI_COPILOT_GRANT.to_string(),
             "shell.plan".to_string(),
         ],
@@ -233,10 +229,6 @@ fn build_wrapper_outcome(
 pub struct SignalControlAuthorizer {
     db: DatabaseConnection,
     issuer: String,
-    /// In-flight remote-collect store. A `DiagnoseCancel` cancels the pending
-    /// collection here (diagnosis is orchestrated centrally; there is no
-    /// diagnose task on the edge to relay a cancel to).
-    collect_pending: Arc<CollectPendingStore>,
     /// Connection map handle used to stream centrally-orchestrated terminal
     /// copilot / completion results back to the asking browser. Held (not just
     /// borrowed per call) so a spawned, `!Send` model dial can reach the browser
@@ -245,15 +237,10 @@ pub struct SignalControlAuthorizer {
 }
 
 impl SignalControlAuthorizer {
-    pub fn new(
-        db: DatabaseConnection,
-        collect_pending: Arc<CollectPendingStore>,
-        connection_map: web::Data<SharedConnectionMap>,
-    ) -> Self {
+    pub fn new(db: DatabaseConnection, connection_map: web::Data<SharedConnectionMap>) -> Self {
         Self {
             db,
             issuer: "signal".to_string(),
-            collect_pending,
             connection_map,
         }
     }
@@ -280,22 +267,6 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
         model: &'a SignalingModel,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ControlFrameOutcome> + Send + 'a>> {
         Box::pin(async move {
-            // Start-over for a centrally-orchestrated diagnosis: cancel
-            // the pending collection (if any) and never relay — the edge has no
-            // diagnose task. Needs only the request id, so it is handled before
-            // the relay pre-flight.
-            if model.signaling_type == SignalingType::CancelDiagnosis {
-                self.collect_pending.cancel(&model.request_id);
-                let cancelled = crate::agent_exec::global_agent_exec_pending()
-                    .cancel_approvals_for_diagnosis(&actor.model.connection_id, &model.request_id);
-                log::info!(
-                    "[agent-exec] diagnose cancel request_id={} browser={} cancelled_approvals={}",
-                    model.request_id,
-                    actor.model.connection_id,
-                    cancelled
-                );
-                return ControlFrameOutcome::Handled;
-            }
             // A copilot cancel is consumed centrally (the copilot runs on signal,
             // not the edge); best-effort no-op, never relayed.
             if model.signaling_type == SignalingType::CancelTerminalCopilot {
@@ -370,8 +341,7 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                     }),
                 }
             };
-            let (audience, available_exec_shells, max_command_runtime_ms) = match target_descriptor
-            {
+            let (audience, _, _) = match target_descriptor {
                 Ok(descriptor) => descriptor,
                 Err(reject) => {
                     return ControlFrameOutcome::Reject {
@@ -405,46 +375,6 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                         self.issuer.clone(),
                         expires_at,
                     )
-                }
-                // Diagnose is orchestrated centrally: signal pushes a
-                // `CollectRequest` to the resolved edge, reassembles the evidence,
-                // dials the model, and streams the result back — never relaying the
-                // question to the edge. The orchestration uses signal's own
-                // provider credentials, so the relay wrapper / audience are not
-                // used on this path.
-                SignalingType::DiagnoseDevice => {
-                    let request = match model.get_data::<DiagnoseRequestData>() {
-                        Ok(r) => r,
-                        Err(e) => {
-                            return ControlFrameOutcome::Reject {
-                                code: DeskErrorCode::INVALID_PARAMS,
-                                message: format!("invalid Diagnose payload: {e}"),
-                            };
-                        }
-                    };
-                    let browser_connection_id = actor.model.connection_id.clone();
-                    crate::diagnose_orchestrator::start_diagnosis(
-                        connection_map,
-                        &self.collect_pending,
-                        &model.request_id,
-                        &to_id,
-                        &browser_connection_id,
-                        actor_user_id,
-                        audience,
-                        scope,
-                        max_risk,
-                        match mode {
-                            ExecutionMode::ConfirmEachAction | ExecutionMode::SessionApproved => {
-                                ExecAdmissionPolicy::OwnerInteractive
-                            }
-                            _ => ExecAdmissionPolicy::TemplateOnly,
-                        },
-                        available_exec_shells,
-                        max_command_runtime_ms,
-                        request,
-                    )
-                    .await;
-                    ControlFrameOutcome::Handled
                 }
                 // The terminal copilot / completion run centrally too: signal
                 // dials its own model over the inline terminal context the browser
@@ -647,15 +577,16 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
 mod tests {
     use super::*;
 
-    fn diagnose_model(request_id: &str, to: Option<&str>) -> SignalingModel {
-        let data = serde_json::to_value(DiagnoseRequestData {
+    fn assistant_model(request_id: &str, to: Option<&str>) -> SignalingModel {
+        let data = serde_json::to_value(DeviceAssistantAsk {
             question: "why slow?".to_string(),
+            client_message_id: "message-1".to_string(),
             ..Default::default()
         })
         .unwrap();
         SignalingModel::new(
             request_id,
-            SignalingType::DiagnoseDevice,
+            SignalingType::AskDeviceAssistant,
             Some("browser-1".to_string()),
             to.map(str::to_string),
             Some(data),
@@ -695,8 +626,8 @@ mod tests {
     }
 
     #[test]
-    fn evidence_capabilities_are_the_nine_reads() {
-        let caps = evidence_capabilities();
+    fn read_evidence_capabilities_are_the_nine_reads() {
+        let caps = read_evidence_capabilities();
         assert_eq!(caps.len(), 9);
         assert!(caps.contains(&Capability::SystemInfo));
         assert!(caps.contains(&Capability::ScreenCaptureCurrent));
@@ -714,7 +645,7 @@ mod tests {
         // the edge clamps it locally.
         assert_eq!(scope.mode, ExecutionMode::ConfirmEachAction);
         assert_eq!(scope.policy_name.as_deref(), Some("single-account"));
-        assert!(grants.contains(&AI_DIAGNOSE_GRANT.to_string()));
+        assert!(grants.contains(&AI_ASSISTANT_GRANT.to_string()));
         assert!(grants.contains(&AI_COPILOT_GRANT.to_string()));
         assert_eq!(max_risk, RiskLevel::Critical);
     }
@@ -771,7 +702,7 @@ mod tests {
 
     #[test]
     fn wrapper_stamps_server_resolved_identity_and_binding() {
-        let model = diagnose_model("req-1", Some("edge-1"));
+        let model = assistant_model("req-1", Some("edge-1"));
         let (scope, grants, max_risk) = single_account_decision(ExecutionMode::ReadOnly);
         let frame = match build_wrapper_outcome(
             &model,
@@ -792,7 +723,7 @@ mod tests {
         // The stamped block carries server-resolved fields the control end cannot
         // self-report: the single-account actor, the target audience binding, and
         // the request-id replay binding.
-        let wrapper: AuthorizedControlPayload<DiagnoseRequestData> =
+        let wrapper: AuthorizedControlPayload<DeviceAssistantAsk> =
             serde_json::from_value(frame.get_raw_data().clone().unwrap()).unwrap();
         assert_eq!(wrapper.authz.actor.user_id, Some(SINGLE_ACCOUNT_USER_ID));
         assert_eq!(wrapper.authz.device.device_id, None);

@@ -20,10 +20,10 @@ use sha2::{Digest, Sha256};
 
 use crate::chat::{ChatMessage, ChatRole};
 use crate::exec_classify::classify_command;
-use crate::parser::{extract_json_object, truncate_on_char_boundary};
 use crate::prompt::ResponseFormatSpec;
 use crate::redaction::Redactor;
 use crate::seam::ModelRequest;
+use crate::text_parse::{extract_json_object, truncate_on_char_boundary};
 
 /// Max command-line candidates kept from one completion turn. Ghost-text shows the
 /// best one inline; the rest back a cycle-through affordance.

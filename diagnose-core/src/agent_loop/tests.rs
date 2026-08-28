@@ -3207,7 +3207,7 @@ fn safety_verdict(
 
 fn safety_context() -> crate::content_safety::SafetyContext {
     crate::content_safety::SafetyContext {
-        surface: desk_agent_protocol::content_safety::ContentSafetySurface::Diagnosis,
+        surface: desk_agent_protocol::content_safety::ContentSafetySurface::AssistantAnswer,
         original_allowed_intent: "diagnose the device".into(),
         policy_revision: 7,
         safety_model_id: "safety-model".into(),

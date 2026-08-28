@@ -376,6 +376,34 @@ enable_turn = false
         assert!(loaded.turn.enable_turn);
     }
 
+    #[test]
+    fn computer_use_communication_handoff_survives_config_and_worker_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        std::fs::write(
+            path.with_extension("toml"),
+            r#"
+[computer_use]
+revision = 7
+enabled = true
+communication_handoff = true
+"#,
+        )
+        .unwrap();
+
+        let args = Args {
+            config_file_path: Some(path.to_path_buf()),
+            ..Args::default()
+        };
+        let loaded = Settings::load_readonly(&args).unwrap();
+        assert!(loaded.computer_use.communication_handoff_enabled());
+
+        let worker_json = serde_json::to_string(&loaded).unwrap();
+        let worker_settings = serde_json::from_str::<Settings>(&worker_json).unwrap();
+        assert_eq!(worker_settings.computer_use.revision, 7);
+        assert!(worker_settings.computer_use.communication_handoff_enabled());
+    }
+
     /// Callers treat a failed `save` as "nothing changed" — the settings
     /// controllers report the error and leave the live values alone. That only
     /// holds if the file on disk is still the previous configuration rather

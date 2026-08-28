@@ -28,12 +28,15 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
+pub mod agent_event;
 pub mod audit;
 pub mod authz;
+pub mod browser_control;
 pub mod capability_grant;
 pub mod capability_provider;
 pub mod command_blocklist;
 pub mod command_template;
+pub mod communication;
 pub mod computer_use;
 pub mod content_safety;
 pub mod data_lineage;
@@ -477,6 +480,31 @@ pub enum Capability {
     FileCopyConfirmed,
     #[serde(rename = "file.artifact.create.confirmed")]
     FileArtifactCreateConfirmed,
+    #[serde(rename = "communication.local_draft.create.confirmed")]
+    CommunicationLocalDraftCreateConfirmed,
+    /// Open the Windows Outlook (new) compose surface with bounded, plain-text
+    /// fields and stop for manual review. This may create a cloud-synchronised
+    /// draft, but never carries send authority.
+    #[serde(rename = "communication.outlook_new.handoff.confirmed")]
+    CommunicationOutlookNewHandoffConfirmed,
+    /// Read a bounded semantic projection from one browser page already bound
+    /// to the current device, OS session, profile and connection revision.
+    #[serde(rename = "browser.page.observe")]
+    BrowserPageObserve,
+    /// Open or navigate one browser page to an exact canonical target.
+    #[serde(rename = "browser.page.navigate.confirmed")]
+    BrowserPageNavigateConfirmed,
+    /// Generic browser form input or activation whose business effect cannot
+    /// be proven by a reviewed site adapter.
+    #[serde(rename = "browser.input.fallback.confirmed")]
+    BrowserInputFallbackConfirmed,
+    /// Create or modify a cloud-synchronised draft through a reviewed browser
+    /// site adapter. This never includes final delivery.
+    #[serde(rename = "browser.external_draft.write.confirmed")]
+    BrowserExternalDraftWriteConfirmed,
+    /// Deliver one exact, read-back-verified browser payload.
+    #[serde(rename = "browser.external.send.confirmed")]
+    BrowserExternalSendConfirmed,
     #[serde(rename = "file.delete.confirmed")]
     FileDeleteConfirmed,
 }

@@ -267,9 +267,8 @@ fn validate_attachment_ids(attachment_ids: &[String]) -> Result<(), &'static str
 }
 
 /// Device Assistant streams the shared agent-loop event contract over its own
-/// signaling discriminant. Keeping the shape shared prevents the Diagnose and
-/// Device Assistant runtimes from drifting in replay, tool, and error semantics.
-pub type DeviceAssistantEvent = crate::diagnose::DiagnoseEvent;
+/// signaling discriminant.
+pub type DeviceAssistantEvent = crate::agent_event::AgentEvent;
 
 #[cfg(test)]
 mod tests {

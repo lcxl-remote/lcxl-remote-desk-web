@@ -1,1 +1,1 @@
-{"type":"string","enum":["read_device","read_file","read_external","export_data","write_artifact","mutate_application","write_external_draft","send_external","capture_screen","input_fallback"],"x-readme-ref-name":"CapabilityEffect"}
+{"type":"string","enum":["read_device","read_file","read_external","export_data","write_artifact","mutate_application","write_external_draft","send_external","capture_screen","input_fallback","execute_command"],"x-readme-ref-name":"CapabilityEffect"}

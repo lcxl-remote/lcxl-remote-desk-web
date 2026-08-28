@@ -349,7 +349,6 @@ fn support_code_issued_is_trusted_central_only() {
     assert!(is_trusted_central_only(SignalingType::RevokeAccessGrant));
     // Alongside the other central→daemon plumbing.
     assert!(is_trusted_central_only(SignalingType::SyncCommandBlocklist));
-    assert!(is_trusted_central_only(SignalingType::CollectEvidence));
     // The host→manager support frames are NOT gated here (they egress, never
     // arrive inbound), nor are ordinary session frames.
     assert!(!is_trusted_central_only(SignalingType::RequestSupportCode));
@@ -697,7 +696,6 @@ async fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
         command_templates: Arc::new(crate::daemon::command_templates::CommandTemplateCache::new()),
         command_blocklist: Arc::new(crate::daemon::command_blocklist::CommandBlocklistCache::new()),
         audit: Arc::new(LogAuditSink),
-        diagnose_tasks: Default::default(),
         inbound_authz: None,
         inbound_request_remote_authz: None,
         inbound_start_terminal_authz: None,
@@ -1150,7 +1148,6 @@ async fn command_template_sync_applies_current_epoch_and_ignores_unknown_version
 use desk_agent_protocol::authz::{
     AUTHORIZATION_BLOCK_VERSION, AuthorizationBlock, AuthzActor, AuthzDevice,
 };
-use desk_agent_protocol::diagnose::DiagnoseRequestData;
 use desk_agent_protocol::{AgentScope, ExecutionMode, RiskLevel};
 
 fn block(request_id: &str, audience: &str) -> AuthorizationBlock {
@@ -1162,7 +1159,7 @@ fn block(request_id: &str, audience: &str) -> AuthorizationBlock {
             expires_at: None,
             policy_name: None,
         },
-        orchestrator_grants: vec!["ai.diagnose".to_string()],
+        orchestrator_grants: vec!["ai.assistant".to_string()],
         max_risk: RiskLevel::Low,
         exec_admission_policy: desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly,
         actor: AuthzActor { user_id: Some(1) },
@@ -1176,17 +1173,14 @@ fn block(request_id: &str, audience: &str) -> AuthorizationBlock {
     }
 }
 
-fn wrapped_diagnose_model(request_id: &str, audience: &str) -> SignalingModel {
+fn wrapped_ai_model(request_id: &str, audience: &str) -> SignalingModel {
     let wrapper = AuthorizedControlPayload {
-        inner: DiagnoseRequestData {
-            question: "why slow?".to_string(),
-            ..Default::default()
-        },
+        inner: serde_json::json!({"operation": "read_system_info"}),
         authz: block(request_id, audience),
     };
     SignalingModel::new(
         request_id,
-        SignalingType::DiagnoseDevice,
+        SignalingType::InvokeAgentCapability,
         Some("browser-conn".to_string()),
         Some("server-conn".to_string()),
         Some(serde_json::to_value(&wrapper).unwrap()),
@@ -1194,14 +1188,11 @@ fn wrapped_diagnose_model(request_id: &str, audience: &str) -> SignalingModel {
     )
 }
 
-fn bare_diagnose_model(request_id: &str) -> SignalingModel {
-    let inner = DiagnoseRequestData {
-        question: "why slow?".to_string(),
-        ..Default::default()
-    };
+fn bare_ai_model(request_id: &str) -> SignalingModel {
+    let inner = serde_json::json!({"operation": "read_system_info"});
     SignalingModel::new(
         request_id,
-        SignalingType::DiagnoseDevice,
+        SignalingType::InvokeAgentCapability,
         Some("browser-conn".to_string()),
         Some("server-conn".to_string()),
         Some(serde_json::to_value(&inner).unwrap()),
@@ -1229,7 +1220,7 @@ fn non_ai_frame_passes_through_any_source() {
 
 #[test]
 fn bare_ai_frame_passes_through_local() {
-    let model = bare_diagnose_model("r1");
+    let model = bare_ai_model("r1");
     assert!(matches!(
         gate_authz_frame(model, InboundSignalingSource::Local, "dev", NOW),
         AuthzGateOutcome::Pass(_, _)
@@ -1242,7 +1233,7 @@ fn bare_ai_frame_from_trusted_central_is_dropped() {
     // trusted-central link is illegitimate and must be dropped rather than
     // falling through to the local default scope (which would bypass central
     // policy).
-    let model = bare_diagnose_model("r1");
+    let model = bare_ai_model("r1");
     assert!(matches!(
         gate_authz_frame(model, InboundSignalingSource::TrustedCentral, "dev", NOW),
         AuthzGateOutcome::Drop(_)
@@ -1253,7 +1244,7 @@ fn bare_ai_frame_from_trusted_central_is_dropped() {
 fn bare_ai_frame_passes_through_remote_signaling() {
     // Remote-signaling links have no PDP; bare frames still pass to local
     // gating (no regression for non-central relays).
-    let model = bare_diagnose_model("r1");
+    let model = bare_ai_model("r1");
     assert!(matches!(
         gate_authz_frame(model, InboundSignalingSource::RemoteSignaling, "dev", NOW),
         AuthzGateOutcome::Pass(_, _)
@@ -1266,7 +1257,7 @@ fn wrapper_from_non_central_source_is_dropped() {
         InboundSignalingSource::Local,
         InboundSignalingSource::RemoteSignaling,
     ] {
-        let model = wrapped_diagnose_model("r1", "dev-1");
+        let model = wrapped_ai_model("r1", "dev-1");
         assert!(
             matches!(
                 gate_authz_frame(model, source, "dev-1", NOW),
@@ -1467,13 +1458,16 @@ fn fleet_gate_drops_an_uncorrelatable_request() {
 
 #[test]
 fn valid_wrapper_from_trusted_central_is_unwrapped_to_inner() {
-    let model = wrapped_diagnose_model("r1", "dev-1");
+    let model = wrapped_ai_model("r1", "dev-1");
     match gate_authz_frame(model, InboundSignalingSource::TrustedCentral, "dev-1", NOW) {
         AuthzGateOutcome::Pass(m, _) => {
             // The forwarded model carries the bare inner payload (no authz).
             let obj = m.get_raw_data().as_ref().unwrap().as_object().unwrap();
             assert!(!obj.contains_key("authz"));
-            assert!(obj.contains_key("question"));
+            assert_eq!(
+                obj.get("operation").and_then(serde_json::Value::as_str),
+                Some("read_system_info")
+            );
         }
         AuthzGateOutcome::Drop(reason) => panic!("expected unwrap, dropped: {reason}"),
     }
@@ -1481,7 +1475,7 @@ fn valid_wrapper_from_trusted_central_is_unwrapped_to_inner() {
 
 #[test]
 fn central_wrapper_with_wrong_audience_is_dropped() {
-    let model = wrapped_diagnose_model("r1", "dev-1");
+    let model = wrapped_ai_model("r1", "dev-1");
     assert!(matches!(
         gate_authz_frame(
             model,
@@ -1496,16 +1490,13 @@ fn central_wrapper_with_wrong_audience_is_dropped() {
 #[test]
 fn central_wrapper_expired_is_dropped() {
     let mut wrapper = AuthorizedControlPayload {
-        inner: DiagnoseRequestData {
-            question: "q".to_string(),
-            ..Default::default()
-        },
+        inner: serde_json::json!({"operation": "read_system_info"}),
         authz: block("r1", "dev-1"),
     };
     wrapper.authz.expires_at = Some("2020-01-01T00:00:00Z".to_string());
     let model = SignalingModel::new(
         "r1",
-        SignalingType::DiagnoseDevice,
+        SignalingType::InvokeAgentCapability,
         Some("browser-conn".to_string()),
         Some("server-conn".to_string()),
         Some(serde_json::to_value(&wrapper).unwrap()),
@@ -1521,15 +1512,12 @@ fn central_wrapper_expired_is_dropped() {
 fn central_wrapper_request_id_mismatch_is_dropped() {
     // Frame request_id differs from the authz block's request_id.
     let wrapper = AuthorizedControlPayload {
-        inner: DiagnoseRequestData {
-            question: "q".to_string(),
-            ..Default::default()
-        },
+        inner: serde_json::json!({"operation": "read_system_info"}),
         authz: block("inner-req", "dev-1"),
     };
     let model = SignalingModel::new(
         "frame-req",
-        SignalingType::DiagnoseDevice,
+        SignalingType::InvokeAgentCapability,
         Some("browser-conn".to_string()),
         Some("server-conn".to_string()),
         Some(serde_json::to_value(&wrapper).unwrap()),
@@ -1543,36 +1531,36 @@ fn central_wrapper_request_id_mismatch_is_dropped() {
 
 // ====== Optional-wrapper gate for central plumbing frames ======
 
-fn collect_request_value(request_id: &str) -> serde_json::Value {
+fn remote_tool_request_value(request_id: &str) -> serde_json::Value {
     serde_json::json!({
         "request_id": request_id,
         "request": { "question": "why slow?" },
     })
 }
 
-fn bare_collect_model(request_id: &str) -> SignalingModel {
+fn bare_remote_tool_model(request_id: &str) -> SignalingModel {
     SignalingModel::new(
         request_id,
-        SignalingType::CollectEvidence,
+        SignalingType::InvokeRemoteTool,
         None,
         None,
-        Some(collect_request_value(request_id)),
+        Some(remote_tool_request_value(request_id)),
         None,
     )
 }
 
-fn wrapped_collect_model(
+fn wrapped_remote_tool_model(
     frame_request_id: &str,
     block_request_id: &str,
     audience: &str,
 ) -> SignalingModel {
     let wrapper = serde_json::json!({
-        "inner": collect_request_value(frame_request_id),
+        "inner": remote_tool_request_value(frame_request_id),
         "authz": serde_json::to_value(block(block_request_id, audience)).unwrap(),
     });
     SignalingModel::new(
         frame_request_id,
-        SignalingType::CollectEvidence,
+        SignalingType::InvokeRemoteTool,
         None,
         None,
         Some(wrapper),
@@ -1584,7 +1572,7 @@ fn wrapped_collect_model(
 fn bare_central_plumbing_frame_passes_through() {
     // The enterprise-manager path emits bare CollectRequest; the trusted-
     // central link authentication is the trust anchor, so it passes through.
-    let model = bare_collect_model("r1");
+    let model = bare_remote_tool_model("r1");
     match gate_optional_central_wrapper(model, "dev-1", NOW) {
         AuthzGateOutcome::Pass(m, authz) => {
             assert!(authz.is_none(), "bare frame carries no authz block");
@@ -1597,7 +1585,7 @@ fn bare_central_plumbing_frame_passes_through() {
 
 #[test]
 fn wrapped_central_plumbing_frame_is_unwrapped_to_inner() {
-    let model = wrapped_collect_model("r1", "r1", "dev-1");
+    let model = wrapped_remote_tool_model("r1", "r1", "dev-1");
     match gate_optional_central_wrapper(model, "dev-1", NOW) {
         AuthzGateOutcome::Pass(m, authz) => {
             assert!(authz.is_some(), "validated wrapper yields an authz block");
@@ -1612,7 +1600,7 @@ fn wrapped_central_plumbing_frame_is_unwrapped_to_inner() {
 
 #[test]
 fn wrapped_central_plumbing_frame_wrong_audience_is_dropped() {
-    let model = wrapped_collect_model("r1", "r1", "dev-1");
+    let model = wrapped_remote_tool_model("r1", "r1", "dev-1");
     assert!(matches!(
         gate_optional_central_wrapper(model, "other-device", NOW),
         AuthzGateOutcome::Drop(_)
@@ -1622,7 +1610,7 @@ fn wrapped_central_plumbing_frame_wrong_audience_is_dropped() {
 #[test]
 fn wrapped_central_plumbing_frame_request_id_mismatch_is_dropped() {
     // The authz block's request_id differs from the frame's request_id.
-    let model = wrapped_collect_model("frame-req", "inner-req", "dev-1");
+    let model = wrapped_remote_tool_model("frame-req", "inner-req", "dev-1");
     assert!(matches!(
         gate_optional_central_wrapper(model, "dev-1", NOW),
         AuthzGateOutcome::Drop(_)

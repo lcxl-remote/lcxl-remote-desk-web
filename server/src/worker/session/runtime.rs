@@ -226,6 +226,7 @@ impl WorkerSession {
             let readiness_writer = writer_tx.clone();
             let readiness_broker = computer_use_broker.clone();
             let readiness_settings = shared_settings.clone();
+            let readiness_os_session_id = init_payload.os_session_id.to_string();
             tokio::spawn(async move {
                 let mut first_report = true;
                 loop {
@@ -233,7 +234,36 @@ impl WorkerSession {
                     let ceiling = settings.computer_use.clone();
                     let allow_screen = settings.collection_policy.allow_screen;
                     let display_selected = !settings.desk.video_device_name.trim().is_empty();
+                    let browser_device_id = settings.system.get_client_id().unwrap_or_default();
                     drop(settings);
+                    let broker = readiness_broker.clone();
+                    let probe_ceiling = ceiling.clone();
+                    let base_readiness = match tokio::task::spawn_blocking(move || {
+                        broker.readiness(&probe_ceiling, allow_screen, display_selected)
+                    })
+                    .await
+                    {
+                        Ok(readiness) => readiness,
+                        Err(error) => {
+                            warn!("Computer Use readiness probe failed to join: {error}");
+                            tokio::time::sleep(Duration::from_secs(10)).await;
+                            continue;
+                        }
+                    };
+                    let interactive_session_unlocked =
+                        base_readiness.capabilities.iter().any(|entry| {
+                            entry.capability
+                                == desk_agent_protocol::Capability::DesktopSessionInspect
+                                && entry.ready
+                        });
+                    readiness_broker
+                        .refresh_browser_readiness(
+                            browser_device_id,
+                            readiness_os_session_id.clone(),
+                            ceiling.browser_semantic,
+                            interactive_session_unlocked,
+                        )
+                        .await;
                     let broker = readiness_broker.clone();
                     let readiness = match tokio::task::spawn_blocking(move || {
                         broker.readiness(&ceiling, allow_screen, display_selected)
@@ -242,7 +272,7 @@ impl WorkerSession {
                     {
                         Ok(readiness) => readiness,
                         Err(error) => {
-                            warn!("Computer Use readiness probe failed to join: {error}");
+                            warn!("Computer Use readiness refresh failed to join: {error}");
                             tokio::time::sleep(Duration::from_secs(10)).await;
                             continue;
                         }
@@ -1470,7 +1500,7 @@ impl WorkerSession {
                                         .map(|error| format!("invalid Computer Use plan: {error}"))
                                         .or_else(|| {
                                             (plan.actions.len() != 1).then(|| {
-                                                "the Stage 3 artifact Provider accepts exactly one action"
+                                                "the edge Computer Action broker accepts exactly one action"
                                                     .to_string()
                                             })
                                         });
@@ -1502,6 +1532,7 @@ impl WorkerSession {
                                                         result: ComputerActionResultClass::DefinitelyNotStarted,
                                                         facts: vec![],
                                                         message: Some(reason),
+                                                        output: None,
                                                     },
                                                 },
                                             ),
@@ -1519,14 +1550,52 @@ impl WorkerSession {
                                             .map(|value| value.with_timezone(&chrono::Utc))
                                             .unwrap_or_else(|_| chrono::Utc::now() - chrono::Duration::seconds(1)),
                                     };
-                                    let preflight = if !ceiling.file_artifact_create_enabled() {
-                                        Err("artifact creation is disabled by the host-local ceiling".to_string())
-                                    } else {
+                                    let action_preflight = match &plan.actions[0].action {
+                                        ComputerActionKind::File(_) => ceiling
+                                            .file_artifact_create_enabled()
+                                            .then_some(())
+                                            .ok_or_else(|| {
+                                                "artifact creation is disabled by the host-local ceiling"
+                                                    .to_string()
+                                            }),
+                                        ComputerActionKind::Browser(request) => {
+                                            if !ceiling.enabled || !ceiling.browser_semantic {
+                                                Err("browser semantic control is disabled by the host-local ceiling".to_string())
+                                            } else if ComputerActionKind::Browser(request.clone())
+                                                .required_capability()
+                                                == desk_agent_protocol::Capability::BrowserExternalDraftWriteConfirmed
+                                                && !ceiling.communication_handoff_enabled()
+                                            {
+                                                Err("browser communication handoff is disabled by the host-local ceiling".to_string())
+                                            } else {
+                                                computer_use_broker
+                                                    .preflight_browser_action(
+                                                        &plan.actions[0].target,
+                                                        request,
+                                                    )
+                                                    .map_err(|error| error.to_string())
+                                            }
+                                        }
+                                        ComputerActionKind::Communication(request) => {
+                                            if !ceiling.communication_handoff_enabled() {
+                                                Err("communication handoff is disabled by the host-local ceiling".to_string())
+                                            } else {
+                                                computer_use_broker
+                                                    .preflight_outlook_new_handoff(
+                                                        &plan.actions[0].target,
+                                                        request,
+                                                    )
+                                                    .map_err(|error| error.message)
+                                            }
+                                        }
+                                        _ => Err("this Computer Action adapter is not enabled".to_string()),
+                                    };
+                                    let preflight = action_preflight.and_then(|()| {
                                         computer_use_broker
                                             .acquire_writer_lease(lease)
                                             .map(|_| ())
                                             .map_err(|error| error.message)
-                                    };
+                                    });
                                     if let Err(reason) = preflight {
                                         let _ = writer_tx.send(
                                             WorkerToService::ComputerActionStarted(
@@ -1555,6 +1624,7 @@ impl WorkerSession {
                                                         result: ComputerActionResultClass::DefinitelyNotStarted,
                                                         facts: vec![],
                                                         message: Some(reason),
+                                                        output: None,
                                                     },
                                                 },
                                             ),
@@ -1582,6 +1652,132 @@ impl WorkerSession {
                                     tokio::spawn(async move {
                                         let generation = plan.execution_generation.clone();
                                         let step = plan.actions.into_iter().next().expect("preflight checked one action");
+                                        if let ComputerActionKind::Browser(request) = &step.action {
+                                            let mutation_may_have_started = matches!(
+                                                &request.action,
+                                                BrowserAction::OpenPage { .. }
+                                                    | BrowserAction::NavigatePage { .. }
+                                                    | BrowserAction::FillForm { .. }
+                                                    | BrowserAction::UploadFile { .. }
+                                                    | BrowserAction::ActivateElement { .. }
+                                            );
+                                            let lease_valid = action_broker
+                                                .require_writer_lease(&generation)
+                                                .map_err(|error| error.message);
+                                            let result = match lease_valid {
+                                                Ok(_) => action_broker
+                                                    .execute_browser_action(&step.target, request)
+                                                    .await
+                                                    .map_err(|_| {
+                                                        "browser action did not return a verified semantic result"
+                                                            .to_string()
+                                                    }),
+                                                Err(reason) => Err(reason),
+                                            };
+                                            action_broker.release_writer_lease(&generation);
+                                            let (class, facts, message, output) = match result {
+                                                Ok(result) => {
+                                                    let changed = mutation_may_have_started;
+                                                    (
+                                                        ComputerActionResultClass::Verified,
+                                                        vec![ComputerActionStepFact {
+                                                            index: 0,
+                                                            changed,
+                                                            verified: true,
+                                                            summary: if changed {
+                                                                "browser action completed with bounded semantic read-back"
+                                                                    .into()
+                                                            } else {
+                                                                "browser observation completed with bounded semantic projection"
+                                                                    .into()
+                                                            },
+                                                        }],
+                                                        Some(
+                                                            "browser adapter returned a typed, page-bound result"
+                                                                .into(),
+                                                        ),
+                                                        Some(ComputerActionOutput::Browser(result)),
+                                                    )
+                                                }
+                                                Err(reason) => (
+                                                    if mutation_may_have_started {
+                                                        ComputerActionResultClass::OutcomeUnknown
+                                                    } else {
+                                                        ComputerActionResultClass::Failed
+                                                    },
+                                                    vec![],
+                                                    Some(reason),
+                                                    None,
+                                                ),
+                                            };
+                                            let _ = action_writer.send(
+                                                WorkerToService::ComputerActionCompleted(
+                                                    ComputerActionCompletedPayload {
+                                                        request_id: payload.request_id,
+                                                        connection_id: payload.connection_id,
+                                                        completed: ComputerActionCompleted {
+                                                            work_id: plan.work_id,
+                                                            action_request_id: plan.action_request_id,
+                                                            execution_generation: generation,
+                                                            result: class,
+                                                            facts,
+                                                            message,
+                                                            output,
+                                                        },
+                                                    },
+                                                ),
+                                            );
+                                            return;
+                                        }
+                                        if let ComputerActionKind::Communication(request) = &step.action {
+                                            let lease_valid = action_broker
+                                                .require_writer_lease(&generation)
+                                                .map_err(|error| error.message);
+                                            let result = match lease_valid {
+                                                Ok(_) => action_broker
+                                                    .execute_outlook_new_handoff(&step.target, request)
+                                                    .map_err(|error| error.message),
+                                                Err(reason) => Err(reason),
+                                            };
+                                            action_broker.release_writer_lease(&generation);
+                                            let (class, facts, message, output) = match result {
+                                                Ok(handoff) => (
+                                                    ComputerActionResultClass::ChangedButUnverified,
+                                                    vec![ComputerActionStepFact {
+                                                        index: 0,
+                                                        changed: true,
+                                                        verified: false,
+                                                        summary: "Outlook (new) accepted a bounded mailto compose handoff; fields were not semantically read back and the user must review and send manually".into(),
+                                                    }],
+                                                    Some("HandedOffToUser: Outlook (new) compose was opened without AI send authority".into()),
+                                                    Some(ComputerActionOutput::CommunicationHandoff(handoff)),
+                                                ),
+                                                Err(reason) => (
+                                                    ComputerActionResultClass::OutcomeUnknown,
+                                                    vec![],
+                                                    Some(reason),
+                                                    None,
+                                                ),
+                                            };
+                                            let _ = action_writer.send(
+                                                WorkerToService::ComputerActionCompleted(
+                                                    ComputerActionCompletedPayload {
+                                                        request_id: payload.request_id,
+                                                        connection_id: payload.connection_id,
+                                                        completed: ComputerActionCompleted {
+                                                            work_id: plan.work_id,
+                                                            action_request_id: plan.action_request_id,
+                                                            execution_generation: generation,
+                                                            result: class,
+                                                            facts,
+                                                            message,
+                                                            output,
+                                                        },
+                                                    },
+                                                ),
+                                            );
+                                            return;
+                                        }
                                         let result = match step.action {
                                             ComputerActionKind::File(FilePatchAction::CreateTextArtifact {
                                                 file_name,
@@ -1717,7 +1913,50 @@ impl WorkerSession {
                                                 .map_err(|error| format!("Word report artifact worker failed to join: {error}"))
                                                 .and_then(|result| result.map_err(|error| error.message))
                                             }
-                                            _ => Err("only create-new text, retained-preview XLSX/formula-XLSX, and retained-preview DOCX artifacts are enabled in this slice".to_string()),
+                                            ComputerActionKind::File(
+                                                FilePatchAction::CreateLocalCommunicationDraftArtifact {
+                                                    file_name,
+                                                    draft,
+                                                },
+                                            ) => {
+                                                let allowed_roots = ceiling.allowed_file_roots.clone();
+                                                let target = step.target;
+                                                let broker = action_broker.clone();
+                                                let generation_for_call = generation.clone();
+                                                tokio::task::spawn_blocking(move || {
+                                                    broker.require_writer_lease(&generation_for_call)?;
+                                                    if !file_name
+                                                        .to_ascii_lowercase()
+                                                        .ends_with(".draft.txt")
+                                                    {
+                                                        return Err(desk_agent_protocol::AgentError {
+                                                            kind: desk_agent_protocol::AgentErrorKind::InvalidInput,
+                                                            message: "local communication draft name must end in .draft.txt".into(),
+                                                            retryable: false,
+                                                            safe_for_model: true,
+                                                            error_code: None,
+                                                        });
+                                                    }
+                                                    let bytes = desk_diagnose_core::communication::render_local_draft_text(&draft)
+                                                        .map_err(|error| desk_agent_protocol::AgentError {
+                                                            kind: desk_agent_protocol::AgentErrorKind::InvalidInput,
+                                                            message: format!("invalid local communication draft: {error}"),
+                                                            retryable: false,
+                                                            safe_for_model: true,
+                                                            error_code: None,
+                                                        })?;
+                                                    crate::worker::agent::file_reference_store::create_binary_artifact(
+                                                        &target,
+                                                        &allowed_roots,
+                                                        &file_name,
+                                                        &bytes,
+                                                    )
+                                                })
+                                                .await
+                                                .map_err(|error| format!("local communication draft worker failed to join: {error}"))
+                                                .and_then(|result| result.map_err(|error| error.message))
+                                            }
+                                            _ => Err("only create-new text, local communication draft, retained-preview XLSX/formula-XLSX, and retained-preview DOCX artifacts are enabled in this slice".to_string()),
                                         };
                                         action_broker.release_writer_lease(&generation);
                                         let (class, facts, message) = match result {
@@ -1752,6 +1991,7 @@ impl WorkerSession {
                                                         result: class,
                                                         facts,
                                                         message,
+                                                        output: None,
                                                     },
                                                 },
                                             ),

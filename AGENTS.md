@@ -59,9 +59,9 @@ sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev \
 
 | 模块 | 角色 |
 |---|---|
-| `server/` | Desk server: REST API (Actix-Web), WebRTC, 设置, 文件/终端管理（支持 ServiceDaemon 和 SessionWorker 模式）；AI 诊断的共享编排契约在 `diagnose-core/`，中心模型适配分别位于 `signal/src/model_dial.rs`（OSS）与父仓 `backend/manager/src/service/model_dialect.rs`（Manager） |
+| `server/` | Desk server: REST API (Actix-Web), WebRTC, 设置, 文件/终端管理（支持 ServiceDaemon 和 SessionWorker 模式）；Device Assistant 的共享编排契约在 `diagnose-core/`，中心模型适配分别位于 `signal/src/model_dial.rs`（OSS）与父仓 `backend/manager/src/service/model_dialect.rs`（Manager） |
 | `signal/` | 信令服务器 + TURN (核心文件: `signal/src/service.rs`) |
-| `vite-project/` | React 19 + TanStack Query 前端 — 包含管理 UI 和 Web 控制端客户端（含 AI 设置页与诊断面板 `features/desk/diagnose-panel.tsx`） |
+| `vite-project/` | React 19 + TanStack Query 前端 — 包含管理 UI、Web 控制端客户端与独立 Device Assistant 页面 |
 | `tauri-app/` | Tauri 壳程序，用于在被控机本地渲染防窥屏/白板功能 |
 | `agent-protocol/` | 设备能力协议（`desk-agent-protocol`）：AI 调用的 wire 类型 + `DeviceAgent` trait + 审计 / 诊断 / exec 协议。纯协议、无平台实现；**服务端是所有受信字段的唯一可信源** |
 | `mcp-server/` | 只读 MCP 服务（`desk-mcp-server`）：基于官方 `rmcp` SDK + stdio，暴露只读工具静态白名单（无 exec/write/control 工具）。具体读 agent 与诊断编排器由 `server` 注入 |
