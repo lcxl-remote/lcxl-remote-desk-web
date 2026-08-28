@@ -677,6 +677,36 @@ pub struct LocalDraftDocument {
     pub attachment_labels: Vec<String>,
 }
 
+/// Exact model/tool input accepted before an Outlook (new) compose handoff is
+/// sealed with server-owned run and surface metadata.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct OutlookNewDraftHandoffInput {
+    pub draft: LocalDraftDocument,
+}
+
+impl OutlookNewDraftHandoffInput {
+    pub fn validate(&self) -> Result<(), CommunicationContractError> {
+        self.draft.validate()?;
+        if !self.draft.attachment_labels.is_empty() {
+            return Err(CommunicationContractError::TooManyItems(
+                "outlook_new_handoff.attachments",
+            ));
+        }
+        if self
+            .draft
+            .recipients
+            .iter()
+            .any(|recipient| recipient.role == RecipientRole::ChatDestination)
+        {
+            return Err(CommunicationContractError::ChannelMismatch);
+        }
+        Ok(())
+    }
+}
+
 /// Exact input accepted by the Outlook (new) manual compose adapter.
 ///
 /// The adapter intentionally accepts no attachment bytes or paths. It opens a
@@ -824,21 +854,10 @@ impl OutlookNewComposeHandoffRequest {
         {
             return Err(CommunicationContractError::SurfaceChannelMismatch);
         }
-        self.draft.validate()?;
-        if !self.draft.attachment_labels.is_empty() {
-            return Err(CommunicationContractError::TooManyItems(
-                "outlook_new_handoff.attachments",
-            ));
+        OutlookNewDraftHandoffInput {
+            draft: self.draft.clone(),
         }
-        if self
-            .draft
-            .recipients
-            .iter()
-            .any(|recipient| recipient.role == RecipientRole::ChatDestination)
-        {
-            return Err(CommunicationContractError::ChannelMismatch);
-        }
-        Ok(())
+        .validate()
     }
 }
 

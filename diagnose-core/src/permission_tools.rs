@@ -411,6 +411,18 @@ pub fn build_permission_request(
             == crate::device_assistant::GMAIL_WEB_HANDOFF_CAPABILITY_ID;
         let exact_slack_handoff = capability.wire.capability_id
             == crate::device_assistant::SLACK_WEB_HANDOFF_CAPABILITY_ID;
+        if exact_outlook_handoff {
+            let canonical = canonical_input_json
+                .as_deref()
+                .ok_or_else(|| invalid("Outlook (new) handoff requires exact_input"))?;
+            let input: desk_agent_protocol::communication::OutlookNewDraftHandoffInput =
+                serde_json::from_str(canonical).map_err(|error| {
+                    invalid(format!("decode Outlook (new) handoff input: {error}"))
+                })?;
+            input.validate().map_err(|error| {
+                invalid(format!("validate Outlook (new) handoff input: {error}"))
+            })?;
+        }
         if exact_gmail_handoff {
             let canonical = canonical_input_json
                 .as_deref()
@@ -1131,6 +1143,22 @@ mod tests {
                     account_id: crate::device_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID.into(),
                 }
             ]
+        );
+
+        let invalid = build_permission_request(
+            &call(
+                r#"{"items":[{"item_id":"outlook","provider_id":"communication.outlook_new.handoff","tool_name":"prepare_outlook_new_draft_handoff","expected_effect":"write_external_draft","exact_input":{"schema_version":3,"draft":{"schema_version":3,"recipients":[{"role":"to","address":"review@example.invalid","display_name":null}],"subject":"Review","body_plain_text":"Please review","attachment_labels":[]}},"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Prepare a manual Outlook draft"}]}"#,
+            ),
+            &registry,
+            "permission-outlook-invalid".into(),
+            1,
+            "2026-08-27T00:00:00Z".into(),
+        )
+        .unwrap_err();
+        assert!(
+            invalid
+                .message
+                .contains("decode Outlook (new) handoff input")
         );
     }
 

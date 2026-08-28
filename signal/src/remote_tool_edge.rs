@@ -34,7 +34,7 @@ use desk_agent_protocol::communication::{
     COMMUNICATION_SCHEMA_VERSION, CommunicationChannel, CommunicationDraftHandoff,
     CommunicationPrepareVerification, CommunicationSendAuthority, CommunicationSurfaceKind,
     CommunicationSurfaceRef, CommunicationSurfaceScope, GmailWebDraftHandoffInput,
-    LocalDraftDocument, OutlookNewComposeHandoffRequest, SlackWebDraftHandoffInput,
+    OutlookNewComposeHandoffRequest, OutlookNewDraftHandoffInput, SlackWebDraftHandoffInput,
 };
 use desk_agent_protocol::computer_use::{
     COMPUTER_USE_SCHEMA_VERSION, ComputerActionCompleted, ComputerActionKind, ComputerActionOutput,
@@ -3226,12 +3226,6 @@ impl SignalDeviceAssistantTools {
         &self,
         call: &ToolCall,
     ) -> Result<ExecOutcome, AgentError> {
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Args {
-            draft: LocalDraftDocument,
-        }
-
         let surface_ref = self.selected_outlook_surface.clone().ok_or_else(|| {
             error(
                 AgentErrorKind::PermissionDenied,
@@ -3279,15 +3273,16 @@ impl SignalDeviceAssistantTools {
             .provider_registry
             .provider_for_capability(&capability.wire.capability_id)
             .expect("registered Outlook capability has a Provider");
-        let args: Args = serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
-            error(
-                AgentErrorKind::InvalidInput,
-                format!("invalid Outlook handoff input: {decode_error}"),
-                false,
-                true,
-            )
-        })?;
-        args.draft.validate().map_err(|validation_error| {
+        let args: OutlookNewDraftHandoffInput = serde_json::from_str(&call.arguments_json)
+            .map_err(|decode_error| {
+                error(
+                    AgentErrorKind::InvalidInput,
+                    format!("invalid Outlook handoff input: {decode_error}"),
+                    false,
+                    true,
+                )
+            })?;
+        args.validate().map_err(|validation_error| {
             error(
                 AgentErrorKind::InvalidInput,
                 format!("invalid Outlook handoff draft: {validation_error}"),
@@ -3295,14 +3290,6 @@ impl SignalDeviceAssistantTools {
                 true,
             )
         })?;
-        if !args.draft.attachment_labels.is_empty() {
-            return Err(error(
-                AgentErrorKind::InvalidInput,
-                "Outlook (new) mailto handoff does not accept attachments",
-                false,
-                true,
-            ));
-        }
         for recipient in &args.draft.recipients {
             if recipient.role == desk_agent_protocol::communication::RecipientRole::ChatDestination
                 || desk_diagnose_core::communication::canonicalize_email_address(&recipient.address)
