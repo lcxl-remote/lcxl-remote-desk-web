@@ -27,6 +27,11 @@ const AX_MESSAGE_TIMEOUT_SECONDS: f32 = 0.1;
 const MAX_STRING_BYTES: usize = 16 * 1024;
 const OBJECT_REF_BUDGET: usize = 320;
 const CF_NUMBER_SINT64_TYPE: i32 = 4;
+const INVOKE_READBACK_MAX_DEPTH: u16 = 16;
+const INVOKE_READBACK_MAX_NODES: u32 = 1_024;
+const INVOKE_READBACK_MAX_BYTES: u32 = 1024 * 1024;
+const INVOKE_READBACK_TIMEOUT: Duration = Duration::from_millis(750);
+const INVOKE_READBACK_INTERVAL: Duration = Duration::from_millis(25);
 
 #[link(name = "AppKit", kind = "framework")]
 unsafe extern "C" {}
@@ -194,6 +199,14 @@ pub(super) fn apply_action(
     validate_action_target(element.0, action)?;
     match action {
         UiSemanticAction::Invoke => {
+            let before = collect_foreground(
+                expected_process_id,
+                expected_image_path,
+                INVOKE_READBACK_MAX_DEPTH,
+                INVOKE_READBACK_MAX_NODES,
+                INVOKE_READBACK_MAX_BYTES,
+            )?;
+            let before_digest = semantic_tree_digest(&before);
             let names = action_names(element.0);
             let name = if names.iter().any(|name| name == "AXPress") {
                 "AXPress"
@@ -201,10 +214,33 @@ pub(super) fn apply_action(
                 "AXConfirm"
             };
             perform_action(element.0, name)?;
+            let readback_deadline = Instant::now() + INVOKE_READBACK_TIMEOUT;
+            let verified = loop {
+                match collect_foreground(
+                    expected_process_id,
+                    expected_image_path,
+                    INVOKE_READBACK_MAX_DEPTH,
+                    INVOKE_READBACK_MAX_NODES,
+                    INVOKE_READBACK_MAX_BYTES,
+                ) {
+                    Ok(after) if semantic_tree_digest(&after) != before_digest => break true,
+                    Ok(_) => {}
+                    Err(_) => break false,
+                }
+                if Instant::now() >= readback_deadline {
+                    break false;
+                }
+                std::thread::sleep(INVOKE_READBACK_INTERVAL);
+            };
             Ok(AppliedUiAction {
                 changed: true,
-                verified: false,
-                summary: "Accessibility action was accepted, but its application effect has no generic read-back".into(),
+                verified,
+                summary: if verified {
+                    "Accessibility action was accepted and an independent semantic application-state change was read back"
+                } else {
+                    "Accessibility action was accepted, but no semantic application-state change was read back within the bounded verification window"
+                }
+                .into(),
             })
         }
         UiSemanticAction::Select => {
@@ -875,6 +911,16 @@ fn fingerprint(
     format!("{:x}", hasher.finalize())
 }
 
+fn semantic_tree_digest(tree: &CollectedUiTree) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update([u8::from(tree.truncated)]);
+    hasher.update(
+        serde_json::to_vec(&tree.nodes)
+            .expect("Accessibility semantic nodes contain only serializable values"),
+    );
+    hasher.finalize().into()
+}
+
 fn failure(kind: AgentErrorKind, message: &str, retryable: bool) -> AgentError {
     AgentError {
         kind,
@@ -917,6 +963,32 @@ mod tests {
         assert_eq!(toggle_state_from_number(1), Some(true));
         assert_eq!(toggle_state_from_number(2), None);
         assert_eq!(toggle_state_from_number(-1), None);
+    }
+
+    #[test]
+    fn semantic_tree_digest_changes_when_accessibility_value_changes() {
+        let node = CollectedUiNode {
+            parent_index: None,
+            role: "AXStaticText".into(),
+            name: Some("Display".into()),
+            value: Some("0".into()),
+            is_protected: false,
+            enabled: true,
+            supported_actions: Vec::new(),
+            fingerprint: "stable-object".into(),
+        };
+        let before = CollectedUiTree {
+            nodes: vec![node.clone()],
+            truncated: false,
+        };
+        let mut after_node = node;
+        after_node.value = Some("1".into());
+        let after = CollectedUiTree {
+            nodes: vec![after_node],
+            truncated: false,
+        };
+
+        assert_ne!(semantic_tree_digest(&before), semantic_tree_digest(&after));
     }
 
     #[test]
@@ -975,6 +1047,6 @@ mod tests {
         )
         .expect("Calculator invoke");
         assert!(result.changed);
-        assert!(!result.verified);
+        assert!(result.verified);
     }
 }

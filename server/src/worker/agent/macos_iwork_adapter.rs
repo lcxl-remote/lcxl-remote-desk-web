@@ -17,12 +17,26 @@ use desk_agent_protocol::computer_use::{
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use objc2::rc::autoreleasepool;
 use objc2::runtime::AnyObject;
-use objc2::{class, msg_send};
+use objc2::{class, msg_send, sel};
 use sha2::{Digest, Sha256};
 use sysinfo::System;
 
 pub const IWORK_ADAPTER_VERSION: &str = "iwork-scripting-bridge/1";
 const APPLE_EVENT_TIMEOUT_TICKS: i64 = 15 * 60;
+const APPLE_EVENT_TIMEOUT_SECONDS: f64 = 15.0;
+const CORE_EVENT_CLASS: u32 = fourcc(*b"aevt");
+const OPEN_DOCUMENTS_EVENT: u32 = fourcc(*b"odoc");
+const KEY_DIRECT_OBJECT: u32 = fourcc(*b"----");
+const APPLE_EVENT_DEFAULT_SEND_OPTIONS: usize = 0x0000_0023;
+const CORE_SUITE: u32 = fourcc(*b"core");
+const CLOSE_EVENT: u32 = fourcc(*b"clos");
+const SAVE_EVENT: u32 = fourcc(*b"save");
+const SAVE_OPTIONS_PARAMETER: u32 = fourcc(*b"savo");
+const FILE_PARAMETER: u32 = fourcc(*b"kfil");
+const FILE_TYPE_PARAMETER: u32 = fourcc(*b"fltp");
+const EXPORT_DESTINATION_PARAMETER: u32 = fourcc(*b"pfil");
+const EXPORT_FORMAT_PARAMETER: u32 = fourcc(*b"exft");
+const EXPORT_PROPERTIES_PARAMETER: u32 = fourcc(*b"expr");
 const DOCUMENTS: u32 = fourcc(*b"docu");
 const TABLES: u32 = fourcc(*b"NmTb");
 const CELLS: u32 = fourcc(*b"NmCl");
@@ -56,6 +70,18 @@ unsafe extern "C" {}
 
 #[link(name = "AppKit", kind = "framework")]
 unsafe extern "C" {}
+
+unsafe extern "C-unwind" {
+    #[link_name = "objc_msgSend"]
+    fn objc_msg_send_variadic(
+        receiver: *mut AnyObject,
+        selector: objc2::runtime::Sel,
+        event_class: u32,
+        event_id: u32,
+        first_parameter_code: u32,
+        ...
+    ) -> *mut AnyObject;
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IworkApplication {
@@ -216,7 +242,7 @@ pub fn observe_batch(
     with_bridge(|| unsafe {
         let app = running_application(spec)?;
         verify_app_version(app, spec)?;
-        let document = open_document(app, &source_path)?;
+        let document = open_document(app, spec, &source_path)?;
         let observation = match application {
             IworkApplication::Numbers => observe_numbers_document(document),
             IworkApplication::Pages => observe_pages_document(document),
@@ -292,7 +318,12 @@ pub fn apply_numbers_batch(
         IworkApplication::Numbers,
         source_path,
         output,
-        |document| unsafe { apply_numbers_document(document, locator, action) },
+        &locator.document_identity_sha256,
+        |document| unsafe {
+            let mut locator = locator.clone();
+            locator.document_identity_sha256 = document_identity(document)?;
+            apply_numbers_document(document, &locator, action)
+        },
     )
 }
 
@@ -306,7 +337,12 @@ pub fn apply_pages_batch(
         IworkApplication::Pages,
         source_path,
         output,
-        |document| unsafe { apply_pages_document(document, locator, action) },
+        &locator.document_identity_sha256,
+        |document| unsafe {
+            let mut locator = locator.clone();
+            locator.document_identity_sha256 = document_identity(document)?;
+            apply_pages_document(document, &locator, action)
+        },
     )
 }
 
@@ -320,7 +356,12 @@ pub fn apply_keynote_batch(
         IworkApplication::Keynote,
         source_path,
         output,
-        |document| unsafe { apply_keynote_document(document, locator, action) },
+        &locator.document_identity_sha256,
+        |document| unsafe {
+            let mut locator = locator.clone();
+            locator.document_identity_sha256 = document_identity(document)?;
+            apply_keynote_document(document, &locator, action)
+        },
     )
 }
 
@@ -328,6 +369,7 @@ fn apply_batch(
     application: IworkApplication,
     source_path: &Path,
     output: &IworkBatchOutput<'_>,
+    expected_document_identity_sha256: &str,
     mutate: impl FnOnce(*mut AnyObject) -> Result<IworkMutationResult, AgentError> + UnwindSafe,
 ) -> Result<IworkMutationResult, AgentError> {
     let spec = spec(application);
@@ -338,7 +380,16 @@ fn apply_batch(
     with_bridge(|| unsafe {
         let app = running_application(spec)?;
         verify_app_version(app, spec)?;
-        let document = open_document(app, &source_path)?;
+        let document = open_document(app, spec, &source_path)?;
+        if document_identity(document)? != expected_document_identity_sha256 {
+            let _ = close_without_saving(document);
+            return Err(stale("the iWork batch document changed after observation"));
+        }
+        if let Err(error) = save_document(document, output.native_path, native_format(application))
+        {
+            let _ = close_without_saving(document);
+            return Err(error);
+        }
         let mutation = mutate(document);
         let Ok(mut mutation) = mutation else {
             let _ = close_without_saving(document);
@@ -350,7 +401,12 @@ fn apply_batch(
             return Err(error);
         }
         if let Some((format, path)) = output.export
-            && let Err(error) = export_document(document, path, export_format(application, format))
+            && let Err(error) = export_document(
+                document,
+                application,
+                path,
+                export_format(application, format),
+            )
         {
             let _ = close_without_saving(document);
             mutation.verified = false;
@@ -639,16 +695,21 @@ unsafe fn current_keynote_slide(document: *mut AnyObject) -> Result<*mut AnyObje
 }
 
 unsafe fn running_application(spec: AppSpec) -> Result<*mut AnyObject, AgentError> {
-    let process_id = running_process_id(spec).ok_or_else(|| {
+    running_process_id(spec).ok_or_else(|| {
         failure(
             AgentErrorKind::TargetOffline,
             "the iWork application is not running",
             true,
         )
     })?;
+    let bundle_path = Path::new(spec.executable_path)
+        .ancestors()
+        .nth(3)
+        .ok_or_else(|| failure(AgentErrorKind::Internal, "invalid frozen iWork path", false))?;
+    let bundle_url = file_url(bundle_path)?;
     let app: *mut AnyObject = msg_send![
         class!(SBApplication),
-        applicationWithProcessIdentifier: process_id
+        applicationWithURL: bundle_url
     ];
     if app.is_null() {
         return Err(unavailable("the iWork application cannot be resolved"));
@@ -678,17 +739,59 @@ unsafe fn file_url(path: &Path) -> Result<*mut AnyObject, AgentError> {
     }
 }
 
-unsafe fn open_document(app: *mut AnyObject, path: &Path) -> Result<*mut AnyObject, AgentError> {
+unsafe fn open_document(
+    app: *mut AnyObject,
+    spec: AppSpec,
+    path: &Path,
+) -> Result<*mut AnyObject, AgentError> {
     let url = file_url(path)?;
-    let document: *mut AnyObject = msg_send![app, open: url];
-    if document.is_null() {
+    let bundle_id = nsstring(spec.bundle_id)?;
+    let target: *mut AnyObject = msg_send![
+        class!(NSAppleEventDescriptor),
+        descriptorWithBundleIdentifier: bundle_id
+    ];
+    let file: *mut AnyObject =
+        msg_send![class!(NSAppleEventDescriptor), descriptorWithFileURL: url];
+    let files: *mut AnyObject = msg_send![class!(NSAppleEventDescriptor), listDescriptor];
+    if target.is_null() || file.is_null() || files.is_null() {
+        return Err(failure(
+            AgentErrorKind::Internal,
+            "cannot construct the iWork open-document Apple event",
+            true,
+        ));
+    }
+    let _: () = msg_send![files, insertDescriptor: file atIndex: 1isize];
+    let event: *mut AnyObject = msg_send![
+        class!(NSAppleEventDescriptor),
+        appleEventWithEventClass: CORE_EVENT_CLASS
+        eventID: OPEN_DOCUMENTS_EVENT
+        targetDescriptor: target
+        returnID: -1i16
+        transactionID: 0i32
+    ];
+    if event.is_null() {
+        return Err(failure(
+            AgentErrorKind::Internal,
+            "cannot construct the iWork open-document Apple event",
+            true,
+        ));
+    }
+    let _: () = msg_send![event, setParamDescriptor: files forKeyword: KEY_DIRECT_OBJECT];
+    let mut error: *mut AnyObject = std::ptr::null_mut();
+    let reply: *mut AnyObject = msg_send![
+        event,
+        sendEventWithOptions: APPLE_EVENT_DEFAULT_SEND_OPTIONS
+        timeout: APPLE_EVENT_TIMEOUT_SECONDS
+        error: &mut error
+    ];
+    if reply.is_null() || !error.is_null() {
         Err(failure(
-            AgentErrorKind::InvalidInput,
-            "iWork could not open the selected batch document",
-            false,
+            AgentErrorKind::TransportError,
+            "iWork rejected the selected batch document open request",
+            true,
         ))
     } else {
-        Ok(document)
+        front_document(app)
     }
 }
 
@@ -698,25 +801,141 @@ unsafe fn save_document(
     format: u32,
 ) -> Result<(), AgentError> {
     let url = file_url(path)?;
-    let _: () = msg_send![document, saveIn: url, as: format];
-    Ok(())
+    let format = enum_descriptor(format)?;
+    send_event_two(
+        document,
+        CORE_SUITE,
+        SAVE_EVENT,
+        FILE_PARAMETER,
+        url,
+        FILE_TYPE_PARAMETER,
+        format,
+    );
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(failure(
+            AgentErrorKind::TransportError,
+            "iWork did not create the requested native batch copy",
+            true,
+        ))
+    }
 }
 
 unsafe fn export_document(
     document: *mut AnyObject,
+    application: IworkApplication,
     path: &Path,
     format: u32,
 ) -> Result<(), AgentError> {
     let url = file_url(path)?;
-    let properties: *mut AnyObject = std::ptr::null_mut();
-    let _: () = msg_send![document, exportTo: url, as: format, withProperties: properties];
-    Ok(())
+    let format = enum_descriptor(format)?;
+    let (event_class, event_id) = match application {
+        IworkApplication::Numbers => (fourcc(*b"Nmst"), fourcc(*b"expo")),
+        IworkApplication::Pages => (fourcc(*b"Pgst"), fourcc(*b"expo")),
+        IworkApplication::Keynote => (fourcc(*b"Knst"), fourcc(*b"expo")),
+    };
+    send_event_three(
+        document,
+        event_class,
+        event_id,
+        EXPORT_DESTINATION_PARAMETER,
+        url,
+        EXPORT_FORMAT_PARAMETER,
+        format,
+        EXPORT_PROPERTIES_PARAMETER,
+        std::ptr::null_mut(),
+    );
+    if path
+        .metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+    {
+        Ok(())
+    } else {
+        Err(failure(
+            AgentErrorKind::TransportError,
+            "iWork did not create the requested batch validation export",
+            true,
+        ))
+    }
 }
 
 unsafe fn close_without_saving(document: *mut AnyObject) -> Result<(), AgentError> {
-    let destination: *mut AnyObject = std::ptr::null_mut();
-    let _: () = msg_send![document, closeSaving: SAVE_NO, savingIn: destination];
+    let saving = enum_descriptor(SAVE_NO)?;
+    send_event_two(
+        document,
+        CORE_SUITE,
+        CLOSE_EVENT,
+        SAVE_OPTIONS_PARAMETER,
+        saving,
+        FILE_PARAMETER,
+        std::ptr::null_mut(),
+    );
     Ok(())
+}
+
+unsafe fn enum_descriptor(code: u32) -> Result<*mut AnyObject, AgentError> {
+    let descriptor: *mut AnyObject =
+        msg_send![class!(NSAppleEventDescriptor), descriptorWithEnumCode: code];
+    if descriptor.is_null() {
+        Err(failure(
+            AgentErrorKind::Internal,
+            "cannot construct an iWork Apple event enum",
+            true,
+        ))
+    } else {
+        Ok(descriptor)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn send_event_two(
+    receiver: *mut AnyObject,
+    event_class: u32,
+    event_id: u32,
+    first_code: u32,
+    first_value: *mut AnyObject,
+    second_code: u32,
+    second_value: *mut AnyObject,
+) -> *mut AnyObject {
+    objc_msg_send_variadic(
+        receiver,
+        sel!(sendEvent:id:parameters:),
+        event_class,
+        event_id,
+        first_code,
+        first_value,
+        second_code,
+        second_value,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn send_event_three(
+    receiver: *mut AnyObject,
+    event_class: u32,
+    event_id: u32,
+    first_code: u32,
+    first_value: *mut AnyObject,
+    second_code: u32,
+    second_value: *mut AnyObject,
+    third_code: u32,
+    third_value: *mut AnyObject,
+) -> *mut AnyObject {
+    objc_msg_send_variadic(
+        receiver,
+        sel!(sendEvent:id:parameters:),
+        event_class,
+        event_id,
+        first_code,
+        first_value,
+        second_code,
+        second_value,
+        third_code,
+        third_value,
+        0,
+    )
 }
 
 const fn native_format(application: IworkApplication) -> u32 {
@@ -1086,6 +1305,69 @@ mod tests {
         let before = std::fs::read(&source).unwrap();
         observe_batch(application, Path::new(&source)).unwrap();
         assert_eq!(std::fs::read(source).unwrap(), before);
+    }
+
+    #[test]
+    #[ignore = "requires a running iWork app, Automation permission, and a disposable LRD_IWORK_BATCH_SOURCE"]
+    fn live_batch_mutation_saves_verified_native_and_pdf_copies_without_changing_source() {
+        let app = std::env::var("LRD_IWORK_LIVE_APP").expect("set LRD_IWORK_LIVE_APP");
+        let source = std::env::var("LRD_IWORK_BATCH_SOURCE")
+            .expect("set LRD_IWORK_BATCH_SOURCE to a disposable native iWork file");
+        let (application, extension) = match app.as_str() {
+            "numbers" => (IworkApplication::Numbers, "numbers"),
+            "pages" => (IworkApplication::Pages, "pages"),
+            "keynote" => (IworkApplication::Keynote, "key"),
+            _ => panic!("LRD_IWORK_LIVE_APP must be numbers, pages, or keynote"),
+        };
+        let marker = format!("LRD_IWORK_BATCH_{}", std::process::id());
+        let output_parent = Path::new(&source).parent().unwrap();
+        let native = output_parent.join(format!("{marker}.{extension}"));
+        let pdf = output_parent.join(format!("{marker}.pdf"));
+        let before = std::fs::read(&source).unwrap();
+        let observed = observe_batch(application, Path::new(&source)).unwrap();
+        let output = IworkBatchOutput {
+            native_path: &native,
+            export: Some((IworkBatchExportFormat::Pdf, &pdf)),
+        };
+        let changed = match observed {
+            IworkObservation::Numbers { locator, .. } => apply_numbers_batch(
+                Path::new(&source),
+                &output,
+                &locator,
+                &SpreadsheetLivePatchAction::SetCellValue {
+                    value: marker.clone(),
+                },
+            ),
+            IworkObservation::Pages { locator, .. } => apply_pages_batch(
+                Path::new(&source),
+                &output,
+                &locator,
+                &DocumentLivePatchAction::ReplaceBodyText {
+                    text: marker.clone(),
+                },
+            ),
+            IworkObservation::Keynote { locator, .. } => apply_keynote_batch(
+                Path::new(&source),
+                &output,
+                &locator,
+                &PresentationLivePatchAction::ReplaceSlideTitle {
+                    text: marker.clone(),
+                },
+            ),
+        }
+        .unwrap();
+        assert!(changed.changed && changed.verified);
+        assert_eq!(std::fs::read(&source).unwrap(), before);
+        assert!(native.exists());
+        assert!(pdf.metadata().unwrap().len() > 0);
+        let copied = observe_batch(application, &native).unwrap();
+        match copied {
+            IworkObservation::Numbers { value, .. } => assert_eq!(value, marker),
+            IworkObservation::Pages { body_text, .. } => assert_eq!(body_text, marker),
+            IworkObservation::Keynote { title, .. } => assert_eq!(title, marker),
+        }
+        std::fs::remove_file(native).unwrap();
+        std::fs::remove_file(pdf).unwrap();
     }
 
     #[test]

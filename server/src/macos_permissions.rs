@@ -23,7 +23,12 @@ const NUMBERS_BUNDLE_ID: &str = "com.apple.Numbers";
 const PAGES_BUNDLE_ID: &str = "com.apple.Pages";
 const KEYNOTE_BUNDLE_ID: &str = "com.apple.Keynote";
 const TYPE_APPLICATION_BUNDLE_ID: u32 = u32::from_be_bytes(*b"bund");
-const TYPE_WILDCARD: u32 = u32::from_be_bytes(*b"****");
+// Query the exact read-only Apple Event used by the iWork adapter. macOS can
+// leave wildcard (`****`/`****`) Automation probes blocked indefinitely for an
+// ad-hoc development identity, while a concrete core/getd decision returns or
+// presents the normal consent flow.
+const CORE_SUITE: u32 = u32::from_be_bytes(*b"core");
+const GET_DATA_EVENT: u32 = u32::from_be_bytes(*b"getd");
 const NO_ERR: i32 = 0;
 const PROC_NOT_FOUND: i32 = -600;
 const EVENT_NOT_PERMITTED: i32 = -1743;
@@ -208,7 +213,7 @@ fn finish_automation_permission(
 }
 
 fn request_automation_permission(bundle_id: &'static str) {
-    if let Some(worker) = permission_worker(bundle_id) {
+    if let Some(worker) = request_permission_worker(bundle_id) {
         worker.request();
     }
 }
@@ -227,6 +232,37 @@ fn permission_worker(bundle_id: &'static str) -> Option<&'static AutomationPermi
     slot.get_or_init(|| {
         AutomationPermissionWorker::spawn(
             &format!("macos-automation-{}", bundle_id.rsplit('.').next().unwrap()),
+            move |ask_user_if_needed| automation_permission_raw(bundle_id, ask_user_if_needed),
+        )
+    })
+    .as_ref()
+}
+
+/// Return the dedicated prompt lane for one Automation target.
+///
+/// CoreServices can leave a non-prompting permission query blocked forever
+/// while validating a development build's code identity. Prompt requests must
+/// not share that worker: otherwise the first status refresh permanently makes
+/// the local "Request permissions" action a no-op.
+fn request_permission_worker(
+    bundle_id: &'static str,
+) -> Option<&'static AutomationPermissionWorker> {
+    static NUMBERS: OnceLock<Option<AutomationPermissionWorker>> = OnceLock::new();
+    static PAGES: OnceLock<Option<AutomationPermissionWorker>> = OnceLock::new();
+    static KEYNOTE: OnceLock<Option<AutomationPermissionWorker>> = OnceLock::new();
+
+    let slot = match bundle_id {
+        NUMBERS_BUNDLE_ID => &NUMBERS,
+        PAGES_BUNDLE_ID => &PAGES,
+        KEYNOTE_BUNDLE_ID => &KEYNOTE,
+        _ => return None,
+    };
+    slot.get_or_init(|| {
+        AutomationPermissionWorker::spawn(
+            &format!(
+                "macos-automation-prompt-{}",
+                bundle_id.rsplit('.').next().unwrap()
+            ),
             move |ask_user_if_needed| automation_permission_raw(bundle_id, ask_user_if_needed),
         )
     })
@@ -259,8 +295,8 @@ fn automation_permission_raw(
     let status = unsafe {
         AEDeterminePermissionToAutomateTarget(
             &target,
-            TYPE_WILDCARD,
-            TYPE_WILDCARD,
+            CORE_SUITE,
+            GET_DATA_EVENT,
             u8::from(ask_user_if_needed),
         )
     };
@@ -384,6 +420,36 @@ mod tests {
             AutomationPermissionState::Granted
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn stalled_query_lane_does_not_block_the_prompt_lane() {
+        let query_worker = AutomationPermissionWorker::spawn("test-query-lane", move |_| {
+            thread::sleep(Duration::from_millis(200));
+            AutomationPermissionState::Granted
+        })
+        .unwrap();
+        let prompt_calls = Arc::new(AtomicUsize::new(0));
+        let worker_prompt_calls = Arc::clone(&prompt_calls);
+        let prompt_worker =
+            AutomationPermissionWorker::spawn("test-prompt-lane", move |ask_user_if_needed| {
+                assert!(ask_user_if_needed);
+                worker_prompt_calls.fetch_add(1, Ordering::SeqCst);
+                AutomationPermissionState::Granted
+            })
+            .unwrap();
+
+        assert_eq!(
+            query_worker.query(Duration::from_millis(20)),
+            AutomationPermissionState::Failed
+        );
+        prompt_worker.request();
+
+        let deadline = Instant::now() + Duration::from_millis(100);
+        while prompt_calls.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(prompt_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

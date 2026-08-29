@@ -37,6 +37,7 @@ use desk_diagnose_core::model_capability::{
 };
 use desk_diagnose_core::model_egress::ModelEgressPolicy;
 use desk_diagnose_core::prompt::ResponseFormatSpec;
+use desk_diagnose_core::registry::RegisteredTool;
 use desk_diagnose_core::seam::{
     ClaimTurnParams, HeartbeatGuard, LeaseHeartbeat, ModelRequest, ModelSeam, SessionSeam, TurnSink,
 };
@@ -54,6 +55,58 @@ const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const BUSY_FOLLOWUP_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
 const OSS_ASSISTANT_POLICY_REVISION: i64 = 1;
 pub(crate) const PERMISSION_RESUME_MESSAGE_PREFIX: &str = "permission-resume-";
+
+fn extend_fixed_exact_action_capabilities(
+    registry: &[RegisteredTool],
+    granted: &mut Vec<desk_agent_protocol::Capability>,
+) {
+    if registry.iter().any(|tool| {
+        tool.name() == desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
+    }) && !granted.contains(&desk_agent_protocol::Capability::DesktopUiActionConfirmed)
+    {
+        // The model-facing tool remains callable after a context attachment
+        // expires so an owner-approved exact grant can resume. The grant store
+        // still binds the call to the exact object, input, device, actor, TTL,
+        // and one-shot use before the edge sees any action.
+        granted.push(desk_agent_protocol::Capability::DesktopUiActionConfirmed);
+    }
+}
+
+fn capability_enables_mutation(capability: &desk_agent_protocol::Capability) -> bool {
+    matches!(
+        capability,
+        desk_agent_protocol::Capability::DesktopUiActionConfirmed
+            | desk_agent_protocol::Capability::FileArtifactCreateConfirmed
+            | desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed
+            | desk_agent_protocol::Capability::SpreadsheetWorkbookCreateConfirmed
+            | desk_agent_protocol::Capability::SpreadsheetFormulaWorkbookCreateConfirmed
+            | desk_agent_protocol::Capability::WordDocumentCreateConfirmed
+            | desk_agent_protocol::Capability::ShellExecConfirmed
+            | desk_agent_protocol::Capability::BrowserPageNavigateConfirmed
+            | desk_agent_protocol::Capability::BrowserInputFallbackConfirmed
+            | desk_agent_protocol::Capability::BrowserExternalDraftWriteConfirmed
+            | desk_agent_protocol::Capability::CommunicationOutlookNewHandoffConfirmed
+            | desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed
+            | desk_agent_protocol::Capability::DocumentLivePatchConfirmed
+            | desk_agent_protocol::Capability::PresentationLivePatchConfirmed
+    )
+}
+
+fn has_active_resume_desktop_ui_inspect_grant(
+    grants: &[desk_agent_protocol::capability_grant::CapabilityGrant],
+    now_unix_ms: u64,
+) -> bool {
+    grants.iter().any(|grant| {
+        grant.provider_id == desk_diagnose_core::device_assistant::DESKTOP_UI_PROVIDER_ID
+            && grant.capability_id == desk_diagnose_core::device_assistant::DESKTOP_UI_CAPABILITY_ID
+            && grant.tool_name == "inspect_desktop_ui"
+            && grant.effect
+                == desk_agent_protocol::capability_provider::CapabilityEffect::ReadDevice
+            && grant.revoked_at_unix_ms.is_none()
+            && grant.expires_at_unix_ms > now_unix_ms
+            && grant.remaining_uses > 0
+    })
+}
 
 fn latest_committed_answer(
     snapshot: &crate::agent_session_store::SessionSnapshot,
@@ -1458,12 +1511,42 @@ async fn run_turn_inner(
         .await;
         return;
     }
+    let capability_grants =
+        match crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
+            .list_for_subject(&conversation_id, &actor_id, &target_device_id)
+            .await
+        {
+            Ok(grants) => grants,
+            Err(error) => {
+                stream_event(
+                    connections.as_ref(),
+                    &browser_connection_id,
+                    &AgentEvent::error(
+                        &request_id,
+                        1,
+                        transport_error(format!("failed to load capability grants: {error}")),
+                    ),
+                )
+                .await;
+                return;
+            }
+        };
+    let resume_desktop_ui_inspect = resume_conversation_id.is_some()
+        && has_active_resume_desktop_ui_inspect_grant(&capability_grants, now_unix_ms);
     let mut selected_source_tools = ask
         .selected_capability_ids
         .iter()
         .filter_map(|capability_id| provider_registry.capability(capability_id))
         .map(|capability| capability.wire.tool_name.clone())
         .collect::<std::collections::BTreeSet<_>>();
+    if resume_desktop_ui_inspect {
+        // This is the same server-triggered continuation of the owner's
+        // original requirement. The explicit read grant remains the authority;
+        // restoring the source tool here only keeps its read-back envelope
+        // eligible for the same model destination after the one-turn context
+        // attachment itself has expired.
+        selected_source_tools.insert("inspect_desktop_ui".into());
+    }
     if !selected_file_roots.is_empty() {
         selected_source_tools.insert("inspect_selected_file_metadata".into());
         let selected_file_count = selected_file_roots
@@ -1560,6 +1643,8 @@ async fn run_turn_inner(
             .map(str::to_string),
     );
     selected_source_tools.insert("execute_confirmed_command".into());
+    selected_source_tools
+        .insert(desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL.into());
     let export_authorization_id = format!(
         "assistant-export-{:x}",
         Sha256::digest(format!("{actor_user_id}:{target_device_id}:{request_id}").as_bytes())
@@ -1582,6 +1667,10 @@ async fn run_turn_inner(
         },
     );
     let mut selected_tool_capability_ids = ask.selected_capability_ids.clone();
+    if resume_desktop_ui_inspect {
+        selected_tool_capability_ids
+            .push(desk_diagnose_core::device_assistant::DESKTOP_UI_CAPABILITY_ID.into());
+    }
     selected_tool_capability_ids
         .push(desk_diagnose_core::device_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID.into());
     selected_tool_capability_ids.extend(
@@ -1724,26 +1813,6 @@ async fn run_turn_inner(
         &inventory,
         &registry,
     );
-    let capability_grants =
-        match crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
-            .list_for_subject(&conversation_id, &actor_id, &target_device_id)
-            .await
-        {
-            Ok(grants) => grants,
-            Err(error) => {
-                stream_event(
-                    connections.as_ref(),
-                    &browser_connection_id,
-                    &AgentEvent::error(
-                        &request_id,
-                        1,
-                        transport_error(format!("failed to load capability grants: {error}")),
-                    ),
-                )
-                .await;
-                return;
-            }
-        };
     let permission_requests = snapshot
         .as_ref()
         .map(|snapshot| snapshot.permission_requests.as_slice())
@@ -1796,6 +1865,12 @@ async fn run_turn_inner(
         &ask.selected_capability_ids,
     )
     .expect("control authorizer validated selected Device Assistant context");
+    if resume_desktop_ui_inspect
+        && !granted.contains(&desk_agent_protocol::Capability::DesktopUiInspect)
+    {
+        granted.push(desk_agent_protocol::Capability::DesktopUiInspect);
+    }
+    extend_fixed_exact_action_capabilities(&registry, &mut granted);
     granted.extend(desk_diagnose_core::device_assistant::system_diagnostic_capabilities());
     // The command Provider itself remains a fixed R3 one-shot exact grant.
     // These two edge capabilities only let the daemon accept the server-owned
@@ -1861,24 +1936,7 @@ async fn run_turn_inner(
             desk_agent_protocol::Capability::PresentationLivePatchConfirmed,
         ]);
     }
-    let mutation_enabled = granted.iter().any(|capability| {
-        matches!(
-            capability,
-            desk_agent_protocol::Capability::FileArtifactCreateConfirmed
-                | desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed
-                | desk_agent_protocol::Capability::SpreadsheetWorkbookCreateConfirmed
-                | desk_agent_protocol::Capability::SpreadsheetFormulaWorkbookCreateConfirmed
-                | desk_agent_protocol::Capability::WordDocumentCreateConfirmed
-                | desk_agent_protocol::Capability::ShellExecConfirmed
-                | desk_agent_protocol::Capability::BrowserPageNavigateConfirmed
-                | desk_agent_protocol::Capability::BrowserInputFallbackConfirmed
-                | desk_agent_protocol::Capability::BrowserExternalDraftWriteConfirmed
-                | desk_agent_protocol::Capability::CommunicationOutlookNewHandoffConfirmed
-                | desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed
-                | desk_agent_protocol::Capability::DocumentLivePatchConfirmed
-                | desk_agent_protocol::Capability::PresentationLivePatchConfirmed
-        )
-    });
+    let mutation_enabled = granted.iter().any(capability_enables_mutation);
     let scope = AgentScope {
         granted,
         // Even a provider configured for confirmed exec is hard-clamped here.
@@ -2249,6 +2307,90 @@ mod tests {
         );
         assert!(envelope.retention.delete_with_run);
         envelope.validate().unwrap();
+    }
+
+    #[test]
+    fn exact_ui_action_remains_in_scope_for_permission_resume() {
+        let mut tools = desk_diagnose_core::device_assistant::device_assistant_tool_registry();
+        desk_diagnose_core::device_assistant::retain_selected_context_tools(
+            &desk_diagnose_core::device_assistant::device_assistant_provider_registry(),
+            &mut tools,
+            &[],
+        );
+        let mut granted =
+            desk_diagnose_core::device_assistant::selected_context_capabilities(&[]).unwrap();
+
+        extend_fixed_exact_action_capabilities(&tools, &mut granted);
+
+        assert!(
+            granted.contains(&desk_agent_protocol::Capability::DesktopUiActionConfirmed),
+            "an exact approved action must remain callable after its observation attachment expires"
+        );
+        assert!(granted.iter().any(capability_enables_mutation));
+
+        tools.retain(|tool| {
+            tool.name() != desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
+        });
+        let mut unavailable = Vec::new();
+        extend_fixed_exact_action_capabilities(&tools, &mut unavailable);
+        assert!(unavailable.is_empty());
+    }
+
+    #[test]
+    fn permission_resume_recognizes_only_active_desktop_ui_read_grants() {
+        use desk_agent_protocol::capability_grant::{
+            CAPABILITY_GRANT_SCHEMA_VERSION, CapabilityGrant, CapabilityGrantIssuer,
+            CapabilityGrantLimits, CapabilityGrantUsePolicy, CapabilityRiskTier,
+        };
+        use desk_agent_protocol::capability_provider::{CapabilityEffect, ProductSurface};
+
+        let grant = CapabilityGrant {
+            schema_version: CAPABILITY_GRANT_SCHEMA_VERSION,
+            grant_id: "grant-ui-read".into(),
+            actor_id: "owner".into(),
+            run_id: "run".into(),
+            surface: ProductSurface::OssPersonalOwner,
+            target_device_id: "device".into(),
+            target_session_id: None,
+            provider_id: desk_diagnose_core::device_assistant::DESKTOP_UI_PROVIDER_ID.into(),
+            capability_id: desk_diagnose_core::device_assistant::DESKTOP_UI_CAPABILITY_ID.into(),
+            tool_name: "inspect_desktop_ui".into(),
+            tool_schema_version: 1,
+            effect: CapabilityEffect::ReadDevice,
+            risk_tier: CapabilityRiskTier::R1,
+            resource_scope: vec!["target:current_device".into()],
+            operation_scope: vec!["observe".into()],
+            export_destinations: Vec::new(),
+            allowed_envelope_ids: Vec::new(),
+            allowed_content_digests_sha256: Vec::new(),
+            use_policy: CapabilityGrantUsePolicy::Reusable,
+            canonical_input_digest_sha256: None,
+            issued_by: CapabilityGrantIssuer::UserDecision,
+            issued_at_unix_ms: 100,
+            expires_at_unix_ms: 1_000,
+            remaining_uses: 2,
+            limits: CapabilityGrantLimits {
+                max_bytes_per_call: 64 * 1024,
+                max_items_per_call: 180,
+                max_calls: 4,
+            },
+            policy_revision: 1,
+            readiness_revision: 1,
+            revoked_at_unix_ms: None,
+            revoked_reason: None,
+        };
+
+        assert!(has_active_resume_desktop_ui_inspect_grant(
+            std::slice::from_ref(&grant),
+            500
+        ));
+        let mut exhausted = grant.clone();
+        exhausted.remaining_uses = 0;
+        assert!(!has_active_resume_desktop_ui_inspect_grant(
+            &[exhausted],
+            500
+        ));
+        assert!(!has_active_resume_desktop_ui_inspect_grant(&[grant], 1_000));
     }
 
     #[test]
