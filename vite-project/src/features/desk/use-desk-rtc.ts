@@ -136,7 +136,10 @@ export function useDeskRTC({ deskId, subscribe, sendTracked, cancelQueued, cance
     const clipboardChannel = useRef<RTCDataChannel | null>(null); // Added clipboardChannel ref
     const fileTransferChannel = useRef<RTCDataChannel | null>(null); // Added fileTransferChannel ref
     const whiteboardChannel = useRef<RTCDataChannel | null>(null);
-    const cursorSyncChannel = useRef<RTCDataChannel | null>(null);
+    // Cursor sync is state (not a ref) so consumers re-render and attach their
+    // message listener immediately after the channel is created, before the
+    // remote peer can replay its cached initial cursor on `open`.
+    const [cursorSyncChannel, setCursorSyncChannel] = useState<RTCDataChannel | null>(null);
     const [isRTCConnected, setIsRTCConnected] = useState(false);
     // Terminal ICE failure, distinct from a transient `disconnected`. ICE
     // routinely dips to `disconnected` (consent refresh, relay path changes)
@@ -525,7 +528,8 @@ export function useDeskRTC({ deskId, subscribe, sendTracked, cancelQueued, cance
         // { ordered: false, maxRetransmits: 0 } means unreliable and unordered UDP style channel for high-frequency updates
         mouseMoveChannel.current = pc.createDataChannel("mouse_move_event", { ordered: false, maxRetransmits: 0 });
         whiteboardChannel.current = pc.createDataChannel("whiteboard_event", { ordered: true });
-        cursorSyncChannel.current = pc.createDataChannel("cursor_sync_event", { ordered: true });
+        const nextCursorSyncChannel = pc.createDataChannel("cursor_sync_event", { ordered: true });
+        setCursorSyncChannel(nextCursorSyncChannel);
 
         mouseChannel.current.onopen = () => console.log("Mouse channel open");
         keyboardChannel.current.onopen = () => console.log("Keyboard channel open");
@@ -533,7 +537,7 @@ export function useDeskRTC({ deskId, subscribe, sendTracked, cancelQueued, cance
         clipboardChannel.current.onopen = () => console.log("Clipboard channel open"); // Added onopen for clipboardChannel
         fileTransferChannel.current.onopen = () => console.log("File Transfer channel open"); // Added onopen for fileTransferChannel
         whiteboardChannel.current.onopen = () => console.log("Whiteboard channel open");
-        cursorSyncChannel.current.onopen = () => console.log("Cursor Sync channel open");
+        nextCursorSyncChannel.onopen = () => console.log("Cursor Sync channel open");
 
         // Create Offer
         await createAndSetStereoOffer(pc);
@@ -614,6 +618,7 @@ export function useDeskRTC({ deskId, subscribe, sendTracked, cancelQueued, cance
         }
         setIsRTCConnected(false);
         setRemoteStream(null);
+        setCursorSyncChannel(null);
     }, [cancelQueued, cancelQueuedScope]);
 
     // RTCPeerConnection Stats Monitor

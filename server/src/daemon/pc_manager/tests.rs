@@ -3385,6 +3385,7 @@ async fn register_data_channel_router_smoke() {
     let pc = build_peer_connection(vec![], &settings).await.expect("pc");
     let signaling_state = Arc::new(RwLock::new(SignalingState::default()));
     let cursor_dc = Arc::new(RwLock::new(None));
+    let latest_cursor_payload = Arc::new(RwLock::new(None));
     let clipboard_dc = Arc::new(RwLock::new(None));
     let file_transfer_dc = Arc::new(RwLock::new(None));
     let shared = SharedSettings::from(Settings::default());
@@ -3395,6 +3396,7 @@ async fn register_data_channel_router_smoke() {
         "conn-smoke".to_string(),
         signaling_state,
         cursor_dc,
+        latest_cursor_payload,
         clipboard_dc,
         file_transfer_dc,
         worker_mgr,
@@ -3420,8 +3422,7 @@ async fn write_cursor_data_unknown_connection_is_silent_noop() {
 /// `write_cursor_data` for a known connection that has not yet
 /// registered a `cursor_sync_event` DC (browser hasn't opened it
 /// — control not granted, or DC negotiation in flight) is a
-/// silent no-op. The browser would naturally not see a cursor
-/// in that state; that is the intended behaviour.
+/// caches the payload for the channel's eventual on-open replay.
 #[tokio::test]
 async fn write_cursor_data_no_dc_registered_is_silent_noop() {
     let registry = PcRegistry::new();
@@ -3441,10 +3442,13 @@ async fn write_cursor_data_no_dc_registered_is_silent_noop() {
         connection_id: "conn-no-cursor-dc".to_string(),
         data: br#"{"visible":true,"shape_id":42}"#.to_vec(),
     };
-    // Test passes if this returns without panicking; the
-    // cursor_data_channel slot is `None` at construction time,
-    // so the silent-drop path must fire.
     write_cursor_data(&registry, payload).await;
+    let ctx = registry.get("conn-no-cursor-dc").await.expect("context");
+    let latest = {
+        let ctx = ctx.read().await;
+        ctx.latest_cursor_payload.read().await.clone()
+    };
+    assert_eq!(latest.as_deref(), Some(r#"{"visible":true,"shape_id":42}"#));
 }
 
 /// Non-UTF-8 cursor payload bytes are dropped with a warn log,
@@ -3474,6 +3478,12 @@ async fn write_cursor_data_invalid_utf8_is_silent_noop() {
         data: vec![0xFFu8, 0xFE, 0xFD],
     };
     write_cursor_data(&registry, payload).await;
+    let ctx = registry.get("conn-bad-utf8").await.expect("context");
+    let latest = {
+        let ctx = ctx.read().await;
+        ctx.latest_cursor_payload.read().await.clone()
+    };
+    assert!(latest.is_none());
 }
 
 // ============== write_clipboard_data ==============

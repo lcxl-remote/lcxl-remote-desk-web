@@ -1,5 +1,46 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CursorDeliveryKey {
+    shape_id: u64,
+    visible: bool,
+    screen_width: u32,
+    screen_height: u32,
+    embedded: bool,
+    hotspot_x: i32,
+    hotspot_y: i32,
+}
+
+fn should_emit_cursor(
+    show_mouse: bool,
+    cursor: Option<&desk_capture_engine::model::image_capture::CursorSyncData>,
+    last: &mut Option<CursorDeliveryKey>,
+) -> bool {
+    if !show_mouse {
+        // Re-enabling the setting must replay the shared capture's cached
+        // cursor even if its shape did not change while disabled.
+        *last = None;
+        return false;
+    }
+    let Some(cursor) = cursor else {
+        return false;
+    };
+    let key = CursorDeliveryKey {
+        shape_id: cursor.shape_id,
+        visible: cursor.visible,
+        screen_width: cursor.screen_width,
+        screen_height: cursor.screen_height,
+        embedded: cursor.embedded,
+        hotspot_x: cursor.hotspot_x,
+        hotspot_y: cursor.hotspot_y,
+    };
+    if *last == Some(key) {
+        return false;
+    }
+    *last = Some(key);
+    true
+}
+
 /// Inner async loop for video. Subscribes to the worker-wide
 /// `SharedCaptureRegistry` for its `(backend, output_index)` and
 /// pumps frames from the broadcast channel into a per-connection
@@ -230,6 +271,7 @@ pub(super) async fn video_pipeline_loop(
     // encoder runs at its initial ceiling.
     let mut current_cap_kbps: Option<u32> = None;
     let mut consecutive_encode_failures = 0_u8;
+    let mut last_cursor_delivery = None;
 
     while !stop_flag.load(Ordering::Relaxed) {
         // Wait for the next shared frame. The capture loop runs as
@@ -426,8 +468,11 @@ pub(super) async fn video_pipeline_loop(
         // dedicated `cursor_sync_event` DC. This is how two browsers
         // sharing a capture can independently choose to display or
         // suppress the cursor.
-        if merged_settings.show_mouse
-            && let Some(cursor) = &shared_frame.cursor_update
+        if should_emit_cursor(
+            merged_settings.show_mouse,
+            shared_frame.cursor_update.as_ref(),
+            &mut last_cursor_delivery,
+        ) && let Some(cursor) = &shared_frame.cursor_update
         {
             match serde_json::to_vec(cursor) {
                 Ok(bytes) => {
@@ -908,4 +953,42 @@ fn report_streaming(
             },
         },
     ));
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+    use desk_capture_engine::model::image_capture::CursorSyncData;
+
+    fn cursor(shape_id: u64) -> CursorSyncData {
+        CursorSyncData {
+            base64_png: "png".to_string(),
+            hotspot_x: 1,
+            hotspot_y: 2,
+            visible: true,
+            shape_id,
+            screen_width: 1920,
+            screen_height: 1080,
+            embedded: false,
+        }
+    }
+
+    #[test]
+    fn cached_cursor_is_sent_once_per_connection_and_replayed_after_reenable() {
+        let current = cursor(7);
+        let mut last = None;
+        assert!(should_emit_cursor(true, Some(&current), &mut last));
+        assert!(!should_emit_cursor(true, Some(&current), &mut last));
+        assert!(!should_emit_cursor(false, Some(&current), &mut last));
+        assert!(should_emit_cursor(true, Some(&current), &mut last));
+    }
+
+    #[test]
+    fn cursor_shape_change_is_forwarded() {
+        let first = cursor(7);
+        let second = cursor(8);
+        let mut last = None;
+        assert!(should_emit_cursor(true, Some(&first), &mut last));
+        assert!(should_emit_cursor(true, Some(&second), &mut last));
+    }
 }

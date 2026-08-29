@@ -215,6 +215,7 @@ pub async fn handle_request_remote(
             from_connection_id.to_string(),
             Arc::clone(&ctx_guard.signaling_state),
             Arc::clone(&ctx_guard.cursor_data_channel),
+            Arc::clone(&ctx_guard.latest_cursor_payload),
             Arc::clone(&ctx_guard.clipboard_data_channel),
             Arc::clone(&ctx_guard.file_transfer_data_channel),
             mgr.clone(),

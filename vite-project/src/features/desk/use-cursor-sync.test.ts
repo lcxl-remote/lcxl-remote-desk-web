@@ -143,7 +143,7 @@ describe('useCursorSync — embed transition toast', () => {
         // worse than the double-cursor artefact.
         const { cursorSyncChannel, videoRef, channel } = makeRefs();
         const { result } = renderHook(() =>
-            useCursorSync(cursorSyncChannel, videoRef, true),
+            useCursorSync(cursorSyncChannel.current, videoRef, true),
         );
 
         // Before any data arrives the hook starts at 'default'.
@@ -174,7 +174,7 @@ describe('useCursorSync — embed transition toast', () => {
         // page reflects the OS behaviour.
         const { cursorSyncChannel, videoRef, channel } = makeRefs();
         const { result } = renderHook(() =>
-            useCursorSync(cursorSyncChannel, videoRef, true),
+            useCursorSync(cursorSyncChannel.current, videoRef, true),
         );
         act(() => {
             channel.__dispatch({
@@ -193,7 +193,7 @@ describe('useCursorSync — embed transition toast', () => {
 
     it('fires the remote-cursor toast when embedded transitions false → true', () => {
         const { cursorSyncChannel, videoRef, channel } = makeRefs();
-        renderHook(() => useCursorSync(cursorSyncChannel, videoRef, true));
+        renderHook(() => useCursorSync(cursorSyncChannel.current, videoRef, true));
 
         // Frame 1: hardware cursor (embedded=false) — no toast.
         act(() => {
@@ -229,7 +229,7 @@ describe('useCursorSync — embed transition toast', () => {
 
     it('does not refire the toast while embedded stays true', () => {
         const { cursorSyncChannel, videoRef, channel } = makeRefs();
-        renderHook(() => useCursorSync(cursorSyncChannel, videoRef, true));
+        renderHook(() => useCursorSync(cursorSyncChannel.current, videoRef, true));
 
         for (let i = 0; i < 3; i += 1) {
             act(() => {
@@ -253,7 +253,7 @@ describe('useCursorSync — embed transition toast', () => {
         // must remain silent — only the embedded transition is the
         // user-visible behavioural change we want to surface.
         const { cursorSyncChannel, videoRef, channel } = makeRefs();
-        renderHook(() => useCursorSync(cursorSyncChannel, videoRef, true));
+        renderHook(() => useCursorSync(cursorSyncChannel.current, videoRef, true));
 
         act(() => {
             channel.__dispatch({
@@ -274,7 +274,7 @@ describe('useCursorSync — embed transition toast', () => {
         // No control = no local cursor sprite rendered, so the
         // "remote cursor took over" message is not relevant.
         const { cursorSyncChannel, videoRef, channel } = makeRefs();
-        renderHook(() => useCursorSync(cursorSyncChannel, videoRef, false));
+        renderHook(() => useCursorSync(cursorSyncChannel.current, videoRef, false));
 
         act(() => {
             channel.__dispatch({
@@ -294,7 +294,7 @@ describe('useCursorSync — embed transition toast', () => {
     it('restores the local browser cursor when remote cursor display is disabled', () => {
         const { cursorSyncChannel, videoRef, channel } = makeRefs();
         const { result, rerender } = renderHook(
-            ({ enabled }) => useCursorSync(cursorSyncChannel, videoRef, enabled),
+            ({ enabled }) => useCursorSync(cursorSyncChannel.current, videoRef, enabled),
             { initialProps: { enabled: true } },
         );
 
@@ -330,5 +330,39 @@ describe('useCursorSync — embed transition toast', () => {
             });
         });
         expect(result.current.cursorStyle).toBe('default');
+    });
+
+    it('attaches when the channel appears and reapplies an initial packet after control is granted', () => {
+        const { videoRef, channel } = makeRefs();
+        const rtcChannel = channel as unknown as RTCDataChannel;
+        const { result, rerender } = renderHook(
+            ({ activeChannel, enabled }) => useCursorSync(activeChannel, videoRef, enabled),
+            {
+                initialProps: {
+                    activeChannel: null as RTCDataChannel | null,
+                    enabled: false,
+                },
+            },
+        );
+
+        rerender({ activeChannel: rtcChannel, enabled: false });
+        expect(channel.addEventListener).toHaveBeenCalledWith('message', expect.any(Function));
+
+        act(() => {
+            channel.__dispatch({
+                base64_png: '',
+                hotspot_x: 0,
+                hotspot_y: 0,
+                visible: false,
+                shape_id: 1,
+                screen_width: 1920,
+                screen_height: 1080,
+                embedded: false,
+            });
+        });
+        expect(result.current.cursorStyle).toBe('default');
+
+        rerender({ activeChannel: rtcChannel, enabled: true });
+        expect(result.current.cursorStyle).toBe('none');
     });
 });

@@ -173,6 +173,7 @@ pub fn register_data_channel_router(
     connection_id: String,
     signaling_state: Arc<RwLock<SignalingState>>,
     cursor_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
+    latest_cursor_payload: Arc<RwLock<Option<String>>>,
     clipboard_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
     file_transfer_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
     worker_mgr: WorkerManager,
@@ -183,6 +184,7 @@ pub fn register_data_channel_router(
         let connection_id = connection_id.clone();
         let signaling_state = Arc::clone(&signaling_state);
         let cursor_data_channel = Arc::clone(&cursor_data_channel);
+        let latest_cursor_payload = Arc::clone(&latest_cursor_payload);
         let clipboard_data_channel = Arc::clone(&clipboard_data_channel);
         let file_transfer_data_channel = Arc::clone(&file_transfer_data_channel);
         let worker_mgr = worker_mgr.clone();
@@ -206,6 +208,23 @@ pub fn register_data_channel_router(
                 // in `route_is_permitted` deliberately never sees it.
                 let mut slot = cursor_data_channel.write().await;
                 *slot = Some(Arc::clone(&dc));
+                drop(slot);
+                let replay_dc = Arc::clone(&dc);
+                let replay_payload = Arc::clone(&latest_cursor_payload);
+                let replay_connection_id = connection_id.clone();
+                dc.on_open(Box::new(move || {
+                    Box::pin(async move {
+                        let cached = replay_payload.read().await.clone();
+                        if let Some(payload) = cached
+                            && let Err(error) = replay_dc.send_text(payload).await
+                        {
+                            log::warn!(
+                                "[DcRouter] {replay_connection_id}: failed to replay cached \
+                                 cursor on channel open: {error}"
+                            );
+                        }
+                    })
+                }));
                 log::info!(
                     "[DcRouter] {connection_id}: stashed cursor_sync_event channel \
                      for worker→daemon cursor write-back"

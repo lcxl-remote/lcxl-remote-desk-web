@@ -348,6 +348,10 @@ pub struct PeerConnectionContext {
     /// worker-side `WorkerToService::CursorData` is routed to
     /// `dc.send(...)` here.
     pub cursor_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
+    /// Most recent valid cursor JSON received from the worker. The media
+    /// pipeline can publish its initial cursor before WebRTC finishes opening
+    /// `cursor_sync_event`; the channel's on-open handler replays this cache.
+    pub latest_cursor_payload: Arc<RwLock<Option<String>>>,
     /// Set when the browser opens the `clipboard_event` DataChannel.
     /// Worker-side `WorkerToService::ClipboardRead` is routed to
     /// `dc.send_text(...)` here. Browser→host clipboard writes flow
@@ -1423,6 +1427,7 @@ impl PcRegistry {
             video_track: None,
             audio_track: None,
             cursor_data_channel: Arc::new(RwLock::new(None)),
+            latest_cursor_payload: Arc::new(RwLock::new(None)),
             clipboard_data_channel: Arc::new(RwLock::new(None)),
             file_transfer_data_channel,
             file_transfer_writer_tx,

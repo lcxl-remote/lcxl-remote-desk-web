@@ -581,6 +581,10 @@ fn run_capture_loop(
         cursor_mode: CursorCaptureMode::SyncNative,
     };
     let mut error_log = CaptureErrorLogState::default();
+    // `CaptureResult::cursor_update` is edge-triggered by every backend. Keep
+    // the latest value on subsequent shared frames so a subscriber joining
+    // after the shape-change frame still receives an initial cursor.
+    let mut cached_cursor_update: Option<CursorSyncData> = None;
     // Geometry is re-queried only on a captured-size edge. This keeps new
     // subscribers and the frame metadata live without performing expensive
     // display enumeration at the OS frame rate.
@@ -679,6 +683,8 @@ fn run_capture_loop(
             );
         }
 
+        let cursor_update =
+            refresh_cached_cursor(&mut cached_cursor_update, result.cursor_update.as_ref());
         let frame = Arc::new(SharedFrame {
             data,
             width,
@@ -687,7 +693,7 @@ fn run_capture_loop(
             image_type,
             dirty_rects: result.dirty_rects,
             content_changed: result.content_changed,
-            cursor_update: result.cursor_update,
+            cursor_update,
             source_generation: geometry_snapshot.generation,
             display_info: geometry_snapshot.display_info,
         });
@@ -702,6 +708,16 @@ fn run_capture_loop(
         "[SharedCapture:{}/{}] capture loop exited",
         key.backend, key.device_name
     );
+}
+
+fn refresh_cached_cursor(
+    cache: &mut Option<CursorSyncData>,
+    update: Option<&CursorSyncData>,
+) -> Option<CursorSyncData> {
+    if let Some(update) = update {
+        *cache = Some(update.clone());
+    }
+    cache.clone()
 }
 
 /// Whether a captured frame may be trusted to describe the source
@@ -761,6 +777,27 @@ mod tests {
         // Degenerate dimensions are never a real capture.
         assert!(!frame_carries_geometry(0, 800, true));
         assert!(!frame_carries_geometry(1280, 0, true));
+    }
+
+    #[test]
+    fn cursor_cache_survives_frames_without_a_shape_edge() {
+        let mut cache = None;
+        let first = CursorSyncData {
+            base64_png: "png".to_string(),
+            hotspot_x: 2,
+            hotspot_y: 3,
+            visible: true,
+            shape_id: 41,
+            screen_width: 1920,
+            screen_height: 1080,
+            embedded: false,
+        };
+
+        let published = refresh_cached_cursor(&mut cache, Some(&first)).expect("cursor");
+        assert_eq!(published.shape_id, 41);
+        let replayed = refresh_cached_cursor(&mut cache, None).expect("cached cursor");
+        assert_eq!(replayed.shape_id, 41);
+        assert_eq!(replayed.base64_png, "png");
     }
 
     struct TestImage {

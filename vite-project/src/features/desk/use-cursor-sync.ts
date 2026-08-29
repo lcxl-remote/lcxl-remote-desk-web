@@ -63,7 +63,7 @@ export function computeCursorScale(
 }
 
 export function useCursorSync(
-    cursorSyncChannel: RefObject<RTCDataChannel | null>,
+    cursorSyncChannel: RTCDataChannel | null,
     videoRef: RefObject<HTMLVideoElement | null>,
     remoteCursorEnabled: boolean
 ) {
@@ -168,7 +168,7 @@ export function useCursorSync(
     };
 
     useEffect(() => {
-        const channel = cursorSyncChannel.current;
+        const channel = cursorSyncChannel;
         if (!channel) return;
 
         const handleMessage = (event: MessageEvent) => {
@@ -182,6 +182,10 @@ export function useCursorSync(
         };
 
         channel.addEventListener('message', handleMessage);
+        // The channel is created before control is granted. Its cached initial
+        // cursor can therefore arrive while rendering is disabled; re-apply
+        // that last packet when the control/show-mouse gate later turns on.
+        applyCursor(lastDataRef.current);
 
         return () => {
             channel.removeEventListener('message', handleMessage);

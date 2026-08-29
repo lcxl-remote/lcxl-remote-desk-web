@@ -28,8 +28,19 @@ pub async fn write_cursor_data(registry: &PcRegistry, payload: CursorDataPayload
             return;
         }
     };
+    let cursor_json = match std::str::from_utf8(&payload.data) {
+        Ok(value) => value.to_string(),
+        Err(e) => {
+            log::warn!(
+                "[pc_manager] cursor data for {} not UTF-8: {e}; dropping",
+                payload.connection_id
+            );
+            return;
+        }
+    };
     let dc_opt = {
         let ctx = ctx.read().await;
+        *ctx.latest_cursor_payload.write().await = Some(cursor_json.clone());
         ctx.cursor_data_channel.read().await.clone()
     };
     let dc = match dc_opt {
@@ -55,17 +66,7 @@ pub async fn write_cursor_data(registry: &PcRegistry, payload: CursorDataPayload
     // model::data_channel); the daemon hands them through unchanged.
     // We use `send_text` rather than `send` so the browser receives a
     // text frame matching the legacy wire shape exactly.
-    let s = match std::str::from_utf8(&payload.data) {
-        Ok(s) => s,
-        Err(e) => {
-            log::warn!(
-                "[pc_manager] cursor data for {} not UTF-8: {e}; dropping",
-                payload.connection_id
-            );
-            return;
-        }
-    };
-    if let Err(e) = dc.send_text(s.to_string()).await {
+    if let Err(e) = dc.send_text(cursor_json).await {
         log::warn!(
             "[pc_manager] failed to send cursor data for {}: {e}",
             payload.connection_id
