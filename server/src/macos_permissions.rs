@@ -11,6 +11,11 @@
 //! Apple Events uses `AEDeterminePermissionToAutomateTarget(..., false)`.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::{Arc, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::model::info::MacosPermissions;
 
@@ -23,6 +28,7 @@ const NO_ERR: i32 = 0;
 const PROC_NOT_FOUND: i32 = -600;
 const EVENT_NOT_PERMITTED: i32 = -1743;
 const EVENT_WOULD_REQUIRE_CONSENT: i32 = -1744;
+const AUTOMATION_PERMISSION_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[repr(C)]
 struct AEDesc {
@@ -36,6 +42,87 @@ pub enum AutomationPermissionState {
     Missing,
     TargetOffline,
     Failed,
+}
+
+struct AutomationPermissionRequest {
+    ask_user_if_needed: bool,
+    reply: Option<mpsc::Sender<AutomationPermissionState>>,
+}
+
+struct AutomationPermissionWorker {
+    sender: SyncSender<AutomationPermissionRequest>,
+    busy: Arc<AtomicBool>,
+}
+
+impl AutomationPermissionWorker {
+    fn spawn(
+        name: &str,
+        operation: impl Fn(bool) -> AutomationPermissionState + Send + 'static,
+    ) -> Option<Self> {
+        let (sender, receiver) = mpsc::sync_channel::<AutomationPermissionRequest>(1);
+        let busy = Arc::new(AtomicBool::new(false));
+        let worker_busy = Arc::clone(&busy);
+        thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || {
+                while let Ok(request) = receiver.recv() {
+                    let result = operation(request.ask_user_if_needed);
+                    worker_busy.store(false, Ordering::Release);
+                    if let Some(reply) = request.reply {
+                        let _ = reply.send(result);
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self { sender, busy })
+    }
+
+    fn begin(&self, ask_user_if_needed: bool) -> Option<Receiver<AutomationPermissionState>> {
+        if self
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return None;
+        }
+        let (reply, receiver) = mpsc::channel();
+        let request = AutomationPermissionRequest {
+            ask_user_if_needed,
+            reply: Some(reply),
+        };
+        if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
+            self.sender.try_send(request)
+        {
+            self.busy.store(false, Ordering::Release);
+            return None;
+        }
+        Some(receiver)
+    }
+
+    fn query(&self, timeout: Duration) -> AutomationPermissionState {
+        self.begin(false)
+            .and_then(|receiver| receiver.recv_timeout(timeout).ok())
+            .unwrap_or(AutomationPermissionState::Failed)
+    }
+
+    fn request(&self) {
+        if self
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let request = AutomationPermissionRequest {
+            ask_user_if_needed: true,
+            reply: None,
+        };
+        if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
+            self.sender.try_send(request)
+        {
+            self.busy.store(false, Ordering::Release);
+        }
+    }
 }
 
 // Screen Recording grant query. CoreGraphics is already linked by the
@@ -74,24 +161,79 @@ pub fn probe() -> MacosPermissions {
     let screen_recording = unsafe { CGPreflightScreenCaptureAccess() };
     let accessibility = unsafe { AXIsProcessTrusted() };
     let input_monitoring = unsafe { CGPreflightListenEventAccess() };
+    let deadline = Instant::now() + AUTOMATION_PERMISSION_TIMEOUT;
+    let numbers_automation = begin_automation_permission(NUMBERS_BUNDLE_ID);
+    let pages_automation = begin_automation_permission(PAGES_BUNDLE_ID);
+    let keynote_automation = begin_automation_permission(KEYNOTE_BUNDLE_ID);
     MacosPermissions {
         screen_recording,
         accessibility,
         input_monitoring,
-        numbers_automation: automation_permission(NUMBERS_BUNDLE_ID, false)
+        numbers_automation: finish_automation_permission(numbers_automation, deadline)
             == AutomationPermissionState::Granted,
-        pages_automation: automation_permission(PAGES_BUNDLE_ID, false)
+        pages_automation: finish_automation_permission(pages_automation, deadline)
             == AutomationPermissionState::Granted,
-        keynote_automation: automation_permission(KEYNOTE_BUNDLE_ID, false)
+        keynote_automation: finish_automation_permission(keynote_automation, deadline)
             == AutomationPermissionState::Granted,
     }
 }
 
-/// Query or explicitly request Automation access for one compile-time-owned
-/// bundle identifier. Callers that are reachable from remote readiness must
-/// always pass `false`; only the loopback/same-origin onboarding endpoint passes
-/// `true` after a local user click.
-pub fn automation_permission(
+/// Query Automation access for one compile-time-owned bundle identifier.
+///
+/// CoreServices may wait indefinitely while TCC validates a broken target code
+/// signature. The dedicated per-target worker keeps that wait out of Actix and
+/// bounds subsequent probes without creating an unbounded number of threads.
+pub fn automation_permission(bundle_id: &'static str) -> AutomationPermissionState {
+    permission_worker(bundle_id)
+        .map(|worker| worker.query(AUTOMATION_PERMISSION_TIMEOUT))
+        .unwrap_or(AutomationPermissionState::Failed)
+}
+
+fn begin_automation_permission(
+    bundle_id: &'static str,
+) -> Option<Receiver<AutomationPermissionState>> {
+    permission_worker(bundle_id)?.begin(false)
+}
+
+fn finish_automation_permission(
+    receiver: Option<Receiver<AutomationPermissionState>>,
+    deadline: Instant,
+) -> AutomationPermissionState {
+    let Some(receiver) = receiver else {
+        return AutomationPermissionState::Failed;
+    };
+    receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .unwrap_or(AutomationPermissionState::Failed)
+}
+
+fn request_automation_permission(bundle_id: &'static str) {
+    if let Some(worker) = permission_worker(bundle_id) {
+        worker.request();
+    }
+}
+
+fn permission_worker(bundle_id: &'static str) -> Option<&'static AutomationPermissionWorker> {
+    static NUMBERS: OnceLock<Option<AutomationPermissionWorker>> = OnceLock::new();
+    static PAGES: OnceLock<Option<AutomationPermissionWorker>> = OnceLock::new();
+    static KEYNOTE: OnceLock<Option<AutomationPermissionWorker>> = OnceLock::new();
+
+    let slot = match bundle_id {
+        NUMBERS_BUNDLE_ID => &NUMBERS,
+        PAGES_BUNDLE_ID => &PAGES,
+        KEYNOTE_BUNDLE_ID => &KEYNOTE,
+        _ => return None,
+    };
+    slot.get_or_init(|| {
+        AutomationPermissionWorker::spawn(
+            &format!("macos-automation-{}", bundle_id.rsplit('.').next().unwrap()),
+            move |ask_user_if_needed| automation_permission_raw(bundle_id, ask_user_if_needed),
+        )
+    })
+    .as_ref()
+}
+
+fn automation_permission_raw(
     bundle_id: &'static str,
     ask_user_if_needed: bool,
 ) -> AutomationPermissionState {
@@ -112,7 +254,8 @@ pub fn automation_permission(
     if created != NO_ERR {
         return AutomationPermissionState::Failed;
     }
-    // SAFETY: `target` remains valid for this synchronous TCC query.
+    // SAFETY: `target` remains valid for this synchronous TCC query. The call
+    // runs only on a bounded, dedicated worker because the OS may not return.
     let status = unsafe {
         AEDeterminePermissionToAutomateTarget(
             &target,
@@ -193,15 +336,56 @@ pub fn request() {
     }
 
     // This function is reachable only through the loopback + same-origin local
-    // onboarding endpoint. Offline apps remain false in the readiness snapshot;
-    // we do not launch them or pretend a prompt was delivered.
+    // onboarding endpoint. Each prompt runs on its target's bounded worker so
+    // a stalled TCC dialog cannot occupy an HTTP runtime thread.
     for bundle_id in [NUMBERS_BUNDLE_ID, PAGES_BUNDLE_ID, KEYNOTE_BUNDLE_ID] {
-        let _ = automation_permission(bundle_id, true);
+        request_automation_permission(bundle_id);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::{AutomationPermissionState, AutomationPermissionWorker};
+
+    #[test]
+    fn stalled_automation_query_is_bounded_and_coalesced() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker_calls = Arc::clone(&calls);
+        let worker = AutomationPermissionWorker::spawn("test-automation-timeout", move |_| {
+            worker_calls.fetch_add(1, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(200));
+            AutomationPermissionState::Granted
+        })
+        .unwrap();
+
+        let started = Instant::now();
+        assert_eq!(
+            worker.query(Duration::from_millis(30)),
+            AutomationPermissionState::Failed
+        );
+        assert!(started.elapsed() < Duration::from_millis(150));
+
+        let retry_started = Instant::now();
+        assert_eq!(
+            worker.query(Duration::from_millis(30)),
+            AutomationPermissionState::Failed
+        );
+        assert!(retry_started.elapsed() < Duration::from_millis(30));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        thread::sleep(Duration::from_millis(220));
+        assert_eq!(
+            worker.query(Duration::from_millis(250)),
+            AutomationPermissionState::Granted
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
     #[test]
     #[ignore = "requires all three running iWork apps with Automation approval"]
     fn live_probe_reports_per_app_iwork_tcc_grants() {

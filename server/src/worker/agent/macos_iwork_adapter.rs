@@ -944,7 +944,7 @@ unsafe fn optional_property_string(
 }
 
 fn ensure_automation_permission(spec: AppSpec) -> Result<(), AgentError> {
-    match crate::macos_permissions::automation_permission(spec.bundle_id, false) {
+    match crate::macos_permissions::automation_permission(spec.bundle_id) {
         crate::macos_permissions::AutomationPermissionState::Granted => Ok(()),
         crate::macos_permissions::AutomationPermissionState::Missing => Err(failure(
             AgentErrorKind::PermissionDenied,
