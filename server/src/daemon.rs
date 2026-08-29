@@ -502,6 +502,17 @@ pub async fn start_inprocess_daemon(
     let initial_desktop = get_initial_desktop_name();
     let computer_use_broker =
         Arc::new(crate::worker::agent::computer_use_broker::ComputerUseBroker::new());
+    let device_id = settings
+        .read()
+        .await
+        .system
+        .get_client_id()
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    computer_use_broker.start_browser_extension_bridge(
+        paths.data_root(),
+        device_id,
+        session_id.to_string(),
+    )?;
 
     // Spawn the in-process worker: same WorkerSession::run_with_transports
     // entry point as the ServiceDaemon path; only difference is the

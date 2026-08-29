@@ -1,0 +1,1 @@
+{"type":"object","required":["connection","workId","executionId"],"properties":{"connection":{"type":"string"},"conversation":{"type":["string","null"]},"executionId":{"type":"string"},"session":{"type":["string","null"]},"workId":{"type":"integer","format":"int64"}},"x-readme-ref-name":"UnknownOutcomeDispositionBody"}

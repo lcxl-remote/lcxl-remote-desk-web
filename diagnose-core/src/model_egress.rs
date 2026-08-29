@@ -22,6 +22,7 @@ use crate::sink_authorizer::{
 };
 
 const MODEL_OUTPUT_TTL_MS: u64 = 5 * 60 * 1000;
+const MODEL_CALL_RETENTION_HEADROOM_MS: u64 = 60 * 1000;
 
 #[derive(Debug, Clone)]
 pub struct ModelEgressPolicy {
@@ -75,6 +76,11 @@ impl ModelEgressPolicy {
                     .map(move |call| (call.id.clone(), turn_id.clone()))
             })
             .collect::<std::collections::BTreeMap<_, _>>();
+        let current_turn_id = request
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| message.turn_id.clone());
         let deselected_turns = request
             .messages
             .iter()
@@ -102,18 +108,43 @@ impl ModelEgressPolicy {
             })
             .cloned()
             .collect::<BTreeSet<_>>();
-        // Ephemeral observations and answers derived from them must not be
-        // replayed after their retention boundary.  Keep the browser-visible
-        // transcript intact, but omit the complete *historical* turn from this
-        // provider request so tool call/result grouping remains valid.  The
-        // current turn is deliberately never omitted here: if its selected
-        // observation expires while the loop is running, the sink authorizer
-        // below still fails closed instead of silently answering without it.
-        let current_turn_id = request
+        // A model/profile switch is a new sink identity. Historical turns that
+        // were authorized only for the old sink must not be replayed to the new
+        // model, but they also must not strand a freshly authorized follow-up.
+        // Omit the complete historical turn so tool-call/result grouping stays
+        // valid. The current turn is deliberately excluded and still fails
+        // closed below if its envelope is not bound to this exact destination.
+        let destination_mismatched_historical_turns = request
             .messages
             .iter()
-            .rev()
-            .find_map(|message| message.turn_id.clone());
+            .filter_map(|message| {
+                let envelope = message.data_envelope.as_ref()?;
+                let turn_id = message.turn_id.as_ref().or_else(|| {
+                    message
+                        .tool_call_id
+                        .as_ref()
+                        .and_then(|call_id| tool_call_turns.get(call_id))
+                })?;
+                (current_turn_id.as_ref() != Some(turn_id)
+                    && !envelope
+                        .allowed_destinations
+                        .iter()
+                        .any(|destination| destination == &self.destination))
+                .then_some(turn_id.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        // Ephemeral observations and answers derived from them must not be
+        // replayed when their retention boundary cannot safely cover another
+        // model round trip. Keep the browser-visible transcript intact, but
+        // omit the complete *historical* turn from this provider request so
+        // tool call/result grouping remains valid. Without this headroom, a
+        // valid request can finish after an old input expires and strand the
+        // dynamic loop with an already-expired model output. The current turn
+        // is deliberately never omitted here: its selected observation still
+        // fails closed rather than being silently removed.
+        let historical_retention_cutoff = self
+            .now_unix_ms
+            .saturating_add(MODEL_CALL_RETENTION_HEADROOM_MS);
         let expired_historical_turns = request
             .messages
             .iter()
@@ -126,14 +157,13 @@ impl ModelEgressPolicy {
                         .and_then(|call_id| tool_call_turns.get(call_id))
                 })?;
                 (current_turn_id.as_ref() != Some(turn_id)
-                    && envelope_is_expired(envelope, self.now_unix_ms))
+                    && envelope_expires_by(envelope, historical_retention_cutoff))
                 .then_some(turn_id.clone())
             })
             .collect::<BTreeSet<_>>();
-        let omitted_turns = deselected_turns
-            .union(&expired_historical_turns)
-            .cloned()
-            .collect::<BTreeSet<_>>();
+        let mut omitted_turns = deselected_turns;
+        omitted_turns.extend(destination_mismatched_historical_turns);
+        omitted_turns.extend(expired_historical_turns);
         if !omitted_turns.is_empty() {
             request.messages.retain(|message| {
                 let turn_id = message.turn_id.as_ref().or_else(|| {
@@ -243,6 +273,14 @@ impl ModelEgressPolicy {
     ) -> Result<DataEnvelope, ModelEgressError> {
         if inputs.is_empty() {
             return Err(ModelEgressError::EmptyInputs);
+        }
+        if inputs
+            .iter()
+            .any(|input| envelope_is_expired(input, self.now_unix_ms))
+        {
+            return Err(ModelEgressError::Sink(
+                SinkAuthorizationError::ExpiredEnvelope,
+            ));
         }
         let bytes = model_turn_content_bytes(turn)?;
         if bytes.is_empty() {
@@ -356,16 +394,20 @@ impl ModelEgressPolicy {
 }
 
 fn envelope_is_expired(envelope: &DataEnvelope, now_unix_ms: u64) -> bool {
+    envelope_expires_by(envelope, now_unix_ms)
+}
+
+fn envelope_expires_by(envelope: &DataEnvelope, cutoff_unix_ms: u64) -> bool {
     envelope
         .retention
         .expires_at_unix_ms
-        .is_some_and(|expiry| expiry <= now_unix_ms)
+        .is_some_and(|expiry| expiry <= cutoff_unix_ms)
         || matches!(
             &envelope.content,
             ContentRef::EphemeralObservation {
                 expires_at_unix_ms,
                 ..
-            } if *expires_at_unix_ms <= now_unix_ms
+            } if *expires_at_unix_ms <= cutoff_unix_ms
         )
 }
 
@@ -716,6 +758,129 @@ mod tests {
     }
 
     #[test]
+    fn historical_turn_without_model_round_trip_headroom_is_omitted() {
+        let destination = destination();
+        let mut expiring_answer = envelope(
+            "expiring-answer-envelope",
+            "model-response",
+            b"answer whose retention is nearly exhausted",
+            Sensitivity::Sensitive,
+            vec![destination.clone()],
+        );
+        expiring_answer.retention.expires_at_unix_ms =
+            Some(100_u64.saturating_add(MODEL_CALL_RETENTION_HEADROOM_MS));
+        let request = ModelRequest::text_only(
+            vec![
+                message(
+                    "prior-answer",
+                    ChatRole::Assistant,
+                    "answer whose retention is nearly exhausted",
+                    Some(expiring_answer),
+                )
+                .with_turn_id("prior-turn"),
+                message(
+                    "current-user",
+                    ChatRole::User,
+                    "continue without stale context",
+                    Some(envelope(
+                        "current-user-envelope",
+                        "send-message",
+                        b"continue without stale context",
+                        Sensitivity::UserContent,
+                        vec![destination],
+                    )),
+                )
+                .with_turn_id("current-turn"),
+            ],
+            ResponseFormatSpec::None,
+        );
+
+        let authorized = policy(&[]).authorize_request(request).unwrap();
+        let message_ids = authorized
+            .request
+            .messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(message_ids, vec!["current-user"]);
+    }
+
+    #[test]
+    fn old_model_turn_is_omitted_but_current_sink_mismatch_still_fails_closed() {
+        let destination = destination();
+        let old_destination = DestinationIdentity::Model {
+            connection_id: "oss-ai-gateway:1".into(),
+            connection_revision: 7,
+            model_id: "old-model".into(),
+            profile_revision: 8,
+        };
+        let request = ModelRequest::text_only(
+            vec![
+                ChatMessage::text("system", ChatRole::System, "trusted prompt"),
+                message(
+                    "old-permission-resume",
+                    ChatRole::User,
+                    "old server control replay",
+                    Some(envelope(
+                        "old-permission-resume-envelope",
+                        "permission-decision-resume",
+                        b"old server control replay",
+                        Sensitivity::UserContent,
+                        vec![old_destination.clone()],
+                    )),
+                )
+                .with_turn_id("old-turn"),
+                message(
+                    "current-user",
+                    ChatRole::User,
+                    "continue with the new model",
+                    Some(envelope(
+                        "current-user-envelope",
+                        "send-message",
+                        b"continue with the new model",
+                        Sensitivity::UserContent,
+                        vec![destination],
+                    )),
+                )
+                .with_turn_id("current-turn"),
+            ],
+            ResponseFormatSpec::None,
+        );
+
+        let authorized = policy(&[]).authorize_request(request).unwrap();
+        let message_ids = authorized
+            .request
+            .messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(message_ids, vec!["system", "current-user"]);
+
+        let current_mismatch = ModelRequest::text_only(
+            vec![
+                message(
+                    "current-user",
+                    ChatRole::User,
+                    "not authorized for the new model",
+                    Some(envelope(
+                        "current-user-envelope",
+                        "send-message",
+                        b"not authorized for the new model",
+                        Sensitivity::UserContent,
+                        vec![old_destination],
+                    )),
+                )
+                .with_turn_id("current-turn"),
+            ],
+            ResponseFormatSpec::None,
+        );
+        assert!(matches!(
+            policy(&[]).authorize_request(current_mismatch),
+            Err(ModelEgressError::ExportNotSelected { .. })
+        ));
+    }
+
+    #[test]
     fn expired_current_turn_still_fails_closed() {
         let destination = destination();
         let mut expired_observation = envelope(
@@ -755,6 +920,34 @@ mod tests {
 
         assert!(matches!(
             policy(&["inspect_office_selection"]).authorize_request(request),
+            Err(ModelEgressError::Sink(
+                SinkAuthorizationError::ExpiredEnvelope
+            ))
+        ));
+    }
+
+    #[test]
+    fn input_that_expires_during_provider_call_cannot_label_model_output() {
+        let destination = destination();
+        let mut input = envelope(
+            "dispatch-valid-envelope",
+            "send-message",
+            b"continue",
+            Sensitivity::UserContent,
+            vec![destination],
+        );
+        input.retention.expires_at_unix_ms = Some(150);
+        let turn = ModelTurn {
+            text: "tool plan".into(),
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+            ..Default::default()
+        };
+        let mut completion_policy = policy(&[]);
+        completion_policy.now_unix_ms = 151;
+
+        assert!(matches!(
+            completion_policy.derive_model_output_envelope(&turn, &[input]),
             Err(ModelEgressError::Sink(
                 SinkAuthorizationError::ExpiredEnvelope
             ))

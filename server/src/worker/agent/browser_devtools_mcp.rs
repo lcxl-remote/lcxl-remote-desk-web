@@ -18,7 +18,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use action::plan_action;
+use action::{plan_action, plan_materialized_upload};
 use desk_agent_protocol::browser_control::{
     BROWSER_CONTROL_SCHEMA_VERSION, BrowserAction, BrowserActionRequest, BrowserActionResult,
     BrowserAdapterRef, BrowserControlContractError, BrowserEngineKind, BrowserReadiness,
@@ -45,7 +45,6 @@ pub const CHROME_DEVTOOLS_MCP_START_TIMEOUT: Duration = Duration::from_secs(20);
 pub const CHROME_DEVTOOLS_MCP_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CHROME_DEVTOOLS_MCP_READINESS_TIMEOUT: Duration = Duration::from_secs(90);
 const CHROME_DEVTOOLS_MCP_CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
-const BROWSER_SURFACE_TTL_SECONDS: i64 = 300;
 pub const CHROME_DEVTOOLS_MCP_ARGS: &[&str] = &[
     "--autoConnect",
     "--channel=stable",
@@ -351,13 +350,18 @@ impl ChromeDevtoolsMcpSession {
         request
             .validate()
             .map_err(ChromeDevtoolsMcpError::InvalidBrowserContract)?;
+        let materialized_upload = materialize_verified_upload(&request.action)?;
         let mut state = self.state.lock().await;
         if let Some(page) = action_page(&request.action) {
             if state.pages.get(&page.page_id) != Some(page) {
                 return Err(ChromeDevtoolsMcpError::StalePage);
             }
         }
-        let plan = plan_action(&request.action).map_err(|_| ChromeDevtoolsMcpError::ActionPlan)?;
+        let plan = match materialized_upload.as_ref() {
+            Some(upload) => plan_materialized_upload(&request.action, &upload.path),
+            None => plan_action(&request.action),
+        }
+        .map_err(|_| ChromeDevtoolsMcpError::ActionPlan)?;
         let outcome = plan.outcome;
         let includes_snapshot = plan.includes_snapshot;
         let open_inventory_before = if matches!(&request.action, BrowserAction::OpenPage { .. }) {
@@ -372,6 +376,21 @@ impl ChromeDevtoolsMcpSession {
                 None
             };
         let raw_call = self.call(plan.tool, plan.arguments).await;
+        // A reviewed draft-with-attachment is one semantic mutation and one
+        // writer lease, even though the pinned upstream MCP exposes form fill
+        // and file upload as two calls. Never start the upload if fill failed;
+        // once fill succeeds, any later error is conservatively surfaced to
+        // the lifecycle as OutcomeUnknown by the caller.
+        let raw_call = match (&request.action, raw_call, materialized_upload.as_ref()) {
+            (BrowserAction::FillFormAndUpload { .. }, Ok(fill_result), Some(upload))
+                if fill_result.is_error != Some(true) =>
+            {
+                let upload_plan = plan_materialized_upload(&request.action, &upload.path)
+                    .map_err(|_| ChromeDevtoolsMcpError::ActionPlan)?;
+                self.call(upload_plan.tool, upload_plan.arguments).await
+            }
+            (_, result, _) => result,
+        };
         let (raw, reconciled_open_page) = match (raw_call, open_inventory_before.as_ref()) {
             (Ok(raw), _) if raw.is_error != Some(true) => (raw, None),
             (Ok(raw), Some(before)) => {
@@ -508,7 +527,9 @@ impl ChromeDevtoolsMcpSession {
                         _ => desk_agent_protocol::browser_control::MAX_BROWSER_ELEMENTS,
                     };
                     let refreshed_snapshot;
-                    let snapshot_result = if followed_new_tab {
+                    let snapshot_result = if followed_new_tab
+                        || matches!(action, BrowserAction::ActivateElement { .. })
+                    {
                         refreshed_snapshot = self
                             .call(
                                 AllowedChromeMcpTool::TakeSnapshot,
@@ -541,7 +562,8 @@ impl ChromeDevtoolsMcpSession {
                         .map_err(|_| ChromeDevtoolsMcpError::Projection)?,
                     );
                     let form_readback = match action {
-                        BrowserAction::FillForm { fields, .. } => {
+                        BrowserAction::FillForm { fields, .. }
+                        | BrowserAction::FillFormAndUpload { fields, .. } => {
                             project_form_readback(snapshot_result, fields)
                                 .map_err(|_| ChromeDevtoolsMcpError::Projection)?
                         }
@@ -570,9 +592,10 @@ impl ChromeDevtoolsMcpSession {
         Ok(result)
     }
 
-    /// Typed Provider surface. Raw MCP responses and tool names remain inside
-    /// this module. Upload currently fails closed until the edge immutable
-    /// artifact store can materialize a verified private path.
+    /// Typed Provider surface. Raw MCP responses, native paths and tool names
+    /// remain inside this module. Upload reopens one edge-issued artifact ref,
+    /// verifies its immutable digest, materializes it under a private temporary
+    /// directory for the single MCP call, and deletes it on return.
     async fn execute(
         &self,
         request: &BrowserActionRequest,
@@ -591,6 +614,57 @@ impl ChromeDevtoolsMcpSession {
             .map(|_| ())
             .map_err(|error| ChromeDevtoolsMcpError::Call(error.to_string()))
     }
+}
+
+struct MaterializedUpload {
+    _directory: tempfile::TempDir,
+    path: PathBuf,
+}
+
+fn materialize_verified_upload(
+    action: &BrowserAction,
+) -> Result<Option<MaterializedUpload>, ChromeDevtoolsMcpError> {
+    let (file, file_name, size_bytes, digest_sha256) = match action {
+        BrowserAction::UploadFile {
+            file,
+            file_name,
+            size_bytes,
+            digest_sha256,
+            ..
+        }
+        | BrowserAction::FillFormAndUpload {
+            file,
+            file_name,
+            size_bytes,
+            digest_sha256,
+            ..
+        } => (file, file_name, size_bytes, digest_sha256),
+        _ => return Ok(None),
+    };
+    let verified = super::file_reference_store::read_verified_bytes(file, *size_bytes)
+        .map_err(|error| ChromeDevtoolsMcpError::ArtifactMaterialization(error.message))?;
+    if verified.bytes.len() as u64 != *size_bytes || verified.sha256 != *digest_sha256 {
+        return Err(ChromeDevtoolsMcpError::ArtifactMaterialization(
+            "artifact bytes changed before browser upload".into(),
+        ));
+    }
+    let directory = tempfile::Builder::new()
+        .prefix("lcxl-browser-upload-")
+        .tempdir()
+        .map_err(|error| ChromeDevtoolsMcpError::ArtifactMaterialization(error.to_string()))?;
+    let path = directory.path().join(file_name);
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| ChromeDevtoolsMcpError::ArtifactMaterialization(error.to_string()))?;
+    std::io::Write::write_all(&mut output, &verified.bytes)
+        .and_then(|_| output.sync_all())
+        .map_err(|error| ChromeDevtoolsMcpError::ArtifactMaterialization(error.to_string()))?;
+    Ok(Some(MaterializedUpload {
+        _directory: directory,
+        path,
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -615,6 +689,7 @@ struct BrowserBrokerProjection {
 pub(super) struct BrowserDevtoolsBroker {
     projection: Arc<StdMutex<BrowserBrokerProjection>>,
     session: Mutex<Option<ChromeDevtoolsMcpSession>>,
+    refresh_guard: Mutex<()>,
     connection_revision: std::sync::atomic::AtomicU64,
 }
 
@@ -628,6 +703,7 @@ impl Default for BrowserDevtoolsBroker {
                 retry_after_unix_ms: 0,
             })),
             session: Mutex::new(None),
+            refresh_guard: Mutex::new(()),
             connection_revision: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -651,9 +727,19 @@ impl BrowserDevtoolsBroker {
     }
 
     pub(super) async fn refresh(&self, context: &BrowserBrokerContext) {
-        if !context.enabled {
+        // A native Chrome approval may occupy the full readiness timeout. The
+        // worker schedules refreshes independently from its short readiness
+        // heartbeat, so collapse overlapping ticks into one MCP attempt.
+        let Ok(_refresh_guard) = self.refresh_guard.try_lock() else {
+            return;
+        };
+        if !context.enabled || !context.interactive_session_unlocked {
             self.disconnect(
-                BrowserReadinessReason::Disconnected,
+                if context.enabled {
+                    BrowserReadinessReason::InteractiveSessionLocked
+                } else {
+                    BrowserReadinessReason::Disconnected
+                },
                 context.interactive_session_unlocked,
             )
             .await;
@@ -728,8 +814,8 @@ impl BrowserDevtoolsBroker {
                 let readiness = BrowserReadiness {
                     schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
                     adapter: adapter.clone(),
-                    remote_debugging_enabled: true,
-                    user_approved: true,
+                    adapter_enabled: true,
+                    user_authorized: true,
                     connected: true,
                     interactive_session_unlocked: context.interactive_session_unlocked,
                     tools: vec![
@@ -760,7 +846,7 @@ impl BrowserDevtoolsBroker {
                     snapshot_id: format!("browser-connection-{}", adapter.connection_revision),
                     object_kind: ObjectKind::BrowserSurface,
                     expires_at: (chrono::Utc::now()
-                        + chrono::Duration::seconds(BROWSER_SURFACE_TTL_SECONDS))
+                        + chrono::Duration::seconds(super::PERMISSION_FLOW_TTL_SECONDS))
                     .to_rfc3339(),
                 };
                 let mut projection = self
@@ -831,7 +917,10 @@ impl BrowserDevtoolsBroker {
             .ok_or(ChromeDevtoolsMcpError::StalePage)?
             .execute(request)
             .await;
-        if result.is_err() {
+        if result
+            .as_ref()
+            .is_err_and(ChromeDevtoolsMcpError::invalidates_session)
+        {
             let interactive_session_unlocked = self
                 .projection
                 .lock()
@@ -890,8 +979,8 @@ impl BrowserDevtoolsBroker {
         projection.readiness = adapter.map(|adapter| BrowserReadiness {
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter,
-            remote_debugging_enabled: devtools_active_port().is_some(),
-            user_approved: false,
+            adapter_enabled: devtools_active_port().is_some(),
+            user_authorized: false,
             connected: false,
             interactive_session_unlocked,
             tools: Vec::new(),
@@ -1022,6 +1111,7 @@ fn action_page(
         | BrowserAction::TakeSnapshot { page, .. }
         | BrowserAction::WaitFor { page, .. }
         | BrowserAction::FillForm { page, .. }
+        | BrowserAction::FillFormAndUpload { page, .. }
         | BrowserAction::UploadFile { page, .. }
         | BrowserAction::ActivateElement { page, .. } => Some(page),
     }
@@ -1125,11 +1215,22 @@ pub enum ChromeDevtoolsMcpError {
     ToolSurface(String),
     Call(String),
     InvalidBrowserContract(BrowserControlContractError),
+    ArtifactMaterialization(String),
     ActionPlan,
     Projection,
     StalePage,
     InvalidClock,
     InvalidApprovedWebSocket,
+}
+
+impl ChromeDevtoolsMcpError {
+    /// Only an upstream transport failure invalidates the MCP session. Stale
+    /// page/element references, rejected contracts, local artifact checks and
+    /// projection failures are action-scoped and must not churn the adapter
+    /// connection revision for every recoverable browser interaction.
+    fn invalidates_session(&self) -> bool {
+        matches!(self, Self::CallTimeout | Self::Call(_))
+    }
 }
 
 impl std::fmt::Display for ChromeDevtoolsMcpError {
@@ -1169,6 +1270,12 @@ impl std::fmt::Display for ChromeDevtoolsMcpError {
             Self::InvalidBrowserContract(error) => {
                 write!(formatter, "invalid browser action contract: {error}")
             }
+            Self::ArtifactMaterialization(error) => {
+                write!(
+                    formatter,
+                    "failed to materialize verified browser upload: {error}"
+                )
+            }
             Self::ActionPlan => formatter.write_str("browser action planning failed"),
             Self::Projection => formatter.write_str("browser result projection failed"),
             Self::StalePage => formatter.write_str("browser page reference is stale"),
@@ -1188,13 +1295,27 @@ mod tests {
 
     use desk_agent_protocol::browser_control::{
         BROWSER_CONTROL_SCHEMA_VERSION, BrowserAction, BrowserActionOutcome, BrowserActionRequest,
-        BrowserAdapterRef, BrowserEngineKind, BrowserFormField, BrowserMutationClass,
-        BrowserNavigationTarget, BrowserOrigin, BrowserOriginKind,
+        BrowserAdapterRef, BrowserElementRef, BrowserElementRole, BrowserEngineKind,
+        BrowserFormField, BrowserMutationClass, BrowserNavigationTarget, BrowserOrigin,
+        BrowserOriginKind, BrowserPageRef,
     };
+    use desk_agent_protocol::data_lineage::ContentRef;
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+
+    #[test]
+    fn only_transport_failures_invalidate_the_browser_session() {
+        assert!(ChromeDevtoolsMcpError::CallTimeout.invalidates_session());
+        assert!(ChromeDevtoolsMcpError::Call("closed".into()).invalidates_session());
+        assert!(!ChromeDevtoolsMcpError::StalePage.invalidates_session());
+        assert!(!ChromeDevtoolsMcpError::Projection.invalidates_session());
+        assert!(
+            !ChromeDevtoolsMcpError::ArtifactMaterialization("mismatch".into())
+                .invalidates_session()
+        );
+    }
 
     fn tool(name: &'static str, properties: &[&str]) -> Tool {
         Tool::new(
@@ -1234,6 +1355,108 @@ mod tests {
         }
     }
 
+    fn upload_action(file: ObjectRef, size_bytes: u64, digest_sha256: String) -> BrowserAction {
+        let page = BrowserPageRef {
+            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+            adapter: live_adapter(),
+            page_id: "7".into(),
+            page_incarnation: "page-incarnation-1".into(),
+            origin: BrowserOrigin {
+                kind: BrowserOriginKind::Https,
+                host_ascii: "mail.google.com".into(),
+                port: 443,
+            },
+            document_revision: 1,
+            url_sha256: "a".repeat(64),
+            observed_at_unix_ms: 1,
+        };
+        BrowserAction::UploadFile {
+            element: BrowserElementRef {
+                page_id: page.page_id.clone(),
+                page_incarnation: page.page_incarnation.clone(),
+                document_revision: page.document_revision,
+                element_id: "attachment-input-1".into(),
+                role: BrowserElementRole::Button,
+                accessible_name: "Attach files".into(),
+                value: None,
+                element_revision: 1,
+            },
+            page,
+            content: ContentRef::Artifact {
+                artifact_id: file.token.clone(),
+                sha256: digest_sha256.clone(),
+                size_bytes,
+                media_type: "application/test".into(),
+            },
+            file,
+            file_name: "report.docx".into(),
+            media_type: "application/test".into(),
+            size_bytes,
+            digest_sha256,
+            mutation_class: BrowserMutationClass::WriteExternalDraft,
+        }
+    }
+
+    #[test]
+    fn verified_upload_materialization_is_exact_private_and_ephemeral() {
+        let _guard = super::super::file_reference_store::file_store_test_lock();
+        let source_directory = tempfile::tempdir().unwrap();
+        let source_path = source_directory.path().join("source.docx");
+        let bytes = b"typed immutable artifact bytes";
+        std::fs::write(&source_path, bytes).unwrap();
+        super::super::file_reference_store::reset_worker_incarnation();
+        let file = super::super::file_reference_store::issue(&source_path).unwrap();
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        let action = upload_action(file, bytes.len() as u64, digest);
+
+        let materialized = materialize_verified_upload(&action).unwrap().unwrap();
+        let private_path = materialized.path.clone();
+        let private_directory = private_path.parent().unwrap().to_path_buf();
+        assert_ne!(private_path, source_path);
+        assert_eq!(private_path.file_name().unwrap(), "report.docx");
+        assert_eq!(std::fs::read(&private_path).unwrap(), bytes);
+        drop(materialized);
+        assert!(!private_path.exists());
+        assert!(!private_directory.exists());
+    }
+
+    #[test]
+    fn upload_materialization_rejects_digest_drift_before_browser_mutation() {
+        let _guard = super::super::file_reference_store::file_store_test_lock();
+        let source_directory = tempfile::tempdir().unwrap();
+        let source_path = source_directory.path().join("source.docx");
+        let bytes = b"typed immutable artifact bytes";
+        std::fs::write(&source_path, bytes).unwrap();
+        super::super::file_reference_store::reset_worker_incarnation();
+        let file = super::super::file_reference_store::issue(&source_path).unwrap();
+        let action = upload_action(file, bytes.len() as u64, "b".repeat(64));
+
+        assert!(matches!(
+            materialize_verified_upload(&action),
+            Err(ChromeDevtoolsMcpError::ArtifactMaterialization(message))
+                if message == "artifact bytes changed before browser upload"
+        ));
+    }
+
+    #[test]
+    fn upload_materialization_rejects_a_pre_restart_artifact_reference() {
+        let _guard = super::super::file_reference_store::file_store_test_lock();
+        let source_directory = tempfile::tempdir().unwrap();
+        let source_path = source_directory.path().join("source.docx");
+        let bytes = b"typed immutable artifact bytes";
+        std::fs::write(&source_path, bytes).unwrap();
+        super::super::file_reference_store::reset_worker_incarnation();
+        let file = super::super::file_reference_store::issue(&source_path).unwrap();
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        let action = upload_action(file, bytes.len() as u64, digest);
+        super::super::file_reference_store::reset_worker_incarnation();
+
+        assert!(matches!(
+            materialize_verified_upload(&action),
+            Err(ChromeDevtoolsMcpError::ArtifactMaterialization(_))
+        ));
+    }
+
     #[test]
     fn unavailable_projection_preserves_locked_session_state() {
         let broker = BrowserDevtoolsBroker::default();
@@ -1261,8 +1484,8 @@ mod tests {
             .readiness = Some(BrowserReadiness {
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: live_adapter(),
-            remote_debugging_enabled: true,
-            user_approved: true,
+            adapter_enabled: true,
+            user_authorized: true,
             connected: true,
             interactive_session_unlocked: true,
             tools: vec![BrowserToolKind::TakeSnapshot],
@@ -1696,8 +1919,8 @@ mod tests {
             projection.readiness = Some(BrowserReadiness {
                 schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
                 adapter,
-                remote_debugging_enabled: true,
-                user_approved: true,
+                adapter_enabled: true,
+                user_authorized: true,
                 connected: true,
                 interactive_session_unlocked: true,
                 tools: vec![

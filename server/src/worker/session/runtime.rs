@@ -62,6 +62,10 @@ impl WorkerSession {
             .log_dir
             .as_deref()
             .map(std::path::PathBuf::from);
+        let worker_data_dir = init_payload
+            .data_dir
+            .as_deref()
+            .map(std::path::PathBuf::from);
 
         let worker_locale = settings
             .system
@@ -87,11 +91,40 @@ impl WorkerSession {
         let shared_settings_data = web::Data::from(shared_settings.clone());
         // One broker per worker lifetime: its incarnation and ObjectRef store
         // must survive individual read requests and reset on worker respawn.
+        let owns_computer_use_broker = shared_computer_use_broker.is_none();
         let computer_use_broker = shared_computer_use_broker.unwrap_or_else(|| {
             Arc::new(crate::worker::agent::computer_use_broker::ComputerUseBroker::new())
         });
+        crate::worker::agent::file_reference_store::configure_durable_artifact_store(
+            worker_data_dir.as_deref(),
+        );
         crate::worker::agent::file_reference_store::reset_worker_incarnation();
         crate::worker::agent::terminal_reference_store::reset_worker_incarnation();
+        // Portable/DeskServer mode passes a broker whose loopback extension
+        // bridge is already owned by the host process. A ServiceDaemon worker
+        // is a separate interactive-user process and owns its broker, so it
+        // must also own the bridge. Replacing the worker closes the old socket;
+        // the MV3 service worker reconnects to the new bridge and receives a
+        // fresh connection revision, invalidating every old page/surface ref.
+        if owns_computer_use_broker {
+            if let Some(data_root) = worker_data_dir.as_deref() {
+                let browser_device_id = shared_settings
+                    .read()
+                    .await
+                    .system
+                    .get_client_id()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                computer_use_broker.start_browser_extension_bridge(
+                    data_root,
+                    browser_device_id,
+                    init_payload.os_session_id.to_string(),
+                )?;
+            } else {
+                warn!(
+                    "SessionWorker Init omitted data_dir; the Chrome extension bridge remains unavailable"
+                );
+            }
+        }
         #[cfg(windows)]
         let computer_use_input_monitor = if shared_settings.read().await.computer_use.enabled {
             match crate::worker::agent::windows_input_ownership::WindowsInputOwnershipMonitor::start(
@@ -270,13 +303,12 @@ impl WorkerSession {
                                 == desk_agent_protocol::Capability::DesktopSessionInspect
                                 && entry.ready
                         });
-                    // Publish the cheap, current host snapshot before the optional browser
-                    // probe. Chrome may spend its full approval/readiness timeout here; if
-                    // we wait for it, the previous 25-second readiness lease can expire and
-                    // unrelated edge capabilities (for example Outlook handoff) fail closed
-                    // until the probe finishes. An equivalent same-revision heartbeat only
-                    // refreshes the lease; the post-probe report below still advances the
-                    // revision when browser material state actually changes.
+                    // Publish the cheap, current host snapshot before scheduling the optional
+                    // browser probe. Chrome may spend its full native-approval timeout here,
+                    // which is longer than the readiness lease. The probe therefore runs as a
+                    // single-flight background task while this loop keeps publishing the host
+                    // heartbeat every ten seconds. The next tick projects any material browser
+                    // state change and advances the revision.
                     if readiness_writer
                         .send(WorkerToService::ComputerUseReadinessUpdated(
                             ComputerUseReadinessPayload {
@@ -287,14 +319,18 @@ impl WorkerSession {
                     {
                         return;
                     }
-                    readiness_broker
-                        .refresh_browser_readiness(
-                            browser_device_id,
-                            readiness_os_session_id.clone(),
-                            ceiling.browser_semantic,
-                            interactive_session_unlocked,
-                        )
-                        .await;
+                    let browser_readiness_broker = readiness_broker.clone();
+                    let browser_readiness_session_id = readiness_os_session_id.clone();
+                    tokio::spawn(async move {
+                        browser_readiness_broker
+                            .refresh_browser_readiness(
+                                browser_device_id,
+                                browser_readiness_session_id,
+                                ceiling.browser_semantic && ceiling.browser_devtools_mcp,
+                                interactive_session_unlocked,
+                            )
+                            .await;
+                    });
                     let broker = readiness_broker.clone();
                     let readiness = match tokio::task::spawn_blocking(move || {
                         broker.readiness(&ceiling, allow_screen, display_selected)
@@ -1866,6 +1902,7 @@ impl WorkerSession {
                                                 BrowserAction::OpenPage { .. }
                                                     | BrowserAction::NavigatePage { .. }
                                                     | BrowserAction::FillForm { .. }
+                                                    | BrowserAction::FillFormAndUpload { .. }
                                                     | BrowserAction::UploadFile { .. }
                                                     | BrowserAction::ActivateElement { .. }
                                             );
@@ -2013,6 +2050,7 @@ impl WorkerSession {
                                                 .await
                                                 .map_err(|error| format!("artifact worker failed to join: {error}"))
                                                 .and_then(|result| result.map_err(|error| error.message))
+                                                .map(|artifact| (artifact, "text/plain;charset=utf-8"))
                                             }
                                             ComputerActionKind::File(
                                                 FilePatchAction::CreateSpreadsheetArtifact {
@@ -2046,6 +2084,7 @@ impl WorkerSession {
                                                 .await
                                                 .map_err(|error| format!("spreadsheet artifact worker failed to join: {error}"))
                                                 .and_then(|result| result.map_err(|error| error.message))
+                                                .map(|artifact| (artifact, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
                                             }
                                             ComputerActionKind::File(
                                                 FilePatchAction::CreateSpreadsheetFormulaArtifact {
@@ -2089,6 +2128,7 @@ impl WorkerSession {
                                                 .await
                                                 .map_err(|error| format!("spreadsheet formula artifact worker failed to join: {error}"))
                                                 .and_then(|result| result.map_err(|error| error.message))
+                                                .map(|artifact| (artifact, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
                                             }
                                             ComputerActionKind::File(
                                                 FilePatchAction::CreateWordReportArtifact {
@@ -2126,6 +2166,7 @@ impl WorkerSession {
                                                 .await
                                                 .map_err(|error| format!("Word report artifact worker failed to join: {error}"))
                                                 .and_then(|result| result.map_err(|error| error.message))
+                                                .map(|artifact| (artifact, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
                                             }
                                             ComputerActionKind::File(
                                                 FilePatchAction::CreateLocalCommunicationDraftArtifact {
@@ -2169,28 +2210,52 @@ impl WorkerSession {
                                                 .await
                                                 .map_err(|error| format!("local communication draft worker failed to join: {error}"))
                                                 .and_then(|result| result.map_err(|error| error.message))
+                                                .map(|artifact| (artifact, "text/plain;charset=utf-8"))
                                             }
                                             _ => Err("only create-new text, local communication draft, retained-preview XLSX/formula-XLSX, and retained-preview DOCX artifacts are enabled in this slice".to_string()),
                                         };
                                         action_broker.release_writer_lease(&generation);
-                                        let (class, facts, message) = match result {
-                                            Ok(artifact) => (
-                                                ComputerActionResultClass::Verified,
-                                                vec![ComputerActionStepFact {
-                                                    index: 0,
-                                                    changed: true,
-                                                    verified: true,
-                                                    summary: format!(
-                                                        "created {} ({} bytes, sha256={})",
-                                                        artifact.file_name, artifact.byte_len, artifact.sha256
-                                                    ),
-                                                }],
-                                                Some("artifact created with create-new semantics and verified by independent handle read-back".to_string()),
-                                            ),
+                                        let (class, facts, message, output) = match result {
+                                            Ok((artifact, media_type)) => {
+                                                let output = (artifact.byte_len > 0).then(|| {
+                                                    let output = desk_agent_protocol::computer_use::CreatedFileArtifactOutput {
+                                                        file: artifact.file.clone(),
+                                                        file_name: artifact.file_name.clone(),
+                                                        media_type: media_type.to_string(),
+                                                        size_bytes: artifact.byte_len,
+                                                        digest_sha256: artifact.sha256.clone(),
+                                                        content: desk_agent_protocol::data_lineage::ContentRef::Artifact {
+                                                            artifact_id: artifact.file.token.clone(),
+                                                            sha256: artifact.sha256.clone(),
+                                                            size_bytes: artifact.byte_len,
+                                                            media_type: media_type.to_string(),
+                                                        },
+                                                    };
+                                                    output
+                                                        .validate()
+                                                        .expect("worker created a valid typed artifact output");
+                                                    ComputerActionOutput::FileArtifact(output)
+                                                });
+                                                (
+                                                    ComputerActionResultClass::Verified,
+                                                    vec![ComputerActionStepFact {
+                                                        index: 0,
+                                                        changed: true,
+                                                        verified: true,
+                                                        summary: format!(
+                                                            "created {} ({} bytes, sha256={})",
+                                                            artifact.file_name, artifact.byte_len, artifact.sha256
+                                                        ),
+                                                    }],
+                                                    Some("artifact created with create-new semantics and verified by independent handle read-back".to_string()),
+                                                    output,
+                                                )
+                                            }
                                             Err(reason) => (
                                                 ComputerActionResultClass::Failed,
                                                 vec![],
                                                 Some(reason),
+                                                None,
                                             ),
                                         };
                                         let _ = action_writer.send(
@@ -2205,7 +2270,7 @@ impl WorkerSession {
                                                         result: class,
                                                         facts,
                                                         message,
-                                                        output: None,
+                                                        output,
                                                     },
                                                 },
                                             ),

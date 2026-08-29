@@ -53,6 +53,9 @@ fn map_blocked_reason(reason: BrowserReadinessReason) -> CapabilityBlockedReason
         BrowserReadinessReason::UnsupportedBrowserVersion => {
             CapabilityBlockedReason::VersionMismatch
         }
+        BrowserReadinessReason::ExtensionUnavailable => CapabilityBlockedReason::AdapterUnavailable,
+        BrowserReadinessReason::PairingRequired => CapabilityBlockedReason::BrowserApprovalRequired,
+        BrowserReadinessReason::HostPermissionMissing => CapabilityBlockedReason::PermissionMissing,
         BrowserReadinessReason::RemoteDebuggingDisabled => {
             CapabilityBlockedReason::RemoteDebuggingDisabled
         }
@@ -91,8 +94,8 @@ mod tests {
                 profile_incarnation: "profile-incarnation-1".into(),
                 connection_revision: 7,
             },
-            remote_debugging_enabled: connected,
-            user_approved: connected,
+            adapter_enabled: connected,
+            user_authorized: connected,
             connected,
             interactive_session_unlocked: true,
             tools: if connected {

@@ -17,6 +17,7 @@ use crate::{
         BrowserMutationClass,
     },
     communication::{CommunicationDraftHandoff, OutlookNewComposeHandoffRequest},
+    data_lineage::ContentRef,
 };
 
 pub const COMPUTER_USE_SCHEMA_VERSION: u16 = 1;
@@ -116,6 +117,7 @@ pub enum ComputerUseAdapterKind {
     Terminal,
     ScreenCapture,
     SystemDiagnostics,
+    BrowserExtension,
     BrowserDevtoolsMcp,
     OutlookNewMailto,
 }
@@ -829,6 +831,7 @@ impl ComputerActionKind {
                     Capability::BrowserPageNavigateConfirmed
                 }
                 BrowserAction::FillForm { mutation_class, .. }
+                | BrowserAction::FillFormAndUpload { mutation_class, .. }
                 | BrowserAction::UploadFile { mutation_class, .. } => match mutation_class {
                     BrowserMutationClass::WriteExternalDraft => {
                         Capability::BrowserExternalDraftWriteConfirmed
@@ -1411,6 +1414,7 @@ pub enum ComputerActionOutput {
     Browser(BrowserActionResult),
     CommunicationHandoff(CommunicationDraftHandoff),
     BatchDocumentArtifact(BatchDocumentArtifact),
+    FileArtifact(CreatedFileArtifactOutput),
 }
 
 #[derive(
@@ -1426,6 +1430,74 @@ pub struct BatchDocumentArtifact {
     /// native copy is published.
     pub validation_byte_len: u64,
     pub validation_sha256: String,
+}
+
+/// Typed identity for one create-new artifact after the controlled edge has
+/// reopened the exact bytes and verified their digest. The opaque file ref is
+/// short-lived and device-owned; it lets another reviewed edge Provider consume
+/// the same verified object without ever exposing a native path to the model.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct CreatedFileArtifactOutput {
+    pub file: ObjectRef,
+    pub file_name: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub digest_sha256: String,
+    pub content: ContentRef,
+}
+
+impl CreatedFileArtifactOutput {
+    pub fn validate(&self) -> Result<(), ComputerUseValidationError> {
+        if self.file.object_kind != ObjectKind::File
+            || self.file.token.is_empty()
+            || self.file.snapshot_id.is_empty()
+            || self.file.expires_at.is_empty()
+            || self.file_name.is_empty()
+            || self.file_name.len() > 200
+            || matches!(self.file_name.as_str(), "." | "..")
+            || self.file_name.ends_with(['.', ' '])
+            || self
+                .file_name
+                .chars()
+                .any(|character| character.is_control() || "\\/:*?\"<>|".contains(character))
+            || self.media_type.is_empty()
+            || self.media_type.len() > 256
+            || self.size_bytes == 0
+            || self.digest_sha256.len() != 64
+            || !self
+                .digest_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ComputerUseValidationError::InvalidContextReference(
+                "created artifact output is invalid",
+            ));
+        }
+        self.content.validate().map_err(|_| {
+            ComputerUseValidationError::InvalidContextReference(
+                "created artifact content reference is invalid",
+            )
+        })?;
+        match &self.content {
+            ContentRef::Artifact {
+                artifact_id,
+                sha256,
+                size_bytes,
+                media_type,
+            } if artifact_id == &self.file.token
+                && sha256 == &self.digest_sha256
+                && size_bytes == &self.size_bytes
+                && media_type == &self.media_type =>
+            {
+                Ok(())
+            }
+            _ => Err(ComputerUseValidationError::InvalidContextReference(
+                "created artifact identity does not match its content reference",
+            )),
+        }
+    }
 }
 
 #[derive(
@@ -1723,6 +1795,34 @@ mod tests {
         let rendered = format!("{:?}", object("secret-token"));
         assert!(!rendered.contains("secret-token"));
         assert!(rendered.contains("[redacted]"));
+    }
+
+    #[test]
+    fn created_artifact_output_binds_file_ref_to_content_digest() {
+        let file = ObjectRef {
+            token: "artifact-token-1".into(),
+            snapshot_id: "worker-1:1".into(),
+            object_kind: ObjectKind::File,
+            expires_at: "2026-08-29T06:00:00Z".into(),
+        };
+        let mut output = CreatedFileArtifactOutput {
+            file: file.clone(),
+            file_name: "report.docx".into(),
+            media_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                .into(),
+            size_bytes: 42,
+            digest_sha256: "d".repeat(64),
+            content: ContentRef::Artifact {
+                artifact_id: file.token,
+                sha256: "d".repeat(64),
+                size_bytes: 42,
+                media_type:
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into(),
+            },
+        };
+        output.validate().unwrap();
+        output.digest_sha256 = "e".repeat(64);
+        assert!(output.validate().is_err());
     }
 
     #[test]

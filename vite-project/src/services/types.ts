@@ -454,6 +454,22 @@ export type BackgroundTaskDto = {
     updatedAt: string;
 };
 
+export type BrowserExtensionPairing = {
+    /**
+     * @type string
+    */
+    bridge_url: string;
+    /**
+     * @type string
+    */
+    extension_version: string;
+    /**
+     * @description Strong owner-only secret entered once in the locally installed extension.
+     * @type string
+    */
+    pairing_code: string;
+};
+
 export type CancelWaylandRequest = {
     /**
      * @minLength 0
@@ -1457,6 +1473,154 @@ export type DeviceAssistantSessionListDto = {
     sessions: DeviceAssistantSessionSummaryDto[];
 };
 
+export type EvidenceArtifactDto = {
+    /**
+     * @type string
+    */
+    artifactId: string;
+    /**
+     * @type string
+    */
+    digestSha256: string;
+    /**
+     * @type string
+    */
+    fileName: string;
+    /**
+     * @type string
+    */
+    mediaType: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    sizeBytes: number;
+    /**
+     * @type string
+    */
+    sourceEnvelopeId: string;
+};
+
+export type EvidenceHandoffReceiptDto = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    handedOffAtUnixMs: number;
+    /**
+     * @type string
+    */
+    handoffId: string;
+    /**
+     * @type string
+    */
+    preparedPayloadSha256: string;
+    /**
+     * @type string,null
+    */
+    readbackPayloadSha256?: string | null;
+    /**
+     * @type string
+    */
+    runId: string;
+    /**
+     * @type string
+    */
+    sendAuthority: string;
+    /**
+     * @type string
+    */
+    sourceEnvelopeId: string;
+    /**
+     * @type string
+    */
+    surfaceKind: string;
+    /**
+     * @type string
+    */
+    verification: string;
+};
+
+export type EvidenceNodeDto = {
+    /**
+     * @type string
+    */
+    contentKind: string;
+    /**
+     * @type string,null
+    */
+    contentSha256?: string | null;
+    /**
+     * @type string
+    */
+    envelopeDigestSha256: string;
+    /**
+     * @type string
+    */
+    envelopeId: string;
+    /**
+     * @type string,null
+    */
+    mediaType?: string | null;
+    /**
+     * @type string
+    */
+    sensitivity: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    sizeBytes: number;
+    /**
+     * @type array
+    */
+    sourceEnvelopeIds: string[];
+    /**
+     * @type string,null
+    */
+    sourceObjectId?: string | null;
+    /**
+     * @type string
+    */
+    sourceProviderId: string;
+    /**
+     * @type string
+    */
+    sourceToolName: string;
+};
+
+export type EvidenceSummaryDto = {
+    /**
+     * @type array
+    */
+    artifacts: EvidenceArtifactDto[];
+    /**
+     * @type boolean
+    */
+    graphComplete: boolean;
+    /**
+     * @type array
+    */
+    handoffReceipts: EvidenceHandoffReceiptDto[];
+    /**
+     * @type array
+    */
+    missingSourceEnvelopeIds: string[];
+    /**
+     * @type array
+    */
+    nodes: EvidenceNodeDto[];
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    schemaVersion: number;
+    /**
+     * @type boolean
+    */
+    truncated: boolean;
+};
+
 export type SnapshotToolCallDto = {
     /**
      * @type string
@@ -1648,6 +1812,25 @@ export type TaskStatusProjectionDto = {
     updatedAt: string;
 };
 
+export type UnknownOutcomeDto = {
+    /**
+     * @type string
+    */
+    actionRequestId: string;
+    /**
+     * @type string
+    */
+    executionId: string;
+    /**
+     * @type integer, int64
+    */
+    workId: number;
+    /**
+     * @type string
+    */
+    workKind: string;
+};
+
 export type DeviceAssistantSessionSnapshotDto = {
     /**
      * @description Whether the persisted turn is still running or awaiting approval.
@@ -1679,6 +1862,11 @@ export type DeviceAssistantSessionSnapshotDto = {
      * @type array
     */
     contextNotices: ContextNoticeDto[];
+    /**
+     * @description Bounded metadata-only lineage graph. It contains no message bodies,\ncredentials, cookies, tokens, browser storage or native paths.
+     * @type object
+    */
+    evidenceSummary: EvidenceSummaryDto;
     /**
      * @minLength 0
      * @type integer, int64
@@ -1714,6 +1902,7 @@ export type DeviceAssistantSessionSnapshotDto = {
     */
     seq: number;
     taskStatusProjection?: (null | TaskStatusProjectionDto);
+    unresolvedOutcome?: (null | UnknownOutcomeDto);
 };
 
 export type DeviceCodeBatchDeleteParams = {
@@ -3687,6 +3876,39 @@ export type RestResponseBackgroundTaskDto = {
     success: boolean;
 };
 
+export type RestResponseBrowserExtensionPairing = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string
+        */
+        bridge_url: string;
+        /**
+         * @type string
+        */
+        extension_version: string;
+        /**
+         * @description Strong owner-only secret entered once in the locally installed extension.
+         * @type string
+        */
+        pairing_code: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseCapabilityGrantDto = {
     /**
      * @type integer, int32
@@ -3986,6 +4208,11 @@ export type RestResponseDeviceAssistantSessionSnapshotDto = {
         */
         contextNotices: ContextNoticeDto[];
         /**
+         * @description Bounded metadata-only lineage graph. It contains no message bodies,\ncredentials, cookies, tokens, browser storage or native paths.
+         * @type object
+        */
+        evidenceSummary: EvidenceSummaryDto;
+        /**
          * @minLength 0
          * @type integer, int64
         */
@@ -4020,6 +4247,7 @@ export type RestResponseDeviceAssistantSessionSnapshotDto = {
         */
         seq: number;
         taskStatusProjection?: (null | TaskStatusProjectionDto);
+        unresolvedOutcome?: (null | UnknownOutcomeDto);
     };
     /**
      * @type string,null
@@ -5288,6 +5516,30 @@ export type RestResponseTurnUsageResult = {
     success: boolean;
 };
 
+export type RestResponseUnknownOutcomeDispositionResponse = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type boolean
+        */
+        disposed: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseUsageRetentionConfig = {
     /**
      * @type integer, int32
@@ -6036,6 +6288,36 @@ export type TurnUsageResult = {
     range: UsageRangeDto;
 };
 
+export type UnknownOutcomeDispositionBody = {
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @type string,null
+    */
+    conversation?: string | null;
+    /**
+     * @type string
+    */
+    executionId: string;
+    /**
+     * @type string,null
+    */
+    session?: string | null;
+    /**
+     * @type integer, int64
+    */
+    workId: number;
+};
+
+export type UnknownOutcomeDispositionResponse = {
+    /**
+     * @type boolean
+    */
+    disposed: boolean;
+};
+
 /**
  * @description Verify the current credentials and optionally replace either credential.
 */
@@ -6269,6 +6551,23 @@ export type QueryBackendInfoQueryResponse = QueryBackendInfo200;
 export type QueryBackendInfoQuery = {
     Response: QueryBackendInfo200;
     Errors: any;
+};
+
+/**
+ * @description Pairing configuration
+*/
+export type GetBrowserExtensionPairing200 = RestResponseBrowserExtensionPairing;
+
+/**
+ * @description Extension bridge is not initialized
+*/
+export type GetBrowserExtensionPairing500 = any;
+
+export type GetBrowserExtensionPairingQueryResponse = GetBrowserExtensionPairing200;
+
+export type GetBrowserExtensionPairingQuery = {
+    Response: GetBrowserExtensionPairing200;
+    Errors: GetBrowserExtensionPairing500;
 };
 
 /**
@@ -7118,6 +7417,21 @@ export type RevokeDeviceAssistantCapabilityGrantMutationResponse = RevokeDeviceA
 export type RevokeDeviceAssistantCapabilityGrantMutation = {
     Response: RevokeDeviceAssistantCapabilityGrant200;
     Request: RevokeDeviceAssistantCapabilityGrantMutationRequest;
+    Errors: any;
+};
+
+/**
+ * @description Owner disposition recorded; no retry or grant restoration occurs
+*/
+export type DisposeDeviceAssistantUnknownOutcome200 = RestResponseUnknownOutcomeDispositionResponse;
+
+export type DisposeDeviceAssistantUnknownOutcomeMutationRequest = UnknownOutcomeDispositionBody;
+
+export type DisposeDeviceAssistantUnknownOutcomeMutationResponse = DisposeDeviceAssistantUnknownOutcome200;
+
+export type DisposeDeviceAssistantUnknownOutcomeMutation = {
+    Response: DisposeDeviceAssistantUnknownOutcome200;
+    Request: DisposeDeviceAssistantUnknownOutcomeMutationRequest;
     Errors: any;
 };
 

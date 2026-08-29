@@ -12,6 +12,7 @@ fn payload_with(
         desktop_name: None,
         config_json: "{}".into(),
         log_dir: None,
+        data_dir: None,
         signaling_url: None,
         auth_token,
         host_upstream_url,

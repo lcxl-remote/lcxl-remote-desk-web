@@ -24,7 +24,9 @@ use desk_agent_protocol::{AgentError, AgentErrorKind};
 #[cfg(any(windows, target_os = "macos"))]
 use sha2::{Digest, Sha256};
 
-const FILE_REF_TTL_SECS: i64 = 5 * 60;
+const DURABLE_ARTIFACT_REF_TTL_SECS: i64 = 24 * 60 * 60;
+const DURABLE_ARTIFACT_REGISTRY_FILE: &str = "assistant-artifact-registry.json";
+const DURABLE_ARTIFACT_REGISTRY_VERSION: u32 = 1;
 const MAX_FILE_REFS: usize = 8_192;
 const MAX_SELECTED_ROOTS: usize = 32;
 const MAX_DIRECTORY_ENTRIES: usize = 256;
@@ -43,12 +45,15 @@ struct StoredFile {
     object_kind: ObjectKind,
     path: PathBuf,
     identity: FileIdentity,
+    durable_artifact: bool,
 }
 
 struct StoreState {
     incarnation: String,
     sequence: u64,
     objects: HashMap<String, StoredFile>,
+    durable_registry_path: Option<PathBuf>,
+    durable_registry_error: Option<String>,
 }
 
 impl Default for StoreState {
@@ -57,7 +62,43 @@ impl Default for StoreState {
             incarnation: uuid::Uuid::new_v4().to_string(),
             sequence: 0,
             objects: HashMap::new(),
+            durable_registry_path: None,
+            durable_registry_error: None,
         }
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct DurableArtifactRegistry {
+    version: u32,
+    artifacts: HashMap<String, DurableArtifactRecord>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct DurableArtifactRecord {
+    snapshot_id: String,
+    expires_at: DateTime<Utc>,
+    object_kind: ObjectKind,
+    path: PathBuf,
+    identity: FileIdentity,
+}
+
+impl serde::Serialize for FileIdentity {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serde::Serialize::serialize(&(self.primary, self.secondary), serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for FileIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let (primary, secondary) = <(u64, u64) as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(Self { primary, secondary })
     }
 }
 
@@ -70,15 +111,43 @@ fn store() -> &'static Mutex<StoreState> {
 /// Resetting here keeps old refs one-way stale across that worker boundary.
 pub fn reset_worker_incarnation() {
     if let Ok(mut state) = store().lock() {
-        *state = StoreState::default();
+        let durable_registry_path = state.durable_registry_path.clone();
+        *state = StoreState {
+            durable_registry_path,
+            ..StoreState::default()
+        };
+        reload_durable_artifacts(&mut state);
     }
     super::spreadsheet_file::reset_preview_store();
+}
+
+/// Configure the device-private registry used to reopen committed artifacts
+/// after a worker or process restart. Native paths never leave this edge store.
+pub fn configure_durable_artifact_store(data_root: Option<&Path>) {
+    if let Ok(mut state) = store().lock() {
+        state.durable_registry_path =
+            data_root.map(|root| root.join(DURABLE_ARTIFACT_REGISTRY_FILE));
+        state.durable_registry_error = None;
+        reload_durable_artifacts(&mut state);
+    }
 }
 
 /// Mint one short-lived reference from the exact filesystem object currently
 /// opened at `path`. Failure only removes the Assistant affordance from that
 /// row; it must not break ordinary file-manager browsing.
 pub fn issue(path: &Path) -> Result<ObjectRef, AgentError> {
+    issue_with_lifetime(path, super::PERMISSION_FLOW_TTL_SECONDS, false)
+}
+
+fn issue_durable_artifact(path: &Path) -> Result<ObjectRef, AgentError> {
+    issue_with_lifetime(path, DURABLE_ARTIFACT_REF_TTL_SECS, true)
+}
+
+fn issue_with_lifetime(
+    path: &Path,
+    ttl_seconds: i64,
+    durable_artifact: bool,
+) -> Result<ObjectRef, AgentError> {
     let opened = open_verified(path)?;
     let object_kind = if opened.metadata.is_dir() {
         ObjectKind::Directory
@@ -91,7 +160,7 @@ pub fn issue(path: &Path) -> Result<ObjectRef, AgentError> {
             false,
         ));
     };
-    let expires_at = Utc::now() + Duration::seconds(FILE_REF_TTL_SECS);
+    let expires_at = Utc::now() + Duration::seconds(ttl_seconds);
     let token = uuid::Uuid::new_v4().to_string();
     let mut state = store().lock().map_err(|_| {
         error(
@@ -119,16 +188,113 @@ pub fn issue(path: &Path) -> Result<ObjectRef, AgentError> {
         expires_at: expires_at.to_rfc3339(),
     };
     state.objects.insert(
-        token,
+        token.clone(),
         StoredFile {
             snapshot_id,
             expires_at,
             object_kind,
             path: path.to_path_buf(),
             identity: opened.identity,
+            durable_artifact,
         },
     );
+    if durable_artifact {
+        #[cfg(test)]
+        if state.durable_registry_path.is_none() {
+            return Ok(object_ref);
+        }
+        if let Err(cause) = persist_durable_artifacts(&state) {
+            state.objects.remove(&token);
+            return Err(error(
+                AgentErrorKind::Internal,
+                format!("persist committed artifact identity: {cause}"),
+                false,
+            ));
+        }
+    }
     Ok(object_ref)
+}
+
+fn reload_durable_artifacts(state: &mut StoreState) {
+    let Some(path) = state.durable_registry_path.as_ref() else {
+        return;
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            state.durable_registry_error = Some(error.to_string());
+            return;
+        }
+    };
+    let registry = match serde_json::from_slice::<DurableArtifactRegistry>(&bytes) {
+        Ok(registry) if registry.version == DURABLE_ARTIFACT_REGISTRY_VERSION => registry,
+        Ok(_) => {
+            state.durable_registry_error = Some("unsupported artifact registry version".into());
+            return;
+        }
+        Err(error) => {
+            state.durable_registry_error = Some(error.to_string());
+            return;
+        }
+    };
+    let now = Utc::now();
+    for (token, record) in registry.artifacts {
+        if record.expires_at <= now || record.object_kind != ObjectKind::File {
+            continue;
+        }
+        state.objects.insert(
+            token,
+            StoredFile {
+                snapshot_id: record.snapshot_id,
+                expires_at: record.expires_at,
+                object_kind: record.object_kind,
+                path: record.path,
+                identity: record.identity,
+                durable_artifact: true,
+            },
+        );
+    }
+}
+
+fn persist_durable_artifacts(state: &StoreState) -> std::io::Result<()> {
+    let Some(path) = state.durable_registry_path.as_ref() else {
+        return Err(std::io::Error::other(
+            "device data directory is unavailable for durable artifact recovery",
+        ));
+    };
+    if let Some(cause) = state.durable_registry_error.as_ref() {
+        return Err(std::io::Error::other(format!(
+            "artifact registry is unreadable: {cause}"
+        )));
+    }
+    let artifacts = state
+        .objects
+        .iter()
+        .filter(|(_, stored)| stored.durable_artifact && stored.expires_at > Utc::now())
+        .map(|(token, stored)| {
+            (
+                token.clone(),
+                DurableArtifactRecord {
+                    snapshot_id: stored.snapshot_id.clone(),
+                    expires_at: stored.expires_at,
+                    object_kind: stored.object_kind,
+                    path: stored.path.clone(),
+                    identity: stored.identity.clone(),
+                },
+            )
+        })
+        .collect();
+    let contents = serde_json::to_vec(&DurableArtifactRegistry {
+        version: DURABLE_ARTIFACT_REGISTRY_VERSION,
+        artifacts,
+    })
+    .map_err(std::io::Error::other)?;
+    crate::durable_file::durable_atomic_write(
+        path,
+        &contents,
+        crate::durable_file::FileMode::OwnerOnly,
+    )
 }
 
 pub fn inspect(
@@ -679,6 +845,7 @@ pub fn read_text(_params: &FileContentReadParams) -> Result<FileContentReadOutpu
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreatedTextArtifact {
+    pub file: ObjectRef,
     pub file_name: String,
     pub byte_len: u64,
     pub sha256: String,
@@ -1717,7 +1884,11 @@ pub fn create_binary_artifact(
         if bytes != content_bytes {
             bail!("artifact read-back differs from requested bytes");
         }
+        drop(verified);
+        let file = issue_durable_artifact(&stored.path.join(file_name))
+            .map_err(|error| anyhow!(error.message))?;
         Ok(CreatedTextArtifact {
+            file,
             file_name: file_name.to_string(),
             byte_len: bytes.len() as u64,
             sha256: format!("{:x}", Sha256::digest(&bytes)),
@@ -1855,7 +2026,10 @@ pub fn create_binary_artifact(
                 "artifact read-back differs from requested bytes",
             ));
         }
+        let file = issue_durable_artifact(&stored.path.join(file_name))
+            .map_err(|error| std::io::Error::other(error.message))?;
         Ok(CreatedTextArtifact {
+            file,
             file_name: file_name.to_string(),
             byte_len: bytes.len() as u64,
             sha256: format!("{:x}", Sha256::digest(&bytes)),
@@ -1939,7 +2113,7 @@ fn resolve(object_ref: &ObjectRef) -> Result<StoredFile, AgentError> {
     if stored.snapshot_id != object_ref.snapshot_id
         || stored.object_kind != object_ref.object_kind
         || stored.expires_at.to_rfc3339() != object_ref.expires_at
-        || !object_ref.snapshot_id.starts_with(&state.incarnation)
+        || (!stored.durable_artifact && !object_ref.snapshot_id.starts_with(&state.incarnation))
     {
         return Err(error(
             AgentErrorKind::InvalidInput,
@@ -2178,6 +2352,23 @@ fn run_artifact_after_close_hook() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn selected_reference_survives_a_model_permission_round_trip() {
+        let _guard = file_store_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        reset_worker_incarnation();
+        let issued_after = Utc::now();
+        let object_ref = issue(temp.path()).unwrap();
+        let expires_at = DateTime::parse_from_rfc3339(&object_ref.expires_at)
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert!(
+            expires_at - issued_after
+                >= Duration::seconds(super::super::PERMISSION_FLOW_TTL_SECONDS - 1)
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn native_document_path_binding_rejects_extension_and_content_drift() {
@@ -2346,6 +2537,41 @@ mod tests {
             create_text_artifact(&directory, &allowed, "stage3-r2.txt", "overwrite").is_err(),
             "FILE_CREATE must never overwrite an existing artifact"
         );
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn committed_artifact_reopens_after_worker_respawn_from_private_registry() {
+        let _guard = file_store_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        configure_durable_artifact_store(Some(data.path()));
+        reset_worker_incarnation();
+        let directory = issue(temp.path()).unwrap();
+        let allowed = vec![temp.path().to_string_lossy().to_string()];
+        let created = create_text_artifact(
+            &directory,
+            &allowed,
+            "restart-safe.txt",
+            "durable exact bytes",
+        )
+        .unwrap();
+
+        reset_worker_incarnation();
+        let reopened = read_verified_bytes(&created.file, created.byte_len).unwrap();
+        assert_eq!(reopened.bytes, b"durable exact bytes");
+        assert_eq!(reopened.sha256, created.sha256);
+        assert!(data.path().join(DURABLE_ARTIFACT_REGISTRY_FILE).is_file());
+
+        std::fs::rename(
+            temp.path().join("restart-safe.txt"),
+            temp.path().join("restart-safe-original.txt"),
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("restart-safe.txt"), b"durable exact bytes").unwrap();
+        assert!(read_verified_bytes(&created.file, created.byte_len).is_err());
+        configure_durable_artifact_store(None);
+        reset_worker_incarnation();
     }
 
     #[cfg(any(windows, target_os = "macos"))]

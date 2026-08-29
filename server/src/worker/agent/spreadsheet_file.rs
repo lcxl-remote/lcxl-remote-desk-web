@@ -21,7 +21,6 @@ use super::file_reference_store::read_verified_spreadsheet_inputs;
 const MAX_WORKBOOK_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ZIP_ENTRIES: usize = 512;
 const MAX_XML_BYTES: u64 = 4 * 1024 * 1024;
-const PREVIEW_TTL_SECS: i64 = 5 * 60;
 const MAX_RETAINED_PREVIEWS: usize = 32;
 
 #[derive(Clone)]
@@ -59,7 +58,7 @@ fn retain_preview(output: &SpreadsheetMergePreviewOutput) -> Result<(), AgentErr
     previews.insert(
         output.preview_id.clone(),
         StoredMergePreview {
-            expires_at: now + Duration::seconds(PREVIEW_TTL_SECS),
+            expires_at: now + Duration::seconds(super::PERMISSION_FLOW_TTL_SECONDS),
             output: output.clone(),
         },
     );

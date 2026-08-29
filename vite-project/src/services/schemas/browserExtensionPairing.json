@@ -1,0 +1,1 @@
+{"type":"object","required":["bridge_url","pairing_code","extension_version"],"properties":{"bridge_url":{"type":"string"},"extension_version":{"type":"string"},"pairing_code":{"type":"string","description":"Strong owner-only secret entered once in the locally installed extension."}},"x-readme-ref-name":"BrowserExtensionPairing"}

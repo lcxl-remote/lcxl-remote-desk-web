@@ -315,6 +315,8 @@ pub enum ExecutionState {
     Interrupted { since: String },
 }
 
+const MANUALLY_DISPOSED_OUTCOME_UNKNOWN: &str = "The user manually disposed this unresolved action after checking the target. The actual provider outcome remains unknown. Do not infer success, restore the consumed grant, or automatically retry the action.";
+
 impl ExecutionState {
     /// Whether a mutating tool may be exposed/started right now. A new mutation is
     /// allowed only from a clean [`None`] state; while an outcome is unknown or the
@@ -831,7 +833,22 @@ impl PersistedAgentSession {
             return Err(crate::dynamic_run::DynamicRunContractError::PermissionEventMismatch);
         }
         if self.permission_requests.len() >= crate::dynamic_run::MAX_PERMISSION_REQUESTS {
-            return Err(crate::dynamic_run::DynamicRunContractError::InvalidPermissionItemCount);
+            // This vector is a bounded UI projection, not the audit ledger. A
+            // long-running agentic task can legitimately need more than the
+            // projection limit over its lifetime, so retain every request the
+            // owner can still decide and evict only the oldest settled or
+            // revalidation-required entry. The append-only run events and any
+            // grants minted from older decisions remain durable elsewhere.
+            let Some(index) = self
+                .permission_requests
+                .iter()
+                .position(|existing| !existing.state.can_user_decide())
+            else {
+                return Err(
+                    crate::dynamic_run::DynamicRunContractError::InvalidPermissionItemCount,
+                );
+            };
+            self.permission_requests.remove(index);
         }
         self.permission_requests.push(request);
         Ok(())
@@ -1225,6 +1242,39 @@ impl PersistedAgentSession {
             .find(|m| m.message_id == placeholder_id)
         {
             msg.text = result_text.into();
+        }
+        self.execution_state = ExecutionState::None;
+        self.updated_at = now.into();
+        true
+    }
+
+    /// Explicitly dispose one recoverable unknown outcome after the owner has
+    /// checked the target. The exact durable action identity must match; this
+    /// never claims success/failure and never authorizes a retry. A later result
+    /// is no longer allowed to replace the placeholder, but may still be appended
+    /// by the completion path as fenced untrusted audit evidence.
+    pub fn manually_dispose_unknown(
+        &mut self,
+        work_id: i64,
+        execution_id: &str,
+        now: impl Into<String>,
+    ) -> bool {
+        let placeholder_id = match &self.execution_state {
+            ExecutionState::OutcomeUnknown {
+                action,
+                placeholder_message_id,
+                ..
+            } if action.work_id == work_id && action.execution_id == execution_id => {
+                placeholder_message_id.clone()
+            }
+            _ => return false,
+        };
+        if let Some(message) = self
+            .conversation
+            .iter_mut()
+            .find(|message| message.message_id == placeholder_id)
+        {
+            message.text = MANUALLY_DISPOSED_OUTCOME_UNKNOWN.to_string();
         }
         self.execution_state = ExecutionState::None;
         self.updated_at = now.into();
@@ -1665,6 +1715,11 @@ mod tests {
         AttachmentBounds, AttachmentObjectRef, AttachmentState, CONTEXT_ATTACHMENT_SCHEMA_VERSION,
         ContextAttachmentKind,
     };
+    use crate::dynamic_run::{
+        GrantRequestItem, MAX_PERMISSION_REQUESTS, PERMISSION_REQUEST_SCHEMA_VERSION,
+        PermissionRequest, PermissionRequestState,
+    };
+    use desk_agent_protocol::capability_provider::CapabilityEffect;
     use desk_agent_protocol::data_lineage::{
         ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance, RetentionBoundary,
         Sensitivity,
@@ -1689,6 +1744,105 @@ mod tests {
             scope(&[Capability::SystemInfo], ExecutionMode::ReadOnly),
             "2026-06-20T00:00:00Z",
         )
+    }
+
+    fn permission_request(id: usize, state: PermissionRequestState) -> PermissionRequest {
+        PermissionRequest {
+            schema_version: PERMISSION_REQUEST_SCHEMA_VERSION,
+            request_id: format!("permission-{id}"),
+            input_revision: 1,
+            state,
+            items: vec![GrantRequestItem {
+                item_id: format!("item-{id}"),
+                provider_id: "file.artifact".into(),
+                tool_name: "create_text_artifact".into(),
+                expected_effect: CapabilityEffect::WriteArtifact,
+                resource_scope: Vec::new(),
+                operation_scope: Vec::new(),
+                export_destinations: Vec::new(),
+                canonical_input_json: None,
+                canonical_input_digest_sha256: None,
+                suggested_ttl_seconds: 300,
+                suggested_max_uses: 1,
+                reason: "test request".into(),
+            }],
+            created_at: "2026-08-29T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn permission_projection_evicts_oldest_non_decidable_history_at_capacity() {
+        let mut value = session();
+        value.input_revision = 1;
+        for id in 0..MAX_PERMISSION_REQUESTS {
+            value
+                .add_permission_request(permission_request(id, PermissionRequestState::Approved))
+                .unwrap();
+        }
+
+        value
+            .add_permission_request(permission_request(
+                MAX_PERMISSION_REQUESTS,
+                PermissionRequestState::Pending,
+            ))
+            .unwrap();
+
+        assert_eq!(value.permission_requests.len(), MAX_PERMISSION_REQUESTS);
+        assert_eq!(value.permission_requests[0].request_id, "permission-1");
+        assert_eq!(
+            value.permission_requests.last().unwrap().request_id,
+            format!("permission-{MAX_PERMISSION_REQUESTS}")
+        );
+    }
+
+    #[test]
+    fn permission_projection_never_evicts_a_user_decidable_request() {
+        let mut value = session();
+        value.input_revision = 1;
+        value
+            .add_permission_request(permission_request(0, PermissionRequestState::Pending))
+            .unwrap();
+        for id in 1..MAX_PERMISSION_REQUESTS {
+            value
+                .add_permission_request(permission_request(id, PermissionRequestState::Approved))
+                .unwrap();
+        }
+
+        value
+            .add_permission_request(permission_request(
+                MAX_PERMISSION_REQUESTS,
+                PermissionRequestState::Pending,
+            ))
+            .unwrap();
+
+        assert_eq!(value.permission_requests.len(), MAX_PERMISSION_REQUESTS);
+        assert_eq!(value.permission_requests[0].request_id, "permission-0");
+        assert!(
+            value
+                .permission_requests
+                .iter()
+                .all(|request| request.request_id != "permission-1")
+        );
+    }
+
+    #[test]
+    fn permission_projection_fails_closed_when_every_entry_is_decidable() {
+        let mut value = session();
+        value.input_revision = 1;
+        for id in 0..MAX_PERMISSION_REQUESTS {
+            value
+                .add_permission_request(permission_request(id, PermissionRequestState::Pending))
+                .unwrap();
+        }
+
+        assert_eq!(
+            value.add_permission_request(permission_request(
+                MAX_PERMISSION_REQUESTS,
+                PermissionRequestState::Pending,
+            )),
+            Err(crate::dynamic_run::DynamicRunContractError::InvalidPermissionItemCount)
+        );
+        assert_eq!(value.permission_requests.len(), MAX_PERMISSION_REQUESTS);
     }
 
     fn context_attachment(id: &str, client_request_id: &str) -> ContextAttachment {
@@ -2274,6 +2428,60 @@ mod tests {
             .find(|m| m.message_id == "run-1")
             .unwrap();
         assert_eq!(anchor.text, "exit_code=0");
+    }
+
+    #[test]
+    fn manually_dispose_unknown_requires_the_exact_action_identity() {
+        let mut s = session();
+        s.conversation.push(crate::chat::ChatMessage::tool_result(
+            "run-1",
+            "call-1",
+            RECOVER_OUTCOME_UNKNOWN,
+        ));
+        s.execution_state = ExecutionState::OutcomeUnknown {
+            action: ActionIdentity::agent_exec(8, "exec_t9", "e9"),
+            placeholder_message_id: "run-1".into(),
+            since: "2026-06-20T00:00:00Z".into(),
+        };
+
+        assert!(!s.manually_dispose_unknown(7, "e9", "t1"));
+        assert!(!s.manually_dispose_unknown(8, "e-other", "t1"));
+        assert!(!s.execution_state.allows_new_mutation());
+
+        assert!(s.manually_dispose_unknown(8, "e9", "t2"));
+        assert_eq!(s.execution_state, ExecutionState::None);
+        assert!(s.execution_state.allows_new_mutation());
+        assert_eq!(
+            s.conversation
+                .iter()
+                .find(|message| message.message_id == "run-1")
+                .unwrap()
+                .text,
+            MANUALLY_DISPOSED_OUTCOME_UNKNOWN
+        );
+        assert!(!s.manually_dispose_unknown(8, "e9", "t3"));
+    }
+
+    #[test]
+    fn late_result_after_manual_disposition_is_separate_untrusted_evidence() {
+        let mut s = session();
+        s.conversation.push(crate::chat::ChatMessage::tool_result(
+            "run-1",
+            "call-1",
+            RECOVER_OUTCOME_UNKNOWN,
+        ));
+        s.execution_state = ExecutionState::OutcomeUnknown {
+            action: ActionIdentity::agent_exec(8, "exec_t9", "e9"),
+            placeholder_message_id: "run-1".into(),
+            since: "2026-06-20T00:00:00Z".into(),
+        };
+        assert!(s.manually_dispose_unknown(8, "e9", "t1"));
+
+        assert!(s.apply_completion("work:8:done", "e9", "call-1", "task-9", "late", "t2"));
+        let late = s.conversation.last().unwrap();
+        assert_eq!(late.role, ChatRole::UntrustedOutput);
+        assert_eq!(late.text, "late");
+        assert_eq!(s.execution_state, ExecutionState::None);
     }
 
     /// The transition is scoped to the matching execution id: a mismatched id (a

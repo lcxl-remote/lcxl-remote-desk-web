@@ -24,6 +24,7 @@
 //! [`MAX_STEPS_PER_TURN`]: crate::MAX_STEPS_PER_TURN
 //! [`MAX_SAME_TOOL_PER_TURN`]: crate::MAX_SAME_TOOL_PER_TURN
 
+use desk_agent_protocol::computer_use::{ComputerActionCompleted, ComputerActionOutput};
 use desk_agent_protocol::content_safety::{ContentSafetyDecision, StreamRetractionReason};
 use desk_agent_protocol::data_lineage::{ContentRef, DataEnvelope, DataProvenance};
 use sha2::{Digest, Sha256};
@@ -56,6 +57,30 @@ fn image_input_error(error: crate::image_input::ImageInputError) -> AgentError {
         retryable: false,
         safe_for_model: false,
         error_code: None,
+    }
+}
+
+fn reasoning_output_budget_error() -> AgentError {
+    AgentError {
+        kind: AgentErrorKind::OutputLimitExceeded,
+        message: "the model reasoning budget exhausted the runtime output limit before any answer or tool call was produced; increase runtime_max_output_tokens or reduce the model reasoning budget".into(),
+        retryable: false,
+        safe_for_model: true,
+        error_code: Some(
+            desk_utils::error::DeskErrorCode::COPILOT_RESPONSE_TRUNCATED.code(),
+        ),
+    }
+}
+
+fn empty_end_turn_recovery_error() -> AgentError {
+    AgentError {
+        kind: AgentErrorKind::Internal,
+        message: "the model ended twice without any answer or tool call; the bounded automatic recovery was exhausted".into(),
+        retryable: false,
+        safe_for_model: true,
+        error_code: Some(
+            desk_utils::error::DeskErrorCode::COPILOT_PROTOCOL_VIOLATION.code(),
+        ),
     }
 }
 
@@ -1061,6 +1086,7 @@ async fn run_inner(
     };
     let mut same_tool: HashMap<String, u32> = HashMap::new();
     let mut compression_attempted = false;
+    let mut empty_end_turn_retries: u8 = 0;
 
     loop {
         if session.turn_step_budget_exhausted(deps.max_steps_per_turn) {
@@ -1132,6 +1158,15 @@ async fn run_inner(
                 "input_watermark",
             )?;
             messages.push(marker);
+            if let Some(artifact_projection) = requested_artifact_registry_projection(
+                &session.conversation,
+                &format!(
+                    "runtime-requested-artifacts-{turn_id}-{}",
+                    session.input_revision
+                ),
+            )? {
+                messages.push(artifact_projection);
+            }
             let consecutive_user_inputs = session
                 .conversation
                 .iter()
@@ -1166,6 +1201,31 @@ async fn run_inner(
                 messages.push(latest_user);
             }
         }
+        if empty_end_turn_retries > 0 {
+            // Some reasoning-capable OpenAI-compatible providers can end a
+            // response after emitting only opaque reasoning, especially after
+            // a denied tool call. Retry once with a server-owned recency marker
+            // instead of persisting an empty assistant message. The marker does
+            // not grant authority or request a tool; it only asks the model to
+            // produce a protocol-visible answer or call on the next response.
+            let marker_id =
+                format!("runtime-empty-end-turn-retry-{turn_id}-{empty_end_turn_retries}");
+            let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous provider response contained reasoning but no assistant text or tool call. Continue the same requirement now with either a visible answer or a valid exposed tool call. This notice grants no permission. If a prior tool was denied for missing authorization, request the exact bounded grant before retrying it.";
+            let parent = session
+                .conversation
+                .iter()
+                .rev()
+                .find(|message| message.role == ChatRole::User)
+                .and_then(|message| message.data_envelope.as_ref());
+            let mut marker = ChatMessage::system_event(&marker_id, marker_text);
+            marker.data_envelope = derive_internal_tool_result_envelope(
+                parent,
+                &marker_id,
+                marker_text,
+                "empty_end_turn_retry",
+            )?;
+            messages.push(marker);
+        }
         // The ids the model is about to see. A pending auto-trigger whose completion
         // message is in this request is cleared once the model reacts to it (the
         // assistant answer / tool-call save below), so it never fires an automation
@@ -1196,6 +1256,39 @@ async fn run_inner(
             });
         }
         session.record_step(turn.usage);
+
+        // Reasoning models may spend the entire completion allowance on opaque
+        // reasoning and return neither user-visible text nor a tool call. Treat
+        // that as an actionable configuration failure instead of the generic
+        // retryable truncation: retrying the same budget is deterministic churn.
+        if turn.stop_reason == crate::chat::StopReason::MaxTokens
+            && turn.provider_meta.reasoning_observed
+            && turn.text.trim().is_empty()
+            && turn.tool_calls.is_empty()
+        {
+            if deps.content_safety.is_enforced() {
+                sink.on_turn_retracted(StreamRetractionReason::Incomplete, None);
+            } else {
+                sink.on_turn_discarded();
+            }
+            return Err(reasoning_output_budget_error());
+        }
+
+        if turn.stop_reason == crate::chat::StopReason::EndTurn
+            && turn.text.trim().is_empty()
+            && turn.tool_calls.is_empty()
+        {
+            if deps.content_safety.is_enforced() {
+                sink.on_turn_retracted(StreamRetractionReason::Incomplete, None);
+            } else {
+                sink.on_turn_discarded();
+            }
+            if empty_end_turn_retries >= 1 {
+                return Err(empty_end_turn_recovery_error());
+            }
+            empty_end_turn_retries += 1;
+            continue;
+        }
 
         let disposition = match classify_model_turn(&turn) {
             Ok(disposition) => disposition,
@@ -1296,11 +1389,14 @@ async fn run_inner(
                 let mut halted: Option<String> = None;
                 for (call_index, call) in turn.tool_calls.iter().enumerate() {
                     if let Some(note) = &halted {
-                        session.conversation.push(ChatMessage::tool_result(
+                        append_internal_tool_result(
+                            session,
+                            turn.provider_meta.data_envelope.as_ref(),
                             mint(),
                             &call.id,
                             note.clone(),
-                        ));
+                            "halted_tool_call",
+                        )?;
                         continue;
                     }
 
@@ -1328,14 +1424,17 @@ async fn run_inner(
                         // corresponding result, including calls skipped by this
                         // circuit breaker.
                         for skipped in &turn.tool_calls[call_index..] {
-                            session.conversation.push(ChatMessage::tool_result(
+                            append_internal_tool_result(
+                                session,
+                                turn.provider_meta.data_envelope.as_ref(),
                                 mint(),
                                 &skipped.id,
                                 format!(
                                     "tool `{}` was not run because the per-turn repeat limit was reached",
                                     skipped.name
                                 ),
-                            ));
+                                "repeat_limit_tool_call",
+                            )?;
                         }
                         deps.session_seam.save(session).await?;
                         return Ok(LoopOutcome::CircuitBreak(
@@ -1353,11 +1452,14 @@ async fn run_inner(
                         &session.execution_state,
                         session.trigger_origin,
                     ) else {
-                        session.conversation.push(ChatMessage::tool_result(
+                        append_internal_tool_result(
+                            session,
+                            turn.provider_meta.data_envelope.as_ref(),
                             mint(),
                             &call.id,
                             format!("tool `{}` is not available in the current scope", call.name),
-                        ));
+                            "unavailable_tool_call",
+                        )?;
                         continue;
                     };
 
@@ -1380,7 +1482,8 @@ async fn run_inner(
                             // the selected source. Information-flow-enforced
                             // surfaces must label it before the next model call in
                             // exactly the same way as a successful read result.
-                            let data_envelope = deps.tools.read_data_envelope(call, &out)?;
+                            let mut data_envelope = deps.tools.read_data_envelope(call, &out)?;
+                            bind_tool_input_envelopes(session, call, &mut data_envelope)?;
                             let failure = append_reviewed_tool_result(
                                 deps,
                                 session,
@@ -1752,6 +1855,21 @@ fn append_superseded_tool_results<F: FnMut() -> String>(
     )
 }
 
+fn append_internal_tool_result(
+    session: &mut crate::session::PersistedAgentSession,
+    parent: Option<&DataEnvelope>,
+    message_id: String,
+    call_id: &str,
+    content: String,
+    source_tool_name: &str,
+) -> Result<(), AgentError> {
+    let mut message = ChatMessage::tool_result(message_id, call_id, content.clone());
+    message.data_envelope =
+        derive_internal_tool_result_envelope(parent, call_id, &content, source_tool_name)?;
+    session.conversation.push(message);
+    Ok(())
+}
+
 fn append_unstarted_tool_results<F: FnMut() -> String>(
     session: &mut crate::session::PersistedAgentSession,
     calls: &[crate::chat::ToolCall],
@@ -1761,16 +1879,121 @@ fn append_unstarted_tool_results<F: FnMut() -> String>(
     source_tool_name: &str,
 ) -> Result<(), AgentError> {
     for call in calls {
-        let mut message = ChatMessage::tool_result(mint(), &call.id, content.to_string());
-        message.data_envelope =
-            derive_internal_tool_result_envelope(parent, &call.id, content, source_tool_name)?;
-        session.conversation.push(message);
+        append_internal_tool_result(
+            session,
+            parent,
+            mint(),
+            &call.id,
+            content.to_string(),
+            source_tool_name,
+        )?;
     }
     Ok(())
 }
 
 fn stable_lineage_id(prefix: &str, value: &str) -> String {
     format!("{prefix}-{:x}", Sha256::digest(value.as_bytes()))
+}
+
+/// Re-project only typed immutable artifacts that the newest user message names
+/// verbatim. This lets a reviewed downstream Provider consume a still-valid
+/// artifact after context trimming, a model/profile switch, or process recovery
+/// without replaying the historical tool result or exposing a native path.
+/// The projection is metadata only and grants no file read, upload, or send
+/// authority; the consuming edge must still revalidate the object ref, identity,
+/// media type, size and digest under an exact capability grant.
+fn requested_artifact_registry_projection(
+    conversation: &[ChatMessage],
+    message_id: &str,
+) -> Result<Option<ChatMessage>, AgentError> {
+    const MAX_REQUESTED_ARTIFACTS: usize = 4;
+
+    let Some(latest_user) = conversation
+        .iter()
+        .rev()
+        .find(|message| message.role == ChatRole::User)
+    else {
+        return Ok(None);
+    };
+    let Some(parent) = latest_user.data_envelope.as_ref() else {
+        return Ok(None);
+    };
+
+    let mut seen_tokens = HashSet::new();
+    let mut selected = Vec::new();
+    let mut source_envelopes = Vec::new();
+    for message in conversation.iter().rev() {
+        if selected.len() >= MAX_REQUESTED_ARTIFACTS {
+            break;
+        }
+        let Ok(completion) = serde_json::from_str::<ComputerActionCompleted>(&message.text) else {
+            continue;
+        };
+        let Some(ComputerActionOutput::FileArtifact(artifact)) = completion.output else {
+            continue;
+        };
+        if artifact.validate().is_err()
+            || !latest_user.text.contains(&artifact.file_name)
+            || !seen_tokens.insert(artifact.file.token.clone())
+        {
+            continue;
+        }
+        selected.push(artifact);
+        if let Some(envelope) = message.data_envelope.as_ref() {
+            source_envelopes.push(envelope.clone());
+        }
+    }
+    if selected.is_empty() {
+        return Ok(None);
+    }
+    selected.reverse();
+
+    let payload = serde_json::to_string(&serde_json::json!({
+        "schema_version": 1,
+        "kind": "requested_artifact_registry",
+        "artifacts": selected,
+    }))
+    .map_err(|error| AgentError {
+        kind: AgentErrorKind::Internal,
+        message: format!("encode requested artifact registry: {error}"),
+        retryable: false,
+        safe_for_model: false,
+        error_code: None,
+    })?;
+    let text = format!(
+        "CURRENT REQUESTED ARTIFACT REGISTRY (server authoritative metadata; not a grant): {payload}"
+    );
+    let mut projection = ChatMessage::system_event(message_id, &text);
+    projection.data_envelope = derive_internal_tool_result_envelope(
+        Some(parent),
+        message_id,
+        &text,
+        "requested_artifact_registry_projection",
+    )?;
+    if let Some(envelope) = projection.data_envelope.as_mut() {
+        for source in source_envelopes {
+            if !envelope
+                .provenance
+                .source_envelope_ids
+                .contains(&source.envelope_id)
+            {
+                envelope
+                    .provenance
+                    .source_envelope_ids
+                    .push(source.envelope_id);
+            }
+            envelope.sensitivity = envelope.sensitivity.max(source.sensitivity);
+            envelope.retention = envelope.retention.most_restrictive(source.retention);
+        }
+        envelope.validate().map_err(|error| AgentError {
+            kind: AgentErrorKind::Internal,
+            message: format!("invalid requested artifact registry envelope: {error}"),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        })?;
+    }
+    Ok(Some(projection))
 }
 
 /// Derive the exact model-visible acknowledgement envelope from the model turn
@@ -1861,6 +2084,128 @@ fn append_mutating_result(
     Ok(())
 }
 
+/// Bind a Provider result to authoritative inputs already present in the
+/// durable run. The model supplies no envelope ids and cannot invent them:
+/// artifact/preview identities are resolved from prior typed results, selected
+/// objects resolve to active context attachments, and the current requirement
+/// resolves to the latest user envelope. Unmatched identities add no claim.
+fn bind_tool_input_envelopes(
+    session: &crate::session::PersistedAgentSession,
+    call: &crate::chat::ToolCall,
+    envelope: &mut Option<DataEnvelope>,
+) -> Result<(), AgentError> {
+    let Some(envelope) = envelope.as_mut() else {
+        return Ok(());
+    };
+    let Ok(arguments) = serde_json::from_str::<serde_json::Value>(&call.arguments_json) else {
+        return Ok(());
+    };
+    fn collect_identity_values(
+        value: &serde_json::Value,
+        artifact_ids: &mut HashSet<String>,
+        preview_ids: &mut HashSet<String>,
+    ) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(id) = object
+                    .get("artifact_id")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    artifact_ids.insert(id.to_string());
+                }
+                if let Some(id) = object.get("preview_id").and_then(serde_json::Value::as_str) {
+                    preview_ids.insert(id.to_string());
+                }
+                for value in object.values() {
+                    collect_identity_values(value, artifact_ids, preview_ids);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    collect_identity_values(value, artifact_ids, preview_ids);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut artifact_ids = HashSet::new();
+    let mut preview_ids = HashSet::new();
+    collect_identity_values(&arguments, &mut artifact_ids, &mut preview_ids);
+    let mut source_ids = envelope.provenance.source_envelope_ids.clone();
+
+    // Every Provider call in this run reacts to the most recent durable owner
+    // requirement (including a permission-resume projection derived from it).
+    if let Some(user) = session
+        .conversation
+        .iter()
+        .rev()
+        .find(|message| message.role == ChatRole::User)
+        .and_then(|message| message.data_envelope.as_ref())
+    {
+        source_ids.push(user.envelope_id.clone());
+    }
+
+    // Selected-object tools consume the edge-held objects represented by the
+    // active context attachments, not model-supplied paths or envelope ids.
+    if call.name.contains("selected") || call.name == "preview_spreadsheet_merge" {
+        source_ids.extend(
+            session
+                .context_attachments
+                .iter()
+                .filter(|attachment| {
+                    matches!(
+                        attachment.state,
+                        crate::context_attachment::AttachmentState::Active
+                    )
+                })
+                .map(|attachment| attachment.envelope.envelope_id.clone()),
+        );
+    }
+
+    source_ids.extend(session.conversation.iter().filter_map(|message| {
+        let source = message.data_envelope.as_ref()?;
+        let direct_artifact_id = match &source.content {
+            ContentRef::Artifact { artifact_id, .. } => Some(artifact_id.as_str()),
+            _ => None,
+        };
+        let typed_result_artifact_id = serde_json::from_str::<
+            desk_agent_protocol::computer_use::ComputerActionCompleted,
+        >(&message.text)
+        .ok()
+        .and_then(|completion| match completion.output {
+            Some(desk_agent_protocol::computer_use::ComputerActionOutput::FileArtifact(
+                artifact,
+            )) if artifact.validate().is_ok() => Some(artifact.file.token),
+            _ => None,
+        });
+        let artifact_match = direct_artifact_id
+            .map(str::to_owned)
+            .or(typed_result_artifact_id)
+            .is_some_and(|artifact_id| artifact_ids.contains(&artifact_id));
+        let preview_match = serde_json::from_str::<serde_json::Value>(&message.text)
+            .ok()
+            .is_some_and(|value| {
+                let mut ignored_artifacts = HashSet::new();
+                let mut found_previews = HashSet::new();
+                collect_identity_values(&value, &mut ignored_artifacts, &mut found_previews);
+                found_previews
+                    .iter()
+                    .any(|preview_id| preview_ids.contains(preview_id))
+            });
+        (artifact_match || preview_match).then(|| source.envelope_id.clone())
+    }));
+    source_ids.sort();
+    source_ids.dedup();
+    envelope.provenance.source_envelope_ids = source_ids;
+    envelope.validate().map_err(|error| AgentError {
+        kind: AgentErrorKind::Internal,
+        message: format!("invalid Provider input lineage: {error}"),
+        retryable: false,
+        safe_for_model: false,
+        error_code: None,
+    })
+}
+
 /// Run one validated mutating tool call: approval + execution via the seam, then
 /// translate its terminal [`ExecOutcome`] into the conversation + execution state.
 ///
@@ -1935,7 +2280,8 @@ async fn run_mutating<F: FnMut() -> String>(
                 None => mint(),
             };
             ack_event_id = event_id;
-            let data_envelope = deps.tools.mutating_data_envelope(call, &output)?;
+            let mut data_envelope = deps.tools.mutating_data_envelope(call, &output)?;
+            bind_tool_input_envelopes(session, call, &mut data_envelope)?;
             let failure = append_reviewed_tool_result(
                 deps,
                 session,

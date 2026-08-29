@@ -15,6 +15,7 @@ use crate::{
     browser_control::{
         BrowserElementRef, BrowserElementRole, BrowserOrigin, BrowserOriginKind, BrowserPageRef,
     },
+    computer_use::CreatedFileArtifactOutput,
     data_lineage::ContentRef,
 };
 
@@ -79,8 +80,11 @@ pub enum CommunicationSurfaceKind {
     /// WebView2-based Outlook (new). The initial adapter may open a compose
     /// handoff but cannot claim semantic read-back or AI send authority.
     OutlookNewDesktop,
+    /// Generic paired LCXL Chrome extension Provider. Gmail, Slack, and
+    /// future sites are semantic adapters above this browser surface.
+    ChromeExtension,
     /// Generic controlled-edge Chrome DevTools MCP Provider. Gmail, Slack,
-    /// and future sites are semantic adapters above this one browser surface.
+    /// and future sites may use it only in explicitly enabled development mode.
     ChromeDevtoolsMcp,
     /// Built-in UIA/vision assistance. It may prepare a visible compose UI but
     /// can never claim exact read-back or AI send authority.
@@ -93,7 +97,7 @@ impl CommunicationSurfaceKind {
             Self::ClassicOutlookDesktop | Self::OutlookNewDesktop => {
                 channel == CommunicationChannel::Email
             }
-            Self::ChromeDevtoolsMcp => {
+            Self::ChromeExtension | Self::ChromeDevtoolsMcp => {
                 matches!(
                     channel,
                     CommunicationChannel::Email | CommunicationChannel::Chat
@@ -104,7 +108,10 @@ impl CommunicationSurfaceKind {
     }
 
     fn supports_exact_send(self) -> bool {
-        matches!(self, Self::ClassicOutlookDesktop | Self::ChromeDevtoolsMcp)
+        matches!(
+            self,
+            Self::ClassicOutlookDesktop | Self::ChromeExtension | Self::ChromeDevtoolsMcp
+        )
     }
 }
 
@@ -778,8 +785,8 @@ impl SlackWebDraftHandoffInput {
 /// snapshot. Gmail currently exposes the To recipient editor as either a
 /// textbox or a combobox, while Subject and Message Body remain textboxes.
 /// This initial semantic adapter supports one To recipient, a subject, and a
-/// plain-text body, accepts no attachments, and never activates Gmail's Send
-/// control.
+/// plain-text body, accepts at most one typed immutable artifact created by the
+/// controlled edge, and never activates Gmail's Send control.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
@@ -790,7 +797,19 @@ pub struct GmailWebDraftHandoffInput {
     pub to_field: BrowserElementRef,
     pub subject_field: BrowserElementRef,
     pub body_field: BrowserElementRef,
+    pub attachment: Option<GmailWebAttachmentInput>,
     pub draft: LocalDraftDocument,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct GmailWebAttachmentInput {
+    /// Fresh semantic reference for Gmail's reviewed file chooser control.
+    pub element: BrowserElementRef,
+    /// Exact edge-issued immutable artifact identity; never a native path.
+    pub artifact: CreatedFileArtifactOutput,
 }
 
 impl GmailWebDraftHandoffInput {
@@ -809,10 +828,26 @@ impl GmailWebDraftHandoffInput {
         if self.draft.recipients.len() != 1 || self.draft.recipients[0].role != RecipientRole::To {
             return Err(CommunicationContractError::InvalidRecipientCount);
         }
-        if !self.draft.attachment_labels.is_empty() {
-            return Err(CommunicationContractError::TooManyItems(
-                "gmail_web_handoff.attachments",
-            ));
+        match &self.attachment {
+            None if self.draft.attachment_labels.is_empty() => {}
+            Some(attachment)
+                if self.draft.attachment_labels.as_slice()
+                    == [attachment.artifact.file_name.as_str()] =>
+            {
+                attachment
+                    .element
+                    .validate_for_page(&self.page)
+                    .map_err(|_| CommunicationContractError::InvalidSurfaceScope)?;
+                attachment
+                    .artifact
+                    .validate()
+                    .map_err(|_| CommunicationContractError::InvalidContentRef)?;
+            }
+            _ => {
+                return Err(CommunicationContractError::TooManyItems(
+                    "gmail_web_handoff.attachments",
+                ));
+            }
         }
         let fields = [&self.to_field, &self.subject_field, &self.body_field];
         let mut element_ids = BTreeSet::new();
@@ -830,6 +865,15 @@ impl GmailWebDraftHandoffInput {
                     "gmail_web_handoff.fields",
                 ));
             }
+        }
+        if self
+            .attachment
+            .as_ref()
+            .is_some_and(|attachment| element_ids.contains(attachment.element.element_id.as_str()))
+        {
+            return Err(CommunicationContractError::DuplicateItem(
+                "gmail_web_handoff.fields",
+            ));
         }
         if !matches!(
             self.to_field.role,
@@ -1342,6 +1386,7 @@ mod tests {
             subject_field: field("subject-1", "Subject"),
             body_field: field("body-1", "Message Body"),
             page: input_page,
+            attachment: None,
             draft: LocalDraftDocument {
                 schema_version: COMMUNICATION_SCHEMA_VERSION,
                 recipients: vec![LocalDraftRecipient {
@@ -1629,6 +1674,43 @@ mod tests {
         assert_eq!(
             invalid_subject_role.validate(),
             Err(CommunicationContractError::RecipientRoleMismatch)
+        );
+
+        let mut with_attachment = input.clone();
+        let mut upload_element = with_attachment.body_field.clone();
+        upload_element.element_id = "attachment-1".into();
+        upload_element.role = BrowserElementRole::Button;
+        upload_element.accessible_name = "Attach files".into();
+        let file = crate::computer_use::ObjectRef {
+            token: "artifact-token-1".into(),
+            snapshot_id: "worker-1:1".into(),
+            object_kind: crate::computer_use::ObjectKind::File,
+            expires_at: "2026-08-29T06:00:00Z".into(),
+        };
+        with_attachment.draft.attachment_labels = vec!["report.docx".into()];
+        with_attachment.attachment = Some(GmailWebAttachmentInput {
+            element: upload_element,
+            artifact: CreatedFileArtifactOutput {
+                file: file.clone(),
+                file_name: "report.docx".into(),
+                media_type: "application/test".into(),
+                size_bytes: 7,
+                digest_sha256: digest('a'),
+                content: ContentRef::Artifact {
+                    artifact_id: file.token,
+                    sha256: digest('a'),
+                    size_bytes: 7,
+                    media_type: "application/test".into(),
+                },
+            },
+        });
+        with_attachment.validate().unwrap();
+        with_attachment.draft.attachment_labels[0] = "different.docx".into();
+        assert_eq!(
+            with_attachment.validate(),
+            Err(CommunicationContractError::TooManyItems(
+                "gmail_web_handoff.attachments"
+            ))
         );
 
         let mut multiple_recipients = input;

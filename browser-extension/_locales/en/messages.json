@@ -1,0 +1,17 @@
+{
+    "extensionName": { "message": "LCXL Browser Assistant" },
+    "extensionDescription": { "message": "Connects the local LCXL AI assistant to explicitly approved browser pages." },
+    "bridgeUrlLabel": { "message": "Local bridge URL" },
+    "pairingCodeLabel": { "message": "Pairing code" },
+    "pairButton": { "message": "Pair this browser" },
+    "allowSiteButton": { "message": "Allow current site" },
+    "connection_connecting": { "message": "Connecting to LCXL…" },
+    "connection_connected": { "message": "Connected to LCXL" },
+    "connection_disconnected": { "message": "Not connected" },
+    "pairingCodeRequired": { "message": "Enter the pairing code shown by LCXL." },
+    "pairingSaved": { "message": "Saved. The extension is connecting to this device." },
+    "noActivePage": { "message": "No active web page is available." },
+    "httpsOnly": { "message": "Only HTTPS sites can be added." },
+    "siteDenied": { "message": "Site access was not granted." },
+    "siteAllowed": { "message": "Allowed $SITE$.", "placeholders": { "site": { "content": "$1" } } }
+}

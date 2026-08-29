@@ -1,7 +1,8 @@
 //! Current-schema contracts for the built-in browser-control provider.
 //!
-//! The edge adapter owns the Chrome DevTools MCP connection. The model sees
-//! only the closed semantic tool set declared here; raw MCP tools, browser
+//! The edge adapter owns either the paired Chrome extension connection or an
+//! explicitly enabled development DevTools MCP connection. The model sees
+//! only the closed semantic tool set declared here; adapter internals, browser
 //! credentials, cookies, storage, network logs, and arbitrary script
 //! execution are never part of the provider contract.
 
@@ -12,7 +13,10 @@ use url::Url;
 use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::data_lineage::ContentRef;
+use crate::{
+    computer_use::{ObjectKind, ObjectRef},
+    data_lineage::ContentRef,
+};
 
 pub const BROWSER_CONTROL_SCHEMA_VERSION: u16 = 1;
 pub const MIN_CHROME_DEVTOOLS_MCP_MAJOR_VERSION: u16 = 144;
@@ -45,6 +49,7 @@ pub const MAX_BROWSER_WAIT_MS: u32 = 30_000;
 )]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserEngineKind {
+    ChromeExtension,
     ChromeDevtoolsMcp,
 }
 
@@ -210,6 +215,9 @@ pub enum BrowserToolKind {
 #[serde(rename_all = "snake_case")]
 pub enum BrowserReadinessReason {
     UnsupportedBrowserVersion,
+    ExtensionUnavailable,
+    PairingRequired,
+    HostPermissionMissing,
     RemoteDebuggingDisabled,
     UserApprovalRequired,
     UserDenied,
@@ -227,8 +235,11 @@ pub enum BrowserReadinessReason {
 pub struct BrowserReadiness {
     pub schema_version: u16,
     pub adapter: BrowserAdapterRef,
-    pub remote_debugging_enabled: bool,
-    pub user_approved: bool,
+    /// The selected edge adapter is installed and locally enabled.
+    pub adapter_enabled: bool,
+    /// The owner completed the adapter-specific authorization step: extension
+    /// pairing for the product path or Chrome approval for development MCP.
+    pub user_authorized: bool,
     pub connected: bool,
     /// Informational session state. A live adapter may remain usable while the
     /// desktop is locked, so this field is not itself an execution fence.
@@ -245,8 +256,8 @@ impl BrowserReadiness {
         if self.observed_at_unix_ms == 0 {
             return Err(BrowserControlContractError::InvalidTimestamp);
         }
-        if self.user_approved && !self.remote_debugging_enabled
-            || self.connected && (!self.remote_debugging_enabled || !self.user_approved)
+        if self.user_authorized && !self.adapter_enabled
+            || self.connected && (!self.adapter_enabled || !self.user_authorized)
         {
             return Err(BrowserControlContractError::InvalidReadiness);
         }
@@ -602,9 +613,26 @@ pub enum BrowserAction {
         fields: Vec<BrowserFormField>,
         mutation_class: BrowserMutationClass,
     },
+    /// One reviewed draft mutation that fills the exact requested fields and
+    /// uploads one exact edge-issued immutable artifact under the same writer
+    /// lease. The adapter must read the fields and visible attachment name
+    /// back before reporting success.
+    FillFormAndUpload {
+        page: BrowserPageRef,
+        fields: Vec<BrowserFormField>,
+        upload_element: BrowserElementRef,
+        file: ObjectRef,
+        content: ContentRef,
+        file_name: String,
+        media_type: String,
+        size_bytes: u64,
+        digest_sha256: String,
+        mutation_class: BrowserMutationClass,
+    },
     UploadFile {
         page: BrowserPageRef,
         element: BrowserElementRef,
+        file: ObjectRef,
         content: ContentRef,
         file_name: String,
         media_type: String,
@@ -646,7 +674,7 @@ impl BrowserAction {
                 }
                 Ok(())
             }
-            Self::FillForm { page, fields, .. } => {
+            Self::FillForm { page, fields, .. } | Self::FillFormAndUpload { page, fields, .. } => {
                 page.validate()?;
                 if fields.is_empty() || fields.len() > MAX_BROWSER_FORM_FIELDS {
                     return Err(BrowserControlContractError::InvalidForm);
@@ -666,40 +694,50 @@ impl BrowserAction {
                 if total_bytes > MAX_BROWSER_FORM_TOTAL_BYTES {
                     return Err(BrowserControlContractError::InvalidForm);
                 }
+                if let Self::FillFormAndUpload {
+                    upload_element,
+                    file,
+                    content,
+                    file_name,
+                    media_type,
+                    size_bytes,
+                    digest_sha256,
+                    ..
+                } = self
+                {
+                    validate_upload(
+                        page,
+                        upload_element,
+                        file,
+                        content,
+                        file_name,
+                        media_type,
+                        *size_bytes,
+                        digest_sha256,
+                    )?;
+                }
                 Ok(())
             }
             Self::UploadFile {
                 page,
                 element,
+                file,
                 content,
                 file_name,
                 media_type,
                 size_bytes,
                 digest_sha256,
                 ..
-            } => {
-                element.validate_for_page(page)?;
-                validate_safe_leaf_name(file_name)?;
-                validate_id("upload.media_type", media_type, MAX_BROWSER_ID_BYTES)?;
-                validate_sha256(digest_sha256)?;
-                if *size_bytes == 0 || *size_bytes > MAX_BROWSER_FILE_BYTES {
-                    return Err(BrowserControlContractError::InvalidUpload);
-                }
-                match content {
-                    ContentRef::ImmutableBlob {
-                        sha256,
-                        size_bytes: content_size,
-                        media_type: content_media_type,
-                        ..
-                    } if sha256 == digest_sha256
-                        && content_size == size_bytes
-                        && content_media_type == media_type =>
-                    {
-                        Ok(())
-                    }
-                    _ => Err(BrowserControlContractError::InvalidUpload),
-                }
-            }
+            } => validate_upload(
+                page,
+                element,
+                file,
+                content,
+                file_name,
+                media_type,
+                *size_bytes,
+                digest_sha256,
+            ),
             Self::ActivateElement {
                 page,
                 element,
@@ -732,6 +770,7 @@ pub enum BrowserActionOutcome {
     SnapshotCaptured,
     WaitSatisfied,
     FormFilled,
+    FormFilledWithFile,
     FileUploaded,
     ElementActivated,
 }
@@ -770,6 +809,7 @@ impl BrowserActionResult {
             BrowserActionOutcome::SnapshotCaptured
                 | BrowserActionOutcome::WaitSatisfied
                 | BrowserActionOutcome::FormFilled
+                | BrowserActionOutcome::FormFilledWithFile
                 | BrowserActionOutcome::FileUploaded
                 | BrowserActionOutcome::ElementActivated
         );
@@ -780,7 +820,10 @@ impl BrowserActionResult {
         {
             return Err(BrowserControlContractError::InvalidActionResult);
         }
-        if self.outcome == BrowserActionOutcome::FormFilled {
+        if matches!(
+            self.outcome,
+            BrowserActionOutcome::FormFilled | BrowserActionOutcome::FormFilledWithFile
+        ) {
             if self.form_readback.is_empty() || self.form_readback.len() > MAX_BROWSER_FORM_FIELDS {
                 return Err(BrowserControlContractError::InvalidActionResult);
             }
@@ -979,6 +1022,51 @@ fn validate_safe_leaf_name(value: &str) -> Result<(), BrowserControlContractErro
     Ok(())
 }
 
+fn validate_upload(
+    page: &BrowserPageRef,
+    element: &BrowserElementRef,
+    file: &ObjectRef,
+    content: &ContentRef,
+    file_name: &str,
+    media_type: &str,
+    size_bytes: u64,
+    digest_sha256: &str,
+) -> Result<(), BrowserControlContractError> {
+    element.validate_for_page(page)?;
+    if file.object_kind != ObjectKind::File
+        || file.token.is_empty()
+        || file.snapshot_id.is_empty()
+        || file.expires_at.is_empty()
+    {
+        return Err(BrowserControlContractError::InvalidUpload);
+    }
+    validate_safe_leaf_name(file_name)?;
+    validate_id("upload.media_type", media_type, MAX_BROWSER_ID_BYTES)?;
+    validate_sha256(digest_sha256)?;
+    if size_bytes == 0 || size_bytes > MAX_BROWSER_FILE_BYTES {
+        return Err(BrowserControlContractError::InvalidUpload);
+    }
+    content
+        .validate()
+        .map_err(|_| BrowserControlContractError::InvalidUpload)?;
+    match content {
+        ContentRef::Artifact {
+            artifact_id,
+            sha256,
+            size_bytes: content_size,
+            media_type: content_media_type,
+            ..
+        } if artifact_id == &file.token
+            && sha256 == digest_sha256
+            && *content_size == size_bytes
+            && content_media_type == media_type =>
+        {
+            Ok(())
+        }
+        _ => Err(BrowserControlContractError::InvalidUpload),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1019,8 +1107,8 @@ mod tests {
         let readiness = BrowserReadiness {
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: adapter(),
-            remote_debugging_enabled: true,
-            user_approved: true,
+            adapter_enabled: true,
+            user_authorized: true,
             connected: true,
             interactive_session_unlocked: true,
             tools: vec![
@@ -1056,8 +1144,8 @@ mod tests {
         let readiness = BrowserReadiness {
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: adapter(),
-            remote_debugging_enabled: true,
-            user_approved: false,
+            adapter_enabled: true,
+            user_authorized: false,
             connected: true,
             interactive_session_unlocked: true,
             tools: vec![BrowserToolKind::TakeSnapshot],
@@ -1171,6 +1259,58 @@ mod tests {
         assert_eq!(
             invalid_send.validate(),
             Err(BrowserControlContractError::InvalidDigest)
+        );
+    }
+
+    #[test]
+    fn upload_accepts_only_the_same_edge_artifact_identity_and_digest() {
+        let page = page();
+        let element = BrowserElementRef {
+            page_id: page.page_id.clone(),
+            page_incarnation: page.page_incarnation.clone(),
+            document_revision: page.document_revision,
+            element_id: "attachment-input".into(),
+            role: BrowserElementRole::Button,
+            accessible_name: "Attach files".into(),
+            value: None,
+            element_revision: 1,
+        };
+        let file = ObjectRef {
+            token: "artifact-token-1".into(),
+            snapshot_id: "worker-1:7".into(),
+            object_kind: ObjectKind::File,
+            expires_at: "2026-08-29T06:00:00Z".into(),
+        };
+        let action = BrowserAction::UploadFile {
+            page,
+            element,
+            file: file.clone(),
+            content: ContentRef::Artifact {
+                artifact_id: file.token.clone(),
+                sha256: "b".repeat(64),
+                size_bytes: 42,
+                media_type: "application/test".into(),
+            },
+            file_name: "report.docx".into(),
+            media_type: "application/test".into(),
+            size_bytes: 42,
+            digest_sha256: "b".repeat(64),
+            mutation_class: BrowserMutationClass::WriteExternalDraft,
+        };
+        action.validate().unwrap();
+
+        let mut mismatched = action;
+        if let BrowserAction::UploadFile { content, .. } = &mut mismatched {
+            *content = ContentRef::Artifact {
+                artifact_id: "different-artifact".into(),
+                sha256: "b".repeat(64),
+                size_bytes: 42,
+                media_type: "application/test".into(),
+            };
+        }
+        assert_eq!(
+            mismatched.validate(),
+            Err(BrowserControlContractError::InvalidUpload)
         );
     }
 

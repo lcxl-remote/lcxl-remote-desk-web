@@ -14,6 +14,7 @@
 
 pub mod audit_sink;
 pub mod browser_devtools_mcp;
+pub mod browser_extension_bridge;
 pub mod collectors;
 pub mod computer_use_broker;
 pub mod computer_use_writer;
@@ -33,6 +34,14 @@ pub mod terminal_reference_store;
 pub mod windows_input_ownership;
 #[cfg(windows)]
 pub mod windows_uia_observer;
+
+/// Minimum lifetime for an edge-issued object that may cross a model-driven
+/// permission round trip. A five-minute token can expire while a reasoning
+/// model requests a grant and the server resumes the approved turn. Keeping
+/// the object for thirty minutes does not relax identity or revision checks:
+/// every call still resolves the opaque token in this worker and revalidates
+/// the exact filesystem/browser object before use.
+pub(super) const PERMISSION_FLOW_TTL_SECONDS: i64 = 30 * 60;
 
 use std::sync::Arc;
 use std::time::Instant;

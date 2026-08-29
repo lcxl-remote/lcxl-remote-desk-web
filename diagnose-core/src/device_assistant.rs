@@ -1187,7 +1187,7 @@ fn prepare_gmail_web_handoff_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: "prepare_gmail_web_draft_handoff".into(),
-            description: "Fill one exact Gmail Web compose surface obtained from a fresh bounded semantic snapshot, read the same To, Subject, and Message Body fields back, and stop for the user to review and send manually. This initial adapter accepts exactly one To recipient, no Cc/Bcc and no attachments. Copy every owner-provided field verbatim; never translate, summarize, or add text. The external account destination is fixed server-side to the current browser profile. The adapter accepts only mail.google.com, never exposes cookies/tokens/storage, never activates Send, and requires one exact WriteExternalDraft grant because Gmail may cloud-sync the draft.".into(),
+            description: "Fill one exact Gmail Web compose surface obtained from a fresh bounded semantic snapshot, optionally upload one exact typed immutable artifact returned by an earlier file-creation tool in this run, read the same To, Subject, Message Body and visible attachment name back, and stop for the user to review and send manually. This adapter accepts exactly one To recipient, no Cc/Bcc and at most one attachment. Copy every owner-provided field verbatim; never translate, summarize, or add text. The external account destination is fixed server-side to the current browser profile. The adapter accepts only mail.google.com, never accepts a native path, never exposes cookies/tokens/storage, never activates Send, and requires one exact WriteExternalDraft grant because Gmail may cloud-sync the draft.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1196,6 +1196,48 @@ fn prepare_gmail_web_handoff_tool() -> RegisteredTool {
                     "to_field": browser_element_schema(),
                     "subject_field": browser_element_schema(),
                     "body_field": browser_element_schema(),
+                    "attachment": {
+                        "type": ["object", "null"],
+                        "properties": {
+                            "element": browser_element_schema(),
+                            "artifact": {
+                                "type": "object",
+                                "properties": {
+                                    "file": {
+                                        "type": "object",
+                                        "properties": {
+                                            "token": {"type": "string", "minLength": 1},
+                                            "snapshot_id": {"type": "string", "minLength": 1},
+                                            "object_kind": {"type": "string", "const": "file"},
+                                            "expires_at": {"type": "string", "minLength": 1}
+                                        },
+                                        "required": ["token", "snapshot_id", "object_kind", "expires_at"],
+                                        "additionalProperties": false
+                                    },
+                                    "file_name": {"type": "string", "minLength": 1, "maxLength": 200},
+                                    "media_type": {"type": "string", "minLength": 1, "maxLength": 256},
+                                    "size_bytes": {"type": "integer", "minimum": 1},
+                                    "digest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                                    "content": {
+                                        "type": "object",
+                                        "properties": {
+                                            "kind": {"type": "string", "const": "artifact"},
+                                            "artifact_id": {"type": "string", "minLength": 1},
+                                            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                                            "size_bytes": {"type": "integer", "minimum": 1},
+                                            "media_type": {"type": "string", "minLength": 1, "maxLength": 256}
+                                        },
+                                        "required": ["kind", "artifact_id", "sha256", "size_bytes", "media_type"],
+                                        "additionalProperties": false
+                                    }
+                                },
+                                "required": ["file", "file_name", "media_type", "size_bytes", "digest_sha256", "content"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "required": ["element", "artifact"],
+                        "additionalProperties": false
+                    },
                     "draft": {
                         "type": "object",
                         "properties": {
@@ -1227,13 +1269,17 @@ fn prepare_gmail_web_handoff_tool() -> RegisteredTool {
                                 "maxLength": 65536,
                                 "description": "Exact plain-text body requested by the owner. Copy verbatim; do not translate, summarize, or append explanations."
                             },
-                            "attachment_labels": {"type": "array", "maxItems": 0}
+                            "attachment_labels": {
+                                "type": "array",
+                                "maxItems": 1,
+                                "items": {"type": "string", "minLength": 1, "maxLength": 200}
+                            }
                         },
                         "required": ["schema_version", "recipients", "subject", "body_plain_text", "attachment_labels"],
                         "additionalProperties": false
                     }
                 },
-                "required": ["schema_version", "page", "to_field", "subject_field", "body_field", "draft"],
+                "required": ["schema_version", "page", "to_field", "subject_field", "body_field", "attachment", "draft"],
                 "additionalProperties": false
             }),
         },
@@ -2803,6 +2849,10 @@ fn prompt(locale: Option<&str>) -> String {
          For a request with multiple meaningful steps, call update_task_status before or during the work and again only after your assessment materially changes. Keep stable item_id values. After a successful update, continue the actual task or answer; never call update_task_status repeatedly just to rephrase an equivalent projection. This projection is an advisory status shown to the user; it never grants permission, proves execution, or overrides durable tool outcomes. Do not use it for a trivial one-step answer.\n\n\
          Give concise Markdown answers grounded in the observed evidence. Never reveal opaque reference tokens in prose. Never claim a change occurred.",
     );
+    text = text.replace(
+        "Copy every owner-provided value verbatim; do not translate, summarize, append, add Cc/Bcc, or add attachments. The account destination is fixed server-side to the current browser profile. After approval the reviewed adapter fills and semantically reads back those same three fields, stops with HandedOffToUser/ManualOnly, and never activates Send.",
+        "Copy every owner-provided value verbatim; do not translate, summarize, append, or add Cc/Bcc. You may attach at most one exact typed immutable artifact returned by an earlier file-creation tool in this run, using a fresh Gmail file-input element; never invent or pass a native path. Keep attachment_labels empty when attachment is null, otherwise set it to exactly the artifact file_name. The account destination is fixed server-side to the current browser profile. After approval the reviewed adapter fills and semantically reads back those same three fields and the visible attachment name, stops with HandedOffToUser/ManualOnly, and never activates Send.",
+    );
     if let Some(tag) = locale.filter(|tag| !tag.is_empty()) {
         text.push_str(&format!(
             "\n\nWrite natural-language answers in BCP-47 locale {tag}; tool names and JSON fields remain English."
@@ -2899,6 +2949,8 @@ mod tests {
         let prompt = build_device_assistant_system_message(None).text;
         assert!(prompt.contains("newest message wins"));
         assert!(prompt.contains("never call update_task_status repeatedly"));
+        assert!(prompt.contains("at most one exact typed immutable artifact"));
+        assert!(!prompt.contains("or add attachments. The account destination"));
     }
 
     #[test]

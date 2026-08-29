@@ -1,0 +1,1 @@
+{"type":"object","required":["workId","actionRequestId","executionId","workKind"],"properties":{"actionRequestId":{"type":"string"},"executionId":{"type":"string"},"workId":{"type":"integer","format":"int64"},"workKind":{"type":"string"}},"x-readme-ref-name":"UnknownOutcomeDto"}

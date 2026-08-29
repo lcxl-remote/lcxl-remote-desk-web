@@ -615,4 +615,57 @@ describe('useDeviceAssistantChat', () => {
             expect.objectContaining({ method: 'POST' }),
         );
     });
+
+    it('requires an explicit exact disposition before clearing an unknown outcome', async () => {
+        localStorage.setItem('device-assistant-conversation:desk-1', 'conversation-1');
+        let unresolved = true;
+        const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+            if (String(input).endsWith('/outcome-unknown/dispose')) {
+                expect(JSON.parse(String(init?.body))).toEqual({
+                    connection: 'desk-1',
+                    conversation: 'conversation-1',
+                    workId: 94,
+                    executionId: 'generation-94',
+                });
+                unresolved = false;
+                return {
+                    ok: true,
+                    json: async () => ({ success: true, data: { disposed: true } }),
+                };
+            }
+            return {
+                ok: true,
+                json: async () => ({
+                    data: {
+                        active: false,
+                        messages: [{ id: 'user-1', role: 'user', text: 'continue' }],
+                        contextAttachments: [],
+                        unresolvedOutcome: unresolved ? {
+                            workId: 94,
+                            actionRequestId: 'action-94',
+                            executionId: 'generation-94',
+                            workKind: 'computer_action',
+                        } : null,
+                    },
+                }),
+            };
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const { result } = renderHook(() => useDeviceAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage: () => 'request',
+        }));
+
+        await waitFor(() => expect(result.current.status).toBe('outcome_unknown'));
+        expect(result.current.unresolvedOutcome?.workId).toBe(94);
+        await act(async () => {
+            expect(await result.current.disposeUnknownOutcome()).toBe(true);
+        });
+        await waitFor(() => expect(result.current.unresolvedOutcome).toBeNull());
+        expect(fetchMock).toHaveBeenCalledWith(
+            '/api/my/device-assistant-session/outcome-unknown/dispose',
+            expect.objectContaining({ method: 'POST' }),
+        );
+    });
 });

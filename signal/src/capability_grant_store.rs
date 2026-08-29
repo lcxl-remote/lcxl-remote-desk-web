@@ -146,6 +146,14 @@ pub struct DispatchUnknownResult {
     pub idempotent_replay: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityManualDispositionResult {
+    Applied,
+    AlreadyResolved,
+    SubjectMismatch,
+    StateMismatch,
+}
+
 #[derive(Debug, Clone)]
 pub struct PrepareCapabilityCall<'a> {
     pub grant_id: &'a str,
@@ -803,6 +811,77 @@ impl SignalCapabilityGrantStore {
             work_id: work.id,
             idempotent_replay: false,
         })
+    }
+
+    /// Record an owner disposition for the exact capability dispatch whose
+    /// durable outcome is unknown. The outbox and work remain unknown so the
+    /// audit trail is truthful; the committed reservation is not restored.
+    pub async fn manually_dispose_unknown_for_subject(
+        &self,
+        work_id: i64,
+        dispatch_id: &str,
+        conversation_id: &str,
+        actor_id: &str,
+        target_device_id: &str,
+        now_unix_ms: u64,
+    ) -> Result<CapabilityManualDispositionResult, DbErr> {
+        let txn = self.db.begin().await?;
+        let Some(outbox) = agent_capability_dispatch_outbox::Entity::find()
+            .filter(agent_capability_dispatch_outbox::Column::DispatchId.eq(dispatch_id))
+            .filter(agent_capability_dispatch_outbox::Column::WorkId.eq(work_id))
+            .one(&txn)
+            .await?
+        else {
+            txn.rollback().await.ok();
+            return Ok(CapabilityManualDispositionResult::SubjectMismatch);
+        };
+        let payload: CapabilityDispatchPayload =
+            serde_json::from_str(&outbox.payload_json).map_err(json_error)?;
+        let Some(work) = agent_action_item::Entity::find_by_id(work_id)
+            .one(&txn)
+            .await?
+        else {
+            txn.rollback().await.ok();
+            return Ok(CapabilityManualDispositionResult::SubjectMismatch);
+        };
+        if payload.dispatch_id != dispatch_id
+            || payload.work_id != work_id
+            || work.conversation_id != conversation_id
+            || work.actor_id != actor_id
+            || work.target_device_id != target_device_id
+        {
+            txn.rollback().await.ok();
+            return Ok(CapabilityManualDispositionResult::SubjectMismatch);
+        }
+        if work.manual_resolved_at.is_some() {
+            txn.rollback().await.ok();
+            return Ok(CapabilityManualDispositionResult::AlreadyResolved);
+        }
+        if outbox.state != DISPATCH_OUTBOX_OUTCOME_UNKNOWN
+            || work.status != CAPABILITY_WORK_OUTCOME_UNKNOWN
+        {
+            txn.rollback().await.ok();
+            return Ok(CapabilityManualDispositionResult::StateMismatch);
+        }
+        let now = timestamp(now_unix_ms)?;
+        let updated = agent_action_item::Entity::update_many()
+            .col_expr(
+                agent_action_item::Column::ManualResolvedAt,
+                Expr::value(Some(now)),
+            )
+            .col_expr(agent_action_item::Column::UpdatedAt, Expr::value(now))
+            .filter(agent_action_item::Column::Id.eq(work_id))
+            .filter(agent_action_item::Column::Status.eq(CAPABILITY_WORK_OUTCOME_UNKNOWN))
+            .filter(agent_action_item::Column::ManualResolvedAt.is_null())
+            .exec(&txn)
+            .await?;
+        if updated.rows_affected == 1 {
+            txn.commit().await?;
+            Ok(CapabilityManualDispositionResult::Applied)
+        } else {
+            txn.rollback().await.ok();
+            Ok(CapabilityManualDispositionResult::AlreadyResolved)
+        }
     }
 
     /// Persist a bounded terminal Provider fact. A completion may arrive after
@@ -1917,6 +1996,48 @@ mod tests {
                 idempotent_replay: true,
             }
         );
+        assert_eq!(
+            store
+                .manually_dispose_unknown_for_subject(
+                    unknown.work_id,
+                    "wrong-dispatch",
+                    "run-1",
+                    "actor-1",
+                    "device-1",
+                    675,
+                )
+                .await
+                .unwrap(),
+            CapabilityManualDispositionResult::SubjectMismatch
+        );
+        assert_eq!(
+            store
+                .manually_dispose_unknown_for_subject(
+                    unknown.work_id,
+                    &dispatch_id,
+                    "run-1",
+                    "actor-1",
+                    "device-1",
+                    675,
+                )
+                .await
+                .unwrap(),
+            CapabilityManualDispositionResult::Applied
+        );
+        assert_eq!(
+            store
+                .manually_dispose_unknown_for_subject(
+                    unknown.work_id,
+                    &dispatch_id,
+                    "run-1",
+                    "actor-1",
+                    "device-1",
+                    676,
+                )
+                .await
+                .unwrap(),
+            CapabilityManualDispositionResult::AlreadyResolved
+        );
         let completion = CapabilityDispatchCompletion {
             dispatch_id: dispatch_id.clone(),
             call_id: "call-late".into(),
@@ -1968,6 +2089,7 @@ mod tests {
             .unwrap();
         assert_eq!(outbox.state, DISPATCH_OUTBOX_COMPLETED);
         assert_eq!(work.status, CAPABILITY_WORK_SUCCEEDED);
+        assert!(work.manual_resolved_at.is_some());
         assert_eq!(stored_grant.remaining_uses, 0);
         db.close().await.unwrap();
     }

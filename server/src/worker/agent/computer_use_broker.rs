@@ -6,27 +6,30 @@
 //! remains hard-disabled in the daemon and worker.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, Utc};
 use desk_agent_protocol::browser_control::{
-    BrowserActionRequest, BrowserActionResult, BrowserAdapterRef, BrowserReadinessReason,
+    BrowserActionRequest, BrowserActionResult, BrowserAdapterRef, BrowserEngineKind,
+    BrowserReadiness, BrowserReadinessReason,
 };
 use desk_agent_protocol::communication::{
     CommunicationDraftHandoff, OutlookNewComposeHandoffRequest,
 };
 #[cfg(target_os = "macos")]
 use desk_agent_protocol::computer_use::{
-    BatchDocumentArtifact, BatchDocumentSourceProjection, ComputerActionKind, ComputerActionOutput,
+    BatchDocumentArtifact, BatchDocumentSourceProjection, ComputerActionKind,
     LiveDocumentInspectOutput, LiveDocumentInspectParams, LiveDocumentProjection,
 };
 use desk_agent_protocol::computer_use::{
-    COMPUTER_USE_SCHEMA_VERSION, ComputerUseAdapterKind, ComputerUseAdapterRef,
-    ComputerUseCapabilityReadiness, ComputerUseContextReference, ComputerUseReadiness,
-    ComputerUseReadinessReason, DesktopSessionInspectOutput, DesktopSessionInspectParams,
-    MAX_COMPUTER_USE_INSPECT_BYTES, MAX_COMPUTER_USE_INSPECT_NODES, ObjectKind, ObjectRef,
-    OfficeInspectParams, UiInspectOutput, UiInspectParams, UiNodeProjection, UiSemanticAction,
+    COMPUTER_USE_SCHEMA_VERSION, ComputerActionOutput, ComputerUseAdapterKind,
+    ComputerUseAdapterRef, ComputerUseCapabilityReadiness, ComputerUseContextReference,
+    ComputerUseReadiness, ComputerUseReadinessReason, DesktopSessionInspectOutput,
+    DesktopSessionInspectParams, MAX_COMPUTER_USE_INSPECT_BYTES, MAX_COMPUTER_USE_INSPECT_NODES,
+    ObjectKind, ObjectRef, OfficeInspectParams, UiInspectOutput, UiInspectParams, UiNodeProjection,
+    UiSemanticAction,
 };
 #[cfg(any(windows, target_os = "macos"))]
 use desk_agent_protocol::computer_use::{OfficeInspectOutput, OfficeSelectionProjection};
@@ -48,6 +51,7 @@ use crate::model::settings::ComputerUseSettings;
 use super::browser_devtools_mcp::{
     BrowserBrokerContext, BrowserDevtoolsBroker, ChromeDevtoolsMcpError,
 };
+use super::browser_extension_bridge::{BrowserExtensionBridgeError, BrowserExtensionBroker};
 use super::computer_use_writer::{
     InputPreemptionSource, WriterLeaseCoordinator, WriterLeaseRequest, WriterLeaseState,
 };
@@ -188,7 +192,8 @@ pub struct ComputerUseBroker {
     input_ownership_ready: AtomicBool,
     objects: Mutex<HashMap<String, StoredObject>>,
     writer_lease: WriterLeaseCoordinator,
-    browser: BrowserDevtoolsBroker,
+    browser_extension: Arc<BrowserExtensionBroker>,
+    browser_devtools: BrowserDevtoolsBroker,
 }
 
 pub(crate) struct SemanticActionResult {
@@ -197,6 +202,23 @@ pub(crate) struct SemanticActionResult {
     pub(crate) summary: String,
     pub(crate) output: Option<ComputerActionOutput>,
 }
+
+#[derive(Debug)]
+pub(crate) enum BrowserProviderError {
+    Extension(BrowserExtensionBridgeError),
+    Devtools(ChromeDevtoolsMcpError),
+}
+
+impl std::fmt::Display for BrowserProviderError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Extension(error) => error.fmt(formatter),
+            Self::Devtools(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for BrowserProviderError {}
 
 impl Default for ComputerUseBroker {
     fn default() -> Self {
@@ -217,8 +239,23 @@ impl ComputerUseBroker {
             input_ownership_ready: AtomicBool::new(false),
             objects: Mutex::new(HashMap::new()),
             writer_lease: WriterLeaseCoordinator::new(),
-            browser: BrowserDevtoolsBroker::default(),
+            browser_extension: Arc::new(BrowserExtensionBroker::default()),
+            browser_devtools: BrowserDevtoolsBroker::default(),
         }
+    }
+
+    pub(crate) fn start_browser_extension_bridge(
+        &self,
+        data_root: &Path,
+        device_id: String,
+        os_session_id: String,
+    ) -> std::io::Result<()> {
+        super::browser_extension_bridge::start_loopback_bridge(
+            Arc::clone(&self.browser_extension),
+            data_root,
+            device_id,
+            os_session_id,
+        )
     }
 
     pub async fn refresh_browser_readiness(
@@ -228,7 +265,7 @@ impl ComputerUseBroker {
         enabled: bool,
         interactive_session_unlocked: bool,
     ) {
-        self.browser
+        self.browser_devtools
             .refresh(&BrowserBrokerContext {
                 device_id,
                 os_session_id,
@@ -242,20 +279,50 @@ impl ComputerUseBroker {
         self.input_ownership_ready.store(ready, Ordering::SeqCst);
     }
 
-    pub fn preflight_browser_action(
+    pub(crate) fn preflight_browser_action(
         &self,
         surface: &ObjectRef,
         request: &BrowserActionRequest,
-    ) -> Result<(), ChromeDevtoolsMcpError> {
-        self.browser.preflight(surface, request)
+    ) -> Result<(), BrowserProviderError> {
+        if self.browser_extension.surface_ref().as_ref() == Some(surface) {
+            self.browser_extension
+                .preflight(surface, request)
+                .map_err(BrowserProviderError::Extension)
+        } else {
+            self.browser_devtools
+                .preflight(surface, request)
+                .map_err(BrowserProviderError::Devtools)
+        }
     }
 
-    pub async fn execute_browser_action(
+    pub(crate) async fn execute_browser_action(
         &self,
         surface: &ObjectRef,
         request: &BrowserActionRequest,
-    ) -> Result<BrowserActionResult, ChromeDevtoolsMcpError> {
-        self.browser.execute(surface, request).await
+    ) -> Result<BrowserActionResult, BrowserProviderError> {
+        if self.browser_extension.surface_ref().as_ref() == Some(surface) {
+            self.browser_extension
+                .execute(surface, request)
+                .await
+                .map_err(BrowserProviderError::Extension)
+        } else {
+            self.browser_devtools
+                .execute(surface, request)
+                .await
+                .map_err(BrowserProviderError::Devtools)
+        }
+    }
+
+    fn selected_browser_state(&self) -> (Option<BrowserReadiness>, Option<ObjectRef>) {
+        if let Some(readiness) = self.browser_extension.readiness()
+            && readiness.connected
+        {
+            return (Some(readiness), self.browser_extension.surface_ref());
+        }
+        (
+            self.browser_devtools.readiness(),
+            self.browser_devtools.surface_ref(),
+        )
     }
 
     pub(crate) fn preflight_ui_action(
@@ -648,8 +715,7 @@ impl ComputerUseBroker {
             screen_ready = false;
             screen_reason = Some(ComputerUseReadinessReason::PermissionMissing);
         }
-        let browser_readiness = self.browser.readiness();
-        let browser_surface = self.browser.surface_ref();
+        let (browser_readiness, browser_surface) = self.selected_browser_state();
         let browser_ready = browser_provider_supported
             && session_ready
             && ceiling.browser_semantic
@@ -669,7 +735,9 @@ impl ComputerUseBroker {
                 .and_then(|readiness| readiness.reason)
             {
                 Some(BrowserReadinessReason::UserApprovalRequired)
-                | Some(BrowserReadinessReason::UserDenied) => {
+                | Some(BrowserReadinessReason::UserDenied)
+                | Some(BrowserReadinessReason::PairingRequired)
+                | Some(BrowserReadinessReason::HostPermissionMissing) => {
                     ComputerUseReadinessReason::PermissionMissing
                 }
                 _ => ComputerUseReadinessReason::AdapterUnavailable,
@@ -682,10 +750,21 @@ impl ComputerUseBroker {
             browser_reason.unwrap_or(ComputerUseReadinessReason::AdapterUnavailable)
         });
         let slack_browser_surface = slack_ready.then(|| browser_surface.clone()).flatten();
-        let browser_adapter = ComputerUseAdapterRef {
-            kind: ComputerUseAdapterKind::BrowserDevtoolsMcp,
-            version: super::browser_devtools_mcp::CHROME_DEVTOOLS_MCP_VERSION.into(),
-        };
+        let browser_adapter = browser_readiness
+            .as_ref()
+            .map(|readiness| ComputerUseAdapterRef {
+                kind: match readiness.adapter.engine {
+                    BrowserEngineKind::ChromeExtension => ComputerUseAdapterKind::BrowserExtension,
+                    BrowserEngineKind::ChromeDevtoolsMcp => {
+                        ComputerUseAdapterKind::BrowserDevtoolsMcp
+                    }
+                },
+                version: readiness.adapter.adapter_version.clone(),
+            })
+            .unwrap_or_else(|| ComputerUseAdapterRef {
+                kind: ComputerUseAdapterKind::BrowserExtension,
+                version: super::browser_extension_bridge::BROWSER_EXTENSION_VERSION.into(),
+            });
         let outlook_handler = if outlook_provider_supported
             && session_ready
             && ceiling.communication_handoff_enabled()
@@ -1106,17 +1185,14 @@ impl ComputerUseBroker {
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::BrowserInputFallbackConfirmed,
-                    adapter: browser_adapter,
+                    adapter: browser_adapter.clone(),
                     supported: browser_provider_supported,
                     ready: browser_ready,
                     reason: browser_reason,
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::BrowserExternalDraftWriteConfirmed,
-                    adapter: ComputerUseAdapterRef {
-                        kind: ComputerUseAdapterKind::BrowserDevtoolsMcp,
-                        version: super::browser_devtools_mcp::CHROME_DEVTOOLS_MCP_VERSION.into(),
-                    },
+                    adapter: browser_adapter.clone(),
                     supported: browser_provider_supported,
                     ready: slack_ready,
                     reason: slack_reason,
@@ -1208,7 +1284,10 @@ impl ComputerUseBroker {
                 .iter()
                 .map(|reference| reference.capability)
                 .collect(),
-            browser_adapter: self.browser.readiness().map(|readiness| readiness.adapter),
+            browser_adapter: self
+                .selected_browser_state()
+                .0
+                .map(|readiness| readiness.adapter),
         };
         let mut state = self
             .readiness_revision_state

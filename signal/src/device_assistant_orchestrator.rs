@@ -910,7 +910,43 @@ impl ModelSeam for MeteredModel {
                 return Err(error);
             }
         };
-        let output_envelope = match policy
+        if turn.text.trim().is_empty() && turn.tool_calls.is_empty() {
+            // There is no model output content to label or export. Close this
+            // audited provider call as unusable, then let the pure agent loop
+            // apply its single bounded empty-EndTurn recovery. Returning the
+            // empty turn is safe: it carries no bytes and is never persisted as
+            // an assistant message.
+            egress_store
+                .mark_failed(&receipt_id)
+                .await
+                .map_err(|error| {
+                    log::warn!(
+                        "[device-assistant] failed to close empty model egress receipt_id={receipt_id}: {error}"
+                    );
+                    AgentError {
+                        kind: AgentErrorKind::Internal,
+                        message: "The empty AI model response could not be audited safely.".into(),
+                        retryable: false,
+                        safe_for_model: true,
+                        error_code: None,
+                    }
+                })?;
+            crate::agent_runtime::record_usage(&self.db, &self.model_name, &turn.usage).await;
+            return Ok(turn);
+        }
+        // A provider call may outlive an ephemeral input that was valid at
+        // dispatch. Re-evaluate retention against the completion clock before
+        // accepting the model output or allowing any requested tool call to
+        // execute. The egress projector already removes historical inputs that
+        // lack bounded model-call headroom; this completion check is the final
+        // fail-closed guard for current-turn observations.
+        let completion_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
+            .map_err(|_| transport_error("system clock predates the Unix epoch"))?;
+        let completion_policy = ModelEgressPolicy {
+            now_unix_ms: completion_unix_ms,
+            ..policy.clone()
+        };
+        let output_envelope = match completion_policy
             .derive_model_output_envelope(&turn, &authorized.input_envelopes)
         {
             Ok(envelope) => envelope,
@@ -2250,7 +2286,10 @@ mod tests {
         envelope.validate().unwrap();
     }
 
-    async fn capture_one_openai_request(listener: TcpListener) -> Vec<u8> {
+    async fn capture_one_openai_request_with_sse(
+        listener: TcpListener,
+        sse: &'static str,
+    ) -> Vec<u8> {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut request = Vec::new();
         let mut buffer = [0_u8; 4096];
@@ -2280,12 +2319,6 @@ mod tests {
             request.extend_from_slice(&buffer[..read]);
         }
 
-        let sse = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"captured-ok\"}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
-            "data: [DONE]\n\n"
-        );
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}",
             sse.len()
@@ -2293,6 +2326,19 @@ mod tests {
         socket.write_all(response.as_bytes()).await.unwrap();
         socket.shutdown().await.unwrap();
         request[header_end..header_end + content_length].to_vec()
+    }
+
+    async fn capture_one_openai_request(listener: TcpListener) -> Vec<u8> {
+        capture_one_openai_request_with_sse(
+            listener,
+            concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"captured-ok\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
+            "data: [DONE]\n\n"
+            ),
+        )
+        .await
     }
 
     fn selected_tool_envelope(content: &str) -> DataEnvelope {
@@ -2399,5 +2445,68 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    #[actix_web::test]
+    async fn empty_gateway_end_turn_reaches_bounded_agent_loop_recovery() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let capture = actix_web::rt::spawn(capture_one_openai_request_with_sse(
+            listener,
+            concat!(
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":0}}\n\n",
+                "data: [DONE]\n\n"
+            ),
+        ));
+        let config = crate::model_provider::ModelProviderConfig {
+            wire_protocol: Some(
+                desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
+            ),
+            model: Some("fake-model".into()),
+            base_url: Some(format!("http://{address}")),
+            api_key: Some("test-only-key".into()),
+            max_context_bytes: Some(131_072),
+            ..Default::default()
+        };
+        let destination = config.destination_identity().unwrap();
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        let model = MeteredModel {
+            inner: SignalModelSeam::from_config(&config).unwrap(),
+            db: db.clone(),
+            model_name: "fake-model".into(),
+            destination: destination.clone(),
+            selected_source_tools: Default::default(),
+            export_authorization_id: "empty-http-export".into(),
+            model_call_ordinal: std::sync::atomic::AtomicU64::new(0),
+        };
+        let request = ModelRequest::text_only(
+            vec![
+                ChatMessage::text("system", ChatRole::System, "trusted system prompt"),
+                model_bound_user_message(
+                    "user-message-empty".into(),
+                    "continue".into(),
+                    destination,
+                )
+                .unwrap(),
+            ],
+            ResponseFormatSpec::None,
+        );
+        let turn = model.call(request, &mut NullTurnSink).await.unwrap();
+        assert!(turn.text.is_empty());
+        assert!(turn.tool_calls.is_empty());
+        assert_eq!(
+            turn.stop_reason,
+            desk_diagnose_core::chat::StopReason::EndTurn
+        );
+        let _ = capture.await.unwrap();
+        let receipts = crate::entity::model_egress_receipt::Entity::find()
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].state, crate::model_egress_store::STATE_FAILED);
+        assert!(receipts[0].model_output_envelope_id.is_none());
     }
 }

@@ -40,6 +40,10 @@ pub struct WorkerInitPayload {
     /// daemon must pass this separately to an out-of-process worker.
     #[serde(default)]
     pub log_dir: Option<String>,
+    /// Absolute device-private data directory. Assistant artifact recovery
+    /// records live here and are never sent to the model or central server.
+    #[serde(default)]
+    pub data_dir: Option<String>,
     /// Signaling server URL to connect to (or proxy through service)
     pub signaling_url: Option<String>,
     /// Authentication token. In daemon-spawned workers this is the

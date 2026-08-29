@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LCXL Browser Assistant</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <main>
+        <h1 data-i18n="extensionName">LCXL Browser Assistant</h1>
+        <p id="connection-state"></p>
+        <label><span data-i18n="bridgeUrlLabel">Local bridge URL</span><input id="bridge-url" type="url" value="ws://127.0.0.1:8091/browser-extension/v1"></label>
+        <label><span data-i18n="pairingCodeLabel">Pairing code</span><input id="pairing-token" type="password" autocomplete="off"></label>
+        <button id="save" type="button" data-i18n="pairButton">Pair this browser</button>
+        <button id="allow-site" type="button" data-i18n="allowSiteButton">Allow current site</button>
+        <p id="status" role="status"></p>
+    </main>
+    <script src="popup.js"></script>
+</body>
+</html>

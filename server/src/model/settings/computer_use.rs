@@ -23,8 +23,12 @@ pub struct ComputerUseSettings {
     /// Allow the closed-surface macOS iWork adapters after their independent gate.
     pub iwork_semantic: bool,
     /// Allow the built-in, closed-surface browser semantic adapter after the
-    /// user has enabled Chrome remote debugging and approved the connection.
+    /// Chrome extension has been installed and paired on this device.
     pub browser_semantic: bool,
+    /// Development-only Chrome DevTools MCP adapter. It is never an automatic
+    /// fallback for the extension and defaults off because Chrome requires a
+    /// native approval prompt for each new debugging connection.
+    pub browser_devtools_mcp: bool,
     /// Allow the reviewed Outlook (new) `mailto:` compose handoff adapter.
     /// This may create a cloud-synchronised draft, so central WriteExternalDraft
     /// authorization is still required for every exact input.
@@ -92,6 +96,7 @@ mod tests {
         assert!(!settings.office_semantic);
         assert!(!settings.iwork_semantic);
         assert!(!settings.browser_semantic);
+        assert!(!settings.browser_devtools_mcp);
         assert!(!settings.communication_handoff);
         assert!(!settings.generic_semantic_ui);
         assert!(!settings.raw_input_fallback);

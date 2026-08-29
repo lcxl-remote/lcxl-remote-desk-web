@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { QueryTurnClientSettingsQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import { queryTurnClientSettings } from "../../clients.ts";
+import type { QueryTurnClientSettingsQueryResponse } from "../../types.ts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
+import { queryTurnClientSettings } from "../../clients.ts";
 
 export const queryTurnClientSettingsQueryKey = () => [{ url: '/api/desk/settings/turn-client' }] as const
 

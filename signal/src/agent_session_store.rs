@@ -434,11 +434,16 @@ impl SignalAgentSessionStore {
             .execution_state
             .waitable_task()
             .map(|action| action.execution_id.clone());
+        let unresolved_action = match &session.execution_state {
+            ExecutionState::OutcomeUnknown { action, .. } => Some(action.clone()),
+            _ => None,
+        };
         Ok(Some(SessionSnapshot {
             seq: row.version,
             active: session.turn_state.is_active(),
             request_id: session.current_request_id,
             active_execution_generation,
+            unresolved_action,
             latest_input_seq: session.latest_input_seq,
             input_revision: session.input_revision,
             handled_input_seq: session.handled_input_seq,
@@ -1005,6 +1010,64 @@ impl SignalAgentSessionStore {
         }
         Ok(EventAppend::Busy)
     }
+
+    /// Clear the exact recoverable unknown state after its durable action row has
+    /// recorded an owner disposition. Subject filters and the work/execution pair
+    /// are repeated under the session version CAS; this never retries the action.
+    pub async fn manually_dispose_unknown_for_subject(
+        &self,
+        conversation_id: &str,
+        actor_id: &str,
+        device_id: &str,
+        work_id: i64,
+        execution_id: &str,
+        now: &str,
+    ) -> Result<EventAppend, AgentError> {
+        let now_dt = now_from(now);
+        for _ in 0..CLAIM_ATTEMPTS {
+            let Some(row) = agent_session::Entity::find()
+                .filter(agent_session::Column::ConversationId.eq(conversation_id))
+                .filter(agent_session::Column::ActorId.eq(actor_id))
+                .filter(agent_session::Column::DeviceId.eq(device_id))
+                .one(&self.db)
+                .await
+                .map_err(|error| internal(format!("load manual disposition session: {error}")))?
+            else {
+                return Ok(EventAppend::AlreadyPresent);
+            };
+            let mut session = PersistedAgentSession::decode_json(&row.state_json)
+                .map_err(|error| internal(format!("decode manual disposition session: {error}")))?;
+            session.version = row.version;
+            if session.turn_state.is_active()
+                && row
+                    .lease_deadline
+                    .is_some_and(|deadline| deadline >= now_dt)
+            {
+                return Ok(EventAppend::Busy);
+            }
+            if !session.manually_dispose_unknown(work_id, execution_id, now) {
+                return Ok(EventAppend::AlreadyPresent);
+            }
+            let new_version = row.version + 1;
+            session.version = new_version;
+            let state_json = session
+                .encode_json_for_storage()
+                .map_err(|error| internal(format!("encode manual disposition session: {error}")))?;
+            let result = agent_session::Entity::update_many()
+                .col_expr(agent_session::Column::StateJson, Expr::value(state_json))
+                .col_expr(agent_session::Column::Version, Expr::value(new_version))
+                .col_expr(agent_session::Column::UpdatedAt, Expr::value(now_dt))
+                .filter(agent_session::Column::Id.eq(row.id))
+                .filter(agent_session::Column::Version.eq(row.version))
+                .exec(&self.db)
+                .await
+                .map_err(|error| internal(format!("save manual disposition session: {error}")))?;
+            if result.rows_affected == 1 {
+                return Ok(EventAppend::Appended);
+            }
+        }
+        Ok(EventAppend::Busy)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1342,6 +1405,7 @@ pub struct SessionSnapshot {
     pub active: bool,
     pub request_id: Option<String>,
     pub active_execution_generation: Option<String>,
+    pub unresolved_action: Option<ActionIdentity>,
     pub latest_input_seq: u64,
     pub input_revision: u64,
     pub handled_input_seq: u64,
@@ -1370,11 +1434,16 @@ fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, Agent
         .execution_state
         .waitable_task()
         .map(|action| action.execution_id.clone());
+    let unresolved_action = match &session.execution_state {
+        ExecutionState::OutcomeUnknown { action, .. } => Some(action.clone()),
+        _ => None,
+    };
     Ok(SessionSnapshot {
         seq: row.version,
         active: session.turn_state.is_active(),
         request_id: session.current_request_id,
         active_execution_generation,
+        unresolved_action,
         latest_input_seq: session.latest_input_seq,
         input_revision: session.input_revision,
         handled_input_seq: session.handled_input_seq,
@@ -3346,6 +3415,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stage5_committed_artifact_identity_and_lineage_survive_sqlite_wal_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("stage5-artifact-reopen.db");
+        let first = create_file_store(&path).await;
+        let mut session = first.claim_turn(claim("artifact-turn")).await.unwrap();
+        let artifact = DataEnvelope {
+            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+            envelope_id: "docx-envelope-1".into(),
+            content: ContentRef::Artifact {
+                artifact_id: "docx-artifact-1".into(),
+                sha256: "a".repeat(64),
+                size_bytes: 7,
+                media_type:
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into(),
+            },
+            provenance: DataProvenance {
+                source_provider_id: "file.workspace".into(),
+                source_tool_name: "create_word_report_from_merge_preview".into(),
+                source_object_id: Some("device-1:docx-call-1".into()),
+                source_envelope_ids: vec!["merge-preview-envelope-1".into()],
+            },
+            digest_sha256: "a".repeat(64),
+            sensitivity: Sensitivity::Sensitive,
+            allowed_destinations: Vec::new(),
+            retention: RetentionBoundary {
+                expires_at_unix_ms: None,
+                delete_with_run: false,
+            },
+        };
+        artifact.validate().unwrap();
+        let mut result = desk_diagnose_core::chat::ChatMessage::tool_result(
+            "docx-result-1",
+            "docx-call-1",
+            "typed artifact created",
+        );
+        result.data_envelope = Some(artifact.clone());
+        session.conversation.push(result);
+        session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+        first.save(&mut session).await.unwrap();
+        let db = first.db.clone();
+        drop(first);
+        db.close().await.unwrap();
+
+        let reopened_db = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
+            .await
+            .unwrap();
+        let reopened = SignalAgentSessionStore::new(reopened_db);
+        let resumed = reopened
+            .claim_turn(claim("communication-turn"))
+            .await
+            .unwrap();
+        let restored = resumed
+            .conversation
+            .iter()
+            .filter_map(|message| message.data_envelope.as_ref())
+            .find(|envelope| envelope.envelope_id == "docx-envelope-1")
+            .unwrap();
+        assert_eq!(restored, &artifact);
+        assert!(matches!(
+            restored.content,
+            ContentRef::Artifact {
+                ref artifact_id,
+                ..
+            } if artifact_id == "docx-artifact-1"
+        ));
+        assert_eq!(
+            restored.provenance.source_envelope_ids,
+            vec!["merge-preview-envelope-1"]
+        );
+        reopened.db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn history_is_subject_scoped_and_excludes_other_surfaces() {
         use desk_diagnose_core::chat::{ChatMessage, ChatRole};
 
@@ -3479,6 +3621,76 @@ mod tests {
                 .unwrap(),
             EventAppend::Busy
         );
+    }
+
+    #[tokio::test]
+    async fn manual_unknown_disposition_is_subject_and_identity_fenced() {
+        let store = store().await;
+        let mut session = store.claim_turn(claim("turn-1")).await.unwrap();
+        session
+            .conversation
+            .push(desk_diagnose_core::chat::ChatMessage::tool_result(
+                "unknown-placeholder",
+                "call-1",
+                "outcome unknown",
+            ));
+        session.execution_state = ExecutionState::OutcomeUnknown {
+            action: ActionIdentity::new(94, "action-94", "generation-94", WorkKind::ComputerAction),
+            placeholder_message_id: "unknown-placeholder".into(),
+            since: Utc::now().to_rfc3339(),
+        };
+        session.finish_turn(TurnState::Failed, Utc::now().to_rfc3339());
+        store.save(&mut session).await.unwrap();
+
+        assert_eq!(
+            store
+                .manually_dispose_unknown_for_subject(
+                    "conversation-1",
+                    "other-actor",
+                    "device-1",
+                    94,
+                    "generation-94",
+                    &Utc::now().to_rfc3339(),
+                )
+                .await
+                .unwrap(),
+            EventAppend::AlreadyPresent
+        );
+        assert_eq!(
+            store
+                .manually_dispose_unknown_for_subject(
+                    "conversation-1",
+                    "1",
+                    "device-1",
+                    94,
+                    "wrong-generation",
+                    &Utc::now().to_rfc3339(),
+                )
+                .await
+                .unwrap(),
+            EventAppend::AlreadyPresent
+        );
+        assert_eq!(
+            store
+                .manually_dispose_unknown_for_subject(
+                    "conversation-1",
+                    "1",
+                    "device-1",
+                    94,
+                    "generation-94",
+                    &Utc::now().to_rfc3339(),
+                )
+                .await
+                .unwrap(),
+            EventAppend::Appended
+        );
+        let snapshot = store
+            .read_snapshot_for_subject("conversation-1", "1", "device-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(snapshot.unresolved_action.is_none());
+        assert!(snapshot.active_execution_generation.is_none());
     }
 
     #[tokio::test]

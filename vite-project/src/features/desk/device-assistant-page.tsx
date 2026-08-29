@@ -1,7 +1,7 @@
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowLeft, Bot, Check, Eye, LoaderCircle, RefreshCw, Send, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, Bot, Check, Copy, Eye, LoaderCircle, Puzzle, RefreshCw, Send, ShieldCheck, Sparkles, X } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -13,6 +13,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { MarkdownContent } from '@/components/markdown-content';
 import { useListConnections } from '@/services/hooks/connectionController/useListConnections';
 import { useGetModelProvider } from '@/services/hooks/modelProviderController/useGetModelProvider';
+import { useGetBrowserExtensionPairing } from '@/services/hooks/browserExtensionController/useGetBrowserExtensionPairing';
 import { useRestrictedSession } from './restricted-session';
 import { useDeskSignaling } from './use-desk-signaling';
 import {
@@ -92,9 +93,11 @@ function ObservationCard({
 function DeviceAssistantWorkspace({
     deskId,
     stableDeviceId,
+    localPairingAvailable,
 }: {
     deskId: string;
     stableDeviceId: string;
+    localPairingAvailable: boolean;
 }) {
     const { t } = useTranslation();
     const { i18n } = useTranslation();
@@ -112,7 +115,12 @@ function DeviceAssistantWorkspace({
     });
     const capabilities = useDeviceAssistantCapabilities({ deskId, subscribe, sendMessage });
     const provider = useGetModelProvider();
+    const browserPairing = useGetBrowserExtensionPairing({
+        query: { enabled: false, retry: false },
+    });
     const providerConfig = provider.data?.data;
+    const pairing = browserPairing.data?.data;
+    const [pairingCopied, setPairingCopied] = useState(false);
     const [question, setQuestion] = useState('');
     const [selectedCapabilityIds, setSelectedCapabilityIds] = useState<string[]>([]);
     const [permissionSelections, setPermissionSelections] = useState<Record<string, string[]>>({});
@@ -241,6 +249,71 @@ function DeviceAssistantWorkspace({
                 <AlertTitle>{t('pages.deviceAssistant.disclosureTitle')}</AlertTitle>
                 <AlertDescription>{t('pages.deviceAssistant.disclosure')}</AlertDescription>
             </Alert>
+            {localPairingAvailable && (
+                <Card data-testid="browser-extension-pairing">
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2 text-base">
+                            <Puzzle className="h-4 w-4" />
+                            {t('pages.deviceAssistant.browserExtensionTitle')}
+                        </CardTitle>
+                        <CardDescription>
+                            {t('pages.deviceAssistant.browserExtensionDescription')}
+                        </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                        {!pairing && (
+                            <Button
+                                variant="outline"
+                                onClick={() => browserPairing.refetch()}
+                                disabled={browserPairing.isFetching}
+                            >
+                                {browserPairing.isFetching && (
+                                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+                                )}
+                                {t('pages.deviceAssistant.browserExtensionShowCode')}
+                            </Button>
+                        )}
+                        {browserPairing.isError && (
+                            <Alert variant="destructive">
+                                <AlertDescription>
+                                    {t('pages.deviceAssistant.browserExtensionUnavailable')}
+                                </AlertDescription>
+                            </Alert>
+                        )}
+                        {pairing && (
+                            <div className="space-y-2">
+                                <div className="flex gap-2">
+                                    <Input
+                                        aria-label={t('pages.deviceAssistant.browserExtensionPairingCode')}
+                                        readOnly
+                                        value={pairing.pairing_code}
+                                        className="font-mono text-xs"
+                                    />
+                                    <Button
+                                        variant="outline"
+                                        size="icon"
+                                        aria-label={t('pages.deviceAssistant.browserExtensionCopyCode')}
+                                        onClick={async () => {
+                                            await navigator.clipboard.writeText(pairing.pairing_code);
+                                            setPairingCopied(true);
+                                        }}
+                                    >
+                                        {pairingCopied
+                                            ? <Check className="h-4 w-4" />
+                                            : <Copy className="h-4 w-4" />}
+                                    </Button>
+                                </div>
+                                <p className="break-all text-xs text-muted-foreground">
+                                    {t('pages.deviceAssistant.browserExtensionBridge', {
+                                        bridge: pairing.bridge_url,
+                                        version: pairing.extension_version,
+                                    })}
+                                </p>
+                            </div>
+                        )}
+                    </CardContent>
+                </Card>
+            )}
             <Card data-testid="device-assistant-context-selector">
                 <CardHeader>
                     <CardTitle className="text-base">{t('pages.deviceAssistant.contextTitle')}</CardTitle>
@@ -382,6 +455,28 @@ function DeviceAssistantWorkspace({
                                     </div>
                                 ))}
                             </div>
+                        </div>
+                    )}
+                    {chat.unresolvedOutcome && (
+                        <div data-testid="device-assistant-outcome-unknown" className="space-y-3 rounded-md border border-amber-500/50 bg-amber-500/5 p-3">
+                            <div>
+                                <p className="text-sm font-medium">{t('pages.deviceAssistant.outcomeUnknownTitle')}</p>
+                                <p className="text-xs text-muted-foreground">
+                                    {t('pages.deviceAssistant.outcomeUnknownDescription')}
+                                </p>
+                            </div>
+                            <p className="break-all text-xs text-muted-foreground">
+                                {chat.unresolvedOutcome.workKind} · work {chat.unresolvedOutcome.workId} · {chat.unresolvedOutcome.executionId}
+                            </p>
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={chat.outcomeDisposing}
+                                onClick={() => void chat.disposeUnknownOutcome()}
+                            >
+                                {chat.outcomeDisposing && <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />}
+                                {t('pages.deviceAssistant.outcomeUnknownDispose')}
+                            </Button>
                         </div>
                     )}
                     {chat.backgroundTasks.length > 0 && (
@@ -946,6 +1041,7 @@ export default function DeviceAssistantPage() {
             <DeviceAssistantWorkspace
                 deskId={deskId}
                 stableDeviceId={connection.version_info.client_id ?? connection.device_id ?? deskId}
+                localPairingAvailable={!connection.device_id}
             />
         </div>
     );

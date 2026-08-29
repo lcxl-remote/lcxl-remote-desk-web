@@ -1,0 +1,39 @@
+{
+    "manifest_version": 3,
+    "name": "__MSG_extensionName__",
+    "description": "__MSG_extensionDescription__",
+    "default_locale": "en",
+    "version": "0.1.0",
+    "minimum_chrome_version": "120",
+    "permissions": ["storage", "alarms", "activeTab", "scripting"],
+    "host_permissions": [
+        "https://mail.google.com/*",
+        "https://app.slack.com/*",
+        "https://*.slack.com/*",
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+    ],
+    "optional_host_permissions": ["https://*/*"],
+    "background": {
+        "service_worker": "src/service-worker.js",
+        "type": "module"
+    },
+    "action": {
+        "default_title": "__MSG_extensionName__",
+        "default_popup": "src/popup.html"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://mail.google.com/*",
+                "https://app.slack.com/*",
+                "https://*.slack.com/*",
+                "http://127.0.0.1/*",
+                "http://localhost/*"
+            ],
+            "js": ["src/content-script.js"],
+            "run_at": "document_idle",
+            "all_frames": false
+        }
+    ]
+}

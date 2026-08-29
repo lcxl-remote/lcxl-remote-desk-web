@@ -482,13 +482,14 @@ impl WorkerManager {
 
         let (ipc_cmd_tx, ipc_cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
 
-        let (config_json, ipc_token, log_dir) = {
+        let (config_json, ipc_token, log_dir, data_dir) = {
             let settings = self.settings.read().await;
             let json = serde_json::to_string(&*settings)
                 .map_err(|e| format!("Failed to serialize settings: {e}"))?;
             let token = settings.system.tauri_ipc_token.clone();
             let log_dir = settings.paths().log_dir().to_string_lossy().into_owned();
-            (json, token, log_dir)
+            let data_dir = settings.paths().data_root().to_string_lossy().into_owned();
+            (json, token, log_dir, data_dir)
         };
 
         // Daemon-side host-upstream endpoint that the worker's Forwarder hub
@@ -504,6 +505,7 @@ impl WorkerManager {
         let desktop_c = desktop_name.clone();
         let config_c = config_json.clone();
         let log_dir_c = log_dir.clone();
+        let data_dir_c = data_dir.clone();
         let host_upstream_url_c = host_upstream_url.clone();
         let ipc_token_c = ipc_token.clone();
         let mgr_c = self.clone();
@@ -523,6 +525,7 @@ impl WorkerManager {
                 desktop_c,
                 config_c,
                 log_dir_c,
+                data_dir_c,
                 ipc_cmd_rx,
                 worker_msg_tx,
                 mgr_c,
@@ -616,12 +619,13 @@ impl WorkerManager {
         let pipe_name = format!("inprocess-{session_id}-{}", uuid::Uuid::new_v4());
         let (ipc_cmd_tx, mut ipc_cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
 
-        let (config_json, log_dir) = {
+        let (config_json, log_dir, data_dir) = {
             let s = self.settings.read().await;
             let json = serde_json::to_string(&*s)
                 .map_err(|e| format!("Failed to serialize settings: {e}"))?;
             let log_dir = s.paths().log_dir().to_string_lossy().into_owned();
-            (json, log_dir)
+            let data_dir = s.paths().data_root().to_string_lossy().into_owned();
+            (json, log_dir, data_dir)
         };
 
         let remote_access_state = self.remote_access_state();
@@ -631,6 +635,7 @@ impl WorkerManager {
             desktop_name: desktop_name.clone(),
             config_json,
             log_dir: Some(log_dir),
+            data_dir: Some(data_dir),
             signaling_url: None,
             // No upstream WS — the worker shares the daemon's hub via
             // the `shared_hub` parameter to `run_with_transports`.

@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { QueryLogSettingsQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryResult } from "@tanstack/react-query";
-import { queryLogSettings } from "../../clients.ts";
+import type { QueryLogSettingsQueryResponse } from "../../types.ts";
 import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
+import { queryLogSettings } from "../../clients.ts";
 
 export const queryLogSettingsSuspenseQueryKey = () => [{ url: '/api/desk/settings/log' }] as const
 

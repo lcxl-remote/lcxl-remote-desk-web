@@ -6,6 +6,8 @@
 //! select an arbitrary SQLite row.
 
 use actix_web::{HttpResponse, get, post, web};
+use desk_agent_protocol::computer_use::{ComputerActionCompleted, ComputerActionOutput};
+use desk_agent_protocol::data_lineage::{ContentRef, DataEnvelope};
 use desk_agent_protocol::device_assistant::DeviceAssistantAsk;
 use desk_diagnose_core::chat::ChatMessage;
 use desk_diagnose_core::context_attachment::{
@@ -21,6 +23,7 @@ use desk_signal_facade::model::{
 };
 use desk_utils::{error::DeskErrorCode, rest::RestResponse};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use utoipa::ToSchema;
 
 use crate::agent_session_store::{PermissionGrantIssuanceContext, SignalAgentSessionStore};
@@ -28,6 +31,9 @@ use crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
 use crate::error::DeskSignalError;
 
 pub const TAG: &str = "DeviceAssistantSession";
+const EVIDENCE_SUMMARY_SCHEMA_VERSION: u16 = 1;
+const MAX_EVIDENCE_NODES: usize = 128;
+const MAX_EVIDENCE_RECEIPTS: usize = 32;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct DeviceAssistantSessionQuery {
@@ -72,6 +78,31 @@ pub struct CapabilityGrantRevokeBody {
     pub session: Option<String>,
     pub grant_id: String,
     pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UnknownOutcomeDispositionBody {
+    pub connection: String,
+    pub conversation: Option<String>,
+    pub session: Option<String>,
+    pub work_id: i64,
+    pub execution_id: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UnknownOutcomeDto {
+    pub work_id: i64,
+    pub action_request_id: String,
+    pub execution_id: String,
+    pub work_kind: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UnknownOutcomeDispositionResponse {
+    pub disposed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, ToSchema)]
@@ -312,6 +343,9 @@ pub struct DeviceAssistantSessionSnapshotDto {
     pub request_id: Option<String>,
     /// Running background command generation that may be cancelled.
     pub active_execution_generation: Option<String>,
+    /// Exact unresolved durable action that requires owner disposition before
+    /// another mutation can start. No payload or secret-bearing input is exposed.
+    pub unresolved_outcome: Option<UnknownOutcomeDto>,
     /// Latest durably accepted user input and the model-processing watermark.
     pub latest_input_seq: u64,
     pub input_revision: u64,
@@ -325,11 +359,206 @@ pub struct DeviceAssistantSessionSnapshotDto {
     pub background_tasks: Vec<BackgroundTaskDto>,
     /// Server-issued authority metadata. It never proves a call was dispatched.
     pub capability_grants: Vec<CapabilityGrantDto>,
+    /// Bounded metadata-only lineage graph. It contains no message bodies,
+    /// credentials, cookies, tokens, browser storage or native paths.
+    pub evidence_summary: EvidenceSummaryDto,
     pub messages: Vec<SnapshotMessageDto>,
     /// Durable transcript metadata for context-window changes. No omitted text is exposed.
     pub context_notices: Vec<ContextNoticeDto>,
     /// Durable selection metadata only; no UI tree, cells, files or screenshots.
     pub context_attachments: Vec<ContextAttachmentDto>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceSummaryDto {
+    pub schema_version: u16,
+    pub nodes: Vec<EvidenceNodeDto>,
+    pub artifacts: Vec<EvidenceArtifactDto>,
+    pub handoff_receipts: Vec<EvidenceHandoffReceiptDto>,
+    pub missing_source_envelope_ids: Vec<String>,
+    pub truncated: bool,
+    pub graph_complete: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceNodeDto {
+    pub envelope_id: String,
+    pub content_kind: String,
+    pub content_sha256: Option<String>,
+    pub size_bytes: u64,
+    pub media_type: Option<String>,
+    pub envelope_digest_sha256: String,
+    pub sensitivity: String,
+    pub source_provider_id: String,
+    pub source_tool_name: String,
+    pub source_object_id: Option<String>,
+    pub source_envelope_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceArtifactDto {
+    pub source_envelope_id: String,
+    pub artifact_id: String,
+    pub file_name: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub digest_sha256: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceHandoffReceiptDto {
+    pub source_envelope_id: String,
+    pub handoff_id: String,
+    pub run_id: String,
+    pub surface_kind: String,
+    pub prepared_payload_sha256: String,
+    pub readback_payload_sha256: Option<String>,
+    pub verification: String,
+    pub send_authority: String,
+    pub handed_off_at_unix_ms: u64,
+}
+
+fn enum_wire_name<T: Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn evidence_node(envelope: &DataEnvelope) -> EvidenceNodeDto {
+    let (content_kind, content_sha256, size_bytes, media_type) = match &envelope.content {
+        ContentRef::ImmutableBlob {
+            sha256,
+            size_bytes,
+            media_type,
+            ..
+        } => (
+            "immutable_blob",
+            Some(sha256.clone()),
+            *size_bytes,
+            Some(media_type.clone()),
+        ),
+        ContentRef::Artifact {
+            sha256,
+            size_bytes,
+            media_type,
+            ..
+        } => (
+            "artifact",
+            Some(sha256.clone()),
+            *size_bytes,
+            Some(media_type.clone()),
+        ),
+        ContentRef::EphemeralObservation { size_bytes, .. } => {
+            ("ephemeral_observation", None, *size_bytes, None)
+        }
+    };
+    EvidenceNodeDto {
+        envelope_id: envelope.envelope_id.clone(),
+        content_kind: content_kind.into(),
+        content_sha256,
+        size_bytes,
+        media_type,
+        envelope_digest_sha256: envelope.digest_sha256.clone(),
+        sensitivity: enum_wire_name(&envelope.sensitivity),
+        source_provider_id: envelope.provenance.source_provider_id.clone(),
+        source_tool_name: envelope.provenance.source_tool_name.clone(),
+        source_object_id: envelope.provenance.source_object_id.clone(),
+        source_envelope_ids: envelope.provenance.source_envelope_ids.clone(),
+    }
+}
+
+fn build_evidence_summary(
+    messages: &[ChatMessage],
+    attachments: &[ContextAttachment],
+) -> EvidenceSummaryDto {
+    let mut envelopes = BTreeMap::<String, &DataEnvelope>::new();
+    for attachment in attachments {
+        envelopes
+            .entry(attachment.envelope.envelope_id.clone())
+            .or_insert(&attachment.envelope);
+    }
+    for message in messages {
+        if let Some(envelope) = message.data_envelope.as_ref() {
+            envelopes
+                .entry(envelope.envelope_id.clone())
+                .or_insert(envelope);
+        }
+    }
+    let all_ids = envelopes.keys().cloned().collect::<BTreeSet<_>>();
+    let mut missing = BTreeSet::new();
+    for envelope in envelopes.values() {
+        for source in &envelope.provenance.source_envelope_ids {
+            if !all_ids.contains(source) {
+                missing.insert(source.clone());
+            }
+        }
+    }
+    let truncated = envelopes.len() > MAX_EVIDENCE_NODES;
+    let nodes = envelopes
+        .values()
+        .take(MAX_EVIDENCE_NODES)
+        .map(|envelope| evidence_node(envelope))
+        .collect();
+
+    let mut artifacts = Vec::new();
+    let mut handoff_receipts = Vec::new();
+    for message in messages {
+        let Some(source_envelope_id) = message
+            .data_envelope
+            .as_ref()
+            .map(|envelope| envelope.envelope_id.clone())
+        else {
+            continue;
+        };
+        let Ok(completion) = serde_json::from_str::<ComputerActionCompleted>(&message.text) else {
+            continue;
+        };
+        match completion.output {
+            Some(ComputerActionOutput::FileArtifact(artifact))
+                if artifact.validate().is_ok() && artifacts.len() < MAX_EVIDENCE_RECEIPTS =>
+            {
+                artifacts.push(EvidenceArtifactDto {
+                    source_envelope_id,
+                    artifact_id: artifact.file.token,
+                    file_name: artifact.file_name,
+                    media_type: artifact.media_type,
+                    size_bytes: artifact.size_bytes,
+                    digest_sha256: artifact.digest_sha256,
+                });
+            }
+            Some(ComputerActionOutput::CommunicationHandoff(handoff))
+                if handoff.validate().is_ok() && handoff_receipts.len() < MAX_EVIDENCE_RECEIPTS =>
+            {
+                handoff_receipts.push(EvidenceHandoffReceiptDto {
+                    source_envelope_id,
+                    handoff_id: handoff.handoff_id,
+                    run_id: handoff.run_id,
+                    surface_kind: enum_wire_name(&handoff.surface.kind),
+                    prepared_payload_sha256: handoff.prepared_payload_sha256,
+                    readback_payload_sha256: handoff.readback_payload_sha256,
+                    verification: enum_wire_name(&handoff.verification),
+                    send_authority: enum_wire_name(&handoff.send_authority),
+                    handed_off_at_unix_ms: handoff.handed_off_at_unix_ms,
+                });
+            }
+            _ => {}
+        }
+    }
+    let missing_source_envelope_ids = missing.into_iter().collect::<Vec<_>>();
+    EvidenceSummaryDto {
+        schema_version: EVIDENCE_SUMMARY_SCHEMA_VERSION,
+        nodes,
+        artifacts,
+        handoff_receipts,
+        graph_complete: !truncated && missing_source_envelope_ids.is_empty(),
+        missing_source_envelope_ids,
+        truncated,
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -663,12 +892,22 @@ pub async fn get_device_assistant_session(
                     &format!("load capability grants: {error}"),
                 )
             })?;
+            let evidence_summary =
+                build_evidence_summary(&snapshot.messages, &snapshot.context_attachments);
             Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
                 DeviceAssistantSessionSnapshotDto {
                     seq: snapshot.seq,
                     active: snapshot.active,
                     request_id: snapshot.request_id,
                     active_execution_generation: snapshot.active_execution_generation,
+                    unresolved_outcome: snapshot.unresolved_action.map(|action| {
+                        UnknownOutcomeDto {
+                            work_id: action.work_id,
+                            action_request_id: action.action_request_id,
+                            execution_id: action.execution_id,
+                            work_kind: action.kind.as_str().to_string(),
+                        }
+                    }),
                     latest_input_seq: snapshot.latest_input_seq,
                     input_revision: snapshot.input_revision,
                     handled_input_seq: snapshot.handled_input_seq,
@@ -680,6 +919,7 @@ pub async fn get_device_assistant_session(
                         .collect(),
                     background_tasks: background_tasks.into_iter().map(Into::into).collect(),
                     capability_grants: capability_grants.into_iter().map(Into::into).collect(),
+                    evidence_summary,
                     messages: snapshot
                         .messages
                         .into_iter()
@@ -705,6 +945,124 @@ pub async fn get_device_assistant_session(
         }
         None => Ok(not_accessible()),
     }
+}
+
+#[utoipa::path(
+    tag = TAG,
+    summary = "Manually dispose one exact unknown Device Assistant action",
+    request_body = UnknownOutcomeDispositionBody,
+    responses((status = 200, description = "Owner disposition recorded; no retry or grant restoration occurs", body = RestResponse<UnknownOutcomeDispositionResponse>)),
+)]
+#[post("/my/device-assistant-session/outcome-unknown/dispose")]
+pub async fn dispose_device_assistant_unknown_outcome(
+    connection_map: web::Data<SharedConnectionMap>,
+    body: web::Json<UnknownOutcomeDispositionBody>,
+) -> Result<HttpResponse, DeskSignalError> {
+    let target_audience = {
+        let map = connection_map.read().await;
+        let Some(target) = map.get(&body.connection) else {
+            return Ok(not_accessible());
+        };
+        if target.auth_context.auth_kind != AuthKind::TokenAuth
+            || target.auth_context.remote_desk_type != RemoteDeskTypeEnum::Server
+        {
+            return Ok(not_accessible());
+        }
+        match target.model.version_info.client_id.as_deref() {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => return Ok(not_accessible()),
+        }
+    };
+    let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
+    let session_id = match (
+        body.session.as_deref().filter(|value| !value.is_empty()),
+        body.conversation.as_deref(),
+    ) {
+        (Some(session_id), _) => session_id.to_string(),
+        (None, Some(conversation)) => {
+            derive_conversation_key(&actor_id, &target_audience, Some(conversation), "")
+        }
+        (None, None) => return Ok(not_accessible()),
+    };
+    let session_store = SignalAgentSessionStore::new(crate::db::get_db().clone());
+    let Some(snapshot) = session_store
+        .read_snapshot_for_subject(&session_id, &actor_id, &target_audience)
+        .await
+        .map_err(|error| {
+            DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
+        })?
+    else {
+        return Ok(not_accessible());
+    };
+    if !snapshot.unresolved_action.as_ref().is_some_and(|action| {
+        action.work_id == body.work_id && action.execution_id == body.execution_id
+    }) {
+        return Err(DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "the exact unknown action is no longer pending disposition",
+        ));
+    }
+
+    let now_dt = chrono::Utc::now();
+    let now_unix_ms = u64::try_from(now_dt.timestamp_millis()).map_err(|_| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "system clock predates Unix epoch",
+        )
+    })?;
+    use crate::capability_grant_store::CapabilityManualDispositionResult;
+    match crate::capability_grant_store::SignalCapabilityGrantStore::new(
+        crate::db::get_db().clone(),
+    )
+    .manually_dispose_unknown_for_subject(
+        body.work_id,
+        &body.execution_id,
+        &session_id,
+        &actor_id,
+        &target_audience,
+        now_unix_ms,
+    )
+    .await
+    .map_err(|error| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::SYSTEM_ERROR,
+            &format!("record unknown-action disposition: {error}"),
+        )
+    })? {
+        CapabilityManualDispositionResult::Applied
+        | CapabilityManualDispositionResult::AlreadyResolved => {}
+        CapabilityManualDispositionResult::SubjectMismatch
+        | CapabilityManualDispositionResult::StateMismatch => {
+            return Err(DeskSignalError::new_custom_error(
+                DeskErrorCode::PRECONDITION_FAILED,
+                "the exact unknown action cannot be manually disposed",
+            ));
+        }
+    }
+
+    let now = now_dt.to_rfc3339();
+    let disposition = session_store
+        .manually_dispose_unknown_for_subject(
+            &session_id,
+            &actor_id,
+            &target_audience,
+            body.work_id,
+            &body.execution_id,
+            &now,
+        )
+        .await
+        .map_err(|error| {
+            DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
+        })?;
+    if disposition == crate::agent_session_store::EventAppend::Busy {
+        return Err(DeskSignalError::new_custom_error(
+            DeskErrorCode::ACTION_NEED_RETRY,
+            "the conversation is still active; retry the disposition",
+        ));
+    }
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
+        UnknownOutcomeDispositionResponse { disposed: true },
+    )))
 }
 
 #[utoipa::path(
@@ -1134,6 +1492,76 @@ mod tests {
         let value = serde_json::to_value(SnapshotMessageDto::from(completion)).unwrap();
         assert_eq!(value["backgroundTaskId"], "task-1");
         assert!(value.get("background_task_id").is_none());
+    }
+
+    #[test]
+    fn evidence_summary_is_bounded_metadata_only_and_checks_graph_integrity() {
+        fn envelope(id: &str, sources: Vec<String>, digest: char) -> DataEnvelope {
+            DataEnvelope {
+                schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+                envelope_id: id.into(),
+                content: ContentRef::ImmutableBlob {
+                    blob_id: format!("{id}-blob"),
+                    sha256: digest.to_string().repeat(64),
+                    size_bytes: 7,
+                    media_type: "application/json".into(),
+                },
+                provenance: DataProvenance {
+                    source_provider_id: "test.provider".into(),
+                    source_tool_name: "test_tool".into(),
+                    source_object_id: None,
+                    source_envelope_ids: sources,
+                },
+                digest_sha256: digest.to_string().repeat(64),
+                sensitivity: Sensitivity::Sensitive,
+                allowed_destinations: Vec::new(),
+                retention: RetentionBoundary {
+                    expires_at_unix_ms: None,
+                    delete_with_run: false,
+                },
+            }
+        }
+
+        let mut user = ChatMessage::text(
+            "user-1",
+            ChatRole::User,
+            "SECRET BODY C:\\private\\report.docx",
+        );
+        user.data_envelope = Some(envelope("user-envelope", Vec::new(), 'a'));
+        let mut result = ChatMessage::tool_result(
+            "result-1",
+            "call-1",
+            "SECRET TOOL OUTPUT C:\\private\\report.docx",
+        );
+        result.data_envelope = Some(envelope(
+            "result-envelope",
+            vec!["user-envelope".into()],
+            'b',
+        ));
+
+        let summary = build_evidence_summary(&[user, result], &[]);
+        assert!(summary.graph_complete);
+        assert!(!summary.truncated);
+        assert_eq!(summary.nodes.len(), 2);
+        assert!(summary.missing_source_envelope_ids.is_empty());
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(!json.contains("SECRET"));
+        assert!(!json.contains("private"));
+
+        let orphan = ChatMessage {
+            data_envelope: Some(envelope(
+                "orphan-envelope",
+                vec!["missing-envelope".into()],
+                'c',
+            )),
+            ..ChatMessage::text("orphan", ChatRole::Assistant, "hidden")
+        };
+        let incomplete = build_evidence_summary(&[orphan], &[]);
+        assert!(!incomplete.graph_complete);
+        assert_eq!(
+            incomplete.missing_source_envelope_ids,
+            vec!["missing-envelope"]
+        );
     }
 
     #[test]

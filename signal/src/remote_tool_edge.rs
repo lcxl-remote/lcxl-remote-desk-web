@@ -157,13 +157,35 @@ fn gmail_exact_form_readback(
     {
         return false;
     }
-    match to.kind {
-        BrowserFormReadbackKind::ControlValue => true,
-        BrowserFormReadbackKind::CommittedText => {
-            to.container_element_id.is_some()
-                && to.container_element_id == subject.container_element_id
-        }
+    let Some(container) = to.container_element_id.as_deref() else {
+        return false;
+    };
+    if subject.container_element_id.as_deref() != Some(container)
+        || body.container_element_id.as_deref() != Some(container)
+    {
+        return false;
     }
+    matches!(
+        to.kind,
+        BrowserFormReadbackKind::ControlValue | BrowserFormReadbackKind::CommittedText
+    )
+}
+
+fn gmail_exact_attachment_readback(
+    result: &BrowserActionResult,
+    gmail: &GmailWebDraftHandoffInput,
+) -> bool {
+    let Some(attachment) = &gmail.attachment else {
+        return result.outcome
+            == desk_agent_protocol::browser_control::BrowserActionOutcome::FormFilled;
+    };
+    result.outcome == desk_agent_protocol::browser_control::BrowserActionOutcome::FormFilledWithFile
+        && result.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.elements.iter().any(|element| {
+                element.accessible_name == attachment.artifact.file_name
+                    || element.value.as_deref() == Some(attachment.artifact.file_name.as_str())
+            })
+        })
 }
 
 fn slack_exact_form_readback(
@@ -3206,23 +3228,38 @@ impl SignalDeviceAssistantTools {
                     .map_err(|error| decode(&error.to_string()))?;
                 args.validate()
                     .map_err(|error| decode(&error.to_string()))?;
-                BrowserAction::FillForm {
-                    page: args.page,
-                    fields: vec![
-                        BrowserFormField {
-                            element: args.to_field,
-                            value: args.draft.recipients[0].address.clone(),
-                        },
-                        BrowserFormField {
-                            element: args.subject_field,
-                            value: args.draft.subject,
-                        },
-                        BrowserFormField {
-                            element: args.body_field,
-                            value: args.draft.body_plain_text,
-                        },
-                    ],
-                    mutation_class: BrowserMutationClass::WriteExternalDraft,
+                let fields = vec![
+                    BrowserFormField {
+                        element: args.to_field,
+                        value: args.draft.recipients[0].address.clone(),
+                    },
+                    BrowserFormField {
+                        element: args.subject_field,
+                        value: args.draft.subject,
+                    },
+                    BrowserFormField {
+                        element: args.body_field,
+                        value: args.draft.body_plain_text,
+                    },
+                ];
+                match args.attachment {
+                    Some(attachment) => BrowserAction::FillFormAndUpload {
+                        page: args.page,
+                        fields,
+                        upload_element: attachment.element,
+                        file: attachment.artifact.file,
+                        content: attachment.artifact.content,
+                        file_name: attachment.artifact.file_name,
+                        media_type: attachment.artifact.media_type,
+                        size_bytes: attachment.artifact.size_bytes,
+                        digest_sha256: attachment.artifact.digest_sha256,
+                        mutation_class: BrowserMutationClass::WriteExternalDraft,
+                    },
+                    None => BrowserAction::FillForm {
+                        page: args.page,
+                        fields,
+                        mutation_class: BrowserMutationClass::WriteExternalDraft,
+                    },
                 }
             }
             "browser_activate_element" => {
@@ -3934,8 +3971,7 @@ impl SignalDeviceAssistantTools {
             browser_result
                 .as_ref()
                 .and_then(|result| {
-                    (result.outcome
-                        == desk_agent_protocol::browser_control::BrowserActionOutcome::FormFilled
+                    (gmail_exact_attachment_readback(result, gmail)
                         && result.page.adapter == gmail.page.adapter
                         && result.page.page_id == gmail.page.page_id
                         && result.page.page_incarnation == gmail.page.page_incarnation
@@ -5495,6 +5531,16 @@ impl ToolSeam for SignalDeviceAssistantTools {
             .expect("registered capability has a provider");
         let (size_bytes, digest_sha256) = tool_output_fingerprint(output)?;
         let browser_result = call.name.starts_with("browser_");
+        let created_artifact = serde_json::from_str::<ComputerActionCompleted>(&output.content)
+            .ok()
+            .and_then(|completion| match completion.output {
+                Some(ComputerActionOutput::FileArtifact(artifact))
+                    if artifact.validate().is_ok() =>
+                {
+                    Some(artifact)
+                }
+                _ => None,
+            });
         let observed_at_unix_ms =
             u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
                 error(
@@ -5508,6 +5554,14 @@ impl ToolSeam for SignalDeviceAssistantTools {
         let envelope = DataEnvelope {
             schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
             envelope_id: format!("mutation-result-{}", uuid::Uuid::new_v4()),
+            // This envelope labels the exact tool-result bytes sent back to the
+            // model, not the artifact bytes themselves.  A created artifact is
+            // represented inside those result bytes by its typed immutable
+            // ContentRef; binding the surrounding message directly to that
+            // ContentRef would make the sink compare metadata JSON length and
+            // digest with the file length and digest.  Keep the model-facing
+            // result as an exact immutable blob and let artifact-consuming
+            // mutations resolve lineage from the typed result below.
             content: if browser_result {
                 ContentRef::EphemeralObservation {
                     observation_id: format!("browser-result-{}", uuid::Uuid::new_v4()),
@@ -5525,7 +5579,10 @@ impl ToolSeam for SignalDeviceAssistantTools {
             provenance: DataProvenance {
                 source_provider_id: provider.wire.provider_id.clone(),
                 source_tool_name: call.name.clone(),
-                source_object_id: Some(format!("{}:{}", self.target_device_id, call.id)),
+                source_object_id: created_artifact
+                    .as_ref()
+                    .map(|artifact| format!("artifact:{}", artifact.file.token))
+                    .or_else(|| Some(format!("{}:{}", self.target_device_id, call.id))),
                 source_envelope_ids: Vec::new(),
             },
             digest_sha256,
@@ -5533,9 +5590,16 @@ impl ToolSeam for SignalDeviceAssistantTools {
             // Effect authorization is not ExportData authorization. The model
             // egress projector must authorize the exact resolved destination.
             allowed_destinations: Vec::new(),
-            retention: RetentionBoundary {
-                expires_at_unix_ms: browser_result.then_some(expires_at_unix_ms),
-                delete_with_run: true,
+            retention: if created_artifact.is_some() {
+                RetentionBoundary {
+                    expires_at_unix_ms: None,
+                    delete_with_run: false,
+                }
+            } else {
+                RetentionBoundary {
+                    expires_at_unix_ms: browser_result.then_some(expires_at_unix_ms),
+                    delete_with_run: true,
+                }
             },
         };
         envelope.validate().map_err(|error_value| {
@@ -5968,6 +6032,7 @@ mod tests {
                 "to_field": to_field,
                 "subject_field": field("subject-1", "Subject"),
                 "body_field": field("body-1", "Message Body"),
+                "attachment": null,
                 "draft": {
                     "schema_version": desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION,
                     "recipients": [{"role": "to", "address": "alice@example.com", "display_name": null}],
@@ -5991,6 +6056,52 @@ mod tests {
                 && fields[0].value == "alice@example.com"
                 && fields[1].value == "Stage 5 Gmail verification"
                 && fields[2].value == "Semantic draft only; do not send."
+        ));
+
+        let mut attachment_arguments: serde_json::Value =
+            serde_json::from_str(&call.arguments_json).unwrap();
+        attachment_arguments["attachment"] = serde_json::json!({
+            "element": field("attachment-1", "Attach files"),
+            "artifact": {
+                "file": {
+                    "token": "artifact-token-1",
+                    "snapshot_id": "artifact-snapshot-1",
+                    "object_kind": "file",
+                    "expires_at": "2026-08-29T06:00:00Z"
+                },
+                "file_name": "report.docx",
+                "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "size_bytes": 7,
+                "digest_sha256": "a".repeat(64),
+                "content": {
+                    "kind": "artifact",
+                    "artifact_id": "artifact-token-1",
+                    "sha256": "a".repeat(64),
+                    "size_bytes": 7,
+                    "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                }
+            }
+        });
+        attachment_arguments["draft"]["attachment_labels"] = serde_json::json!(["report.docx"]);
+        let attachment_call = ToolCall {
+            id: "model-call-with-attachment".into(),
+            name: "prepare_gmail_web_draft_handoff".into(),
+            arguments_json: attachment_arguments.to_string(),
+        };
+        let attachment_request = SignalDeviceAssistantTools::browser_action_from_call(
+            &attachment_call,
+            "server-call-with-attachment",
+        )
+        .unwrap();
+        assert!(matches!(
+            attachment_request.action,
+            BrowserAction::FillFormAndUpload {
+                fields,
+                file_name,
+                size_bytes: 7,
+                mutation_class: BrowserMutationClass::WriteExternalDraft,
+                ..
+            } if fields.len() == 3 && file_name == "report.docx"
         ));
 
         let input: GmailWebDraftHandoffInput = serde_json::from_str(&call.arguments_json).unwrap();
@@ -6043,7 +6154,7 @@ mod tests {
                     &input.body_field,
                     input.draft.body_plain_text.as_str(),
                     input.body_field.element_id.as_str(),
-                    None,
+                    Some("compose-form"),
                     BrowserFormReadbackKind::ControlValue,
                 ),
             ],
@@ -6052,8 +6163,39 @@ mod tests {
         result.validate().unwrap();
         assert!(gmail_exact_form_readback(&result, &input));
 
+        let attachment_input: GmailWebDraftHandoffInput =
+            serde_json::from_str(&attachment_call.arguments_json).unwrap();
+        let mut attachment_result = result.clone();
+        attachment_result.outcome =
+            desk_agent_protocol::browser_control::BrowserActionOutcome::FormFilledWithFile;
+        let snapshot = attachment_result.snapshot.as_mut().unwrap();
+        snapshot.elements.push(BrowserElementRef {
+            page_id: snapshot.page.page_id.clone(),
+            page_incarnation: snapshot.page.page_incarnation.clone(),
+            document_revision: snapshot.page.document_revision,
+            element_id: "attachment-chip-1".into(),
+            role: BrowserElementRole::Generic,
+            accessible_name: "report.docx".into(),
+            value: None,
+            element_revision: 1,
+        });
+        attachment_result.validate().unwrap();
+        assert!(gmail_exact_attachment_readback(
+            &attachment_result,
+            &attachment_input
+        ));
+        attachment_result.snapshot.as_mut().unwrap().elements[0].accessible_name =
+            "different.docx".into();
+        assert!(!gmail_exact_attachment_readback(
+            &attachment_result,
+            &attachment_input
+        ));
+
         let mut wrong_container = result;
         wrong_container.form_readback[0].container_element_id = Some("other-form".into());
+        assert!(!gmail_exact_form_readback(&wrong_container, &input));
+        wrong_container.form_readback[0].container_element_id = Some("compose-form".into());
+        wrong_container.form_readback[2].container_element_id = Some("other-form".into());
         assert!(!gmail_exact_form_readback(&wrong_container, &input));
     }
 

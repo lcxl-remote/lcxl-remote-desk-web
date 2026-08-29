@@ -1,4 +1,5 @@
 pub mod api_token;
+pub mod browser_extension;
 pub mod connection;
 pub mod host_readiness;
 pub mod info;

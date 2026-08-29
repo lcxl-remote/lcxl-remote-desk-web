@@ -1,0 +1,17 @@
+{
+    "extensionName": { "message": "LCXL 浏览器助手" },
+    "extensionDescription": { "message": "将本机 LCXL AI 助手连接到用户明确允许的浏览器页面。" },
+    "bridgeUrlLabel": { "message": "本机桥地址" },
+    "pairingCodeLabel": { "message": "配对码" },
+    "pairButton": { "message": "配对这个浏览器" },
+    "allowSiteButton": { "message": "允许当前站点" },
+    "connection_connecting": { "message": "正在连接 LCXL…" },
+    "connection_connected": { "message": "已连接 LCXL" },
+    "connection_disconnected": { "message": "尚未连接" },
+    "pairingCodeRequired": { "message": "请输入 LCXL 显示的配对码。" },
+    "pairingSaved": { "message": "已保存，扩展正在连接这台设备。" },
+    "noActivePage": { "message": "没有可用的活动网页。" },
+    "httpsOnly": { "message": "只能添加 HTTPS 站点。" },
+    "siteDenied": { "message": "未授予站点访问权限。" },
+    "siteAllowed": { "message": "已允许 $SITE$。", "placeholders": { "site": { "content": "$1" } } }
+}

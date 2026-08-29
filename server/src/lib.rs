@@ -38,6 +38,7 @@ use crate::telemetry::TelemetryGuards;
 use crate::{
     controller::{
         api_token::create_token,
+        browser_extension::get_browser_extension_pairing,
         connection::verify_connection,
         host_readiness::{authorize_wayland, cancel_wayland, request_macos_permissions},
         info::{query_backend_info, query_macos_autologin, query_server_info, query_sysinfo},
@@ -88,8 +89,8 @@ use desk_signal::{
         connection::list_connections,
         device_assistant_session::{
             cancel_device_assistant_background_task, decide_device_assistant_permission,
-            get_device_assistant_session, list_device_assistant_sessions,
-            revoke_device_assistant_capability_grant,
+            dispose_device_assistant_unknown_outcome, get_device_assistant_session,
+            list_device_assistant_sessions, revoke_device_assistant_capability_grant,
         },
         device_code::{
             batch_delete_device_codes, create_device_code, delete_device_code, list_device_codes,
@@ -249,6 +250,7 @@ pub fn configure_api_surface(
                 if opts.include_signaling {
                     cfg.service(create_token)
                         .service(get_device_assistant_session)
+                        .service(dispose_device_assistant_unknown_outcome)
                         .service(decide_device_assistant_permission)
                         .service(revoke_device_assistant_capability_grant)
                         .service(cancel_device_assistant_background_task)
@@ -257,6 +259,7 @@ pub fn configure_api_surface(
             })
             .service(
                 utoipa_actix_web::scope("/desk")
+                    .service(get_browser_extension_pairing)
                     .service(query_settings)
                     .service(update_settings)
                     .service(query_ai_policy_settings)

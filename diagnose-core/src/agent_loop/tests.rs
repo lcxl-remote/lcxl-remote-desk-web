@@ -1914,6 +1914,7 @@ struct ScriptedTools {
     waits: RefCell<std::collections::VecDeque<WaitOutcome>>,
     wait_calls: Rc<RefCell<Vec<String>>>,
     mutation_envelope_inputs: Rc<RefCell<Vec<String>>>,
+    mutation_envelopes: RefCell<std::collections::VecDeque<Option<DataEnvelope>>>,
 }
 #[async_trait(?Send)]
 impl ToolSeam for ScriptedTools {
@@ -1944,7 +1945,11 @@ impl ToolSeam for ScriptedTools {
         self.mutation_envelope_inputs
             .borrow_mut()
             .push(output.content.clone());
-        Ok(None)
+        Ok(self
+            .mutation_envelopes
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or(None))
     }
     async fn ack_delivery(&self, event_id: &str) -> Result<(), AgentError> {
         self.acks.borrow_mut().push(event_id.to_string());
@@ -2008,6 +2013,7 @@ fn tools_with_waits(execs: Vec<ExecOutcome>, waits: Vec<WaitOutcome>) -> Scripte
         waits: RefCell::new(waits.into()),
         wait_calls: Rc::new(RefCell::new(vec![])),
         mutation_envelope_inputs: Rc::new(RefCell::new(vec![])),
+        mutation_envelopes: RefCell::new(std::collections::VecDeque::new()),
     }
 }
 
@@ -2671,7 +2677,7 @@ async fn executed_keys_the_result_message_on_the_delivery_id() {
 #[tokio::test]
 async fn mutating_rejected_skips_remaining_in_turn() {
     let sess = MemSession::default();
-    let two = ModelTurn {
+    let mut two = ModelTurn {
         stop_reason: StopReason::ToolUse,
         tool_calls: vec![
             ToolCall {
@@ -2688,6 +2694,33 @@ async fn mutating_rejected_skips_remaining_in_turn() {
         provider_meta: tool_meta(),
         ..Default::default()
     };
+    two.provider_meta.data_envelope = Some(DataEnvelope {
+        schema_version: desk_agent_protocol::data_lineage::DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: "model-output-two-mutations".into(),
+        content: ContentRef::ImmutableBlob {
+            blob_id: "model-output-two-mutations-content".into(),
+            sha256: "a".repeat(64),
+            size_bytes: 1,
+            media_type: "application/json".into(),
+        },
+        provenance: desk_agent_protocol::data_lineage::DataProvenance {
+            source_provider_id: "external-model".into(),
+            source_tool_name: "model-response".into(),
+            source_object_id: None,
+            source_envelope_ids: Vec::new(),
+        },
+        digest_sha256: "a".repeat(64),
+        sensitivity: desk_agent_protocol::data_lineage::Sensitivity::Sensitive,
+        allowed_destinations: vec![
+            desk_agent_protocol::data_lineage::DestinationIdentity::LocalArtifact {
+                workspace_id: "test".into(),
+            },
+        ],
+        retention: desk_agent_protocol::data_lineage::RetentionBoundary {
+            expires_at_unix_ms: None,
+            delete_with_run: false,
+        },
+    });
     let model = ScriptModel {
         turns: RefCell::new([two, answer("ok")].into()),
         requests: Rc::new(RefCell::new(vec![])),
@@ -2722,6 +2755,18 @@ async fn mutating_rejected_skips_remaining_in_turn() {
     assert!(s.conversation[2].text.contains("rejected"));
     assert_eq!(s.conversation[3].tool_call_id.as_deref(), Some("c2"));
     assert!(s.conversation[3].text.contains("not executed"));
+    let skipped_envelope = s.conversation[3]
+        .data_envelope
+        .as_ref()
+        .expect("a skipped tool result stays model-egress labeled");
+    assert_eq!(
+        skipped_envelope.provenance.source_tool_name,
+        "halted_tool_call"
+    );
+    assert_eq!(
+        skipped_envelope.provenance.source_envelope_ids,
+        vec!["model-output-two-mutations"]
+    );
     assert_eq!(s.execution_state, ExecutionState::None);
 }
 
@@ -3098,6 +3143,165 @@ async fn streams_discarded_on_truncated_turn() {
     .unwrap();
     assert_eq!(outcome, LoopOutcome::Truncated);
     assert_eq!(*log.borrow(), vec!["discarded".to_string()]);
+}
+
+#[tokio::test]
+async fn reasoning_only_max_tokens_reports_runtime_budget_configuration_error() {
+    let sess = MemSession::default();
+    let truncated = ModelTurn {
+        stop_reason: StopReason::MaxTokens,
+        provider_meta: ProviderResponseMeta {
+            reasoning_observed: true,
+            reasoning_tokens: Some(8192),
+            ..ProviderResponseMeta::without_reasoning(StopReason::MaxTokens)
+        },
+        ..Default::default()
+    };
+    let model = ScriptModel {
+        turns: RefCell::new([truncated].into()),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "x".into(),
+    };
+    let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "t".to_string();
+    let log = Rc::new(RefCell::new(vec![]));
+    let mut sink = EventLog(log.clone());
+    let error = run_agent_turn(
+        &deps(&sess, &model, &tools, &reg, &clock),
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "q"),
+        &mut sink,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.kind, AgentErrorKind::OutputLimitExceeded);
+    assert!(!error.retryable);
+    assert!(error.message.contains("runtime_max_output_tokens"));
+    assert_eq!(*log.borrow(), vec!["discarded".to_string()]);
+}
+
+#[tokio::test]
+async fn reasoning_only_end_turn_retries_once_with_server_recovery_notice() {
+    let sess = MemSession::default();
+    let reasoning_only = ModelTurn {
+        stop_reason: StopReason::EndTurn,
+        provider_meta: ProviderResponseMeta {
+            reasoning_observed: true,
+            reasoning_tokens: Some(128),
+            ..ProviderResponseMeta::without_reasoning(StopReason::EndTurn)
+        },
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new([reasoning_only, answer("recovered")].into()),
+        requests: requests.clone(),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "x".into(),
+    };
+    let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "t".to_string();
+    let log = Rc::new(RefCell::new(vec![]));
+    let mut sink = EventLog(log.clone());
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &reg, &clock),
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "q"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("recovered".into()));
+    assert_eq!(requests.borrow().len(), 2);
+    assert!(
+        requests.borrow()[1]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("RUNTIME RECOVERY NOTICE"))
+    );
+    assert_eq!(
+        *log.borrow(),
+        vec!["discarded".to_string(), "answer:recovered".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn repeated_reasoning_only_end_turn_fails_after_one_bounded_retry() {
+    let sess = MemSession::default();
+    let reasoning_only = || ModelTurn {
+        stop_reason: StopReason::EndTurn,
+        provider_meta: ProviderResponseMeta {
+            reasoning_observed: true,
+            reasoning_tokens: Some(128),
+            ..ProviderResponseMeta::without_reasoning(StopReason::EndTurn)
+        },
+        ..Default::default()
+    };
+    let model = ScriptModel {
+        turns: RefCell::new([reasoning_only(), reasoning_only()].into()),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "x".into(),
+    };
+    let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "t".to_string();
+    let log = Rc::new(RefCell::new(vec![]));
+    let mut sink = EventLog(log.clone());
+    let error = run_agent_turn(
+        &deps(&sess, &model, &tools, &reg, &clock),
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "q"),
+        &mut sink,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.kind, AgentErrorKind::Internal);
+    assert!(!error.retryable);
+    assert!(error.message.contains("bounded automatic recovery"));
+    assert_eq!(
+        *log.borrow(),
+        vec!["discarded".to_string(), "discarded".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn empty_end_turn_without_reasoning_also_uses_bounded_recovery() {
+    let sess = MemSession::default();
+    let empty = ModelTurn {
+        stop_reason: StopReason::EndTurn,
+        provider_meta: ProviderResponseMeta::without_reasoning(StopReason::EndTurn),
+        ..Default::default()
+    };
+    let model = ScriptModel {
+        turns: RefCell::new([empty, answer("recovered")].into()),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "x".into(),
+    };
+    let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "t".to_string();
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &reg, &clock),
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "q"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("recovered".into()));
 }
 
 #[tokio::test]
@@ -3924,4 +4128,492 @@ async fn unavailable_retry_resumes_existing_history_without_duplicate_user() {
     );
     assert_eq!(stored.conversation.len(), 2);
     assert_eq!(stored.conversation[1].text, "recovered");
+}
+
+#[test]
+fn artifact_consumer_lineage_resolves_a_prior_typed_artifact_result() {
+    use desk_agent_protocol::data_lineage::{
+        DATA_ENVELOPE_SCHEMA_VERSION, DataProvenance, RetentionBoundary, Sensitivity,
+    };
+
+    let mut session = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "t0");
+    let source = DataEnvelope {
+        schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: "artifact-envelope-1".into(),
+        content: ContentRef::ImmutableBlob {
+            blob_id: "artifact-metadata-1".into(),
+            sha256: "c".repeat(64),
+            size_bytes: 10,
+            media_type: "application/json".into(),
+        },
+        provenance: DataProvenance {
+            source_provider_id: "file.provider".into(),
+            source_tool_name: "create_file".into(),
+            source_object_id: None,
+            source_envelope_ids: Vec::new(),
+        },
+        digest_sha256: "a".repeat(64),
+        sensitivity: Sensitivity::Sensitive,
+        allowed_destinations: Vec::new(),
+        retention: RetentionBoundary {
+            expires_at_unix_ms: None,
+            delete_with_run: false,
+        },
+    };
+    let source_text = serde_json::json!({
+        "work_id": "work-1",
+        "action_request_id": "request-1",
+        "execution_generation": "generation-1",
+        "result": "verified",
+        "facts": [],
+        "message": "created",
+        "output": {
+            "kind": "file_artifact",
+            "value": {
+                "file": {
+                    "token": "artifact-token-1",
+                    "snapshot_id": "snapshot-1",
+                    "object_kind": "file",
+                    "expires_at": "2026-08-29T07:00:00Z"
+                },
+                "file_name": "report.docx",
+                "media_type": "application/test",
+                "size_bytes": 7,
+                "digest_sha256": "a".repeat(64),
+                "content": {
+                    "kind": "artifact",
+                    "artifact_id": "artifact-token-1",
+                    "sha256": "a".repeat(64),
+                    "size_bytes": 7,
+                    "media_type": "application/test"
+                }
+            }
+        }
+    })
+    .to_string();
+    let mut source_message = ChatMessage::tool_result("result-1", "create-1", source_text);
+    source_message.data_envelope = Some(source);
+    session.conversation.push(source_message);
+
+    let call = ToolCall {
+        id: "gmail-1".into(),
+        name: "prepare_gmail_web_draft_handoff".into(),
+        arguments_json: serde_json::json!({
+            "attachment": {"artifact": {"content": {
+                "kind": "artifact",
+                "artifact_id": "artifact-token-1",
+                "sha256": "a".repeat(64),
+                "size_bytes": 7,
+                "media_type": "application/test"
+            }}}
+        })
+        .to_string(),
+    };
+    let mut result = Some(DataEnvelope {
+        schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: "gmail-envelope-1".into(),
+        content: ContentRef::EphemeralObservation {
+            observation_id: "gmail-result-1".into(),
+            size_bytes: 1,
+            expires_at_unix_ms: 2,
+        },
+        provenance: DataProvenance {
+            source_provider_id: "gmail.provider".into(),
+            source_tool_name: call.name.clone(),
+            source_object_id: None,
+            source_envelope_ids: Vec::new(),
+        },
+        digest_sha256: "b".repeat(64),
+        sensitivity: Sensitivity::Sensitive,
+        allowed_destinations: Vec::new(),
+        retention: RetentionBoundary {
+            expires_at_unix_ms: Some(2),
+            delete_with_run: true,
+        },
+    });
+    bind_tool_input_envelopes(&session, &call, &mut result).unwrap();
+    assert_eq!(
+        result.unwrap().provenance.source_envelope_ids,
+        vec!["artifact-envelope-1"]
+    );
+}
+
+#[test]
+fn artifact_producer_lineage_resolves_preview_and_current_requirement() {
+    use desk_agent_protocol::data_lineage::{
+        DATA_ENVELOPE_SCHEMA_VERSION, DataProvenance, RetentionBoundary, Sensitivity,
+    };
+
+    fn envelope(id: &str, provider: &str, tool: &str, digest: char) -> DataEnvelope {
+        DataEnvelope {
+            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+            envelope_id: id.into(),
+            content: ContentRef::ImmutableBlob {
+                blob_id: format!("{id}-blob"),
+                sha256: digest.to_string().repeat(64),
+                size_bytes: 7,
+                media_type: "application/json".into(),
+            },
+            provenance: DataProvenance {
+                source_provider_id: provider.into(),
+                source_tool_name: tool.into(),
+                source_object_id: None,
+                source_envelope_ids: Vec::new(),
+            },
+            digest_sha256: digest.to_string().repeat(64),
+            sensitivity: Sensitivity::Sensitive,
+            allowed_destinations: Vec::new(),
+            retention: RetentionBoundary {
+                expires_at_unix_ms: None,
+                delete_with_run: false,
+            },
+        }
+    }
+
+    let mut session = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "t0");
+    let mut user = ChatMessage::text("user-1", ChatRole::User, "create the report");
+    user.data_envelope = Some(envelope("user-envelope-1", "user", "message", 'a'));
+    session.conversation.push(user);
+    let mut preview = ChatMessage::tool_result(
+        "preview-result-1",
+        "preview-call-1",
+        serde_json::json!({
+            "ReadContext": {
+                "SpreadsheetMergePreview": {"preview_id": "preview-1"}
+            }
+        })
+        .to_string(),
+    );
+    preview.data_envelope = Some(envelope(
+        "preview-envelope-1",
+        "spreadsheet.merge",
+        "preview_spreadsheet_merge",
+        'b',
+    ));
+    session.conversation.push(preview);
+
+    let call = ToolCall {
+        id: "docx-1".into(),
+        name: "create_word_report_from_merge_preview".into(),
+        arguments_json: serde_json::json!({
+            "preview_id": "preview-1",
+            "file_name": "report.docx"
+        })
+        .to_string(),
+    };
+    let mut result = Some(envelope(
+        "docx-envelope-1",
+        "word.document",
+        "create_word_report_from_merge_preview",
+        'c',
+    ));
+    bind_tool_input_envelopes(&session, &call, &mut result).unwrap();
+
+    assert_eq!(
+        result.unwrap().provenance.source_envelope_ids,
+        vec!["preview-envelope-1", "user-envelope-1"]
+    );
+}
+
+#[test]
+fn requested_artifact_projection_restores_only_verbatim_named_typed_artifact() {
+    use desk_agent_protocol::data_lineage::{
+        DATA_ENVELOPE_SCHEMA_VERSION, DestinationIdentity, RetentionBoundary, Sensitivity,
+    };
+
+    fn envelope(id: &str, tool: &str, sensitivity: Sensitivity) -> DataEnvelope {
+        DataEnvelope {
+            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+            envelope_id: id.into(),
+            content: ContentRef::ImmutableBlob {
+                blob_id: format!("{id}-blob"),
+                sha256: "a".repeat(64),
+                size_bytes: 7,
+                media_type: "application/json".into(),
+            },
+            provenance: DataProvenance {
+                source_provider_id: "test".into(),
+                source_tool_name: tool.into(),
+                source_object_id: None,
+                source_envelope_ids: Vec::new(),
+            },
+            digest_sha256: "a".repeat(64),
+            sensitivity,
+            allowed_destinations: vec![DestinationIdentity::Model {
+                connection_id: "gateway:1".into(),
+                connection_revision: 1,
+                model_id: "model".into(),
+                profile_revision: 1,
+            }],
+            retention: RetentionBoundary {
+                expires_at_unix_ms: None,
+                delete_with_run: true,
+            },
+        }
+    }
+
+    let digest = "b".repeat(64);
+    let artifact_json = serde_json::json!({
+        "work_id": "work-1",
+        "action_request_id": "request-1",
+        "execution_generation": "generation-1",
+        "result": "verified",
+        "facts": [],
+        "message": "created",
+        "output": {
+            "kind": "file_artifact",
+            "value": {
+                "file": {
+                    "token": "artifact-token-1",
+                    "snapshot_id": "volume:identity",
+                    "object_kind": "file",
+                    "expires_at": "2030-01-01T00:00:00Z"
+                },
+                "file_name": "stage5_report.docx",
+                "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "size_bytes": 7,
+                "digest_sha256": digest,
+                "content": {
+                    "kind": "artifact",
+                    "artifact_id": "artifact-token-1",
+                    "sha256": "b".repeat(64),
+                    "size_bytes": 7,
+                    "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                }
+            }
+        }
+    });
+    let mut artifact = ChatMessage::tool_result("artifact", "call", artifact_json.to_string());
+    artifact.data_envelope = Some(envelope(
+        "artifact-envelope",
+        "create_word_report_from_merge_preview",
+        Sensitivity::Sensitive,
+    ));
+    let mut user = ChatMessage::text(
+        "user",
+        ChatRole::User,
+        "Attach stage5_report.docx to the manual-only draft",
+    );
+    user.data_envelope = Some(envelope(
+        "user-envelope",
+        "send-message",
+        Sensitivity::UserContent,
+    ));
+
+    let projection =
+        requested_artifact_registry_projection(&[artifact.clone(), user.clone()], "projection")
+            .unwrap()
+            .unwrap();
+    assert!(projection.text.contains("artifact-token-1"));
+    assert!(projection.text.contains("volume:identity"));
+    assert!(!projection.text.contains("C:\\"));
+    let projected_envelope = projection.data_envelope.unwrap();
+    assert_eq!(projected_envelope.sensitivity, Sensitivity::Sensitive);
+    assert!(
+        projected_envelope
+            .provenance
+            .source_envelope_ids
+            .contains(&"user-envelope".to_string())
+    );
+    assert!(
+        projected_envelope
+            .provenance
+            .source_envelope_ids
+            .contains(&"artifact-envelope".to_string())
+    );
+
+    user.text = "Prepare an unrelated manual-only draft".into();
+    assert!(
+        requested_artifact_registry_projection(&[artifact, user], "projection-2")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_with_lineage() {
+    use desk_agent_protocol::data_lineage::{
+        DATA_ENVELOPE_SCHEMA_VERSION, DataProvenance, RetentionBoundary, Sensitivity,
+    };
+
+    fn artifact_envelope(id: &str, artifact_id: &str, digest: char) -> DataEnvelope {
+        DataEnvelope {
+            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+            envelope_id: id.into(),
+            content: ContentRef::Artifact {
+                artifact_id: artifact_id.into(),
+                sha256: digest.to_string().repeat(64),
+                size_bytes: 7,
+                media_type: "application/test".into(),
+            },
+            provenance: DataProvenance {
+                source_provider_id: "file.provider".into(),
+                source_tool_name: "create_artifact".into(),
+                source_object_id: None,
+                source_envelope_ids: Vec::new(),
+            },
+            digest_sha256: digest.to_string().repeat(64),
+            sensitivity: Sensitivity::Sensitive,
+            allowed_destinations: Vec::new(),
+            retention: RetentionBoundary {
+                expires_at_unix_ms: None,
+                delete_with_run: false,
+            },
+        }
+    }
+    fn handoff_envelope(id: &str, observation_id: &str, digest: char) -> DataEnvelope {
+        DataEnvelope {
+            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+            envelope_id: id.into(),
+            content: ContentRef::EphemeralObservation {
+                observation_id: observation_id.into(),
+                size_bytes: 1,
+                expires_at_unix_ms: 10,
+            },
+            provenance: DataProvenance {
+                source_provider_id: "communication.provider".into(),
+                source_tool_name: "manual_handoff".into(),
+                source_object_id: None,
+                source_envelope_ids: Vec::new(),
+            },
+            digest_sha256: digest.to_string().repeat(64),
+            sensitivity: Sensitivity::Sensitive,
+            allowed_destinations: Vec::new(),
+            retention: RetentionBoundary {
+                expires_at_unix_ms: Some(10),
+                delete_with_run: true,
+            },
+        }
+    }
+    fn read_tool(name: &str) -> RegisteredTool {
+        RegisteredTool {
+            spec: ToolSpec {
+                name: name.into(),
+                description: "read".into(),
+                parameters_schema: serde_json::json!({"type":"object"}),
+            },
+            required_capability: Capability::SystemInfo,
+            effect: ToolEffect::ReadOnly,
+        }
+    }
+
+    let sess = MemSession::default();
+    let gmail_args = serde_json::json!({
+        "attachment": {"artifact": {"content": {
+            "kind": "artifact",
+            "artifact_id": "docx-artifact-1",
+            "sha256": "b".repeat(64),
+            "size_bytes": 7,
+            "media_type": "application/test"
+        }}}
+    })
+    .to_string();
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use("read-1", "inspect_selected_spreadsheets"),
+                tool_use("read-2", "preview_spreadsheet_merge"),
+                tool_use("read-3", "search_public_web"),
+                tool_use("xlsx-1", "create_workbook_from_merge_preview"),
+                tool_use("docx-1", "create_word_report_from_merge_preview"),
+                tool_use_args("gmail-1", "prepare_gmail_web_draft_handoff", &gmail_args),
+                tool_use("slack-1", "prepare_slack_web_message_handoff"),
+                answer("combined task complete"),
+            ]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let scripted = tools(vec![
+        ExecOutcome::Executed {
+            output: ToolRunOutput {
+                content: "xlsx created".into(),
+                image_data_url: None,
+            },
+            event_id: None,
+        },
+        ExecOutcome::Executed {
+            output: ToolRunOutput {
+                content: "docx created".into(),
+                image_data_url: None,
+            },
+            event_id: None,
+        },
+        ExecOutcome::Executed {
+            output: ToolRunOutput {
+                content: "gmail handed off".into(),
+                image_data_url: None,
+            },
+            event_id: None,
+        },
+        ExecOutcome::Executed {
+            output: ToolRunOutput {
+                content: "slack handed off".into(),
+                image_data_url: None,
+            },
+            event_id: None,
+        },
+    ]);
+    scripted.mutation_envelopes.borrow_mut().extend([
+        Some(artifact_envelope("xlsx-envelope-1", "xlsx-artifact-1", 'a')),
+        Some(artifact_envelope("docx-envelope-1", "docx-artifact-1", 'b')),
+        Some(handoff_envelope("gmail-envelope-1", "gmail-result-1", 'c')),
+        Some(handoff_envelope("slack-envelope-1", "slack-result-1", 'd')),
+    ]);
+    let registry = vec![
+        read_tool("inspect_selected_spreadsheets"),
+        read_tool("preview_spreadsheet_merge"),
+        read_tool("search_public_web"),
+        mutating_tool(
+            "create_workbook_from_merge_preview",
+            Capability::ShellExecConfirmed,
+        ),
+        mutating_tool(
+            "create_word_report_from_merge_preview",
+            Capability::ShellExecConfirmed,
+        ),
+        mutating_tool(
+            "prepare_gmail_web_draft_handoff",
+            Capability::ShellExecConfirmed,
+        ),
+        mutating_tool(
+            "prepare_slack_web_message_handoff",
+            Capability::ShellExecConfirmed,
+        ),
+    ];
+    let clock = || "t".to_string();
+    let outcome = run_agent_turn(
+        &exec_deps(&sess, &model, &scripted, &registry, &clock),
+        exec_claim(),
+        ChatMessage::text(
+            "u",
+            ChatRole::User,
+            "merge files, research, create XLSX/DOCX, prepare Gmail and Slack",
+        ),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        LoopOutcome::Answered("combined task complete".into())
+    );
+    assert_eq!(
+        scripted.exec_calls.borrow().as_slice(),
+        ["xlsx-1", "docx-1", "gmail-1", "slack-1"]
+    );
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    let gmail = stored
+        .conversation
+        .iter()
+        .filter_map(|message| message.data_envelope.as_ref())
+        .find(|envelope| envelope.envelope_id == "gmail-envelope-1")
+        .unwrap();
+    assert_eq!(
+        gmail.provenance.source_envelope_ids,
+        vec!["docx-envelope-1"]
+    );
+    assert_eq!(stored.conversation_id, "conv");
 }

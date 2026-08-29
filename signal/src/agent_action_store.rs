@@ -53,6 +53,14 @@ pub enum ApprovalOutcome {
     Expired,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualDispositionOutcome {
+    Applied,
+    AlreadyResolved,
+    SubjectMismatch,
+    StateMismatch,
+}
+
 #[derive(Clone)]
 pub struct SignalActionStore {
     db: DatabaseConnection,
@@ -176,6 +184,43 @@ impl SignalActionStore {
             }
         } else {
             ApprovalOutcome::AlreadyResolved
+        })
+    }
+
+    /// Record an owner's explicit disposition of the exact unresolved action.
+    /// This is an audit fact only: the action remains `unknown`, no grant use is
+    /// restored, and a late provider result may still be recorded separately.
+    pub async fn manually_dispose_for_subject(
+        &self,
+        work_id: i64,
+        execution_id: &str,
+        conversation_id: &str,
+        actor_id: &str,
+        target_device_id: &str,
+    ) -> Result<ManualDispositionOutcome, DbErr> {
+        let Some(row) = agent_action_item::Entity::find_by_id(work_id)
+            .one(&self.db)
+            .await?
+        else {
+            return Ok(ManualDispositionOutcome::SubjectMismatch);
+        };
+        if row.conversation_id != conversation_id
+            || row.actor_id != actor_id
+            || row.target_device_id != target_device_id
+            || row.execution_id.as_deref() != Some(execution_id)
+        {
+            return Ok(ManualDispositionOutcome::SubjectMismatch);
+        }
+        if row.manual_resolved_at.is_some() {
+            return Ok(ManualDispositionOutcome::AlreadyResolved);
+        }
+        if !matches!(row.status.as_str(), STATUS_DISPATCHED | STATUS_UNKNOWN) {
+            return Ok(ManualDispositionOutcome::StateMismatch);
+        }
+        Ok(match self.manual_resolve(work_id).await? {
+            WritebackOutcome::Applied => ManualDispositionOutcome::Applied,
+            WritebackOutcome::AlreadyResolved => ManualDispositionOutcome::AlreadyResolved,
+            WritebackOutcome::Stale => ManualDispositionOutcome::StateMismatch,
         })
     }
 
@@ -810,8 +855,43 @@ mod tests {
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].new_status, STATUS_UNKNOWN);
         assert_eq!(
-            store.manual_resolve(row.id).await.unwrap(),
-            WritebackOutcome::Applied
+            store
+                .manually_dispose_for_subject(
+                    row.id,
+                    "generation-1",
+                    "conv-1",
+                    "other-owner",
+                    "device-1",
+                )
+                .await
+                .unwrap(),
+            ManualDispositionOutcome::SubjectMismatch
+        );
+        assert_eq!(
+            store
+                .manually_dispose_for_subject(
+                    row.id,
+                    "generation-1",
+                    "conv-1",
+                    "owner-1",
+                    "device-1",
+                )
+                .await
+                .unwrap(),
+            ManualDispositionOutcome::Applied
+        );
+        assert_eq!(
+            store
+                .manually_dispose_for_subject(
+                    row.id,
+                    "generation-1",
+                    "conv-1",
+                    "owner-1",
+                    "device-1",
+                )
+                .await
+                .unwrap(),
+            ManualDispositionOutcome::AlreadyResolved
         );
         assert_eq!(
             store
