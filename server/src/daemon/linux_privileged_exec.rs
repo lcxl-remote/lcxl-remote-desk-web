@@ -13,15 +13,20 @@ use desk_agent_protocol::exec::{
     ExecutionPrincipal, RequiredEnforcement,
 };
 use desk_agent_protocol::exec_policy::{ExecLimits, fingerprint_for_principal};
+use desk_agent_protocol::{AgentError, AgentErrorKind, AgentOutcome, ExecOutput, OperationOutput};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
+use std::io::Read;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use uuid::Uuid;
 
-use crate::daemon::exec_ledger::{ExecLedger, Reservation};
+use crate::agent_adapter::redaction::{Redactor, RegexRedactor};
+use crate::daemon::exec_ledger::{ExecLedger, Reservation, Terminal};
 use crate::host_control::session_shell::{
     RegisteredSessionShell, SessionShellRegistry, read_process_identity,
 };
@@ -64,6 +69,10 @@ const PRIVILEGED_RAW_OUTPUT_BYTES: u32 = PRIVILEGED_OUTPUT_BYTES + 8 * 1024;
 const PRIVILEGED_MAX_PROCESSES: u32 = 16;
 const PRIVILEGED_MAX_MEMORY_BYTES: u64 = 128 * 1024 * 1024;
 const PRIVILEGED_CPU_MAX_PERCENT: u16 = 50;
+const SYSTEMD_CLIENT_GRACE: Duration = Duration::from_secs(15);
+const UNIT_OBSERVE_INTERVAL: Duration = Duration::from_millis(25);
+const SYSTEMCTL_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
+const SYSTEMD_CLIENT_DIAGNOSTIC_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PolkitSubject {
@@ -422,13 +431,13 @@ fn validate_privileged_plan(plan: &ExecPlan) -> Result<(), PrivilegedPlanError> 
 /// are daemon constants; the only varying option is a SHA-256-derived unit name.
 /// The sealed executable and argv appear after a literal `--` and are never
 /// parsed as systemd-run options.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SystemdTransientSpec {
-    pub unit_name: String,
-    pub stdout_path: String,
-    pub stderr_path: String,
-    pub program: &'static str,
-    pub argv: Vec<String>,
+    unit_name: String,
+    stdout_path: String,
+    stderr_path: String,
+    program: &'static str,
+    argv: Vec<String>,
 }
 
 impl SystemdTransientSpec {
@@ -499,6 +508,10 @@ impl SystemdTransientSpec {
             argv,
         })
     }
+
+    pub fn unit_name(&self) -> &str {
+        &self.unit_name
+    }
 }
 
 /// Unit identity contains no caller-controlled text. The full digest keeps the
@@ -518,6 +531,310 @@ fn execution_digest_hex(execution_generation: &str) -> String {
         write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
     }
     hex
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TransientRunOutcome {
+    Exited {
+        exit_code: i32,
+        unit_observed: bool,
+        duration_ms: u32,
+    },
+    SpawnFailed(String),
+    WaitFailed {
+        unit_observed: bool,
+        reason: String,
+    },
+    TimedOut {
+        unit_observed: bool,
+    },
+}
+
+#[async_trait]
+trait TransientCommandRunner: Send + Sync {
+    async fn run(&self, spec: &SystemdTransientSpec, timeout: Duration) -> TransientRunOutcome;
+    async fn terminate(&self, unit_name: &str);
+}
+
+struct RealTransientCommandRunner;
+
+#[async_trait]
+impl TransientCommandRunner for RealTransientCommandRunner {
+    async fn run(&self, spec: &SystemdTransientSpec, timeout: Duration) -> TransientRunOutcome {
+        if let Err(error) = prepare_privileged_output_paths(spec, 0) {
+            return TransientRunOutcome::SpawnFailed(error);
+        }
+
+        let mut command = Command::new(spec.program);
+        command
+            .args(&spec.argv)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            // This is only systemd-run's own fixed-binary diagnostic stream;
+            // service output goes to the bounded root-only files in `spec`.
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let started = Instant::now();
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                cleanup_privileged_output_paths(spec);
+                return TransientRunOutcome::SpawnFailed(format!(
+                    "systemd-run could not be started: {error}"
+                ));
+            }
+        };
+        let mut diagnostic = child.stderr.take();
+        let diagnostic_reader = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt as _;
+            let mut retained = Vec::new();
+            let mut chunk = [0u8; 1024];
+            if let Some(reader) = diagnostic.as_mut() {
+                loop {
+                    match reader.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) if retained.len() < SYSTEMD_CLIENT_DIAGNOSTIC_BYTES => {
+                            let take =
+                                (SYSTEMD_CLIENT_DIAGNOSTIC_BYTES - retained.len()).min(count);
+                            retained.extend_from_slice(&chunk[..take]);
+                        }
+                        Ok(_) => {}
+                    }
+                }
+            }
+            retained
+        });
+
+        let deadline = timeout.saturating_add(SYSTEMD_CLIENT_GRACE);
+        let mut unit_observed = false;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(Ok(status)),
+                Err(error) => break Some(Err(error)),
+                Ok(None) => {}
+            }
+            if !unit_observed {
+                unit_observed = systemd_unit_exists(&spec.unit_name).await;
+            }
+            if started.elapsed() >= deadline {
+                break None;
+            }
+            tokio::time::sleep(UNIT_OBSERVE_INTERVAL).await;
+        };
+
+        if status.is_none() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            self.terminate(&spec.unit_name).await;
+            let _ = diagnostic_reader.await;
+            unit_observed |= privileged_output_exists(spec);
+            return TransientRunOutcome::TimedOut { unit_observed };
+        }
+
+        let diagnostic = diagnostic_reader.await.unwrap_or_default();
+        let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        unit_observed |= privileged_output_exists(spec);
+        match status.expect("checked above") {
+            Ok(status) => TransientRunOutcome::Exited {
+                exit_code: status.code().unwrap_or(-1),
+                unit_observed,
+                duration_ms,
+            },
+            Err(error) => TransientRunOutcome::WaitFailed {
+                unit_observed,
+                reason: format!(
+                    "systemd-run wait failed: {error}; diagnostic_bytes={}",
+                    diagnostic.len()
+                ),
+            },
+        }
+    }
+
+    async fn terminate(&self, unit_name: &str) {
+        // Unit names are SHA-256-derived, never caller text. Kill the whole
+        // control group first, then stop/reset the transient unit. Every call is
+        // best effort because the unit may already have been collected.
+        for args in [
+            vec!["kill", "--kill-whom=all", "--signal=SIGKILL", unit_name],
+            vec!["stop", unit_name],
+            vec!["reset-failed", unit_name],
+        ] {
+            let mut command = Command::new(SYSTEMCTL_PATH);
+            command
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            let _ = tokio::time::timeout(SYSTEMCTL_OPERATION_TIMEOUT, command.status()).await;
+        }
+    }
+}
+
+async fn systemd_unit_exists(unit_name: &str) -> bool {
+    let mut command = Command::new(SYSTEMCTL_PATH);
+    command
+        .args([
+            "show",
+            unit_name,
+            "--property=LoadState",
+            "--value",
+            "--no-pager",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(SYSTEMCTL_OPERATION_TIMEOUT, command.output()).await;
+    output.is_ok_and(|output| {
+        output.is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() != "not-found"
+        })
+    })
+}
+
+fn prepare_privileged_output_paths(
+    spec: &SystemdTransientSpec,
+    required_uid: u32,
+) -> Result<(), String> {
+    fs::create_dir_all(PRIVILEGED_OUTPUT_DIR)
+        .map_err(|error| format!("could not create privileged output directory: {error}"))?;
+    fs::set_permissions(PRIVILEGED_OUTPUT_DIR, fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("could not protect privileged output directory: {error}"))?;
+    let metadata = fs::symlink_metadata(PRIVILEGED_OUTPUT_DIR)
+        .map_err(|error| format!("could not inspect privileged output directory: {error}"))?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != required_uid
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err("privileged output directory has unsafe owner, mode, or type".to_string());
+    }
+    for path in [&spec.stdout_path, &spec.stderr_path] {
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("could not inspect privileged output path: {error}")),
+            Ok(_) => return Err("privileged output path already exists".to_string()),
+        }
+    }
+    Ok(())
+}
+
+fn privileged_output_exists(spec: &SystemdTransientSpec) -> bool {
+    [&spec.stdout_path, &spec.stderr_path]
+        .into_iter()
+        .any(|path| fs::symlink_metadata(path).is_ok())
+}
+
+fn cleanup_privileged_output_paths(spec: &SystemdTransientSpec) {
+    for path in [&spec.stdout_path, &spec.stderr_path] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => log::warn!("could not remove privileged output artifact: {error}"),
+        }
+    }
+}
+
+fn read_privileged_output(path: &str, required_uid: u32) -> Result<(Vec<u8>, bool), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), false));
+        }
+        Err(error) => return Err(format!("could not inspect privileged output: {error}")),
+    };
+    if !metadata.file_type().is_file()
+        || metadata.uid() != required_uid
+        || metadata.mode() & 0o077 != 0
+        || metadata.len() > PRIVILEGED_RAW_OUTPUT_BYTES as u64
+    {
+        return Err("privileged output has unsafe owner, mode, type, or size".to_string());
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| format!("could not open privileged output: {error}"))?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read privileged output: {error}"))?;
+    if bytes.len() > PRIVILEGED_RAW_OUTPUT_BYTES as usize {
+        return Err("privileged output exceeded its hard size limit".to_string());
+    }
+    Ok((bytes, metadata.len() >= PRIVILEGED_RAW_OUTPUT_BYTES as u64))
+}
+
+fn sanitize_privileged_output(
+    plan: &ExecPlan,
+    exit_code: i32,
+    duration_ms: u32,
+    stdout: (Vec<u8>, bool),
+    stderr: (Vec<u8>, bool),
+) -> AgentOutcome {
+    let redactor = RegexRedactor::new();
+    let stdout_redacted = match redactor.redact(&String::from_utf8_lossy(&stdout.0)) {
+        Ok(output) => output,
+        Err(_) => return AgentOutcome::Err(redaction_failed()),
+    };
+    let stderr_redacted = match redactor.redact(&String::from_utf8_lossy(&stderr.0)) {
+        Ok(output) => output,
+        Err(_) => return AgentOutcome::Err(redaction_failed()),
+    };
+    let mut redactions = stdout_redacted.kinds;
+    redactions.extend(stderr_redacted.kinds);
+    let (stdout, stdout_truncated) = finalize_redacted_output(
+        stdout_redacted.text,
+        plan.max_stdout_bytes as usize,
+        stdout.1,
+    );
+    let (stderr, stderr_truncated) = finalize_redacted_output(
+        stderr_redacted.text,
+        plan.max_stderr_bytes as usize,
+        stderr.1,
+    );
+    AgentOutcome::Ok(OperationOutput::Exec(ExecOutput {
+        exit_code,
+        stdout,
+        stderr,
+        stdout_truncated,
+        stderr_truncated,
+        duration_ms,
+        redactions,
+    }))
+}
+
+fn finalize_redacted_output(text: String, cap: usize, overflowed: bool) -> (String, bool) {
+    if text.len() <= cap && !overflowed {
+        return (text, false);
+    }
+    let mut end = cap.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut output = text[..end].to_string();
+    if end < text.len()
+        && let Some(position) = output.rfind(char::is_whitespace)
+    {
+        output.truncate(position);
+    }
+    (output, true)
+}
+
+fn redaction_failed() -> AgentError {
+    agent_error(
+        AgentErrorKind::RedactionFailed,
+        "administrator command output was withheld because redaction failed",
+    )
+}
+
+fn agent_error(kind: AgentErrorKind, message: impl Into<String>) -> AgentError {
+    AgentError {
+        kind,
+        message: message.into(),
+        retryable: false,
+        safe_for_model: true,
+        error_code: None,
+    }
 }
 
 #[derive(Debug)]
@@ -552,11 +869,29 @@ impl std::error::Error for PrivilegedPrepareError {}
 pub struct LinuxPrivilegedExecSupervisor {
     permits: PrivilegedPermitStore,
     ledger: Arc<ExecLedger>,
+    runner: Arc<dyn TransientCommandRunner>,
 }
 
 impl LinuxPrivilegedExecSupervisor {
     pub fn new(permits: PrivilegedPermitStore, ledger: Arc<ExecLedger>) -> Self {
-        Self { permits, ledger }
+        Self {
+            permits,
+            ledger,
+            runner: Arc::new(RealTransientCommandRunner),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_runner(
+        permits: PrivilegedPermitStore,
+        ledger: Arc<ExecLedger>,
+        runner: Arc<dyn TransientCommandRunner>,
+    ) -> Self {
+        Self {
+            permits,
+            ledger,
+            runner,
+        }
     }
 
     pub async fn prepare_dispatch(
@@ -570,13 +905,16 @@ impl LinuxPrivilegedExecSupervisor {
             .consume(permit_id, plan, registry, registration)
             .map_err(PrivilegedPrepareError::Permit)?;
         let spec = SystemdTransientSpec::from_plan(plan).map_err(PrivilegedPrepareError::Plan)?;
+        let plan_json = serde_json::to_string(plan)
+            .map_err(|error| PrivilegedPrepareError::Ledger(error.to_string()))?;
         match self
             .ledger
-            .reserve(
+            .reserve_with_sealed_plan(
                 &plan.exec_request_id.0,
                 &plan.execution_generation,
                 &plan.fingerprint,
-                Some(&spec.unit_name),
+                &spec.unit_name,
+                &plan_json,
             )
             .await
             .map_err(|error| PrivilegedPrepareError::Ledger(error.to_string()))?
@@ -587,6 +925,189 @@ impl LinuxPrivilegedExecSupervisor {
                 Err(PrivilegedPrepareError::GenerationFingerprintMismatch)
             }
         }
+    }
+
+    /// Execute a spec returned by [`Self::prepare_dispatch`]. This is kept
+    /// separate from authorization so Stage 3 can perform its final freshness
+    /// checks between permit mint and dispatch intent. The spec is rebuilt from
+    /// the plan again before spawn; even an internal stale/mismatched value is
+    /// therefore refused.
+    pub async fn execute_prepared(
+        &self,
+        plan: &ExecPlan,
+        spec: SystemdTransientSpec,
+    ) -> AgentOutcome {
+        let expected = match SystemdTransientSpec::from_plan(plan) {
+            Ok(expected) => expected,
+            Err(error) => {
+                return AgentOutcome::Err(agent_error(
+                    AgentErrorKind::PermissionDenied,
+                    format!("privileged plan rejected before launch: {error}"),
+                ));
+            }
+        };
+        if spec != expected {
+            return AgentOutcome::Err(agent_error(
+                AgentErrorKind::PermissionDenied,
+                "privileged transient-service specification drifted before launch",
+            ));
+        }
+
+        let run = self
+            .runner
+            .run(&spec, Duration::from_millis(plan.timeout_ms as u64))
+            .await;
+        let outcome = match run {
+            TransientRunOutcome::SpawnFailed(reason) => {
+                cleanup_privileged_output_paths(&spec);
+                if let Err(error) = self
+                    .ledger
+                    .mark_terminal(
+                        &plan.execution_generation,
+                        Terminal::SpawnFailed(reason.clone()),
+                    )
+                    .await
+                {
+                    log::error!(
+                        "could not record privileged spawn failure for {}: {error}",
+                        plan.execution_generation
+                    );
+                }
+                AgentOutcome::Err(agent_error(
+                    AgentErrorKind::Internal,
+                    "administrator command was not started because systemd launch failed",
+                ))
+            }
+            TransientRunOutcome::Exited {
+                exit_code,
+                unit_observed,
+                duration_ms,
+            } if unit_observed || exit_code == 0 => {
+                self.record_privileged_running(plan, &spec).await;
+                let output =
+                    read_and_cleanup_privileged_outputs(&spec, plan, exit_code, duration_ms);
+                self.record_privileged_terminal(plan, &output).await;
+                output
+            }
+            TransientRunOutcome::Exited { .. } => {
+                cleanup_privileged_output_paths(&spec);
+                self.record_privileged_indeterminate(plan).await;
+                AgentOutcome::Err(agent_error(
+                    AgentErrorKind::Internal,
+                    "systemd returned an error before the daemon could prove whether the administrator command started",
+                ))
+            }
+            TransientRunOutcome::TimedOut { unit_observed } if unit_observed => {
+                self.record_privileged_running(plan, &spec).await;
+                cleanup_privileged_output_paths(&spec);
+                let outcome = AgentOutcome::Err(agent_error(
+                    AgentErrorKind::Timeout,
+                    "administrator command timed out and its transient service was reclaimed",
+                ));
+                self.record_privileged_terminal(plan, &outcome).await;
+                outcome
+            }
+            TransientRunOutcome::TimedOut { .. } => {
+                cleanup_privileged_output_paths(&spec);
+                self.record_privileged_indeterminate(plan).await;
+                AgentOutcome::Err(agent_error(
+                    AgentErrorKind::Internal,
+                    "administrator command launch timed out before start could be proven",
+                ))
+            }
+            TransientRunOutcome::WaitFailed {
+                unit_observed: true,
+                reason,
+            } => {
+                self.record_privileged_running(plan, &spec).await;
+                cleanup_privileged_output_paths(&spec);
+                self.record_privileged_indeterminate(plan).await;
+                log::warn!(
+                    "lost privileged systemd-run result for {}: {reason}",
+                    plan.execution_generation
+                );
+                AgentOutcome::Err(agent_error(
+                    AgentErrorKind::Internal,
+                    "administrator command started but its final state is unknown",
+                ))
+            }
+            TransientRunOutcome::WaitFailed {
+                unit_observed: false,
+                reason,
+            } => {
+                cleanup_privileged_output_paths(&spec);
+                self.record_privileged_indeterminate(plan).await;
+                log::warn!(
+                    "could not determine privileged systemd-run start for {}: {reason}",
+                    plan.execution_generation
+                );
+                AgentOutcome::Err(agent_error(
+                    AgentErrorKind::Internal,
+                    "administrator command state is unknown",
+                ))
+            }
+        };
+        outcome
+    }
+
+    async fn record_privileged_running(&self, plan: &ExecPlan, spec: &SystemdTransientSpec) {
+        if let Err(error) = self
+            .ledger
+            .mark_running(&plan.execution_generation, Some(&spec.unit_name))
+            .await
+        {
+            log::error!(
+                "could not mark privileged execution {} running: {error}",
+                plan.execution_generation
+            );
+        }
+    }
+
+    async fn record_privileged_terminal(&self, plan: &ExecPlan, outcome: &AgentOutcome) {
+        let result = serde_json::to_string(outcome).unwrap_or_else(|_| "null".to_string());
+        if let Err(error) = self
+            .ledger
+            .mark_terminal(&plan.execution_generation, Terminal::Completed(result))
+            .await
+        {
+            log::error!(
+                "could not settle privileged execution {}: {error}",
+                plan.execution_generation
+            );
+        }
+    }
+
+    async fn record_privileged_indeterminate(&self, plan: &ExecPlan) {
+        if let Err(error) = self
+            .ledger
+            .mark_terminal(&plan.execution_generation, Terminal::Indeterminate)
+            .await
+        {
+            log::error!(
+                "could not mark privileged execution {} indeterminate: {error}",
+                plan.execution_generation
+            );
+        }
+    }
+}
+
+fn read_and_cleanup_privileged_outputs(
+    spec: &SystemdTransientSpec,
+    plan: &ExecPlan,
+    exit_code: i32,
+    duration_ms: u32,
+) -> AgentOutcome {
+    let stdout = read_privileged_output(&spec.stdout_path, 0);
+    let stderr = read_privileged_output(&spec.stderr_path, 0);
+    cleanup_privileged_output_paths(spec);
+    match (stdout, stderr) {
+        (Ok(stdout), Ok(stderr)) => {
+            sanitize_privileged_output(plan, exit_code, duration_ms, stdout, stderr)
+        }
+        _ => AgentOutcome::Err(agent_error(
+            AgentErrorKind::RedactionFailed,
+            "administrator command output was withheld because its root-owned artifact failed validation",
+        )),
     }
 }
 
@@ -601,6 +1122,7 @@ fn plan_digest(plan: &ExecPlan) -> [u8; 32] {
 mod tests {
     use super::*;
     use desk_agent_protocol::exec::{ApprovalId, ExecRequestId};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FakeRunner(PolkitCommandOutcome);
 
@@ -608,6 +1130,26 @@ mod tests {
     impl PolkitCommandRunner for FakeRunner {
         async fn check(&self, _subject: PolkitSubject) -> PolkitCommandOutcome {
             self.0
+        }
+    }
+
+    struct FakeTransientRunner {
+        outcome: TransientRunOutcome,
+        terminations: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl TransientCommandRunner for FakeTransientRunner {
+        async fn run(
+            &self,
+            _spec: &SystemdTransientSpec,
+            _timeout: Duration,
+        ) -> TransientRunOutcome {
+            self.outcome.clone()
+        }
+
+        async fn terminate(&self, _unit_name: &str) {
+            self.terminations.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -891,6 +1433,192 @@ mod tests {
                 .await,
             Err(PrivilegedPrepareError::Duplicate)
         ));
+    }
+
+    async fn prepared_supervisor(
+        generation: &str,
+        outcome: TransientRunOutcome,
+    ) -> (
+        LinuxPrivilegedExecSupervisor,
+        Arc<ExecLedger>,
+        ExecPlan,
+        SystemdTransientSpec,
+    ) {
+        let (registry, registration) = current_registration();
+        let permits = PrivilegedPermitStore::default();
+        let ledger = Arc::new(ExecLedger::open_in_memory().await.unwrap());
+        let runner = Arc::new(FakeTransientRunner {
+            outcome,
+            terminations: AtomicUsize::new(0),
+        });
+        let supervisor =
+            LinuxPrivilegedExecSupervisor::with_runner(permits.clone(), ledger.clone(), runner);
+        let plan = administrator_plan(generation);
+        let permit = permits.mint(&plan, &registration);
+        let spec = supervisor
+            .prepare_dispatch(permit.permit_id, &plan, &registry, &registration)
+            .await
+            .unwrap();
+        (supervisor, ledger, plan, spec)
+    }
+
+    #[tokio::test]
+    async fn observed_transient_exit_is_redacted_and_settled_terminal() {
+        let (supervisor, ledger, plan, spec) = prepared_supervisor(
+            "generation-complete",
+            TransientRunOutcome::Exited {
+                exit_code: 7,
+                unit_observed: true,
+                duration_ms: 321,
+            },
+        )
+        .await;
+        let outcome = supervisor.execute_prepared(&plan, spec).await;
+        match &outcome {
+            AgentOutcome::Ok(OperationOutput::Exec(output)) => {
+                assert_eq!(output.exit_code, 7);
+                assert_eq!(output.duration_ms, 321);
+            }
+            other => panic!("expected exec output, got {other:?}"),
+        }
+        let row = ledger
+            .get(&plan.execution_generation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.state,
+            crate::daemon::exec_ledger::State::Terminal.as_str()
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentOutcome>(row.result_json.as_deref().unwrap()).unwrap(),
+            outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn unobserved_nonzero_systemd_exit_is_indeterminate_not_spawn_failed() {
+        let (supervisor, ledger, plan, spec) = prepared_supervisor(
+            "generation-unknown",
+            TransientRunOutcome::Exited {
+                exit_code: 1,
+                unit_observed: false,
+                duration_ms: 10,
+            },
+        )
+        .await;
+        assert!(matches!(
+            supervisor.execute_prepared(&plan, spec).await,
+            AgentOutcome::Err(_)
+        ));
+        let row = ledger
+            .get(&plan.execution_generation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.state,
+            crate::daemon::exec_ledger::State::Indeterminate.as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn systemd_client_spawn_failure_is_definitely_not_started() {
+        let (supervisor, ledger, plan, spec) = prepared_supervisor(
+            "generation-not-started",
+            TransientRunOutcome::SpawnFailed("missing systemd-run".into()),
+        )
+        .await;
+        assert!(matches!(
+            supervisor.execute_prepared(&plan, spec).await,
+            AgentOutcome::Err(_)
+        ));
+        let row = ledger
+            .get(&plan.execution_generation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.state,
+            crate::daemon::exec_ledger::State::SpawnFailed.as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn observed_timeout_is_terminal_but_reports_timeout() {
+        let (supervisor, ledger, plan, spec) = prepared_supervisor(
+            "generation-timeout",
+            TransientRunOutcome::TimedOut {
+                unit_observed: true,
+            },
+        )
+        .await;
+        let outcome = supervisor.execute_prepared(&plan, spec).await;
+        assert!(matches!(
+            outcome,
+            AgentOutcome::Err(ref error) if error.kind == AgentErrorKind::Timeout
+        ));
+        let row = ledger
+            .get(&plan.execution_generation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.state,
+            crate::daemon::exec_ledger::State::Terminal.as_str()
+        );
+    }
+
+    #[test]
+    fn privileged_output_is_redacted_before_utf8_safe_truncation() {
+        let mut plan = administrator_plan("generation-redaction");
+        plan.max_stdout_bytes = 24;
+        let outcome = sanitize_privileged_output(
+            &plan,
+            0,
+            5,
+            (
+                b"prefix AKIA1234567890ABCDEF trailing secret text".to_vec(),
+                true,
+            ),
+            (Vec::new(), false),
+        );
+        match outcome {
+            AgentOutcome::Ok(OperationOutput::Exec(output)) => {
+                assert!(!output.stdout.contains("AKIA1234567890ABCDEF"));
+                assert!(output.stdout_truncated);
+                assert!(
+                    output
+                        .redactions
+                        .iter()
+                        .any(|kind| kind == "aws_access_key")
+                );
+            }
+            other => panic!("expected redacted output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn privileged_output_reader_rejects_symlinks_and_permissive_files() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        fs::write(&target, b"safe").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        let uid = fs::metadata(&target).unwrap().uid();
+        assert_eq!(
+            read_privileged_output(target.to_str().unwrap(), uid)
+                .unwrap()
+                .0,
+            b"safe"
+        );
+
+        let link = directory.path().join("link");
+        symlink(&target, &link).unwrap();
+        assert!(read_privileged_output(link.to_str().unwrap(), uid).is_err());
+
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_privileged_output(target.to_str().unwrap(), uid).is_err());
     }
 
     #[test]

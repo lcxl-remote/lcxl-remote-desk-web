@@ -38,7 +38,7 @@ use desk_agent_protocol::exec_lifecycle::{ExecState, ExecStateReplyPayload};
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
-    DbErr, EntityTrait, QueryFilter, Schema, Set, TransactionTrait,
+    DbErr, EntityTrait, QueryFilter, Schema, Set, Statement, TransactionTrait,
 };
 
 pub mod entity;
@@ -130,12 +130,51 @@ impl ExecLedger {
         plan_fingerprint: &str,
         containment_identity: Option<&str>,
     ) -> Result<Reservation, DbErr> {
+        self.reserve_inner(
+            task_id,
+            generation,
+            plan_fingerprint,
+            containment_identity,
+            None,
+        )
+        .await
+    }
+
+    /// Privileged variant that durably stores the full sealed plan needed to
+    /// validate output and reconcile a systemd transient unit after restart.
+    pub async fn reserve_with_sealed_plan(
+        &self,
+        task_id: &str,
+        generation: &str,
+        plan_fingerprint: &str,
+        containment_identity: &str,
+        plan_json: &str,
+    ) -> Result<Reservation, DbErr> {
+        self.reserve_inner(
+            task_id,
+            generation,
+            plan_fingerprint,
+            Some(containment_identity),
+            Some(plan_json),
+        )
+        .await
+    }
+
+    async fn reserve_inner(
+        &self,
+        task_id: &str,
+        generation: &str,
+        plan_fingerprint: &str,
+        containment_identity: Option<&str>,
+        plan_json: Option<&str>,
+    ) -> Result<Reservation, DbErr> {
         let now = chrono::Utc::now().naive_utc();
         let insert = exec_ledger_entry::Entity::insert(exec_ledger_entry::ActiveModel {
             execution_generation: Set(generation.to_string()),
             task_id: Set(task_id.to_string()),
             state: Set(State::Reserved.as_str().to_string()),
             plan_fingerprint: Set(plan_fingerprint.to_string()),
+            plan_json: Set(plan_json.map(str::to_string)),
             containment_identity: Set(containment_identity.map(str::to_string)),
             result_json: Set(None),
             created_at: Set(now),
@@ -156,7 +195,9 @@ impl ExecLedger {
                     // permanent-tombstone rule forbids. Refuse rather than spawn.
                     return Ok(Reservation::FingerprintMismatch);
                 };
-                if existing.plan_fingerprint != plan_fingerprint {
+                if existing.plan_fingerprint != plan_fingerprint
+                    || plan_json.is_some() && existing.plan_json.as_deref() != plan_json
+                {
                     return Ok(Reservation::FingerprintMismatch);
                 }
                 Ok(Reservation::Duplicate(Box::new(existing)))
@@ -389,6 +430,24 @@ async fn initialize_schema(db: &DatabaseConnection) -> Result<(), DbErr> {
     let mut table = schema.create_table_from_entity(exec_ledger_entry::Entity);
     table.if_not_exists();
     db.execute(&table).await?;
+
+    // The ledger predates privileged restart reconciliation. It is not yet a
+    // released schema, but developer machines can already have the old file;
+    // upgrade it in place instead of turning a safe daemon restart into a boot
+    // failure. New databases already include the column through the entity.
+    let table_info = Statement::from_string(
+        db.get_database_backend(),
+        "PRAGMA table_info(exec_ledger_entry)".to_string(),
+    );
+    let columns = db.query_all_raw(table_info).await?;
+    let has_plan_json = columns.iter().any(|row| {
+        row.try_get::<String>("", "name")
+            .is_ok_and(|name| name == "plan_json")
+    });
+    if !has_plan_json {
+        db.execute_unprepared("ALTER TABLE exec_ledger_entry ADD COLUMN plan_json TEXT")
+            .await?;
+    }
 
     for mut index in schema.create_index_from_entity(exec_ledger_entry::Entity) {
         index.if_not_exists();
