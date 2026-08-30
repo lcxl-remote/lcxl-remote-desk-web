@@ -48,6 +48,7 @@ pub mod model_context;
 pub mod model_egress;
 pub mod model_profile;
 pub mod parser;
+pub mod permission_grant;
 pub mod permission_tools;
 pub mod prompt;
 pub mod provider_probe;

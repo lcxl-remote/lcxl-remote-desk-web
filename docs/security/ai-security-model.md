@@ -16,6 +16,10 @@ The open-source Signal's central grant defaults to **confirm each action**, whil
 
 Both the **AI diagnosis panel** and the **terminal AI copilot** share one sealed confirmation chain. The copilot itself stays suggest-only — it never executes anything on its own. For a `confirm_required` suggestion, the operator may explicitly **promote it to execution**: that click relays the exact command to the host, which **re-classifies it server-side** (a control plane's self-reported decision is never trusted), mints the `exec_request_id`, and returns a preview the operator must **approve** before anything runs. Execution is gated by the same **local execution ceiling** — left at suggest-only it is off, so the Run action returns a non-executable preview that guides the owner to raise the ceiling first. Raising it opens confirmed execution for every AI surface on that device (diagnosis and copilot alike), not the copilot alone.
 
+## Scoped Device Assistant Grants
+
+When Device Assistant presents a scoped permission request, the owner must approve or deny each item. Approval may only remove resources, operations or export destinations, shorten the lifetime, or reduce the number of uses. The server rechecks the request revision, capability contract and current readiness; it never restores a scope the owner removed. Exact actions remain bound to server-frozen input, and approval records authority rather than dispatch or successful execution. Servers without the corresponding control path do not expose the operation.
+
 ## Owner-Interactive Free-Form Commands
 
 Template matching remains the default admission policy. A trusted central brain may explicitly grant `OwnerInteractive` only to the authenticated owner acting on that owner's own device. The open-source signal's single authenticated account is its owner subject. Non-owners, shared/access-code sessions, organization members acting on shared devices, fleet execution, automation, MCP, and raw agent requests remain template-only or disabled.

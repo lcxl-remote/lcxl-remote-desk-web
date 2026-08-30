@@ -2,18 +2,8 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
+use desk_agent_protocol::capability_grant::CAPABILITY_GRANT_SCHEMA_VERSION;
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope};
-use desk_agent_protocol::{
-    capability_grant::{
-        CAPABILITY_GRANT_SCHEMA_VERSION, CapabilityGrant, CapabilityGrantIssuer,
-        CapabilityGrantLimits, CapabilityGrantUsePolicy,
-    },
-    capability_provider::{AuthorizationResourceKind, CapabilityDataCategory, ProductSurface},
-    computer_use::{ObjectKind, ObjectRef},
-    data_lineage::DestinationIdentity,
-};
-use desk_diagnose_core::capability_availability::CapabilityAvailability;
-use desk_diagnose_core::capability_risk::{CapabilityRiskSignals, classify_capability_risk};
 use desk_diagnose_core::context_attachment::{
     AttachmentRuntimeBinding, AttachmentStaleReason, AttachmentState, ContextAttachment,
     ContextAttachmentKind,
@@ -21,7 +11,8 @@ use desk_diagnose_core::context_attachment::{
 use desk_diagnose_core::dynamic_run::{
     AGENT_RUN_EVENT_SCHEMA_VERSION, PermissionRequestedEvent, TaskStatusUpdatedEvent,
 };
-use desk_diagnose_core::provider_registry::ProviderRegistry;
+pub use desk_diagnose_core::permission_grant::PermissionGrantIssuanceContext;
+use desk_diagnose_core::permission_grant::build_permission_grants;
 use desk_diagnose_core::seam::{ClaimError, ClaimTurnParams, SessionSeam};
 use desk_diagnose_core::session::{
     ActionIdentity, AgentSessionSurface, ExecutionState, PendingAutoTrigger, PersistedAgentSession,
@@ -35,18 +26,6 @@ use sea_orm::{
 use sha2::{Digest, Sha256};
 
 use crate::entity::{agent_capability_grant, agent_exec_task, agent_run_event, agent_session};
-
-pub struct PermissionGrantIssuanceContext<'a> {
-    pub surface: ProductSurface,
-    pub registry: &'a ProviderRegistry,
-    pub inventory: &'a [CapabilityAvailability],
-    pub readiness_revision: u64,
-    pub now_unix_ms: u64,
-    /// Server-issued, readiness-bound object references that are selected by
-    /// capability rather than by a persisted user attachment. The decision
-    /// payload can only narrow display scopes; it cannot inject these refs.
-    pub implicit_fresh_object_refs: &'a [ObjectRef],
-}
 
 const LEASE_TTL_SECS: i64 = 90;
 const CLAIM_ATTEMPTS: usize = 5;
@@ -1078,357 +1057,6 @@ pub enum EventAppend {
     Busy,
 }
 
-fn build_permission_grants(
-    session: &PersistedAgentSession,
-    request: &desk_diagnose_core::dynamic_run::PermissionRequest,
-    decisions: &[desk_diagnose_core::dynamic_run::PermissionDecisionItem],
-    context: &PermissionGrantIssuanceContext<'_>,
-) -> Result<Vec<CapabilityGrant>, AgentError> {
-    if context.readiness_revision == 0 || context.now_unix_ms == 0 {
-        return Err(internal("invalid grant issuance readiness or clock"));
-    }
-    let decisions = decisions
-        .iter()
-        .map(|item| (item.item_id.as_str(), &item.decision))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let mut grants = Vec::new();
-    for requested in &request.items {
-        let Some(desk_diagnose_core::dynamic_run::PermissionItemDecision::Approve {
-            resource_scope,
-            operation_scope,
-            export_destinations,
-            ttl_seconds,
-            max_uses,
-        }) = decisions.get(requested.item_id.as_str()).copied()
-        else {
-            continue;
-        };
-        let provider = context
-            .registry
-            .provider(&requested.provider_id)
-            .ok_or_else(|| internal("approved permission Provider is no longer registered"))?;
-        let capability = provider
-            .capabilities
-            .iter()
-            .find(|capability| capability.tool_spec.name == requested.tool_name)
-            .ok_or_else(|| internal("approved permission tool is no longer registered"))?;
-        if capability.wire.effect != requested.expected_effect
-            || !capability.wire.surfaces.contains(&context.surface)
-        {
-            return Err(internal(
-                "approved permission no longer matches the compiled capability contract",
-            ));
-        }
-        let availability = context
-            .inventory
-            .iter()
-            .find(|item| {
-                item.provider_id == requested.provider_id
-                    && item.capability_id == capability.wire.capability_id
-                    && item.tool_name == requested.tool_name
-            })
-            .ok_or_else(|| internal("approved permission has no current readiness fact"))?;
-        if !availability.callable() {
-            return Err(internal(
-                "approved permission capability is no longer ready; refresh and decide again",
-            ));
-        }
-        let sensitive_content = capability.wire.data_policy.reads.iter().any(|category| {
-            !matches!(
-                category,
-                CapabilityDataCategory::UserRequest
-                    | CapabilityDataCategory::DesktopSessionMetadata
-                    | CapabilityDataCategory::FileMetadata
-            )
-        });
-        let exact_external_query = capability.wire.authorization_hint.resources
-            == [AuthorizationResourceKind::ExternalQuery];
-        let exact_ui_action = matches!(
-            capability.required_capability,
-            desk_agent_protocol::Capability::DesktopUiActionConfirmed
-                | desk_agent_protocol::Capability::DesktopInputFallbackConfirmed
-        );
-        let resource_scope = if exact_ui_action {
-            #[derive(serde::Deserialize)]
-            struct DesktopActionTarget {
-                target: ObjectRef,
-            }
-            let canonical = requested
-                .canonical_input_json
-                .as_deref()
-                .ok_or_else(|| internal("approved semantic UI action has no exact input"))?;
-            let input: DesktopActionTarget = serde_json::from_str(canonical)
-                .map_err(|_| internal("approved desktop action input is invalid"))?;
-            let expected_kind = match capability.required_capability {
-                desk_agent_protocol::Capability::DesktopUiActionConfirmed => ObjectKind::UiElement,
-                desk_agent_protocol::Capability::DesktopInputFallbackConfirmed => {
-                    ObjectKind::Application
-                }
-                _ => unreachable!(),
-            };
-            if input.target.object_kind != expected_kind {
-                return Err(internal("approved desktop action target kind is invalid"));
-            }
-            if capability.required_capability
-                == desk_agent_protocol::Capability::DesktopUiActionConfirmed
-            {
-                #[derive(serde::Deserialize)]
-                struct UiActionOnly {
-                    action: desk_agent_protocol::computer_use::UiSemanticAction,
-                }
-                let action: UiActionOnly = serde_json::from_str(canonical)
-                    .map_err(|_| internal("approved semantic UI action input is invalid"))?;
-                match action.action {
-                    desk_agent_protocol::computer_use::UiSemanticAction::Invoke
-                    | desk_agent_protocol::computer_use::UiSemanticAction::Select
-                    | desk_agent_protocol::computer_use::UiSemanticAction::Focus => {}
-                    desk_agent_protocol::computer_use::UiSemanticAction::SetValue { value }
-                        if value.len() <= 16 * 1024 => {}
-                    _ => {
-                        return Err(internal(
-                            "approved semantic UI action is outside the bounded allowlist",
-                        ));
-                    }
-                }
-            }
-            if capability.required_capability
-                == desk_agent_protocol::Capability::DesktopInputFallbackConfirmed
-            {
-                #[derive(serde::Deserialize)]
-                struct RawInputOnly {
-                    action: desk_agent_protocol::computer_use::RawInputAction,
-                }
-                let action: RawInputOnly = serde_json::from_str(canonical)
-                    .map_err(|_| internal("approved raw input action is invalid"))?;
-                action.action.validate().map_err(|_| {
-                    internal("approved raw input action is outside the bounded allowlist")
-                })?;
-            }
-            desk_diagnose_core::capability_grant::fresh_object_resource_scope(&[input.target])
-        } else if capability.wire.authorization_hint.resources
-            == [AuthorizationResourceKind::FreshObjectReference]
-        {
-            let object_refs = session
-                .context_attachments
-                .iter()
-                .filter(|attachment| {
-                    matches!(attachment.state, AttachmentState::Active)
-                        && attachment_matches_fresh_object_capability(
-                            capability.required_capability,
-                            attachment,
-                        )
-                })
-                .filter_map(|attachment| {
-                    serde_json::from_str::<desk_agent_protocol::computer_use::ObjectRef>(
-                        &attachment.object_ref.opaque_token,
-                    )
-                    .ok()
-                })
-                .chain(
-                    context
-                        .implicit_fresh_object_refs
-                        .iter()
-                        .filter(|object_ref| {
-                            object_ref_matches_fresh_object_capability(
-                                capability.required_capability,
-                                object_ref,
-                            )
-                        })
-                        .cloned(),
-                )
-                .collect::<Vec<_>>();
-            let exact =
-                desk_diagnose_core::capability_grant::fresh_object_resource_scope(&object_refs);
-            if exact.is_empty() {
-                return Err(internal(
-                    "approved permission has no exact active selected object",
-                ));
-            }
-            exact
-        } else if capability.wire.authorization_hint.resources
-            == [AuthorizationResourceKind::ExternalUrl]
-            || exact_external_query
-        {
-            // External URL authority is server-derived from the immutable exact
-            // input stored on the pending request. Decision payload labels are
-            // display data and cannot widen or replace it.
-            requested.resource_scope.clone()
-        } else {
-            resource_scope.clone()
-        };
-        let operation_scope = if capability.wire.authorization_hint.resources
-            == [AuthorizationResourceKind::ExternalUrl]
-            || exact_external_query
-            || exact_ui_action
-        {
-            requested.operation_scope.clone()
-        } else {
-            operation_scope.clone()
-        };
-        let risk_tier = classify_capability_risk(
-            capability.wire.effect,
-            CapabilityRiskSignals {
-                sensitive_content,
-                external_egress: capability.wire.data_policy.may_export_data,
-                destructive_or_overwrite: false,
-                unpredictable_input: false,
-            },
-        );
-        let (use_policy, canonical_input_digest_sha256) = if risk_tier
-            == desk_agent_protocol::capability_grant::CapabilityRiskTier::R3
-            || exact_ui_action
-        {
-            if *max_uses != 1 || requested.canonical_input_json.is_none() {
-                return Err(internal(
-                    "exact permission requires one use and an exact canonical input contract",
-                ));
-            }
-            (
-                CapabilityGrantUsePolicy::OneShotExact,
-                requested.canonical_input_digest_sha256.clone(),
-            )
-        } else {
-            (
-                CapabilityGrantUsePolicy::Reusable,
-                requested.canonical_input_digest_sha256.clone(),
-            )
-        };
-        let expires_at_unix_ms = context
-            .now_unix_ms
-            .checked_add(u64::from(*ttl_seconds).saturating_mul(1_000))
-            .ok_or_else(|| internal("grant expiry exceeds timestamp range"))?;
-        let grant_id = format!(
-            "grant-{:x}",
-            Sha256::digest(
-                format!(
-                    "{}:{}:{}:{}",
-                    session.conversation_id,
-                    request.request_id,
-                    requested.item_id,
-                    request.input_revision
-                )
-                .as_bytes()
-            )
-        );
-        let export_destinations = if exact_external_query {
-            vec![DestinationIdentity::WebResearch {
-                connector_id: desk_diagnose_core::device_assistant::DUCKDUCKGO_HTML_CONNECTOR_ID
-                    .into(),
-            }]
-        } else if exact_ui_action {
-            requested.export_destinations.clone()
-        } else {
-            export_destinations.clone()
-        };
-        grants.push(CapabilityGrant {
-            schema_version: CAPABILITY_GRANT_SCHEMA_VERSION,
-            grant_id,
-            actor_id: session.actor_id.clone(),
-            run_id: session.conversation_id.clone(),
-            surface: context.surface,
-            target_device_id: session.device_id.clone(),
-            target_session_id: None,
-            provider_id: requested.provider_id.clone(),
-            capability_id: capability.wire.capability_id.clone(),
-            tool_name: requested.tool_name.clone(),
-            tool_schema_version: capability.wire.input_schema_version,
-            effect: capability.wire.effect,
-            risk_tier,
-            resource_scope,
-            operation_scope,
-            export_destinations,
-            allowed_envelope_ids: Vec::new(),
-            allowed_content_digests_sha256: Vec::new(),
-            use_policy,
-            canonical_input_digest_sha256,
-            issued_by: CapabilityGrantIssuer::UserDecision,
-            issued_at_unix_ms: context.now_unix_ms,
-            expires_at_unix_ms,
-            remaining_uses: *max_uses,
-            limits: CapabilityGrantLimits {
-                max_bytes_per_call: capability.wire.limits.max_output_bytes,
-                max_items_per_call: capability.wire.limits.max_objects,
-                max_calls: *max_uses,
-            },
-            policy_revision: session.policy_revision,
-            readiness_revision: context.readiness_revision,
-            revoked_at_unix_ms: None,
-            revoked_reason: None,
-        });
-    }
-    Ok(grants)
-}
-
-fn is_supported_spreadsheet_attachment(display_summary: &str) -> bool {
-    let display_summary = display_summary.to_ascii_lowercase();
-    [".xlsx", ".csv", ".tsv"]
-        .iter()
-        .any(|extension| display_summary.ends_with(extension))
-}
-
-fn attachment_matches_fresh_object_capability(
-    capability: desk_agent_protocol::Capability,
-    attachment: &ContextAttachment,
-) -> bool {
-    match capability {
-        desk_agent_protocol::Capability::FileArtifactCreateConfirmed
-        | desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed
-        | desk_agent_protocol::Capability::SpreadsheetWorkbookCreateConfirmed
-        | desk_agent_protocol::Capability::SpreadsheetFormulaWorkbookCreateConfirmed
-        | desk_agent_protocol::Capability::WordDocumentCreateConfirmed => {
-            attachment.kind == ContextAttachmentKind::DirectorySelection
-        }
-        desk_agent_protocol::Capability::FileMetadataRead => matches!(
-            attachment.kind,
-            ContextAttachmentKind::File | ContextAttachmentKind::DirectorySelection
-        ),
-        desk_agent_protocol::Capability::FileContentRead => {
-            attachment.kind == ContextAttachmentKind::File
-        }
-        desk_agent_protocol::Capability::SpreadsheetFileInspect
-        | desk_agent_protocol::Capability::SpreadsheetMergePreview => {
-            attachment.kind == ContextAttachmentKind::DirectorySelection
-                || (attachment.kind == ContextAttachmentKind::File
-                    && is_supported_spreadsheet_attachment(&attachment.display_summary))
-        }
-        desk_agent_protocol::Capability::TerminalOutputRead => {
-            attachment.kind == ContextAttachmentKind::TerminalSessionRef
-        }
-        _ => false,
-    }
-}
-
-fn object_ref_matches_fresh_object_capability(
-    capability: desk_agent_protocol::Capability,
-    object_ref: &ObjectRef,
-) -> bool {
-    (matches!(
-        capability,
-        desk_agent_protocol::Capability::BrowserPageObserve
-            | desk_agent_protocol::Capability::BrowserPageNavigateConfirmed
-            | desk_agent_protocol::Capability::BrowserInputFallbackConfirmed
-            | desk_agent_protocol::Capability::BrowserExternalDraftWriteConfirmed
-            | desk_agent_protocol::Capability::BrowserExternalSendConfirmed
-    ) && object_ref.object_kind == ObjectKind::BrowserSurface)
-        || (capability == desk_agent_protocol::Capability::CommunicationOutlookNewHandoffConfirmed
-            && object_ref.object_kind == ObjectKind::Application)
-        || (matches!(
-            capability,
-            desk_agent_protocol::Capability::SpreadsheetLiveInspect
-                | desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed
-        ) && object_ref.object_kind == ObjectKind::Range)
-        || (matches!(
-            capability,
-            desk_agent_protocol::Capability::DocumentLiveInspect
-                | desk_agent_protocol::Capability::DocumentLivePatchConfirmed
-        ) && object_ref.object_kind == ObjectKind::Document)
-        || (matches!(
-            capability,
-            desk_agent_protocol::Capability::PresentationLiveInspect
-                | desk_agent_protocol::Capability::PresentationLivePatchConfirmed
-        ) && object_ref.object_kind == ObjectKind::Slide)
-}
-
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
     pub seq: i64,
@@ -2289,12 +1917,15 @@ fn superseded_tool_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use desk_agent_protocol::capability_provider::CapabilityEffect;
+    use desk_agent_protocol::capability_grant::{CapabilityGrant, CapabilityGrantUsePolicy};
+    use desk_agent_protocol::capability_provider::{CapabilityEffect, ProductSurface};
+    use desk_agent_protocol::computer_use::{ObjectKind, ObjectRef};
     use desk_agent_protocol::data_lineage::{
         ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance,
         DestinationIdentity, RetentionBoundary, Sensitivity,
     };
     use desk_agent_protocol::{AgentScope, ExecutionMode};
+    use desk_diagnose_core::capability_availability::CapabilityAvailability;
     use desk_diagnose_core::context_attachment::{
         AttachmentBounds, AttachmentObjectRef, AttachmentStaleReason,
         CONTEXT_ATTACHMENT_SCHEMA_VERSION, ContextAttachmentKind,
@@ -2687,7 +2318,9 @@ mod tests {
     #[tokio::test]
     async fn semantic_ui_grant_is_one_shot_and_server_binds_exact_authority() {
         let store = store().await;
-        let session = store.claim_turn(claim("ui-action-turn")).await.unwrap();
+        let mut session = store.claim_turn(claim("ui-action-turn")).await.unwrap();
+        session.input_revision = 1;
+        session.policy_revision = 1;
         let target = ObjectRef {
             token: "signed-ui-element-token".into(),
             snapshot_id: "snapshot-1".into(),
@@ -2726,7 +2359,7 @@ mod tests {
             }],
             created_at: "2026-08-26T00:00:00Z".into(),
         };
-        let decisions = vec![PermissionDecisionItem {
+        let mut decisions = vec![PermissionDecisionItem {
             item_id: "ui-action".into(),
             decision: PermissionItemDecision::Approve {
                 resource_scope: vec!["display-label-cannot-authorize".into()],
@@ -2752,20 +2385,23 @@ mod tests {
             reason: None,
         }];
 
-        let grants = build_permission_grants(
-            &session,
-            &request,
-            &decisions,
-            &PermissionGrantIssuanceContext {
-                surface: ProductSurface::OssPersonalOwner,
-                registry: &registry,
-                inventory: &inventory,
-                readiness_revision: 7,
-                now_unix_ms: 1_000,
-                implicit_fresh_object_refs: &[],
-            },
-        )
-        .unwrap();
+        let context = PermissionGrantIssuanceContext {
+            surface: ProductSurface::OssPersonalOwner,
+            registry: &registry,
+            inventory: &inventory,
+            readiness_revision: 7,
+            now_unix_ms: 1_000,
+            implicit_fresh_object_refs: &[],
+        };
+        assert!(build_permission_grants(&session, &request, &decisions, &context).is_err());
+        decisions[0].decision = PermissionItemDecision::Approve {
+            resource_scope: exact_resource_scope.clone(),
+            operation_scope: request.items[0].operation_scope.clone(),
+            export_destinations: Vec::new(),
+            ttl_seconds: 120,
+            max_uses: 1,
+        };
+        let grants = build_permission_grants(&session, &request, &decisions, &context).unwrap();
 
         assert_eq!(grants.len(), 1);
         let grant = &grants[0];
@@ -2779,6 +2415,16 @@ mod tests {
             grant.canonical_input_digest_sha256.as_deref(),
             Some(canonical_input_digest_sha256.as_str())
         );
+        decisions[0].decision = PermissionItemDecision::Approve {
+            resource_scope: Vec::new(),
+            operation_scope: Vec::new(),
+            export_destinations: Vec::new(),
+            ttl_seconds: 120,
+            max_uses: 1,
+        };
+        let narrowed = build_permission_grants(&session, &request, &decisions, &context).unwrap();
+        assert!(narrowed[0].resource_scope.is_empty());
+        assert!(narrowed[0].operation_scope.is_empty());
     }
 
     #[tokio::test]
@@ -2918,61 +2564,6 @@ mod tests {
             },
             state: AttachmentState::Active,
         }
-    }
-
-    #[test]
-    fn directory_selection_can_back_spreadsheet_and_local_draft_grants() {
-        let mut directory = context_attachment("directory", "attach-directory", "worker-1", 1);
-        directory.kind = ContextAttachmentKind::DirectorySelection;
-        directory.display_summary = "selected spreadsheet input directory".into();
-
-        assert!(attachment_matches_fresh_object_capability(
-            desk_agent_protocol::Capability::SpreadsheetFileInspect,
-            &directory,
-        ));
-        assert!(attachment_matches_fresh_object_capability(
-            desk_agent_protocol::Capability::SpreadsheetMergePreview,
-            &directory,
-        ));
-        assert!(!attachment_matches_fresh_object_capability(
-            desk_agent_protocol::Capability::FileContentRead,
-            &directory,
-        ));
-        assert!(attachment_matches_fresh_object_capability(
-            desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed,
-            &directory,
-        ));
-
-        let mut unsupported_file = directory;
-        unsupported_file.kind = ContextAttachmentKind::File;
-        unsupported_file.display_summary = "notes.txt".into();
-        assert!(!attachment_matches_fresh_object_capability(
-            desk_agent_protocol::Capability::SpreadsheetFileInspect,
-            &unsupported_file,
-        ));
-    }
-
-    #[test]
-    fn readiness_browser_surface_can_back_only_browser_grants() {
-        let surface = ObjectRef {
-            token: "browser-surface".into(),
-            snapshot_id: "browser-connection-1".into(),
-            object_kind: ObjectKind::BrowserSurface,
-            expires_at: "2026-08-27T12:00:00Z".into(),
-        };
-
-        assert!(object_ref_matches_fresh_object_capability(
-            desk_agent_protocol::Capability::BrowserPageNavigateConfirmed,
-            &surface,
-        ));
-        assert!(object_ref_matches_fresh_object_capability(
-            desk_agent_protocol::Capability::BrowserInputFallbackConfirmed,
-            &surface,
-        ));
-        assert!(!object_ref_matches_fresh_object_capability(
-            desk_agent_protocol::Capability::FileMetadataRead,
-            &surface,
-        ));
     }
 
     #[tokio::test]
