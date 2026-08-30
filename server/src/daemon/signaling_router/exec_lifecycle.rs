@@ -234,6 +234,42 @@ pub(super) async fn handle_confirm_exec_inbound(
         return Ok(());
     }
 
+    // Administrator templates are executable only through the Device Assistant
+    // edge-dispatch path, which binds a selected Linux registration, performs
+    // polkit authorization, and hands the sealed plan to the root supervisor.
+    // The browser ConfirmExec/ResolveExec path dispatches to a session worker and
+    // must never park or approve a plan that the worker is forbidden to elevate.
+    if outcome.draft.as_ref().is_some_and(|draft| {
+        draft.principal == desk_agent_protocol::exec::ExecutionPrincipal::Administrator
+    }) {
+        ctx.audit
+            .record(AuditEvent::capability_denied(
+                new_audit_event_id(),
+                audit_now(),
+                &request_id,
+                risk_str(classification.risk),
+                "administrator execution requires the Device Assistant privileged flow".to_string(),
+            ))
+            .await;
+        send_exec_preview(
+            &ctx.outbound_tx,
+            &request_id,
+            to,
+            non_executable_preview(
+                shell,
+                command,
+                cwd,
+                limits.timeout_ms,
+                classification.risk,
+                Some(
+                    "administrator execution requires the Device Assistant privileged flow"
+                        .to_string(),
+                ),
+            ),
+        );
+        return Ok(());
+    }
+
     // Decide executability from the classification + the active execution mode.
     let mode_note = match (
         classification.decision,
@@ -966,6 +1002,28 @@ pub(super) fn pep_common_checks(
     max_risk: desk_agent_protocol::RiskLevel,
     blocklist: &[desk_agent_protocol::command_blocklist::BlocklistRule],
 ) -> Option<String> {
+    if let Some(reason) = pep_policy_checks(plan, max_risk, blocklist) {
+        return Some(reason);
+    }
+
+    // Session-user execution is handed to the worker, so its containment backend
+    // must satisfy the sealed tier. Administrator execution is checked separately
+    // and runs in a systemd transient service owned by the root supervisor.
+    if plan.containment.required_enforcement
+        == desk_agent_protocol::exec::RequiredEnforcement::NativeHard
+        && !crate::worker::exec_containment::provides_native_hard()
+    {
+        return Some("pep_rejected:native_hard_unavailable".to_string());
+    }
+
+    None
+}
+
+pub(super) fn pep_policy_checks(
+    plan: &ExecPlan,
+    max_risk: desk_agent_protocol::RiskLevel,
+    blocklist: &[desk_agent_protocol::command_blocklist::BlocklistRule],
+) -> Option<String> {
     let full_argv: Vec<String> = std::iter::once(plan.program.clone())
         .chain(plan.argv.iter().cloned())
         .collect();
@@ -987,18 +1045,6 @@ pub(super) fn pep_common_checks(
             "pep_rejected:risk_exceeds_max:{:?}>{:?}",
             plan.risk, max_risk
         ));
-    }
-
-    // Enforcement-tier fail-closed: a plan that demands native-hard containment must
-    // not spawn on a host that can only provide the baseline tier. This runs before
-    // dispatch (the reason surfaces as RejectedBeforeDispatch), so the host never
-    // silently downgrades — the trusted central only ever learns the command ran under the
-    // tier it required, or that it was refused.
-    if plan.containment.required_enforcement
-        == desk_agent_protocol::exec::RequiredEnforcement::NativeHard
-        && !crate::worker::exec_containment::provides_native_hard()
-    {
-        return Some("pep_rejected:native_hard_unavailable".to_string());
     }
 
     None
@@ -1101,6 +1147,20 @@ pub(super) fn validate_agentic_edge_exec(
     templates: &[desk_agent_protocol::command_template::SyncedCommandTemplate],
     blocklist: &[desk_agent_protocol::command_blocklist::BlocklistRule],
 ) -> Option<String> {
+    if plan.principal == desk_agent_protocol::exec::ExecutionPrincipal::Administrator {
+        if let Some(reason) = pep_policy_checks(plan, max_risk, blocklist) {
+            return Some(reason);
+        }
+        #[cfg(target_os = "linux")]
+        return crate::daemon::linux_privileged_exec::validate_privileged_agentic_request(
+            plan,
+            validation_input,
+        )
+        .err()
+        .map(|error| format!("pep_rejected:privileged_plan:{error}"));
+        #[cfg(not(target_os = "linux"))]
+        return Some("pep_rejected:administrator_unsupported_platform".to_string());
+    }
     if plan.execution_basis == desk_agent_protocol::exec::ExecExecutionBasis::OwnerBlocklistOnly
         && admission_policy != desk_agent_protocol::authz::ExecAdmissionPolicy::OwnerInteractive
     {

@@ -205,12 +205,19 @@ pub async fn run_signaling_proxy(
     let command_blocklist =
         Arc::new(crate::daemon::command_blocklist::CommandBlocklistCache::new());
     #[cfg(target_os = "linux")]
+    let linux_service_daemon = matches!(
+        settings.read().await.args.startup_mode,
+        StartupMode::ServiceDaemon
+    );
+    #[cfg(target_os = "linux")]
     let privileged_exec = {
-        let service_daemon = matches!(
-            settings.read().await.args.startup_mode,
-            StartupMode::ServiceDaemon
-        );
-        if !service_daemon {
+        if !linux_service_daemon {
+            None
+        } else if !crate::daemon::linux_privileged_exec::experimental_privileged_exec_enabled() {
+            log::info!(
+                "Linux privileged AI execution remains disabled; set {}=1 only for explicit development validation",
+                crate::daemon::linux_privileged_exec::EXPERIMENTAL_PRIVILEGED_EXEC_ENV
+            );
             None
         } else if let Some(registry) = worker_mgr.session_shell_registry() {
             let permits = crate::daemon::linux_privileged_exec::PrivilegedPermitStore::default();

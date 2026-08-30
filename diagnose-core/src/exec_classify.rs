@@ -171,6 +171,22 @@ fn classify_command_core_with_policy(
     // not end OwnerInteractive classification because shell metacharacters are
     // valid free-form syntax; structural validation still runs before fallback.
     let tokens = tokenize::tokenize(command).ok();
+    if let Some(action) = privileged_service_action(command, input) {
+        let draft = privileged_service_draft(action);
+        return ClassifyOutcome {
+            classification: CommandClassification {
+                risk: RiskLevel::Critical,
+                matched_template: Some(draft.template_id.clone()),
+                impact: format!(
+                    "Run systemctl {} for the LCXL Remote Desk system service as administrator",
+                    action.verb()
+                ),
+                decision: ExecDecision::ConfirmRequired,
+                effect: Some(ExecEffect::Mutating),
+            },
+            draft: Some(draft),
+        };
+    }
     let table = templates::templates();
     if let Some(m) = tokens
         .as_ref()
@@ -263,6 +279,95 @@ fn classify_command_core_with_policy(
     match admission_policy {
         ExecAdmissionPolicy::TemplateOnly => not_executable(),
         ExecAdmissionPolicy::OwnerInteractive => freeform_draft(input, shell),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PrivilegedServiceAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl PrivilegedServiceAction {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Stop => "stop",
+            Self::Restart => "restart",
+        }
+    }
+
+    fn template_id(self) -> &'static str {
+        match self {
+            Self::Start => "linux.systemd.start.lcxl-remote-desk.v1",
+            Self::Stop => "linux.systemd.stop.lcxl-remote-desk.v1",
+            Self::Restart => "linux.systemd.restart.lcxl-remote-desk.v1",
+        }
+    }
+}
+
+/// Trusted-central copy of the three privileged template renders. The Linux root
+/// daemon independently rebuilds the same ids and every executable field before
+/// it prompts or launches; keeping this copy here lets manager and OSS signal
+/// preview/seal an Administrator plan without importing daemon code.
+fn privileged_service_action(command: &str, input: &ExecInput) -> Option<PrivilegedServiceAction> {
+    if input.cwd.is_some() || !matches!(input.target, ExecTarget::Shell { .. }) {
+        return None;
+    }
+    [
+        PrivilegedServiceAction::Start,
+        PrivilegedServiceAction::Stop,
+        PrivilegedServiceAction::Restart,
+    ]
+    .into_iter()
+    .find(|action| {
+        ["systemctl", "/usr/bin/systemctl"]
+            .into_iter()
+            .any(|program| {
+                command.trim() == format!("{program} {} lcxl-remote-desk.service", action.verb())
+            })
+    })
+}
+
+fn privileged_service_draft(action: PrivilegedServiceAction) -> ExecPlanDraft {
+    let program = "/usr/bin/systemctl".to_string();
+    let argv = vec![
+        action.verb().to_string(),
+        "lcxl-remote-desk.service".to_string(),
+    ];
+    let containment = ExecContainmentSnapshot {
+        allow_background: false,
+        required_enforcement: desk_agent_protocol::exec::RequiredEnforcement::NativeHard,
+        max_processes: Some(16),
+        max_memory_bytes: Some(128 * 1024 * 1024),
+        cpu_max_percent: Some(50),
+        io_max_bytes_per_sec: None,
+        resource_profile_id: Some("linux.privileged.systemd.v1".to_string()),
+        resource_profile_revision: Some(1),
+    };
+    let limits = ExecLimits {
+        timeout_ms: 30_000,
+        max_stdout_bytes: 64 * 1024,
+        max_stderr_bytes: 64 * 1024,
+    };
+    let principal = ExecutionPrincipal::Administrator;
+    let fingerprint =
+        fingerprint_for_principal(&program, &argv, None, &limits, &containment, principal);
+    ExecPlanDraft {
+        program,
+        argv,
+        cwd: None,
+        shell: ExecShellKind::Native,
+        risk: RiskLevel::Critical,
+        execution_basis: ExecExecutionBasis::Template,
+        principal,
+        template_id: action.template_id().to_string(),
+        fingerprint,
+        timeout_ms: limits.timeout_ms,
+        max_stdout_bytes: limits.max_stdout_bytes,
+        max_stderr_bytes: limits.max_stderr_bytes,
+        containment,
     }
 }
 
@@ -428,6 +533,45 @@ mod tests {
         assert_eq!(
             desk_agent_protocol::OperationInput::required_capability(&out.classification),
             Some(desk_agent_protocol::Capability::ShellExecConfirmed)
+        );
+    }
+
+    #[test]
+    fn exact_lcxl_system_service_action_seals_an_administrator_plan() {
+        for verb in ["start", "stop", "restart"] {
+            let out = classify_command(&shell_input(&format!(
+                "systemctl {verb} lcxl-remote-desk.service"
+            )));
+            assert_eq!(out.classification.decision, ExecDecision::ConfirmRequired);
+            assert_eq!(out.classification.risk, RiskLevel::Critical);
+            let draft = out.draft.expect("privileged draft");
+            assert_eq!(draft.principal, ExecutionPrincipal::Administrator);
+            assert_eq!(draft.program, "/usr/bin/systemctl");
+            assert_eq!(
+                draft.argv,
+                vec![verb.to_string(), "lcxl-remote-desk.service".to_string()]
+            );
+            assert_eq!(draft.cwd, None);
+            assert_eq!(
+                draft.containment.required_enforcement,
+                desk_agent_protocol::exec::RequiredEnforcement::NativeHard
+            );
+        }
+    }
+
+    #[test]
+    fn privileged_template_rejects_cwd_and_arbitrary_units() {
+        let mut with_cwd = shell_input("systemctl restart lcxl-remote-desk.service");
+        with_cwd.cwd = Some("/tmp".to_string());
+        assert_eq!(
+            classify_command(&with_cwd).classification.decision,
+            ExecDecision::NotExecutable
+        );
+        assert_eq!(
+            classify_command(&shell_input("systemctl restart ssh.service"))
+                .classification
+                .decision,
+            ExecDecision::NotExecutable
         );
     }
 

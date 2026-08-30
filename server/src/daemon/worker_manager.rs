@@ -800,6 +800,35 @@ impl WorkerManager {
         self.session_shell_registry.read().unwrap().clone()
     }
 
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn bind_session_shell_registry_for_test(
+        &self,
+        registry: crate::host_control::session_shell::SessionShellRegistry,
+    ) {
+        *self.session_shell_registry.write().unwrap() = Some(registry);
+        self.session_targeting_enabled
+            .store(true, Ordering::Release);
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn session_shell_registration(
+        &self,
+        session: &desk_ipc_protocol::message::SessionKey,
+    ) -> Option<Arc<crate::host_control::session_shell::RegisteredSessionShell>> {
+        self.session_shell_registry
+            .read()
+            .unwrap()
+            .as_ref()?
+            .snapshot()
+            .into_iter()
+            .find(|registration| {
+                linux_session_key(
+                    &registration.logical_session,
+                    registration.registration_generation,
+                ) == *session
+            })
+    }
+
     pub fn session_targets(&self) -> SessionTargetCatalog {
         self.session_targets.clone()
     }

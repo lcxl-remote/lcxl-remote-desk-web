@@ -34,6 +34,7 @@ use crate::host_control::session_shell::{
 
 pub const POLKIT_ACTION_ID: &str = "com.lcxl.remote-desk.ai.execute-administrator-command";
 pub const POLKIT_POLICY_PATH: &str = "/usr/share/polkit-1/actions/com.lcxl.remote-desk.ai.policy";
+pub const EXPERIMENTAL_PRIVILEGED_EXEC_ENV: &str = "LRD_EXPERIMENTAL_LINUX_PRIVILEGED_EXEC";
 pub const POLKIT_POLICY_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE policyconfig PUBLIC
  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
@@ -74,6 +75,11 @@ const SYSTEMD_CLIENT_GRACE: Duration = Duration::from_secs(15);
 const UNIT_OBSERVE_INTERVAL: Duration = Duration::from_millis(25);
 const SYSTEMCTL_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 const SYSTEMD_CLIENT_DIAGNOSTIC_BYTES: usize = 16 * 1024;
+
+pub fn experimental_privileged_exec_enabled() -> bool {
+    std::env::var_os(EXPERIMENTAL_PRIVILEGED_EXEC_ENV)
+        .is_some_and(|value| value == std::ffi::OsStr::new("1"))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PolkitSubject {
@@ -300,6 +306,10 @@ impl PrivilegedPermitStore {
         });
     }
 
+    fn revoke(&self, permit_id: Uuid) {
+        self.permits.lock().unwrap().remove(&permit_id);
+    }
+
     fn retain_current_registrations(&self, registry: &SessionShellRegistry) {
         let current: HashSet<_> = registry
             .snapshot()
@@ -452,6 +462,7 @@ pub fn privileged_service_draft(action: PrivilegedServiceAction) -> ExecPlanDraf
 pub enum PrivilegedPlanError {
     WrongPrincipal,
     UnknownTemplate,
+    InputDrift,
     PlanDrift,
 }
 
@@ -460,6 +471,7 @@ impl std::fmt::Display for PrivilegedPlanError {
         formatter.write_str(match self {
             Self::WrongPrincipal => "the plan is not an Administrator plan",
             Self::UnknownTemplate => "the privileged template is not allowlisted",
+            Self::InputDrift => "the privileged command input does not match the sealed template",
             Self::PlanDrift => "the privileged plan differs from its compiled-in template",
         })
     }
@@ -493,6 +505,24 @@ fn validate_privileged_plan(plan: &ExecPlan) -> Result<(), PrivilegedPlanError> 
         .ok_or(PrivilegedPlanError::UnknownTemplate)?;
     if plan_draft(plan) != privileged_service_draft(action) {
         return Err(PrivilegedPlanError::PlanDrift);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_privileged_agentic_request(
+    plan: &ExecPlan,
+    input: &desk_agent_protocol::ExecInput,
+) -> Result<(), PrivilegedPlanError> {
+    validate_privileged_plan(plan)?;
+    let action = PrivilegedServiceAction::from_template_id(&plan.template_id)
+        .ok_or(PrivilegedPlanError::UnknownTemplate)?;
+    if input.cwd.is_some()
+        || !matches!(input.target, desk_agent_protocol::ExecTarget::Shell { .. })
+        || !["systemctl", SYSTEMCTL_PATH].into_iter().any(|program| {
+            input.command.trim() == format!("{program} {} {MANAGED_SERVICE_UNIT}", action.verb())
+        })
+    {
+        return Err(PrivilegedPlanError::InputDrift);
     }
     Ok(())
 }
@@ -800,6 +830,39 @@ impl TransientCommandRunner for RealTransientCommandRunner {
     }
 }
 
+#[cfg(test)]
+struct TestAllowPolkitRunner;
+
+#[cfg(test)]
+#[async_trait]
+impl PolkitCommandRunner for TestAllowPolkitRunner {
+    async fn check(&self, _subject: PolkitSubject) -> PolkitCommandOutcome {
+        PolkitCommandOutcome::Exit(0)
+    }
+}
+
+#[cfg(test)]
+struct TestSpawnFailedTransientRunner;
+
+#[cfg(test)]
+#[async_trait]
+impl TransientCommandRunner for TestSpawnFailedTransientRunner {
+    async fn run(
+        &self,
+        _spec: &SystemdTransientSpec,
+        _timeout: Duration,
+        _cancelled: Arc<AtomicBool>,
+    ) -> TransientRunOutcome {
+        TransientRunOutcome::SpawnFailed("test runner refused spawn".to_string())
+    }
+
+    async fn inspect(&self, _unit_name: &str) -> Result<TransientUnitInspection, String> {
+        Ok(TransientUnitInspection::Missing)
+    }
+
+    async fn terminate(&self, _unit_name: &str) {}
+}
+
 async fn inspect_systemd_unit(unit_name: &str) -> Result<TransientUnitInspection, String> {
     let mut command = Command::new(SYSTEMCTL_PATH);
     command
@@ -1050,6 +1113,25 @@ pub enum PrivilegedPrepareError {
     GenerationFingerprintMismatch,
 }
 
+#[derive(Debug)]
+pub enum PrivilegedAuthorizationError {
+    Plan(PrivilegedPlanError),
+    Authorization(AuthorizationError),
+}
+
+impl std::fmt::Display for PrivilegedAuthorizationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plan(error) => write!(formatter, "privileged plan rejected: {error}"),
+            Self::Authorization(error) => {
+                write!(formatter, "administrator authorization failed: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PrivilegedAuthorizationError {}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PrivilegedReconcileSummary {
     pub recovered_running: usize,
@@ -1079,6 +1161,7 @@ impl std::error::Error for PrivilegedPrepareError {}
 #[derive(Clone)]
 pub struct LinuxPrivilegedExecSupervisor {
     permits: PrivilegedPermitStore,
+    authorizer: LinuxPolkitAuthorizer,
     ledger: Arc<ExecLedger>,
     runner: Arc<dyn TransientCommandRunner>,
     active: Arc<Mutex<HashMap<String, ActivePrivilegedDispatch>>>,
@@ -1103,6 +1186,7 @@ impl LinuxPrivilegedExecSupervisor {
     pub fn new(permits: PrivilegedPermitStore, ledger: Arc<ExecLedger>) -> Self {
         Self {
             permits,
+            authorizer: LinuxPolkitAuthorizer::default(),
             ledger,
             runner: Arc::new(RealTransientCommandRunner),
             active: Arc::new(Mutex::new(HashMap::new())),
@@ -1117,10 +1201,38 @@ impl LinuxPrivilegedExecSupervisor {
     ) -> Self {
         Self {
             permits,
+            authorizer: LinuxPolkitAuthorizer::default(),
             ledger,
             runner,
             active: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_authorized_spawn_failure(ledger: Arc<ExecLedger>) -> Self {
+        Self {
+            permits: PrivilegedPermitStore::default(),
+            authorizer: LinuxPolkitAuthorizer {
+                runner: Arc::new(TestAllowPolkitRunner),
+            },
+            ledger,
+            runner: Arc::new(TestSpawnFailedTransientRunner),
+            active: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub async fn authorize_and_mint(
+        &self,
+        plan: &ExecPlan,
+        registry: &SessionShellRegistry,
+        registration: &Arc<RegisteredSessionShell>,
+    ) -> Result<Uuid, PrivilegedAuthorizationError> {
+        validate_privileged_plan(plan).map_err(PrivilegedAuthorizationError::Plan)?;
+        self.authorizer
+            .authorize(registry, registration)
+            .await
+            .map_err(PrivilegedAuthorizationError::Authorization)?;
+        Ok(self.permits.mint(plan, registration).permit_id)
     }
 
     pub async fn prepare_dispatch(
@@ -1163,6 +1275,13 @@ impl LinuxPrivilegedExecSupervisor {
                 Err(PrivilegedPrepareError::GenerationFingerprintMismatch)
             }
         }
+    }
+
+    /// Burn an authorization that became stale before the dispatch handshake
+    /// consumed it. A stale host/manager decision must never remain usable for
+    /// the rest of the permit TTL.
+    pub(crate) fn discard_permit(&self, permit_id: Uuid) {
+        self.permits.revoke(permit_id);
     }
 
     /// Execute a spec returned by [`Self::prepare_dispatch`]. This is kept
@@ -1746,6 +1865,32 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn supervisor_authorization_mints_an_exact_registration_bound_permit() {
+        let (registry, registration) = current_registration();
+        let ledger = Arc::new(ExecLedger::open_in_memory().await.unwrap());
+        let supervisor = LinuxPrivilegedExecSupervisor {
+            permits: PrivilegedPermitStore::default(),
+            authorizer: LinuxPolkitAuthorizer {
+                runner: Arc::new(FakeRunner(PolkitCommandOutcome::Exit(0))),
+            },
+            ledger,
+            runner: Arc::new(RealTransientCommandRunner),
+            active: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let plan = administrator_plan("generation-authorized");
+
+        let permit_id = supervisor
+            .authorize_and_mint(&plan, &registry, &registration)
+            .await
+            .unwrap();
+
+        supervisor
+            .permits
+            .consume(permit_id, &plan, &registry, &registration)
+            .unwrap();
+    }
+
     #[test]
     fn permit_is_single_use_and_bound_to_plan_and_registration() {
         let (registry, registration) = current_registration();
@@ -1898,6 +2043,59 @@ mod tests {
                 validate_privileged_plan(&drifted),
                 Err(PrivilegedPlanError::PlanDrift)
             );
+        }
+    }
+
+    #[test]
+    fn privileged_agentic_input_must_name_the_same_exact_service_action() {
+        let plan = administrator_plan("generation-input-binding");
+        let input = desk_agent_protocol::ExecInput {
+            target: desk_agent_protocol::ExecTarget::Shell {
+                shell: "bash".to_string(),
+            },
+            command: "systemctl restart lcxl-remote-desk.service".to_string(),
+            cwd: None,
+            timeout_ms: 0,
+            max_stdout_bytes: 0,
+            max_stderr_bytes: 0,
+        };
+        validate_privileged_agentic_request(&plan, &input).unwrap();
+
+        let mut wrong_unit = input.clone();
+        wrong_unit.command = "systemctl restart ssh.service".to_string();
+        assert_eq!(
+            validate_privileged_agentic_request(&plan, &wrong_unit),
+            Err(PrivilegedPlanError::InputDrift)
+        );
+        let mut with_cwd = input;
+        with_cwd.cwd = Some("/tmp".to_string());
+        assert_eq!(
+            validate_privileged_agentic_request(&plan, &with_cwd),
+            Err(PrivilegedPlanError::InputDrift)
+        );
+    }
+
+    #[test]
+    fn central_and_root_privileged_template_renders_match_for_every_action() {
+        for action in [
+            PrivilegedServiceAction::Start,
+            PrivilegedServiceAction::Stop,
+            PrivilegedServiceAction::Restart,
+        ] {
+            let input = desk_agent_protocol::ExecInput {
+                target: desk_agent_protocol::ExecTarget::Shell {
+                    shell: "bash".to_string(),
+                },
+                command: format!("systemctl {} {MANAGED_SERVICE_UNIT}", action.verb()),
+                cwd: None,
+                timeout_ms: 0,
+                max_stdout_bytes: 0,
+                max_stderr_bytes: 0,
+            };
+            let central = desk_diagnose_core::exec_classify::classify_command(&input)
+                .draft
+                .expect("central privileged draft");
+            assert_eq!(central, privileged_service_draft(action));
         }
     }
 

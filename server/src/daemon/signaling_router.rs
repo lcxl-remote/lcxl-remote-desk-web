@@ -473,11 +473,9 @@ pub struct RouterContext {
     /// worker can read locally); `None` in ServiceDaemon, where a `RemoteToolRequest`
     /// replies with a wholesale error.
     pub remote_read: Option<Arc<crate::agent_adapter::remote_read::EdgeReadInvoker>>,
-    /// Whether confirmed execution is available in this startup mode. `true`
-    /// only where an in-process worker can execute (Default / DeskServer);
-    /// `false` in ServiceDaemon mode, where `ConfirmExec` / `ResolveExec` reply
-    /// with `UnsupportedCapability` (cross-process exec is a later step). Gated
-    /// like `diagnose_orchestrator`.
+    /// Whether direct confirmed execution is available in this startup mode. `true`
+    /// only where an in-process worker can execute (Default / DeskServer). Trusted-
+    /// central `EdgeExecRequest` has a separate ServiceDaemon resident-worker gate.
     pub exec_supported: bool,
     /// Short-lived store of previewed-but-not-yet-resolved executions, keyed by
     /// `exec_request_id`. Always present (in-memory state); the startup-mode and

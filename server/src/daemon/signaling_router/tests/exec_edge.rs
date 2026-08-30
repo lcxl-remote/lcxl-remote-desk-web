@@ -463,6 +463,9 @@ pub(super) async fn fleet_exec_valid_plan_dispatches_to_worker_and_marks_in_flig
 #[tokio::test]
 pub(super) async fn fleet_exec_uses_the_only_ready_assistant_session() {
     let (mut ctx, _rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+    // ServiceDaemon keeps direct browser ConfirmExec disabled, while trusted-
+    // central EdgeExec may use its registered resident session workers.
+    ctx.exec_supported = false;
     ctx.inbound_authz = Some(authz_block(
         vec![Capability::ShellExecConfirmed],
         vec![],
@@ -713,6 +716,171 @@ pub(super) async fn agentic_exec_with_a_stale_connection_never_falls_back_to_ano
             .unwrap()
             .is_none()
     );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+pub(super) async fn administrator_agentic_exec_uses_registration_bound_root_supervisor() {
+    use crate::host_control::protocol::{SESSION_SHELL_PROTOCOL_VERSION, SessionShellInfo};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+    ctx.inbound_authz = Some(authz_block(
+        vec![Capability::ShellExecConfirmed],
+        vec![],
+        ExecutionMode::ConfirmEachAction,
+        desk_agent_protocol::RiskLevel::Critical,
+    ));
+    let identity =
+        crate::host_control::session_shell::read_process_identity(std::process::id()).unwrap();
+    let registry = crate::host_control::session_shell::SessionShellRegistry::default();
+    let registration = registry
+        .register(
+            91,
+            SessionShellInfo {
+                app_version: env!("CARGO_PKG_VERSION").to_string(),
+                protocol_version: SESSION_SHELL_PROTOCOL_VERSION,
+                pid: std::process::id(),
+                process_start_ticks: identity.start_ticks,
+                reported_uid: identity.uid,
+                session_id: Some("privileged-test".to_string()),
+                seat: Some("seat-test".to_string()),
+                session_type: Some("wayland".to_string()),
+                cwd_base64: STANDARD.encode(b"/tmp"),
+                umask: 0o022,
+                environment: Vec::new(),
+            },
+        )
+        .unwrap();
+    ctx.worker_mgr
+        .bind_session_shell_registry_for_test(registry.clone());
+    let session = desk_ipc_protocol::message::SessionKey {
+        platform_session_id: format!(
+            "linux:{}",
+            serde_json::to_string(&(
+                registration.logical_session.uid,
+                &registration.logical_session.session_id,
+                &registration.logical_session.seat,
+            ))
+            .unwrap()
+        ),
+        session_generation: registration.registration_generation,
+    };
+    ctx.worker_mgr
+        .session_targets()
+        .upsert(crate::daemon::session_target::SessionCandidate {
+            session: session.clone(),
+            display_name: "Privileged test session".to_string(),
+            session_type: Some("wayland".to_string()),
+            seat: Some("seat-test".to_string()),
+            foreground: true,
+            remote_desktop_ready: true,
+            terminal_ready: true,
+            file_ready: true,
+            assistant_ready: true,
+        });
+    ctx.worker_mgr
+        .bind_connection_target("privileged-controller", &session)
+        .unwrap();
+    ctx.privileged_exec = Some(Arc::new(
+        crate::daemon::linux_privileged_exec::LinuxPrivilegedExecSupervisor::test_authorized_spawn_failure(
+            ctx.exec_ledger.clone(),
+        ),
+    ));
+
+    let input = desk_agent_protocol::ExecInput {
+        target: desk_agent_protocol::ExecTarget::Shell {
+            shell: "bash".to_string(),
+        },
+        command: "systemctl restart lcxl-remote-desk.service".to_string(),
+        cwd: None,
+        timeout_ms: 0,
+        max_stdout_bytes: 0,
+        max_stderr_bytes: 0,
+    };
+    let draft = desk_diagnose_core::exec_classify::classify_command(&input)
+        .draft
+        .expect("privileged draft");
+    let plan = ExecPlan::from_draft(
+        ExecRequestId("privileged-task".to_string()),
+        "privileged-generation",
+        ApprovalId("privileged-approval".to_string()),
+        draft,
+    );
+
+    ctx.settings
+        .write()
+        .await
+        .ai_policy
+        .max_command_runtime_seconds = 10;
+    let mut over_runtime_ceiling = plan.clone();
+    over_runtime_ceiling.execution_generation = "privileged-over-runtime".to_string();
+    handle_edge_exec_request_inbound(
+        &ctx,
+        &agentic_exec_model_for_session(
+            "privileged-over-runtime",
+            &over_runtime_ceiling,
+            &input,
+            Some("privileged-controller"),
+        ),
+    )
+    .await
+    .unwrap();
+    match read_fleet_result(&mut rx).disposition {
+        EdgeExecDisposition::RejectedBeforeDispatch { error } => assert!(
+            error.message.contains("runtime_exceeds_local_ceiling"),
+            "{error:?}"
+        ),
+        other => panic!("expected runtime-ceiling rejection, got {other:?}"),
+    }
+    assert!(
+        ctx.exec_ledger
+            .get("privileged-over-runtime")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    ctx.settings
+        .write()
+        .await
+        .ai_policy
+        .max_command_runtime_seconds = 600;
+
+    handle_edge_exec_request_inbound(
+        &ctx,
+        &agentic_exec_model_for_session(
+            "privileged-generation",
+            &plan,
+            &input,
+            Some("privileged-controller"),
+        ),
+    )
+    .await
+    .unwrap();
+
+    let text = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("privileged result timeout")
+        .expect("privileged result channel");
+    let result = serde_json::from_str::<SignalingModel>(&text)
+        .unwrap()
+        .get_data::<EdgeExecResultPayload>()
+        .unwrap();
+    assert!(matches!(
+        result.disposition,
+        EdgeExecDisposition::DispatchFailedBeforeWorker { .. }
+    ));
+    let row = ctx
+        .exec_ledger
+        .get("privileged-generation")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.state,
+        crate::daemon::exec_ledger::State::SpawnFailed.as_str()
+    );
+    assert!(row.plan_json.is_some());
 }
 
 #[tokio::test]
@@ -1745,6 +1913,30 @@ pub(super) async fn confirm_exec_suggest_only_mode_blocks_even_a_template() {
 }
 
 #[tokio::test]
+pub(super) async fn browser_confirm_exec_cannot_approve_an_administrator_template() {
+    let (ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+    handle_confirm_exec_inbound(
+        &ctx,
+        &confirm_exec_model(
+            "admin-browser",
+            "systemctl restart lcxl-remote-desk.service",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let preview = read_preview(&mut rx);
+    assert!(!preview.executable);
+    assert!(!preview.requires_confirmation);
+    assert!(
+        preview
+            .blocked_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Device Assistant privileged flow"))
+    );
+}
+
+#[tokio::test]
 pub(super) async fn confirm_exec_read_only_mode_rejects_mutating_template() {
     let (ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ReadOnly).await;
     // Read-only template is allowed.
@@ -1769,6 +1961,7 @@ pub(super) async fn confirm_exec_unsupported_in_service_daemon_mode() {
     // in ServiceDaemon mode regardless of the local execution mode.
     let (mut ctx, mut rx) = make_ctx_with_rx().await;
     ctx.settings.write().await.ai_policy.execution_mode = ExecutionMode::ConfirmEachAction;
+    ctx.worker_mgr.enable_session_targeting_for_test();
     let _ = &mut ctx;
     handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "Get-Service -Name Spooler"))
         .await
