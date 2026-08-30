@@ -732,6 +732,12 @@ fn a_locked_host_still_accepts_the_instructions_about_itself() {
             operation_id: "op".to_string(),
             locale: "en-US".to_string(),
         }),
+        ServiceToWorker::SetInteractiveRoute(
+            desk_ipc_protocol::message::InteractiveRouteCommandPayload {
+                route_epoch: 9,
+                active: false,
+            },
+        ),
     ] {
         assert!(
             crate::worker::session::survives_remote_access_lock(&msg),

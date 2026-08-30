@@ -914,3 +914,20 @@ pub struct DesktopChangedPayload {
     /// after that worker became active.
     pub observed_at_unix_ms: u64,
 }
+
+/// Daemon-authoritative interactive-route state for one resident worker.
+/// `route_epoch` is monotonic within the worker's [`SessionKey`](super::SessionKey).
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct InteractiveRouteCommandPayload {
+    pub route_epoch: u64,
+    pub active: bool,
+}
+
+/// Worker acknowledgement that desktop-dependent capture/input resources have
+/// reached the requested interactive state.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct InteractiveRouteAppliedPayload {
+    pub route_epoch: u64,
+    pub active: bool,
+    pub applied_at_unix_ms: u64,
+}

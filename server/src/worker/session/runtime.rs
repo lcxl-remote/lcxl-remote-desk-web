@@ -41,6 +41,10 @@ impl WorkerSession {
             .worker_identity
             .as_ref()
             .map_or(WorkerProfile::SessionUser, |identity| identity.profile);
+        // Legacy/in-process workers have no keyed identity and remain active
+        // under the single-worker adapter. Every keyed resident starts in
+        // standby and must receive an epoch-fenced activation from the daemon.
+        let mut interactive_route_active = init_payload.worker_identity.is_none();
         let settings = match serde_json::from_str::<Settings>(&init_payload.config_json) {
             Ok(mut s) => {
                 // Args is #[serde(skip)] so it defaults to Args::default() after
@@ -799,7 +803,9 @@ impl WorkerSession {
                                     );
                                 }
                                 ServiceToWorker::ApplyMediaSettings(payload) => {
-                                    if let Some(producer) = media_producer.as_ref() {
+                                    if interactive_route_active
+                                        && let Some(producer) = media_producer.as_ref()
+                                    {
                                         producer.apply_media_settings(payload);
                                     }
                                 }
@@ -903,6 +909,39 @@ impl WorkerSession {
                                         ),
                                     );
                                 }
+                                ServiceToWorker::SetInteractiveRoute(payload) => {
+                                    // Close the input gate before stopping resources so no
+                                    // event can slip into the old desktop during teardown.
+                                    interactive_route_active = payload.active;
+                                    if !payload.active {
+                                        let mut connection_ids = input_dispatcher
+                                            .connection_ids()
+                                            .into_iter()
+                                            .collect::<HashSet<_>>();
+                                        if let Some(producer) = media_producer.as_ref() {
+                                            connection_ids.extend(producer.stop_all_media());
+                                        }
+                                        for connection_id in connection_ids {
+                                            input_dispatcher
+                                                .stop_connection_by_id(&connection_id);
+                                        }
+                                    }
+                                    let ack = WorkerToService::InteractiveRouteApplied(
+                                        InteractiveRouteAppliedPayload {
+                                            route_epoch: payload.route_epoch,
+                                            active: payload.active,
+                                            applied_at_unix_ms: SystemTime::now()
+                                                .duration_since(UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_millis()
+                                                as u64,
+                                        },
+                                    );
+                                    if writer_tx.send(ack).is_err() {
+                                        error!("IPC writer task died while acknowledging interactive route");
+                                        break;
+                                    }
+                                }
                                 // Media-control IPC. Routed
                                 // straight to the producer; the producer
                                 // returns immediately (start_media spawns a
@@ -910,6 +949,13 @@ impl WorkerSession {
                                 // stays responsive to the watchdog and the
                                 // daemon's other commands.
                                 ServiceToWorker::StartMedia(payload) => {
+                                    if !interactive_route_active {
+                                        warn!(
+                                            "Dropping StartMedia for {} while resident worker is standby",
+                                            payload.connection_id
+                                        );
+                                        continue;
+                                    }
                                     if let Some(producer) = media_producer.as_ref() {
                                         info!(
                                             "Worker received StartMedia for {}: codec={:?}, fps={}",
@@ -1027,12 +1073,16 @@ impl WorkerSession {
                                     connection_ceilings.clear(&payload.connection_id).await;
                                 }
                                 ServiceToWorker::ForceKeyframe(payload) => {
-                                    if let Some(producer) = media_producer.as_ref() {
+                                    if interactive_route_active
+                                        && let Some(producer) = media_producer.as_ref()
+                                    {
                                         producer.force_keyframe(&payload.connection_id);
                                     }
                                 }
                                 ServiceToWorker::UpdateMediaSettings(payload) => {
-                                    if let Some(producer) = media_producer.as_ref() {
+                                    if interactive_route_active
+                                        && let Some(producer) = media_producer.as_ref()
+                                    {
                                         producer.update_settings(payload);
                                     }
                                 }
@@ -1041,16 +1091,22 @@ impl WorkerSession {
                                 // `accept_clipboard_sync` before sending,
                                 // so the worker injects unconditionally.
                                 ServiceToWorker::MouseInput(payload) => {
-                                    computer_use_broker.note_browser_input();
-                                    input_dispatcher.dispatch_mouse(&payload);
+                                    if interactive_route_active {
+                                        computer_use_broker.note_browser_input();
+                                        input_dispatcher.dispatch_mouse(&payload);
+                                    }
                                 }
                                 ServiceToWorker::MouseMoveInput(payload) => {
-                                    computer_use_broker.note_browser_input();
-                                    input_dispatcher.dispatch_mouse_move(&payload);
+                                    if interactive_route_active {
+                                        computer_use_broker.note_browser_input();
+                                        input_dispatcher.dispatch_mouse_move(&payload);
+                                    }
                                 }
                                 ServiceToWorker::KeyboardInput(payload) => {
-                                    computer_use_broker.note_browser_input();
-                                    input_dispatcher.dispatch_keyboard(&payload);
+                                    if interactive_route_active {
+                                        computer_use_broker.note_browser_input();
+                                        input_dispatcher.dispatch_keyboard(&payload);
+                                    }
                                 }
                                 // Clipboard handlers route to
                                 // the per-worker clipboard dispatcher when

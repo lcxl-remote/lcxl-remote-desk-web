@@ -1141,9 +1141,14 @@ async fn write_video_frame_paused_i_frame_clears_flag() {
     write_video_frame(&registry, frame).await;
 
     let ctx = registry.get("conn-pause-i").await.unwrap();
+    let ctx = ctx.read().await;
     assert!(
-        !ctx.read().await.media_paused.load(Ordering::Relaxed),
+        !ctx.media_paused.load(Ordering::Relaxed),
         "first IDR while paused must clear the flag"
+    );
+    assert!(
+        ctx.media_switch_timing.lock().unwrap().is_none(),
+        "first IDR must consume the switch timing observation exactly once"
     );
 }
 

@@ -40,13 +40,18 @@ pub async fn write_video_frame(registry: &PcRegistry, frame: MediaFrame) {
     // pause flag; clone them out before awaiting on `write_sample` so
     // the daemon's offer / ice_candidate handlers (which take the write lock)
     // are not blocked while the codec write completes.
-    let (track_opt, paused, fence) = {
+    let (track_opt, paused, fence, switch_timing) = {
         let g = ctx.read().await;
         let t = match frame.kind {
             MediaFrameKind::VideoI | MediaFrameKind::VideoP => g.video_track.clone(),
             MediaFrameKind::Audio => g.audio_track.clone(),
         };
-        (t, g.media_paused.clone(), Arc::clone(&g.media_output_fence))
+        (
+            t,
+            g.media_paused.clone(),
+            Arc::clone(&g.media_output_fence),
+            Arc::clone(&g.media_switch_timing),
+        )
     };
 
     // Keep the read guard through `write_sample`: revocation takes the write
@@ -88,10 +93,18 @@ pub async fn write_video_frame(registry: &PcRegistry, frame: MediaFrame) {
         match frame.kind {
             MediaFrameKind::VideoI => {
                 paused.store(false, Ordering::Relaxed);
-                log::info!(
-                    "[pc_manager] {} resumed media (first IDR after worker swap)",
-                    frame.connection_id
-                );
+                if let Some(timing) = switch_timing.lock().unwrap().take() {
+                    log::info!(
+                        "resident_switch stage=first_idr connection={} route_epoch={} elapsed_ms={} connection_epoch={} generation={}",
+                        frame.connection_id,
+                        timing
+                            .route_epoch
+                            .map_or_else(|| "legacy".to_string(), |epoch| epoch.to_string()),
+                        timing.started_at.elapsed().as_millis(),
+                        frame.connection_epoch,
+                        frame.generation
+                    );
+                }
                 // fall through to write_sample
             }
             MediaFrameKind::VideoP | MediaFrameKind::Audio => {

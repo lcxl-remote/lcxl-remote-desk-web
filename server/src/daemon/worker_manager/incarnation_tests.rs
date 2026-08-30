@@ -270,6 +270,168 @@ async fn interactive_route_switches_per_desktop_but_session_resources_stay_on_de
 }
 
 #[tokio::test]
+async fn interactive_route_waits_for_the_exact_worker_epoch_ack() {
+    let (manager, _worker_rx) = test_manager();
+    let key = resident_key("session-ack");
+    let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+    let incarnation = manager
+        .install_resident_for_test(key.clone(), command_tx)
+        .await;
+    let applying = {
+        let manager = manager.clone();
+        let key = key.clone();
+        tokio::spawn(async move {
+            manager
+                .request_interactive_route_state(&key, incarnation, 7, true)
+                .await
+        })
+    };
+
+    assert!(matches!(
+        command_rx.recv().await,
+        Some(ServiceToWorker::SetInteractiveRoute(
+            InteractiveRouteCommandPayload {
+                route_epoch: 7,
+                active: true,
+            }
+        ))
+    ));
+    assert!(
+        !manager.complete_interactive_route_ack(
+            &key,
+            WorkerIncarnation(incarnation.0.saturating_add(1)),
+            InteractiveRouteAppliedPayload {
+                route_epoch: 7,
+                active: true,
+                applied_at_unix_ms: 10,
+            },
+        ),
+        "another incarnation must not satisfy the pending activation"
+    );
+    assert!(!applying.is_finished());
+    assert!(manager.complete_interactive_route_ack(
+        &key,
+        incarnation,
+        InteractiveRouteAppliedPayload {
+            route_epoch: 7,
+            active: true,
+            applied_at_unix_ms: 11,
+        },
+    ));
+    let applied = applying.await.unwrap().unwrap();
+    assert_eq!(applied.route_epoch, 7);
+    assert!(applied.active);
+
+    assert_eq!(manager.allocate_interactive_route_epoch(&key.session), 1);
+    assert_eq!(manager.allocate_interactive_route_epoch(&key.session), 2);
+}
+
+#[tokio::test]
+async fn remote_desktop_readiness_waits_for_interactive_activation_ack() {
+    use crate::daemon::session_target::{
+        SessionCandidate, SessionCapability, SessionTargetSelectionError,
+    };
+    use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
+
+    let (manager, _worker_rx) = test_manager();
+    let key = resident_key("session-readiness");
+    manager.session_targets.upsert(SessionCandidate {
+        session: key.session.clone(),
+        display_name: "Session readiness".to_string(),
+        session_type: Some("wayland".to_string()),
+        seat: Some("seat0".to_string()),
+        foreground: true,
+        remote_desktop_ready: false,
+        terminal_ready: false,
+        file_ready: false,
+        assistant_ready: false,
+    });
+    let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+    let incarnation = manager
+        .install_resident_for_test(key.clone(), command_tx)
+        .await;
+    let caps = MediaCapabilities {
+        video_codecs: vec![desk_ipc_protocol::message::MediaCodec::H264],
+        video_device_list: std::collections::BTreeMap::from([(
+            "portal".to_string(),
+            vec![DisplayInfo {
+                device_name: "portal-display".to_string(),
+                display_device_name: None,
+                desktop_coordinates: DisplayRect {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+                resolutions: vec![],
+                attached_to_desktop: true,
+                rotation: 0,
+                current_capture_resolution: None,
+            }],
+        )]),
+        ..MediaCapabilities::default()
+    };
+
+    assert!(
+        manager
+            .set_resident_worker_capabilities(&key, caps.clone())
+            .await
+    );
+    assert!(manager.set_resident_worker_capabilities(&key, caps).await);
+    assert_eq!(
+        manager
+            .session_targets
+            .select(SessionCapability::RemoteDesktop, None),
+        Err(SessionTargetSelectionError::Unavailable),
+        "capabilities alone must not admit a desktop connection"
+    );
+    assert_eq!(
+        manager
+            .session_targets
+            .list_for(SessionCapability::Terminal)
+            .1
+            .len(),
+        1,
+        "non-interactive session operations become ready independently"
+    );
+
+    let ServiceToWorker::SetInteractiveRoute(command) = command_rx.recv().await.unwrap() else {
+        panic!("expected interactive activation command");
+    };
+    assert!(command.active);
+    assert!(manager.complete_interactive_route_ack(
+        &key,
+        incarnation,
+        InteractiveRouteAppliedPayload {
+            route_epoch: command.route_epoch,
+            active: true,
+            applied_at_unix_ms: 20,
+        },
+    ));
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if manager
+                .session_targets
+                .select(SessionCapability::RemoteDesktop, None)
+                .is_ok()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("activation acknowledgement must publish desktop readiness");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), command_rx.recv())
+            .await
+            .is_err(),
+        "duplicate capability reports must not re-activate an already current route"
+    );
+}
+
+#[tokio::test]
 async fn process_wide_remote_access_state_reaches_and_waits_for_every_resident() {
     let (manager, _worker_rx) = test_manager();
     manager.enable_session_targeting_for_test();

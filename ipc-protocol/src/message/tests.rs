@@ -1161,6 +1161,10 @@ fn service_to_worker_all_variants_round_trip() {
             state_version: 2,
             locked: true,
         }),
+        ServiceToWorker::SetInteractiveRoute(InteractiveRouteCommandPayload {
+            route_epoch: 7,
+            active: true,
+        }),
         ServiceToWorker::StartMedia(StartMediaPayload {
             connection_id: "c".to_string(),
             connection_epoch: "epoch-c".to_string(),
@@ -1534,6 +1538,11 @@ fn worker_to_service_all_variants_round_trip() {
         WorkerToService::DesktopChanged(DesktopChangedPayload {
             name: "Default".to_string(),
             observed_at_unix_ms: 42,
+        }),
+        WorkerToService::InteractiveRouteApplied(InteractiveRouteAppliedPayload {
+            route_epoch: 7,
+            active: true,
+            applied_at_unix_ms: 43,
         }),
         WorkerToService::Error(ErrorPayload {
             code: -1,
@@ -2494,6 +2503,13 @@ fn restricted_desktop_profile_has_no_session_user_protocol_surface() {
     let restricted = WorkerProfile::RestrictedDesktop;
     assert!(ServiceToWorker::RefreshCapabilities.allowed_for_profile(restricted));
     assert!(ServiceToWorker::Shutdown.allowed_for_profile(restricted));
+    assert!(
+        ServiceToWorker::SetInteractiveRoute(InteractiveRouteCommandPayload {
+            route_epoch: 1,
+            active: false,
+        })
+        .allowed_for_profile(restricted)
+    );
     assert!(!ServiceToWorker::DetachVirtualDisplay.allowed_for_profile(restricted));
     assert!(
         !ServiceToWorker::InvokeAgentCapability(AgentRequestPayload {
@@ -2505,6 +2521,14 @@ fn restricted_desktop_profile_has_no_session_user_protocol_surface() {
     );
 
     assert!(WorkerToService::Ready.allowed_for_profile(restricted));
+    assert!(
+        WorkerToService::InteractiveRouteApplied(InteractiveRouteAppliedPayload {
+            route_epoch: 1,
+            active: false,
+            applied_at_unix_ms: 1,
+        })
+        .allowed_for_profile(restricted)
+    );
     assert!(
         !WorkerToService::ComputerUseReadinessUpdated(ComputerUseReadinessPayload {
             readiness: sample_computer_use_readiness(),

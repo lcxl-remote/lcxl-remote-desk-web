@@ -145,6 +145,23 @@ impl SessionTargetCatalog {
         true
     }
 
+    /// Update only interactive desktop readiness. Desktop switches briefly
+    /// fence new remote-desktop admissions while terminal, file, and assistant
+    /// operations remain bound to the same session-user worker.
+    pub fn set_remote_desktop_readiness(
+        &self,
+        session: &SessionKey,
+        remote_desktop_ready: bool,
+    ) -> bool {
+        let mut inner = self.inner.write().unwrap();
+        let Some(entry) = inner.by_session.get_mut(session) else {
+            return false;
+        };
+        entry.candidate.remote_desktop_ready = remote_desktop_ready;
+        inner.revision = inner.revision.saturating_add(1);
+        true
+    }
+
     /// Reconciles the catalog with an authoritative platform snapshot.
     /// Existing identities survive when the full session key (including its
     /// generation) is unchanged; missing and generation-reused sessions are

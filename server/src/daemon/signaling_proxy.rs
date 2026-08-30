@@ -695,6 +695,7 @@ pub async fn run_signaling_proxy(
                     | WorkerToService::Heartbeat(_)
                     | WorkerToService::Capabilities(_)
                     | WorkerToService::DesktopChanged(_)
+                    | WorkerToService::InteractiveRouteApplied(_)
                     | WorkerToService::RemoteAccessStateApplied(_)
                     | WorkerToService::LocaleApplied(_)
                     | WorkerToService::SecurityPolicyApplied(_)
@@ -828,19 +829,27 @@ pub async fn run_signaling_proxy(
                         );
                         continue;
                     }
-                    match worker_mgr
-                        .switch_interactive_desktop(&key.session, &payload.name)
-                        .await
-                    {
-                        Ok(epoch) => info!(
-                            "[SignalingProxy] switched {:?} to desktop '{}' at route epoch {}",
-                            key.session, payload.name, epoch
-                        ),
-                        Err(error) => warn!(
-                            "[SignalingProxy] refusing desktop switch for {:?} to '{}': {}",
-                            key.session, payload.name, error
-                        ),
-                    }
+                    // The switch waits for worker acknowledgements. Run it
+                    // outside this reader loop so the acknowledgements can be
+                    // consumed and matched below.
+                    let manager = worker_mgr.clone();
+                    let session = key.session.clone();
+                    let desktop_name = payload.name;
+                    tokio::spawn(async move {
+                        match manager
+                            .switch_interactive_desktop(&session, &desktop_name)
+                            .await
+                        {
+                            Ok(epoch) => info!(
+                                "[SignalingProxy] switched {:?} to desktop '{}' at route epoch {}",
+                                session, desktop_name, epoch
+                            ),
+                            Err(error) => warn!(
+                                "[SignalingProxy] refusing desktop switch for {:?} to '{}': {}",
+                                session, desktop_name, error
+                            ),
+                        }
+                    });
                     continue;
                 }
                 // Portable / Default mode: the "worker" is an in-process
@@ -915,6 +924,22 @@ pub async fn run_signaling_proxy(
                              cannot scope reset — leaving stream paused"
                         );
                     }
+                }
+            }
+            WorkerToService::InteractiveRouteApplied(payload) => {
+                let Some(key) = resident_worker_key.as_ref() else {
+                    warn!("[SignalingProxy] legacy worker sent an interactive-route ack");
+                    continue;
+                };
+                if !worker_mgr.complete_interactive_route_ack(
+                    key,
+                    worker_message.incarnation,
+                    payload.clone(),
+                ) {
+                    debug!(
+                        "[SignalingProxy] stale/unexpected interactive-route ack from {:?} incarnation {} epoch {} active={}",
+                        key, worker_message.incarnation, payload.route_epoch, payload.active
+                    );
                 }
             }
             // Cursor sync: worker emits CursorData when its

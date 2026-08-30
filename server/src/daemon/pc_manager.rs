@@ -260,6 +260,12 @@ pub struct MediaOutputFenceState {
     pub audio_open: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct MediaSwitchTiming {
+    pub route_epoch: Option<u64>,
+    pub started_at: Instant,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaSlotLifecycle {
     Stable,
@@ -393,6 +399,10 @@ pub struct PeerConnectionContext {
     /// resync. Audio falls under the same flag — the brief silence is
     /// preferable to playing audio against a frozen video frame.
     pub media_paused: Arc<AtomicBool>,
+    /// Exact start of the current worker/desktop media pause. The first
+    /// matching IDR consumes it and emits the end-to-end switch latency used by
+    /// the Windows real-machine gate.
+    pub media_switch_timing: Arc<std::sync::Mutex<Option<MediaSwitchTiming>>>,
     /// Serialized output gate shared with `write_video_frame`. Audio starts
     /// closed and is opened only after a matching active terminal event.
     pub media_output_fence: Arc<RwLock<MediaOutputFenceState>>,
@@ -1435,6 +1445,7 @@ impl PcRegistry {
             file_transfer_data_channel,
             file_transfer_writer_tx,
             media_paused: Arc::new(AtomicBool::new(false)),
+            media_switch_timing: Arc::new(std::sync::Mutex::new(None)),
             media_output_fence: Arc::new(RwLock::new(MediaOutputFenceState::default())),
             media_coordinator: Arc::new(tokio::sync::Mutex::new(
                 PerConnectionMediaCoordinator::default(),
@@ -1479,17 +1490,25 @@ impl PcRegistry {
         for (id, ctx) in map.iter() {
             let ctx = ctx.read().await;
             ctx.media_paused.store(true, Ordering::Relaxed);
+            *ctx.media_switch_timing.lock().unwrap() = Some(MediaSwitchTiming {
+                route_epoch: None,
+                started_at: Instant::now(),
+            });
             log::debug!("[pc_manager] paused media for {id} (worker swap)");
         }
     }
 
-    pub async fn pause_media_for_connections(&self, connection_ids: &[String]) {
+    pub async fn pause_media_for_connections(&self, connection_ids: &[String], route_epoch: u64) {
         for id in connection_ids {
             let Some(ctx) = self.get(id).await else {
                 continue;
             };
             let ctx = ctx.read().await;
             ctx.media_paused.store(true, Ordering::Relaxed);
+            *ctx.media_switch_timing.lock().unwrap() = Some(MediaSwitchTiming {
+                route_epoch: Some(route_epoch),
+                started_at: Instant::now(),
+            });
             log::debug!("[pc_manager] paused media for {id} (interactive route switch)");
         }
     }

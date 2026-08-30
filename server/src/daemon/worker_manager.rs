@@ -6,7 +6,8 @@ use actix_web::web;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaReceiver, framed, inprocess},
     message::{
-        DesktopTarget, FileTransferPayload, MediaCapabilities, PolicyApplyOutcome,
+        DesktopTarget, FileTransferPayload, InteractiveRouteAppliedPayload,
+        InteractiveRouteCommandPayload, MediaCapabilities, PolicyApplyOutcome,
         SecurityPolicyAppliedPayload, ServiceToWorker, UpdateSecurityPolicyPayload, WorkerIdentity,
         WorkerInitPayload, WorkerKey, WorkerProfile, WorkerToService,
     },
@@ -32,6 +33,7 @@ const DEFAULT_WORKER_HEARTBEAT_TIMEOUT_SECS: u64 = 30;
 /// timeout itself — finer granularity costs nothing meaningful and
 /// keeps recovery latency bounded.
 const WORKER_HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+const INTERACTIVE_ROUTE_ACK_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Identifies one worker the daemon started, so what that worker says can be
 /// told apart from what the worker that replaced it says.
@@ -60,6 +62,14 @@ struct ActiveInteractiveRoute {
     activated_at: Instant,
     activated_at_unix_ms: u64,
     accepting_interactive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct InteractiveRouteAckKey {
+    worker_key: WorkerKey,
+    incarnation: WorkerIncarnation,
+    route_epoch: u64,
+    active: bool,
 }
 
 /// A message from a worker, carrying which worker sent it.
@@ -257,6 +267,10 @@ pub struct WorkerManager {
         Arc<StdMutex<HashMap<desk_ipc_protocol::message::SessionKey, DesktopTarget>>>,
     interactive_switch_locks:
         Arc<StdMutex<HashMap<desk_ipc_protocol::message::SessionKey, Arc<Mutex<()>>>>>,
+    interactive_route_epochs: Arc<StdMutex<HashMap<desk_ipc_protocol::message::SessionKey, u64>>>,
+    interactive_route_acks: Arc<
+        StdMutex<HashMap<InteractiveRouteAckKey, oneshot::Sender<InteractiveRouteAppliedPayload>>>,
+    >,
     /// Monotonic counter bumped every time [`Self::set_worker_capabilities`]
     /// installs a fresh snapshot. Paired with [`Self::capabilities_version_tx`]
     /// so async callers can wait until the cache reflects a known-newer
@@ -596,6 +610,8 @@ impl WorkerManager {
             active_interactive_routes: Arc::new(StdMutex::new(HashMap::new())),
             desired_interactive_desktops: Arc::new(StdMutex::new(HashMap::new())),
             interactive_switch_locks: Arc::new(StdMutex::new(HashMap::new())),
+            interactive_route_epochs: Arc::new(StdMutex::new(HashMap::new())),
+            interactive_route_acks: Arc::new(StdMutex::new(HashMap::new())),
             capabilities_version: Arc::new(AtomicU64::new(0)),
             policy_applied_seq: Arc::new(AtomicU64::new(0)),
             capabilities_version_tx: Arc::new(cap_version_tx),
@@ -1120,6 +1136,10 @@ impl WorkerManager {
             return;
         };
         self.fence_resident_worker(key, worker.incarnation);
+        self.interactive_route_acks
+            .lock()
+            .unwrap()
+            .retain(|ack, _| ack.worker_key != *key || ack.incarnation != worker.incarnation);
         self.revoke_interactive_route(key, worker.incarnation);
         if key.desktop != DesktopTarget::WindowsWinlogon {
             self.session_targets
@@ -1152,6 +1172,10 @@ impl WorkerManager {
                 .unwrap()
                 .remove(&key.session);
             self.interactive_switch_locks
+                .lock()
+                .unwrap()
+                .remove(&key.session);
+            self.interactive_route_epochs
                 .lock()
                 .unwrap()
                 .remove(&key.session);
@@ -1278,7 +1302,7 @@ impl WorkerManager {
                 session: registration.session.clone(),
                 desktop: DesktopTarget::WindowsDefault,
             };
-            let default_ready = self
+            let default_capabilities_ready = self
                 .resident_worker_capabilities(&default_key)
                 .await
                 .is_some_and(|caps| {
@@ -1288,16 +1312,22 @@ impl WorkerManager {
                             .values()
                             .any(|devices| !devices.is_empty())
                 });
+            let interactive_route_ready = self
+                .active_interactive_routes
+                .lock()
+                .unwrap()
+                .get(&registration.session)
+                .is_some_and(|route| route.accepting_interactive);
             candidates.push(crate::daemon::session_target::SessionCandidate {
                 session: registration.session.clone(),
                 display_name: registration.display_name.clone(),
                 session_type: Some("windows".to_string()),
                 seat: Some(registration.station_name.clone()),
                 foreground: registration.foreground,
-                remote_desktop_ready: default_ready,
-                terminal_ready: default_ready,
-                file_ready: default_ready,
-                assistant_ready: default_ready,
+                remote_desktop_ready: default_capabilities_ready && interactive_route_ready,
+                terminal_ready: default_capabilities_ready,
+                file_ready: default_capabilities_ready,
+                assistant_ready: default_capabilities_ready,
             });
         }
         self.session_targets.replace_all(candidates);
@@ -1740,17 +1770,6 @@ impl WorkerManager {
             worker.capabilities = Some(caps);
             worker.incarnation
         };
-        let updated = if key.desktop == DesktopTarget::WindowsWinlogon {
-            // The secure-desktop worker contributes only warm interactive
-            // readiness. It must never make session-user capabilities appear
-            // available and it never replaces the Default worker's catalog
-            // snapshot.
-            true
-        } else {
-            self.session_targets
-                .set_readiness(&key.session, remote_desktop_ready, true, true, true)
-        };
-
         let route_is_current = self
             .active_interactive_routes
             .lock()
@@ -1761,6 +1780,21 @@ impl WorkerManager {
                     && route.incarnation == incarnation
                     && route.accepting_interactive
             });
+        let updated = if key.desktop == DesktopTarget::WindowsWinlogon {
+            // The secure-desktop worker contributes only warm interactive
+            // readiness. It must never make session-user capabilities appear
+            // available and it never replaces the Default worker's catalog
+            // snapshot.
+            true
+        } else {
+            self.session_targets.set_readiness(
+                &key.session,
+                remote_desktop_ready && route_is_current,
+                true,
+                true,
+                true,
+            )
+        };
         let desired = self
             .desired_interactive_desktops
             .lock()
@@ -1775,25 +1809,173 @@ impl WorkerManager {
                 .then_some(key.desktop)
             });
         if remote_desktop_ready && desired == Some(key.desktop) && !route_is_current {
-            if self.activate_interactive_worker(key).await.is_ok() {
-                let connection_ids = self.connection_ids_for_session(&key.session);
-                if !connection_ids.is_empty() {
-                    self.pc_registry
-                        .pause_media_for_connections(&connection_ids)
-                        .await;
-                    self.pc_registry
-                        .resume_media_for_connections(self, None, &connection_ids)
-                        .await;
+            // Do not await the worker acknowledgement from signaling_proxy's
+            // message loop: that same loop must remain free to receive the ack.
+            let manager = self.clone();
+            let key = key.clone();
+            tokio::spawn(async move {
+                match manager.activate_interactive_worker(&key).await {
+                    Ok(epoch) => {
+                        let connection_ids = manager.connection_ids_for_session(&key.session);
+                        if !connection_ids.is_empty() {
+                            manager
+                                .pc_registry
+                                .pause_media_for_connections(&connection_ids, epoch)
+                                .await;
+                            manager
+                                .pc_registry
+                                .resume_media_for_connections(&manager, None, &connection_ids)
+                                .await;
+                        }
+                    }
+                    Err(error) => warn!(
+                        "resident worker {:?} could not become interactive: {}",
+                        key, error
+                    ),
                 }
-            }
+            });
         }
         updated
     }
 
+    async fn request_interactive_route_state(
+        &self,
+        key: &WorkerKey,
+        incarnation: WorkerIncarnation,
+        route_epoch: u64,
+        active: bool,
+    ) -> Result<InteractiveRouteAppliedPayload, String> {
+        let sender = {
+            let inner = self.inner.lock().await;
+            inner
+                .resident_workers
+                .get(key)
+                .filter(|worker| worker.incarnation == incarnation)
+                .map(|worker| worker.ipc_tx.clone())
+                .ok_or_else(|| format!("resident worker {key:?} was replaced before route apply"))?
+        };
+        let ack_key = InteractiveRouteAckKey {
+            worker_key: key.clone(),
+            incarnation,
+            route_epoch,
+            active,
+        };
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut pending = self.interactive_route_acks.lock().unwrap();
+            if pending.contains_key(&ack_key) {
+                return Err(format!("duplicate interactive route operation {ack_key:?}"));
+            }
+            pending.insert(ack_key.clone(), tx);
+        }
+        if let Err(error) = sender.send(ServiceToWorker::SetInteractiveRoute(
+            InteractiveRouteCommandPayload {
+                route_epoch,
+                active,
+            },
+        )) {
+            self.interactive_route_acks.lock().unwrap().remove(&ack_key);
+            return Err(format!("failed to send interactive route command: {error}"));
+        }
+        match tokio::time::timeout(INTERACTIVE_ROUTE_ACK_TIMEOUT, rx).await {
+            Ok(Ok(payload)) => Ok(payload),
+            Ok(Err(_)) => Err(format!(
+                "interactive route acknowledgement sender dropped for {ack_key:?}"
+            )),
+            Err(_) => {
+                self.interactive_route_acks.lock().unwrap().remove(&ack_key);
+                Err(format!(
+                    "interactive route acknowledgement timed out for {ack_key:?}"
+                ))
+            }
+        }
+    }
+
+    pub fn complete_interactive_route_ack(
+        &self,
+        key: &WorkerKey,
+        incarnation: WorkerIncarnation,
+        payload: InteractiveRouteAppliedPayload,
+    ) -> bool {
+        let ack_key = InteractiveRouteAckKey {
+            worker_key: key.clone(),
+            incarnation,
+            route_epoch: payload.route_epoch,
+            active: payload.active,
+        };
+        self.interactive_route_acks
+            .lock()
+            .unwrap()
+            .remove(&ack_key)
+            .is_some_and(|sender| sender.send(payload).is_ok())
+    }
+
     /// Publish one resident slot as the current capture/human-input route for
-    /// its session. The route and incarnation are changed in one mutex critical
-    /// section, so media drains can never observe a new key with an old epoch.
+    /// its session only after that exact worker incarnation acknowledges local
+    /// activation. The route and incarnation are then changed in one mutex
+    /// critical section, so media drains can never observe a new key with an
+    /// old epoch.
     pub async fn activate_interactive_worker(&self, key: &WorkerKey) -> Result<u64, String> {
+        let switch_lock = self
+            .interactive_switch_locks
+            .lock()
+            .unwrap()
+            .entry(key.session.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _switch_guard = switch_lock.lock().await;
+        let existing_route = self
+            .active_interactive_routes
+            .lock()
+            .unwrap()
+            .get(&key.session)
+            .filter(|route| route.worker_key == *key && route.accepting_interactive)
+            .cloned();
+        if let Some(route) = existing_route {
+            let incarnation_is_current = self
+                .inner
+                .lock()
+                .await
+                .resident_workers
+                .get(key)
+                .is_some_and(|worker| worker.incarnation == route.incarnation);
+            if incarnation_is_current {
+                return Ok(route.route_epoch);
+            }
+        }
+        if let Some(desired) = self
+            .desired_interactive_desktops
+            .lock()
+            .unwrap()
+            .get(&key.session)
+            .copied()
+            && desired != key.desktop
+        {
+            return Err(format!(
+                "interactive activation for {:?} was superseded by desired desktop {:?}",
+                key.desktop, desired
+            ));
+        }
+        let route_epoch = self.allocate_interactive_route_epoch(&key.session);
+        self.activate_interactive_worker_at_epoch_locked(key, route_epoch)
+            .await
+    }
+
+    fn allocate_interactive_route_epoch(
+        &self,
+        session: &desk_ipc_protocol::message::SessionKey,
+    ) -> u64 {
+        let mut epochs = self.interactive_route_epochs.lock().unwrap();
+        let next = epochs.get(session).copied().unwrap_or(0).saturating_add(1);
+        epochs.insert(session.clone(), next);
+        next
+    }
+
+    async fn activate_interactive_worker_at_epoch_locked(
+        &self,
+        key: &WorkerKey,
+        route_epoch: u64,
+    ) -> Result<u64, String> {
         let incarnation = {
             let inner = self.inner.lock().await;
             let worker = inner
@@ -1814,16 +1996,27 @@ impl WorkerManager {
             }
             worker.incarnation
         };
+        self.request_interactive_route_state(key, incarnation, route_epoch, true)
+            .await?;
+        {
+            let inner = self.inner.lock().await;
+            if !inner
+                .resident_workers
+                .get(key)
+                .is_some_and(|worker| worker.incarnation == incarnation)
+            {
+                return Err(format!(
+                    "resident worker {key:?} was replaced after activation acknowledgement"
+                ));
+            }
+        }
         let mut routes = self.active_interactive_routes.lock().unwrap();
-        let next_epoch = routes
-            .get(&key.session)
-            .map_or(1, |route| route.route_epoch.saturating_add(1));
         routes.insert(
             key.session.clone(),
             ActiveInteractiveRoute {
                 worker_key: key.clone(),
                 incarnation,
-                route_epoch: next_epoch,
+                route_epoch,
                 activated_at: Instant::now(),
                 activated_at_unix_ms: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -1833,15 +2026,17 @@ impl WorkerManager {
             },
         );
         drop(routes);
+        self.session_targets
+            .set_remote_desktop_readiness(&key.session, true);
         self.desired_interactive_desktops
             .lock()
             .unwrap()
             .insert(key.session.clone(), key.desktop);
         info!(
             "activated resident interactive route {:?} incarnation {} epoch {}",
-            key, incarnation, next_epoch
+            key, incarnation, route_epoch
         );
-        Ok(next_epoch)
+        Ok(route_epoch)
     }
 
     /// Windows desktop transition without replacing either resident process.
@@ -1853,6 +2048,7 @@ impl WorkerManager {
         session: &desk_ipc_protocol::message::SessionKey,
         desktop_name: &str,
     ) -> Result<u64, String> {
+        let switch_started = Instant::now();
         let switch_lock = self
             .interactive_switch_locks
             .lock()
@@ -1895,6 +2091,13 @@ impl WorkerManager {
             return Ok(epoch);
         }
 
+        // Record the observed input desktop before fencing the old route. If
+        // activation fails, a later capability refresh may retry only this
+        // target; it must never reopen the desktop we just observed leaving.
+        self.desired_interactive_desktops
+            .lock()
+            .unwrap()
+            .insert(session.clone(), desktop);
         let old_route = {
             let mut routes = self.active_interactive_routes.lock().unwrap();
             let route = routes
@@ -1903,39 +2106,53 @@ impl WorkerManager {
             route.accepting_interactive = false;
             route.clone()
         };
-        let old_sender = {
-            let inner = self.inner.lock().await;
-            inner
-                .resident_workers
-                .get(&old_route.worker_key)
-                .filter(|worker| worker.incarnation == old_route.incarnation)
-                .map(|worker| worker.ipc_tx.clone())
-        };
+        self.session_targets
+            .set_remote_desktop_readiness(session, false);
+        let next_epoch = self.allocate_interactive_route_epoch(session);
         let connection_ids = self.connection_ids_for_session(session);
         self.pc_registry
-            .pause_media_for_connections(&connection_ids)
+            .pause_media_for_connections(&connection_ids, next_epoch)
             .await;
-        for connection_id in &connection_ids {
-            let Some(connection_epoch) = self.pc_registry.connection_epoch(connection_id).await
-            else {
-                continue;
-            };
-            let stop = ServiceToWorker::StopMedia(desk_ipc_protocol::message::StopMediaPayload {
-                connection_id: connection_id.clone(),
-                connection_epoch,
-            });
-            if let Some(sender) = old_sender.as_ref()
-                && let Err(error) = sender.send(stop)
-            {
-                warn!(
-                    "failed to stop old interactive media for {connection_id}: {error}; route fencing will drop its queued frames"
-                );
-            }
+        if let Err(error) = self
+            .request_interactive_route_state(
+                &old_route.worker_key,
+                old_route.incarnation,
+                next_epoch,
+                false,
+            )
+            .await
+        {
+            warn!(
+                "old interactive worker {:?} did not acknowledge deactivation: {}; route remains fenced",
+                old_route.worker_key, error
+            );
+        } else {
+            info!(
+                "resident_switch stage=deactivate_applied session={:?} route_epoch={} elapsed_ms={}",
+                session,
+                next_epoch,
+                switch_started.elapsed().as_millis()
+            );
         }
-        let epoch = self.activate_interactive_worker(&key).await?;
+        let epoch = self
+            .activate_interactive_worker_at_epoch_locked(&key, next_epoch)
+            .await?;
+        info!(
+            "resident_switch stage=activate_applied session={:?} desktop={:?} route_epoch={} elapsed_ms={}",
+            session,
+            key.desktop,
+            epoch,
+            switch_started.elapsed().as_millis()
+        );
         self.pc_registry
             .resume_media_for_connections(self, None, &connection_ids)
             .await;
+        info!(
+            "resident_switch stage=media_replayed session={:?} route_epoch={} elapsed_ms={}",
+            session,
+            epoch,
+            switch_started.elapsed().as_millis()
+        );
         Ok(epoch)
     }
 

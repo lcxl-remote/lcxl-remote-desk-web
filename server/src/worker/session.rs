@@ -33,8 +33,8 @@ use desk_ipc_protocol::{
         AgentResponsePayload, ComputerActionCompletedPayload, ComputerActionStartedPayload,
         ComputerActionStateReportedPayload, ComputerUseReadinessPayload, DesktopChangedPayload,
         ExecCancelPayload, ExecHeartbeatPayload, ExecResultIpcPayload, ExecSpawnReportPayload,
-        FileTransferPayload, FilesListedPayload, HeartbeatPayload, LocaleAppliedPayload,
-        ManagerResponseRefPayload, PrivateScreenStateChangedPayload,
+        FileTransferPayload, FilesListedPayload, HeartbeatPayload, InteractiveRouteAppliedPayload,
+        LocaleAppliedPayload, ManagerResponseRefPayload, PrivateScreenStateChangedPayload,
         RemoteAccessStateAppliedPayload, SecurityPolicyAppliedPayload, ServiceToWorker,
         SignalingErrorPayload, StopMediaPayload, SystemInfoRetrievedPayload, TerminalClosedPayload,
         TerminalCommandsListedPayload, TerminalOutputProducedPayload, TerminalStartedPayload,
@@ -73,6 +73,7 @@ pub(crate) fn survives_remote_access_lock(msg: &ServiceToWorker) -> bool {
         ServiceToWorker::Shutdown
             | ServiceToWorker::Init(_)
             | ServiceToWorker::SetRemoteAccessState(_)
+            | ServiceToWorker::SetInteractiveRoute(_)
             | ServiceToWorker::SetLocale(_)
     )
 }

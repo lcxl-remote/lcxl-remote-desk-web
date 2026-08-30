@@ -28,6 +28,11 @@ pub enum ServiceToWorker {
     /// activity when transitioning to locked.
     SetRemoteAccessState(RemoteAccessStatePayload),
 
+    /// Activate or deactivate desktop-dependent capture and manual-input
+    /// resources for a resident worker. The worker acknowledges only after the
+    /// requested local state is applied.
+    SetInteractiveRoute(InteractiveRouteCommandPayload),
+
     // ---------- Media control (event pipe) ----------
     /// Start a per-connection media pipeline (capture + per-connection
     /// video/audio encoder). Capture is shared across connections; the
@@ -282,6 +287,7 @@ impl ServiceToWorker {
                     Self::Init(_)
                         | Self::Shutdown
                         | Self::SetRemoteAccessState(_)
+                        | Self::SetInteractiveRoute(_)
                         | Self::StartMedia(_)
                         | Self::StopMedia(_)
                         | Self::SetConnectionCeiling(_)
@@ -345,6 +351,10 @@ pub enum WorkerToService {
     /// shutting down this worker and launching a fresh one bound to the
     /// new desktop.
     DesktopChanged(DesktopChangedPayload),
+
+    /// Confirms [`ServiceToWorker::SetInteractiveRoute`] for this exact worker
+    /// incarnation and route epoch.
+    InteractiveRouteApplied(InteractiveRouteAppliedPayload),
 
     /// Worker reports an error
     Error(ErrorPayload),
@@ -544,6 +554,7 @@ impl WorkerToService {
                     | Self::Capabilities(_)
                     | Self::Heartbeat(_)
                     | Self::DesktopChanged(_)
+                    | Self::InteractiveRouteApplied(_)
                     | Self::Error(_)
                     | Self::CursorData(_)
                     | Self::MediaPipelineState(_)
@@ -592,6 +603,7 @@ impl WorkerToService {
             | Self::WaylandPortalStatus(_)
             | Self::Heartbeat(_)
             | Self::DesktopChanged(_)
+            | Self::InteractiveRouteApplied(_)
             | Self::VirtualDisplayAttachResult(_)
             | Self::ExclusiveResult(_)
             | Self::ComputerUseReadinessUpdated(_)
