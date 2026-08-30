@@ -523,6 +523,101 @@ pub(super) async fn route_list_terminal_without_connection_id_forwards() {
     assert!(route(&model, &ctx).await.is_ok());
 }
 
+#[tokio::test]
+pub(super) async fn route_list_terminal_uses_the_only_ready_session_worker() {
+    let ctx = make_ctx().await;
+    ctx.worker_mgr.enable_session_targeting_for_test();
+    let session = desk_ipc_protocol::message::SessionKey {
+        platform_session_id: "terminal-session".to_string(),
+        session_generation: 7,
+    };
+    ctx.worker_mgr
+        .session_targets()
+        .upsert(crate::daemon::session_target::SessionCandidate {
+            session: session.clone(),
+            display_name: "Terminal session".to_string(),
+            session_type: Some("wayland".to_string()),
+            seat: Some("seat0".to_string()),
+            foreground: true,
+            remote_desktop_ready: false,
+            terminal_ready: true,
+            file_ready: false,
+            assistant_ready: false,
+        });
+    let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.worker_mgr
+        .install_resident_for_test(
+            desk_ipc_protocol::message::WorkerKey {
+                session,
+                desktop: desk_ipc_protocol::message::DesktopTarget::LinuxSession,
+            },
+            worker_tx,
+        )
+        .await;
+    let model = SignalingModel::new(
+        "req-list-single-session",
+        SignalingType::ListTerminalCommands,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    route(&model, &ctx).await.expect("list route");
+    assert!(matches!(
+        worker_rx.recv().await,
+        Some(ServiceToWorker::ListTerminalCommands(
+            ListTerminalCommandsPayload { request_id, .. }
+        )) if request_id == "req-list-single-session"
+    ));
+}
+
+#[tokio::test]
+pub(super) async fn route_list_terminal_requires_selection_for_multiple_sessions() {
+    let (ctx, mut outbound_rx) = make_ctx_with_rx().await;
+    ctx.worker_mgr.enable_session_targeting_for_test();
+    for index in 0..2 {
+        ctx.worker_mgr
+            .session_targets()
+            .upsert(crate::daemon::session_target::SessionCandidate {
+                session: desk_ipc_protocol::message::SessionKey {
+                    platform_session_id: format!("terminal-session-{index}"),
+                    session_generation: 1,
+                },
+                display_name: format!("Terminal session {index}"),
+                session_type: Some("wayland".to_string()),
+                seat: Some(format!("seat{index}")),
+                foreground: index == 0,
+                remote_desktop_ready: false,
+                terminal_ready: true,
+                file_ready: false,
+                assistant_ready: false,
+            });
+    }
+    let model = SignalingModel::new(
+        "req-list-multiple-sessions",
+        SignalingType::ListTerminalCommands,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    route(&model, &ctx).await.expect("list route");
+    let response = read_response(&mut outbound_rx);
+    assert_eq!(
+        response
+            .response_state
+            .as_ref()
+            .expect("selection error")
+            .error_code,
+        DeskErrorCode::SESSION_SELECTION_REQUIRED.code()
+    );
+    let targets: desk_signal_facade::model::signal::SessionTargetListData =
+        response.get_data().expect("session target list");
+    assert_eq!(targets.targets.len(), 2);
+}
+
 /// Malformed manager request bodies (e.g. `ListFiles` with
 /// non-`FileListParams` JSON) must not crash the router — they
 /// should log + drop.

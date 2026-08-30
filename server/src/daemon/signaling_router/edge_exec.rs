@@ -220,6 +220,33 @@ pub(super) async fn dispatch_fleet_exec_plan(
     request_id: &str,
     plan: ExecPlan,
 ) {
+    // A ServiceDaemon can host several independently ready desktop sessions.
+    // Resolve the execution anchor before claiming the at-most-once ledger: an
+    // ambiguous target is definitely not dispatched and must not consume or
+    // poison this execution generation. Portable/DeskServer keep returning
+    // `None` here and use their anonymous single-worker adapter.
+    let selected_session = match ctx.worker_mgr.resolve_session_target(
+        crate::daemon::session_target::SessionCapability::Assistant,
+        None,
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            send_edge_execution_completed(
+                &ctx.outbound_tx,
+                request_id,
+                EdgeExecDisposition::RejectedBeforeDispatch {
+                    error: agent_error(
+                        AgentErrorKind::SessionUnavailable,
+                        &format!("assistant session target unavailable: {error}"),
+                        true,
+                        true,
+                    ),
+                },
+            );
+            return;
+        }
+    };
+
     // Claim this dispatch in the ledger before the worker can start anything.
     match admit_exec(ctx, &plan).await {
         ExecAdmission::Spawn => {}
@@ -284,11 +311,16 @@ pub(super) async fn dispatch_fleet_exec_plan(
         plan,
         audit_source_request_id: Some(request_id.to_string()),
     };
-    if let Err(e) = ctx
-        .worker_mgr
-        .send_to_worker(ServiceToWorker::ExecPlan(payload))
-        .await
-    {
+    let dispatch = if let Some(session) = selected_session.as_ref() {
+        ctx.worker_mgr
+            .send_to_session_worker(session, ServiceToWorker::ExecPlan(payload))
+            .await
+    } else {
+        ctx.worker_mgr
+            .send_to_worker(ServiceToWorker::ExecPlan(payload))
+            .await
+    };
+    if let Err(e) = dispatch {
         if let Ok(mut pending) = ctx.edge_exec_pending.lock() {
             pending.remove(request_id);
         }

@@ -36,6 +36,32 @@ fn resident_key(name: &str) -> WorkerKey {
     }
 }
 
+fn ready_media_capabilities() -> MediaCapabilities {
+    use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
+
+    MediaCapabilities {
+        video_codecs: vec![desk_ipc_protocol::message::MediaCodec::H264],
+        video_device_list: std::collections::BTreeMap::from([(
+            "portal".to_string(),
+            vec![DisplayInfo {
+                device_name: "portal-display".to_string(),
+                display_device_name: None,
+                desktop_coordinates: DisplayRect {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+                resolutions: vec![],
+                attached_to_desktop: true,
+                rotation: 0,
+                current_capture_resolution: None,
+            }],
+        )]),
+        ..MediaCapabilities::default()
+    }
+}
+
 async fn install_resident(manager: &WorkerManager, key: WorkerKey) -> WorkerIncarnation {
     let (ipc_tx, _ipc_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
     manager.install_resident_for_test(key, ipc_tx).await
@@ -331,7 +357,6 @@ async fn remote_desktop_readiness_waits_for_interactive_activation_ack() {
     use crate::daemon::session_target::{
         SessionCandidate, SessionCapability, SessionTargetSelectionError,
     };
-    use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
 
     let (manager, _worker_rx) = test_manager();
     let key = resident_key("session-readiness");
@@ -350,27 +375,7 @@ async fn remote_desktop_readiness_waits_for_interactive_activation_ack() {
     let incarnation = manager
         .install_resident_for_test(key.clone(), command_tx)
         .await;
-    let caps = MediaCapabilities {
-        video_codecs: vec![desk_ipc_protocol::message::MediaCodec::H264],
-        video_device_list: std::collections::BTreeMap::from([(
-            "portal".to_string(),
-            vec![DisplayInfo {
-                device_name: "portal-display".to_string(),
-                display_device_name: None,
-                desktop_coordinates: DisplayRect {
-                    left: 0,
-                    top: 0,
-                    right: 1920,
-                    bottom: 1080,
-                },
-                resolutions: vec![],
-                attached_to_desktop: true,
-                rotation: 0,
-                current_capture_resolution: None,
-            }],
-        )]),
-        ..MediaCapabilities::default()
-    };
+    let caps = ready_media_capabilities();
 
     assert!(
         manager
@@ -428,6 +433,99 @@ async fn remote_desktop_readiness_waits_for_interactive_activation_ack() {
             .await
             .is_err(),
         "duplicate capability reports must not re-activate an already current route"
+    );
+}
+
+#[tokio::test]
+async fn linux_sessions_publish_independent_active_routes_and_require_selection() {
+    use crate::daemon::session_target::{
+        SessionCandidate, SessionCapability, SessionTargetSelectionError,
+    };
+
+    let (manager, _worker_rx) = test_manager();
+    manager.enable_session_targeting_for_test();
+    let first_key = resident_key("linux-session-a");
+    let second_key = resident_key("linux-session-b");
+    for (index, key) in [&first_key, &second_key].into_iter().enumerate() {
+        manager.session_targets.upsert(SessionCandidate {
+            session: key.session.clone(),
+            display_name: format!("Linux session {}", index + 1),
+            session_type: Some("wayland".to_string()),
+            seat: Some(format!("seat{index}")),
+            foreground: index == 0,
+            remote_desktop_ready: false,
+            terminal_ready: false,
+            file_ready: false,
+            assistant_ready: false,
+        });
+    }
+    let (first_tx, mut first_rx) = mpsc::unbounded_channel();
+    let (second_tx, mut second_rx) = mpsc::unbounded_channel();
+    let first_incarnation = manager
+        .install_resident_for_test(first_key.clone(), first_tx)
+        .await;
+    let second_incarnation = manager
+        .install_resident_for_test(second_key.clone(), second_tx)
+        .await;
+
+    assert!(
+        manager
+            .set_resident_worker_capabilities(&first_key, ready_media_capabilities())
+            .await
+    );
+    assert!(
+        manager
+            .set_resident_worker_capabilities(&second_key, ready_media_capabilities())
+            .await
+    );
+    let ServiceToWorker::SetInteractiveRoute(first_command) = first_rx.recv().await.unwrap() else {
+        panic!("first Linux session must receive activation");
+    };
+    let ServiceToWorker::SetInteractiveRoute(second_command) = second_rx.recv().await.unwrap()
+    else {
+        panic!("second Linux session must receive activation");
+    };
+    assert!(manager.complete_interactive_route_ack(
+        &first_key,
+        first_incarnation,
+        InteractiveRouteAppliedPayload {
+            route_epoch: first_command.route_epoch,
+            active: true,
+            applied_at_unix_ms: 30,
+        },
+    ));
+    assert!(manager.complete_interactive_route_ack(
+        &second_key,
+        second_incarnation,
+        InteractiveRouteAppliedPayload {
+            route_epoch: second_command.route_epoch,
+            active: true,
+            applied_at_unix_ms: 31,
+        },
+    ));
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if manager
+                .session_targets
+                .list_for(SessionCapability::RemoteDesktop)
+                .1
+                .len()
+                == 2
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both Linux sessions must become independently interactive");
+    assert!(manager.resident_worker_is_active_interactive(&first_key, first_incarnation));
+    assert!(manager.resident_worker_is_active_interactive(&second_key, second_incarnation));
+    assert_eq!(
+        manager.resolve_session_target(SessionCapability::RemoteDesktop, None),
+        Err(SessionTargetSelectionError::SelectionRequired),
+        "multiple active desktops must never be resolved by foreground or order"
     );
 }
 

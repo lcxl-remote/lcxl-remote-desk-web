@@ -427,11 +427,32 @@ pub(super) async fn handle_list_terminal_inbound(
         request_id: model.request_id.clone(),
         connection_id: optional_from_connection_id(model),
     };
-    if let Err(e) = ctx
-        .worker_mgr
-        .send_to_worker(ServiceToWorker::ListTerminalCommands(payload))
-        .await
-    {
+    let dispatch = match ctx.worker_mgr.resolve_session_target(
+        crate::daemon::session_target::SessionCapability::Terminal,
+        None,
+    ) {
+        Ok(Some(session)) => {
+            ctx.worker_mgr
+                .send_to_session_worker(&session, ServiceToWorker::ListTerminalCommands(payload))
+                .await
+        }
+        Ok(None) => {
+            // Portable/DeskServer retain the anonymous single-worker adapter.
+            ctx.worker_mgr
+                .send_to_worker(ServiceToWorker::ListTerminalCommands(payload))
+                .await
+        }
+        Err(error) => {
+            emit_session_target_error(
+                ctx,
+                model,
+                crate::daemon::session_target::SessionCapability::Terminal,
+                error,
+            );
+            return Ok(());
+        }
+    };
+    if let Err(e) = dispatch {
         log::warn!("[router] failed to send typed ListTerminalCommands: {e}");
     }
     Ok(())

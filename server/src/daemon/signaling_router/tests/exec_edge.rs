@@ -451,6 +451,128 @@ pub(super) async fn fleet_exec_valid_plan_dispatches_to_worker_and_marks_in_flig
 }
 
 #[tokio::test]
+pub(super) async fn fleet_exec_uses_the_only_ready_assistant_session() {
+    let (mut ctx, _rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+    ctx.inbound_authz = Some(authz_block(
+        vec![Capability::ShellExecConfirmed],
+        vec![],
+        ExecutionMode::ConfirmEachAction,
+        desk_agent_protocol::RiskLevel::High,
+    ));
+    let template = fleet_template();
+    ctx.command_templates.replace(
+        vec![template.clone()],
+        desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
+        Some(1),
+    );
+    ctx.worker_mgr.enable_session_targeting_for_test();
+    let session = desk_ipc_protocol::message::SessionKey {
+        platform_session_id: "assistant-session".to_string(),
+        session_generation: 5,
+    };
+    ctx.worker_mgr
+        .session_targets()
+        .upsert(crate::daemon::session_target::SessionCandidate {
+            session: session.clone(),
+            display_name: "Assistant session".to_string(),
+            session_type: Some("wayland".to_string()),
+            seat: Some("seat0".to_string()),
+            foreground: true,
+            remote_desktop_ready: true,
+            terminal_ready: true,
+            file_ready: true,
+            assistant_ready: true,
+        });
+    let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.worker_mgr
+        .install_resident_for_test(
+            desk_ipc_protocol::message::WorkerKey {
+                session,
+                desktop: desk_ipc_protocol::message::DesktopTarget::LinuxSession,
+            },
+            worker_tx,
+        )
+        .await;
+    let plan = fleet_plan(&template, "assistant-single");
+
+    handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("assistant-single", &plan))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        worker_rx.recv().await,
+        Some(ServiceToWorker::ExecPlan(ExecPlanPayload { request_id, .. }))
+            if request_id == "assistant-single"
+    ));
+    assert!(
+        ctx.edge_exec_pending
+            .lock()
+            .unwrap()
+            .contains("assistant-single")
+    );
+}
+
+#[tokio::test]
+pub(super) async fn fleet_exec_multiple_assistant_sessions_reject_before_ledger_claim() {
+    let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+    ctx.inbound_authz = Some(authz_block(
+        vec![Capability::ShellExecConfirmed],
+        vec![],
+        ExecutionMode::ConfirmEachAction,
+        desk_agent_protocol::RiskLevel::High,
+    ));
+    let template = fleet_template();
+    ctx.command_templates.replace(
+        vec![template.clone()],
+        desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
+        Some(1),
+    );
+    ctx.worker_mgr.enable_session_targeting_for_test();
+    for index in 0..2 {
+        ctx.worker_mgr
+            .session_targets()
+            .upsert(crate::daemon::session_target::SessionCandidate {
+                session: desk_ipc_protocol::message::SessionKey {
+                    platform_session_id: format!("assistant-session-{index}"),
+                    session_generation: 1,
+                },
+                display_name: format!("Assistant session {index}"),
+                session_type: Some("wayland".to_string()),
+                seat: Some(format!("seat{index}")),
+                foreground: index == 0,
+                remote_desktop_ready: true,
+                terminal_ready: true,
+                file_ready: true,
+                assistant_ready: true,
+            });
+    }
+    let plan = fleet_plan(&template, "assistant-multiple");
+
+    handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("assistant-multiple", &plan))
+        .await
+        .unwrap();
+
+    match read_fleet_result(&mut rx).disposition {
+        EdgeExecDisposition::RejectedBeforeDispatch { error } => {
+            assert!(
+                error.message.contains("SESSION_SELECTION_REQUIRED"),
+                "{error:?}"
+            );
+        }
+        other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
+    }
+    assert!(ctx.edge_exec_pending.lock().unwrap().is_empty());
+    assert!(
+        ctx.exec_ledger
+            .get("assistant-multiple")
+            .await
+            .unwrap()
+            .is_none(),
+        "ambiguous target must be rejected before reserving the execution generation"
+    );
+}
+
+#[tokio::test]
 pub(super) async fn fleet_exec_valid_plan_without_worker_reports_dispatch_failed() {
     let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
     ctx.inbound_authz = Some(authz_block(

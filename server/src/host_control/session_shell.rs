@@ -20,6 +20,10 @@ pub const MAX_SESSION_ENVIRONMENT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_SESSION_ENVIRONMENT_ENCODED_BYTES: usize = 3 * 1024 * 1024;
 pub const MAX_SESSION_ENVIRONMENT_ENTRY_BYTES: usize = 128 * 1024;
 pub const MAX_SESSION_CWD_BYTES: usize = 64 * 1024;
+/// Hard host-local bound for concurrently trusted desktop-session shells. One
+/// logical session already has a single-leader constraint below; this protects
+/// the daemon and resident-worker pool across many distinct sessions/seats.
+pub const MAX_SESSION_SHELL_REGISTRATIONS: usize = 32;
 pub const MAX_HOST_CONTROL_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SESSION_LABEL_BYTES: usize = 256;
 const MAX_APP_VERSION_BYTES: usize = 128;
@@ -171,6 +175,14 @@ impl SessionShellRegistry {
             return Err(SessionShellRegistrationFailure::new(
                 SessionShellRegistrationError::SessionConflict,
                 "another live Tauri websocket already leads this logical session",
+            ));
+        }
+        if !inner.by_websocket.contains_key(&websocket_session_id)
+            && inner.by_websocket.len() >= MAX_SESSION_SHELL_REGISTRATIONS
+        {
+            return Err(SessionShellRegistrationFailure::new(
+                SessionShellRegistrationError::CapacityExceeded,
+                "the host reached its resident session-shell limit",
             ));
         }
 
@@ -582,6 +594,34 @@ mod tests {
             }
             other => panic!("expected replacement registration, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn registry_refuses_an_unbounded_number_of_logical_sessions() {
+        let registry = SessionShellRegistry::default();
+        for index in 0..MAX_SESSION_SHELL_REGISTRATIONS {
+            let mut info = current_info(vec![(b"PATH", b"/usr/bin")]);
+            info.session_id = Some(format!("bounded-session-{index}"));
+            registry.register(index as u64 + 1, info).unwrap();
+        }
+
+        let mut overflow = current_info(vec![(b"PATH", b"/usr/bin")]);
+        overflow.session_id = Some("bounded-session-overflow".to_string());
+        let error = registry
+            .register(MAX_SESSION_SHELL_REGISTRATIONS as u64 + 1, overflow)
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            SessionShellRegistrationError::CapacityExceeded
+        );
+        assert_eq!(registry.snapshot().len(), MAX_SESSION_SHELL_REGISTRATIONS);
+
+        // Replacing the same websocket does not grow the pool and must remain
+        // possible at capacity so a trusted shell can refresh its snapshot.
+        let mut replacement = current_info(vec![(b"PATH", b"/usr/local/bin")]);
+        replacement.session_id = Some("bounded-session-0".to_string());
+        registry.register(1, replacement).unwrap();
+        assert_eq!(registry.snapshot().len(), MAX_SESSION_SHELL_REGISTRATIONS);
     }
 
     #[test]

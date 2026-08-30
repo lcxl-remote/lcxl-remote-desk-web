@@ -63,6 +63,7 @@ pub enum SessionShellRegistrationError {
     InvalidPayload,
     IdentityMismatch,
     SessionConflict,
+    CapacityExceeded,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
