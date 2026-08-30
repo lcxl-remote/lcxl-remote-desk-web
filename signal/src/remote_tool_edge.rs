@@ -5514,75 +5514,35 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 true,
             )
         })?;
-        let provider = registry
-            .provider_for_capability(&capability.wire.capability_id)
-            .expect("registered capability has a provider");
-        let now = chrono::Utc::now().timestamp_millis();
-        let observed_at_unix_ms = u64::try_from(now).map_err(|_| {
-            error(
-                AgentErrorKind::Internal,
-                "system clock predates the Unix epoch",
-                false,
-                false,
-            )
-        })?;
-        let expires_at_unix_ms = observed_at_unix_ms.saturating_add(5 * 60 * 1000);
-        let (size_bytes, digest_sha256) = tool_output_fingerprint(output)?;
         let source_object_id = if capability.wire.capability_id
             == desk_diagnose_core::device_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID
         {
-            let (_, canonical_input_digest_sha256) = Self::canonical_call_input(call)?;
-            Some(format!(
-                "external_url_input:sha256:{canonical_input_digest_sha256}"
-            ))
+            let (_, digest) = Self::canonical_call_input(call)?;
+            Some(format!("external_url_input:sha256:{digest}"))
         } else {
             Some(format!("{}:{}", self.target_device_id, call.id))
         };
-        let envelope = DataEnvelope {
-            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
-            envelope_id: format!("tool-result-{}", uuid::Uuid::new_v4()),
-            content: ContentRef::EphemeralObservation {
+        let observed_at_unix_ms =
+            u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
+                error(
+                    AgentErrorKind::Internal,
+                    "system clock predates the Unix epoch",
+                    false,
+                    false,
+                )
+            })?;
+        desk_diagnose_core::model_message_labels::read_result_envelope(
+            &registry,
+            call,
+            output,
+            desk_diagnose_core::model_message_labels::ReadResultLabel {
+                envelope_id: format!("tool-result-{}", uuid::Uuid::new_v4()),
                 observation_id: format!("observation-{}", uuid::Uuid::new_v4()),
-                size_bytes,
-                expires_at_unix_ms,
-            },
-            provenance: DataProvenance {
-                source_provider_id: provider.wire.provider_id.clone(),
-                source_tool_name: call.name.clone(),
                 source_object_id,
-                source_envelope_ids: Vec::new(),
+                observed_at_unix_ms,
             },
-            digest_sha256,
-            sensitivity: match capability.wire.capability_id.as_str() {
-                desk_diagnose_core::device_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID => {
-                    Sensitivity::Public
-                }
-                desk_diagnose_core::device_assistant::DESKTOP_SESSION_CAPABILITY_ID
-                | desk_diagnose_core::device_assistant::SYSTEM_INFO_CAPABILITY_ID
-                | desk_diagnose_core::device_assistant::SYSTEM_NETWORK_CAPABILITY_ID
-                | desk_diagnose_core::device_assistant::SYSTEM_SERVICE_CAPABILITY_ID
-                | desk_diagnose_core::device_assistant::SYSTEM_CONTAINER_CAPABILITY_ID => {
-                    Sensitivity::UserContent
-                }
-                _ => Sensitivity::Sensitive,
-            },
-            // Read permission does not imply ExportData. The pre-model
-            // authorizer must add one exact destination under an explicit grant.
-            allowed_destinations: Vec::new(),
-            retention: RetentionBoundary {
-                expires_at_unix_ms: Some(expires_at_unix_ms),
-                delete_with_run: true,
-            },
-        };
-        envelope.validate().map_err(|error_value| {
-            error(
-                AgentErrorKind::Internal,
-                format!("failed to envelope read result: {error_value}"),
-                false,
-                false,
-            )
-        })?;
-        Ok(Some(envelope))
+        )
+        .map(Some)
     }
 
     fn mutating_data_envelope(

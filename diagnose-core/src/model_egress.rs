@@ -187,6 +187,21 @@ impl ModelEgressPolicy {
             })
             .collect::<BTreeSet<_>>();
         let mut omitted_turns = deselected_turns;
+        // Unlabeled legacy content has no transferable export authority. Drop
+        // complete historical turns, never relabel them for the current model.
+        // Current/unattributed dynamic content still fails closed below.
+        omitted_turns.extend(request.messages.iter().filter_map(|message| {
+            (message.role != ChatRole::System && message.data_envelope.is_none())
+                .then_some(message.turn_id.as_ref().or_else(|| {
+                    message
+                        .tool_call_id
+                        .as_ref()
+                        .and_then(|id| tool_call_turns.get(id))
+                }))
+                .flatten()
+                .filter(|turn_id| current_turn_id.as_ref() != Some(*turn_id))
+                .cloned()
+        }));
         omitted_turns.extend(destination_mismatched_historical_turns);
         omitted_turns.extend(expired_historical_turns);
         if !omitted_turns.is_empty() {
@@ -662,6 +677,45 @@ mod tests {
             now_unix_ms: 100,
             byte_cap: MAX_SINK_BYTES,
             omit_finite_retention_historical_turns: false,
+        }
+    }
+
+    #[test]
+    fn legacy_unlabeled_history_is_omitted_as_a_whole_turn_not_reauthorized() {
+        let mut old = message("old-user", ChatRole::User, "old private question", None);
+        old.turn_id = Some("old-turn".into());
+        let mut old_answer = message(
+            "old-answer",
+            ChatRole::Assistant,
+            "old private answer",
+            None,
+        );
+        old_answer.turn_id = old.turn_id.clone();
+        let mut current = crate::model_message_labels::model_bound_user_message(
+            "new-user".into(),
+            "new request".into(),
+            destination(),
+        )
+        .unwrap();
+        current.turn_id = Some("new-turn".into());
+        let request = ModelRequest::text_only(
+            vec![old, old_answer, current.clone()],
+            ResponseFormatSpec::None,
+        );
+        let projected = policy(&[]).authorize_request(request).unwrap();
+        assert_eq!(projected.request.messages, vec![current]);
+    }
+
+    #[test]
+    fn current_and_unattributed_unlabeled_messages_still_fail_closed() {
+        for turn_id in [Some("current-turn".into()), None] {
+            let mut current = message("user", ChatRole::User, "unlabeled", None);
+            current.turn_id = turn_id;
+            let request = ModelRequest::text_only(vec![current], ResponseFormatSpec::None);
+            assert!(matches!(
+                policy(&[]).authorize_request(request),
+                Err(ModelEgressError::MissingEnvelope { .. })
+            ));
         }
     }
 

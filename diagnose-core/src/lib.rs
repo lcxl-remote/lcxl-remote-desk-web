@@ -46,6 +46,7 @@ pub mod image_input;
 pub mod model_capability;
 pub mod model_context;
 pub mod model_egress;
+pub mod model_message_labels;
 pub mod model_profile;
 pub mod parser;
 pub mod permission_grant;

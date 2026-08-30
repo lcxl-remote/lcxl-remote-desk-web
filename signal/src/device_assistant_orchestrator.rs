@@ -1058,51 +1058,7 @@ impl ModelSeam for MeteredModel {
     }
 }
 
-fn model_bound_user_message(
-    message_id: String,
-    text: String,
-    destination: DestinationIdentity,
-) -> Result<ChatMessage, AgentError> {
-    let bytes = text.as_bytes();
-    let digest_sha256 = format!("{:x}", Sha256::digest(bytes));
-    let envelope = DataEnvelope {
-        schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
-        envelope_id: format!("user-message-{message_id}"),
-        content: ContentRef::ImmutableBlob {
-            blob_id: format!("session-message-{message_id}"),
-            sha256: digest_sha256.clone(),
-            size_bytes: bytes.len() as u64,
-            media_type: "text/plain;charset=utf-8".into(),
-        },
-        provenance: DataProvenance {
-            source_provider_id: "device-assistant-user".into(),
-            source_tool_name: "send-message".into(),
-            source_object_id: Some(message_id.clone()),
-            source_envelope_ids: Vec::new(),
-        },
-        digest_sha256,
-        sensitivity: Sensitivity::UserContent,
-        // Pressing Send explicitly targets the currently resolved model. A
-        // different gateway/model revision produces a different identity and
-        // cannot reuse this allowance.
-        allowed_destinations: vec![destination],
-        retention: RetentionBoundary {
-            expires_at_unix_ms: None,
-            delete_with_run: false,
-        },
-    };
-    envelope.validate().map_err(|error| AgentError {
-        kind: AgentErrorKind::Internal,
-        message: format!("failed to label Device Assistant input: {error}"),
-        retryable: false,
-        safe_for_model: false,
-        error_code: None,
-    })?;
-    let mut message = ChatMessage::text(message_id, ChatRole::User, text);
-    message.data_envelope = Some(envelope);
-    Ok(message)
-}
-
+use desk_diagnose_core::model_message_labels::model_bound_user_message;
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn(
     connections: web::Data<SharedConnectionMap>,
