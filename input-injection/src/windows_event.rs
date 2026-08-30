@@ -39,6 +39,18 @@ pub fn mark_browser_input(input: &mut INPUT) {
     }
 }
 
+/// Mark one input produced by the Device Assistant raw-input fallback. This is
+/// intentionally distinct from browser/controller input: browser input must
+/// preempt an AI writer lease, while the current AI step must not preempt
+/// itself. Unknown or stripped markers still classify as external.
+pub fn mark_ai_input(input: &mut INPUT) {
+    match input.r#type {
+        INPUT_KEYBOARD => input.Anonymous.ki.dwExtraInfo = AI_INPUT_MARKER,
+        INPUT_MOUSE => input.Anonymous.mi.dwExtraInfo = AI_INPUT_MARKER,
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +99,21 @@ mod tests {
             unsafe { mouse.Anonymous.mi.dwExtraInfo },
             BROWSER_INPUT_MARKER
         );
+    }
+
+    #[test]
+    fn ai_marker_is_written_to_keyboard_and_mouse_inputs() {
+        let mut keyboard = INPUT::default();
+        keyboard.r#type = INPUT_KEYBOARD;
+        mark_ai_input(&mut keyboard);
+        assert_eq!(
+            unsafe { keyboard.Anonymous.ki.dwExtraInfo },
+            AI_INPUT_MARKER
+        );
+
+        let mut mouse = INPUT::default();
+        mouse.r#type = INPUT_MOUSE;
+        mark_ai_input(&mut mouse);
+        assert_eq!(unsafe { mouse.Anonymous.mi.dwExtraInfo }, AI_INPUT_MARKER);
     }
 }

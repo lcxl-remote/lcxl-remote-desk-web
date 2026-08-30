@@ -70,12 +70,19 @@ fn extend_fixed_exact_action_capabilities(
         // and one-shot use before the edge sees any action.
         granted.push(desk_agent_protocol::Capability::DesktopUiActionConfirmed);
     }
+    if registry.iter().any(|tool| {
+        tool.name() == desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_RAW_INPUT_TOOL
+    }) && !granted.contains(&desk_agent_protocol::Capability::DesktopInputFallbackConfirmed)
+    {
+        granted.push(desk_agent_protocol::Capability::DesktopInputFallbackConfirmed);
+    }
 }
 
 fn capability_enables_mutation(capability: &desk_agent_protocol::Capability) -> bool {
     matches!(
         capability,
         desk_agent_protocol::Capability::DesktopUiActionConfirmed
+            | desk_agent_protocol::Capability::DesktopInputFallbackConfirmed
             | desk_agent_protocol::Capability::FileArtifactCreateConfirmed
             | desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed
             | desk_agent_protocol::Capability::SpreadsheetWorkbookCreateConfirmed
@@ -1647,6 +1654,8 @@ async fn run_turn_inner(
     selected_source_tools.insert("execute_confirmed_command".into());
     selected_source_tools
         .insert(desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL.into());
+    selected_source_tools
+        .insert(desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_RAW_INPUT_TOOL.into());
     let export_authorization_id = format!(
         "assistant-export-{:x}",
         Sha256::digest(format!("{actor_user_id}:{target_device_id}:{request_id}").as_bytes())
@@ -2330,10 +2339,18 @@ mod tests {
             granted.contains(&desk_agent_protocol::Capability::DesktopUiActionConfirmed),
             "an exact approved action must remain callable after its observation attachment expires"
         );
+        assert!(
+            granted.contains(&desk_agent_protocol::Capability::DesktopInputFallbackConfirmed),
+            "an exact approved raw-input fallback must remain callable after its observation attachment expires"
+        );
         assert!(granted.iter().any(capability_enables_mutation));
 
         tools.retain(|tool| {
-            tool.name() != desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
+            !matches!(
+                tool.name(),
+                desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
+                    | desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_RAW_INPUT_TOOL
+            )
         });
         let mut unavailable = Vec::new();
         extend_fixed_exact_action_capabilities(&tools, &mut unavailable);

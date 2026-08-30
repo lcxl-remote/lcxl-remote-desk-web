@@ -349,9 +349,12 @@ mod tests {
         let outcome = AgentOutcome::Ok(desk_agent_protocol::OperationOutput::ReadContext(
             desk_agent_protocol::ReadContextOutput::ScreenCaptureCurrent(
                 desk_agent_protocol::ScreenCaptureOutput {
+                    display: r"\\.\DISPLAY1".into(),
                     format: desk_agent_protocol::ImageFormat::Png,
                     width: 4,
                     height: 2,
+                    dpi_x: 96,
+                    dpi_y: 96,
                     image: png,
                     truncated: false,
                 },

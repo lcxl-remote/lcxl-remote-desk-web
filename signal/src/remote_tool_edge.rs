@@ -39,9 +39,10 @@ use desk_agent_protocol::computer_use::{
     ComputerUseAdapterKind, ComputerUseAdapterRef, DocumentLiveBatchPatchAction,
     DocumentLivePatchAction, FileContentReadParams, FileMetadataInspectParams, FilePatchAction,
     LiveDocumentInspectParams, ObjectKind, ObjectRef, OfficeInspectParams,
-    PresentationLiveBatchPatchAction, PresentationLivePatchAction, SealedComputerActionPlan,
-    SpreadsheetFileInspectParams, SpreadsheetLiveBatchPatchAction, SpreadsheetLivePatchAction,
-    SpreadsheetMergePreviewParams, TerminalOutputInspectParams, UiSemanticAction,
+    PresentationLiveBatchPatchAction, PresentationLivePatchAction, RawInputAction,
+    SealedComputerActionPlan, SpreadsheetFileInspectParams, SpreadsheetLiveBatchPatchAction,
+    SpreadsheetLivePatchAction, SpreadsheetMergePreviewParams, TerminalOutputInspectParams,
+    UiSemanticAction,
 };
 use desk_agent_protocol::data_lineage::{
     ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance, DestinationIdentity,
@@ -66,7 +67,8 @@ use desk_diagnose_core::capability_risk::{CapabilityRiskSignals, classify_capabi
 use desk_diagnose_core::chat::ToolCall;
 use desk_diagnose_core::chunk::ByteReassembler;
 use desk_diagnose_core::device_assistant::{
-    EXECUTE_CONFIRMED_UI_ACTION_TOOL, PREVIEW_COMPUTER_ACTION_TOOL, validate_preview_call,
+    EXECUTE_CONFIRMED_RAW_INPUT_TOOL, EXECUTE_CONFIRMED_UI_ACTION_TOOL,
+    PREVIEW_COMPUTER_ACTION_TOOL, validate_preview_call,
 };
 use desk_diagnose_core::permission_tools::canonical_tool_permission_input_json;
 use desk_diagnose_core::provider_registry::ProviderRegistry;
@@ -1697,6 +1699,12 @@ impl SignalDeviceAssistantTools {
         }
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
+        struct RawInputArgs {
+            target: ObjectRef,
+            action: RawInputAction,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct SpreadsheetActionArgs {
             target: ObjectRef,
             action: SpreadsheetLivePatchAction,
@@ -1793,13 +1801,39 @@ impl SignalDeviceAssistantTools {
                     UiSemanticAction::Toggle { .. } => "toggle",
                     UiSemanticAction::Scroll { .. } => unreachable!(),
                 };
+                #[cfg(windows)]
+                let ui_adapter_kind = ComputerUseAdapterKind::WindowsUia;
+                #[cfg(target_os = "macos")]
+                let ui_adapter_kind = ComputerUseAdapterKind::MacosAccessibility;
+                #[cfg(not(any(windows, target_os = "macos")))]
+                let ui_adapter_kind = ComputerUseAdapterKind::WindowsUia;
                 (
                     args.target.clone(),
                     vec![args.target],
                     ComputerActionKind::Ui(args.action),
                     desk_agent_protocol::Capability::DesktopUiActionConfirmed,
-                    ComputerUseAdapterKind::MacosAccessibility,
+                    ui_adapter_kind,
                     action_name,
+                )
+            }
+            EXECUTE_CONFIRMED_RAW_INPUT_TOOL => {
+                let args: RawInputArgs =
+                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
+                if args.target.object_kind != ObjectKind::Application {
+                    return Err(error(
+                        AgentErrorKind::InvalidInput,
+                        "raw input requires a fresh foreground application reference",
+                        false,
+                        true,
+                    ));
+                }
+                (
+                    args.target.clone(),
+                    vec![args.target],
+                    ComputerActionKind::RawInput(args.action),
+                    desk_agent_protocol::Capability::DesktopInputFallbackConfirmed,
+                    ComputerUseAdapterKind::WindowsRawInput,
+                    "single raw-input fallback",
                 )
             }
             "patch_live_spreadsheet_cell" => {
@@ -1930,6 +1964,9 @@ impl SignalDeviceAssistantTools {
         if target_ref.object_kind
             != match required_capability {
                 desk_agent_protocol::Capability::DesktopUiActionConfirmed => ObjectKind::UiElement,
+                desk_agent_protocol::Capability::DesktopInputFallbackConfirmed => {
+                    ObjectKind::Application
+                }
                 desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed => ObjectKind::Range,
                 desk_agent_protocol::Capability::DocumentLivePatchConfirmed => ObjectKind::Document,
                 desk_agent_protocol::Capability::PresentationLivePatchConfirmed => {
@@ -2148,6 +2185,8 @@ impl SignalDeviceAssistantTools {
                 ));
             }
             let generation = dispatch_id.clone();
+            let raw_input = required_capability
+                == desk_agent_protocol::Capability::DesktopInputFallbackConfirmed;
             let plan = SealedComputerActionPlan {
                 schema_version: COMPUTER_USE_SCHEMA_VERSION,
                 work_id: claimed.work_id.to_string(),
@@ -2168,10 +2207,18 @@ impl SignalDeviceAssistantTools {
                     action: computer_action,
                     before_summary: "fresh exact object resolved from the inspected snapshot"
                         .into(),
-                    after_intent: format!("perform one bounded semantic {action_name} action"),
-                    verification:
+                    after_intent: if raw_input {
+                        format!("perform one bounded {action_name} action")
+                    } else {
+                        format!("perform one bounded semantic {action_name} action")
+                    },
+                    verification: if raw_input {
+                        "re-observe foreground application and display/DPI, then require a later semantic or screen observation before completion"
+                            .into()
+                    } else {
                         "re-locate the exact object and independently read back semantic state"
-                            .into(),
+                            .into()
+                    },
                 }],
             };
             plan.validate().map_err(|validation_error| {
@@ -5343,6 +5390,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
         if matches!(
             call.name.as_str(),
             EXECUTE_CONFIRMED_UI_ACTION_TOOL
+                | EXECUTE_CONFIRMED_RAW_INPUT_TOOL
                 | "patch_live_spreadsheet_cell"
                 | "replace_live_document_body"
                 | "patch_live_presentation_slide"

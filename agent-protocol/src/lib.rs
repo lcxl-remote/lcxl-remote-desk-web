@@ -939,9 +939,17 @@ pub struct ContainerLogsOutput {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct ScreenCaptureOutput {
+    /// Exact owner-selected display identifier used by the edge capture
+    /// backend. Raw-input fallback may bind to this value but cannot replace
+    /// it with a model-selected target.
+    pub display: String,
     pub format: ImageFormat,
     pub width: u32,
     pub height: u32,
+    /// Physical display DPI observed with this frame. A raw-input action must
+    /// present the same values and the edge rechecks them before injection.
+    pub dpi_x: u32,
+    pub dpi_y: u32,
     /// Encoded image bytes (per `format`). Truncated outputs set `truncated`.
     pub image: Vec<u8>,
     pub truncated: bool,

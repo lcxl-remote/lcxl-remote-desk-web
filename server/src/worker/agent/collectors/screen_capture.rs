@@ -2,10 +2,11 @@
 //!
 //! Captures on the worker side (where the authoritative desktop frame lives,
 //! per the frozen design) via the capture-engine factory, then encodes the
-//! frame to PNG. The per-`display` override is not wired yet — the
-//! configured / current output is captured. A capture failure surfaces as an
-//! error rather than silently degrading, since a capture request implies a
-//! desktop is present.
+//! frame to PNG. Production dispatch first binds `params.display` to the exact
+//! owner-selected `DeskSettings.video_device_name`; this collector therefore
+//! always captures that already-validated configured output instead of letting
+//! the model retarget it. A capture failure surfaces as an error rather than
+//! silently degrading, since a capture request implies a desktop is present.
 
 use std::io::Cursor;
 
@@ -34,8 +35,8 @@ pub fn collect(
     params: &ScreenCaptureParams,
     desk_settings: &DeskSettings,
 ) -> Result<ScreenCaptureOutput, AgentError> {
-    // The configured / current output is captured; a per-display override is
-    // not wired.
+    // The broker already proved this optional value equals the configured
+    // owner-selected display. Capture-engine consumes the configured target.
     let _ = &params.display;
 
     let mut capture = create_image_capture(desk_settings).map_err(capture_err)?;
@@ -48,18 +49,42 @@ pub fn collect(
     let frame = result.image;
     let width = frame.get_width();
     let height = frame.get_height();
+    let (dpi_x, dpi_y) = capture_dpi();
     let png = encode_png(frame.as_ref())?;
     enforce_size_limit(png.len(), MAX_IMAGE_BYTES)?;
 
     Ok(ScreenCaptureOutput {
+        display: desk_settings.video_device_name.clone(),
         format: ImageFormat::Png,
         width,
         height,
+        dpi_x,
+        dpi_y,
         image: png,
         // The frame is returned whole; if it had exceeded the limit the call
         // would have errored above rather than shipping a partial image.
         truncated: false,
     })
+}
+
+#[cfg(windows)]
+fn capture_dpi() -> (u32, u32) {
+    use windows::Win32::UI::{HiDpi::GetDpiForWindow, WindowsAndMessaging::GetForegroundWindow};
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return (96, 96);
+    }
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    if dpi == 0 { (96, 96) } else { (dpi, dpi) }
+}
+
+#[cfg(not(windows))]
+fn capture_dpi() -> (u32, u32) {
+    // The Windows raw-input beta is the only consumer today. Other platform
+    // capture adapters still return an explicit neutral value instead of
+    // omitting the coordinate-space fact from the current schema.
+    (96, 96)
 }
 
 /// Reject an encoded image that would overflow the IPC frame. A truncated image

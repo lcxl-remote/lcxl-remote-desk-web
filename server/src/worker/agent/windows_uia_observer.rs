@@ -1,12 +1,12 @@
-//! Bounded, read-only Windows UI Automation projection.
+//! Bounded Windows UI Automation projection and semantic actions.
 //!
-//! This adapter never invokes a UIA action. It rechecks the foreground process
-//! after COM initialization, redacts password controls before reading name or
-//! value, and stops at the first caller or hard deadline/size bound.
+//! Every action rechecks the foreground process and relocates the target from
+//! its process-incarnation-bound fingerprint. Password controls fail closed;
+//! mutations are limited to typed UIA patterns and independently read back.
 
 use std::time::{Duration, Instant};
 
-use desk_agent_protocol::computer_use::UiSemanticActionKind;
+use desk_agent_protocol::computer_use::{UiSemanticAction, UiSemanticActionKind};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use sha2::{Digest, Sha256};
 use windows::Win32::Foundation::{CloseHandle, FILETIME};
@@ -20,15 +20,20 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
     IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
-    IUIAutomationValuePattern, UIA_InvokePatternId, UIA_SelectionItemPatternId,
-    UIA_TogglePatternId, UIA_ValuePatternId,
+    IUIAutomationValuePattern, ToggleState, ToggleState_Off, ToggleState_On, UIA_InvokePatternId,
+    UIA_SelectionItemPatternId, UIA_TogglePatternId, UIA_ValuePatternId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
-use windows::core::PWSTR;
+use windows::core::{BSTR, PWSTR};
 
 const HARD_DEADLINE: Duration = Duration::from_secs(2);
 const MAX_STRING_BYTES: usize = 16 * 1024;
 const OBJECT_REF_BUDGET: usize = 320;
+const ACTION_MAX_DEPTH: u16 = 16;
+const ACTION_MAX_NODES: usize = 1_024;
+const INVOKE_READBACK_MAX_BYTES: u32 = 1024 * 1024;
+const INVOKE_READBACK_TIMEOUT: Duration = Duration::from_millis(750);
+const INVOKE_READBACK_INTERVAL: Duration = Duration::from_millis(25);
 
 use super::computer_use_broker::{CollectedUiNode, CollectedUiTree};
 
@@ -41,6 +46,18 @@ impl ComGuard {
             .map_err(|_| failure("Windows UI Automation COM initialization failed", true))?;
         Ok(Self)
     }
+}
+
+struct LocatedElement {
+    // COM interface fields must be dropped before the apartment guard.
+    element: IUIAutomationElement,
+    _com: ComGuard,
+}
+
+pub(super) struct AppliedUiAction {
+    pub(super) changed: bool,
+    pub(super) verified: bool,
+    pub(super) summary: String,
 }
 
 impl Drop for ComGuard {
@@ -64,7 +81,7 @@ struct WalkState {
     truncated: bool,
 }
 
-pub fn collect_foreground(
+pub(super) fn collect_foreground(
     expected_process_id: u32,
     expected_image_path: &str,
     max_depth: u16,
@@ -118,6 +135,438 @@ pub fn collect_foreground(
         nodes,
         truncated: state.truncated,
     })
+}
+
+pub(super) fn foreground_contains_protected_control(
+    expected_process_id: u32,
+    expected_image_path: &str,
+) -> Result<bool, AgentError> {
+    collect_foreground(
+        expected_process_id,
+        expected_image_path,
+        ACTION_MAX_DEPTH,
+        ACTION_MAX_NODES as u32,
+        INVOKE_READBACK_MAX_BYTES,
+    )
+    .map(|tree| tree.truncated || tree.nodes.iter().any(|node| node.is_protected))
+}
+
+pub(super) fn preflight_action(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    target_fingerprint: &str,
+    action: &UiSemanticAction,
+) -> Result<(), AgentError> {
+    let target =
+        locate_action_target(expected_process_id, expected_image_path, target_fingerprint)?;
+    validate_action_target(&target.element, action)
+}
+
+pub(super) fn apply_action(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    target_fingerprint: &str,
+    action: &UiSemanticAction,
+) -> Result<AppliedUiAction, AgentError> {
+    let target =
+        locate_action_target(expected_process_id, expected_image_path, target_fingerprint)?;
+    validate_action_target(&target.element, action)?;
+    match action {
+        UiSemanticAction::Invoke => {
+            let before = collect_foreground(
+                expected_process_id,
+                expected_image_path,
+                ACTION_MAX_DEPTH,
+                ACTION_MAX_NODES as u32,
+                INVOKE_READBACK_MAX_BYTES,
+            )?;
+            let before_digest = semantic_tree_digest(&before);
+            let pattern = invoke_pattern(&target.element)?;
+            unsafe { pattern.Invoke() }.map_err(|_| {
+                action_failure("the UI Automation invoke action was rejected by the target")
+            })?;
+            let deadline = Instant::now() + INVOKE_READBACK_TIMEOUT;
+            let verified = loop {
+                match collect_foreground(
+                    expected_process_id,
+                    expected_image_path,
+                    ACTION_MAX_DEPTH,
+                    ACTION_MAX_NODES as u32,
+                    INVOKE_READBACK_MAX_BYTES,
+                ) {
+                    Ok(after) if semantic_tree_digest(&after) != before_digest => break true,
+                    Ok(_) => {}
+                    Err(_) => break false,
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::sleep(INVOKE_READBACK_INTERVAL);
+            };
+            Ok(AppliedUiAction {
+                changed: true,
+                verified,
+                summary: if verified {
+                    "UI Automation invoke was accepted and a semantic application-state change was read back"
+                } else {
+                    "UI Automation invoke was accepted, but no semantic application-state change was read back within the bounded verification window"
+                }
+                .into(),
+            })
+        }
+        UiSemanticAction::Toggle { desired } => {
+            let pattern = toggle_pattern(&target.element)?;
+            let before = toggle_state(
+                unsafe { pattern.CurrentToggleState() }
+                    .map_err(|_| action_failure("cannot read the UI Automation toggle state"))?,
+            )
+            .ok_or_else(|| {
+                unsupported("the UI Automation toggle has an indeterminate or unknown state")
+            })?;
+            if before != *desired {
+                unsafe { pattern.Toggle() }.map_err(|_| {
+                    action_failure("the UI Automation toggle action was rejected by the target")
+                })?;
+            }
+            let after =
+                toggle_state(unsafe { pattern.CurrentToggleState() }.map_err(|_| {
+                    action_failure("cannot read back the UI Automation toggle state")
+                })?);
+            if after != Some(*desired) {
+                return Err(action_failure(
+                    "the UI Automation toggle read-back did not match the requested state",
+                ));
+            }
+            Ok(AppliedUiAction {
+                changed: before != *desired,
+                verified: true,
+                summary: "UI Automation toggle state was read back from the target element".into(),
+            })
+        }
+        UiSemanticAction::Select => {
+            let pattern = selection_pattern(&target.element)?;
+            unsafe { pattern.Select() }.map_err(|_| {
+                action_failure("the UI Automation selection action was rejected by the target")
+            })?;
+            let selected = unsafe { pattern.CurrentIsSelected() }
+                .map(|value| value.as_bool())
+                .unwrap_or(false);
+            if !selected {
+                return Err(action_failure(
+                    "the UI Automation selection read-back did not match the requested state",
+                ));
+            }
+            Ok(AppliedUiAction {
+                changed: true,
+                verified: true,
+                summary: "UI Automation selection was read back from the target element".into(),
+            })
+        }
+        UiSemanticAction::SetValue { value } => {
+            if value.len() > MAX_STRING_BYTES {
+                return Err(failure_with_kind(
+                    AgentErrorKind::OutputLimitExceeded,
+                    "the UI Automation value exceeds its bounded action ceiling",
+                    false,
+                ));
+            }
+            let pattern = value_pattern(&target.element)?;
+            unsafe { pattern.SetValue(&BSTR::from(value)) }.map_err(|_| {
+                action_failure("the UI Automation value action was rejected by the target")
+            })?;
+            let readback = unsafe { pattern.CurrentValue() }
+                .map(|value| value.to_string())
+                .map_err(|_| action_failure("cannot read back the UI Automation value"))?;
+            if readback != *value {
+                return Err(action_failure(
+                    "the UI Automation value read-back did not match the requested value",
+                ));
+            }
+            Ok(AppliedUiAction {
+                changed: true,
+                verified: true,
+                summary: "UI Automation value was read back from the target element".into(),
+            })
+        }
+        UiSemanticAction::Focus => {
+            unsafe { target.element.SetFocus() }.map_err(|_| {
+                action_failure("the UI Automation focus action was rejected by the target")
+            })?;
+            let focused = unsafe { target.element.CurrentHasKeyboardFocus() }
+                .map(|value| value.as_bool())
+                .unwrap_or(false);
+            if !focused {
+                return Err(action_failure(
+                    "the UI Automation focus read-back did not match the requested state",
+                ));
+            }
+            Ok(AppliedUiAction {
+                changed: true,
+                verified: true,
+                summary: "UI Automation keyboard focus was read back from the target element"
+                    .into(),
+            })
+        }
+        UiSemanticAction::Scroll { .. } => Err(unsupported(
+            "this UI Automation semantic action is not enabled by the Windows adapter",
+        )),
+    }
+}
+
+fn locate_action_target(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    target_fingerprint: &str,
+) -> Result<LocatedElement, AgentError> {
+    let com = ComGuard::initialize()?;
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return Err(failure("the foreground window disappeared", false));
+    }
+    let mut process_id = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+    let image_path = process_image(process_id)
+        .ok_or_else(|| failure("cannot resolve the foreground process image", false))?;
+    if process_id != expected_process_id || !path_eq(&image_path, expected_image_path) {
+        return Err(failure(
+            "the foreground application changed before the UI Automation action",
+            false,
+        ));
+    }
+    let started = process_start(process_id).ok_or_else(|| {
+        failure(
+            "cannot bind the foreground application to its process incarnation",
+            false,
+        )
+    })?;
+    let automation: IUIAutomation =
+        unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
+            .map_err(|_| failure("Windows UI Automation is unavailable", false))?;
+    let root = unsafe { automation.ElementFromHandle(hwnd) }
+        .map_err(|_| failure("the foreground window has no UI Automation root", false))?;
+    if unsafe { root.CurrentProcessId() }
+        .unwrap_or_default()
+        .max(0) as u32
+        != process_id
+    {
+        return Err(failure(
+            "the foreground UI Automation root belongs to a different process",
+            false,
+        ));
+    }
+    let walker = unsafe { automation.ControlViewWalker() }
+        .map_err(|_| failure("cannot create a UI Automation tree walker", false))?;
+    let deadline = Instant::now() + HARD_DEADLINE;
+    let mut visited = 0usize;
+    let element = find_element(
+        &root,
+        &walker,
+        None,
+        0,
+        0,
+        process_id,
+        started,
+        target_fingerprint,
+        deadline,
+        &mut visited,
+    )
+    .ok_or_else(|| {
+        failure(
+            "the UI Automation element reference is stale or no longer reachable",
+            false,
+        )
+    })?;
+    Ok(LocatedElement { element, _com: com })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn find_element(
+    element: &IUIAutomationElement,
+    walker: &IUIAutomationTreeWalker,
+    parent_fingerprint: Option<&str>,
+    depth: u16,
+    sibling_ordinal: usize,
+    process_id: u32,
+    process_started_at: u64,
+    target_fingerprint: &str,
+    deadline: Instant,
+    visited: &mut usize,
+) -> Option<IUIAutomationElement> {
+    if *visited >= ACTION_MAX_NODES || Instant::now() >= deadline {
+        return None;
+    }
+    let element_process_id = unsafe { element.CurrentProcessId() }.ok()?.max(0) as u32;
+    if element_process_id != process_id {
+        return None;
+    }
+    *visited += 1;
+    let hwnd = unsafe { element.CurrentNativeWindowHandle() }
+        .map(|value| value.0 as isize)
+        .unwrap_or_default();
+    let control_type = unsafe { element.CurrentControlType() }
+        .map(|value| value.0)
+        .unwrap_or_default();
+    let automation_id = unsafe { element.CurrentAutomationId() }
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let current_fingerprint = fingerprint(
+        parent_fingerprint,
+        sibling_ordinal,
+        process_id as i32,
+        Some(process_started_at),
+        hwnd,
+        control_type,
+        &automation_id,
+    );
+    if current_fingerprint == target_fingerprint {
+        return Some(element.clone());
+    }
+    if depth >= ACTION_MAX_DEPTH {
+        return None;
+    }
+    let mut child = unsafe { walker.GetFirstChildElement(element) }.ok()?;
+    let mut ordinal = 0usize;
+    loop {
+        if let Some(found) = find_element(
+            &child,
+            walker,
+            Some(&current_fingerprint),
+            depth + 1,
+            ordinal,
+            process_id,
+            process_started_at,
+            target_fingerprint,
+            deadline,
+            visited,
+        ) {
+            return Some(found);
+        }
+        if *visited >= ACTION_MAX_NODES || Instant::now() >= deadline {
+            return None;
+        }
+        let Ok(next) = (unsafe { walker.GetNextSiblingElement(&child) }) else {
+            return None;
+        };
+        child = next;
+        ordinal += 1;
+    }
+}
+
+fn validate_action_target(
+    element: &IUIAutomationElement,
+    action: &UiSemanticAction,
+) -> Result<(), AgentError> {
+    let is_password = unsafe { element.CurrentIsPassword() }
+        .map(|value| value.as_bool())
+        .unwrap_or(true);
+    if is_password {
+        return Err(failure_with_kind(
+            AgentErrorKind::PermissionDenied,
+            "password UI Automation controls cannot receive semantic actions",
+            false,
+        ));
+    }
+    if !unsafe { element.CurrentIsEnabled() }
+        .map(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(failure_with_kind(
+            AgentErrorKind::InvalidInput,
+            "the UI Automation target is disabled",
+            false,
+        ));
+    }
+    match action {
+        UiSemanticAction::Invoke => invoke_pattern(element).map(|_| ()),
+        UiSemanticAction::Toggle { .. } => {
+            let pattern = toggle_pattern(element)?;
+            let state = unsafe { pattern.CurrentToggleState() }
+                .map_err(|_| action_failure("cannot read the UI Automation toggle state"))?;
+            toggle_state(state).map(|_| ()).ok_or_else(|| {
+                unsupported("the UI Automation toggle has an indeterminate or unknown state")
+            })
+        }
+        UiSemanticAction::Select => selection_pattern(element).map(|_| ()),
+        UiSemanticAction::SetValue { value } => {
+            if value.len() > MAX_STRING_BYTES {
+                return Err(failure_with_kind(
+                    AgentErrorKind::OutputLimitExceeded,
+                    "the UI Automation value exceeds its bounded action ceiling",
+                    false,
+                ));
+            }
+            let pattern = value_pattern(element)?;
+            if unsafe { pattern.CurrentIsReadOnly() }
+                .map(|value| value.as_bool())
+                .unwrap_or(true)
+            {
+                Err(unsupported("the UI Automation value target is read-only"))
+            } else {
+                Ok(())
+            }
+        }
+        UiSemanticAction::Focus => {
+            if unsafe { element.CurrentIsKeyboardFocusable() }
+                .map(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                Ok(())
+            } else {
+                Err(unsupported(
+                    "the UI Automation target cannot receive keyboard focus",
+                ))
+            }
+        }
+        UiSemanticAction::Scroll { .. } => Err(unsupported(
+            "this UI Automation semantic action is not enabled by the Windows adapter",
+        )),
+    }
+}
+
+fn invoke_pattern(
+    element: &IUIAutomationElement,
+) -> Result<IUIAutomationInvokePattern, AgentError> {
+    unsafe { element.GetCurrentPatternAs(UIA_InvokePatternId) }
+        .map_err(|_| unsupported("the UI Automation target does not support invoke"))
+}
+
+fn toggle_pattern(
+    element: &IUIAutomationElement,
+) -> Result<IUIAutomationTogglePattern, AgentError> {
+    unsafe { element.GetCurrentPatternAs(UIA_TogglePatternId) }
+        .map_err(|_| unsupported("the UI Automation target does not support toggle"))
+}
+
+fn selection_pattern(
+    element: &IUIAutomationElement,
+) -> Result<IUIAutomationSelectionItemPattern, AgentError> {
+    unsafe { element.GetCurrentPatternAs(UIA_SelectionItemPatternId) }
+        .map_err(|_| unsupported("the UI Automation target does not support selection"))
+}
+
+fn value_pattern(element: &IUIAutomationElement) -> Result<IUIAutomationValuePattern, AgentError> {
+    unsafe { element.GetCurrentPatternAs(UIA_ValuePatternId) }
+        .map_err(|_| unsupported("the UI Automation target does not support value updates"))
+}
+
+fn toggle_state(state: ToggleState) -> Option<bool> {
+    if state == ToggleState_Off {
+        Some(false)
+    } else if state == ToggleState_On {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+fn semantic_tree_digest(tree: &CollectedUiTree) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update([u8::from(tree.truncated)]);
+    hasher.update(
+        serde_json::to_vec(&tree.nodes)
+            .expect("UI Automation semantic nodes contain only serializable values"),
+    );
+    hasher.finalize().into()
 }
 
 fn walk(
@@ -281,6 +730,14 @@ fn read_node(
         {
             supported_actions.push(UiSemanticActionKind::SetValue);
         }
+        if !is_protected
+            && element
+                .CurrentIsKeyboardFocusable()
+                .map(|value| value.as_bool())
+                .unwrap_or(false)
+        {
+            supported_actions.push(UiSemanticActionKind::Focus);
+        }
         let fingerprint = fingerprint(
             parent_fingerprint,
             sibling_ordinal,
@@ -338,7 +795,7 @@ fn fingerprint(
     format!("{:x}", hasher.finalize())
 }
 
-fn process_start(process_id: u32) -> Option<u64> {
+pub(super) fn process_start(process_id: u32) -> Option<u64> {
     unsafe {
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id).ok()?;
         let mut created = FILETIME::default();
@@ -384,6 +841,24 @@ fn failure(message: &str, retryable: bool) -> AgentError {
     }
 }
 
+fn unsupported(message: &str) -> AgentError {
+    failure_with_kind(AgentErrorKind::UnsupportedCapability, message, false)
+}
+
+fn action_failure(message: &str) -> AgentError {
+    failure_with_kind(AgentErrorKind::Internal, message, false)
+}
+
+fn failure_with_kind(kind: AgentErrorKind, message: &str, retryable: bool) -> AgentError {
+    AgentError {
+        kind,
+        message: message.to_string(),
+        retryable,
+        safe_for_model: true,
+        error_code: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,7 +877,92 @@ mod tests {
         let first = fingerprint(Some("parent-a"), 1, 4, Some(8), 9, 10, "id");
         let second = fingerprint(Some("parent-b"), 1, 4, Some(8), 9, 10, "id");
         let restarted = fingerprint(Some("parent-a"), 1, 4, Some(9), 9, 10, "id");
+        let replaced_window = fingerprint(Some("parent-a"), 1, 4, Some(8), 11, 10, "id");
         assert_ne!(first, second);
         assert_ne!(first, restarted);
+        assert_ne!(first, replaced_window);
+    }
+
+    #[test]
+    fn toggle_state_rejects_indeterminate_or_unknown_values() {
+        assert_eq!(toggle_state(ToggleState_Off), Some(false));
+        assert_eq!(toggle_state(ToggleState_On), Some(true));
+        assert_eq!(toggle_state(ToggleState(2)), None);
+        assert_eq!(toggle_state(ToggleState(99)), None);
+    }
+
+    #[test]
+    fn semantic_tree_digest_changes_when_uia_value_changes() {
+        let node = CollectedUiNode {
+            parent_index: None,
+            role: "text".into(),
+            name: Some("Display".into()),
+            value: Some("0".into()),
+            is_protected: false,
+            enabled: true,
+            supported_actions: Vec::new(),
+            fingerprint: "stable-object".into(),
+        };
+        let before = CollectedUiTree {
+            nodes: vec![node.clone()],
+            truncated: false,
+        };
+        let mut after_node = node;
+        after_node.value = Some("1".into());
+        let after = CollectedUiTree {
+            nodes: vec![after_node],
+            truncated: false,
+        };
+        assert_ne!(semantic_tree_digest(&before), semantic_tree_digest(&after));
+    }
+
+    #[test]
+    #[ignore = "requires Calculator to be foreground on an interactive Windows desktop"]
+    fn live_calculator_tree_and_invoke_use_the_production_uia_adapter() {
+        let hwnd = unsafe { GetForegroundWindow() };
+        assert!(!hwnd.0.is_null(), "no foreground window");
+        let mut process_id = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+        let image_path = process_image(process_id).expect("foreground process image");
+        assert!(
+            image_path.to_ascii_lowercase().contains("calculator"),
+            "foreground app is not Calculator: {image_path}"
+        );
+        let tree = collect_foreground(
+            process_id,
+            &image_path,
+            ACTION_MAX_DEPTH,
+            ACTION_MAX_NODES as u32,
+            INVOKE_READBACK_MAX_BYTES,
+        )
+        .expect("Calculator UIA tree");
+        let button = tree
+            .nodes
+            .iter()
+            .find(|node| {
+                node.supported_actions
+                    .contains(&UiSemanticActionKind::Invoke)
+                    && node
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| matches!(name, "One" | "1" | "一" | "数字 1"))
+            })
+            .expect("Calculator digit-one invoke target");
+        preflight_action(
+            process_id,
+            &image_path,
+            &button.fingerprint,
+            &UiSemanticAction::Invoke,
+        )
+        .expect("Calculator invoke preflight");
+        let result = apply_action(
+            process_id,
+            &image_path,
+            &button.fingerprint,
+            &UiSemanticAction::Invoke,
+        )
+        .expect("Calculator invoke");
+        assert!(result.changed);
+        assert!(result.verified, "{}", result.summary);
     }
 }

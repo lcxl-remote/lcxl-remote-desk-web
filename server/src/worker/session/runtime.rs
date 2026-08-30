@@ -1607,7 +1607,10 @@ impl WorkerSession {
                                         continue;
                                     }
 
-                                    let ceiling = shared_settings.read().await.computer_use.clone();
+                                    let action_settings = shared_settings.read().await;
+                                    let ceiling = action_settings.computer_use.clone();
+                                    let selected_display = action_settings.desk.video_device_name.clone();
+                                    drop(action_settings);
                                     let lease = crate::worker::agent::computer_use_writer::WriterLeaseRequest {
                                         work_id: plan.work_id.clone(),
                                         action_request_id: plan.action_request_id.clone(),
@@ -1623,6 +1626,14 @@ impl WorkerSession {
                                                 &plan.actions[0].target,
                                                 action,
                                                 &ceiling,
+                                            )
+                                            .map_err(|error| error.message),
+                                        ComputerActionKind::RawInput(action) => computer_use_broker
+                                            .preflight_raw_input(
+                                                &plan.actions[0].target,
+                                                action,
+                                                &ceiling,
+                                                &selected_display,
                                             )
                                             .map_err(|error| error.message),
                                         ComputerActionKind::File(_) => ceiling
@@ -1790,6 +1801,64 @@ impl WorkerSession {
                                                         "semantic UI action may have changed the application without a generic verifier"
                                                             .to_string()
                                                     }),
+                                                ),
+                                                Err(reason) => (
+                                                    ComputerActionResultClass::OutcomeUnknown,
+                                                    vec![],
+                                                    Some(reason),
+                                                ),
+                                            };
+                                            let _ = action_writer.send(
+                                                WorkerToService::ComputerActionCompleted(
+                                                    ComputerActionCompletedPayload {
+                                                        request_id: payload.request_id,
+                                                        connection_id: payload.connection_id,
+                                                        completed: ComputerActionCompleted {
+                                                            work_id: plan.work_id,
+                                                            action_request_id: plan.action_request_id,
+                                                            execution_generation: generation,
+                                                            result: class,
+                                                            facts,
+                                                            message,
+                                                            output: None,
+                                                        },
+                                                    },
+                                                ),
+                                            );
+                                            return;
+                                        }
+                                        if let ComputerActionKind::RawInput(action) = &step.action {
+                                            let target = step.target.clone();
+                                            let action = action.clone();
+                                            let broker = action_broker.clone();
+                                            let generation_for_call = generation.clone();
+                                            let ceiling = ceiling.clone();
+                                            let selected_display = selected_display.clone();
+                                            let result = tokio::task::spawn_blocking(move || -> Result<_, desk_agent_protocol::AgentError> {
+                                                broker.require_writer_lease(&generation_for_call)?;
+                                                let result = broker.execute_raw_input(
+                                                    &target,
+                                                    &action,
+                                                    &ceiling,
+                                                    &selected_display,
+                                                )?;
+                                                broker.require_writer_lease(&generation_for_call)?;
+                                                Ok(result)
+                                            })
+                                            .await
+                                            .map_err(|error| format!("raw-input worker failed to join: {error}"))
+                                            .and_then(|result| result.map_err(|error| error.message));
+                                            action_broker.release_writer_lease(&generation);
+                                            let (class, facts, message) = match result {
+                                                Ok(result) => (
+                                                    ComputerActionResultClass::ChangedButUnverified,
+                                                    vec![ComputerActionStepFact {
+                                                        index: 0,
+                                                        changed: result.changed,
+                                                        verified: false,
+                                                        summary: result.summary,
+                                                    }],
+                                                    Some("raw input was injected and the foreground/display preconditions were freshly re-observed; inspect application state before deciding completion".to_string()),
                                                 ),
                                                 Err(reason) => (
                                                     ComputerActionResultClass::OutcomeUnknown,
@@ -2280,6 +2349,9 @@ impl WorkerSession {
                                     });
                                 }
                                 ServiceToWorker::ComputerActionCancel(payload) => {
+                                    computer_use_broker.cancel_writer_lease(
+                                        &payload.cancel.execution_generation,
+                                    );
                                     let state = ComputerActionStateReport {
                                         work_id: payload.cancel.work_id,
                                         action_request_id: payload.cancel.action_request_id,

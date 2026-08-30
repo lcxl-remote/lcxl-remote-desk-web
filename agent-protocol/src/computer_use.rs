@@ -31,6 +31,8 @@ pub const MAX_COMPUTER_USE_INSPECT_NODES: u32 = 4096;
 pub const MAX_LIVE_DOCUMENT_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_LIVE_SPREADSHEET_CELL_BYTES: usize = 16 * 1024;
 pub const MAX_LIVE_SPREADSHEET_FORMULA_BYTES: usize = 4 * 1024;
+pub const MAX_RAW_INPUT_TEXT_BYTES: usize = 512;
+pub const MAX_RAW_INPUT_SCROLL_DELTA: i32 = 1200;
 
 #[derive(
     Debug,
@@ -107,6 +109,7 @@ impl std::fmt::Debug for ObjectRef {
 #[serde(rename_all = "snake_case")]
 pub enum ComputerUseAdapterKind {
     WindowsUia,
+    WindowsRawInput,
     MacosAccessibility,
     OfficeExcel,
     OfficePowerPoint,
@@ -625,6 +628,117 @@ pub enum UiSemanticAction {
     Focus,
 }
 
+/// Exact screen geometry observed immediately before one raw-input fallback
+/// step. The edge re-resolves the owner-selected display and foreground
+/// application, then requires these physical-pixel and DPI facts to remain
+/// identical before injecting anything. Coordinates are never interpreted in
+/// a stale or model-selected display space.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct RawInputScreenContext {
+    pub display: String,
+    pub width: u32,
+    pub height: u32,
+    pub dpi_x: u32,
+    pub dpi_y: u32,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    SchemaWrite,
+    SchemaRead,
+    ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RawInputMouseButton {
+    Primary,
+    Secondary,
+}
+
+/// Closed navigation-key set for the raw-input beta. Arbitrary virtual-key
+/// codes and modifier chords are deliberately absent, so this cannot become a
+/// hidden command launcher or macro surface.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    SchemaWrite,
+    SchemaRead,
+    ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RawInputKey {
+    Enter,
+    Tab,
+    Escape,
+    Backspace,
+    Delete,
+    Space,
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+}
+
+/// One and only one bounded raw-input fallback step. A sealed plan containing
+/// this action must contain exactly one action, and completion remains
+/// unverified until a later semantic or screen observation proves the intended
+/// application state.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(tag = "kind", content = "params", rename_all = "snake_case")]
+pub enum RawInputStep {
+    Click {
+        x: u32,
+        y: u32,
+        button: RawInputMouseButton,
+    },
+    KeyPress {
+        key: RawInputKey,
+    },
+    TypeText {
+        text: String,
+    },
+    Scroll {
+        horizontal: i32,
+        vertical: i32,
+    },
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct RawInputAction {
+    pub screen: RawInputScreenContext,
+    pub step: RawInputStep,
+}
+
+impl RawInputAction {
+    pub fn validate(&self) -> Result<(), ComputerUseValidationError> {
+        validate_raw_input_action(self)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]
 #[serde(tag = "kind", content = "params", rename_all = "snake_case")]
 pub enum ExcelPatchAction {
@@ -794,6 +908,7 @@ pub enum FilePatchAction {
 #[serde(tag = "adapter", content = "action", rename_all = "snake_case")]
 pub enum ComputerActionKind {
     Ui(UiSemanticAction),
+    RawInput(RawInputAction),
     Excel(ExcelPatchAction),
     PowerPoint(PowerPointPatchAction),
     SpreadsheetLive(SpreadsheetLivePatchAction),
@@ -812,6 +927,7 @@ impl ComputerActionKind {
     pub const fn required_capability(&self) -> Capability {
         match self {
             Self::Ui(_) => Capability::DesktopUiActionConfirmed,
+            Self::RawInput(_) => Capability::DesktopInputFallbackConfirmed,
             Self::Excel(_) => Capability::OfficeExcelPatchConfirmed,
             Self::PowerPoint(_) => Capability::OfficePowerPointPatchConfirmed,
             Self::SpreadsheetLive(_) => Capability::SpreadsheetLivePatchConfirmed,
@@ -1061,6 +1177,15 @@ fn validate_actions(
             max: MAX_COMPUTER_ACTIONS,
         });
     }
+    if actions
+        .iter()
+        .any(|step| matches!(step.action, ComputerActionKind::RawInput(_)))
+        && actions.len() != 1
+    {
+        return Err(ComputerUseValidationError::InvalidContextReference(
+            "raw input fallback plans must contain exactly one action",
+        ));
+    }
 
     let snapshot_id = actions[0].target.snapshot_id.as_str();
     require_non_empty("object_ref.snapshot_id", snapshot_id)?;
@@ -1070,6 +1195,9 @@ fn validate_actions(
             (
                 ComputerUseAdapterKind::WindowsUia | ComputerUseAdapterKind::MacosAccessibility,
                 ComputerActionKind::Ui(_)
+            ) | (
+                ComputerUseAdapterKind::WindowsRawInput,
+                ComputerActionKind::RawInput(_)
             ) | (
                 ComputerUseAdapterKind::OfficeExcel,
                 ComputerActionKind::Excel(_)
@@ -1104,6 +1232,7 @@ fn validate_actions(
         let target_matches = matches!(
             (&step.action, step.target.object_kind),
             (ComputerActionKind::Ui(_), ObjectKind::UiElement)
+                | (ComputerActionKind::RawInput(_), ObjectKind::Application)
                 | (ComputerActionKind::Excel(_), ObjectKind::Range)
                 | (ComputerActionKind::PowerPoint(_), ObjectKind::Shape)
                 | (ComputerActionKind::SpreadsheetLive(_), ObjectKind::Range)
@@ -1147,6 +1276,9 @@ fn validate_actions(
         );
         if !target_matches {
             return Err(ComputerUseValidationError::IncompatibleActionTarget);
+        }
+        if let ComputerActionKind::RawInput(action) = &step.action {
+            validate_raw_input_action(action)?;
         }
         if let ComputerActionKind::Browser(request) = &step.action {
             request.validate().map_err(|_| {
@@ -1223,6 +1355,54 @@ fn validate_actions(
         if step.target.snapshot_id != snapshot_id {
             return Err(ComputerUseValidationError::MixedSnapshots);
         }
+    }
+    Ok(())
+}
+
+fn validate_raw_input_action(action: &RawInputAction) -> Result<(), ComputerUseValidationError> {
+    let screen = &action.screen;
+    require_non_empty("raw_input.screen.display", &screen.display)?;
+    if screen.width == 0
+        || screen.height == 0
+        || screen.dpi_x == 0
+        || screen.dpi_y == 0
+        || screen.width > 32_768
+        || screen.height > 32_768
+        || screen.dpi_x > 960
+        || screen.dpi_y > 960
+    {
+        return Err(ComputerUseValidationError::InvalidContextReference(
+            "raw input screen geometry is outside the bounded physical-pixel contract",
+        ));
+    }
+    match &action.step {
+        RawInputStep::Click { x, y, .. } if *x < screen.width && *y < screen.height => {}
+        RawInputStep::Click { .. } => {
+            return Err(ComputerUseValidationError::InvalidContextReference(
+                "raw input click is outside the observed display",
+            ));
+        }
+        RawInputStep::TypeText { text }
+            if !text.is_empty()
+                && text.len() <= MAX_RAW_INPUT_TEXT_BYTES
+                && !text.chars().any(char::is_control) => {}
+        RawInputStep::TypeText { .. } => {
+            return Err(ComputerUseValidationError::InvalidContextReference(
+                "raw input text is empty, oversized, or contains control characters",
+            ));
+        }
+        RawInputStep::Scroll {
+            horizontal,
+            vertical,
+        } if (*horizontal != 0 || *vertical != 0)
+            && horizontal.unsigned_abs() <= MAX_RAW_INPUT_SCROLL_DELTA as u32
+            && vertical.unsigned_abs() <= MAX_RAW_INPUT_SCROLL_DELTA as u32 => {}
+        RawInputStep::Scroll { .. } => {
+            return Err(ComputerUseValidationError::InvalidContextReference(
+                "raw input scroll is empty or outside the bounded delta",
+            ));
+        }
+        RawInputStep::KeyPress { .. } => {}
     }
     Ok(())
 }
@@ -1796,6 +1976,36 @@ mod tests {
         }
     }
 
+    fn raw_plan(step: RawInputStep) -> SealedComputerActionPlan {
+        let mut sealed = plan();
+        sealed.adapter = ComputerUseAdapterRef {
+            kind: ComputerUseAdapterKind::WindowsRawInput,
+            version: "1".into(),
+        };
+        sealed.actions = vec![ComputerActionStep {
+            target: ObjectRef {
+                token: "application-1".into(),
+                snapshot_id: "snapshot-1".into(),
+                object_kind: ObjectKind::Application,
+                expires_at: "2026-08-23T12:00:00Z".into(),
+            },
+            action: ComputerActionKind::RawInput(RawInputAction {
+                screen: RawInputScreenContext {
+                    display: r"\\.\DISPLAY1".into(),
+                    width: 1920,
+                    height: 1080,
+                    dpi_x: 96,
+                    dpi_y: 96,
+                },
+                step,
+            }),
+            before_summary: "foreground application and screen were observed".into(),
+            after_intent: "perform one raw-input fallback step".into(),
+            verification: "observe application state again".into(),
+        }];
+        sealed
+    }
+
     #[test]
     fn sealed_plan_round_trips_and_validates() {
         let plan = plan();
@@ -1803,6 +2013,46 @@ mod tests {
         let encoded = serde_json::to_string(&plan).expect("encode");
         let decoded: SealedComputerActionPlan = serde_json::from_str(&encoded).expect("decode");
         assert_eq!(decoded, plan);
+    }
+
+    #[test]
+    fn raw_input_is_single_step_bounded_and_uses_independent_capability() {
+        let mut sealed = raw_plan(RawInputStep::Click {
+            x: 1919,
+            y: 1079,
+            button: RawInputMouseButton::Primary,
+        });
+        sealed.validate().expect("bounded raw input plan");
+        assert_eq!(
+            sealed.actions[0].action.required_capability(),
+            Capability::DesktopInputFallbackConfirmed
+        );
+
+        if let ComputerActionKind::RawInput(action) = &mut sealed.actions[0].action {
+            action.step = RawInputStep::Click {
+                x: 1920,
+                y: 0,
+                button: RawInputMouseButton::Primary,
+            };
+        }
+        assert!(sealed.validate().is_err());
+
+        let mut batched = raw_plan(RawInputStep::KeyPress {
+            key: RawInputKey::Enter,
+        });
+        batched.actions.push(batched.actions[0].clone());
+        assert!(batched.validate().is_err());
+
+        let control_text = raw_plan(RawInputStep::TypeText {
+            text: "unsafe\ntext".into(),
+        });
+        assert!(control_text.validate().is_err());
+
+        let overflowing_scroll = raw_plan(RawInputStep::Scroll {
+            horizontal: i32::MIN,
+            vertical: 0,
+        });
+        assert!(overflowing_scroll.validate().is_err());
     }
 
     #[test]

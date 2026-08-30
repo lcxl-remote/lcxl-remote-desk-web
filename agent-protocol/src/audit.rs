@@ -1216,9 +1216,12 @@ mod tests {
         }));
         let output = OperationOutput::ReadContext(ReadContextOutput::ScreenCaptureCurrent(
             crate::ScreenCaptureOutput {
+                display: r"\\.\DISPLAY1".into(),
                 format: crate::ImageFormat::Png,
                 width: 2,
                 height: 1,
+                dpi_x: 96,
+                dpi_y: 96,
                 image: vec![137, 80, 78, 71, 1, 2, 3],
                 truncated: false,
             },

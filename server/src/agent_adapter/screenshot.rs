@@ -239,9 +239,12 @@ mod tests {
         let png = noisy_png(64, 64);
         let shot = AgentOutcome::Ok(OperationOutput::ReadContext(
             ReadContextOutput::ScreenCaptureCurrent(ScreenCaptureOutput {
+                display: r"\\.\DISPLAY1".into(),
                 format: ProtoFmt::Png,
                 width: 64,
                 height: 64,
+                dpi_x: 96,
+                dpi_y: 96,
                 image: png,
                 truncated: false,
             }),
@@ -269,9 +272,12 @@ mod tests {
         let png = noisy_png(64, 64);
         let shot = AgentOutcome::Ok(OperationOutput::ReadContext(
             ReadContextOutput::ScreenCaptureCurrent(ScreenCaptureOutput {
+                display: r"\\.\DISPLAY1".into(),
                 format: ProtoFmt::Png,
                 width: 64,
                 height: 64,
+                dpi_x: 96,
+                dpi_y: 96,
                 image: png,
                 truncated: false,
             }),
@@ -302,9 +308,12 @@ mod tests {
         use desk_agent_protocol::{Capability, ImageFormat as ProtoFmt, ScreenCaptureOutput};
         let shot = AgentOutcome::Ok(OperationOutput::ReadContext(
             ReadContextOutput::ScreenCaptureCurrent(ScreenCaptureOutput {
+                display: r"\\.\DISPLAY1".into(),
                 format: ProtoFmt::Png,
                 width: 1,
                 height: 1,
+                dpi_x: 96,
+                dpi_y: 96,
                 image: b"not an image".to_vec(),
                 truncated: false,
             }),

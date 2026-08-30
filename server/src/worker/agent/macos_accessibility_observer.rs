@@ -177,6 +177,20 @@ pub(super) fn collect_foreground(
     })
 }
 
+pub(super) fn foreground_contains_protected_control(
+    expected_process_id: u32,
+    expected_image_path: &str,
+) -> Result<bool, AgentError> {
+    collect_foreground(
+        expected_process_id,
+        expected_image_path,
+        INVOKE_READBACK_MAX_DEPTH,
+        INVOKE_READBACK_MAX_NODES,
+        INVOKE_READBACK_MAX_BYTES,
+    )
+    .map(|tree| tree.truncated || tree.nodes.iter().any(|node| node.is_protected))
+}
+
 pub(super) fn preflight_action(
     expected_process_id: u32,
     expected_image_path: &str,
@@ -661,6 +675,7 @@ fn frontmost_application() -> Result<ObservedApplication, AgentError> {
         Ok(ObservedApplication {
             process_id: process_id as u32,
             image_path: CStr::from_ptr(utf8).to_string_lossy().into_owned(),
+            process_started_at: None,
         })
     })
 }

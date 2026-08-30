@@ -504,6 +504,7 @@ pub fn build_permission_request(
         let exact_semantic_action = matches!(
             capability.wire.capability_id.as_str(),
             crate::device_assistant::DESKTOP_UI_ACTION_CAPABILITY_ID
+                | crate::device_assistant::DESKTOP_RAW_INPUT_CAPABILITY_ID
                 | crate::device_assistant::SPREADSHEET_LIVE_PATCH_CAPABILITY_ID
                 | crate::device_assistant::DOCUMENT_LIVE_PATCH_CAPABILITY_ID
                 | crate::device_assistant::PRESENTATION_LIVE_PATCH_CAPABILITY_ID
@@ -526,6 +527,9 @@ pub fn build_permission_request(
             let expected_kind = match capability.required_capability {
                 Capability::DesktopUiActionConfirmed => {
                     desk_agent_protocol::computer_use::ObjectKind::UiElement
+                }
+                Capability::DesktopInputFallbackConfirmed => {
+                    desk_agent_protocol::computer_use::ObjectKind::Application
                 }
                 Capability::SpreadsheetLivePatchConfirmed => {
                     desk_agent_protocol::computer_use::ObjectKind::Range
@@ -568,6 +572,18 @@ pub fn build_permission_request(
                         ));
                     }
                 }
+            }
+            if capability.required_capability == Capability::DesktopInputFallbackConfirmed {
+                #[derive(Deserialize)]
+                struct RawInputOnly {
+                    action: desk_agent_protocol::computer_use::RawInputAction,
+                }
+                let action: RawInputOnly = serde_json::from_str(canonical)
+                    .map_err(|error| invalid(format!("decode raw input action: {error}")))?;
+                action
+                    .action
+                    .validate()
+                    .map_err(|error| invalid(format!("validate raw input action: {error}")))?;
             }
             let is_batch = matches!(
                 capability.wire.capability_id.as_str(),
@@ -1226,6 +1242,37 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message.contains("bounded macOS action allowlist"));
+    }
+
+    #[test]
+    fn raw_input_permission_is_r3_one_shot_and_binds_application_screen_and_step() {
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let exact = r#"{"items":[{"item_id":"raw","provider_id":"desktop.input.fallback","tool_name":"execute_confirmed_raw_input","expected_effect":"input_fallback","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"target":{"token":"application-token","snapshot_id":"snapshot-1","object_kind":"application","expires_at":"2026-08-28T00:01:00Z"},"action":{"screen":{"display":"\\\\.\\DISPLAY1","width":1920,"height":1080,"dpi_x":96,"dpi_y":96},"step":{"kind":"click","params":{"x":100,"y":200,"button":"primary"}}}},"suggested_ttl_seconds":300,"suggested_max_uses":9,"reason":"Last-resort click after semantic controls were unavailable"}]}"#;
+        let request = build_permission_request(
+            &call(exact),
+            &registry,
+            "permission-raw-input".into(),
+            1,
+            "2026-08-28T00:00:00Z".into(),
+        )
+        .unwrap();
+        let item = &request.items[0];
+        assert_eq!(item.suggested_max_uses, 1);
+        assert_eq!(item.operation_scope, vec!["use_selected_object"]);
+        assert_eq!(item.resource_scope.len(), 1);
+        assert!(item.resource_scope[0].starts_with("selected:sha256:"));
+        assert!(item.canonical_input_digest_sha256.is_some());
+
+        let out_of_bounds = exact.replace(r#""x":100"#, r#""x":1920"#);
+        let error = build_permission_request(
+            &call(&out_of_bounds),
+            &registry,
+            "permission-raw-input-out-of-bounds".into(),
+            1,
+            "2026-08-28T00:00:00Z".into(),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("outside the observed display"));
     }
 
     #[test]

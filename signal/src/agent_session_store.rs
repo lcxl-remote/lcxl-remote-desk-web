@@ -1142,37 +1142,66 @@ fn build_permission_grants(
         });
         let exact_external_query = capability.wire.authorization_hint.resources
             == [AuthorizationResourceKind::ExternalQuery];
-        let exact_ui_action = capability.required_capability
-            == desk_agent_protocol::Capability::DesktopUiActionConfirmed;
+        let exact_ui_action = matches!(
+            capability.required_capability,
+            desk_agent_protocol::Capability::DesktopUiActionConfirmed
+                | desk_agent_protocol::Capability::DesktopInputFallbackConfirmed
+        );
         let resource_scope = if exact_ui_action {
             #[derive(serde::Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct UiActionInput {
+            struct DesktopActionTarget {
                 target: ObjectRef,
-                action: desk_agent_protocol::computer_use::UiSemanticAction,
             }
             let canonical = requested
                 .canonical_input_json
                 .as_deref()
                 .ok_or_else(|| internal("approved semantic UI action has no exact input"))?;
-            let input: UiActionInput = serde_json::from_str(canonical)
-                .map_err(|_| internal("approved semantic UI action input is invalid"))?;
-            if input.target.object_kind != ObjectKind::UiElement {
-                return Err(internal(
-                    "approved semantic UI action target is not a UI element",
-                ));
-            }
-            match input.action {
-                desk_agent_protocol::computer_use::UiSemanticAction::Invoke
-                | desk_agent_protocol::computer_use::UiSemanticAction::Select
-                | desk_agent_protocol::computer_use::UiSemanticAction::Focus => {}
-                desk_agent_protocol::computer_use::UiSemanticAction::SetValue { value }
-                    if value.len() <= 16 * 1024 => {}
-                _ => {
-                    return Err(internal(
-                        "approved semantic UI action is outside the bounded allowlist",
-                    ));
+            let input: DesktopActionTarget = serde_json::from_str(canonical)
+                .map_err(|_| internal("approved desktop action input is invalid"))?;
+            let expected_kind = match capability.required_capability {
+                desk_agent_protocol::Capability::DesktopUiActionConfirmed => ObjectKind::UiElement,
+                desk_agent_protocol::Capability::DesktopInputFallbackConfirmed => {
+                    ObjectKind::Application
                 }
+                _ => unreachable!(),
+            };
+            if input.target.object_kind != expected_kind {
+                return Err(internal("approved desktop action target kind is invalid"));
+            }
+            if capability.required_capability
+                == desk_agent_protocol::Capability::DesktopUiActionConfirmed
+            {
+                #[derive(serde::Deserialize)]
+                struct UiActionOnly {
+                    action: desk_agent_protocol::computer_use::UiSemanticAction,
+                }
+                let action: UiActionOnly = serde_json::from_str(canonical)
+                    .map_err(|_| internal("approved semantic UI action input is invalid"))?;
+                match action.action {
+                    desk_agent_protocol::computer_use::UiSemanticAction::Invoke
+                    | desk_agent_protocol::computer_use::UiSemanticAction::Select
+                    | desk_agent_protocol::computer_use::UiSemanticAction::Focus => {}
+                    desk_agent_protocol::computer_use::UiSemanticAction::SetValue { value }
+                        if value.len() <= 16 * 1024 => {}
+                    _ => {
+                        return Err(internal(
+                            "approved semantic UI action is outside the bounded allowlist",
+                        ));
+                    }
+                }
+            }
+            if capability.required_capability
+                == desk_agent_protocol::Capability::DesktopInputFallbackConfirmed
+            {
+                #[derive(serde::Deserialize)]
+                struct RawInputOnly {
+                    action: desk_agent_protocol::computer_use::RawInputAction,
+                }
+                let action: RawInputOnly = serde_json::from_str(canonical)
+                    .map_err(|_| internal("approved raw input action is invalid"))?;
+                action.action.validate().map_err(|_| {
+                    internal("approved raw input action is outside the bounded allowlist")
+                })?;
             }
             desk_diagnose_core::capability_grant::fresh_object_resource_scope(&[input.target])
         } else if capability.wire.authorization_hint.resources

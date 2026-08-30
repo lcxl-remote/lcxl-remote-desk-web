@@ -33,6 +33,8 @@ pub mod terminal_reference_store;
 #[cfg(windows)]
 pub mod windows_input_ownership;
 #[cfg(windows)]
+pub mod windows_raw_input;
+#[cfg(windows)]
 pub mod windows_uia_observer;
 
 /// Minimum lifetime for an edge-issued object that may cross a model-driven
@@ -259,6 +261,8 @@ async fn dispatch_read_context(
                 return Err(unsupported("screen capture requires a session context"));
             };
             let desk_settings = settings.read().await.desk.clone();
+            let _capture_permit = computer_use_broker
+                .acquire_screen_capture_permit(&params, &desk_settings.video_device_name)?;
             let output =
                 run_blocking(move || collectors::screen_capture::collect(&params, &desk_settings))
                     .await??;

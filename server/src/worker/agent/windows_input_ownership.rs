@@ -11,6 +11,10 @@ use std::time::Duration;
 
 use desk_input_injection::windows_event::{InputSource, classify_input};
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::StationsAndDesktops::{
+    CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_HOOKCONTROL, DESKTOP_READOBJECTS,
+    DESKTOP_WRITEOBJECTS, GetThreadDesktop, OpenInputDesktop, SetThreadDesktop,
+};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG,
@@ -75,13 +79,53 @@ fn run_hook_loop(broker: Weak<ComputerUseBroker>, ready_tx: mpsc::SyncSender<Res
             ));
             return;
         }
-        *active = Some(broker);
+        *active = Some(broker.clone());
+    }
+
+    let thread_id = unsafe { GetCurrentThreadId() };
+    let original_desktop = match unsafe { GetThreadDesktop(thread_id) } {
+        Ok(desktop) => desktop,
+        Err(error) => {
+            clear_active_broker();
+            let _ = ready_tx.send(Err(format!(
+                "cannot resolve the Windows input monitor thread desktop: {error}"
+            )));
+            return;
+        }
+    };
+    let input_desktop = match unsafe {
+        OpenInputDesktop(
+            DESKTOP_CONTROL_FLAGS::default(),
+            false,
+            windows::Win32::System::StationsAndDesktops::DESKTOP_ACCESS_FLAGS(
+                DESKTOP_READOBJECTS.0 | DESKTOP_WRITEOBJECTS.0 | DESKTOP_HOOKCONTROL.0,
+            ),
+        )
+    } {
+        Ok(desktop) => desktop,
+        Err(error) => {
+            clear_active_broker();
+            let _ = ready_tx.send(Err(format!(
+                "cannot open the active Windows input desktop: {error}"
+            )));
+            return;
+        }
+    };
+    if let Err(error) = unsafe { SetThreadDesktop(input_desktop) } {
+        let _ = unsafe { CloseDesktop(input_desktop) };
+        clear_active_broker();
+        let _ = ready_tx.send(Err(format!(
+            "cannot bind the Windows input monitor to the active desktop: {error}"
+        )));
+        return;
     }
 
     let keyboard_hook =
         match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_callback), None, 0) } {
             Ok(hook) => hook,
             Err(error) => {
+                let _ = unsafe { SetThreadDesktop(original_desktop) };
+                let _ = unsafe { CloseDesktop(input_desktop) };
                 clear_active_broker();
                 let _ = ready_tx.send(Err(format!(
                     "cannot install the Windows low-level keyboard hook: {error}"
@@ -94,6 +138,8 @@ fn run_hook_loop(broker: Weak<ComputerUseBroker>, ready_tx: mpsc::SyncSender<Res
             Ok(hook) => hook,
             Err(error) => {
                 let _ = unsafe { UnhookWindowsHookEx(keyboard_hook) };
+                let _ = unsafe { SetThreadDesktop(original_desktop) };
+                let _ = unsafe { CloseDesktop(input_desktop) };
                 clear_active_broker();
                 let _ = ready_tx.send(Err(format!(
                     "cannot install the Windows low-level mouse hook: {error}"
@@ -102,17 +148,25 @@ fn run_hook_loop(broker: Weak<ComputerUseBroker>, ready_tx: mpsc::SyncSender<Res
             }
         };
 
-    let thread_id = unsafe { GetCurrentThreadId() };
     let mut message = MSG::default();
     // Force creation of the thread message queue before publishing thread_id,
     // otherwise an immediate Drop could race PostThreadMessageW against it.
     let _ = unsafe { PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE) };
+    if let Some(broker) = broker.upgrade() {
+        broker.set_input_ownership_ready(true);
+    }
     if ready_tx.send(Ok(thread_id)).is_ok() {
         while unsafe { GetMessageW(&mut message, None, 0, 0) }.as_bool() {}
     }
 
+    if let Some(broker) = broker.upgrade() {
+        broker.set_input_ownership_ready(false);
+    }
+
     let _ = unsafe { UnhookWindowsHookEx(mouse_hook) };
     let _ = unsafe { UnhookWindowsHookEx(keyboard_hook) };
+    let _ = unsafe { SetThreadDesktop(original_desktop) };
+    let _ = unsafe { CloseDesktop(input_desktop) };
     clear_active_broker();
 }
 
@@ -212,6 +266,7 @@ mod tests {
         let broker = Arc::new(ComputerUseBroker::new());
         let monitor = WindowsInputOwnershipMonitor::start(&broker)
             .expect("the low-level hooks must start on an active desktop");
+        assert!(broker.input_ownership_is_ready());
         let browser = [key(false, true), key(true, true)];
         assert_eq!(
             unsafe { SendInput(&browser, size_of::<INPUT>() as i32) },
@@ -228,5 +283,6 @@ mod tests {
         thread::sleep(Duration::from_millis(100));
         assert_eq!(broker.human_input_epoch(), 2);
         drop(monitor);
+        assert!(!broker.input_ownership_is_ready());
     }
 }

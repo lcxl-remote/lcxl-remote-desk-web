@@ -2,13 +2,14 @@
 //!
 //! The broker owns the interactive-session incarnation and opaque ObjectRef
 //! store. Restarting a worker constructs a new broker, immediately invalidating
-//! every prior reference. A3 exposes only bounded observation; action dispatch
-//! remains hard-disabled in the daemon and worker.
+//! every prior reference. Typed actions re-resolve those references and run
+//! only behind the writer lease, local ceiling, and exact-grant dispatch path.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration as StdDuration, Instant as StdInstant};
 
 use chrono::{DateTime, Duration, Utc};
 use desk_agent_protocol::browser_control::{
@@ -28,12 +29,12 @@ use desk_agent_protocol::computer_use::{
     ComputerUseAdapterRef, ComputerUseCapabilityReadiness, ComputerUseContextReference,
     ComputerUseReadiness, ComputerUseReadinessReason, DesktopSessionInspectOutput,
     DesktopSessionInspectParams, MAX_COMPUTER_USE_INSPECT_BYTES, MAX_COMPUTER_USE_INSPECT_NODES,
-    ObjectKind, ObjectRef, OfficeInspectParams, UiInspectOutput, UiInspectParams, UiNodeProjection,
-    UiSemanticAction,
+    ObjectKind, ObjectRef, OfficeInspectParams, RawInputAction, UiInspectOutput, UiInspectParams,
+    UiNodeProjection, UiSemanticAction,
 };
 #[cfg(any(windows, target_os = "macos"))]
 use desk_agent_protocol::computer_use::{OfficeInspectOutput, OfficeSelectionProjection};
-use desk_agent_protocol::{AgentError, AgentErrorKind, Capability};
+use desk_agent_protocol::{AgentError, AgentErrorKind, Capability, ScreenCaptureParams};
 #[cfg(target_os = "macos")]
 use desk_diagnose_core::device_assistant::MACOS_ACCESSIBILITY_ADAPTER_ID;
 #[cfg(not(target_os = "macos"))]
@@ -42,7 +43,7 @@ use desk_diagnose_core::device_assistant::{
     CURRENT_SCREEN_ADAPTER_ID, DESKTOP_SESSION_ADAPTER_ID, FILE_ARTIFACT_ADAPTER_ID,
     FILE_WORKSPACE_ADAPTER_ID, IWORK_ADAPTER_VERSION, OFFICE_EXCEL_ADAPTER_ID,
     OUTLOOK_NEW_MAILTO_ADAPTER_VERSION, SPREADSHEET_FILE_ADAPTER_ID, SYSTEM_COMMAND_ADAPTER_ID,
-    SYSTEM_DIAGNOSTICS_ADAPTER_ID, TERMINAL_OUTPUT_ADAPTER_ID,
+    SYSTEM_DIAGNOSTICS_ADAPTER_ID, TERMINAL_OUTPUT_ADAPTER_ID, WINDOWS_RAW_INPUT_ADAPTER_ID,
     device_assistant_edge_adapter_registry,
 };
 
@@ -64,6 +65,7 @@ use super::computer_use_writer::{
 const OBJECT_REF_TTL_SECS: i64 = 300;
 const MAX_UI_INSPECT_DEPTH: u16 = 16;
 const MAX_OBJECT_REFS: usize = 8_192;
+const SCREEN_CAPTURE_MIN_INTERVAL: StdDuration = StdDuration::from_secs(2);
 
 fn screen_capture_readiness(
     observation_enabled: bool,
@@ -94,6 +96,7 @@ pub(crate) enum ResolvedObject {
     Application {
         process_id: u32,
         image_path: String,
+        process_started_at: Option<u64>,
     },
     UiElement {
         process_id: u32,
@@ -182,12 +185,20 @@ struct ReadinessRevisionState {
     revision: u64,
 }
 
+#[derive(Default)]
+struct ScreenCaptureGateState {
+    in_flight: bool,
+    last_started: Option<StdInstant>,
+}
+
 pub struct ComputerUseBroker {
     incarnation_nonce: String,
     worker_generation: AtomicU64,
     snapshot_counter: AtomicU64,
     readiness_revision: AtomicU64,
     readiness_revision_state: Mutex<Option<ReadinessRevisionState>>,
+    active_session_incarnation: Mutex<Option<String>>,
+    screen_capture_gate: Mutex<ScreenCaptureGateState>,
     human_input_epoch: AtomicU64,
     input_ownership_ready: AtomicBool,
     objects: Mutex<HashMap<String, StoredObject>>,
@@ -235,6 +246,8 @@ impl ComputerUseBroker {
             snapshot_counter: AtomicU64::new(0),
             readiness_revision: AtomicU64::new(0),
             readiness_revision_state: Mutex::new(None),
+            active_session_incarnation: Mutex::new(None),
+            screen_capture_gate: Mutex::new(ScreenCaptureGateState::default()),
             human_input_epoch: AtomicU64::new(0),
             input_ownership_ready: AtomicBool::new(false),
             objects: Mutex::new(HashMap::new()),
@@ -275,8 +288,34 @@ impl ComputerUseBroker {
             .await;
     }
 
+    pub(crate) fn acquire_screen_capture_permit(
+        self: &Arc<Self>,
+        params: &ScreenCaptureParams,
+        selected_display: &str,
+    ) -> Result<ScreenCapturePermit, AgentError> {
+        validate_screen_selection(params, selected_display)?;
+        ensure_screen_capture_safe()?;
+        let now = StdInstant::now();
+        let mut gate = self.screen_capture_gate.lock().map_err(|_| {
+            error(
+                AgentErrorKind::Internal,
+                "screen capture admission state is unavailable",
+                true,
+            )
+        })?;
+        admit_screen_capture(&mut gate, now)?;
+        drop(gate);
+        Ok(ScreenCapturePermit {
+            broker: Arc::clone(self),
+        })
+    }
+
     pub(crate) fn set_input_ownership_ready(&self, ready: bool) {
         self.input_ownership_ready.store(ready, Ordering::SeqCst);
+    }
+
+    pub(crate) fn input_ownership_is_ready(&self) -> bool {
+        self.input_ownership_ready.load(Ordering::SeqCst)
     }
 
     pub(crate) fn preflight_browser_action(
@@ -331,6 +370,13 @@ impl ComputerUseBroker {
         action: &UiSemanticAction,
         ceiling: &ComputerUseSettings,
     ) -> Result<(), AgentError> {
+        if !self.input_ownership_is_ready() {
+            return Err(error(
+                AgentErrorKind::SessionUnavailable,
+                "semantic desktop UI actions require an active local-input ownership monitor",
+                true,
+            ));
+        }
         if !ceiling.enabled || !ceiling.generic_semantic_ui {
             return Err(error(
                 AgentErrorKind::PermissionDenied,
@@ -364,7 +410,14 @@ impl ComputerUseBroker {
             &fingerprint,
             action,
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        return super::windows_uia_observer::preflight_action(
+            process_id,
+            &image_path,
+            &fingerprint,
+            action,
+        );
+        #[cfg(not(any(windows, target_os = "macos")))]
         Err(error(
             AgentErrorKind::UnsupportedCapability,
             "semantic desktop UI actions are not enabled for this platform adapter",
@@ -402,12 +455,138 @@ impl ComputerUseBroker {
                 output: None,
             });
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        {
+            let result = super::windows_uia_observer::apply_action(
+                process_id,
+                &image_path,
+                &fingerprint,
+                action,
+            )?;
+            return Ok(SemanticActionResult {
+                changed: result.changed,
+                verified: result.verified,
+                summary: result.summary,
+                output: None,
+            });
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
         Err(error(
             AgentErrorKind::UnsupportedCapability,
             "semantic desktop UI actions are not enabled for this platform adapter",
             false,
         ))
+    }
+
+    pub(crate) fn preflight_raw_input(
+        &self,
+        target: &ObjectRef,
+        action: &RawInputAction,
+        ceiling: &ComputerUseSettings,
+        selected_display: &str,
+    ) -> Result<(), AgentError> {
+        if !self.input_ownership_is_ready() {
+            return Err(error(
+                AgentErrorKind::SessionUnavailable,
+                "raw input requires an active local-input ownership monitor",
+                true,
+            ));
+        }
+        if !ceiling.enabled || !ceiling.raw_input_fallback {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "raw input fallback is disabled by the independent device-local beta ceiling",
+                false,
+            ));
+        }
+        let ResolvedObject::Application {
+            process_id,
+            image_path,
+            process_started_at,
+        } = self.resolve_ref(target)?
+        else {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "raw input requires a fresh foreground application reference",
+                false,
+            ));
+        };
+        if !ceiling.application_allowed(&image_path) {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "the raw-input target application is not in the device-local allowlist",
+                false,
+            ));
+        }
+        #[cfg(windows)]
+        {
+            let process_started_at = process_started_at.ok_or_else(|| {
+                error(
+                    AgentErrorKind::InvalidInput,
+                    "raw input requires a process-incarnation-bound application reference",
+                    false,
+                )
+            })?;
+            super::windows_raw_input::preflight(
+                process_id,
+                process_started_at,
+                selected_display,
+                action,
+            )?;
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (process_id, selected_display, action);
+            Err(error(
+                AgentErrorKind::UnsupportedCapability,
+                "the raw-input beta adapter is not enabled on this platform",
+                false,
+            ))
+        }
+    }
+
+    pub(crate) fn execute_raw_input(
+        &self,
+        target: &ObjectRef,
+        action: &RawInputAction,
+        ceiling: &ComputerUseSettings,
+        selected_display: &str,
+    ) -> Result<SemanticActionResult, AgentError> {
+        self.preflight_raw_input(target, action, ceiling, selected_display)?;
+        let ResolvedObject::Application {
+            process_id,
+            process_started_at,
+            ..
+        } = self.resolve_ref(target)?
+        else {
+            unreachable!("preflight accepted only an application reference")
+        };
+        #[cfg(windows)]
+        {
+            let process_started_at = process_started_at.expect("preflight required process start");
+            let summary = super::windows_raw_input::apply(
+                process_id,
+                process_started_at,
+                selected_display,
+                action,
+            )?;
+            return Ok(SemanticActionResult {
+                changed: true,
+                verified: false,
+                summary,
+                output: None,
+            });
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (process_id, selected_display, action);
+            Err(error(
+                AgentErrorKind::UnsupportedCapability,
+                "the raw-input beta adapter is not enabled on this platform",
+                false,
+            ))
+        }
     }
 
     pub fn preflight_outlook_new_handoff(
@@ -475,6 +654,7 @@ impl ComputerUseBroker {
                         ResolvedObject::Application {
                             process_id: application.process_id,
                             image_path: application.image_path,
+                            process_started_at: application.process_started_at,
                         },
                     )
                 })
@@ -546,6 +726,11 @@ impl ComputerUseBroker {
             .expect("compiled current screen adapter is registered")
             .adapter_version
             .clone();
+        let raw_input_adapter_version = edge_registry
+            .adapter(WINDOWS_RAW_INPUT_ADAPTER_ID)
+            .expect("compiled Windows raw-input adapter is registered")
+            .adapter_version
+            .clone();
         let system_diagnostics_adapter_version = edge_registry
             .adapter(SYSTEM_DIAGNOSTICS_ADAPTER_ID)
             .expect("compiled system diagnostics adapter is registered")
@@ -574,13 +759,20 @@ impl ComputerUseBroker {
                 )
             })
             .unwrap_or_else(|| format!("unavailable:{}", self.current_incarnation_nonce()));
+        self.update_active_session_incarnation(
+            observation
+                .as_ref()
+                .is_some_and(|result| result.is_ok())
+                .then(|| interactive_session_incarnation.clone()),
+        );
         let platform_supported = cfg!(any(windows, target_os = "macos"));
         let file_provider_supported = cfg!(any(windows, target_os = "macos"));
         let office_provider_supported = cfg!(windows);
         let iwork_provider_supported = cfg!(target_os = "macos");
         let outlook_provider_supported = cfg!(windows);
         let browser_provider_supported = cfg!(any(windows, target_os = "macos"));
-        let semantic_action_supported = cfg!(target_os = "macos");
+        let semantic_action_supported = cfg!(any(windows, target_os = "macos"));
+        let raw_input_supported = cfg!(windows);
         #[cfg(target_os = "macos")]
         let macos_permissions = crate::macos_permissions::probe();
         #[cfg(not(target_os = "macos"))]
@@ -591,8 +783,11 @@ impl ComputerUseBroker {
         let macos_input_permission_ready = macos_permissions.input_monitoring;
         #[cfg(not(target_os = "macos"))]
         let macos_input_permission_ready = false;
-        let macos_input_ownership_ready =
-            macos_input_permission_ready && self.input_ownership_ready.load(Ordering::SeqCst);
+        let input_ownership_ready = if cfg!(target_os = "macos") {
+            macos_input_permission_ready && self.input_ownership_is_ready()
+        } else {
+            self.input_ownership_is_ready()
+        };
         let (session_ready, session_reason) = if !ceiling.observation_enabled() {
             (
                 false,
@@ -702,7 +897,7 @@ impl ComputerUseBroker {
                 },
             )
         };
-        let (mut screen_ready, mut screen_reason) = screen_capture_readiness(
+        let (screen_ready, screen_reason) = screen_capture_readiness(
             ceiling.observation_enabled(),
             platform_supported,
             session_ready,
@@ -711,10 +906,11 @@ impl ComputerUseBroker {
             display_selected,
         );
         #[cfg(target_os = "macos")]
-        if screen_ready && !macos_permissions.screen_recording {
-            screen_ready = false;
-            screen_reason = Some(ComputerUseReadinessReason::PermissionMissing);
-        }
+        let (screen_ready, screen_reason) = if screen_ready && !macos_permissions.screen_recording {
+            (false, Some(ComputerUseReadinessReason::PermissionMissing))
+        } else {
+            (screen_ready, screen_reason)
+        };
         let (browser_readiness, browser_surface) = self.selected_browser_state();
         let browser_ready = browser_provider_supported
             && session_ready
@@ -782,6 +978,7 @@ impl ComputerUseBroker {
                 ResolvedObject::Application {
                     process_id: 0,
                     image_path: handler.executable_path.clone(),
+                    process_started_at: None,
                 },
             )
             .ok()
@@ -921,22 +1118,61 @@ impl ComputerUseBroker {
                     supported: semantic_action_supported,
                     ready: semantic_action_supported
                         && ui_ready
-                        && macos_input_ownership_ready
+                        && input_ownership_ready
                         && ceiling.generic_semantic_ui,
                     reason: (!(semantic_action_supported
                         && ui_ready
-                        && macos_input_ownership_ready
+                        && input_ownership_ready
                         && ceiling.generic_semantic_ui))
                         .then_some(if !semantic_action_supported {
                             ComputerUseReadinessReason::UnsupportedPlatform
                         } else if !ceiling.generic_semantic_ui {
                             ComputerUseReadinessReason::DisabledByLocalCeiling
                         } else if !macos_accessibility_ready
-                            || semantic_action_supported && !macos_input_permission_ready
+                            || cfg!(target_os = "macos") && !macos_input_permission_ready
                         {
                             ComputerUseReadinessReason::PermissionMissing
+                        } else if !input_ownership_ready {
+                            ComputerUseReadinessReason::AdapterUnavailable
                         } else {
                             session_reason.unwrap_or(ComputerUseReadinessReason::AdapterUnavailable)
+                        }),
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::DesktopInputFallbackConfirmed,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::WindowsRawInput,
+                        version: raw_input_adapter_version,
+                    },
+                    supported: raw_input_supported,
+                    ready: raw_input_supported
+                        && session_ready
+                        && input_ownership_ready
+                        && display_selected
+                        && !ceiling.allowed_application_paths.is_empty()
+                        && ceiling.enabled
+                        && ceiling.raw_input_fallback,
+                    reason: (!(raw_input_supported
+                        && session_ready
+                        && input_ownership_ready
+                        && display_selected
+                        && !ceiling.allowed_application_paths.is_empty()
+                        && ceiling.enabled
+                        && ceiling.raw_input_fallback))
+                        .then_some(if !raw_input_supported {
+                            ComputerUseReadinessReason::UnsupportedPlatform
+                        } else if !ceiling.enabled
+                            || !ceiling.raw_input_fallback
+                            || ceiling.allowed_application_paths.is_empty()
+                        {
+                            ComputerUseReadinessReason::DisabledByLocalCeiling
+                        } else if !display_selected {
+                            ComputerUseReadinessReason::NoDisplaySelected
+                        } else if !input_ownership_ready {
+                            ComputerUseReadinessReason::AdapterUnavailable
+                        } else {
+                            session_reason
+                                .unwrap_or(ComputerUseReadinessReason::NoInteractiveSession)
                         }),
                 },
                 ComputerUseCapabilityReadiness {
@@ -2127,8 +2363,10 @@ impl ComputerUseBroker {
             Some(ResolvedObject::Application {
                 process_id,
                 image_path,
+                process_started_at,
             }) if process_id == application.process_id
-                && path_eq(&image_path, &application.image_path) => {}
+                && path_eq(&image_path, &application.image_path)
+                && process_started_at == application.process_started_at => {}
             None => {}
             Some(_) => {
                 return Err(error(
@@ -2272,6 +2510,24 @@ impl ComputerUseBroker {
         &self,
         request: WriterLeaseRequest,
     ) -> Result<WriterLeaseState, AgentError> {
+        let active_incarnation = self
+            .active_session_incarnation
+            .lock()
+            .map_err(|_| {
+                error(
+                    AgentErrorKind::Internal,
+                    "Computer Use active session state is unavailable",
+                    true,
+                )
+            })?
+            .clone();
+        if active_incarnation.as_deref() != Some(request.interactive_session_incarnation.as_str()) {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "Computer Use writer lease targets a stale interactive session incarnation",
+                false,
+            ));
+        }
         self.writer_lease
             .acquire(request, self.human_input_epoch.load(Ordering::SeqCst))
     }
@@ -2280,10 +2536,31 @@ impl ComputerUseBroker {
         &self,
         execution_generation: &str,
     ) -> Result<WriterLeaseState, AgentError> {
-        self.writer_lease.require_active(
+        let state = self.writer_lease.require_active(
             execution_generation,
             self.human_input_epoch.load(Ordering::SeqCst),
-        )
+        )?;
+        let active_incarnation = self
+            .active_session_incarnation
+            .lock()
+            .map_err(|_| {
+                error(
+                    AgentErrorKind::Internal,
+                    "Computer Use active session state is unavailable",
+                    true,
+                )
+            })?
+            .clone();
+        if active_incarnation.as_deref()
+            != Some(state.request.interactive_session_incarnation.as_str())
+        {
+            return Err(error(
+                AgentErrorKind::Cancelled,
+                "Computer Use writer lease was fenced by an interactive session change",
+                false,
+            ));
+        }
+        Ok(state)
     }
 
     pub fn cancel_writer_lease(&self, execution_generation: &str) -> bool {
@@ -2311,10 +2588,33 @@ impl ComputerUseBroker {
         }
     }
 
+    fn update_active_session_incarnation(&self, next: Option<String>) {
+        let changed_from_live = if let Ok(mut active) = self.active_session_incarnation.lock() {
+            let changed = active.is_some() && *active != next;
+            *active = next;
+            changed
+        } else {
+            return;
+        };
+        if !changed_from_live {
+            return;
+        }
+        self.human_input_epoch.fetch_add(1, Ordering::SeqCst);
+        self.writer_lease
+            .preempt(InputPreemptionSource::LocalExternal);
+        if let Ok(mut objects) = self.objects.lock() {
+            objects.clear();
+        }
+    }
+
     /// Advance the worker incarnation while preserving the shared broker handle
     /// used by portable daemon-side reads. Every prior ObjectRef becomes invalid
     /// before a replacement in-process worker starts.
     pub(crate) fn reset_worker_incarnation(&self) {
+        self.set_input_ownership_ready(false);
+        if let Ok(mut active) = self.active_session_incarnation.lock() {
+            *active = None;
+        }
         self.worker_generation.fetch_add(1, Ordering::SeqCst);
         self.snapshot_counter.store(0, Ordering::SeqCst);
         self.human_input_epoch.fetch_add(1, Ordering::SeqCst);
@@ -2431,6 +2731,152 @@ impl ComputerUseBroker {
         }
         Ok(stored.resolved.clone())
     }
+}
+
+pub(crate) struct ScreenCapturePermit {
+    broker: Arc<ComputerUseBroker>,
+}
+
+impl Drop for ScreenCapturePermit {
+    fn drop(&mut self) {
+        if let Ok(mut gate) = self.broker.screen_capture_gate.lock() {
+            gate.in_flight = false;
+        }
+    }
+}
+
+fn validate_screen_selection(
+    params: &ScreenCaptureParams,
+    selected_display: &str,
+) -> Result<(), AgentError> {
+    let selected_display = selected_display.trim();
+    if selected_display.is_empty() {
+        return Err(error(
+            AgentErrorKind::PermissionDenied,
+            "screen capture requires an owner-selected display",
+            false,
+        ));
+    }
+    if let Some(requested) = params.display.as_deref() {
+        let requested = requested.trim();
+        if requested.is_empty() || !screen_target_eq(requested, selected_display) {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "the requested display does not match the owner-selected display",
+                false,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn admit_screen_capture(
+    gate: &mut ScreenCaptureGateState,
+    now: StdInstant,
+) -> Result<(), AgentError> {
+    if gate.in_flight {
+        return Err(error(
+            AgentErrorKind::HostAtCapacity,
+            "another bounded screen capture is already in progress",
+            true,
+        ));
+    }
+    if gate
+        .last_started
+        .is_some_and(|started| now.duration_since(started) < SCREEN_CAPTURE_MIN_INTERVAL)
+    {
+        return Err(error(
+            AgentErrorKind::HostAtCapacity,
+            "screen capture frequency exceeds the device-local bounded rate",
+            true,
+        ));
+    }
+    gate.in_flight = true;
+    gate.last_started = Some(now);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn screen_target_eq(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+#[cfg(not(windows))]
+fn screen_target_eq(left: &str, right: &str) -> bool {
+    left == right
+}
+
+fn ensure_screen_capture_safe() -> Result<(), AgentError> {
+    let observed = observe_interactive_desktop()?;
+    let Some(application) = observed.foreground_application else {
+        return Err(error(
+            AgentErrorKind::SessionUnavailable,
+            "screen capture requires a visible foreground application",
+            true,
+        ));
+    };
+    if screen_capture_application_blocked(&application.image_path) {
+        return Err(error(
+            AgentErrorKind::PermissionDenied,
+            "the foreground application is blocked from screen capture",
+            false,
+        ));
+    }
+    #[cfg(windows)]
+    // UIA is an additional sensitive-control detector, not a prerequisite for
+    // vision fallback: apps without a UIA tree still remain eligible after the
+    // secure-desktop and executable denylist checks above.
+    if super::windows_uia_observer::foreground_contains_protected_control(
+        application.process_id,
+        &application.image_path,
+    )
+    .unwrap_or(false)
+    {
+        return Err(error(
+            AgentErrorKind::PermissionDenied,
+            "the foreground application contains a protected UI control",
+            false,
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    if super::macos_accessibility_observer::foreground_contains_protected_control(
+        application.process_id,
+        &application.image_path,
+    )
+    .unwrap_or(false)
+    {
+        return Err(error(
+            AgentErrorKind::PermissionDenied,
+            "the foreground application contains a protected UI control",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn screen_capture_application_blocked(image_path: &str) -> bool {
+    let Some(name) = Path::new(image_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+    else {
+        return true;
+    };
+    [
+        "consent.exe",
+        "credentialuibroker.exe",
+        "lockapp.exe",
+        "logonui.exe",
+        "1password.exe",
+        "1password",
+        "bitwarden.exe",
+        "bitwarden",
+        "keepass.exe",
+        "keepassxc.exe",
+        "keepassxc",
+        "loginwindow",
+    ]
+    .iter()
+    .any(|blocked| name.eq_ignore_ascii_case(blocked))
 }
 
 #[cfg(target_os = "macos")]
@@ -2591,6 +3037,7 @@ pub(super) struct ObservedDesktop {
 pub(super) struct ObservedApplication {
     pub(super) process_id: u32,
     pub(super) image_path: String,
+    pub(super) process_started_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -2697,6 +3144,7 @@ fn observe_interactive_desktop() -> Result<ObservedDesktop, AgentError> {
         process_image(process_id).map(|image_path| ObservedApplication {
             process_id,
             image_path,
+            process_started_at: super::windows_uia_observer::process_start(process_id),
         })
     };
     return Ok(ObservedDesktop {
@@ -2842,12 +3290,32 @@ mod tests {
                 },
             )
             .unwrap();
+        broker.set_input_ownership_ready(true);
+        *broker.active_session_incarnation.lock().unwrap() = Some("session-before-respawn".into());
+        broker
+            .acquire_writer_lease(WriterLeaseRequest {
+                work_id: "work-before-respawn".into(),
+                action_request_id: "action-before-respawn".into(),
+                execution_generation: "generation-before-respawn".into(),
+                interactive_session_incarnation: "session-before-respawn".into(),
+                expires_at: Utc::now() + Duration::seconds(30),
+            })
+            .unwrap();
 
         broker.reset_worker_incarnation();
         let after_snapshot = broker.next_snapshot_id();
 
         assert_ne!(before.snapshot_id, after_snapshot);
         assert!(broker.resolve_ref(&before).is_err());
+        assert!(!broker.input_ownership_is_ready());
+        assert!(broker.active_session_incarnation.lock().unwrap().is_none());
+        assert_eq!(
+            broker
+                .require_writer_lease("generation-before-respawn")
+                .unwrap_err()
+                .kind,
+            AgentErrorKind::Cancelled
+        );
     }
 
     #[test]
@@ -2864,6 +3332,64 @@ mod tests {
         reference.snapshot_id.push_str("-tampered");
         let error = broker.resolve_ref(&reference).unwrap_err();
         assert_eq!(error.kind, AgentErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn writer_lease_requires_the_latest_device_session_incarnation() {
+        let broker = ComputerUseBroker::new();
+        *broker.active_session_incarnation.lock().unwrap() = Some("session-current".into());
+        let request = WriterLeaseRequest {
+            work_id: "work".into(),
+            action_request_id: "action".into(),
+            execution_generation: "generation".into(),
+            interactive_session_incarnation: "session-stale".into(),
+            expires_at: Utc::now() + Duration::seconds(30),
+        };
+        let error = broker.acquire_writer_lease(request.clone()).unwrap_err();
+        assert_eq!(error.kind, AgentErrorKind::InvalidInput);
+
+        let current = WriterLeaseRequest {
+            interactive_session_incarnation: "session-current".into(),
+            ..request
+        };
+        broker.acquire_writer_lease(current).unwrap();
+    }
+
+    #[test]
+    fn live_session_change_preempts_writer_and_invalidates_every_reference() {
+        let broker = ComputerUseBroker::new();
+        broker.update_active_session_incarnation(Some("session-a".into()));
+        let reference = broker
+            .issue_ref(
+                &broker.next_snapshot_id(),
+                "session-a",
+                ObjectKind::OfficeDocument,
+                ResolvedObject::OfficeDocument {
+                    document_url_hash: "document-a".into(),
+                },
+            )
+            .unwrap();
+        broker
+            .acquire_writer_lease(WriterLeaseRequest {
+                work_id: "work".into(),
+                action_request_id: "action".into(),
+                execution_generation: "generation".into(),
+                interactive_session_incarnation: "session-a".into(),
+                expires_at: Utc::now() + Duration::seconds(30),
+            })
+            .unwrap();
+
+        broker.update_active_session_incarnation(Some("session-b".into()));
+
+        assert_eq!(
+            broker.require_writer_lease("generation").unwrap_err().kind,
+            AgentErrorKind::Cancelled
+        );
+        assert!(broker.resolve_ref(&reference).is_err());
+        assert_eq!(
+            broker.active_session_incarnation.lock().unwrap().as_deref(),
+            Some("session-b")
+        );
     }
 
     #[test]
@@ -3054,7 +3580,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn semantic_action_monitor_state_starts_fail_closed_and_is_explicit() {
         let broker = ComputerUseBroker::new();
@@ -3083,7 +3609,7 @@ mod tests {
         let broker = ComputerUseBroker::new();
         let readiness = broker.readiness(&ComputerUseSettings::default(), false, false);
         readiness.validate().unwrap();
-        assert_eq!(readiness.capabilities.len(), 33);
+        assert_eq!(readiness.capabilities.len(), 34);
         assert!(readiness.capabilities.iter().all(|entry| {
             if matches!(
                 entry.capability,
@@ -3120,6 +3646,7 @@ mod tests {
                     | Capability::DesktopSessionInspect
                     | Capability::DesktopUiInspect
                     | Capability::DesktopUiActionConfirmed
+                    | Capability::DesktopInputFallbackConfirmed
                     | Capability::OfficeDocumentInspect
                     | Capability::SpreadsheetLiveInspect
                     | Capability::SpreadsheetLivePatchConfirmed
@@ -3169,6 +3696,71 @@ mod tests {
         };
         let second = broker.readiness(&changed, false, false);
         assert!(second.revision > first.revision);
+    }
+
+    #[test]
+    fn screen_capture_is_bound_to_the_owner_selected_display() {
+        let selected = r"\\.\DISPLAY2";
+        validate_screen_selection(&ScreenCaptureParams { display: None }, selected).unwrap();
+        validate_screen_selection(
+            &ScreenCaptureParams {
+                display: Some(selected.into()),
+            },
+            selected,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_screen_selection(&ScreenCaptureParams::default(), "")
+                .unwrap_err()
+                .kind,
+            AgentErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            validate_screen_selection(
+                &ScreenCaptureParams {
+                    display: Some(r"\\.\DISPLAY1".into()),
+                },
+                selected,
+            )
+            .unwrap_err()
+            .kind,
+            AgentErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn screen_capture_gate_rejects_concurrency_and_bounded_frequency() {
+        let now = StdInstant::now();
+        let mut gate = ScreenCaptureGateState::default();
+        admit_screen_capture(&mut gate, now).unwrap();
+        assert_eq!(
+            admit_screen_capture(&mut gate, now).unwrap_err().kind,
+            AgentErrorKind::HostAtCapacity
+        );
+        gate.in_flight = false;
+        assert_eq!(
+            admit_screen_capture(&mut gate, now + StdDuration::from_secs(1))
+                .unwrap_err()
+                .kind,
+            AgentErrorKind::HostAtCapacity
+        );
+        admit_screen_capture(&mut gate, now + SCREEN_CAPTURE_MIN_INTERVAL).unwrap();
+    }
+
+    #[test]
+    fn screen_capture_blocks_credential_and_password_manager_surfaces() {
+        for path in [
+            r"C:\Windows\System32\consent.exe",
+            r"C:\Windows\SystemApps\CredentialUIBroker.exe",
+            r"C:\Program Files\Bitwarden\Bitwarden.exe",
+            r"C:\Tools\KeePassXC.exe",
+        ] {
+            assert!(screen_capture_application_blocked(path), "{path}");
+        }
+        assert!(!screen_capture_application_blocked(
+            r"C:\Windows\System32\notepad.exe"
+        ));
+        assert!(screen_capture_application_blocked(""));
     }
 
     #[test]

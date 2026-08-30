@@ -146,6 +146,7 @@ pub fn build_messages(
     let mut evidence = serde_json::Map::new();
     let mut omitted: Vec<String> = Vec::new();
     let mut screen_data_url: Option<String> = None;
+    let mut screen_metadata = Value::Null;
     let mut budget = max_context_bytes;
 
     for entry in &snapshot.contexts {
@@ -154,6 +155,18 @@ pub fn build_messages(
         if entry.capability == "screen.capture.current" {
             if screen_data_url.is_none() {
                 screen_data_url = entry.image_data_url.clone();
+            }
+            if let AgentOutcome::Ok(desk_agent_protocol::OperationOutput::ReadContext(
+                desk_agent_protocol::ReadContextOutput::ScreenCaptureCurrent(shot),
+            )) = &entry.outcome
+            {
+                screen_metadata = json!({
+                    "display": shot.display,
+                    "width": shot.width,
+                    "height": shot.height,
+                    "dpi_x": shot.dpi_x,
+                    "dpi_y": shot.dpi_y,
+                });
             }
             continue;
         }
@@ -186,7 +199,10 @@ pub fn build_messages(
     let user_payload = json!({
         "user_question": question,
         "device_summary": device_summary,
-        "screen": { "available": screen_data_url.is_some() },
+        "screen": {
+            "available": screen_data_url.is_some(),
+            "coordinate_space": screen_metadata,
+        },
         "evidence": Value::Object(evidence),
         "collected": collected,
         "omitted_evidence": omitted,
@@ -418,9 +434,12 @@ mod tests {
             capability: "screen.capture.current".into(),
             outcome: AgentOutcome::Ok(OperationOutput::ReadContext(
                 ReadContextOutput::ScreenCaptureCurrent(desk_agent_protocol::ScreenCaptureOutput {
+                    display: r"\\.\DISPLAY1".into(),
                     format: desk_agent_protocol::ImageFormat::Jpeg,
                     width: 32,
                     height: 32,
+                    dpi_x: 96,
+                    dpi_y: 96,
                     image: Vec::new(),
                     truncated: false,
                 }),
@@ -432,6 +451,12 @@ mod tests {
         let msgs = build_messages("what is on screen?", &snap, 128_000, None, &[]);
         let user: Value = serde_json::from_str(&msgs[1].text).unwrap();
         assert_eq!(user["screen"]["available"], true);
+        assert_eq!(
+            user["screen"]["coordinate_space"]["display"],
+            r"\\.\DISPLAY1"
+        );
+        assert_eq!(user["screen"]["coordinate_space"]["width"], 32);
+        assert_eq!(user["screen"]["coordinate_space"]["dpi_x"], 96);
         // No screen bytes in the evidence JSON.
         assert!(user["evidence"].get("screen.capture.current").is_none());
         // The image rides on the user message as the edge-produced data URL.
@@ -450,9 +475,12 @@ mod tests {
             capability: "screen.capture.current".into(),
             outcome: AgentOutcome::Ok(OperationOutput::ReadContext(
                 ReadContextOutput::ScreenCaptureCurrent(desk_agent_protocol::ScreenCaptureOutput {
+                    display: r"\\.\DISPLAY1".into(),
                     format: desk_agent_protocol::ImageFormat::Jpeg,
                     width: 1,
                     height: 1,
+                    dpi_x: 96,
+                    dpi_y: 96,
                     image: vec![0xFF],
                     truncated: false,
                 }),
