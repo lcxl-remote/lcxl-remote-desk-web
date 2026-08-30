@@ -31,7 +31,7 @@ use desk_agent_protocol::computer_use::{
     ComputerActionCompleted, ComputerActionOutput, ComputerActionResultClass,
 };
 use desk_agent_protocol::content_safety::{ContentSafetyDecision, StreamRetractionReason};
-use desk_agent_protocol::data_lineage::{ContentRef, DataEnvelope, DataProvenance};
+use desk_agent_protocol::data_lineage::{ContentRef, DataEnvelope};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
@@ -39,6 +39,7 @@ use crate::content_safety::{
     ContentSafetyMode, SafetyImage, SafetyModelTurn, SafetyToolCall, content_blocked_error,
     normalize_safety_error, refusal_placeholder_for,
 };
+use crate::model_message_labels::internal_tool_result_envelope as derive_internal_tool_result_envelope;
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 
 use crate::chat::{ChatMessage, ChatRole, ModelTurnError, TurnDisposition, classify_model_turn};
@@ -405,7 +406,10 @@ async fn run_or_resume(
         {
             newer_user_inputs_after_request = session.conversation[position + 1..]
                 .iter()
-                .filter(|message| message.role == ChatRole::User)
+                .filter(|message| {
+                    message.role == ChatRole::User
+                        && !crate::permission_resume::is_permission_resume_message(message)
+                })
                 .count() as u64;
         }
         if let Some(existing) = session
@@ -413,7 +417,7 @@ async fn run_or_resume(
             .iter_mut()
             .find(|existing| existing.message_id == message.message_id)
         {
-            // Stage 2 can durably append a user follow-up before claiming its
+            // The runtime can durably append a user follow-up before claiming its
             // model turn. Adopt the turn id without duplicating the message.
             let mut expected = message.clone();
             expected.turn_id = existing.turn_id.clone();
@@ -431,7 +435,12 @@ async fn run_or_resume(
             session.conversation.push(message);
         }
     }
-    deps.session_seam.save(&mut session).await?;
+    if let Err(error) = deps.session_seam.save(&mut session).await {
+        return match settle_if_superseded(deps, &session, sink).await? {
+            Some(outcome) => Ok(outcome),
+            None => Err(error),
+        };
+    }
 
     // Run the loop. A concurrently appended user follow-up advances the durable
     // input revision and fences this owner even if cancellation of the provider
@@ -450,25 +459,8 @@ async fn run_or_resume(
     } else {
         run_inner(deps, &mut session, &turn_id, sink).await
     };
-    if let Some(current_input_revision) = input_revision_advanced(deps, &session).await? {
-        sink.on_turn_retracted(StreamRetractionReason::Incomplete, None);
-        if !deps
-            .session_seam
-            .settle_superseded(&session, &(deps.clock)())
-            .await?
-        {
-            return Err(AgentError {
-                kind: AgentErrorKind::Internal,
-                message: "superseded turn could not be fenced and settled".into(),
-                retryable: true,
-                safe_for_model: false,
-                error_code: None,
-            });
-        }
-        return Ok(LoopOutcome::Superseded {
-            previous_input_revision: session.input_revision,
-            current_input_revision,
-        });
+    if let Some(outcome) = settle_if_superseded(deps, &session, sink).await? {
+        return Ok(outcome);
     }
     if result.is_err() && deps.content_safety.is_enforced() {
         // The provider/session error is intentionally not copied into a retraction
@@ -491,6 +483,11 @@ async fn run_or_resume(
     crate::image_input::strip_session_images(&mut session.conversation);
     // Surface a save failure only if the loop itself otherwise succeeded.
     let save = deps.session_seam.save(&mut session).await;
+    if save.is_err()
+        && let Some(outcome) = settle_if_superseded(deps, &session, sink).await?
+    {
+        return Ok(outcome);
+    }
     match (result, save) {
         (Ok(outcome), Ok(())) => Ok(outcome),
         (Ok(_), Err(e)) => Err(e),
@@ -2125,6 +2122,37 @@ async fn input_revision_advanced(
         .filter(|revision| *revision > session.input_revision))
 }
 
+/// Cover every save boundary, including initial turn adoption and final settle.
+/// A failed CAS alone is not proof of supersession: the runtime must confirm a
+/// newer durable input and successfully settle this exact held lease.
+async fn settle_if_superseded(
+    deps: &LoopDeps<'_>,
+    session: &crate::session::PersistedAgentSession,
+    sink: &mut dyn TurnSink,
+) -> Result<Option<LoopOutcome>, AgentError> {
+    let Some(current_input_revision) = input_revision_advanced(deps, session).await? else {
+        return Ok(None);
+    };
+    sink.on_turn_retracted(StreamRetractionReason::Incomplete, None);
+    if !deps
+        .session_seam
+        .settle_superseded(session, &(deps.clock)())
+        .await?
+    {
+        return Err(AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "superseded turn could not be fenced and settled".into(),
+            retryable: true,
+            safe_for_model: false,
+            error_code: None,
+        });
+    }
+    Ok(Some(LoopOutcome::Superseded {
+        previous_input_revision: session.input_revision,
+        current_input_revision,
+    }))
+}
+
 fn append_superseded_tool_results<F: FnMut() -> String>(
     session: &mut crate::session::PersistedAgentSession,
     calls: &[crate::chat::ToolCall],
@@ -2706,58 +2734,6 @@ fn validate_browser_permission_references(
         }
     }
     Ok(())
-}
-
-/// Derive the exact model-visible acknowledgement envelope from the model turn
-/// that requested the projection update. Non-egress test/runtime seams may omit
-/// the parent envelope; information-flow-enforced surfaces always provide it.
-fn derive_internal_tool_result_envelope(
-    parent: Option<&DataEnvelope>,
-    call_id: &str,
-    content: &str,
-    source_tool_name: &str,
-) -> Result<Option<DataEnvelope>, AgentError> {
-    let Some(parent) = parent else {
-        return Ok(None);
-    };
-    let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
-    let envelope = DataEnvelope {
-        schema_version: desk_agent_protocol::data_lineage::DATA_ENVELOPE_SCHEMA_VERSION,
-        envelope_id: stable_lineage_id(
-            "status-result",
-            &format!("{}:{call_id}:{digest}", parent.envelope_id),
-        ),
-        content: ContentRef::ImmutableBlob {
-            blob_id: stable_lineage_id("status-content", &digest),
-            sha256: digest.clone(),
-            size_bytes: u64::try_from(content.len()).map_err(|_| AgentError {
-                kind: AgentErrorKind::Internal,
-                message: "internal tool result size overflow".into(),
-                retryable: false,
-                safe_for_model: false,
-                error_code: None,
-            })?,
-            media_type: "text/plain".into(),
-        },
-        provenance: DataProvenance {
-            source_provider_id: crate::dynamic_run::RUN_CONTROL_PROVIDER_ID.into(),
-            source_tool_name: source_tool_name.into(),
-            source_object_id: None,
-            source_envelope_ids: vec![parent.envelope_id.clone()],
-        },
-        digest_sha256: digest,
-        sensitivity: parent.sensitivity,
-        allowed_destinations: parent.allowed_destinations.clone(),
-        retention: parent.retention,
-    };
-    envelope.validate().map_err(|error| AgentError {
-        kind: AgentErrorKind::Internal,
-        message: format!("invalid internal tool result envelope: {error}"),
-        retryable: false,
-        safe_for_model: false,
-        error_code: None,
-    })?;
-    Ok(Some(envelope))
 }
 
 /// Emit a tool's terminal UI event from the authoritative result that was just

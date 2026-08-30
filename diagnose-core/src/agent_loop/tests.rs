@@ -6,6 +6,7 @@ use crate::replay::{ProviderResponseMeta, ReplayDisposition, SourceContextKey};
 use crate::seam::{NullTurnSink, ToolRunOutput, TurnSink, WaitOutcome};
 use crate::session::PersistedAgentSession;
 use async_trait::async_trait;
+use desk_agent_protocol::data_lineage::DataProvenance;
 use desk_agent_protocol::{AgentScope, Capability, ExecutionMode};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -18,6 +19,9 @@ struct MemSession {
     inner: RefCell<Option<PersistedAgentSession>>,
     latest_revision: Rc<RefCell<Option<u64>>>,
     superseded_settles: Rc<RefCell<u32>>,
+    saves: RefCell<usize>,
+    fail_save_at: Option<usize>,
+    supersede_on_save_failure: bool,
 }
 #[async_trait(?Send)]
 impl SessionSeam for MemSession {
@@ -53,6 +57,19 @@ impl SessionSeam for MemSession {
         Ok(session)
     }
     async fn save(&self, session: &mut PersistedAgentSession) -> Result<(), AgentError> {
+        *self.saves.borrow_mut() += 1;
+        if self.fail_save_at == Some(*self.saves.borrow()) {
+            if self.supersede_on_save_failure {
+                *self.latest_revision.borrow_mut() = Some(session.input_revision + 1);
+            }
+            return Err(AgentError {
+                kind: AgentErrorKind::Internal,
+                message: "synthetic save failure".into(),
+                retryable: true,
+                safe_for_model: false,
+                error_code: None,
+            });
+        }
         *self.inner.borrow_mut() = Some(session.clone());
         Ok(())
     }
@@ -778,6 +795,52 @@ async fn newer_input_after_model_call_discards_stale_answer_and_settles_once() {
             .iter()
             .all(|message| message.text != "stale answer must be discarded")
     );
+}
+
+#[tokio::test]
+async fn input_at_first_or_final_save_settles_but_unrelated_save_failure_does_not() {
+    for (fail_save_at, model_calls) in [(1, 0), (3, 1)] {
+        for supersede in [false, true] {
+            let sess = MemSession {
+                fail_save_at: Some(fail_save_at),
+                supersede_on_save_failure: supersede,
+                ..Default::default()
+            };
+            let requests = Rc::new(RefCell::new(vec![]));
+            let model = ScriptModel {
+                turns: RefCell::new([answer("answer")].into()),
+                requests: requests.clone(),
+            };
+            let tools = RecordingTools {
+                calls: Rc::new(RefCell::new(vec![])),
+                reply: "unused".into(),
+            };
+            let clock = || "2026-06-20T00:00:01Z".to_string();
+            let events = Rc::new(RefCell::new(vec![]));
+            let outcome = run_agent_turn(
+                &deps(&sess, &model, &tools, &[], &clock),
+                claim(),
+                ChatMessage::text("u", ChatRole::User, "question"),
+                &mut SafetyEventLog(events.clone()),
+            )
+            .await;
+            if supersede {
+                assert!(matches!(outcome, Ok(LoopOutcome::Superseded { .. })));
+            } else {
+                assert!(outcome.is_err());
+            }
+            assert_eq!(*sess.superseded_settles.borrow(), u32::from(supersede));
+            assert_eq!(
+                events
+                    .borrow()
+                    .iter()
+                    .filter(|event| event.starts_with("retracted:"))
+                    .count(),
+                usize::from(supersede)
+            );
+            assert_eq!(requests.borrow().len(), model_calls);
+        }
+    }
 }
 
 #[tokio::test]

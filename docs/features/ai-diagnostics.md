@@ -42,6 +42,8 @@ reader's place unexpectedly.
 - **Inspectable Tool Calls** — select any item in the tool timeline to expand the model-produced JSON input and the redacted, bounded output returned to the model. The details remain available in settled turns and restored conversation history.
 - **Shared Core** — the transport-neutral diagnostic logic lives in the `desk-diagnose-core` crate, reused by the central brain so behavior never drifts.
 
+When Device Assistant accepts an in-flight follow-up, the shared loop rechecks the input revision at both the initial and final save boundaries so an old answer cannot become the result for a new requirement. Ordinary storage failures remain errors rather than being reported as supersession. Retracting an old answer does not confirm cancellation of a device action that already started.
+
 ### Linux capability boundary
 
 On Linux, the Assistant advertises each capability independently. System information, process and network inspection, container inspection, terminal-output reads, and owner-confirmed `bash`/`sh` execution use the same thin-edge and confirmation boundaries as Windows and macOS. On a booted systemd host, it also provides `systemd` service status and bounded `journald` JSON queries; those two capabilities remain visibly unavailable when `systemctl`/`journalctl` or the systemd runtime is absent, and journal visibility is limited by the Desk Server process permissions.

@@ -132,9 +132,111 @@ fn invalid_label() -> AgentError {
     }
 }
 
+/// Runtime-authored tool closure inherits its parent authority and retention.
+/// A missing label remains missing; this never grants export to a new sink.
+pub fn internal_tool_result_envelope(
+    parent: Option<&DataEnvelope>,
+    call_id: &str,
+    content: &str,
+    source_tool_name: &str,
+) -> Result<Option<DataEnvelope>, AgentError> {
+    let Some(parent) = parent else {
+        return Ok(None);
+    };
+    parent.validate().map_err(|_| invalid_label())?;
+    let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
+    let mut retention = parent.retention;
+    if let ContentRef::EphemeralObservation {
+        expires_at_unix_ms, ..
+    } = parent.content
+    {
+        retention = retention.most_restrictive(RetentionBoundary {
+            expires_at_unix_ms: Some(expires_at_unix_ms),
+            delete_with_run: true,
+        });
+    }
+    let envelope = DataEnvelope {
+        schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: format!(
+            "status-result-{:x}",
+            Sha256::digest(format!("{}:{call_id}:{digest}", parent.envelope_id).as_bytes())
+        ),
+        content: ContentRef::ImmutableBlob {
+            blob_id: format!("status-content-{:x}", Sha256::digest(digest.as_bytes())),
+            sha256: digest.clone(),
+            size_bytes: content.len() as u64,
+            media_type: "text/plain".into(),
+        },
+        provenance: DataProvenance {
+            source_provider_id: crate::dynamic_run::RUN_CONTROL_PROVIDER_ID.into(),
+            source_tool_name: source_tool_name.into(),
+            source_object_id: None,
+            source_envelope_ids: vec![parent.envelope_id.clone()],
+        },
+        digest_sha256: digest,
+        sensitivity: parent.sensitivity,
+        allowed_destinations: parent.allowed_destinations.clone(),
+        retention,
+    };
+    envelope.validate().map_err(|_| invalid_label())?;
+    Ok(Some(envelope))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_result_never_renews_ephemeral_parent_or_mints_missing_authority() {
+        assert!(
+            internal_tool_result_envelope(None, "call", "unavailable", "supersede_tool_call")
+                .unwrap()
+                .is_none()
+        );
+        let mut parent = model_bound_user_message(
+            "source".into(),
+            "input".into(),
+            DestinationIdentity::Model {
+                connection_id: "gateway".into(),
+                connection_revision: 1,
+                model_id: "model".into(),
+                profile_revision: 1,
+            },
+        )
+        .unwrap()
+        .data_envelope
+        .unwrap();
+        parent.content = ContentRef::EphemeralObservation {
+            observation_id: "observation".into(),
+            size_bytes: 5,
+            expires_at_unix_ms: 100,
+        };
+        let result = internal_tool_result_envelope(
+            Some(&parent),
+            "call",
+            "unavailable",
+            "supersede_tool_call",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.retention.expires_at_unix_ms, Some(100));
+        assert!(result.retention.delete_with_run);
+        assert_eq!(result.allowed_destinations, parent.allowed_destinations);
+        assert_eq!(
+            result.provenance.source_envelope_ids,
+            vec![parent.envelope_id.clone()]
+        );
+        parent.digest_sha256 = "bad".into();
+        assert!(
+            internal_tool_result_envelope(
+                Some(&parent),
+                "call",
+                "unavailable",
+                "supersede_tool_call"
+            )
+            .is_err()
+        );
+    }
 
     fn call(name: &str) -> ToolCall {
         ToolCall {
