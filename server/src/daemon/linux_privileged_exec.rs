@@ -15,7 +15,7 @@ use desk_agent_protocol::exec::{
 use desk_agent_protocol::exec_policy::{ExecLimits, fingerprint_for_principal};
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentOutcome, ExecOutput, OperationOutput};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -299,6 +299,75 @@ impl PrivilegedPermitStore {
                 || permit.registration_generation != registration_generation
         });
     }
+
+    fn retain_current_registrations(&self, registry: &SessionShellRegistry) {
+        let current: HashSet<_> = registry
+            .snapshot()
+            .into_iter()
+            .map(|registration| {
+                (
+                    registration.registration_id,
+                    registration.registration_generation,
+                )
+            })
+            .collect();
+        self.permits.lock().unwrap().retain(|_, permit| {
+            current.contains(&(permit.registration_id, permit.registration_generation))
+        });
+    }
+
+    fn revoke_all(&self) {
+        self.permits.lock().unwrap().clear();
+    }
+
+    fn revoke_expired(&self) {
+        let now = Instant::now();
+        self.permits
+            .lock()
+            .unwrap()
+            .retain(|_, permit| permit.expires_at >= now);
+    }
+}
+
+/// Keep unconsumed one-shot permits fenced to the exact live Tauri registration.
+/// Subscribe before taking the initial snapshot so a disconnect racing startup is
+/// either present in the snapshot or queued as an event. A lagged consumer performs
+/// an authoritative registry reconciliation instead of trusting the incomplete
+/// event stream.
+pub(crate) fn spawn_permit_revocation_watcher(
+    permits: PrivilegedPermitStore,
+    registry: SessionShellRegistry,
+) -> tokio::task::JoinHandle<()> {
+    let mut events = registry.subscribe();
+    let mut expiry_tick = tokio::time::interval(Duration::from_secs(1));
+    expiry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    permits.retain_current_registrations(&registry);
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = expiry_tick.tick() => permits.revoke_expired(),
+                event = events.recv() => match event {
+                    Ok(crate::host_control::session_shell::SessionShellRegistryEvent::Registered(
+                        _,
+                    )) => {}
+                    Ok(
+                        crate::host_control::session_shell::SessionShellRegistryEvent::Disconnected {
+                            registration_id,
+                            registration_generation,
+                            ..
+                        },
+                    ) => permits.revoke_registration(registration_id, registration_generation),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        permits.retain_current_registrations(&registry);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        permits.revoke_all();
+                        break;
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// The initial root allowlist is intentionally tiny. Each variant maps to one
@@ -1719,6 +1788,38 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn registry_disconnect_event_revokes_unconsumed_permits() {
+        let (registry, registration) = current_registration();
+        let store = PrivilegedPermitStore::default();
+        let plan = administrator_plan("generation-watched-disconnect");
+        let permit = store.mint(&plan, &registration);
+        let watcher = spawn_permit_revocation_watcher(store.clone(), registry.clone());
+
+        registry.unregister_websocket(7).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !store
+                    .permits
+                    .lock()
+                    .unwrap()
+                    .contains_key(&permit.permit_id)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("disconnect event should revoke the permit promptly");
+        watcher.abort();
+
+        assert_eq!(
+            store.consume(permit.permit_id, &plan, &registry, &registration),
+            Err(PermitError::Missing)
+        );
+    }
+
     #[test]
     fn expired_permit_is_burned_and_never_reusable() {
         let (registry, registration) = current_registration();
@@ -1739,6 +1840,31 @@ mod tests {
         assert_eq!(
             store.consume(permit.permit_id, &plan, &registry, &registration),
             Err(PermitError::Missing)
+        );
+    }
+
+    #[test]
+    fn expired_permit_is_removed_without_a_consume_attempt() {
+        let (_registry, registration) = current_registration();
+        let store = PrivilegedPermitStore::default();
+        let plan = administrator_plan("generation-expired-cleanup");
+        let permit = store.mint(&plan, &registration);
+        store
+            .permits
+            .lock()
+            .unwrap()
+            .get_mut(&permit.permit_id)
+            .unwrap()
+            .expires_at = Instant::now() - Duration::from_millis(1);
+
+        store.revoke_expired();
+
+        assert!(
+            !store
+                .permits
+                .lock()
+                .unwrap()
+                .contains_key(&permit.permit_id)
         );
     }
 

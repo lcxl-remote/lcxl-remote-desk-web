@@ -210,14 +210,24 @@ pub async fn run_signaling_proxy(
             settings.read().await.args.startup_mode,
             StartupMode::ServiceDaemon
         );
-        service_daemon.then(|| {
-            Arc::new(
+        if !service_daemon {
+            None
+        } else if let Some(registry) = worker_mgr.session_shell_registry() {
+            let permits = crate::daemon::linux_privileged_exec::PrivilegedPermitStore::default();
+            crate::daemon::linux_privileged_exec::spawn_permit_revocation_watcher(
+                permits.clone(),
+                registry,
+            );
+            Some(Arc::new(
                 crate::daemon::linux_privileged_exec::LinuxPrivilegedExecSupervisor::new(
-                    crate::daemon::linux_privileged_exec::PrivilegedPermitStore::default(),
+                    permits,
                     exec_ledger.clone(),
                 ),
-            )
-        })
+            ))
+        } else {
+            log::error!("Linux privileged execution disabled: session-shell registry is not bound");
+            None
+        }
     };
 
     // The shared Provider read adapter is available wherever an in-process worker

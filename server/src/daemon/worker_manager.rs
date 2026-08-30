@@ -793,6 +793,13 @@ impl WorkerManager {
         });
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn session_shell_registry(
+        &self,
+    ) -> Option<crate::host_control::session_shell::SessionShellRegistry> {
+        self.session_shell_registry.read().unwrap().clone()
+    }
+
     pub fn session_targets(&self) -> SessionTargetCatalog {
         self.session_targets.clone()
     }
