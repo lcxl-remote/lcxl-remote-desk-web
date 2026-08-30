@@ -1,0 +1,142 @@
+{
+  "feature_profiles": {
+    "oss": {
+      "device_assistant": {
+        "schema_version": 1,
+        "turn_stream": true,
+        "capability_inventory": true,
+        "full_session_snapshot": true,
+        "permission_decision": true,
+        "grant_revoke": true,
+        "background_task_cancel": true,
+        "unknown_outcome_disposition": true,
+        "object_context": true,
+        "future_optional": "ignored"
+      }
+    },
+    "manager_inventory_only": {
+      "device_assistant": {
+        "schema_version": 1,
+        "turn_stream": false,
+        "capability_inventory": true,
+        "full_session_snapshot": false,
+        "permission_decision": false,
+        "grant_revoke": false,
+        "background_task_cancel": false,
+        "unknown_outcome_disposition": false,
+        "object_context": false
+      }
+    },
+    "legacy": {}
+  },
+  "asks": {
+    "minimal": {
+      "question": "检查当前设备状态",
+      "client_message_id": "message-min"
+    },
+    "full": {
+      "question": "Inspect the selected desktop context.",
+      "client_message_id": "message-full",
+      "conversation_id": "conversation-1",
+      "locale": "en-US",
+      "selected_capability_ids": ["desktop.session.inspect"],
+      "selected_attachment_ids": ["attachment-1"]
+    }
+  },
+  "events": [
+    {"request_id":"request-1","seq":0,"kind":"status","status":"collecting"},
+    {"request_id":"request-1","seq":1,"kind":"partial","partial_summary":"The device"},
+    {"request_id":"request-1","seq":2,"kind":"partial_committed"},
+    {"request_id":"request-1","seq":3,"kind":"turn_started","turn_id":"turn-1"},
+    {"request_id":"request-1","seq":4,"kind":"tool_started","tool_name":"read_system_info","tool_arguments_json":"{}","tool_call_id":"call-1","awaiting_approval":false},
+    {"request_id":"request-1","seq":5,"kind":"tool_finished","tool_call_id":"call-1","tool_ok":true,"tool_output":"macOS","background_task_id":"task-1"},
+    {"request_id":"request-2","seq":0,"kind":"permission_required","permission_request_id":"permission-1","permission_item_count":1},
+    {"request_id":"request-3","seq":0,"kind":"answer","answer":"The device is ready.","provenance":{"model_id":"fixture-model","generated_at":"2026-08-30T00:00:00Z","marking_scheme":"ai-generated-v1"}},
+    {"request_id":"request-4","seq":0,"kind":"error","error":{"kind":"target_offline","message":"Target offline","retryable":true,"safe_for_model":true,"error_code":8}},
+    {"request_id":"request-5","seq":0,"kind":"retracted","retraction_reason":"policy_blocked"}
+  ],
+  "inventory": {
+    "schema_version": 1,
+    "surface": "oss_personal_owner",
+    "generated_at_unix_ms": 1788086400000,
+    "entries": [
+      {
+        "provider_id": "desktop",
+        "provider_display_name_key": "assistant.provider.desktop",
+        "provider_version": 1,
+        "capability": {
+          "capability_id": "desktop.session.inspect",
+          "tool_name": "read_desktop_session",
+          "display_name_key": "assistant.capability.desktopSession",
+          "input_schema_version": 1,
+          "output_schema_version": 1,
+          "effect": "read_device",
+          "execution_locality": "edge",
+          "prerequisites": {"platforms":[],"applications":[],"requires_edge_connection":true,"requires_interactive_session":true,"requires_credential_connection":false},
+          "execution_policy": {"kind":"inline_only"},
+          "rate_class": "interactive_read",
+          "limits": {"max_input_bytes":4096,"max_output_bytes":65536,"max_objects":64,"hard_timeout_ms":10000},
+          "supports_progress": false,
+          "supports_cancel": false,
+          "data_policy": {"reads":["desktop_session_metadata"],"may_export_data":false},
+          "authorization_hint": {"resources":["target_device"]},
+          "fallback_capability_ids": [],
+          "surfaces": ["oss_personal_owner"]
+        },
+        "context_selectable": true,
+        "compiled": true,
+        "enabled": true,
+        "connected": true,
+        "ready": true,
+        "reason": null
+      }
+    ]
+  },
+  "context_update": {
+    "conversation_id": "conversation-1",
+    "client_request_id": "context-request-1",
+    "selected_capability_ids": ["desktop.session.inspect"]
+  },
+  "context_updated": {
+    "conversation_id": "conversation-1",
+    "client_request_id": "context-request-1",
+    "changed": true
+  },
+  "object_context_update": {
+    "conversation_id": "conversation-1",
+    "client_request_id": "object-request-1",
+    "operation": {
+      "kind": "attach_file",
+      "object_ref": {"token":"opaque-edge-token","snapshot_id":"snapshot-1","object_kind":"file","expires_at":"2026-08-30T01:00:00Z"},
+      "display_summary": "report.txt"
+    }
+  },
+  "snapshot": {
+    "seq": 42,
+    "active": true,
+    "requestId": "request-2",
+    "activeExecutionGeneration": "generation-1",
+    "unresolvedOutcome": {"workId":7,"actionRequestId":"action-1","executionId":"execution-1","workKind":"provider_call"},
+    "latestInputSeq": 2,
+    "inputRevision": 3,
+    "handledInputSeq": 1,
+    "taskStatusProjection": {"schemaVersion":1,"revision":4,"items":[{"itemId":"item-1","description":"Inspect device","status":"in_progress","note":null,"lastUpdatedStepId":"step-1"}],"updatedAt":"2026-08-30T00:00:00Z"},
+    "permissionRequests": [{"schemaVersion":1,"requestId":"permission-1","inputRevision":3,"state":"pending","items":[{"itemId":"permission-item-1","providerId":"shell","toolName":"exec_command","expectedEffect":"execute_command","resourceScope":["device-1"],"operationScope":["digest:abc"],"exportDestinations":[],"suggestedTtlSeconds":300,"suggestedMaxUses":1,"reason":"Run the approved command"}],"createdAt":"2026-08-30T00:00:00Z"}],
+    "backgroundTasks": [{"taskId":"task-1","callId":"call-1","providerId":"shell","capabilityId":"shell.command.execute","toolName":"exec_command","effect":"execute_command","state":"running","progressSequence":2,"supportsCancel":true,"updatedAt":"2026-08-30T00:00:01Z","terminalAt":null}],
+    "capabilityGrants": [{"grantId":"grant-1","providerId":"shell","capabilityId":"shell.command.execute","toolName":"exec_command","riskTier":"r3","resourceScope":["device-1"],"operationScope":["digest:abc"],"remainingUses":1,"expiresAtUnixMs":1788086700000,"revokedAtUnixMs":null,"revokedReason":null}],
+    "evidenceSummary": {"schemaVersion":1,"nodes":[],"artifacts":[],"handoffReceipts":[],"missingSourceEnvelopeIds":[],"truncated":false,"graphComplete":true},
+    "messages": [{"id":"message-1","turnId":"turn-1","role":"user","text":"Inspect the device","toolCalls":[]}],
+    "contextNotices": [{"id":"notice-1","turnId":"turn-1","kind":"compacted","checkpointGeneration":1,"coveredMessageCount":2}],
+    "contextAttachments": [{"id":"attachment-1","kind":"file","providerId":"filesystem","capabilityId":"file.inspect","displaySummary":"report.txt","createdAtUnixMs":1788086400000,"expiresAtUnixMs":1788086700000,"state":"active"}]
+  },
+  "session_list": {
+    "sessions": [{"sessionId":"session-1","conversationId":"conversation-1","firstQuestion":"Inspect the device","createdAt":"2026-08-30T00:00:00Z","updatedAt":"2026-08-30T00:00:02Z","active":true,"messageCount":2}]
+  },
+  "mutations": {
+    "permission_approve": {"connection":"device-1","conversation":"conversation-1","session":"session-1","requestId":"permission-1","items":[{"itemId":"permission-item-1","decision":"approve","resourceScope":["device-1"],"operationScope":["digest:abc"],"exportDestinations":[],"ttlSeconds":60,"maxUses":1}]},
+    "permission_deny": {"connection":"device-1","conversation":"conversation-1","session":"session-1","requestId":"permission-1","items":[{"itemId":"permission-item-1","decision":"deny"}]},
+    "background_cancel": {"connection":"device-1","conversation":"conversation-1","session":"session-1","taskId":"task-1","requestId":"cancel-request-1","reason":"Owner cancelled"},
+    "grant_revoke": {"connection":"device-1","conversation":"conversation-1","session":"session-1","grantId":"grant-1","reason":"No longer needed"},
+    "unknown_outcome_dispose": {"connection":"device-1","conversation":"conversation-1","session":"session-1","workId":7,"executionId":"execution-1"}
+  }
+}

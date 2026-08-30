@@ -545,6 +545,11 @@ pub struct CapabilityInventoryEntry {
     pub provider_display_name_key: String,
     pub provider_version: u16,
     pub capability: CapabilityWireDescriptor,
+    /// Whether a control end may place this capability id in
+    /// `DeviceAssistantAsk.selected_capability_ids`. This server-authored bit
+    /// is metadata, not a grant or readiness claim.
+    #[serde(default)]
+    pub context_selectable: bool,
     pub compiled: bool,
     pub enabled: bool,
     pub connected: bool,
@@ -1005,6 +1010,7 @@ mod tests {
             provider_display_name_key: "assistant.provider.desktop".into(),
             provider_version: 1,
             capability: capability(ExecutionPolicy::InlineOnly),
+            context_selectable: true,
             compiled: true,
             enabled: true,
             connected: false,

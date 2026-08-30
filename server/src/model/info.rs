@@ -243,6 +243,45 @@ pub struct ServerInfo {
     pub macos_permissions: Option<MacosPermissions>,
     /// Wayland Portal readiness; `None` outside a Wayland desktop session.
     pub wayland_portal: Option<WaylandPortalInfo>,
+    /// Optional control-end feature profile for the Device Assistant surface.
+    /// Absence means unsupported so a newer client fails closed against an
+    /// older server instead of inferring support from Provider inventory.
+    pub device_assistant: Option<DeviceAssistantClientCapabilities>,
+}
+
+/// Server-side Device Assistant product features understood by a control end.
+///
+/// This profile advertises implementation support only. Authentication,
+/// ownership, target readiness and grants are still checked for every request.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, ToSchema)]
+pub struct DeviceAssistantClientCapabilities {
+    pub schema_version: u16,
+    pub turn_stream: bool,
+    pub capability_inventory: bool,
+    pub full_session_snapshot: bool,
+    pub permission_decision: bool,
+    pub grant_revoke: bool,
+    pub background_task_cancel: bool,
+    pub unknown_outcome_disposition: bool,
+    pub object_context: bool,
+}
+
+impl DeviceAssistantClientCapabilities {
+    pub const SCHEMA_VERSION: u16 = 1;
+
+    pub const fn oss() -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            turn_stream: true,
+            capability_inventory: true,
+            full_session_snapshot: true,
+            permission_decision: true,
+            grant_revoke: true,
+            background_task_cancel: true,
+            unknown_outcome_disposition: true,
+            object_context: true,
+        }
+    }
 }
 
 /// Runtime backend diagnostics.
@@ -341,6 +380,7 @@ mod tests {
                 background_start: None,
                 macos_permissions: None,
                 wayland_portal: None,
+                device_assistant: Some(DeviceAssistantClientCapabilities::oss()),
             };
             assert_eq!(
                 serde_json::to_value(&info).unwrap()["startup_mode"],
@@ -350,6 +390,24 @@ mod tests {
             // The strum name the field used to be built from must agree, so no
             // client sees a spelling different from before the field was typed.
             assert_eq!(mode.as_ref(), expected);
+        }
+    }
+
+    #[test]
+    fn device_assistant_profile_is_explicit_and_complete_for_oss() {
+        let value = serde_json::to_value(DeviceAssistantClientCapabilities::oss()).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        for field in [
+            "turn_stream",
+            "capability_inventory",
+            "full_session_snapshot",
+            "permission_decision",
+            "grant_revoke",
+            "background_task_cancel",
+            "unknown_outcome_disposition",
+            "object_context",
+        ] {
+            assert_eq!(value[field], true, "OSS must advertise {field}");
         }
     }
 

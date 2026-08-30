@@ -187,6 +187,25 @@ pub fn system_diagnostic_capabilities() -> [Capability; 6] {
     ]
 }
 
+/// Whether a capability can be explicitly selected as read context by a
+/// Device Assistant control end. Inventory consumers use this server-authored
+/// bit instead of maintaining their own capability-id allowlist.
+pub fn is_selectable_context_capability_id(capability_id: &str) -> bool {
+    matches!(
+        capability_id,
+        DESKTOP_SESSION_CAPABILITY_ID
+            | DESKTOP_UI_CAPABILITY_ID
+            | OFFICE_DOCUMENT_CAPABILITY_ID
+            | SPREADSHEET_LIVE_INSPECT_CAPABILITY_ID
+            | SPREADSHEET_BATCH_INSPECT_CAPABILITY_ID
+            | DOCUMENT_LIVE_INSPECT_CAPABILITY_ID
+            | DOCUMENT_BATCH_INSPECT_CAPABILITY_ID
+            | PRESENTATION_LIVE_INSPECT_CAPABILITY_ID
+            | PRESENTATION_BATCH_INSPECT_CAPABILITY_ID
+            | CURRENT_SCREEN_CAPABILITY_ID
+    )
+}
+
 pub fn selected_context_capabilities(
     selected_capability_ids: &[String],
 ) -> Result<Vec<Capability>, String> {
@@ -3051,6 +3070,32 @@ pub fn build_device_assistant_system_message_with_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_authored_context_selection_matches_the_ask_validator() {
+        let selectable = [
+            DESKTOP_SESSION_CAPABILITY_ID,
+            DESKTOP_UI_CAPABILITY_ID,
+            OFFICE_DOCUMENT_CAPABILITY_ID,
+            SPREADSHEET_LIVE_INSPECT_CAPABILITY_ID,
+            SPREADSHEET_BATCH_INSPECT_CAPABILITY_ID,
+            DOCUMENT_LIVE_INSPECT_CAPABILITY_ID,
+            DOCUMENT_BATCH_INSPECT_CAPABILITY_ID,
+            PRESENTATION_LIVE_INSPECT_CAPABILITY_ID,
+            PRESENTATION_BATCH_INSPECT_CAPABILITY_ID,
+            CURRENT_SCREEN_CAPABILITY_ID,
+        ];
+        for capability_id in selectable {
+            assert!(is_selectable_context_capability_id(capability_id));
+            assert!(selected_context_capabilities(&[capability_id.into()]).is_ok());
+        }
+        assert!(!is_selectable_context_capability_id(
+            SYSTEM_COMMAND_CAPABILITY_ID
+        ));
+        assert!(!is_selectable_context_capability_id(
+            SPREADSHEET_LIVE_PATCH_CAPABILITY_ID
+        ));
+    }
 
     #[test]
     fn registry_contains_reads_preview_and_bounded_artifact_create() {
