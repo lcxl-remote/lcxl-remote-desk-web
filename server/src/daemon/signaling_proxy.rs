@@ -204,6 +204,21 @@ pub async fn run_signaling_proxy(
     let command_templates = Arc::new(crate::daemon::command_templates::CommandTemplateCache::new());
     let command_blocklist =
         Arc::new(crate::daemon::command_blocklist::CommandBlocklistCache::new());
+    #[cfg(target_os = "linux")]
+    let privileged_exec = {
+        let service_daemon = matches!(
+            settings.read().await.args.startup_mode,
+            StartupMode::ServiceDaemon
+        );
+        service_daemon.then(|| {
+            Arc::new(
+                crate::daemon::linux_privileged_exec::LinuxPrivilegedExecSupervisor::new(
+                    crate::daemon::linux_privileged_exec::PrivilegedPermitStore::default(),
+                    exec_ledger.clone(),
+                ),
+            )
+        })
+    };
 
     // The shared Provider read adapter is available wherever an in-process worker
     // can read locally (Default / DeskServer); ServiceDaemon leaves it `None`.
@@ -260,6 +275,8 @@ pub async fn run_signaling_proxy(
     // regardless of which WS surfaced them.
     let router_ctx = RouterContext {
         exec_ledger: exec_ledger.clone(),
+        #[cfg(target_os = "linux")]
+        privileged_exec,
         exec_capacity: Arc::new(crate::daemon::exec_capacity::ExecCapacity::new()),
         pc_registry: pc_registry.clone(),
         admission_origin: crate::daemon::pc_manager::AdmissionOrigin::Local,

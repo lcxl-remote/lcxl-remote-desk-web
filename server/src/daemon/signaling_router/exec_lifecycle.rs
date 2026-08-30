@@ -474,23 +474,61 @@ pub(super) async fn handle_exec_control_inbound(
             "[router] exec cancel requested: generation={generation} by={requested_by} \
              (request_id={request_id})"
         );
-        // Best-effort by design: the worker may be gone, or the command may have
-        // just finished. Either way the ledger below reports what is actually
-        // true, rather than this send's success standing in for it.
-        let result = if let Some(connection_id) = to.as_deref() {
-            ctx.worker_mgr
-                .send_to_connection_worker(
-                    connection_id,
-                    ServiceToWorker::ExecCancel(ExecCancelPayload {
-                        execution_generation: generation.clone(),
-                    }),
-                )
-                .await
+        // A privileged row is owned by the Linux root supervisor, never by a
+        // session worker. Ask it first so the reserve→spawn cancellation token
+        // can win before systemd admission and restart recovery can target the
+        // deterministic transient unit. A non-privileged generation falls
+        // through to the existing worker path.
+        #[cfg(target_os = "linux")]
+        let privileged_handled = if let Some(supervisor) = ctx.privileged_exec.as_ref() {
+            match supervisor.cancel_generation(&generation).await {
+                Ok(
+                    crate::daemon::linux_privileged_exec::PrivilegedCancelOutcome::NotPrivileged,
+                ) => false,
+                Ok(outcome) => {
+                    log::info!(
+                        "[router] privileged exec cancel outcome: generation={generation} \
+                         outcome={outcome:?}"
+                    );
+                    true
+                }
+                Err(error) => {
+                    // Fail closed: if the root supervisor cannot read its
+                    // durable authority, do not guess that a session worker owns
+                    // this generation. The state reply below remains the source
+                    // of truth and the caller can retry the cancel.
+                    log::error!(
+                        "[router] privileged exec cancel could not be resolved: \
+                         generation={generation} error={error}"
+                    );
+                    true
+                }
+            }
         } else {
-            Err("exec cancel has no selected desktop session".to_string())
+            false
         };
-        if let Err(e) = result {
-            log::warn!("[router] could not pass the cancel to the worker: {e}");
+        #[cfg(not(target_os = "linux"))]
+        let privileged_handled = false;
+
+        if !privileged_handled {
+            // Best-effort by design: the worker may be gone, or the command may
+            // have just finished. Either way the ledger below reports what is
+            // actually true, rather than this send's success standing in for it.
+            let result = if let Some(connection_id) = to.as_deref() {
+                ctx.worker_mgr
+                    .send_to_connection_worker(
+                        connection_id,
+                        ServiceToWorker::ExecCancel(ExecCancelPayload {
+                            execution_generation: generation.clone(),
+                        }),
+                    )
+                    .await
+            } else {
+                Err("exec cancel has no selected desktop session".to_string())
+            };
+            if let Err(e) = result {
+                log::warn!("[router] could not pass the cancel to the worker: {e}");
+            }
         }
         // `requested_by` is a wire hint only; the audit pipeline stamps the
         // authenticated actor, so a control end cannot name someone else as the

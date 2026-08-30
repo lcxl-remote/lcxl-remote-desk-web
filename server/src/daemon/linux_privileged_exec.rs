@@ -20,6 +20,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
@@ -568,6 +569,7 @@ enum TransientRunOutcome {
     TimedOut {
         unit_observed: bool,
     },
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -580,7 +582,12 @@ enum TransientUnitInspection {
 
 #[async_trait]
 trait TransientCommandRunner: Send + Sync {
-    async fn run(&self, spec: &SystemdTransientSpec, timeout: Duration) -> TransientRunOutcome;
+    async fn run(
+        &self,
+        spec: &SystemdTransientSpec,
+        timeout: Duration,
+        cancelled: Arc<AtomicBool>,
+    ) -> TransientRunOutcome;
     async fn inspect(&self, unit_name: &str) -> Result<TransientUnitInspection, String>;
     async fn terminate(&self, unit_name: &str);
 }
@@ -589,9 +596,21 @@ struct RealTransientCommandRunner;
 
 #[async_trait]
 impl TransientCommandRunner for RealTransientCommandRunner {
-    async fn run(&self, spec: &SystemdTransientSpec, timeout: Duration) -> TransientRunOutcome {
+    async fn run(
+        &self,
+        spec: &SystemdTransientSpec,
+        timeout: Duration,
+        cancelled: Arc<AtomicBool>,
+    ) -> TransientRunOutcome {
+        if cancelled.load(Ordering::Acquire) {
+            return TransientRunOutcome::Cancelled;
+        }
         if let Err(error) = prepare_privileged_output_paths(spec, 0) {
             return TransientRunOutcome::SpawnFailed(error);
+        }
+        if cancelled.load(Ordering::Acquire) {
+            cleanup_privileged_output_paths(spec);
+            return TransientRunOutcome::Cancelled;
         }
 
         let mut command = Command::new(spec.program);
@@ -636,7 +655,12 @@ impl TransientCommandRunner for RealTransientCommandRunner {
 
         let deadline = timeout.saturating_add(SYSTEMD_CLIENT_GRACE);
         let mut unit_observed = false;
+        let mut was_cancelled = false;
         let status = loop {
+            if cancelled.load(Ordering::Acquire) {
+                was_cancelled = true;
+                break None;
+            }
             match child.try_wait() {
                 Ok(Some(status)) => break Some(Ok(status)),
                 Err(error) => break Some(Err(error)),
@@ -657,6 +681,9 @@ impl TransientCommandRunner for RealTransientCommandRunner {
             self.terminate(&spec.unit_name).await;
             let _ = diagnostic_reader.await;
             unit_observed |= privileged_output_exists(spec);
+            if was_cancelled {
+                return TransientRunOutcome::Cancelled;
+            }
             return TransientRunOutcome::TimedOut { unit_observed };
         }
 
@@ -985,6 +1012,22 @@ pub struct LinuxPrivilegedExecSupervisor {
     permits: PrivilegedPermitStore,
     ledger: Arc<ExecLedger>,
     runner: Arc<dyn TransientCommandRunner>,
+    active: Arc<Mutex<HashMap<String, ActivePrivilegedDispatch>>>,
+}
+
+struct ActivePrivilegedDispatch {
+    cancelled: Arc<AtomicBool>,
+    launch_started: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivilegedCancelOutcome {
+    NotPrivileged,
+    CancelledBeforeStart,
+    CancelRequested,
+    RecoveredTerminal,
+    Indeterminate,
+    AlreadyTerminal,
 }
 
 impl LinuxPrivilegedExecSupervisor {
@@ -993,6 +1036,7 @@ impl LinuxPrivilegedExecSupervisor {
             permits,
             ledger,
             runner: Arc::new(RealTransientCommandRunner),
+            active: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1006,6 +1050,7 @@ impl LinuxPrivilegedExecSupervisor {
             permits,
             ledger,
             runner,
+            active: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1034,7 +1079,16 @@ impl LinuxPrivilegedExecSupervisor {
             .await
             .map_err(|error| PrivilegedPrepareError::Ledger(error.to_string()))?
         {
-            Reservation::Granted => Ok(spec),
+            Reservation::Granted => {
+                self.active.lock().unwrap().insert(
+                    plan.execution_generation.clone(),
+                    ActivePrivilegedDispatch {
+                        cancelled: Arc::new(AtomicBool::new(false)),
+                        launch_started: false,
+                    },
+                );
+                Ok(spec)
+            }
             Reservation::Duplicate(_) => Err(PrivilegedPrepareError::Duplicate),
             Reservation::FingerprintMismatch => {
                 Err(PrivilegedPrepareError::GenerationFingerprintMismatch)
@@ -1068,9 +1122,65 @@ impl LinuxPrivilegedExecSupervisor {
             ));
         }
 
+        // A pre-launch cancel (or another terminal recovery decision) can win
+        // after prepare reserved the row but before this future is polled. The
+        // durable terminal state is authoritative: never recreate an active
+        // token and spawn after it.
+        match self.ledger.get(&plan.execution_generation).await {
+            Ok(Some(row)) if row.state == crate::daemon::exec_ledger::State::Terminal.as_str() => {
+                return row
+                    .result_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str::<AgentOutcome>(json).ok())
+                    .unwrap_or_else(|| {
+                        AgentOutcome::Err(agent_error(
+                            AgentErrorKind::Internal,
+                            "administrator command already ended but its result is unavailable",
+                        ))
+                    });
+            }
+            Ok(Some(row))
+                if matches!(
+                    crate::daemon::exec_ledger::State::parse(&row.state),
+                    Some(
+                        crate::daemon::exec_ledger::State::Indeterminate
+                            | crate::daemon::exec_ledger::State::SpawnFailed
+                    )
+                ) =>
+            {
+                return AgentOutcome::Err(agent_error(
+                    AgentErrorKind::Internal,
+                    "administrator command is already terminal and cannot be launched",
+                ));
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => {
+                return AgentOutcome::Err(agent_error(
+                    AgentErrorKind::Internal,
+                    "administrator command has no durable launch reservation",
+                ));
+            }
+        }
+
+        let cancelled = {
+            let mut active = self.active.lock().unwrap();
+            let entry = active
+                .entry(plan.execution_generation.clone())
+                .or_insert_with(|| ActivePrivilegedDispatch {
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                    launch_started: false,
+                });
+            entry.launch_started = true;
+            entry.cancelled.clone()
+        };
+
         let run = self
             .runner
-            .run(&spec, Duration::from_millis(plan.timeout_ms as u64))
+            .run(
+                &spec,
+                Duration::from_millis(plan.timeout_ms as u64),
+                cancelled,
+            )
             .await;
         let outcome = match run {
             TransientRunOutcome::SpawnFailed(reason) => {
@@ -1161,8 +1271,109 @@ impl LinuxPrivilegedExecSupervisor {
                     "administrator command state is unknown",
                 ))
             }
+            TransientRunOutcome::Cancelled => {
+                cleanup_privileged_output_paths(&spec);
+                let outcome = privileged_cancelled_outcome(
+                    "administrator command was cancelled and its transient service was reclaimed",
+                );
+                self.record_privileged_terminal(plan, &outcome).await;
+                outcome
+            }
         };
+        self.active
+            .lock()
+            .unwrap()
+            .remove(&plan.execution_generation);
         outcome
+    }
+
+    /// Cancel one generation without ever falling through to a session worker
+    /// when the durable row proves that it is a privileged transient. The
+    /// in-memory pre-launch token closes the reserve→spawn race; after daemon
+    /// restart the sealed ledger row and deterministic unit name provide the
+    /// recovery authority instead.
+    pub async fn cancel_generation(
+        &self,
+        execution_generation: &str,
+    ) -> Result<PrivilegedCancelOutcome, String> {
+        let Some(row) = self
+            .ledger
+            .get(execution_generation)
+            .await
+            .map_err(|error| format!("could not read privileged execution: {error}"))?
+        else {
+            return Ok(PrivilegedCancelOutcome::NotPrivileged);
+        };
+        if !is_recoverable_privileged_ledger_row(&row) {
+            return Ok(PrivilegedCancelOutcome::NotPrivileged);
+        }
+        if !matches!(
+            crate::daemon::exec_ledger::State::parse(&row.state),
+            Some(
+                crate::daemon::exec_ledger::State::Reserved
+                    | crate::daemon::exec_ledger::State::Running
+            )
+        ) {
+            return Ok(PrivilegedCancelOutcome::AlreadyTerminal);
+        }
+        let plan = serde_json::from_str::<ExecPlan>(
+            row.plan_json
+                .as_deref()
+                .expect("recoverable privileged row has a sealed plan"),
+        )
+        .map_err(|error| format!("could not decode privileged execution: {error}"))?;
+        let spec = SystemdTransientSpec::from_plan(&plan)
+            .map_err(|error| format!("stored privileged plan became invalid: {error}"))?;
+
+        let active_state = {
+            let mut active = self.active.lock().unwrap();
+            active.get_mut(execution_generation).map(|entry| {
+                entry.cancelled.store(true, Ordering::Release);
+                entry.launch_started
+            })
+        };
+        if active_state == Some(false) {
+            cleanup_privileged_output_paths(&spec);
+            let outcome = privileged_cancelled_outcome(
+                "administrator command was cancelled before it started",
+            );
+            self.record_privileged_terminal(&plan, &outcome).await;
+            self.active.lock().unwrap().remove(execution_generation);
+            return Ok(PrivilegedCancelOutcome::CancelledBeforeStart);
+        }
+        if active_state == Some(true) {
+            // The runner observes the same token before spawn and throughout
+            // its wait loop. Terminating here as well shortens cancellation for
+            // a unit that systemd has already admitted.
+            self.runner.terminate(&spec.unit_name).await;
+            return Ok(PrivilegedCancelOutcome::CancelRequested);
+        }
+
+        // Recovery path: there is no live launch token after daemon restart, so
+        // systemd state is the only authority. Never infer "not started" from a
+        // missing unit because --collect may already have removed it.
+        match self.runner.inspect(&spec.unit_name).await {
+            Ok(TransientUnitInspection::Running) => {
+                self.runner.terminate(&spec.unit_name).await;
+                cleanup_privileged_output_paths(&spec);
+                let outcome = privileged_cancelled_outcome(
+                    "administrator command was cancelled and its recovered transient service was reclaimed",
+                );
+                self.record_privileged_terminal(&plan, &outcome).await;
+                Ok(PrivilegedCancelOutcome::CancelRequested)
+            }
+            Ok(TransientUnitInspection::Exited { exit_code }) => {
+                let outcome = read_and_cleanup_privileged_outputs(&spec, &plan, exit_code, 0);
+                self.record_privileged_terminal(&plan, &outcome).await;
+                self.runner.terminate(&spec.unit_name).await;
+                Ok(PrivilegedCancelOutcome::RecoveredTerminal)
+            }
+            Ok(TransientUnitInspection::Missing | TransientUnitInspection::Unknown(_)) | Err(_) => {
+                cleanup_privileged_output_paths(&spec);
+                self.record_privileged_indeterminate(&plan).await;
+                Ok(PrivilegedCancelOutcome::Indeterminate)
+            }
+        }
     }
 
     /// Reconcile only the privileged rows explicitly deferred by daemon startup.
@@ -1318,6 +1529,10 @@ fn read_and_cleanup_privileged_outputs(
     }
 }
 
+fn privileged_cancelled_outcome(message: &str) -> AgentOutcome {
+    AgentOutcome::Err(agent_error(AgentErrorKind::Cancelled, message))
+}
+
 fn plan_digest(plan: &ExecPlan) -> [u8; 32] {
     // ExecPlan has a deterministic field order and no maps. This digest is a
     // local authority key, not a cross-version wire protocol.
@@ -1343,6 +1558,7 @@ mod tests {
     struct FakeTransientRunner {
         outcome: TransientRunOutcome,
         inspection: TransientUnitInspection,
+        runs: AtomicUsize,
         terminations: AtomicUsize,
     }
 
@@ -1352,7 +1568,12 @@ mod tests {
             &self,
             _spec: &SystemdTransientSpec,
             _timeout: Duration,
+            cancelled: Arc<AtomicBool>,
         ) -> TransientRunOutcome {
+            self.runs.fetch_add(1, Ordering::AcqRel);
+            if cancelled.load(Ordering::Acquire) {
+                return TransientRunOutcome::Cancelled;
+            }
             self.outcome.clone()
         }
 
@@ -1696,6 +1917,7 @@ mod tests {
         let runner = Arc::new(FakeTransientRunner {
             outcome,
             inspection: TransientUnitInspection::Missing,
+            runs: AtomicUsize::new(0),
             terminations: AtomicUsize::new(0),
         });
         let supervisor =
@@ -1719,6 +1941,7 @@ mod tests {
         let runner = Arc::new(FakeTransientRunner {
             outcome: TransientRunOutcome::SpawnFailed("unused".into()),
             inspection,
+            runs: AtomicUsize::new(0),
             terminations: AtomicUsize::new(0),
         });
         let supervisor =
@@ -1730,6 +1953,44 @@ mod tests {
             .await
             .unwrap();
         (supervisor, ledger, plan)
+    }
+
+    async fn recovered_supervisor_for_cancel(
+        generation: &str,
+        inspection: TransientUnitInspection,
+    ) -> (
+        LinuxPrivilegedExecSupervisor,
+        Arc<ExecLedger>,
+        ExecPlan,
+        Arc<FakeTransientRunner>,
+    ) {
+        let (registry, registration) = current_registration();
+        let permits = PrivilegedPermitStore::default();
+        let ledger = Arc::new(ExecLedger::open_in_memory().await.unwrap());
+        let runner = Arc::new(FakeTransientRunner {
+            outcome: TransientRunOutcome::SpawnFailed("unused".into()),
+            inspection,
+            runs: AtomicUsize::new(0),
+            terminations: AtomicUsize::new(0),
+        });
+        let preparer = LinuxPrivilegedExecSupervisor::with_runner(
+            permits.clone(),
+            ledger.clone(),
+            runner.clone(),
+        );
+        let plan = administrator_plan(generation);
+        let permit = permits.mint(&plan, &registration);
+        preparer
+            .prepare_dispatch(permit.permit_id, &plan, &registry, &registration)
+            .await
+            .unwrap();
+        drop(preparer);
+        let recovered = LinuxPrivilegedExecSupervisor::with_runner(
+            PrivilegedPermitStore::default(),
+            ledger.clone(),
+            runner.clone(),
+        );
+        (recovered, ledger, plan, runner)
     }
 
     #[tokio::test]
@@ -1836,6 +2097,126 @@ mod tests {
         assert_eq!(
             row.state,
             crate::daemon::exec_ledger::State::Terminal.as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn prelaunch_cancel_is_terminal_and_execute_cannot_spawn_afterward() {
+        let (supervisor, ledger, plan, spec) = prepared_supervisor(
+            "generation-cancel-before-start",
+            TransientRunOutcome::Exited {
+                exit_code: 0,
+                unit_observed: true,
+                duration_ms: 1,
+            },
+        )
+        .await;
+        assert_eq!(
+            supervisor
+                .cancel_generation(&plan.execution_generation)
+                .await
+                .unwrap(),
+            PrivilegedCancelOutcome::CancelledBeforeStart
+        );
+        let outcome = supervisor.execute_prepared(&plan, spec).await;
+        assert!(matches!(
+            outcome,
+            AgentOutcome::Err(ref error) if error.kind == AgentErrorKind::Cancelled
+        ));
+        let row = ledger
+            .get(&plan.execution_generation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.state,
+            crate::daemon::exec_ledger::State::Terminal.as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn active_cancel_sets_launch_token_and_reclaims_the_unit() {
+        let (supervisor, _ledger, plan, _spec) = prepared_supervisor(
+            "generation-cancel-running",
+            TransientRunOutcome::Exited {
+                exit_code: 0,
+                unit_observed: true,
+                duration_ms: 1,
+            },
+        )
+        .await;
+        {
+            let mut active = supervisor.active.lock().unwrap();
+            active
+                .get_mut(&plan.execution_generation)
+                .unwrap()
+                .launch_started = true;
+        }
+        assert_eq!(
+            supervisor
+                .cancel_generation(&plan.execution_generation)
+                .await
+                .unwrap(),
+            PrivilegedCancelOutcome::CancelRequested
+        );
+        let active = supervisor.active.lock().unwrap();
+        assert!(
+            active[&plan.execution_generation]
+                .cancelled
+                .load(Ordering::Acquire)
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_exited_unit_keeps_its_real_result_when_cancel_is_late() {
+        let (supervisor, ledger, plan, runner) = recovered_supervisor_for_cancel(
+            "generation-cancel-late",
+            TransientUnitInspection::Exited { exit_code: 11 },
+        )
+        .await;
+        assert_eq!(
+            supervisor
+                .cancel_generation(&plan.execution_generation)
+                .await
+                .unwrap(),
+            PrivilegedCancelOutcome::RecoveredTerminal
+        );
+        assert_eq!(runner.terminations.load(Ordering::Acquire), 1);
+        let row = ledger
+            .get(&plan.execution_generation)
+            .await
+            .unwrap()
+            .unwrap();
+        let outcome =
+            serde_json::from_str::<AgentOutcome>(row.result_json.as_deref().unwrap()).unwrap();
+        assert!(matches!(
+            outcome,
+            AgentOutcome::Ok(OperationOutput::Exec(ExecOutput { exit_code: 11, .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovered_missing_unit_cancel_is_indeterminate_not_retryable() {
+        let (supervisor, ledger, plan, _runner) = recovered_supervisor_for_cancel(
+            "generation-cancel-missing",
+            TransientUnitInspection::Missing,
+        )
+        .await;
+        assert_eq!(
+            supervisor
+                .cancel_generation(&plan.execution_generation)
+                .await
+                .unwrap(),
+            PrivilegedCancelOutcome::Indeterminate
+        );
+        assert_eq!(
+            ledger
+                .get(&plan.execution_generation)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            crate::daemon::exec_ledger::State::Indeterminate.as_str()
         );
     }
 

@@ -552,6 +552,14 @@ pub struct RouterContext {
     /// frame cannot spawn a second process. Not optional: a host without a ledger
     /// would silently double-execute, so there is no "skip it if absent" path.
     pub exec_ledger: Arc<crate::daemon::exec_ledger::ExecLedger>,
+    /// Linux ServiceDaemon-only owner of one-shot privileged launch and
+    /// cancellation state. Keeping this in the shared router context closes the
+    /// prepare→spawn cancellation race and lets a cancel after daemon restart
+    /// recover from the same sealed ledger/systemd unit identity. Other Linux
+    /// startup modes leave it `None`; non-Linux builds have no field at all.
+    #[cfg(target_os = "linux")]
+    pub privileged_exec:
+        Option<Arc<crate::daemon::linux_privileged_exec::LinuxPrivilegedExecSupervisor>>,
     /// How many commands this host currently has running. Enforced locally on
     /// every path, because a central quota only binds work the manager dispatched
     /// and a control end can reach this host through an open-source signal server
