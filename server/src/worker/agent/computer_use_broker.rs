@@ -29,11 +29,9 @@ use desk_agent_protocol::computer_use::{
     ComputerUseAdapterRef, ComputerUseCapabilityReadiness, ComputerUseContextReference,
     ComputerUseReadiness, ComputerUseReadinessReason, DesktopSessionInspectOutput,
     DesktopSessionInspectParams, MAX_COMPUTER_USE_INSPECT_BYTES, MAX_COMPUTER_USE_INSPECT_NODES,
-    ObjectKind, ObjectRef, OfficeInspectParams, RawInputAction, UiInspectOutput, UiInspectParams,
-    UiNodeProjection, UiSemanticAction,
+    ObjectKind, ObjectRef, OfficeInspectOutput, OfficeInspectParams, OfficeSelectionProjection,
+    RawInputAction, UiInspectOutput, UiInspectParams, UiNodeProjection, UiSemanticAction,
 };
-#[cfg(any(windows, target_os = "macos"))]
-use desk_agent_protocol::computer_use::{OfficeInspectOutput, OfficeSelectionProjection};
 use desk_agent_protocol::{AgentError, AgentErrorKind, Capability, ScreenCaptureParams};
 #[cfg(target_os = "macos")]
 use desk_diagnose_core::device_assistant::MACOS_ACCESSIBILITY_ADAPTER_ID;
@@ -771,8 +769,11 @@ impl ComputerUseBroker {
                 .is_some_and(|result| result.is_ok())
                 .then(|| interactive_session_incarnation.clone()),
         );
-        let platform_supported = cfg!(any(windows, target_os = "macos"));
-        let file_provider_supported = cfg!(any(windows, target_os = "macos"));
+        let core_diagnostics_supported =
+            cfg!(any(windows, target_os = "linux", target_os = "macos"));
+        let terminal_provider_supported = core_diagnostics_supported;
+        let desktop_provider_supported = cfg!(any(windows, target_os = "macos"));
+        let file_provider_supported = cfg!(any(windows, target_os = "linux", target_os = "macos"));
         let office_provider_supported = cfg!(windows);
         let iwork_provider_supported = cfg!(target_os = "macos");
         let outlook_provider_supported = cfg!(windows);
@@ -799,7 +800,7 @@ impl ComputerUseBroker {
                 false,
                 Some(ComputerUseReadinessReason::DisabledByLocalCeiling),
             )
-        } else if !platform_supported {
+        } else if !desktop_provider_supported {
             (false, Some(ComputerUseReadinessReason::UnsupportedPlatform))
         } else if observation.is_some_and(|result| result.is_ok()) {
             (true, None)
@@ -905,7 +906,7 @@ impl ComputerUseBroker {
         };
         let (screen_ready, screen_reason) = screen_capture_readiness(
             ceiling.observation_enabled(),
-            platform_supported,
+            desktop_provider_supported,
             session_ready,
             session_reason,
             allow_screen,
@@ -1018,11 +1019,25 @@ impl ComputerUseBroker {
             kind: ComputerUseAdapterKind::SystemDiagnostics,
             version: system_diagnostics_adapter_version,
         };
-        let diagnostic_reason =
-            (!platform_supported).then_some(ComputerUseReadinessReason::UnsupportedPlatform);
+        let diagnostic_reason = (!core_diagnostics_supported)
+            .then_some(ComputerUseReadinessReason::UnsupportedPlatform);
+        let service_status_ready =
+            core_diagnostics_supported && super::collectors::service_status::ready();
+        let service_status_reason =
+            (!service_status_ready).then_some(if !core_diagnostics_supported {
+                ComputerUseReadinessReason::UnsupportedPlatform
+            } else {
+                ComputerUseReadinessReason::AdapterUnavailable
+            });
+        let log_recent_ready = core_diagnostics_supported && super::collectors::log_recent::ready();
+        let log_recent_reason = (!log_recent_ready).then_some(if !core_diagnostics_supported {
+            ComputerUseReadinessReason::UnsupportedPlatform
+        } else {
+            ComputerUseReadinessReason::AdapterUnavailable
+        });
         let command_shells_available = !crate::exec_shells::available_exec_shells().is_empty();
-        let command_ready = platform_supported && command_shells_available;
-        let command_reason = (!command_ready).then_some(if !platform_supported {
+        let command_ready = terminal_provider_supported && command_shells_available;
+        let command_reason = (!command_ready).then_some(if !terminal_provider_supported {
             ComputerUseReadinessReason::UnsupportedPlatform
         } else {
             ComputerUseReadinessReason::AdapterUnavailable
@@ -1040,43 +1055,43 @@ impl ComputerUseBroker {
                 ComputerUseCapabilityReadiness {
                     capability: Capability::SystemInfo,
                     adapter: diagnostic_adapter.clone(),
-                    supported: platform_supported,
-                    ready: platform_supported,
+                    supported: core_diagnostics_supported,
+                    ready: core_diagnostics_supported,
                     reason: diagnostic_reason,
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::ProcessList,
                     adapter: diagnostic_adapter.clone(),
-                    supported: platform_supported,
-                    ready: platform_supported,
+                    supported: core_diagnostics_supported,
+                    ready: core_diagnostics_supported,
                     reason: diagnostic_reason,
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::NetworkPorts,
                     adapter: diagnostic_adapter.clone(),
-                    supported: platform_supported,
-                    ready: platform_supported,
+                    supported: core_diagnostics_supported,
+                    ready: core_diagnostics_supported,
                     reason: diagnostic_reason,
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::ServiceStatus,
                     adapter: diagnostic_adapter.clone(),
-                    supported: platform_supported,
-                    ready: platform_supported,
-                    reason: diagnostic_reason,
+                    supported: core_diagnostics_supported,
+                    ready: service_status_ready,
+                    reason: service_status_reason,
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::LogRecent,
                     adapter: diagnostic_adapter.clone(),
-                    supported: platform_supported,
-                    ready: platform_supported,
-                    reason: diagnostic_reason,
+                    supported: core_diagnostics_supported,
+                    ready: log_recent_ready,
+                    reason: log_recent_reason,
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::ContainerList,
                     adapter: diagnostic_adapter,
-                    supported: platform_supported,
-                    ready: platform_supported,
+                    supported: core_diagnostics_supported,
+                    ready: core_diagnostics_supported,
                     reason: diagnostic_reason,
                 },
                 ComputerUseCapabilityReadiness {
@@ -1085,14 +1100,14 @@ impl ComputerUseBroker {
                         kind: ComputerUseAdapterKind::Terminal,
                         version: system_command_adapter_version,
                     },
-                    supported: platform_supported,
+                    supported: terminal_provider_supported,
                     ready: command_ready,
                     reason: command_reason,
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::DesktopSessionInspect,
                     adapter: adapter.clone(),
-                    supported: platform_supported,
+                    supported: desktop_provider_supported,
                     ready: session_ready,
                     reason: session_reason,
                 },
@@ -1102,7 +1117,7 @@ impl ComputerUseBroker {
                         kind: adapter.kind,
                         version: ui_adapter_version.clone(),
                     },
-                    supported: platform_supported,
+                    supported: desktop_provider_supported,
                     ready: ui_ready,
                     reason: (!ui_ready).then_some(
                         if !ceiling.observation_enabled()
@@ -1397,9 +1412,9 @@ impl ComputerUseBroker {
                         kind: ComputerUseAdapterKind::Terminal,
                         version: terminal_adapter_version,
                     },
-                    supported: platform_supported,
-                    ready: platform_supported,
-                    reason: (!platform_supported)
+                    supported: terminal_provider_supported,
+                    ready: terminal_provider_supported,
+                    reason: (!terminal_provider_supported)
                         .then_some(ComputerUseReadinessReason::UnsupportedPlatform),
                 },
                 ComputerUseCapabilityReadiness {
@@ -1408,7 +1423,7 @@ impl ComputerUseBroker {
                         kind: ComputerUseAdapterKind::ScreenCapture,
                         version: screen_adapter_version,
                     },
-                    supported: platform_supported,
+                    supported: desktop_provider_supported,
                     ready: screen_ready,
                     reason: screen_reason,
                 },
@@ -2386,38 +2401,8 @@ impl ComputerUseBroker {
             }
         }
 
-        #[cfg(windows)]
-        let (collected, adapter_kind, adapter_version, adapter_name) = (
-            super::windows_uia_observer::collect_foreground(
-                application.process_id,
-                &application.image_path,
-                params.max_depth,
-                params.max_nodes,
-                params.max_bytes,
-            )?,
-            ComputerUseAdapterKind::WindowsUia,
-            "a4-windows-uia-read/v1",
-            "Windows UI Automation",
-        );
-        #[cfg(target_os = "macos")]
-        let (collected, adapter_kind, adapter_version, adapter_name) = (
-            super::macos_accessibility_observer::collect_foreground(
-                application.process_id,
-                &application.image_path,
-                params.max_depth,
-                params.max_nodes,
-                params.max_bytes,
-            )?,
-            ComputerUseAdapterKind::MacosAccessibility,
-            "macos-accessibility-read/v1",
-            "macOS Accessibility",
-        );
-        #[cfg(not(any(windows, target_os = "macos")))]
-        return Err(error(
-            AgentErrorKind::UnsupportedPlatform,
-            "semantic desktop UI inspection is unavailable on this platform",
-            false,
-        ));
+        let (collected, adapter_kind, adapter_version, adapter_name) =
+            collect_foreground_desktop_ui(application.process_id, &application.image_path, params)?;
 
         let snapshot_id = self.next_snapshot_id();
         let incarnation = format!(
@@ -3067,6 +3052,62 @@ pub(super) struct CollectedUiTree {
     pub(super) truncated: bool,
 }
 
+fn collect_foreground_desktop_ui(
+    process_id: u32,
+    image_path: &str,
+    params: &UiInspectParams,
+) -> Result<
+    (
+        CollectedUiTree,
+        ComputerUseAdapterKind,
+        &'static str,
+        &'static str,
+    ),
+    AgentError,
+> {
+    #[cfg(windows)]
+    {
+        Ok((
+            super::windows_uia_observer::collect_foreground(
+                process_id,
+                image_path,
+                params.max_depth,
+                params.max_nodes,
+                params.max_bytes,
+            )?,
+            ComputerUseAdapterKind::WindowsUia,
+            "a4-windows-uia-read/v1",
+            "Windows UI Automation",
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Ok((
+            super::macos_accessibility_observer::collect_foreground(
+                process_id,
+                image_path,
+                params.max_depth,
+                params.max_nodes,
+                params.max_bytes,
+            )?,
+            ComputerUseAdapterKind::MacosAccessibility,
+            "macos-accessibility-read/v1",
+            "macOS Accessibility",
+        ))
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (process_id, image_path, params);
+        Err(error(
+            AgentErrorKind::UnsupportedPlatform,
+            "semantic desktop UI inspection is unavailable on this platform",
+            false,
+        ))
+    }
+}
+
 #[cfg(windows)]
 fn observe_interactive_desktop() -> Result<ObservedDesktop, AgentError> {
     use std::mem::size_of;
@@ -3230,6 +3271,24 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.kind, AgentErrorKind::InvalidInput);
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[test]
+    fn unsupported_desktop_ui_adapter_fails_closed() {
+        let error = collect_foreground_desktop_ui(
+            1,
+            "/usr/bin/example",
+            &UiInspectParams {
+                root: None,
+                max_depth: 1,
+                max_nodes: 1,
+                max_bytes: 1,
+            },
+        )
+        .err()
+        .expect("unsupported platforms must not expose a desktop UI adapter");
+        assert_eq!(error.kind, AgentErrorKind::UnsupportedPlatform);
     }
 
     #[cfg(not(windows))]
@@ -3600,8 +3659,6 @@ mod tests {
                 Capability::SystemInfo
                     | Capability::ProcessList
                     | Capability::NetworkPorts
-                    | Capability::ServiceStatus
-                    | Capability::LogRecent
                     | Capability::ContainerList
                     | Capability::FileMetadataRead
                     | Capability::FileContentRead
@@ -3609,10 +3666,18 @@ mod tests {
                     | Capability::SpreadsheetMergePreview
                     | Capability::TerminalOutputRead
             ) {
-                entry.ready == cfg!(any(windows, target_os = "macos"))
+                entry.ready == cfg!(any(windows, target_os = "linux", target_os = "macos"))
+            } else if entry.capability == Capability::ServiceStatus {
+                entry.ready
+                    == (cfg!(any(windows, target_os = "linux", target_os = "macos"))
+                        && crate::worker::agent::collectors::service_status::ready())
+            } else if entry.capability == Capability::LogRecent {
+                entry.ready
+                    == (cfg!(any(windows, target_os = "linux", target_os = "macos"))
+                        && crate::worker::agent::collectors::log_recent::ready())
             } else if entry.capability == Capability::ShellExecConfirmed {
                 entry.ready
-                    == (cfg!(any(windows, target_os = "macos"))
+                    == (cfg!(any(windows, target_os = "linux", target_os = "macos"))
                         && !crate::exec_shells::available_exec_shells().is_empty())
             } else {
                 !entry.ready
@@ -3731,8 +3796,9 @@ mod tests {
         admit_screen_capture(&mut gate, now + SCREEN_CAPTURE_MIN_INTERVAL).unwrap();
     }
 
+    #[cfg(windows)]
     #[test]
-    fn screen_capture_blocks_credential_and_password_manager_surfaces() {
+    fn screen_capture_blocks_windows_credential_and_password_manager_surfaces() {
         for path in [
             r"C:\Windows\System32\consent.exe",
             r"C:\Windows\SystemApps\CredentialUIBroker.exe",
@@ -3744,6 +3810,20 @@ mod tests {
         assert!(!screen_capture_application_blocked(
             r"C:\Windows\System32\notepad.exe"
         ));
+        assert!(screen_capture_application_blocked(""));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn screen_capture_blocks_unix_password_manager_surfaces() {
+        for path in [
+            "/Applications/1Password.app/Contents/MacOS/1Password",
+            "/Applications/Bitwarden.app/Contents/MacOS/bitwarden",
+            "/usr/bin/keepassxc",
+        ] {
+            assert!(screen_capture_application_blocked(path), "{path}");
+        }
+        assert!(!screen_capture_application_blocked("/usr/bin/gedit"));
         assert!(screen_capture_application_blocked(""));
     }
 

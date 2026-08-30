@@ -1023,7 +1023,23 @@ fn chrome_user_data_dir() -> Option<PathBuf> {
             .map(PathBuf::from)
             .map(|root| root.join("Library/Application Support/Google/Chrome"));
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        let config_root = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+        let candidates = [
+            config_root.join("google-chrome"),
+            config_root.join("google-chrome-beta"),
+            config_root.join("google-chrome-unstable"),
+        ];
+        return candidates
+            .iter()
+            .find(|path| path.join("DevToolsActivePort").is_file())
+            .cloned()
+            .or_else(|| candidates.into_iter().find(|path| path.is_dir()));
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     None
 }
 
@@ -1038,33 +1054,68 @@ fn devtools_active_port() -> Option<String> {
 }
 
 fn installed_chrome_identity() -> Option<(String, u16, String)> {
-    #[cfg(windows)]
-    let version = {
-        let local_app = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-        let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
-        let application_dir = [
-            local_app.map(|root| root.join("Google/Chrome/Application")),
-            program_files.map(|root| root.join("Google/Chrome/Application")),
-        ]
-        .into_iter()
-        .flatten()
-        .find(|path| path.join("chrome.exe").is_file())?;
-        fs::read_dir(application_dir)
-            .ok()?
-            .filter_map(Result::ok)
-            .filter(|entry| entry.path().is_dir())
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .max_by_key(|name| parse_chrome_version(name).map(|(_, parts)| parts))?
-    };
-    #[cfg(target_os = "macos")]
-    let version = installed_macos_chrome_version()?;
-    #[cfg(not(any(windows, target_os = "macos")))]
-    return None;
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
 
-    let (major, _) = parse_chrome_version(&version)?;
-    let active_port = devtools_active_port()?;
-    let profile_incarnation = format!("{:x}", Sha256::digest(active_port.as_bytes()));
-    Some((version, major, profile_incarnation))
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    {
+        #[cfg(windows)]
+        let version = {
+            let local_app = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+            let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+            let application_dir = [
+                local_app.map(|root| root.join("Google/Chrome/Application")),
+                program_files.map(|root| root.join("Google/Chrome/Application")),
+            ]
+            .into_iter()
+            .flatten()
+            .find(|path| path.join("chrome.exe").is_file())?;
+            fs::read_dir(application_dir)
+                .ok()?
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().is_dir())
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .max_by_key(|name| parse_chrome_version(name).map(|(_, parts)| parts))?
+        };
+        #[cfg(target_os = "macos")]
+        let version = installed_macos_chrome_version()?;
+        #[cfg(target_os = "linux")]
+        let version = installed_linux_chrome_version()?;
+
+        let (major, _) = parse_chrome_version(&version)?;
+        let active_port = devtools_active_port()?;
+        let profile_incarnation = format!("{:x}", Sha256::digest(active_port.as_bytes()));
+        Some((version, major, profile_incarnation))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn installed_linux_chrome_version() -> Option<String> {
+    ["google-chrome", "google-chrome-stable"]
+        .into_iter()
+        .filter_map(|program| which::which(program).ok())
+        .chain([PathBuf::from("/opt/google/chrome/google-chrome")])
+        .find_map(|program| {
+            let output = std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .ok()?;
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+                .and_then(|output| parse_linux_chrome_version_output(&output))
+        })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_linux_chrome_version_output(output: &str) -> Option<String> {
+    output
+        .split_ascii_whitespace()
+        .find(|token| parse_chrome_version(token).is_some())
+        .map(str::to_string)
 }
 
 fn parse_chrome_version(version: &str) -> Option<(u16, Vec<u32>)> {
@@ -1397,6 +1448,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     #[test]
     fn verified_upload_materialization_is_exact_private_and_ephemeral() {
         let _guard = super::super::file_reference_store::file_store_test_lock();
@@ -1420,6 +1472,7 @@ mod tests {
         assert!(!private_directory.exists());
     }
 
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     #[test]
     fn upload_materialization_rejects_digest_drift_before_browser_mutation() {
         let _guard = super::super::file_reference_store::file_store_test_lock();
@@ -1435,6 +1488,25 @@ mod tests {
             materialize_verified_upload(&action),
             Err(ChromeDevtoolsMcpError::ArtifactMaterialization(message))
                 if message == "artifact bytes changed before browser upload"
+        ));
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn upload_materialization_fails_closed_without_handle_bound_file_reads() {
+        let _guard = super::super::file_reference_store::file_store_test_lock();
+        let source_directory = tempfile::tempdir().unwrap();
+        let source_path = source_directory.path().join("source.docx");
+        let bytes = b"typed immutable artifact bytes";
+        std::fs::write(&source_path, bytes).unwrap();
+        super::super::file_reference_store::reset_worker_incarnation();
+        let file = super::super::file_reference_store::issue(&source_path).unwrap();
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        let action = upload_action(file, bytes.len() as u64, digest);
+
+        assert!(matches!(
+            materialize_verified_upload(&action),
+            Err(ChromeDevtoolsMcpError::ArtifactMaterialization(_))
         ));
     }
 
@@ -1664,6 +1736,21 @@ mod tests {
         assert_eq!(parse_chrome_version("151.0.7922"), None);
         assert_eq!(parse_chrome_version("latest"), None);
         assert_eq!(parse_chrome_version("70000.0.0.0"), None);
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn chrome_identity_is_unavailable_without_a_platform_adapter() {
+        assert!(installed_chrome_identity().is_none());
+    }
+
+    #[test]
+    fn parses_linux_chrome_version_output_without_trusting_product_text() {
+        assert_eq!(
+            parse_linux_chrome_version_output("Google Chrome 151.0.7922.175\n"),
+            Some("151.0.7922.175".into())
+        );
+        assert_eq!(parse_linux_chrome_version_output("Chromium latest"), None);
     }
 
     #[cfg(target_os = "macos")]

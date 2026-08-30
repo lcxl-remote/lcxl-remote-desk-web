@@ -6,15 +6,19 @@
 //! The severity / source / since / limit filters map onto a `Get-WinEvent`
 //! `FilterHashtable`. macOS reads the unified log via `log show --style ndjson`,
 //! parsing each entry and filtering severity in Rust (the unified log has no
-//! native "warning" level). Other platforms return `UnsupportedPlatform`
-//! (journald integration is deferred).
+//! native "warning" level). Linux reads bounded JSON records from journald.
+//! Other platforms return `UnsupportedPlatform`.
 
-use desk_agent_protocol::{AgentError, LogEvent, LogRecentOutput, LogRecentParams, LogSeverity};
+use desk_agent_protocol::{AgentError, LogRecentOutput, LogRecentParams};
+#[cfg(any(windows, target_os = "macos", test))]
+use desk_agent_protocol::{LogEvent, LogSeverity};
 // `AgentErrorKind` is only referenced by the Windows JSON parser and the
-// unsupported-platform fallback; on macOS (outside tests) neither is compiled.
-#[cfg(not(all(target_os = "macos", not(test))))]
+// unsupported-platform fallback; on Linux/macOS outside tests neither is compiled.
+#[cfg(not(all(any(target_os = "linux", target_os = "macos"), not(test))))]
 use desk_agent_protocol::AgentErrorKind;
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(windows)]
@@ -24,6 +28,22 @@ mod windows;
 const DEFAULT_LIMIT: u32 = 100;
 /// Hard ceiling on returned events regardless of the requested limit.
 const MAX_LIMIT: u32 = 500;
+
+/// Whether the platform log backend required by this collector is present.
+pub fn ready() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new("/run/systemd/system").is_dir() && which::which("journalctl").is_ok()
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        true
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        false
+    }
+}
 
 /// Collect recent log events, filtered by the request. The effective limit is
 /// the requested one clamped to `[1, MAX_LIMIT]` (default `DEFAULT_LIMIT`).
@@ -51,7 +71,14 @@ pub fn collect(params: &LogRecentParams) -> Result<LogRecentOutput, AgentError> 
         events.truncate(limit as usize);
         Ok(LogRecentOutput { events, truncated })
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        let mut events = linux::query(params, limit)?;
+        let truncated = events.len() as u32 > limit;
+        events.truncate(limit as usize);
+        Ok(LogRecentOutput { events, truncated })
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = (params, limit);
         Err(AgentError {

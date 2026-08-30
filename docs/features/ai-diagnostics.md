@@ -42,6 +42,14 @@ reader's place unexpectedly.
 - **Inspectable Tool Calls** — select any item in the tool timeline to expand the model-produced JSON input and the redacted, bounded output returned to the model. The details remain available in settled turns and restored conversation history.
 - **Shared Core** — the transport-neutral diagnostic logic lives in the `desk-diagnose-core` crate, reused by the central brain so behavior never drifts.
 
+### Linux capability boundary
+
+On Linux, the Assistant advertises each capability independently. System information, process and network inspection, container inspection, terminal-output reads, and owner-confirmed `bash`/`sh` execution use the same thin-edge and confirmation boundaries as Windows and macOS. On a booted systemd host, it also provides `systemd` service status and bounded `journald` JSON queries; those two capabilities remain visibly unavailable when `systemctl`/`journalctl` or the systemd runtime is absent, and journal visibility is limited by the Desk Server process permissions.
+
+Explicitly selected Linux files and directories can be inspected without sending native paths to the model. Directory traversal and reads are handle-relative, reject symbolic links, revalidate object identity around bounded reads, and never recurse implicitly. Confirmed artifact creation is restricted to an exact device allowlisted directory and publishes a private `0600` staging file with Linux no-replace rename semantics, so an existing target is never overwritten.
+
+Linux desktop UI inspection/actions, screen Computer Use, and browser Computer Use are not advertised yet. Chrome installation/profile detection exists for the future browser adapter, but it does not bypass the missing Linux interactive-session, foreground-window, protected-field, and local-input ownership safety proofs. Wayland remote-desktop capture is a separate transport feature and does not itself satisfy those Computer Use gates.
+
 ::: tip DeskServer-only mode has no local brain
 A headless `desk-server` is a pure thin edge: it has **no embedded signaling server**, so it must be attached to a remote central server (signaling server or manager) to use AI features. The portable `default` mode embeds the signaling server in the same process, so it remains self-contained.
 :::

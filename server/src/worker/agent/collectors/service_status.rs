@@ -1,4 +1,4 @@
-//! `service.status` collector — Windows service state (and start type).
+//! `service.status` collector — native service-manager state.
 //!
 //! Platform-dispatched:
 //! - **Windows** queries the Service Control Manager. A `name` filter opens
@@ -10,25 +10,49 @@
 //!   the job with that exact label; without a filter, all loaded jobs are
 //!   returned. State is `running` (numeric PID) or `stopped` (`-`); launchd
 //!   exposes no per-job start type, so `start_type` is always `None`.
-//! - Other platforms return `UnsupportedPlatform` (systemd integration is
-//!   deferred; Linux can follow with partial coverage).
+//! - **Linux** queries loaded systemd service units through structured
+//!   `systemctl show` properties.
+//! - Other platforms return `UnsupportedPlatform`.
 
 use desk_agent_protocol::{AgentError, ServiceStatusOutput, ServiceStatusParams};
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(windows)]
 mod windows;
 
 /// Hard cap on enumerated services; a host with more sets `truncated`.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 const MAX_SERVICES: usize = 1000;
+
+/// Whether the native service manager required by this collector is present.
+/// Linux support is intentionally scoped to a booted systemd host; merely
+/// finding a `systemctl` binary in a container or chroot must not advertise a
+/// ready capability that every request will fail to use.
+pub fn ready() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new("/run/systemd/system").is_dir() && which::which("systemctl").is_ok()
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        true
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        false
+    }
+}
 
 /// Collect service status. With `params.name` set, returns that single
 /// service; otherwise enumerates all services.
 pub fn collect(params: &ServiceStatusParams) -> Result<ServiceStatusOutput, AgentError> {
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     {
+        #[cfg(target_os = "linux")]
+        use linux as backend;
         #[cfg(target_os = "macos")]
         use macos as backend;
         #[cfg(windows)]
@@ -47,7 +71,7 @@ pub fn collect(params: &ServiceStatusParams) -> Result<ServiceStatusOutput, Agen
             truncated,
         })
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = params;
         Err(AgentError {
@@ -157,7 +181,7 @@ mod tests {
 
     /// On platforms without a backend, the collector degrades rather than
     /// failing the transport.
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     #[test]
     fn unsupported_off_windows() {
         let err = collect(&ServiceStatusParams::default()).expect_err("must be unsupported");
