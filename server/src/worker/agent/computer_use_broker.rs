@@ -2849,9 +2849,10 @@ fn ensure_screen_capture_safe() -> Result<(), AgentError> {
 }
 
 fn screen_capture_application_blocked(image_path: &str) -> bool {
-    let Some(name) = Path::new(image_path)
-        .file_name()
-        .and_then(|value| value.to_str())
+    let Some(name) = image_path
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
     else {
         return true;
     };
@@ -3435,6 +3436,51 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires a macOS Aqua session with Input Monitoring permission and a physical keyboard or mouse event after the ready marker is written"]
+    fn live_external_macos_input_preempts_the_writer_lease() {
+        let broker = Arc::new(ComputerUseBroker::new());
+        let monitor =
+            super::super::macos_input_ownership::MacosInputOwnershipMonitor::start(&broker)
+                .expect("the passive macOS input event tap must start");
+        let session = "macos-live-input-session";
+        *broker.active_session_incarnation.lock().unwrap() = Some(session.into());
+        let initial_epoch = broker.human_input_epoch();
+        broker
+            .acquire_writer_lease(WriterLeaseRequest {
+                work_id: "macos-live-work".into(),
+                action_request_id: "macos-live-action".into(),
+                execution_generation: "macos-live-generation".into(),
+                interactive_session_incarnation: session.into(),
+                expires_at: Utc::now() + Duration::seconds(30),
+            })
+            .expect("acquire macOS live writer lease");
+
+        let marker = std::env::var_os("LRD_INPUT_PREEMPT_READY_FILE")
+            .expect("LRD_INPUT_PREEMPT_READY_FILE must name an external-harness marker");
+        std::fs::write(&marker, b"ready").expect("write input-preemption ready marker");
+
+        let deadline = StdInstant::now() + StdDuration::from_secs(30);
+        while broker.human_input_epoch() == initial_epoch {
+            assert!(
+                StdInstant::now() < deadline,
+                "no external macOS GUI input was observed in time"
+            );
+            std::thread::sleep(StdDuration::from_millis(25));
+        }
+        assert_eq!(
+            broker
+                .require_writer_lease("macos-live-generation")
+                .expect_err("external macOS input must preempt the writer lease")
+                .kind,
+            AgentErrorKind::Cancelled
+        );
+
+        let _ = std::fs::remove_file(marker);
+        drop(monitor);
+    }
+
     #[test]
     fn human_input_invalidates_existing_references() {
         let broker = ComputerUseBroker::new();
@@ -3838,11 +3884,20 @@ mod tests {
         assert_eq!(reason, None);
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
-    #[ignore = "requires a non-sensitive foreground application on an interactive Windows desktop"]
+    #[ignore = "requires a non-sensitive foreground application on an interactive desktop"]
     fn live_screen_safety_accepts_a_non_sensitive_foreground_application() {
         ensure_screen_capture_safe().expect("foreground screen safety gate");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires the current macOS session to be locked with loginwindow in the foreground"]
+    fn live_screen_safety_rejects_macos_loginwindow() {
+        let error = ensure_screen_capture_safe()
+            .expect_err("the macOS loginwindow must be blocked from screen capture");
+        assert_eq!(error.kind, AgentErrorKind::PermissionDenied);
     }
 
     #[cfg(windows)]
