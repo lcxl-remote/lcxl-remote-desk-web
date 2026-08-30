@@ -984,8 +984,8 @@ pub async fn get_device_assistant_session(
                         .messages
                         .into_iter()
                         .filter(|message| {
-                            !message.message_id.starts_with(
-                                crate::device_assistant_orchestrator::PERMISSION_RESUME_MESSAGE_PREFIX,
+                            !desk_diagnose_core::permission_resume::is_permission_resume_message(
+                                message,
                             )
                         })
                         .map(Into::into)
@@ -1317,17 +1317,9 @@ pub async fn decide_device_assistant_permission(
         .map_err(|error| {
             DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
         })?
-        && let Some(question) = snapshot
-            .messages
-            .iter()
-            .rev()
-            .find(|message| {
-                message.role == desk_diagnose_core::chat::ChatRole::User
-                    && !message.message_id.starts_with(
-                        crate::device_assistant_orchestrator::PERMISSION_RESUME_MESSAGE_PREFIX,
-                    )
-            })
-            .map(|message| message.text.clone())
+        && let Some(question) =
+            desk_diagnose_core::permission_resume::latest_user_requirement(&snapshot.messages)
+                .map(|message| message.text.clone())
     {
         let (selected_capability_ids, selected_attachment_ids) =
             permission_resume_context_selection(
