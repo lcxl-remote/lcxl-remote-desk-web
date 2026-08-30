@@ -299,6 +299,29 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires an active interactive Windows display"]
+    fn live_windows_capture_requires_a_real_png() {
+        let display = std::env::var("LRD_SCREEN_CAPTURE_TEST_DISPLAY")
+            .expect("LRD_SCREEN_CAPTURE_TEST_DISPLAY must name the owner-selected display");
+        let settings = DeskSettings {
+            video_device_name: display,
+            // The development VM exposes Microsoft Basic Render Driver; its
+            // DXGI duplication device can be suspended even while the real
+            // interactive desktop is available. GDI is the production
+            // capture-engine fallback that exercises the same owner-selected
+            // display contract without depending on that virtual GPU path.
+            image_capture: Some("GDI".to_string()),
+            ..Default::default()
+        };
+        let out =
+            collect(&ScreenCaptureParams::default(), &settings).expect("Windows screen capture");
+        assert_eq!(out.format, ImageFormat::Png);
+        assert!(out.width > 0 && out.height > 0);
+        assert_eq!(&out.image[..4], &[0x89, b'P', b'N', b'G']);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "requires an Aqua session with Screen Recording permission"]

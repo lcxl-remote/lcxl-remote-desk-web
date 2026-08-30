@@ -118,6 +118,33 @@ pub fn capability_authorization_prompt(
     }
 }
 
+/// Exact Provider tools whose approved canonical input can be recovered for a
+/// permission-decision continuation right now. The orchestration loop uses
+/// this server-owned set to temporarily hide research / preview tools until
+/// the model proposes the already-approved mutation, preventing a fresh
+/// observation from invalidating an ephemeral object reference before use.
+pub fn active_exact_authorized_tool_names(
+    grants: &[CapabilityGrant],
+    permission_requests: &[PermissionRequest],
+    now_unix_ms: u64,
+    current_readiness_revision: u64,
+) -> Vec<String> {
+    grants
+        .iter()
+        .filter(|grant| {
+            grant.revoked_at_unix_ms.is_none()
+                && grant.expires_at_unix_ms > now_unix_ms
+                && grant.remaining_uses > 0
+                && grant.readiness_revision == current_readiness_revision
+                && grant.canonical_input_digest_sha256.is_some()
+                && approved_exact_input(grant, permission_requests).is_some()
+        })
+        .map(|grant| grant.tool_name.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn approved_exact_input(
     grant: &CapabilityGrant,
     permission_requests: &[PermissionRequest],
@@ -1564,6 +1591,15 @@ mod tests {
         assert!(active.text.contains("\"value\":\"approved\""));
         assert!(!active.text.contains("secret-exact-grant-id"));
         assert_eq!(active.approved_exact_input_expires_at_unix_ms, Some(1_000));
+        assert_eq!(
+            active_exact_authorized_tool_names(
+                std::slice::from_ref(&grant),
+                std::slice::from_ref(&request),
+                500,
+                1,
+            ),
+            vec!["browser_activate_element"]
+        );
 
         let mut reusable_exact = grant.clone();
         reusable_exact.use_policy = CapabilityGrantUsePolicy::Reusable;
@@ -1596,10 +1632,18 @@ mod tests {
         ] {
             // Keep the stored contract internally valid for every state fixture.
             inactive.validate().unwrap();
-            let projection =
-                capability_authorization_prompt(&[inactive], &[request.clone()], 500, 1);
+            let projection = capability_authorization_prompt(
+                std::slice::from_ref(&inactive),
+                &[request.clone()],
+                500,
+                1,
+            );
             assert!(!projection.text.contains("\"approved_exact_input\""));
             assert_eq!(projection.approved_exact_input_expires_at_unix_ms, None);
+            assert!(
+                active_exact_authorized_tool_names(&[inactive], &[request.clone()], 500, 1)
+                    .is_empty()
+            );
         }
 
         let mut stale_readiness = grant.clone();

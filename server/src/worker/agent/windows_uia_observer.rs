@@ -21,7 +21,7 @@ use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
     IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
     IUIAutomationValuePattern, ToggleState, ToggleState_Off, ToggleState_On, UIA_InvokePatternId,
-    UIA_SelectionItemPatternId, UIA_TogglePatternId, UIA_ValuePatternId,
+    UIA_SelectionItemPatternId, UIA_TogglePatternId, UIA_ValuePatternId, UIA_WindowControlTypeId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 use windows::core::{BSTR, PWSTR};
@@ -60,6 +60,14 @@ pub(super) struct AppliedUiAction {
     pub(super) summary: String,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct WindowsForegroundApplication {
+    pub(super) window_handle: isize,
+    pub(super) process_id: u32,
+    pub(super) image_path: String,
+    pub(super) process_started_at: u64,
+}
+
 impl Drop for ComGuard {
     fn drop(&mut self) {
         unsafe { CoUninitialize() };
@@ -81,6 +89,165 @@ struct WalkState {
     truncated: bool,
 }
 
+pub(super) fn resolve_foreground_application() -> Result<WindowsForegroundApplication, AgentError> {
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return Err(failure("the foreground window disappeared", true));
+    }
+    let mut host_process_id = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut host_process_id)) };
+    let host_image_path = process_image(host_process_id)
+        .ok_or_else(|| failure("cannot resolve the foreground process image", true))?;
+    let (process_id, image_path) = if executable_name(&host_image_path)
+        .eq_ignore_ascii_case("ApplicationFrameHost.exe")
+    {
+        let _com = ComGuard::initialize()?;
+        let automation: IUIAutomation =
+            unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
+                .map_err(|_| failure("Windows UI Automation is unavailable", true))?;
+        let root = unsafe { automation.ElementFromHandle(hwnd) }
+            .map_err(|_| failure("the foreground window has no UI Automation root", true))?;
+        let walker = unsafe { automation.ControlViewWalker() }
+            .map_err(|_| failure("cannot create a UI Automation tree walker", true))?;
+        let mut candidates = Vec::new();
+        let mut visited = 0usize;
+        collect_hosted_window_processes(
+            &root,
+            &walker,
+            host_process_id,
+            0,
+            Instant::now() + HARD_DEADLINE,
+            &mut visited,
+            &mut candidates,
+        );
+        candidates.sort_unstable();
+        candidates.dedup();
+        if candidates.len() != 1 {
+            return Err(failure(
+                "the hosted foreground window does not resolve to exactly one application process",
+                false,
+            ));
+        }
+        let process_id = candidates[0];
+        let image_path = process_image(process_id).ok_or_else(|| {
+            failure(
+                "cannot resolve the hosted foreground application image",
+                false,
+            )
+        })?;
+        (process_id, image_path)
+    } else {
+        (host_process_id, host_image_path)
+    };
+    let process_started_at = process_start(process_id).ok_or_else(|| {
+        failure(
+            "cannot bind the foreground application to its process incarnation",
+            false,
+        )
+    })?;
+    Ok(WindowsForegroundApplication {
+        window_handle: hwnd.0 as isize,
+        process_id,
+        image_path,
+        process_started_at,
+    })
+}
+
+fn executable_name(path: &str) -> &str {
+    path.rsplit(['\\', '/']).next().unwrap_or(path)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_hosted_window_processes(
+    element: &IUIAutomationElement,
+    walker: &IUIAutomationTreeWalker,
+    host_process_id: u32,
+    depth: u16,
+    deadline: Instant,
+    visited: &mut usize,
+    candidates: &mut Vec<u32>,
+) {
+    if *visited >= ACTION_MAX_NODES || Instant::now() >= deadline {
+        return;
+    }
+    *visited += 1;
+    let process_id = unsafe { element.CurrentProcessId() }
+        .unwrap_or_default()
+        .max(0) as u32;
+    let control_type = unsafe { element.CurrentControlType() }
+        .map(|value| value.0)
+        .unwrap_or_default();
+    if process_id != 0 && process_id != host_process_id && control_type == UIA_WindowControlTypeId.0
+    {
+        candidates.push(process_id);
+    }
+    if depth >= ACTION_MAX_DEPTH {
+        return;
+    }
+    let Ok(mut child) = (unsafe { walker.GetFirstChildElement(element) }) else {
+        return;
+    };
+    loop {
+        collect_hosted_window_processes(
+            &child,
+            walker,
+            host_process_id,
+            depth + 1,
+            deadline,
+            visited,
+            candidates,
+        );
+        if *visited >= ACTION_MAX_NODES || Instant::now() >= deadline {
+            return;
+        }
+        let Ok(next) = (unsafe { walker.GetNextSiblingElement(&child) }) else {
+            return;
+        };
+        child = next;
+    }
+}
+
+fn find_process_root(
+    element: &IUIAutomationElement,
+    walker: &IUIAutomationTreeWalker,
+    expected_process_id: u32,
+    depth: u16,
+    deadline: Instant,
+    visited: &mut usize,
+) -> Option<IUIAutomationElement> {
+    if *visited >= ACTION_MAX_NODES || Instant::now() >= deadline {
+        return None;
+    }
+    *visited += 1;
+    let process_id = unsafe { element.CurrentProcessId() }.ok()?.max(0) as u32;
+    if process_id == expected_process_id {
+        return Some(element.clone());
+    }
+    if depth >= ACTION_MAX_DEPTH {
+        return None;
+    }
+    let mut child = unsafe { walker.GetFirstChildElement(element) }.ok()?;
+    loop {
+        if let Some(found) = find_process_root(
+            &child,
+            walker,
+            expected_process_id,
+            depth + 1,
+            deadline,
+            visited,
+        ) {
+            return Some(found);
+        }
+        if *visited >= ACTION_MAX_NODES || Instant::now() >= deadline {
+            return None;
+        }
+        let Ok(next) = (unsafe { walker.GetNextSiblingElement(&child) }) else {
+            return None;
+        };
+        child = next;
+    }
+}
+
 pub(super) fn collect_foreground(
     expected_process_id: u32,
     expected_image_path: &str,
@@ -89,15 +256,10 @@ pub(super) fn collect_foreground(
     max_bytes: u32,
 ) -> Result<CollectedUiTree, AgentError> {
     let _com = ComGuard::initialize()?;
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.0.is_null() {
-        return Err(failure("the foreground window disappeared", true));
-    }
-    let mut process_id = 0u32;
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
-    let image_path = process_image(process_id)
-        .ok_or_else(|| failure("cannot resolve the foreground process image", true))?;
-    if process_id != expected_process_id || !path_eq(&image_path, expected_image_path) {
+    let foreground = resolve_foreground_application()?;
+    if foreground.process_id != expected_process_id
+        || !path_eq(&foreground.image_path, expected_image_path)
+    {
         return Err(failure(
             "the foreground application changed during UI inspection",
             true,
@@ -107,19 +269,29 @@ pub(super) fn collect_foreground(
     let automation: IUIAutomation =
         unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
             .map_err(|_| failure("Windows UI Automation is unavailable", true))?;
-    let root = unsafe { automation.ElementFromHandle(hwnd) }
-        .map_err(|_| failure("the foreground window has no UI Automation root", true))?;
-    let root_process_id = unsafe { root.CurrentProcessId() }
-        .unwrap_or_default()
-        .max(0) as u32;
-    if root_process_id != expected_process_id {
-        return Err(failure(
-            "the foreground UI Automation root belongs to a different process",
-            false,
-        ));
+    let root = unsafe {
+        automation.ElementFromHandle(windows::Win32::Foundation::HWND(
+            foreground.window_handle as *mut std::ffi::c_void,
+        ))
     }
+    .map_err(|_| failure("the foreground window has no UI Automation root", true))?;
     let walker = unsafe { automation.ControlViewWalker() }
         .map_err(|_| failure("cannot create a UI Automation tree walker", true))?;
+    let mut root_search_visited = 0usize;
+    let root = find_process_root(
+        &root,
+        &walker,
+        expected_process_id,
+        0,
+        Instant::now() + HARD_DEADLINE,
+        &mut root_search_visited,
+    )
+    .ok_or_else(|| {
+        failure(
+            "the foreground UI Automation tree has no root for the resolved application process",
+            false,
+        )
+    })?;
     let config = WalkConfig {
         walker: &walker,
         process_id: expected_process_id,
@@ -319,44 +491,44 @@ fn locate_action_target(
     target_fingerprint: &str,
 ) -> Result<LocatedElement, AgentError> {
     let com = ComGuard::initialize()?;
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.0.is_null() {
-        return Err(failure("the foreground window disappeared", false));
-    }
-    let mut process_id = 0u32;
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
-    let image_path = process_image(process_id)
-        .ok_or_else(|| failure("cannot resolve the foreground process image", false))?;
-    if process_id != expected_process_id || !path_eq(&image_path, expected_image_path) {
+    let foreground = resolve_foreground_application()?;
+    if foreground.process_id != expected_process_id
+        || !path_eq(&foreground.image_path, expected_image_path)
+    {
         return Err(failure(
             "the foreground application changed before the UI Automation action",
             false,
         ));
     }
-    let started = process_start(process_id).ok_or_else(|| {
-        failure(
-            "cannot bind the foreground application to its process incarnation",
-            false,
-        )
-    })?;
+    let process_id = foreground.process_id;
+    let started = foreground.process_started_at;
     let automation: IUIAutomation =
         unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
             .map_err(|_| failure("Windows UI Automation is unavailable", false))?;
-    let root = unsafe { automation.ElementFromHandle(hwnd) }
-        .map_err(|_| failure("the foreground window has no UI Automation root", false))?;
-    if unsafe { root.CurrentProcessId() }
-        .unwrap_or_default()
-        .max(0) as u32
-        != process_id
-    {
-        return Err(failure(
-            "the foreground UI Automation root belongs to a different process",
-            false,
-        ));
+    let root = unsafe {
+        automation.ElementFromHandle(windows::Win32::Foundation::HWND(
+            foreground.window_handle as *mut std::ffi::c_void,
+        ))
     }
+    .map_err(|_| failure("the foreground window has no UI Automation root", false))?;
     let walker = unsafe { automation.ControlViewWalker() }
         .map_err(|_| failure("cannot create a UI Automation tree walker", false))?;
     let deadline = Instant::now() + HARD_DEADLINE;
+    let mut root_search_visited = 0usize;
+    let root = find_process_root(
+        &root,
+        &walker,
+        process_id,
+        0,
+        deadline,
+        &mut root_search_visited,
+    )
+    .ok_or_else(|| {
+        failure(
+            "the foreground UI Automation tree has no root for the resolved application process",
+            false,
+        )
+    })?;
     let mut visited = 0usize;
     let element = find_element(
         &root,
@@ -919,11 +1091,9 @@ mod tests {
     #[test]
     #[ignore = "requires Calculator to be foreground on an interactive Windows desktop"]
     fn live_calculator_tree_and_invoke_use_the_production_uia_adapter() {
-        let hwnd = unsafe { GetForegroundWindow() };
-        assert!(!hwnd.0.is_null(), "no foreground window");
-        let mut process_id = 0u32;
-        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
-        let image_path = process_image(process_id).expect("foreground process image");
+        let foreground = resolve_foreground_application().expect("foreground application identity");
+        let process_id = foreground.process_id;
+        let image_path = foreground.image_path;
         assert!(
             image_path.to_ascii_lowercase().contains("calculator"),
             "foreground app is not Calculator: {image_path}"
@@ -962,6 +1132,85 @@ mod tests {
             &UiSemanticAction::Invoke,
         )
         .expect("Calculator invoke");
+        assert!(result.changed);
+        assert!(result.verified, "{}", result.summary);
+    }
+
+    #[test]
+    #[ignore = "requires Settings to be foreground on an interactive Windows desktop"]
+    fn live_settings_tree_resolves_the_hosted_application_process() {
+        let foreground = resolve_foreground_application().expect("foreground application identity");
+        assert!(
+            foreground
+                .image_path
+                .to_ascii_lowercase()
+                .contains("systemsettings"),
+            "foreground app is not Settings: {}",
+            foreground.image_path
+        );
+        let tree = collect_foreground(
+            foreground.process_id,
+            &foreground.image_path,
+            ACTION_MAX_DEPTH,
+            ACTION_MAX_NODES as u32,
+            INVOKE_READBACK_MAX_BYTES,
+        )
+        .expect("Settings UIA tree");
+        assert!(!tree.nodes.is_empty());
+        assert!(tree.nodes.iter().any(|node| {
+            node.supported_actions
+                .contains(&UiSemanticActionKind::Focus)
+                || node
+                    .supported_actions
+                    .contains(&UiSemanticActionKind::Invoke)
+        }));
+    }
+
+    #[test]
+    #[ignore = "requires Notepad to be foreground on an interactive Windows desktop"]
+    fn live_notepad_focus_uses_the_production_uia_adapter() {
+        let foreground = resolve_foreground_application().expect("foreground application identity");
+        assert!(
+            foreground
+                .image_path
+                .to_ascii_lowercase()
+                .contains("notepad"),
+            "foreground app is not Notepad: {}",
+            foreground.image_path
+        );
+        let tree = collect_foreground(
+            foreground.process_id,
+            &foreground.image_path,
+            ACTION_MAX_DEPTH,
+            ACTION_MAX_NODES as u32,
+            INVOKE_READBACK_MAX_BYTES,
+        )
+        .expect("Notepad UIA tree");
+        let target = tree
+            .nodes
+            .iter()
+            .find(|node| {
+                !node.is_protected
+                    && node.name.as_deref() == Some("File")
+                    && node
+                        .supported_actions
+                        .contains(&UiSemanticActionKind::Focus)
+            })
+            .expect("focusable Notepad target");
+        preflight_action(
+            foreground.process_id,
+            &foreground.image_path,
+            &target.fingerprint,
+            &UiSemanticAction::Focus,
+        )
+        .expect("Notepad focus preflight");
+        let result = apply_action(
+            foreground.process_id,
+            &foreground.image_path,
+            &target.fingerprint,
+            &UiSemanticAction::Focus,
+        )
+        .expect("Notepad focus");
         assert!(result.changed);
         assert!(result.verified, "{}", result.summary);
     }

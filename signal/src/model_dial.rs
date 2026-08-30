@@ -1931,6 +1931,39 @@ mod tests {
         assert!(turn.usage.output_tokens.is_some_and(|tokens| tokens > 0));
     }
 
+    #[actix_web::test]
+    #[ignore = "requires LRD_LIVE_DEEPSEEK_API_KEY and public network access"]
+    async fn live_deepseek_vision_proves_image_access_through_the_oss_seam() {
+        let api_key = std::env::var("LRD_LIVE_DEEPSEEK_API_KEY")
+            .expect("set LRD_LIVE_DEEPSEEK_API_KEY for the explicit live test");
+        let model = std::env::var("LRD_LIVE_DEEPSEEK_VISION_MODEL")
+            .unwrap_or_else(|_| "deepseek-v4-flash-vision-exp".to_string());
+        let base_url = std::env::var("LRD_LIVE_DEEPSEEK_BASE_URL")
+            .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string());
+        let config = ModelProviderConfig {
+            wire_protocol: Some(WireProtocol::OpenAiChatCompletions),
+            model: Some(model),
+            supports_image_input: true,
+            base_url: Some(base_url),
+            api_key: Some(api_key),
+            max_context_bytes: Some(128 * 1024),
+            ..Default::default()
+        };
+        let seam = SignalModelSeam::from_config(&config).unwrap();
+        let expectation =
+            desk_diagnose_core::provider_probe::provider_probe_request(ModelCapabilities {
+                image_input: true,
+            });
+        let request =
+            ModelRequest::text_only(vec![expectation.message.clone()], ResponseFormatSpec::None);
+        let mut sink = desk_diagnose_core::seam::NullTurnSink;
+        let turn = seam.call(request, &mut sink).await.unwrap();
+        assert_eq!(turn.stop_reason, StopReason::EndTurn);
+        desk_diagnose_core::provider_probe::verify_probe_response(&expectation, &turn.text)
+            .expect("provider must read the marker from the owned PNG");
+        assert!(turn.usage.output_tokens.is_some_and(|tokens| tokens > 0));
+    }
+
     /// A mid-stream Anthropic `error` event is surfaced.
     #[test]
     fn anthropic_stream_surfaces_error_event() {

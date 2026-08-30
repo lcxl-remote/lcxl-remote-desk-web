@@ -292,6 +292,11 @@ pub struct LoopDeps<'a> {
     /// permission-request validation. Static compilation alone is insufficient
     /// for edge capabilities such as the paired Office add-in.
     pub capability_inventory: Option<&'a [crate::capability_availability::CapabilityAvailability]>,
+    /// Active exact-input Provider tools recovered from the durable permission
+    /// decision. On a permission-resumed turn the loop initially exposes only
+    /// these mutations (plus internal run projection) so a model cannot replace
+    /// an approved ephemeral reference by re-running observation first.
+    pub permission_continuation_exact_tools: &'a [String],
     pub response_format: crate::prompt::ResponseFormatSpec,
     /// The system message prepended to the (trimmed) conversation on every model
     /// call. The caller builds it (with the control-end locale) via
@@ -1093,6 +1098,16 @@ async fn run_inner(
     let mut compression_attempted = false;
     let mut empty_end_turn_retries: u8 = 0;
     let mut truncated_turn_retries: u8 = 0;
+    // A permission decision resumes at the authorization boundary, not at the
+    // beginning of the user's workflow. Keep a recency-edge checkpoint in
+    // model requests until the model proposes a real mutating Provider call.
+    // This prevents weaker OpenAI-compatible models from re-running a read /
+    // preview, minting a new ephemeral object reference, and stranding the
+    // exact one-shot grant that the owner just approved. Once a mutating call
+    // is proposed the normal authorizer remains the sole execution authority;
+    // later model calls may inspect again to verify the outcome.
+    let mut permission_continuation_pending =
+        session.trigger_origin == crate::session::TriggerOrigin::PermissionDecision;
 
     loop {
         if session.turn_step_budget_exhausted(deps.max_steps_per_turn) {
@@ -1105,12 +1120,20 @@ async fn run_inner(
             });
         }
 
-        let exposed = exposed_tools(
+        let mut exposed = exposed_tools(
             deps.registry,
             &session.scope_snapshot,
             &session.execution_state,
             session.trigger_origin,
         );
+        if permission_continuation_pending && !deps.permission_continuation_exact_tools.is_empty() {
+            exposed.retain(|tool| {
+                deps.permission_continuation_exact_tools
+                    .iter()
+                    .any(|name| name == tool.name())
+                    || tool.effect == ToolEffect::RunProjection
+            });
+        }
         let tool_requirements = crate::model_capability::ModelRequirements::for_registered_tools(
             exposed.iter().copied(),
         );
@@ -1215,6 +1238,27 @@ async fn run_inner(
                 )?;
                 latest_user.message_id = projection_id;
                 messages.push(latest_user);
+            }
+            if permission_continuation_pending {
+                let marker_id = format!(
+                    "runtime-permission-continuation-{turn_id}-{}",
+                    session.input_revision
+                );
+                let marker_text = "PERMISSION CONTINUATION CHECKPOINT (server authoritative): resume at the authorization boundary; do not restart the workflow. Re-read CURRENT AUTHORIZED GRANTS. If a required tool has state=active with approved_exact_input, call that tool now with exactly approved_exact_input and no changed fields. Do not inspect again, create another preview, or request the same permission before that call, because doing so can replace the approved ephemeral object reference. If no matching active grant exists, adapt to the recorded decision or explain the blocker. This checkpoint grants no authority; the server authorizer still performs the final match.";
+                let parent = session
+                    .conversation
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == ChatRole::User)
+                    .and_then(|message| message.data_envelope.as_ref());
+                let mut marker = ChatMessage::system_event(&marker_id, marker_text);
+                marker.data_envelope = derive_internal_tool_result_envelope(
+                    parent,
+                    &marker_id,
+                    marker_text,
+                    "permission_continuation_checkpoint",
+                )?;
+                messages.push(marker);
             }
         }
         if empty_end_turn_retries > 0 {
@@ -1378,6 +1422,19 @@ async fn run_inner(
                 Some(content_blocked_error()),
             );
             return Ok(LoopOutcome::ContentRejected(safety_decision));
+        }
+
+        if permission_continuation_pending
+            && turn.tool_calls.iter().any(|call| {
+                deps.permission_continuation_exact_tools
+                    .iter()
+                    .any(|name| name == &call.name)
+                    && exposed
+                        .iter()
+                        .any(|tool| tool.name() == call.name && tool.effect == ToolEffect::Mutating)
+            })
+        {
+            permission_continuation_pending = false;
         }
 
         match disposition {

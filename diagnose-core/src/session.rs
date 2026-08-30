@@ -353,7 +353,8 @@ impl ExecutionState {
 /// is an automation turn the manager fires by itself after a background command
 /// finishes, so the model reacts to the result without a human prompt.
 /// `PermissionDecision` resumes the same owner-directed requirement after the
-/// owner records a grant decision; it appends no synthetic user message.
+/// owner records a grant decision; the runtime may append a trusted protocol
+/// bridge, but it is not a new owner-authored requirement.
 ///
 /// The origin is adopted at the turn boundary (part of the claim) and pins one
 /// security-relevant invariant for the whole turn: an automation turn must not be

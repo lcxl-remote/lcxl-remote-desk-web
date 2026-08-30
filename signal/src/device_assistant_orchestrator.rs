@@ -1836,6 +1836,13 @@ async fn run_turn_inner(
             now_unix_ms,
             readiness_revision,
         );
+    let permission_continuation_exact_tools =
+        desk_diagnose_core::permission_tools::active_exact_authorized_tool_names(
+            &capability_grants,
+            permission_requests,
+            now_unix_ms,
+            readiness_revision,
+        );
     // Internal run projection is not a Provider capability and grants no device
     // authority. It is always callable so the model can keep the user-visible
     // task assessment current even when no device context was selected.
@@ -2045,6 +2052,7 @@ async fn run_turn_inner(
         registry: &registry,
         provider_registry: Some(&provider_registry),
         capability_inventory: Some(&inventory),
+        permission_continuation_exact_tools: &permission_continuation_exact_tools,
         response_format: ResponseFormatSpec::None,
         system_prompt,
         max_steps_per_turn: config.max_steps_per_turn,

@@ -94,6 +94,7 @@ pub(crate) enum ResolvedObject {
         session_id: u32,
     },
     Application {
+        window_handle: isize,
         process_id: u32,
         image_path: String,
         process_started_at: Option<u64>,
@@ -500,6 +501,7 @@ impl ComputerUseBroker {
             ));
         }
         let ResolvedObject::Application {
+            window_handle,
             process_id,
             image_path,
             process_started_at,
@@ -528,6 +530,7 @@ impl ComputerUseBroker {
                 )
             })?;
             super::windows_raw_input::preflight(
+                window_handle,
                 process_id,
                 process_started_at,
                 selected_display,
@@ -555,6 +558,7 @@ impl ComputerUseBroker {
     ) -> Result<SemanticActionResult, AgentError> {
         self.preflight_raw_input(target, action, ceiling, selected_display)?;
         let ResolvedObject::Application {
+            window_handle,
             process_id,
             process_started_at,
             ..
@@ -566,6 +570,7 @@ impl ComputerUseBroker {
         {
             let process_started_at = process_started_at.expect("preflight required process start");
             let summary = super::windows_raw_input::apply(
+                window_handle,
                 process_id,
                 process_started_at,
                 selected_display,
@@ -652,6 +657,7 @@ impl ComputerUseBroker {
                         &incarnation,
                         ObjectKind::Application,
                         ResolvedObject::Application {
+                            window_handle: application.window_handle,
                             process_id: application.process_id,
                             image_path: application.image_path,
                             process_started_at: application.process_started_at,
@@ -976,6 +982,7 @@ impl ComputerUseBroker {
                 &interactive_session_incarnation,
                 ObjectKind::Application,
                 ResolvedObject::Application {
+                    window_handle: 0,
                     process_id: 0,
                     image_path: handler.executable_path.clone(),
                     process_started_at: None,
@@ -2361,10 +2368,12 @@ impl ComputerUseBroker {
             Some(ResolvedObject::DesktopSession { session_id })
                 if session_id == observed.session_id => {}
             Some(ResolvedObject::Application {
+                window_handle,
                 process_id,
                 image_path,
                 process_started_at,
-            }) if process_id == application.process_id
+            }) if window_handle == application.window_handle
+                && process_id == application.process_id
                 && path_eq(&image_path, &application.image_path)
                 && process_started_at == application.process_started_at => {}
             None => {}
@@ -3035,6 +3044,7 @@ pub(super) struct ObservedDesktop {
 }
 
 pub(super) struct ObservedApplication {
+    pub(super) window_handle: isize,
     pub(super) process_id: u32,
     pub(super) image_path: String,
     pub(super) process_started_at: Option<u64>,
@@ -3061,17 +3071,12 @@ pub(super) struct CollectedUiTree {
 fn observe_interactive_desktop() -> Result<ObservedDesktop, AgentError> {
     use std::mem::size_of;
 
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
     use windows::Win32::System::StationsAndDesktops::{
         CloseDesktop, DESKTOP_READOBJECTS, GetUserObjectInformationW, OpenInputDesktop, UOI_NAME,
     };
-    use windows::Win32::System::Threading::{
-        GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        QueryFullProcessImageNameW,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
-    use windows::core::PWSTR;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
 
     let mut session_id = 0_u32;
     unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session_id) }.map_err(|_| {
@@ -3135,39 +3140,18 @@ fn observe_interactive_desktop() -> Result<ObservedDesktop, AgentError> {
         ));
     }
 
-    let hwnd = unsafe { GetForegroundWindow() };
-    let foreground_application = if hwnd.0.is_null() {
-        None
-    } else {
-        let mut process_id = 0_u32;
-        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
-        process_image(process_id).map(|image_path| ObservedApplication {
-            process_id,
-            image_path,
-            process_started_at: super::windows_uia_observer::process_start(process_id),
-        })
-    };
+    let foreground_application = super::windows_uia_observer::resolve_foreground_application()
+        .ok()
+        .map(|application| ObservedApplication {
+            window_handle: application.window_handle,
+            process_id: application.process_id,
+            image_path: application.image_path,
+            process_started_at: Some(application.process_started_at),
+        });
     return Ok(ObservedDesktop {
         session_id,
         foreground_application,
     });
-
-    fn process_image(process_id: u32) -> Option<String> {
-        unsafe {
-            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id).ok()?;
-            let mut buffer = vec![0_u16; 32_768];
-            let mut length = buffer.len() as u32;
-            let result = QueryFullProcessImageNameW(
-                process,
-                Default::default(),
-                PWSTR(buffer.as_mut_ptr()),
-                &mut length,
-            )
-            .ok();
-            let _ = CloseHandle(process);
-            result.map(|_| String::from_utf16_lossy(&buffer[..length as usize]))
-        }
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -3772,6 +3756,13 @@ mod tests {
         let (ready, reason) = screen_capture_readiness(true, true, true, None, true, true);
         assert!(ready);
         assert_eq!(reason, None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a non-sensitive foreground application on an interactive Windows desktop"]
+    fn live_screen_safety_accepts_a_non_sensitive_foreground_application() {
+        ensure_screen_capture_safe().expect("foreground screen safety gate");
     }
 
     #[cfg(windows)]

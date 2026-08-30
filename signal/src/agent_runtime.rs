@@ -175,6 +175,7 @@ pub async fn resume_completion_turn(
         registry: &registry,
         provider_registry: None,
         capability_inventory: None,
+        permission_continuation_exact_tools: &[],
         response_format: desk_diagnose_core::prompt::ResponseFormatSpec::None,
         system_prompt: build_agentic_system_message(None),
         max_steps_per_turn: config.max_steps_per_turn.min(AUTO_FOLLOW_UP_MAX_STEPS),

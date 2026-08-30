@@ -23,8 +23,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,6 +35,7 @@ pub(super) struct RawInputPreflight {
 }
 
 pub(super) fn preflight(
+    expected_window_handle: isize,
     expected_process_id: u32,
     expected_process_started_at: u64,
     selected_display: &str,
@@ -49,24 +49,17 @@ pub(super) fn preflight(
             false,
         ));
     }
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.0.is_null() {
-        return Err(failure(
-            AgentErrorKind::SessionUnavailable,
-            "raw input requires a visible foreground application",
-            true,
-        ));
-    }
-    let mut process_id = 0u32;
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
-    if process_id == 0 || process_id != expected_process_id {
+    let foreground = super::windows_uia_observer::resolve_foreground_application()?;
+    if foreground.window_handle != expected_window_handle
+        || foreground.process_id != expected_process_id
+    {
         return Err(failure(
             AgentErrorKind::InvalidInput,
-            "foreground application identity changed after observation",
+            "foreground application window identity changed after observation",
             false,
         ));
     }
-    if super::windows_uia_observer::process_start(process_id) != Some(expected_process_started_at) {
+    if foreground.process_started_at != expected_process_started_at {
         return Err(failure(
             AgentErrorKind::InvalidInput,
             "foreground application process incarnation changed after observation",
@@ -83,6 +76,7 @@ pub(super) fn preflight(
                 true,
             )
         })?;
+    let hwnd = windows::Win32::Foundation::HWND(foreground.window_handle as *mut std::ffi::c_void);
     let foreground_monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) };
     if foreground_monitor == HMONITOR::default()
         || foreground_monitor.0 as isize != monitor.hmonitor_raw
@@ -117,12 +111,14 @@ pub(super) fn preflight(
 }
 
 pub(super) fn apply(
+    expected_window_handle: isize,
     expected_process_id: u32,
     expected_process_started_at: u64,
     selected_display: &str,
     action: &RawInputAction,
 ) -> Result<String, AgentError> {
     let screen = preflight(
+        expected_window_handle,
         expected_process_id,
         expected_process_started_at,
         selected_display,
@@ -144,6 +140,7 @@ pub(super) fn apply(
     // exist; the orchestrator must observe UI/screen state again before
     // deciding that the requested business outcome occurred.
     preflight(
+        expected_window_handle,
         expected_process_id,
         expected_process_started_at,
         selected_display,
@@ -378,10 +375,17 @@ mod tests {
                 key: RawInputKey::Escape,
             },
         };
-        let process_started_at = super::super::windows_uia_observer::process_start(process_id)
-            .expect("foreground process start identity");
-        let summary = apply(process_id, process_started_at, &display, &action)
-            .expect("one live raw input step");
+        let foreground = super::super::windows_uia_observer::resolve_foreground_application()
+            .expect("foreground application identity");
+        assert_eq!(foreground.process_id, process_id, "foreground PID changed");
+        let summary = apply(
+            foreground.window_handle,
+            process_id,
+            foreground.process_started_at,
+            &display,
+            &action,
+        )
+        .expect("one live raw input step");
         assert!(summary.contains("unverified"));
     }
 }

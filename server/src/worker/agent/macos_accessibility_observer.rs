@@ -673,6 +673,7 @@ fn frontmost_application() -> Result<ObservedApplication, AgentError> {
             ));
         }
         Ok(ObservedApplication {
+            window_handle: 0,
             process_id: process_id as u32,
             image_path: CStr::from_ptr(utf8).to_string_lossy().into_owned(),
             process_started_at: None,

@@ -399,6 +399,7 @@ fn deps<'a>(
         registry,
         provider_registry: None,
         capability_inventory: None,
+        permission_continuation_exact_tools: &[],
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
@@ -2287,6 +2288,7 @@ fn exec_deps<'a>(
         registry,
         provider_registry: None,
         capability_inventory: None,
+        permission_continuation_exact_tools: &[],
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
@@ -2342,6 +2344,85 @@ async fn mutating_executes_then_answers() {
     assert_eq!(s.conversation[2].text, "exit_code=0");
     assert_eq!(s.execution_state, ExecutionState::None);
     assert_eq!(s.turn_state, TurnState::Idle);
+}
+
+/// When a permission decision carries a recoverable exact input, the first
+/// resumed model request exposes the approved mutation but not observation.
+/// After that mutation is proposed, normal read tools return so the model can
+/// verify the outcome in the same turn.
+#[tokio::test]
+async fn exact_permission_resume_hides_reobservation_until_mutation_is_proposed() {
+    use crate::session::{AgentSessionSurface, TriggerOrigin};
+
+    let sess = MemSession::default();
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use("c1", "exact_action"),
+                tool_use("c2", "inspect"),
+                answer("verified"),
+            ]
+            .into(),
+        ),
+        requests: requests.clone(),
+    };
+    let scripted = tools(vec![ExecOutcome::Executed {
+        output: ToolRunOutput {
+            content: "action completed".into(),
+            image_data_url: None,
+        },
+        event_id: None,
+    }]);
+    let registry = vec![
+        mutating_tool("exact_action", Capability::ShellExecConfirmed),
+        read_tool("inspect", Capability::SystemInfo),
+    ];
+    let exact_tools = vec!["exact_action".to_string()];
+    let clock = || "2026-08-30T12:00:00Z".to_string();
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+
+    let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, exec_scope(), "t0");
+    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.conversation.push(ChatMessage::text(
+        "owner-requirement",
+        ChatRole::User,
+        "inspect, preview, execute, then verify",
+    ));
+    *sess.inner.borrow_mut() = Some(seeded);
+
+    let mut resume_claim = exec_claim();
+    resume_claim.trigger_origin = TriggerOrigin::PermissionDecision;
+    let mut loop_deps = exec_deps(&sess, &model, &scripted, &registry, &clock);
+    loop_deps.permission_continuation_exact_tools = &exact_tools;
+    let outcome = resume_agent_turn_after_permission(
+        &loop_deps,
+        resume_claim,
+        ChatMessage::text(
+            "permission-decision",
+            ChatRole::User,
+            "trusted permission decision bridge",
+        ),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, LoopOutcome::Answered("verified".into()));
+
+    let requests = requests.borrow();
+    assert_eq!(
+        requests[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["exact_action"]
+    );
+    assert!(
+        requests[1].tools.iter().any(|tool| tool.name == "inspect"),
+        "observation must be restored after the approved mutation is proposed"
+    );
+    assert_eq!(*scripted.reads.borrow(), vec!["inspect"]);
 }
 
 /// An automation turn ([`TriggerOrigin::ExecCompletion`]) never runs a mutating
@@ -2541,6 +2622,63 @@ async fn generic_work_completion_resume_runs_against_the_existing_tail_without_a
     assert_eq!(s.conversation.last().unwrap().text, "looked at it");
     // The pending entry the model reacted to is drained.
     assert!(s.pending_auto_triggers.is_empty());
+}
+
+/// A permission resume puts a server-authored checkpoint at the recency edge
+/// so the model consumes an active exact grant instead of repeating the read /
+/// preview that created its ephemeral object reference.
+#[tokio::test]
+async fn permission_resume_places_authorization_checkpoint_at_request_tail() {
+    use crate::session::{AgentSessionSurface, TriggerOrigin};
+
+    let sess = MemSession::default();
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new([answer("continued")].into()),
+        requests: requests.clone(),
+    };
+    let scripted = tools(vec![]);
+    let registry: Vec<RegisteredTool> = vec![];
+    let clock = || "2026-08-30T12:00:00Z".to_string();
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+
+    let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "t0");
+    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.conversation.push(ChatMessage::text(
+        "owner-requirement",
+        ChatRole::User,
+        "inspect, preview, then run the exact action",
+    ));
+    *sess.inner.borrow_mut() = Some(seeded);
+
+    let mut resume_claim = claim();
+    resume_claim.trigger_origin = TriggerOrigin::PermissionDecision;
+    let outcome = resume_agent_turn_after_permission(
+        &deps(&sess, &model, &scripted, &registry, &clock),
+        resume_claim,
+        ChatMessage::text(
+            "permission-decision",
+            ChatRole::User,
+            "trusted permission decision bridge",
+        ),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, LoopOutcome::Answered("continued".into()));
+
+    let requests = requests.borrow();
+    let tail = requests[0].messages.last().unwrap();
+    assert!(
+        tail.text
+            .starts_with("PERMISSION CONTINUATION CHECKPOINT (server authoritative)")
+    );
+    assert!(tail.text.contains("call that tool now"));
+    assert!(tail.text.contains("Do not inspect again"));
+    assert!(
+        tail.message_id
+            .starts_with("runtime-permission-continuation-")
+    );
 }
 
 /// An unknown-outcome execution closes the conversation with a placeholder tool
@@ -3115,6 +3253,7 @@ async fn mutating_backend_error_fails_turn() {
         registry: &reg,
         provider_registry: None,
         capability_inventory: None,
+        permission_continuation_exact_tools: &[],
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
@@ -3215,6 +3354,7 @@ async fn retryable_mutating_error_returns_to_model_for_correction() {
         registry: &reg,
         provider_registry: None,
         capability_inventory: None,
+        permission_continuation_exact_tools: &[],
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
@@ -4137,6 +4277,7 @@ async fn rejected_tool_image_is_not_persisted_and_remaining_calls_are_paired() {
         registry: &registry,
         provider_registry: None,
         capability_inventory: None,
+        permission_continuation_exact_tools: &[],
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
         max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
