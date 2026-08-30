@@ -17,6 +17,9 @@ use crate::chat::{ChatMessage, ChatRole};
 use crate::redaction::{Redactor, RegexRedactor};
 use crate::trim::model_context_cost;
 
+mod egress;
+pub use egress::*;
+
 pub const CONTEXT_SUMMARY_PROMPT_VERSION: &str = "checkpoint-summary-v1";
 pub const CONTEXT_SUMMARY_SCHEMA_VERSION: u16 = 1;
 pub const CONTEXT_SUMMARY_OUTPUT_HARD_CAP_TOKENS: i64 = 4096;
@@ -52,6 +55,8 @@ pub struct ContextCheckpointV1 {
     pub summary: ContextSummaryV1,
     pub summary_model_context_cost: u64,
     pub compressor: CompressorProvenanceV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<ContextSummaryLineageV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +233,7 @@ pub struct ValidatedContextSummary {
     pub summary: ContextSummaryV1,
     pub summary_model_context_cost: u64,
     pub compressor: CompressorProvenanceV1,
+    pub lineage: Option<ContextSummaryLineageV1>,
 }
 
 pub fn plan_model_context(
@@ -544,6 +550,7 @@ pub fn parse_validated_context_summary(
         summary,
         summary_model_context_cost,
         compressor,
+        lineage: None,
     })
 }
 
@@ -595,6 +602,12 @@ pub fn apply_validated_checkpoint(
     validate_summary(&validated.summary, plan)?;
     validate_compressor_provenance(&validated.compressor, plan)?;
     let canonical_summary = canonical_json(&validated.summary)?;
+    if let Some(lineage) = &validated.lineage {
+        validate_summary_lineage(lineage, &canonical_summary, conversation)?;
+        if lineage.sources != compression_source_bindings(plan, conversation)? {
+            return Err(ModelContextError::StaleCompressionPlan);
+        }
+    }
     let actual_summary_cost = u64::try_from(model_context_cost(&ChatMessage::context_summary(
         "checkpoint:validated",
         canonical_summary,
@@ -615,6 +628,7 @@ pub fn apply_validated_checkpoint(
         summary: validated.summary,
         summary_model_context_cost: validated.summary_model_context_cost,
         compressor: validated.compressor,
+        lineage: validated.lineage,
     });
     let mut next_state = state.clone();
     let floor_group_head_message_id = groups
@@ -752,10 +766,16 @@ fn checkpoint_view(
 ) -> Result<ModelContextView, ModelContextError> {
     let canonical = canonical_json(&checkpoint.v1().summary)?;
     let mut messages = Vec::with_capacity(conversation.len() + 1);
-    messages.push(ChatMessage::context_summary(
+    let mut summary_message = ChatMessage::context_summary(
         format!("checkpoint:{}", checkpoint.v1().generation),
         canonical,
-    ));
+    );
+    summary_message.data_envelope = checkpoint
+        .v1()
+        .lineage
+        .as_ref()
+        .map(|lineage| lineage.envelope.clone());
+    messages.push(summary_message);
     let start = groups
         .get(floor)
         .map_or(conversation.len(), |group| group.start);
@@ -864,6 +884,9 @@ fn validate_checkpoint(
         .collect::<HashSet<_>>();
     validate_summary_values(&checkpoint.summary, &allowed, &omitted_images)?;
     let canonical = canonical_json(&checkpoint.summary)?;
+    if let Some(lineage) = &checkpoint.lineage {
+        validate_summary_lineage(lineage, &canonical, conversation)?;
+    }
     if canonical.len() > MAX_CONTEXT_SUMMARY_SERIALIZED_BYTES {
         return Err(ModelContextError::InvalidCheckpoint(
             "summary serialized size exceeds the hard limit".into(),

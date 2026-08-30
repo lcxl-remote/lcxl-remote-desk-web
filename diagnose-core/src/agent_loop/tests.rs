@@ -10,6 +10,8 @@ use desk_agent_protocol::{AgentScope, Capability, ExecutionMode};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+mod egress;
+
 /// An in-memory session store: one session, claimed via the pure transition.
 #[derive(Default)]
 struct MemSession {

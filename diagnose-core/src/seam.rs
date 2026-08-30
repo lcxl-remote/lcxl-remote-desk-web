@@ -256,6 +256,15 @@ pub enum ContextCompressionAuditOutcome {
 /// (text + tool calls + stop reason + usage).
 #[async_trait(?Send)]
 pub trait ModelSeam {
+    /// Exact data-egress policy for Device Assistant context transformations.
+    /// Ordinary diagnostic/copilot seams leave this unset. A strict seam must
+    /// also enforce the same policy inside `call`, before its transport starts.
+    fn model_egress_policy(
+        &self,
+    ) -> Result<Option<crate::model_egress::ModelEgressPolicy>, AgentError> {
+        Ok(None)
+    }
+
     /// Resolve and pin the model/source/profile needed to build a safe history
     /// view before the provider body is rendered.
     async fn context_policy(

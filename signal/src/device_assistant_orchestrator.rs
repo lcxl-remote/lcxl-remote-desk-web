@@ -892,6 +892,19 @@ struct MeteredModel {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for MeteredModel {
+    fn model_egress_policy(&self) -> Result<Option<ModelEgressPolicy>, AgentError> {
+        let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
+            .map_err(|_| transport_error("system clock predates the Unix epoch"))?;
+        Ok(Some(ModelEgressPolicy {
+            destination: self.destination.clone(),
+            selected_source_tools: self.selected_source_tools.clone(),
+            export_authorization_id: self.export_authorization_id.clone(),
+            now_unix_ms,
+            byte_cap: desk_diagnose_core::sink_authorizer::MAX_SINK_BYTES,
+            omit_finite_retention_historical_turns: self.permission_resume,
+        }))
+    }
+
     async fn context_policy(
         &self,
         requirements: desk_diagnose_core::model_capability::ModelRequirements,
@@ -904,16 +917,9 @@ impl ModelSeam for MeteredModel {
         request: ModelRequest,
         sink: &mut dyn TurnSink,
     ) -> Result<desk_diagnose_core::chat::ModelTurn, AgentError> {
-        let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
-            .map_err(|_| transport_error("system clock predates the Unix epoch"))?;
-        let policy = ModelEgressPolicy {
-            destination: self.destination.clone(),
-            selected_source_tools: self.selected_source_tools.clone(),
-            export_authorization_id: self.export_authorization_id.clone(),
-            now_unix_ms,
-            byte_cap: desk_diagnose_core::sink_authorizer::MAX_SINK_BYTES,
-            omit_finite_retention_historical_turns: self.permission_resume,
-        };
+        let policy = self.model_egress_policy()?.ok_or_else(|| {
+            transport_error("device assistant model egress policy is unavailable")
+        })?;
         let authorized = policy.authorize_request(request).map_err(|error| {
             log::warn!("[device-assistant] model egress denied: {error}");
             AgentError {

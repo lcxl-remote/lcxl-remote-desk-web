@@ -753,6 +753,24 @@ async fn prepare_model_context(
             Err(error) => return Err(model_context_error(error)),
         };
 
+        if let Some(policy) = deps.model.model_egress_policy()?
+            && crate::model_context::authorize_context_checkpoint(
+                &policy,
+                &session.model_context_state,
+                &pinned_context.key(),
+                &session.conversation,
+            )
+            .is_err()
+        {
+            return Err(report_context_compression_failure(
+                deps.model,
+                crate::seam::ContextCompressionFailureKind::StaleContext,
+                None,
+                None,
+            )
+            .await);
+        }
+
         match plan {
             crate::model_context::ContextBuildPlan::Ready(ready) => {
                 let changed = session.model_context_state != ready.next_state;
@@ -860,8 +878,30 @@ async fn prepare_model_context(
                     plan.covered_message_count,
                     plan.input_model_context_cost,
                 );
+                let authorized_input = match deps.model.model_egress_policy()? {
+                    Some(policy) => match crate::model_context::authorize_compression_input(
+                        &policy,
+                        &plan,
+                        &session.conversation,
+                    ) {
+                        Ok(input) => Some(input),
+                        Err(_) => {
+                            return Err(report_context_compression_failure(
+                                deps.model,
+                                FailureKind::StaleContext,
+                                Some(audit_context),
+                                None,
+                            )
+                            .await);
+                        }
+                    },
+                    None => None,
+                };
                 let request = ModelRequest {
-                    messages: crate::model_context::compression_request_messages(&plan),
+                    messages: authorized_input.as_ref().map_or_else(
+                        || crate::model_context::compression_request_messages(&plan),
+                        |input| input.messages.clone(),
+                    ),
                     tools: Vec::new(),
                     tool_requirements: crate::model_capability::ModelRequirements::TEXT_ONLY,
                     tool_choice: crate::chat::ToolChoice::None,
@@ -935,7 +975,7 @@ async fn prepare_model_context(
                         .await);
                     }
                 };
-                let validated = match crate::model_context::parse_validated_context_summary(
+                let mut validated = match crate::model_context::parse_validated_context_summary(
                     &turn.text, &plan, provenance,
                 ) {
                     Ok(validated) => validated,
@@ -950,6 +990,26 @@ async fn prepare_model_context(
                         .await);
                     }
                 };
+                if let Some(input) = &authorized_input {
+                    let policy = deps.model.model_egress_policy()?;
+                    if policy.as_ref().is_none_or(|policy| {
+                        crate::model_context::bind_context_summary_lineage(
+                            policy,
+                            &mut validated,
+                            &turn,
+                            input,
+                        )
+                        .is_err()
+                    }) {
+                        return Err(report_context_compression_failure(
+                            deps.model,
+                            FailureKind::StaleContext,
+                            Some(audit_context),
+                            Some(compression_usage),
+                        )
+                        .await);
+                    }
+                }
                 let summary_context_cost = validated.summary_model_context_cost;
                 let candidate = match serde_json::to_string(&validated.summary) {
                     Ok(candidate) => candidate,
@@ -986,6 +1046,29 @@ async fn prepare_model_context(
                         Some(compression_usage),
                     )
                     .await);
+                }
+                // Content review may wait on another service. Recheck expiry
+                // immediately before applying the checkpoint, without extending
+                // the accepted model output's retention boundary.
+                if let Some(input) = &authorized_input {
+                    let policy = deps.model.model_egress_policy()?;
+                    if policy.as_ref().is_none_or(|policy| {
+                        crate::model_context::bind_context_summary_lineage(
+                            policy,
+                            &mut validated,
+                            &turn,
+                            input,
+                        )
+                        .is_err()
+                    }) {
+                        return Err(report_context_compression_failure(
+                            deps.model,
+                            FailureKind::StaleContext,
+                            Some(audit_context),
+                            Some(compression_usage),
+                        )
+                        .await);
+                    }
                 }
                 let generation = plan.generation;
                 let covered_message_count = plan.covered_message_count;
