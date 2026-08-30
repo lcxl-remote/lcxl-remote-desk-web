@@ -38,6 +38,7 @@ export type CapabilityInventoryEntry = {
             hard_timeout_ms: number;
         };
     };
+    context_selectable: boolean;
     compiled: boolean;
     enabled: boolean;
     connected: boolean;

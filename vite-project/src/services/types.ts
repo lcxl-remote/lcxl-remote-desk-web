@@ -1437,6 +1437,49 @@ export type DestinationIdentity = ({
     workspace_id: string;
 });
 
+/**
+ * @description Server-side Device Assistant product features understood by a control end.\n\nThis profile advertises implementation support only. Authentication,\nownership, target readiness and grants are still checked for every request.
+*/
+export type DeviceAssistantClientCapabilities = {
+    /**
+     * @type boolean
+    */
+    background_task_cancel: boolean;
+    /**
+     * @type boolean
+    */
+    capability_inventory: boolean;
+    /**
+     * @type boolean
+    */
+    full_session_snapshot: boolean;
+    /**
+     * @type boolean
+    */
+    grant_revoke: boolean;
+    /**
+     * @type boolean
+    */
+    object_context: boolean;
+    /**
+     * @type boolean
+    */
+    permission_decision: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    schema_version: number;
+    /**
+     * @type boolean
+    */
+    turn_stream: boolean;
+    /**
+     * @type boolean
+    */
+    unknown_outcome_disposition: boolean;
+};
+
 export type DeviceAssistantSessionSummaryDto = {
     /**
      * @type boolean
@@ -4887,6 +4930,7 @@ export type RestResponseServerInfo = {
          * @type string
         */
         default_install_path: string;
+        device_assistant?: (null | DeviceAssistantClientCapabilities);
         /**
          * @description Indicates whether the system is initialized (e.g., admin password set)
          * @type boolean
@@ -5760,6 +5804,7 @@ export type ServerInfo = {
      * @type string
     */
     default_install_path: string;
+    device_assistant?: (null | DeviceAssistantClientCapabilities);
     /**
      * @description Indicates whether the system is initialized (e.g., admin password set)
      * @type boolean

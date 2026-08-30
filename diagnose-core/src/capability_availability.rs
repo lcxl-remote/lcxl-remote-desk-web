@@ -196,6 +196,9 @@ pub fn inventory_snapshot(
             provider_display_name_key: provider.wire.display_name_key.clone(),
             provider_version: provider.wire.provider_version,
             capability: capability.wire.clone(),
+            context_selectable: crate::device_assistant::is_selectable_context_capability_id(
+                &item.capability_id,
+            ),
             compiled: item.compiled,
             enabled: item.enabled,
             connected: item.connected,

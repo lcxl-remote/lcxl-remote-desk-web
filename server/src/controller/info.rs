@@ -221,6 +221,7 @@ pub async fn query_server_info(
         background_start,
         macos_permissions,
         wayland_portal,
+        device_assistant: Some(crate::model::info::DeviceAssistantClientCapabilities::oss()),
     };
 
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(info)))

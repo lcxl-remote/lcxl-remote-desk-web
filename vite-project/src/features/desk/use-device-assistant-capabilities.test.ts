@@ -49,6 +49,7 @@ describe('useDeviceAssistantCapabilities', () => {
                     entries: [{
                         provider_id: 'office.document',
                         capability: { capability_id: 'office.document.inspect' },
+                        context_selectable: true,
                         compiled: true,
                         enabled: true,
                         connected: true,
@@ -60,6 +61,7 @@ describe('useDeviceAssistantCapabilities', () => {
         });
         expect(result.current.snapshot?.entries[0].reason)
             .toBe('office_bridge_not_paired');
+        expect(result.current.snapshot?.entries[0].context_selectable).toBe(true);
         expect(result.current.loading).toBe(false);
     });
 });

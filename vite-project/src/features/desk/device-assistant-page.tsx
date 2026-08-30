@@ -135,14 +135,8 @@ function DeviceAssistantWorkspace({
         capabilities.refresh();
     }, [capabilities.refresh, isConnected]);
 
-    const contextCapabilities = (capabilities.snapshot?.entries ?? []).filter((entry) =>
-        [
-            'desktop.session.inspect',
-            'desktop.ui.inspect',
-            'office.document.inspect',
-            CURRENT_SCREEN_CAPABILITY_ID,
-        ]
-            .includes(entry.capability.capability_id),
+    const contextCapabilities = (capabilities.snapshot?.entries ?? []).filter(
+        (entry) => entry.context_selectable,
     );
 
     useEffect(() => {
