@@ -1676,7 +1676,11 @@ async fn run_inner(
                                 Ok(out) => (out, true),
                                 Err(e) => (
                                     crate::seam::ToolRunOutput {
-                                        content: format!("tool error: {}", e.message),
+                                        content: if e.safe_for_model {
+                                            format!("tool error: {}", e.message)
+                                        } else {
+                                            "tool error: the tool could not complete".into()
+                                        },
                                         image_data_url: None,
                                     },
                                     false,

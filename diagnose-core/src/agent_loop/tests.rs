@@ -1666,6 +1666,7 @@ async fn runs_read_tool_then_answers() {
 async fn failed_read_tool_result_is_offered_for_data_envelope_labeling() {
     struct FailingRead {
         envelope_inputs: Rc<RefCell<Vec<String>>>,
+        safe_for_model: bool,
     }
 
     #[async_trait(?Send)]
@@ -1673,9 +1674,14 @@ async fn failed_read_tool_result_is_offered_for_data_envelope_labeling() {
         async fn run_read(&self, _call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
             Err(AgentError {
                 kind: desk_agent_protocol::AgentErrorKind::TransportError,
-                message: "display is not selected".into(),
+                message: if self.safe_for_model {
+                    "display is not selected"
+                } else {
+                    "PRIVATE_BACKEND_FAILURE"
+                }
+                .into(),
                 retryable: false,
-                safe_for_model: true,
+                safe_for_model: self.safe_for_model,
                 error_code: None,
             })
         }
@@ -1692,41 +1698,50 @@ async fn failed_read_tool_result_is_offered_for_data_envelope_labeling() {
         }
     }
 
-    let sess = MemSession::default();
-    let requests = Rc::new(RefCell::new(vec![]));
-    let model = ScriptModel {
-        turns: RefCell::new([tool_use("c1", "sysinfo"), answer("done")].into()),
-        requests: Rc::clone(&requests),
-    };
-    let envelope_inputs = Rc::new(RefCell::new(vec![]));
-    let tools = FailingRead {
-        envelope_inputs: Rc::clone(&envelope_inputs),
-    };
-    let registry = vec![read_tool("sysinfo", Capability::SystemInfo)];
-    let clock = || "t".to_string();
-    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    for safe_for_model in [true, false] {
+        let sess = MemSession::default();
+        let requests = Rc::new(RefCell::new(vec![]));
+        let model = ScriptModel {
+            turns: RefCell::new([tool_use("c1", "sysinfo"), answer("done")].into()),
+            requests: Rc::clone(&requests),
+        };
+        let envelope_inputs = Rc::new(RefCell::new(vec![]));
+        let tools = FailingRead {
+            envelope_inputs: Rc::clone(&envelope_inputs),
+            safe_for_model,
+        };
+        let registry = vec![read_tool("sysinfo", Capability::SystemInfo)];
+        let clock = || "t".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
 
-    let outcome = run_agent_turn(
-        &deps(&sess, &model, &tools, &registry, &clock),
-        claim(),
-        ChatMessage::text("u", ChatRole::User, "q"),
-        &mut sink,
-    )
-    .await
-    .unwrap();
+        let outcome = run_agent_turn(
+            &deps(&sess, &model, &tools, &registry, &clock),
+            claim(),
+            ChatMessage::text("u", ChatRole::User, "q"),
+            &mut sink,
+        )
+        .await
+        .unwrap();
 
-    assert_eq!(outcome, LoopOutcome::Answered("done".into()));
-    assert_eq!(
-        envelope_inputs.borrow().as_slice(),
-        ["tool error: display is not selected"]
-    );
-    assert!(
-        requests.borrow()[1]
-            .messages
-            .iter()
-            .any(|message| message.role == ChatRole::Tool
-                && message.text == "tool error: display is not selected")
-    );
+        assert_eq!(outcome, LoopOutcome::Answered("done".into()));
+        let expected = if safe_for_model {
+            "tool error: display is not selected"
+        } else {
+            "tool error: the tool could not complete"
+        };
+        assert_eq!(envelope_inputs.borrow().as_slice(), [expected]);
+        assert!(
+            requests.borrow()[1]
+                .messages
+                .iter()
+                .any(|message| message.role == ChatRole::Tool && message.text == expected)
+        );
+        assert!(
+            !serde_json::to_string(&sess.inner.borrow().as_ref().unwrap().conversation)
+                .unwrap()
+                .contains("PRIVATE_BACKEND_FAILURE")
+        );
+    }
 }
 
 /// A model that names a tool it was never shown gets an error tool-result (the

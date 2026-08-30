@@ -76,4 +76,6 @@ Each device additionally keeps two **local** controls in its own settings: an **
 
 ## Security
 
+Device-read failures marked unsafe for the model become a generic tool failure before further model calls or conversation persistence. Internal error details are not included in that message.
+
 The full set of invariants — server-side authority, fail-closed redaction, server-only keys, and metadata-only audit — is documented in the [AI Security Model](/security/ai-security-model).
