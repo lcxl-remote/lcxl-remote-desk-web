@@ -105,7 +105,21 @@ pub async fn run_service_daemon_inner(
         .await
         .map_err(|e| format!("Failed to init signal DB: {e}"))?;
     info!("Signal database initialized at {signal_db_dir}");
-    let exec_ledger = open_exec_ledger(&paths).await?;
+    let exec_ledger = open_exec_ledger(&paths, cfg!(target_os = "linux")).await?;
+    #[cfg(target_os = "linux")]
+    {
+        let privileged_supervisor = linux_privileged_exec::LinuxPrivilegedExecSupervisor::new(
+            linux_privileged_exec::PrivilegedPermitStore::default(),
+            exec_ledger.clone(),
+        );
+        let summary = privileged_supervisor
+            .reconcile_in_flight()
+            .await
+            .map_err(|error| format!("Failed to reconcile privileged executions: {error}"))?;
+        if summary != linux_privileged_exec::PrivilegedReconcileSummary::default() {
+            info!("Privileged execution recovery: {summary:?}");
+        }
+    }
     // Age-based retention cleanup for the local usage rollups (collect-only
     // telemetry, no billing coupling). One task per process; the delete is idempotent.
     tokio::spawn(desk_signal::usage_retention::run_retention_cleanup_loop(
@@ -414,6 +428,7 @@ const EXEC_RESULT_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::fro
 /// not start rather than silently execute unrecorded.
 async fn open_exec_ledger(
     paths: &HostDataPaths,
+    defer_linux_privileged: bool,
 ) -> Result<Arc<crate::daemon::exec_ledger::ExecLedger>, String> {
     let dir = paths.exec_ledger_dir().to_string_lossy().to_string();
     let ledger = crate::daemon::exec_ledger::ExecLedger::open(&dir)
@@ -425,7 +440,23 @@ async fn open_exec_ledger(
     // as indeterminate now: the host genuinely cannot say whether those commands
     // ran, and leaving them looking in-progress would tell a manager "still
     // working on it" for ever.
-    match ledger.abandon_in_flight().await {
+    let abandoned = if defer_linux_privileged {
+        #[cfg(target_os = "linux")]
+        {
+            ledger
+                .abandon_in_flight_except(
+                    crate::daemon::linux_privileged_exec::is_recoverable_privileged_ledger_row,
+                )
+                .await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            ledger.abandon_in_flight().await
+        }
+    } else {
+        ledger.abandon_in_flight().await
+    };
+    match abandoned {
         Ok(lost) if !lost.is_empty() => {
             for row in &lost {
                 warn!(
@@ -507,7 +538,7 @@ pub async fn start_inprocess_daemon(
     let paths = settings.read().await.paths().clone();
     initialize_remote_access(&paths, &host_control_hub);
 
-    let exec_ledger = open_exec_ledger(&paths).await?;
+    let exec_ledger = open_exec_ledger(&paths, false).await?;
 
     // Endpoints of this node's own bundled TURN, read from the running runtime
     // on each use (empty when no embedded TURN is serving) so the PC manager

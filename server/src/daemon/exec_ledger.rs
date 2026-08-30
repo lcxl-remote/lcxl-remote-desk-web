@@ -391,12 +391,27 @@ impl ExecLedger {
     /// Returns what it settled, so the host can log which executions it lost track
     /// of across the restart.
     pub async fn abandon_in_flight(&self) -> Result<Vec<exec_ledger_entry::Model>, DbErr> {
+        self.abandon_in_flight_except(|_| false).await
+    }
+
+    /// Settle in-flight rows except those claimed by a platform recovery
+    /// supervisor. The predicate only defers a row; that supervisor must then
+    /// query and settle it before the daemon advertises the capability.
+    pub async fn abandon_in_flight_except(
+        &self,
+        defer: impl Fn(&exec_ledger_entry::Model) -> bool,
+    ) -> Result<Vec<exec_ledger_entry::Model>, DbErr> {
         let lost = self.in_flight().await?;
-        for row in &lost {
+        let mut settled = Vec::new();
+        for row in lost {
+            if defer(&row) {
+                continue;
+            }
             self.mark_terminal(&row.execution_generation, Terminal::Indeterminate)
                 .await?;
+            settled.push(row);
         }
-        Ok(lost)
+        Ok(settled)
     }
 
     /// Drop stored results older than `retain`, leaving the rows themselves.
@@ -590,6 +605,71 @@ mod tests {
             }
             other => panic!("expected Duplicate, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn privileged_reservation_persists_sealed_plan_and_rejects_plan_drift() {
+        let l = ledger().await;
+        assert_eq!(
+            l.reserve_with_sealed_plan(
+                "task-root",
+                "gen-root",
+                "fp-root",
+                "lcxl-ai-exec-deadbeef.service",
+                r#"{"principal":"administrator"}"#,
+            )
+            .await
+            .unwrap(),
+            Reservation::Granted
+        );
+        let row = l.get("gen-root").await.unwrap().unwrap();
+        assert_eq!(
+            row.plan_json.as_deref(),
+            Some(r#"{"principal":"administrator"}"#)
+        );
+        assert_eq!(
+            l.reserve_with_sealed_plan(
+                "task-root",
+                "gen-root",
+                "fp-root",
+                "lcxl-ai-exec-deadbeef.service",
+                r#"{"principal":"session_user"}"#,
+            )
+            .await
+            .unwrap(),
+            Reservation::FingerprintMismatch
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_recovery_can_defer_only_claimed_rows() {
+        let l = ledger().await;
+        l.reserve("ordinary", "gen-user", "fp-user", Some("pgid:7"))
+            .await
+            .unwrap();
+        l.reserve_with_sealed_plan(
+            "root",
+            "gen-root",
+            "fp-root",
+            "lcxl-ai-exec-deadbeef.service",
+            "{}",
+        )
+        .await
+        .unwrap();
+        let settled = l
+            .abandon_in_flight_except(|row| row.plan_json.is_some())
+            .await
+            .unwrap();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].execution_generation, "gen-user");
+        assert_eq!(
+            l.get("gen-user").await.unwrap().unwrap().state,
+            State::Indeterminate.as_str()
+        );
+        assert_eq!(
+            l.get("gen-root").await.unwrap().unwrap().state,
+            State::Reserved.as_str()
+        );
     }
 
     /// Retrying a task is legitimate: a new generation of the same task reserves

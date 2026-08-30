@@ -533,6 +533,26 @@ fn execution_digest_hex(execution_generation: &str) -> String {
     hex
 }
 
+/// True only for a ledger row that can be handed to the Linux privileged
+/// recovery supervisor. Prefix matching alone is insufficient: the sealed plan,
+/// task/generation/fingerprint, and deterministic unit identity must all agree.
+pub fn is_recoverable_privileged_ledger_row(
+    row: &crate::daemon::exec_ledger::exec_ledger_entry::Model,
+) -> bool {
+    let Some(plan_json) = row.plan_json.as_deref() else {
+        return false;
+    };
+    let Ok(plan) = serde_json::from_str::<ExecPlan>(plan_json) else {
+        return false;
+    };
+    validate_privileged_plan(&plan).is_ok()
+        && plan.exec_request_id.0 == row.task_id
+        && plan.execution_generation == row.execution_generation
+        && plan.fingerprint == row.plan_fingerprint
+        && row.containment_identity.as_deref()
+            == Some(transient_unit_name(&plan.execution_generation).as_str())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TransientRunOutcome {
     Exited {
@@ -550,9 +570,18 @@ enum TransientRunOutcome {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TransientUnitInspection {
+    Missing,
+    Running,
+    Exited { exit_code: i32 },
+    Unknown(String),
+}
+
 #[async_trait]
 trait TransientCommandRunner: Send + Sync {
     async fn run(&self, spec: &SystemdTransientSpec, timeout: Duration) -> TransientRunOutcome;
+    async fn inspect(&self, unit_name: &str) -> Result<TransientUnitInspection, String>;
     async fn terminate(&self, unit_name: &str);
 }
 
@@ -650,6 +679,10 @@ impl TransientCommandRunner for RealTransientCommandRunner {
         }
     }
 
+    async fn inspect(&self, unit_name: &str) -> Result<TransientUnitInspection, String> {
+        inspect_systemd_unit(unit_name).await
+    }
+
     async fn terminate(&self, unit_name: &str) {
         // Unit names are SHA-256-derived, never caller text. Kill the whole
         // control group first, then stop/reset the transient unit. Every call is
@@ -668,6 +701,81 @@ impl TransientCommandRunner for RealTransientCommandRunner {
                 .kill_on_drop(true);
             let _ = tokio::time::timeout(SYSTEMCTL_OPERATION_TIMEOUT, command.status()).await;
         }
+    }
+}
+
+async fn inspect_systemd_unit(unit_name: &str) -> Result<TransientUnitInspection, String> {
+    let mut command = Command::new(SYSTEMCTL_PATH);
+    command
+        .args([
+            "show",
+            unit_name,
+            "--property=LoadState",
+            "--property=ActiveState",
+            "--property=SubState",
+            "--property=Result",
+            "--property=ExecMainCode",
+            "--property=ExecMainStatus",
+            "--no-pager",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(SYSTEMCTL_OPERATION_TIMEOUT, command.output())
+        .await
+        .map_err(|_| "systemctl show timed out".to_string())?
+        .map_err(|error| format!("systemctl show failed: {error}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_systemd_unit_inspection(output.status.success(), &text)
+}
+
+fn parse_systemd_unit_inspection(
+    command_succeeded: bool,
+    text: &str,
+) -> Result<TransientUnitInspection, String> {
+    // `systemctl show` may return non-zero for a collected/missing unit while
+    // still printing LoadState=not-found. Parse that explicit state first.
+    let mut fields = HashMap::new();
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            fields.insert(key, value);
+        }
+    }
+    if fields.get("LoadState") == Some(&"not-found") {
+        return Ok(TransientUnitInspection::Missing);
+    }
+    if !command_succeeded {
+        return Err("systemctl could not query transient unit state".to_string());
+    }
+    match fields.get("ActiveState").copied() {
+        Some("active" | "activating" | "reloading" | "deactivating") => {
+            Ok(TransientUnitInspection::Running)
+        }
+        Some("inactive" | "failed") => {
+            let status = fields
+                .get("ExecMainStatus")
+                .and_then(|value| value.parse::<i32>().ok());
+            let code_is_exit = matches!(fields.get("ExecMainCode").copied(), Some("1" | "exited"));
+            if code_is_exit {
+                return status
+                    .map(|exit_code| TransientUnitInspection::Exited { exit_code })
+                    .ok_or_else(|| "transient unit has no parseable exit status".to_string());
+            }
+            if fields.get("Result") == Some(&"success") {
+                return Ok(TransientUnitInspection::Exited { exit_code: 0 });
+            }
+            Ok(TransientUnitInspection::Unknown(format!(
+                "active_state={:?} sub_state={:?} result={:?} exec_main_code={:?}",
+                fields.get("ActiveState"),
+                fields.get("SubState"),
+                fields.get("Result"),
+                fields.get("ExecMainCode")
+            )))
+        }
+        other => Ok(TransientUnitInspection::Unknown(format!(
+            "unrecognized active state {other:?}"
+        ))),
     }
 }
 
@@ -844,6 +952,13 @@ pub enum PrivilegedPrepareError {
     Ledger(String),
     Duplicate,
     GenerationFingerprintMismatch,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PrivilegedReconcileSummary {
+    pub recovered_running: usize,
+    pub recovered_terminal: usize,
+    pub marked_indeterminate: usize,
 }
 
 impl std::fmt::Display for PrivilegedPrepareError {
@@ -1050,6 +1165,98 @@ impl LinuxPrivilegedExecSupervisor {
         outcome
     }
 
+    /// Reconcile only the privileged rows explicitly deferred by daemon startup.
+    /// A malformed row is never treated as a systemd unit. Running units get a
+    /// bounded background watcher; terminal units recover their root-only output;
+    /// missing/ambiguous units become Indeterminate and can never be re-spawned.
+    pub async fn reconcile_in_flight(&self) -> Result<PrivilegedReconcileSummary, String> {
+        let rows = self
+            .ledger
+            .in_flight()
+            .await
+            .map_err(|error| format!("could not read privileged recovery ledger: {error}"))?;
+        let mut summary = PrivilegedReconcileSummary::default();
+        for row in rows {
+            if !is_recoverable_privileged_ledger_row(&row) {
+                continue;
+            }
+            let plan = match row
+                .plan_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<ExecPlan>(json).ok())
+            {
+                Some(plan) => plan,
+                None => continue,
+            };
+            let spec = SystemdTransientSpec::from_plan(&plan)
+                .map_err(|error| format!("stored privileged plan became invalid: {error}"))?;
+            match self.runner.inspect(&spec.unit_name).await {
+                Ok(TransientUnitInspection::Running) => {
+                    self.record_privileged_running(&plan, &spec).await;
+                    summary.recovered_running += 1;
+                    let supervisor = self.clone();
+                    tokio::spawn(async move {
+                        supervisor.watch_recovered_unit(plan, spec).await;
+                    });
+                }
+                Ok(TransientUnitInspection::Exited { exit_code }) => {
+                    self.record_privileged_running(&plan, &spec).await;
+                    let outcome = read_and_cleanup_privileged_outputs(&spec, &plan, exit_code, 0);
+                    self.record_privileged_terminal(&plan, &outcome).await;
+                    self.runner.terminate(&spec.unit_name).await;
+                    summary.recovered_terminal += 1;
+                }
+                Ok(TransientUnitInspection::Missing | TransientUnitInspection::Unknown(_))
+                | Err(_) => {
+                    cleanup_privileged_output_paths(&spec);
+                    self.record_privileged_indeterminate(&plan).await;
+                    summary.marked_indeterminate += 1;
+                }
+            }
+        }
+        Ok(summary)
+    }
+
+    async fn watch_recovered_unit(&self, plan: ExecPlan, spec: SystemdTransientSpec) {
+        let started = Instant::now();
+        let deadline =
+            Duration::from_millis(plan.timeout_ms as u64).saturating_add(SYSTEMD_CLIENT_GRACE);
+        loop {
+            match self.runner.inspect(&spec.unit_name).await {
+                Ok(TransientUnitInspection::Running) if started.elapsed() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                Ok(TransientUnitInspection::Exited { exit_code }) => {
+                    let outcome = read_and_cleanup_privileged_outputs(
+                        &spec,
+                        &plan,
+                        exit_code,
+                        started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+                    );
+                    self.record_privileged_terminal(&plan, &outcome).await;
+                    self.runner.terminate(&spec.unit_name).await;
+                    return;
+                }
+                Ok(TransientUnitInspection::Running) => {
+                    self.runner.terminate(&spec.unit_name).await;
+                    cleanup_privileged_output_paths(&spec);
+                    let outcome = AgentOutcome::Err(agent_error(
+                        AgentErrorKind::Timeout,
+                        "recovered administrator command exceeded its deadline and was reclaimed",
+                    ));
+                    self.record_privileged_terminal(&plan, &outcome).await;
+                    return;
+                }
+                Ok(TransientUnitInspection::Missing | TransientUnitInspection::Unknown(_))
+                | Err(_) => {
+                    cleanup_privileged_output_paths(&spec);
+                    self.record_privileged_indeterminate(&plan).await;
+                    return;
+                }
+            }
+        }
+    }
+
     async fn record_privileged_running(&self, plan: &ExecPlan, spec: &SystemdTransientSpec) {
         if let Err(error) = self
             .ledger
@@ -1135,6 +1342,7 @@ mod tests {
 
     struct FakeTransientRunner {
         outcome: TransientRunOutcome,
+        inspection: TransientUnitInspection,
         terminations: AtomicUsize,
     }
 
@@ -1146,6 +1354,10 @@ mod tests {
             _timeout: Duration,
         ) -> TransientRunOutcome {
             self.outcome.clone()
+        }
+
+        async fn inspect(&self, _unit_name: &str) -> Result<TransientUnitInspection, String> {
+            Ok(self.inspection.clone())
         }
 
         async fn terminate(&self, _unit_name: &str) {
@@ -1395,6 +1607,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn systemd_show_parser_distinguishes_missing_running_exit_and_signal() {
+        assert_eq!(
+            parse_systemd_unit_inspection(false, "LoadState=not-found\nActiveState=inactive\n")
+                .unwrap(),
+            TransientUnitInspection::Missing
+        );
+        assert_eq!(
+            parse_systemd_unit_inspection(
+                true,
+                "LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n",
+            )
+            .unwrap(),
+            TransientUnitInspection::Running
+        );
+        assert_eq!(
+            parse_systemd_unit_inspection(
+                true,
+                "LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=exit-code\nExecMainCode=1\nExecMainStatus=23\n",
+            )
+            .unwrap(),
+            TransientUnitInspection::Exited { exit_code: 23 }
+        );
+        assert!(matches!(
+            parse_systemd_unit_inspection(
+                true,
+                "LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=signal\nExecMainCode=2\nExecMainStatus=9\n",
+            )
+            .unwrap(),
+            TransientUnitInspection::Unknown(_)
+        ));
+        assert!(parse_systemd_unit_inspection(false, "").is_err());
+    }
+
     #[tokio::test]
     async fn supervisor_burns_permit_then_durably_reserves_unit_before_return() {
         let (registry, registration) = current_registration();
@@ -1449,6 +1695,7 @@ mod tests {
         let ledger = Arc::new(ExecLedger::open_in_memory().await.unwrap());
         let runner = Arc::new(FakeTransientRunner {
             outcome,
+            inspection: TransientUnitInspection::Missing,
             terminations: AtomicUsize::new(0),
         });
         let supervisor =
@@ -1460,6 +1707,29 @@ mod tests {
             .await
             .unwrap();
         (supervisor, ledger, plan, spec)
+    }
+
+    async fn supervisor_for_reconcile(
+        generation: &str,
+        inspection: TransientUnitInspection,
+    ) -> (LinuxPrivilegedExecSupervisor, Arc<ExecLedger>, ExecPlan) {
+        let (registry, registration) = current_registration();
+        let permits = PrivilegedPermitStore::default();
+        let ledger = Arc::new(ExecLedger::open_in_memory().await.unwrap());
+        let runner = Arc::new(FakeTransientRunner {
+            outcome: TransientRunOutcome::SpawnFailed("unused".into()),
+            inspection,
+            terminations: AtomicUsize::new(0),
+        });
+        let supervisor =
+            LinuxPrivilegedExecSupervisor::with_runner(permits.clone(), ledger.clone(), runner);
+        let plan = administrator_plan(generation);
+        let permit = permits.mint(&plan, &registration);
+        let _spec = supervisor
+            .prepare_dispatch(permit.permit_id, &plan, &registry, &registration)
+            .await
+            .unwrap();
+        (supervisor, ledger, plan)
     }
 
     #[tokio::test]
@@ -1567,6 +1837,82 @@ mod tests {
             row.state,
             crate::daemon::exec_ledger::State::Terminal.as_str()
         );
+    }
+
+    #[tokio::test]
+    async fn missing_recovered_unit_is_indeterminate_and_never_respawned() {
+        let (supervisor, ledger, plan) = supervisor_for_reconcile(
+            "generation-reconcile-missing",
+            TransientUnitInspection::Missing,
+        )
+        .await;
+        let row = ledger
+            .get(&plan.execution_generation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(is_recoverable_privileged_ledger_row(&row));
+        let summary = supervisor.reconcile_in_flight().await.unwrap();
+        assert_eq!(summary.marked_indeterminate, 1);
+        assert_eq!(summary.recovered_running, 0);
+        assert_eq!(
+            ledger
+                .get(&plan.execution_generation)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            crate::daemon::exec_ledger::State::Indeterminate.as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_recovered_unit_replays_bounded_result() {
+        let (supervisor, ledger, plan) = supervisor_for_reconcile(
+            "generation-reconcile-terminal",
+            TransientUnitInspection::Exited { exit_code: 9 },
+        )
+        .await;
+        let summary = supervisor.reconcile_in_flight().await.unwrap();
+        assert_eq!(summary.recovered_terminal, 1);
+        let row = ledger
+            .get(&plan.execution_generation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.state,
+            crate::daemon::exec_ledger::State::Terminal.as_str()
+        );
+        let outcome =
+            serde_json::from_str::<AgentOutcome>(row.result_json.as_deref().unwrap()).unwrap();
+        assert!(matches!(
+            outcome,
+            AgentOutcome::Ok(OperationOutput::Exec(ExecOutput { exit_code: 9, .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_privileged_row_is_not_claimed_by_recovery() {
+        let ledger = ExecLedger::open_in_memory().await.unwrap();
+        let plan = administrator_plan("generation-reconcile-malformed");
+        let plan_json = serde_json::to_string(&plan).unwrap();
+        ledger
+            .reserve_with_sealed_plan(
+                &plan.exec_request_id.0,
+                &plan.execution_generation,
+                &plan.fingerprint,
+                "lcxl-ai-exec-EVIL.service",
+                &plan_json,
+            )
+            .await
+            .unwrap();
+        let row = ledger
+            .get(&plan.execution_generation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!is_recoverable_privileged_ledger_row(&row));
     }
 
     #[test]
