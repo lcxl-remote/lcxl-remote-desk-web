@@ -21,7 +21,7 @@ use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use uuid::Uuid;
@@ -137,20 +137,29 @@ impl std::error::Error for AuthorizationError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PolkitCommandOutcome {
     Exit(i32),
+    Cancelled,
     TimedOut,
     Failed,
 }
 
 #[async_trait]
 trait PolkitCommandRunner: Send + Sync {
-    async fn check(&self, subject: PolkitSubject) -> PolkitCommandOutcome;
+    async fn check(
+        &self,
+        subject: PolkitSubject,
+        cancelled: Arc<AtomicBool>,
+    ) -> PolkitCommandOutcome;
 }
 
 struct RealPolkitCommandRunner;
 
 #[async_trait]
 impl PolkitCommandRunner for RealPolkitCommandRunner {
-    async fn check(&self, subject: PolkitSubject) -> PolkitCommandOutcome {
+    async fn check(
+        &self,
+        subject: PolkitSubject,
+        cancelled: Arc<AtomicBool>,
+    ) -> PolkitCommandOutcome {
         let mut command = Command::new(PKCHECK_PATH);
         command
             .arg("--action-id")
@@ -168,13 +177,27 @@ impl PolkitCommandRunner for RealPolkitCommandRunner {
         let Ok(mut child) = command.spawn() else {
             return PolkitCommandOutcome::Failed;
         };
-        match tokio::time::timeout(AUTHORIZATION_TIMEOUT, child.wait()).await {
-            Ok(Ok(status)) => PolkitCommandOutcome::Exit(status.code().unwrap_or(127)),
-            Ok(Err(_)) => PolkitCommandOutcome::Failed,
-            Err(_) => {
+        let deadline = Instant::now() + AUTHORIZATION_TIMEOUT;
+        loop {
+            if cancelled.load(Ordering::Acquire) {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
-                PolkitCommandOutcome::TimedOut
+                return PolkitCommandOutcome::Cancelled;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return PolkitCommandOutcome::TimedOut;
+            }
+            tokio::select! {
+                status = child.wait() => {
+                    return match status {
+                        Ok(status) => PolkitCommandOutcome::Exit(status.code().unwrap_or(127)),
+                        Err(_) => PolkitCommandOutcome::Failed,
+                    };
+                }
+                _ = tokio::time::sleep(remaining.min(Duration::from_millis(50))) => {}
             }
         }
     }
@@ -198,17 +221,19 @@ impl LinuxPolkitAuthorizer {
         &self,
         registry: &SessionShellRegistry,
         registration: &Arc<RegisteredSessionShell>,
+        cancelled: Arc<AtomicBool>,
     ) -> Result<(), AuthorizationError> {
         if !registry.is_current(registration) {
             return Err(AuthorizationError::StaleRegistration);
         }
         let subject = PolkitSubject::from_registration(registration)?;
-        let outcome = self.runner.check(subject).await;
+        let outcome = self.runner.check(subject, cancelled).await;
         let result = match outcome {
             PolkitCommandOutcome::Exit(0) => Ok(()),
             PolkitCommandOutcome::Exit(1) => Err(AuthorizationError::Denied),
             PolkitCommandOutcome::Exit(2) => Err(AuthorizationError::AgentUnavailable),
             PolkitCommandOutcome::Exit(3) => Err(AuthorizationError::Cancelled),
+            PolkitCommandOutcome::Cancelled => Err(AuthorizationError::Cancelled),
             PolkitCommandOutcome::TimedOut => Err(AuthorizationError::TimedOut),
             PolkitCommandOutcome::Exit(_) | PolkitCommandOutcome::Failed => {
                 Err(AuthorizationError::BackendUnavailable)
@@ -836,7 +861,11 @@ struct TestAllowPolkitRunner;
 #[cfg(test)]
 #[async_trait]
 impl PolkitCommandRunner for TestAllowPolkitRunner {
-    async fn check(&self, _subject: PolkitSubject) -> PolkitCommandOutcome {
+    async fn check(
+        &self,
+        _subject: PolkitSubject,
+        _cancelled: Arc<AtomicBool>,
+    ) -> PolkitCommandOutcome {
         PolkitCommandOutcome::Exit(0)
     }
 }
@@ -1111,12 +1140,14 @@ pub enum PrivilegedPrepareError {
     Ledger(String),
     Duplicate,
     GenerationFingerprintMismatch,
+    Cancelled,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivilegedAuthorizationError {
     Plan(PrivilegedPlanError),
     Authorization(AuthorizationError),
+    LeaseConflict,
 }
 
 impl std::fmt::Display for PrivilegedAuthorizationError {
@@ -1126,6 +1157,9 @@ impl std::fmt::Display for PrivilegedAuthorizationError {
             Self::Authorization(error) => {
                 write!(formatter, "administrator authorization failed: {error}")
             }
+            Self::LeaseConflict => formatter.write_str(
+                "this execution generation already has a different administrator authorization",
+            ),
         }
     }
 }
@@ -1149,6 +1183,9 @@ impl std::fmt::Display for PrivilegedPrepareError {
             Self::GenerationFingerprintMismatch => {
                 formatter.write_str("execution generation was replayed with a different plan")
             }
+            Self::Cancelled => {
+                formatter.write_str("administrator authorization was cancelled before dispatch")
+            }
         }
     }
 }
@@ -1162,9 +1199,152 @@ impl std::error::Error for PrivilegedPrepareError {}
 pub struct LinuxPrivilegedExecSupervisor {
     permits: PrivilegedPermitStore,
     authorizer: LinuxPolkitAuthorizer,
+    authorization: PrivilegedAuthorizationCoordinator,
     ledger: Arc<ExecLedger>,
     runner: Arc<dyn TransientCommandRunner>,
     active: Arc<Mutex<HashMap<String, ActivePrivilegedDispatch>>>,
+}
+
+#[derive(Clone, Default)]
+struct PrivilegedAuthorizationCoordinator {
+    gates: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
+    outcomes: Arc<Mutex<HashMap<String, CachedAuthorizationOutcome>>>,
+    attempts: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+}
+
+#[derive(Clone)]
+struct CachedAuthorizationOutcome {
+    plan_digest_sha256: [u8; 32],
+    registration_id: Uuid,
+    registration_generation: u64,
+    outcome: Result<Uuid, PrivilegedAuthorizationError>,
+    expires_at: Instant,
+}
+
+impl PrivilegedAuthorizationCoordinator {
+    fn gate(&self, generation: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self.gates.lock().unwrap();
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(generation).and_then(Weak::upgrade) {
+            return gate;
+        }
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        gates.insert(generation.to_string(), Arc::downgrade(&gate));
+        gate
+    }
+
+    fn cached(
+        &self,
+        plan: &ExecPlan,
+        registration: &RegisteredSessionShell,
+    ) -> Option<Result<Uuid, PrivilegedAuthorizationError>> {
+        let mut outcomes = self.outcomes.lock().unwrap();
+        let now = Instant::now();
+        outcomes.retain(|_, outcome| outcome.expires_at >= now);
+        outcomes.get(&plan.execution_generation).map(|outcome| {
+            if outcome.plan_digest_sha256 != plan_digest(plan)
+                || outcome.registration_id != registration.registration_id
+                || outcome.registration_generation != registration.registration_generation
+            {
+                Err(PrivilegedAuthorizationError::LeaseConflict)
+            } else {
+                outcome.outcome
+            }
+        })
+    }
+
+    fn store(
+        &self,
+        plan: &ExecPlan,
+        registration: &RegisteredSessionShell,
+        outcome: Result<Uuid, PrivilegedAuthorizationError>,
+    ) {
+        self.outcomes.lock().unwrap().insert(
+            plan.execution_generation.clone(),
+            CachedAuthorizationOutcome {
+                plan_digest_sha256: plan_digest(plan),
+                registration_id: registration.registration_id,
+                registration_generation: registration.registration_generation,
+                outcome,
+                expires_at: Instant::now() + PERMIT_TTL,
+            },
+        );
+    }
+
+    fn begin(&self, generation: &str) -> Arc<AtomicBool> {
+        let mut attempts = self.attempts.lock().unwrap();
+        attempts
+            .entry(generation.to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    }
+
+    fn finish(&self, generation: &str, cancelled: &Arc<AtomicBool>) {
+        let mut attempts = self.attempts.lock().unwrap();
+        if attempts
+            .get(generation)
+            .is_some_and(|current| Arc::ptr_eq(current, cancelled))
+        {
+            attempts.remove(generation);
+        }
+    }
+
+    /// Cancel an in-flight prompt or burn an already-minted permit. Keeping a
+    /// cached Cancelled outcome makes repeated cancel/redelivery idempotent until
+    /// the ordinary permit TTL expires.
+    fn cancel(&self, generation: &str) -> (bool, Option<Uuid>) {
+        let mut found = false;
+        if let Some(cancelled) = self.attempts.lock().unwrap().get(generation) {
+            cancelled.store(true, Ordering::Release);
+            found = true;
+        }
+        let mut permit = None;
+        if let Some(outcome) = self.outcomes.lock().unwrap().get_mut(generation) {
+            found = true;
+            if let Ok(permit_id) = outcome.outcome {
+                permit = Some(permit_id);
+            }
+            outcome.outcome = Err(PrivilegedAuthorizationError::Authorization(
+                AuthorizationError::Cancelled,
+            ));
+        }
+        (found, permit)
+    }
+
+    /// Atomically move an authorization outcome into the pre-launch cancellation
+    /// registry. Holding the outcome lock until `active` is installed closes the
+    /// permit-consume → ledger-reserve gap: cancel sees either authorization or an
+    /// active token, never neither.
+    fn transition_to_dispatch(
+        &self,
+        generation: &str,
+        permit_id: Uuid,
+        active: &Mutex<HashMap<String, ActivePrivilegedDispatch>>,
+    ) -> bool {
+        let mut outcomes = self.outcomes.lock().unwrap();
+        if let Some(outcome) = outcomes.get(generation)
+            && outcome.outcome != Ok(permit_id)
+        {
+            return false;
+        }
+        let mut active = active.lock().unwrap();
+        outcomes.remove(generation);
+        active.insert(
+            generation.to_string(),
+            ActivePrivilegedDispatch {
+                cancelled: Arc::new(AtomicBool::new(false)),
+                launch_started: false,
+            },
+        );
+        true
+    }
+
+    fn remove_permit(&self, permit_id: Uuid) {
+        self.outcomes
+            .lock()
+            .unwrap()
+            .retain(|_, outcome| !matches!(outcome.outcome, Ok(cached) if cached == permit_id));
+    }
 }
 
 struct ActivePrivilegedDispatch {
@@ -1175,6 +1355,7 @@ struct ActivePrivilegedDispatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivilegedCancelOutcome {
     NotPrivileged,
+    AuthorizationCancelled,
     CancelledBeforeStart,
     CancelRequested,
     RecoveredTerminal,
@@ -1187,6 +1368,7 @@ impl LinuxPrivilegedExecSupervisor {
         Self {
             permits,
             authorizer: LinuxPolkitAuthorizer::default(),
+            authorization: PrivilegedAuthorizationCoordinator::default(),
             ledger,
             runner: Arc::new(RealTransientCommandRunner),
             active: Arc::new(Mutex::new(HashMap::new())),
@@ -1202,6 +1384,7 @@ impl LinuxPrivilegedExecSupervisor {
         Self {
             permits,
             authorizer: LinuxPolkitAuthorizer::default(),
+            authorization: PrivilegedAuthorizationCoordinator::default(),
             ledger,
             runner,
             active: Arc::new(Mutex::new(HashMap::new())),
@@ -1215,6 +1398,7 @@ impl LinuxPrivilegedExecSupervisor {
             authorizer: LinuxPolkitAuthorizer {
                 runner: Arc::new(TestAllowPolkitRunner),
             },
+            authorization: PrivilegedAuthorizationCoordinator::default(),
             ledger,
             runner: Arc::new(TestSpawnFailedTransientRunner),
             active: Arc::new(Mutex::new(HashMap::new())),
@@ -1227,12 +1411,64 @@ impl LinuxPrivilegedExecSupervisor {
         registry: &SessionShellRegistry,
         registration: &Arc<RegisteredSessionShell>,
     ) -> Result<Uuid, PrivilegedAuthorizationError> {
+        self.authorize_and_mint_with_cancel(
+            plan,
+            registry,
+            registration,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+    }
+
+    async fn authorize_and_mint_with_cancel(
+        &self,
+        plan: &ExecPlan,
+        registry: &SessionShellRegistry,
+        registration: &Arc<RegisteredSessionShell>,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<Uuid, PrivilegedAuthorizationError> {
         validate_privileged_plan(plan).map_err(PrivilegedAuthorizationError::Plan)?;
         self.authorizer
-            .authorize(registry, registration)
+            .authorize(registry, registration, cancelled.clone())
             .await
             .map_err(PrivilegedAuthorizationError::Authorization)?;
-        Ok(self.permits.mint(plan, registration).permit_id)
+        if cancelled.load(Ordering::Acquire) {
+            return Err(PrivilegedAuthorizationError::Authorization(
+                AuthorizationError::Cancelled,
+            ));
+        }
+        let permit_id = self.permits.mint(plan, registration).permit_id;
+        if cancelled.load(Ordering::Acquire) {
+            self.permits.revoke(permit_id);
+            return Err(PrivilegedAuthorizationError::Authorization(
+                AuthorizationError::Cancelled,
+            ));
+        }
+        Ok(permit_id)
+    }
+
+    /// Serialize authorization by execution generation and replay the same
+    /// permit/result to concurrent redeliveries. Only the first caller invokes
+    /// polkit; every exact duplicate observes that result without another prompt.
+    pub async fn authorize_once(
+        &self,
+        plan: &ExecPlan,
+        registry: &SessionShellRegistry,
+        registration: &Arc<RegisteredSessionShell>,
+    ) -> Result<Uuid, PrivilegedAuthorizationError> {
+        let gate = self.authorization.gate(&plan.execution_generation);
+        let _guard = gate.lock().await;
+        if let Some(cached) = self.authorization.cached(plan, registration) {
+            return cached;
+        }
+        let cancelled = self.authorization.begin(&plan.execution_generation);
+        let outcome = self
+            .authorize_and_mint_with_cancel(plan, registry, registration, cancelled.clone())
+            .await;
+        self.authorization
+            .finish(&plan.execution_generation, &cancelled);
+        self.authorization.store(plan, registration, outcome);
+        outcome
     }
 
     pub async fn prepare_dispatch(
@@ -1242,13 +1478,22 @@ impl LinuxPrivilegedExecSupervisor {
         registry: &SessionShellRegistry,
         registration: &Arc<RegisteredSessionShell>,
     ) -> Result<SystemdTransientSpec, PrivilegedPrepareError> {
-        self.permits
+        let consumed = self
+            .permits
             .consume(permit_id, plan, registry, registration)
-            .map_err(PrivilegedPrepareError::Permit)?;
+            .map_err(PrivilegedPrepareError::Permit);
+        consumed?;
         let spec = SystemdTransientSpec::from_plan(plan).map_err(PrivilegedPrepareError::Plan)?;
         let plan_json = serde_json::to_string(plan)
             .map_err(|error| PrivilegedPrepareError::Ledger(error.to_string()))?;
-        match self
+        if !self.authorization.transition_to_dispatch(
+            &plan.execution_generation,
+            permit_id,
+            &self.active,
+        ) {
+            return Err(PrivilegedPrepareError::Cancelled);
+        }
+        let reservation = self
             .ledger
             .reserve_with_sealed_plan(
                 &plan.exec_request_id.0,
@@ -1258,23 +1503,22 @@ impl LinuxPrivilegedExecSupervisor {
                 &plan_json,
             )
             .await
-            .map_err(|error| PrivilegedPrepareError::Ledger(error.to_string()))?
-        {
-            Reservation::Granted => {
-                self.active.lock().unwrap().insert(
-                    plan.execution_generation.clone(),
-                    ActivePrivilegedDispatch {
-                        cancelled: Arc::new(AtomicBool::new(false)),
-                        launch_started: false,
-                    },
-                );
-                Ok(spec)
-            }
-            Reservation::Duplicate(_) => Err(PrivilegedPrepareError::Duplicate),
-            Reservation::FingerprintMismatch => {
+            .map_err(|error| PrivilegedPrepareError::Ledger(error.to_string()));
+        let result = match reservation {
+            Ok(Reservation::Granted) => Ok(spec),
+            Ok(Reservation::Duplicate(_)) => Err(PrivilegedPrepareError::Duplicate),
+            Ok(Reservation::FingerprintMismatch) => {
                 Err(PrivilegedPrepareError::GenerationFingerprintMismatch)
             }
+            Err(error) => Err(error),
+        };
+        if result.is_err() {
+            self.active
+                .lock()
+                .unwrap()
+                .remove(&plan.execution_generation);
         }
+        result
     }
 
     /// Burn an authorization that became stale before the dispatch handshake
@@ -1282,6 +1526,7 @@ impl LinuxPrivilegedExecSupervisor {
     /// the rest of the permit TTL.
     pub(crate) fn discard_permit(&self, permit_id: Uuid) {
         self.permits.revoke(permit_id);
+        self.authorization.remove_permit(permit_id);
     }
 
     /// Execute a spec returned by [`Self::prepare_dispatch`]. This is kept
@@ -1484,13 +1729,31 @@ impl LinuxPrivilegedExecSupervisor {
         &self,
         execution_generation: &str,
     ) -> Result<PrivilegedCancelOutcome, String> {
+        let (authorization_found, permit_id) = self.authorization.cancel(execution_generation);
+        if let Some(permit_id) = permit_id {
+            self.permits.revoke(permit_id);
+        }
+        if authorization_found {
+            return Ok(PrivilegedCancelOutcome::AuthorizationCancelled);
+        }
+        let active_state = {
+            let mut active = self.active.lock().unwrap();
+            active.get_mut(execution_generation).map(|entry| {
+                entry.cancelled.store(true, Ordering::Release);
+                entry.launch_started
+            })
+        };
         let Some(row) = self
             .ledger
             .get(execution_generation)
             .await
             .map_err(|error| format!("could not read privileged execution: {error}"))?
         else {
-            return Ok(PrivilegedCancelOutcome::NotPrivileged);
+            return Ok(if active_state.is_some() {
+                PrivilegedCancelOutcome::CancelRequested
+            } else {
+                PrivilegedCancelOutcome::NotPrivileged
+            });
         };
         if !is_recoverable_privileged_ledger_row(&row) {
             return Ok(PrivilegedCancelOutcome::NotPrivileged);
@@ -1513,13 +1776,6 @@ impl LinuxPrivilegedExecSupervisor {
         let spec = SystemdTransientSpec::from_plan(&plan)
             .map_err(|error| format!("stored privileged plan became invalid: {error}"))?;
 
-        let active_state = {
-            let mut active = self.active.lock().unwrap();
-            active.get_mut(execution_generation).map(|entry| {
-                entry.cancelled.store(true, Ordering::Release);
-                entry.launch_started
-            })
-        };
         if active_state == Some(false) {
             cleanup_privileged_output_paths(&spec);
             let outcome = privileged_cancelled_outcome(
@@ -1738,8 +1994,50 @@ mod tests {
 
     #[async_trait]
     impl PolkitCommandRunner for FakeRunner {
-        async fn check(&self, _subject: PolkitSubject) -> PolkitCommandOutcome {
+        async fn check(
+            &self,
+            _subject: PolkitSubject,
+            _cancelled: Arc<AtomicBool>,
+        ) -> PolkitCommandOutcome {
             self.0
+        }
+    }
+
+    struct CountingPolkitRunner(AtomicUsize);
+
+    #[async_trait]
+    impl PolkitCommandRunner for CountingPolkitRunner {
+        async fn check(
+            &self,
+            _subject: PolkitSubject,
+            _cancelled: Arc<AtomicBool>,
+        ) -> PolkitCommandOutcome {
+            self.0.fetch_add(1, Ordering::AcqRel);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            PolkitCommandOutcome::Exit(0)
+        }
+    }
+
+    struct CancellablePolkitRunner {
+        calls: AtomicUsize,
+        started: AtomicBool,
+    }
+
+    #[async_trait]
+    impl PolkitCommandRunner for CancellablePolkitRunner {
+        async fn check(
+            &self,
+            _subject: PolkitSubject,
+            cancelled: Arc<AtomicBool>,
+        ) -> PolkitCommandOutcome {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            self.started.store(true, Ordering::Release);
+            loop {
+                if cancelled.load(Ordering::Acquire) {
+                    return PolkitCommandOutcome::Cancelled;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
         }
     }
 
@@ -1822,7 +2120,9 @@ mod tests {
                 runner: Arc::new(FakeRunner(PolkitCommandOutcome::Exit(code))),
             };
             assert_eq!(
-                authorizer.authorize(&registry, &registration).await,
+                authorizer
+                    .authorize(&registry, &registration, Arc::new(AtomicBool::new(false)),)
+                    .await,
                 Err(expected)
             );
         }
@@ -1842,7 +2142,9 @@ mod tests {
                 runner: Arc::new(FakeRunner(outcome)),
             };
             assert_eq!(
-                authorizer.authorize(&registry, &registration).await,
+                authorizer
+                    .authorize(&registry, &registration, Arc::new(AtomicBool::new(false)),)
+                    .await,
                 Err(expected)
             );
         }
@@ -1855,12 +2157,14 @@ mod tests {
             runner: Arc::new(FakeRunner(PolkitCommandOutcome::Exit(0))),
         };
         authorizer
-            .authorize(&registry, &registration)
+            .authorize(&registry, &registration, Arc::new(AtomicBool::new(false)))
             .await
             .unwrap();
         registry.unregister_websocket(7).unwrap();
         assert_eq!(
-            authorizer.authorize(&registry, &registration).await,
+            authorizer
+                .authorize(&registry, &registration, Arc::new(AtomicBool::new(false)),)
+                .await,
             Err(AuthorizationError::StaleRegistration)
         );
     }
@@ -1874,6 +2178,7 @@ mod tests {
             authorizer: LinuxPolkitAuthorizer {
                 runner: Arc::new(FakeRunner(PolkitCommandOutcome::Exit(0))),
             },
+            authorization: PrivilegedAuthorizationCoordinator::default(),
             ledger,
             runner: Arc::new(RealTransientCommandRunner),
             active: Arc::new(Mutex::new(HashMap::new())),
@@ -1889,6 +2194,122 @@ mod tests {
             .permits
             .consume(permit_id, &plan, &registry, &registration)
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_redelivery_shares_one_polkit_authorization() {
+        let (registry, registration) = current_registration();
+        let runner = Arc::new(CountingPolkitRunner(AtomicUsize::new(0)));
+        let supervisor = LinuxPrivilegedExecSupervisor {
+            permits: PrivilegedPermitStore::default(),
+            authorizer: LinuxPolkitAuthorizer {
+                runner: runner.clone(),
+            },
+            authorization: PrivilegedAuthorizationCoordinator::default(),
+            ledger: Arc::new(ExecLedger::open_in_memory().await.unwrap()),
+            runner: Arc::new(RealTransientCommandRunner),
+            active: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let plan = administrator_plan("generation-deduped-authorization");
+
+        let (first, second) = tokio::join!(
+            supervisor.authorize_once(&plan, &registry, &registration),
+            supervisor.authorize_once(&plan, &registry, &registration),
+        );
+
+        assert_eq!(first.unwrap(), second.unwrap());
+        assert_eq!(runner.0.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn cancel_generation_stops_an_in_progress_polkit_authorization() {
+        let (registry, registration) = current_registration();
+        let runner = Arc::new(CancellablePolkitRunner {
+            calls: AtomicUsize::new(0),
+            started: AtomicBool::new(false),
+        });
+        let supervisor = LinuxPrivilegedExecSupervisor {
+            permits: PrivilegedPermitStore::default(),
+            authorizer: LinuxPolkitAuthorizer {
+                runner: runner.clone(),
+            },
+            authorization: PrivilegedAuthorizationCoordinator::default(),
+            ledger: Arc::new(ExecLedger::open_in_memory().await.unwrap()),
+            runner: Arc::new(RealTransientCommandRunner),
+            active: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let plan = administrator_plan("generation-cancelled-authorization");
+        let task = {
+            let supervisor = supervisor.clone();
+            let registry = registry.clone();
+            let registration = registration.clone();
+            let plan = plan.clone();
+            tokio::spawn(async move {
+                supervisor
+                    .authorize_once(&plan, &registry, &registration)
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !runner.started.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            supervisor
+                .cancel_generation(&plan.execution_generation)
+                .await
+                .unwrap(),
+            PrivilegedCancelOutcome::AuthorizationCancelled
+        );
+        assert_eq!(
+            task.await.unwrap(),
+            Err(PrivilegedAuthorizationError::Authorization(
+                AuthorizationError::Cancelled
+            ))
+        );
+        assert_eq!(runner.calls.load(Ordering::Acquire), 1);
+        assert!(supervisor.permits.permits.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_transition_is_cancellable_before_ledger_reservation() {
+        let (_registry, registration) = current_registration();
+        let supervisor = LinuxPrivilegedExecSupervisor::new(
+            PrivilegedPermitStore::default(),
+            Arc::new(ExecLedger::open_in_memory().await.unwrap()),
+        );
+        let plan = administrator_plan("generation-dispatch-transition-cancel");
+        let permit_id = Uuid::new_v4();
+        supervisor
+            .authorization
+            .store(&plan, &registration, Ok(permit_id));
+        assert!(supervisor.authorization.transition_to_dispatch(
+            &plan.execution_generation,
+            permit_id,
+            &supervisor.active,
+        ));
+
+        assert_eq!(
+            supervisor
+                .cancel_generation(&plan.execution_generation)
+                .await
+                .unwrap(),
+            PrivilegedCancelOutcome::CancelRequested
+        );
+        assert!(
+            supervisor
+                .active
+                .lock()
+                .unwrap()
+                .get(&plan.execution_generation)
+                .unwrap()
+                .cancelled
+                .load(Ordering::Acquire)
+        );
     }
 
     #[test]

@@ -123,6 +123,22 @@ pub(super) async fn handle_edge_exec_request_inbound(
     // must never assume the PDP got it right.
     let administrator =
         payload.plan().principal == desk_agent_protocol::exec::ExecutionPrincipal::Administrator;
+    let privileged_request = payload.privileged_request().cloned();
+    if administrator != privileged_request.is_some() {
+        send_edge_execution_completed(
+            &ctx.outbound_tx,
+            &request_id,
+            EdgeExecDisposition::RejectedBeforeDispatch {
+                error: agent_error(
+                    AgentErrorKind::InvalidInput,
+                    "pep_rejected:privileged_phase_binding",
+                    false,
+                    true,
+                ),
+            },
+        );
+        return Ok(());
+    }
     #[cfg(target_os = "linux")]
     let execution_available = if administrator {
         ctx.privileged_exec.is_some()
@@ -262,6 +278,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
         session_connection_id.as_deref(),
         authz.scope.mode,
         authz.max_risk,
+        privileged_request,
     )
     .await;
     Ok(())
@@ -279,6 +296,7 @@ pub(super) async fn dispatch_fleet_exec_plan(
     session_connection_id: Option<&str>,
     authorized_mode: ExecutionMode,
     authorized_max_risk: desk_agent_protocol::RiskLevel,
+    privileged_request: Option<PrivilegedExecRequest>,
 ) {
     // A ServiceDaemon can host several independently ready desktop sessions.
     // Resolve the execution anchor before claiming the at-most-once ledger: an
@@ -317,6 +335,7 @@ pub(super) async fn dispatch_fleet_exec_plan(
             selected_session,
             authorized_mode,
             authorized_max_risk,
+            privileged_request.expect("Administrator phase binding was checked"),
         )
         .await;
         return;
@@ -425,6 +444,7 @@ async fn dispatch_linux_privileged_exec_plan(
     selected_session: Option<desk_ipc_protocol::message::SessionKey>,
     authorized_mode: ExecutionMode,
     authorized_max_risk: desk_agent_protocol::RiskLevel,
+    privileged_request: PrivilegedExecRequest,
 ) {
     let Some(supervisor) = ctx.privileged_exec.as_ref().cloned() else {
         send_edge_execution_completed(
@@ -539,57 +559,58 @@ async fn dispatch_linux_privileged_exec_plan(
         return;
     };
 
-    let limit = ctx
-        .settings
-        .read()
-        .await
-        .ai_policy
-        .max_concurrent_executions as usize;
-    if let Err(full) = ctx.exec_capacity.try_admit(
-        &plan.execution_generation,
-        limit,
-        std::time::Duration::from_millis(u64::from(plan.timeout_ms)),
-    ) {
-        send_edge_execution_completed(
-            &ctx.outbound_tx,
-            request_id,
-            EdgeExecDisposition::HostAtCapacity {
-                error: agent_error(
-                    AgentErrorKind::HostAtCapacity,
-                    &full.to_string(),
-                    true,
-                    true,
+    let permit_id = match privileged_request {
+        PrivilegedExecRequest::Authorize => {
+            match supervisor
+                .authorize_once(&plan, &registry, &registration)
+                .await
+            {
+                Ok(permit_id) => send_edge_execution_completed(
+                    &ctx.outbound_tx,
+                    request_id,
+                    EdgeExecDisposition::PrivilegedAuthorizationReady {
+                        permit_id: permit_id.to_string(),
+                    },
                 ),
-            },
-        );
-        return;
-    }
-
-    let permit_id = match supervisor
-        .authorize_and_mint(&plan, &registry, &registration)
-        .await
-    {
-        Ok(permit_id) => permit_id,
-        Err(error) => {
-            ctx.exec_capacity.release(&plan.execution_generation);
-            let kind = match error {
-                crate::daemon::linux_privileged_exec::PrivilegedAuthorizationError::Authorization(
-                    crate::daemon::linux_privileged_exec::AuthorizationError::TimedOut,
-                ) => AgentErrorKind::Timeout,
-                crate::daemon::linux_privileged_exec::PrivilegedAuthorizationError::Plan(_) => {
-                    AgentErrorKind::RiskBlocked
+                Err(error) => {
+                    let kind = match error {
+                        crate::daemon::linux_privileged_exec::PrivilegedAuthorizationError::Authorization(
+                            crate::daemon::linux_privileged_exec::AuthorizationError::TimedOut,
+                        ) => AgentErrorKind::Timeout,
+                        crate::daemon::linux_privileged_exec::PrivilegedAuthorizationError::Plan(_) => {
+                            AgentErrorKind::RiskBlocked
+                        }
+                        _ => AgentErrorKind::PermissionDenied,
+                    };
+                    send_edge_execution_completed(
+                        &ctx.outbound_tx,
+                        request_id,
+                        EdgeExecDisposition::RejectedBeforeDispatch {
+                            error: agent_error(kind, &error.to_string(), false, true),
+                        },
+                    );
                 }
-                _ => AgentErrorKind::PermissionDenied,
-            };
-            send_edge_execution_completed(
-                &ctx.outbound_tx,
-                request_id,
-                EdgeExecDisposition::RejectedBeforeDispatch {
-                    error: agent_error(kind, &error.to_string(), false, true),
-                },
-            );
+            }
             return;
         }
+        PrivilegedExecRequest::Dispatch { permit_id } => match uuid::Uuid::parse_str(&permit_id) {
+            Ok(permit_id) => permit_id,
+            Err(_) => {
+                send_edge_execution_completed(
+                    &ctx.outbound_tx,
+                    request_id,
+                    EdgeExecDisposition::RejectedBeforeDispatch {
+                        error: agent_error(
+                            AgentErrorKind::InvalidInput,
+                            "administrator dispatch permit is malformed",
+                            false,
+                            true,
+                        ),
+                    },
+                );
+                return;
+            }
+        },
     };
 
     // The polkit prompt can outlive a logout, reconnect, target change, or local
@@ -620,7 +641,6 @@ async fn dispatch_linux_privileged_exec_plan(
         )
     {
         supervisor.discard_permit(permit_id);
-        ctx.exec_capacity.release(&plan.execution_generation);
         send_edge_execution_completed(
             &ctx.outbound_tx,
             request_id,
@@ -629,6 +649,28 @@ async fn dispatch_linux_privileged_exec_plan(
                     AgentErrorKind::PermissionDenied,
                     "administrator authorization became stale before dispatch",
                     false,
+                    true,
+                ),
+            },
+        );
+        return;
+    }
+
+    let limit = current_policy.max_concurrent_executions as usize;
+    if let Err(full) = ctx.exec_capacity.try_admit(
+        &plan.execution_generation,
+        limit,
+        std::time::Duration::from_millis(u64::from(plan.timeout_ms)),
+    ) {
+        supervisor.discard_permit(permit_id);
+        send_edge_execution_completed(
+            &ctx.outbound_tx,
+            request_id,
+            EdgeExecDisposition::HostAtCapacity {
+                error: agent_error(
+                    AgentErrorKind::HostAtCapacity,
+                    &full.to_string(),
+                    true,
                     true,
                 ),
             },

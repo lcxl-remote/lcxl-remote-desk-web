@@ -27,6 +27,19 @@ use utoipa::ToSchema;
 use crate::exec::ExecPlan;
 use crate::{AgentError, AgentErrorKind, AgentOutcome, ExecInput};
 
+/// Two-phase Administrator execution handshake. Session-user plans must omit
+/// this field entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum PrivilegedExecRequest {
+    /// Ask the host to perform registration-bound local polkit authorization.
+    /// No execution authority is consumed and no command may start in this phase.
+    Authorize,
+    /// After a fresh central re-authorization, consume the exact one-shot permit
+    /// returned by [`EdgeExecDisposition::PrivilegedAuthorizationReady`].
+    Dispatch { permit_id: String },
+}
+
 /// Central → daemon (`EdgeExecRequest`): the sealed [`ExecPlan`] plus the
 /// source-specific context the daemon PEP needs to re-validate it. Wrapped in an
 /// [`crate::authz::AuthorizedControlPayload`] on the wire.
@@ -62,6 +75,11 @@ pub enum EdgeExecRequestPayload {
         /// table. Missing keeps the 0/1/N behavior for older callers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_connection_id: Option<String>,
+        /// Required for Administrator plans and forbidden for SessionUser plans.
+        /// Optional on the wire only so mixed-version peers fail closed in the PEP
+        /// instead of failing JSON decoding before a structured reply can be sent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        privileged: Option<PrivilegedExecRequest>,
     },
 }
 
@@ -94,6 +112,13 @@ impl EdgeExecRequestPayload {
             } => session_connection_id.as_deref(),
         }
     }
+
+    pub fn privileged_request(&self) -> Option<&PrivilegedExecRequest> {
+        match self {
+            EdgeExecRequestPayload::Fleet { .. } => None,
+            EdgeExecRequestPayload::Agentic { privileged, .. } => privileged.as_ref(),
+        }
+    }
 }
 
 /// Daemon → manager: the structured outcome class for one fleet execution
@@ -116,6 +141,11 @@ impl EdgeExecRequestPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EdgeExecDisposition {
+    /// Intermediate response: local polkit authorization succeeded, but the host
+    /// has not consumed dispatch authority and the command has not started. The
+    /// central brain must freshly re-authorize the exact generation and send a
+    /// `PrivilegedExecRequest::Dispatch` before the permit expires.
+    PrivilegedAuthorizationReady { permit_id: String },
     /// PEP refused the plan before any worker handoff. Change did not run.
     RejectedBeforeDispatch {
         /// Structured failure preserved across the edge and manager routing hops.
@@ -171,6 +201,11 @@ impl EdgeExecDisposition {
                 | EdgeExecDisposition::DispatchFailedBeforeWorker { .. }
                 | EdgeExecDisposition::HostAtCapacity { .. }
         )
+    }
+
+    /// This response advances a two-phase handshake and must never settle a task.
+    pub fn is_intermediate(&self) -> bool {
+        matches!(self, Self::PrivilegedAuthorizationReady { .. })
     }
 
     /// Turn the host's authoritative view of a dispatch into a disposition, for an
@@ -401,6 +436,9 @@ mod tests {
     #[test]
     fn payload_json_round_trips_each_variant() {
         let variants = vec![
+            EdgeExecDisposition::PrivilegedAuthorizationReady {
+                permit_id: "permit-1".into(),
+            },
             EdgeExecDisposition::RejectedBeforeDispatch {
                 error: EdgeExecDisposition::safe_error(
                     AgentErrorKind::PermissionDenied,
@@ -509,6 +547,7 @@ mod tests {
             plan: sample_plan(),
             validation_input: sample_input(),
             session_connection_id: Some("controller-1".into()),
+            privileged: None,
         };
         for payload in [fleet.clone(), agentic.clone()] {
             let json = serde_json::to_string(&payload).expect("encode");
@@ -528,6 +567,31 @@ mod tests {
                 .unwrap()
                 .contains("\"source\":\"agentic\"")
         );
+    }
+
+    #[test]
+    fn privileged_handshake_round_trips_and_never_looks_terminal() {
+        let request = EdgeExecRequestPayload::Agentic {
+            plan: sample_plan(),
+            validation_input: sample_input(),
+            session_connection_id: Some("controller-1".into()),
+            privileged: Some(PrivilegedExecRequest::Dispatch {
+                permit_id: "permit-1".into(),
+            }),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        let decoded: EdgeExecRequestPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, request);
+        assert!(matches!(
+            decoded.privileged_request(),
+            Some(PrivilegedExecRequest::Dispatch { permit_id }) if permit_id == "permit-1"
+        ));
+
+        let ready = EdgeExecDisposition::PrivilegedAuthorizationReady {
+            permit_id: "permit-1".into(),
+        };
+        assert!(ready.is_intermediate());
+        assert!(!ready.proves_not_executed());
     }
 
     /// A frame without the `source` tag is rejected — there is no bare-`ExecPlan`

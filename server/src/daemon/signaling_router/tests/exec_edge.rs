@@ -65,10 +65,44 @@ pub(super) fn agentic_exec_model_for_session(
     validation_input: &desk_agent_protocol::ExecInput,
     session_connection_id: Option<&str>,
 ) -> SignalingModel {
+    agentic_exec_model_for_session_phase(
+        request_id,
+        plan,
+        validation_input,
+        session_connection_id,
+        None,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn privileged_agentic_exec_model(
+    request_id: &str,
+    plan: &ExecPlan,
+    validation_input: &desk_agent_protocol::ExecInput,
+    session_connection_id: Option<&str>,
+    privileged: PrivilegedExecRequest,
+) -> SignalingModel {
+    agentic_exec_model_for_session_phase(
+        request_id,
+        plan,
+        validation_input,
+        session_connection_id,
+        Some(privileged),
+    )
+}
+
+fn agentic_exec_model_for_session_phase(
+    request_id: &str,
+    plan: &ExecPlan,
+    validation_input: &desk_agent_protocol::ExecInput,
+    session_connection_id: Option<&str>,
+    privileged: Option<PrivilegedExecRequest>,
+) -> SignalingModel {
     let payload = EdgeExecRequestPayload::Agentic {
         plan: plan.clone(),
         validation_input: validation_input.clone(),
         session_connection_id: session_connection_id.map(str::to_string),
+        privileged,
     };
     SignalingModel::new(
         request_id,
@@ -718,6 +752,39 @@ pub(super) async fn agentic_exec_with_a_stale_connection_never_falls_back_to_ano
     );
 }
 
+#[tokio::test]
+pub(super) async fn session_user_plan_rejects_a_privileged_phase() {
+    let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+    ctx.inbound_authz = Some(authz_block(
+        vec![Capability::ShellExecConfirmed],
+        vec![],
+        ExecutionMode::ConfirmEachAction,
+        desk_agent_protocol::RiskLevel::High,
+    ));
+    let input = agentic_input("Get-Service -Name Spooler", None, 5_000);
+    let plan = agentic_plan_from_input(&input, &[], "session-user-with-privileged-phase");
+    handle_edge_exec_request_inbound(
+        &ctx,
+        &agentic_exec_model_for_session_phase(
+            "session-user-with-privileged-phase",
+            &plan,
+            &input,
+            None,
+            Some(PrivilegedExecRequest::Authorize),
+        ),
+    )
+    .await
+    .unwrap();
+
+    match read_fleet_result(&mut rx).disposition {
+        EdgeExecDisposition::RejectedBeforeDispatch { error } => assert!(
+            error.message.contains("privileged_phase_binding"),
+            "{error:?}"
+        ),
+        other => panic!("expected phase-binding rejection, got {other:?}"),
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 pub(super) async fn administrator_agentic_exec_uses_registration_bound_root_supervisor() {
@@ -817,11 +884,12 @@ pub(super) async fn administrator_agentic_exec_uses_registration_bound_root_supe
     over_runtime_ceiling.execution_generation = "privileged-over-runtime".to_string();
     handle_edge_exec_request_inbound(
         &ctx,
-        &agentic_exec_model_for_session(
+        &privileged_agentic_exec_model(
             "privileged-over-runtime",
             &over_runtime_ceiling,
             &input,
             Some("privileged-controller"),
+            PrivilegedExecRequest::Authorize,
         ),
     )
     .await
@@ -846,13 +914,53 @@ pub(super) async fn administrator_agentic_exec_uses_registration_bound_root_supe
         .ai_policy
         .max_command_runtime_seconds = 600;
 
+    let mut missing_phase = plan.clone();
+    missing_phase.execution_generation = "privileged-missing-phase".to_string();
     handle_edge_exec_request_inbound(
         &ctx,
-        &agentic_exec_model_for_session(
+        &agentic_exec_model_for_session_phase(
+            "privileged-missing-phase",
+            &missing_phase,
+            &input,
+            Some("privileged-controller"),
+            None,
+        ),
+    )
+    .await
+    .unwrap();
+    match read_fleet_result(&mut rx).disposition {
+        EdgeExecDisposition::RejectedBeforeDispatch { error } => assert!(
+            error.message.contains("privileged_phase_binding"),
+            "{error:?}"
+        ),
+        other => panic!("expected missing-phase rejection, got {other:?}"),
+    }
+
+    handle_edge_exec_request_inbound(
+        &ctx,
+        &privileged_agentic_exec_model(
             "privileged-generation",
             &plan,
             &input,
             Some("privileged-controller"),
+            PrivilegedExecRequest::Authorize,
+        ),
+    )
+    .await
+    .unwrap();
+
+    let ready = read_fleet_result(&mut rx).disposition;
+    let EdgeExecDisposition::PrivilegedAuthorizationReady { permit_id } = ready else {
+        panic!("expected privileged authorization, got {ready:?}");
+    };
+    handle_edge_exec_request_inbound(
+        &ctx,
+        &privileged_agentic_exec_model(
+            "privileged-generation",
+            &plan,
+            &input,
+            Some("privileged-controller"),
+            PrivilegedExecRequest::Dispatch { permit_id },
         ),
     )
     .await

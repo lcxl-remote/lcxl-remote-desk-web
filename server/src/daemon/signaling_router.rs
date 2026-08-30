@@ -31,7 +31,7 @@ use desk_agent_protocol::diagnose::{
     COLLECT_CHUNK_PAYLOAD_LIMIT, CollectRequest, CollectResponse, CollectResponseError,
 };
 use desk_agent_protocol::edge_exec::{
-    EdgeExecDisposition, EdgeExecRequestPayload, EdgeExecResultPayload,
+    EdgeExecDisposition, EdgeExecRequestPayload, EdgeExecResultPayload, PrivilegedExecRequest,
 };
 use desk_agent_protocol::exec::{
     ConfirmExecData, ExecDecision, ExecEffect, ExecPlan, ExecPreview, ExecResultPayload,

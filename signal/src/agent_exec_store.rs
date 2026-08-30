@@ -49,7 +49,8 @@ fn disposition_text(disposition: &EdgeExecDisposition) -> Option<String> {
         } else {
             "execution did not complete".to_string()
         }),
-        EdgeExecDisposition::ExecutionStateUnknown { .. } => None,
+        EdgeExecDisposition::PrivilegedAuthorizationReady { .. }
+        | EdgeExecDisposition::ExecutionStateUnknown { .. } => None,
     }
 }
 
@@ -139,6 +140,9 @@ impl SignalAgentExecStore {
         };
         if row.target_connection_id != source_connection_id {
             return Ok(None);
+        }
+        if disposition.is_intermediate() {
+            return Ok(Some(row));
         }
         if matches!(row.status.as_str(), STATUS_DONE | STATUS_UNKNOWN) {
             return Ok(Some(row));

@@ -10,12 +10,12 @@ use desk_agent_protocol::authz::{
     AuthzDevice, ExecAdmissionPolicy,
 };
 use desk_agent_protocol::edge_exec::{
-    EdgeExecDisposition, EdgeExecRequestPayload, EdgeExecResultPayload,
+    EdgeExecDisposition, EdgeExecRequestPayload, EdgeExecResultPayload, PrivilegedExecRequest,
 };
 use desk_agent_protocol::evidence::EvidenceSnapshot;
 use desk_agent_protocol::exec::{
     ApprovalDecision, ApprovalId, ExecDecision, ExecExecutionBasis, ExecPlan, ExecPreview,
-    ExecRequestId, ResolveExecData,
+    ExecRequestId, ExecutionPrincipal, ResolveExecData,
 };
 use desk_agent_protocol::exec_lifecycle::{
     ExecControlAction, ExecControlPayload, ExecState, ExecStateReplyPayload,
@@ -39,6 +39,7 @@ use tokio::sync::oneshot;
 
 const RESULT_SLACK: Duration = Duration::from_secs(30);
 const FOREGROUND_THRESHOLD: Duration = Duration::from_secs(8);
+const PRIVILEGED_AUTHORIZATION_WAIT: Duration = Duration::from_secs(130);
 const WAIT_FOR_TASK_TIMEOUT: Duration = Duration::from_secs(10);
 const WAIT_FOR_TASK_POLL: Duration = Duration::from_millis(250);
 
@@ -320,6 +321,74 @@ async fn send_frame(target: &ConnectionState, frame: &SignalingModel) -> Result<
     })
 }
 
+fn build_exec_frame(
+    target: &ConnectionState,
+    target_connection_id: &str,
+    actor_user_id: i32,
+    scope: AgentScope,
+    admission_policy: ExecAdmissionPolicy,
+    max_risk: RiskLevel,
+    session_connection_id: Option<String>,
+    plan: &ExecPlan,
+    validation_input: &ExecInput,
+    privileged: Option<PrivilegedExecRequest>,
+) -> Result<SignalingModel, AgentError> {
+    let audience = target
+        .model
+        .version_info
+        .client_id
+        .clone()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            safe(
+                AgentErrorKind::PermissionDenied,
+                "target device has no trusted client id",
+            )
+        })?;
+    let request_id = plan.execution_generation.clone();
+    let authz = AuthorizationBlock {
+        version: AUTHORIZATION_BLOCK_VERSION,
+        exec_admission_policy: admission_policy,
+        scope,
+        orchestrator_grants: vec!["shell.plan".to_string()],
+        max_risk,
+        actor: AuthzActor {
+            user_id: Some(actor_user_id),
+        },
+        device: AuthzDevice { device_id: None },
+        request_id: request_id.clone(),
+        session_id: None,
+        expires_at: Some(
+            (chrono::Utc::now() + chrono::Duration::minutes(5))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ),
+        issuer: "signal".to_string(),
+        audience,
+        signature: None,
+    };
+    let inner = serde_json::to_value(EdgeExecRequestPayload::Agentic {
+        plan: plan.clone(),
+        validation_input: validation_input.clone(),
+        session_connection_id,
+        privileged,
+    })
+    .map_err(|error| {
+        safe(
+            AgentErrorKind::Internal,
+            format!("encode exec request: {error}"),
+        )
+    })?;
+    let wrapper = AuthorizedControlPayload { inner, authz };
+    Ok(SignalingModel::new(
+        &request_id,
+        SignalingType::ExecuteEdgePlan,
+        None,
+        Some(target_connection_id.to_string()),
+        serde_json::to_value(wrapper).ok(),
+        None,
+    ))
+}
+
 /// Tools for one signal-owned agent turn. Reads replay the already-redacted
 /// collection snapshot; mutations take the explicit browser approval path.
 pub struct SignalAgentTools {
@@ -446,23 +515,20 @@ impl SignalAgentTools {
         ctx: &ExecContext,
     ) -> Result<SignalDispatch, AgentError> {
         let target = self.connection(&self.target_connection_id).await?;
-        let audience = target
-            .model
-            .version_info
-            .client_id
-            .clone()
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| {
-                safe(
-                    AgentErrorKind::PermissionDenied,
-                    "target device has no trusted client id",
-                )
-            })?;
         let request_id = plan.execution_generation.clone();
         let exec_store = crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone());
+        let privileged = plan.principal == ExecutionPrincipal::Administrator;
         let deadline = chrono::Utc::now()
             + chrono::Duration::milliseconds(plan.timeout_ms as i64)
-            + chrono::Duration::from_std(RESULT_SLACK).unwrap_or_default();
+            + chrono::Duration::from_std(RESULT_SLACK).unwrap_or_default()
+            // An Administrator task has not been dispatched while polkit is open.
+            // Keep the durable task alive for that separate authorization phase so
+            // the sweeper cannot settle it unknown before phase two is even sent.
+            + if privileged {
+                chrono::Duration::from_std(PRIVILEGED_AUTHORIZATION_WAIT).unwrap_or_default()
+            } else {
+                chrono::Duration::zero()
+            };
         let task = exec_store
             .create(
                 &plan.exec_request_id.0,
@@ -488,46 +554,18 @@ impl SignalAgentTools {
                 "an execution with this id is already pending",
             ));
         };
-        let authz = AuthorizationBlock {
-            version: AUTHORIZATION_BLOCK_VERSION,
-            exec_admission_policy: self.admission_policy,
-            scope,
-            orchestrator_grants: vec!["shell.plan".to_string()],
-            max_risk: self.max_risk,
-            actor: AuthzActor {
-                user_id: Some(actor_user_id),
-            },
-            device: AuthzDevice { device_id: None },
-            request_id: request_id.clone(),
-            session_id: None,
-            expires_at: Some(
-                (chrono::Utc::now() + chrono::Duration::minutes(5))
-                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            ),
-            issuer: "signal".to_string(),
-            audience,
-            signature: None,
-        };
-        let inner = serde_json::to_value(EdgeExecRequestPayload::Agentic {
-            plan: plan.clone(),
-            validation_input,
-            session_connection_id: ctx.connection_id.clone(),
-        })
-        .map_err(|e| {
-            safe(
-                AgentErrorKind::Internal,
-                format!("encode exec request: {e}"),
-            )
-        })?;
-        let wrapper = AuthorizedControlPayload { inner, authz };
-        let frame = SignalingModel::new(
-            &request_id,
-            SignalingType::ExecuteEdgePlan,
-            None,
-            Some(self.target_connection_id.clone()),
-            serde_json::to_value(wrapper).ok(),
-            None,
-        );
+        let frame = build_exec_frame(
+            &target,
+            &self.target_connection_id,
+            actor_user_id,
+            scope.clone(),
+            self.admission_policy,
+            self.max_risk,
+            ctx.connection_id.clone(),
+            &plan,
+            &validation_input,
+            privileged.then_some(PrivilegedExecRequest::Authorize),
+        )?;
         if let Err(error) = send_frame(&target, &frame).await {
             self.pending.cancel_result(&request_id);
             if let Err(store_error) = exec_store.mark_unsent(&request_id).await {
@@ -537,6 +575,109 @@ impl SignalAgentTools {
                 );
             }
             return Err(error);
+        }
+        let mut rx = rx;
+        if privileged {
+            let permit_id = match tokio::time::timeout(PRIVILEGED_AUTHORIZATION_WAIT, rx).await {
+                Ok(Ok(EdgeExecDisposition::PrivilegedAuthorizationReady { permit_id })) => {
+                    permit_id
+                }
+                Ok(Ok(disposition)) => {
+                    return Ok(SignalDispatch::Settled { task, disposition });
+                }
+                Ok(Err(_)) => {
+                    let _ = exec_store.mark_unsent(&request_id).await;
+                    return Err(safe(
+                        AgentErrorKind::SessionUnavailable,
+                        "the host disconnected before administrator authorization completed",
+                    ));
+                }
+                Err(_) => {
+                    self.pending.cancel_result(&request_id);
+                    let _ = exec_store.mark_unsent(&request_id).await;
+                    return Err(safe(
+                        AgentErrorKind::Timeout,
+                        "administrator authorization timed out; the command was not executed",
+                    ));
+                }
+            };
+
+            // Local authorization grants no execution authority. Re-read every
+            // OSS central policy axis before minting the second authz block.
+            let current_mode = crate::model_provider::load(&self.db)
+                .await
+                .map_err(|error| {
+                    safe(
+                        AgentErrorKind::PermissionDenied,
+                        format!("execution policy could not be refreshed: {error}"),
+                    )
+                })?
+                .execution_mode;
+            let effective_mode = scope.mode.restrict_to(current_mode);
+            if !matches!(
+                effective_mode,
+                desk_agent_protocol::ExecutionMode::ConfirmEachAction
+                    | desk_agent_protocol::ExecutionMode::SessionApproved
+            ) {
+                let _ = exec_store.mark_unsent(&request_id).await;
+                return Err(safe(
+                    AgentErrorKind::PermissionDenied,
+                    "execution policy changed after administrator authorization; the command was not executed",
+                ));
+            }
+            let refreshed = classify_command_with_policy(
+                &validation_input,
+                &[],
+                desk_agent_protocol::exec_policy::builtin_blocklist(),
+                self.admission_policy,
+            );
+            let rebuilt = refreshed.draft.map(|draft| {
+                ExecPlan::from_draft(
+                    plan.exec_request_id.clone(),
+                    plan.execution_generation.clone(),
+                    plan.approval_id.clone(),
+                    draft,
+                )
+            });
+            if rebuilt.as_ref() != Some(&plan) || plan.risk > self.max_risk {
+                let _ = exec_store.mark_unsent(&request_id).await;
+                return Err(safe(
+                    AgentErrorKind::PermissionDenied,
+                    "execution policy changed after administrator authorization; the command was not executed",
+                ));
+            }
+
+            let target = self.connection(&self.target_connection_id).await?;
+            let Some(dispatch_rx) = self
+                .pending
+                .register_result(request_id.clone(), self.target_connection_id.clone())
+            else {
+                let _ = exec_store.mark_unsent(&request_id).await;
+                return Err(safe(
+                    AgentErrorKind::Internal,
+                    "administrator dispatch correlation is already in use",
+                ));
+            };
+            let mut fresh_scope = scope.clone();
+            fresh_scope.mode = effective_mode;
+            let dispatch_frame = build_exec_frame(
+                &target,
+                &self.target_connection_id,
+                actor_user_id,
+                fresh_scope,
+                self.admission_policy,
+                self.max_risk,
+                ctx.connection_id.clone(),
+                &plan,
+                &validation_input,
+                Some(PrivilegedExecRequest::Dispatch { permit_id }),
+            )?;
+            if let Err(error) = send_frame(&target, &dispatch_frame).await {
+                self.pending.cancel_result(&request_id);
+                let _ = exec_store.mark_unsent(&request_id).await;
+                return Err(error);
+            }
+            rx = dispatch_rx;
         }
         if let Err(error) = exec_store.mark_running(&request_id).await {
             // The frame may already be executing on the host. Never turn a
@@ -685,6 +826,13 @@ impl SignalAgentTools {
                     task.exec_request_id,
                     task.execution_generation,
                 ),
+            )),
+            SignalDispatch::Settled {
+                disposition: EdgeExecDisposition::PrivilegedAuthorizationReady { .. },
+                ..
+            } => Err(safe(
+                AgentErrorKind::Internal,
+                "administrator authorization escaped the two-phase dispatcher",
             )),
             SignalDispatch::Dispatched(task) => Ok(ExecOutcome::Dispatched(
                 desk_diagnose_core::session::ActionIdentity::agent_exec(
@@ -927,6 +1075,13 @@ impl ToolSeam for SignalAgentTools {
                     task.exec_request_id,
                     task.execution_generation,
                 ),
+            )),
+            SignalDispatch::Settled {
+                disposition: EdgeExecDisposition::PrivilegedAuthorizationReady { .. },
+                ..
+            } => Err(safe(
+                AgentErrorKind::Internal,
+                "administrator authorization escaped the two-phase dispatcher",
             )),
             SignalDispatch::Dispatched(task) => Ok(ExecOutcome::Dispatched(
                 desk_diagnose_core::session::ActionIdentity::agent_exec(
